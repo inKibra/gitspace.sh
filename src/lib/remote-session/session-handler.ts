@@ -33,7 +33,8 @@ import { loadProjects } from "../../tui/state";
 
 // Import workspace removal
 import { removeWorktree, deleteLocalBranch, getWorktreeInfo } from "../../core/git";
-import { getProjectWorkspacesDir, getProjectBaseDir } from "../../core/config";
+import { getProjectWorkspacesDir, getProjectBaseDir, getScriptsPhaseDir, readProjectConfig } from "../../core/config";
+import { runScriptsInTerminal } from "../../utils/run-scripts";
 
 /**
  * Session state for a connected client
@@ -458,6 +459,16 @@ export class RemoteSessionHandler {
       if (!info) {
         await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
         return;
+      }
+
+      // Run remove scripts (cleanup before deletion)
+      try {
+        const projectConfig = readProjectConfig(projectName);
+        const removeScriptsDir = getScriptsPhaseDir(projectName, 'remove');
+        await runScriptsInTerminal(removeScriptsDir, workspacePath, workspaceId, projectConfig.repository);
+      } catch (e) {
+        // Log but don't fail - scripts are best-effort
+        console.error("[remote-session] Remove scripts failed:", e);
       }
 
       // Remove worktree
