@@ -3,31 +3,27 @@
  * Handles 'gssh remove workspace' and 'gssh remove project'
  */
 
-import { existsSync, rmSync, readdirSync } from 'fs'
+import { existsSync, readdirSync } from 'fs'
 import { join } from 'path'
 import {
 	getCurrentProject,
 	readProjectConfig,
 	getProjectWorkspacesDir,
-	getProjectBaseDir,
 	getProjectDir,
-	readGlobalConfig,
-	updateGlobalConfig,
 	getAllProjectNames,
-	getScriptsPhaseDir,
 } from '../core/config.js'
+import { getWorktreeInfo } from '../core/git.js'
 import {
-	removeWorktree,
-	deleteLocalBranch,
-	getWorktreeInfo,
-} from '../core/git.js'
+	deleteWorkspaceCore,
+	deleteProjectCore,
+} from '../core/workspace.js'
 import { logger } from '../utils/logger.js'
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js'
 import { SpacesError, NoProjectError } from '../types/errors.js'
-import { runScriptsInTerminal } from '../utils/run-scripts.js'
 
 /**
- * Remove a workspace
+ * Remove a workspace (CLI command)
+ * Handles interactive prompts and delegates to core deletion logic
  */
 export async function removeWorkspace(
 	workspaceNameArg?: string,
@@ -42,7 +38,6 @@ export async function removeWorkspace(
 	}
 
 	const workspacesDir = getProjectWorkspacesDir(currentProject)
-	const baseDir = getProjectBaseDir(currentProject)
 
 	if (!existsSync(workspacesDir)) {
 		throw new SpacesError('No workspaces found', 'USER_ERROR', 1)
@@ -82,7 +77,7 @@ export async function removeWorkspace(
 
 	const workspacePath = join(workspacesDir, workspaceName)
 
-	// Get workspace info
+	// Get workspace info for display
 	const info = await getWorktreeInfo(workspacePath)
 
 	if (!info) {
@@ -117,44 +112,37 @@ export async function removeWorkspace(
 		}
 	}
 
-	// Run remove scripts (cleanup before deletion)
-	const projectConfig = readProjectConfig(currentProject)
-	const removeScriptsDir = getScriptsPhaseDir(currentProject, 'remove')
-	await runScriptsInTerminal(
-		removeScriptsDir,
-		workspacePath,
-		workspaceName,
-		projectConfig.repository
-	)
+	// Delegate to core deletion logic (interactive mode for CLI)
+	logger.info('Removing workspace...')
+	const result = await deleteWorkspaceCore(currentProject, workspaceName, {
+		nonInteractive: false, // CLI is interactive
+		keepBranch: options.keepBranch,
+	})
 
-	// Remove worktree
-	logger.info('Removing worktree...')
-	await removeWorktree(baseDir, workspacePath, true)
+	if (!result.success) {
+		throw new SpacesError(
+			result.error || 'Failed to remove workspace',
+			'SYSTEM_ERROR',
+			2
+		)
+	}
 
 	logger.success(`Removed worktree: ${workspaceName}`)
 
-	// Ask about deleting local branch unless --keep-branch
-	if (!options.keepBranch) {
-		// const deleteBranch = await promptConfirm(`Delete local branch "${info.branch}"?`, false);
-		const deleteBranch = true
+	if (result.sessionsKilled > 0) {
+		logger.info(`Killed ${result.sessionsKilled} active session(s)`)
+	}
 
-		if (deleteBranch) {
-			try {
-				await deleteLocalBranch(baseDir, info.branch, true)
-				logger.success(`Deleted branch: ${info.branch}`)
-			} catch (error) {
-				logger.warning(
-					`Could not delete branch: ${
-						error instanceof Error ? error.message : 'Unknown error'
-					}`
-				)
-			}
-		}
+	if (result.branchDeleted) {
+		logger.success(`Deleted branch: ${result.branch}`)
+	} else if (result.branch && !options.keepBranch) {
+		logger.warning(`Could not delete branch: ${result.branch}`)
 	}
 }
 
 /**
- * Remove a project
+ * Remove a project (CLI command)
+ * Handles interactive prompts and delegates to core deletion logic
  */
 export async function removeProject(
 	projectNameArg?: string,
@@ -226,16 +214,44 @@ export async function removeProject(
 		}
 	}
 
-	// Remove entire project directory
-	logger.info('Removing project directory...')
-	rmSync(projectDir, { recursive: true, force: true })
+	// Delegate to core deletion logic (interactive mode for CLI)
+	logger.info('Removing project...')
+	const result = await deleteProjectCore(projectName, {
+		nonInteractive: false, // CLI is interactive
+	})
+
+	if (!result.success) {
+		if (result.errors.length > 0) {
+			for (const error of result.errors) {
+				logger.warning(`  ${error}`)
+			}
+		}
+		throw new SpacesError(
+			'Failed to remove project completely',
+			'SYSTEM_ERROR',
+			2
+		)
+	}
+
+	// Log any partial errors that occurred during cleanup (even on success)
+	if (result.errors.length > 0) {
+		logger.warning('Some cleanup operations had issues:')
+		for (const error of result.errors) {
+			logger.warning(`  ${error}`)
+		}
+	}
 
 	logger.success(`Removed project: ${projectName}`)
 
-	// Update global config if this was the current project
-	const globalConfig = readGlobalConfig()
-	if (globalConfig.currentProject === projectName) {
-		updateGlobalConfig({ currentProject: null })
+	if (result.sessionsKilled > 0) {
+		logger.info(`Killed ${result.sessionsKilled} active session(s)`)
+	}
+
+	if (result.workspacesDeleted > 0) {
+		logger.info(`Cleaned up ${result.workspacesDeleted} workspace(s)`)
+	}
+
+	if (result.wasCurrentProject) {
 		logger.info('Cleared current project (was this project)')
 	}
 }

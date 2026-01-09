@@ -53,6 +53,13 @@ export interface RunScriptsOptions {
   bundleValues?: Record<string, string>;
   /** Secret values to pass as SPACE_SECRET_* environment variables */
   bundleSecrets?: Record<string, string>;
+  /**
+   * Run scripts in non-interactive mode (for daemon/remote contexts).
+   * - stdin is closed immediately (scripts can't prompt for input)
+   * - stdout/stderr are captured and logged on failure
+   * - Prevents scripts from blocking indefinitely
+   */
+  nonInteractive?: boolean;
 }
 
 /**
@@ -104,15 +111,32 @@ export async function runScriptsInTerminal(
       const scriptName = scriptPath.split('/').pop() || scriptPath;
       logger.dim(`  $ ${scriptName} ${workspaceName} ${repository}`);
 
+      // Non-interactive mode: stdin=ignore, capture stdout/stderr
+      // Interactive mode: inherit all stdio
+      const stdio: 'inherit' | ['ignore', 'pipe', 'pipe'] = options?.nonInteractive
+        ? ['ignore', 'pipe', 'pipe']
+        : 'inherit';
+
       const child = spawn(scriptPath, [workspaceName, repository], {
-        stdio: 'inherit',
+        stdio,
         shell: false,
         cwd: workspacePath,
         env: scriptEnv,
       });
 
-      child.on('close', (code) => {
+      // Capture output in non-interactive mode for logging on failure
+      let output = '';
+      if (options?.nonInteractive && child.stdout && child.stderr) {
+        child.stdout.on('data', (data: Buffer) => { output += data.toString(); });
+        child.stderr.on('data', (data: Buffer) => { output += data.toString(); });
+      }
+
+      child.on('close', (code: number | null) => {
         if (code !== 0) {
+          // Log captured output on failure in non-interactive mode
+          if (options?.nonInteractive && output) {
+            logger.debug(`Script output:\n${output}`);
+          }
           reject(
             new SpacesError(
               `Script failed with exit code ${code}: ${scriptName}`,
@@ -125,7 +149,7 @@ export async function runScriptsInTerminal(
         }
       });
 
-      child.on('error', (error) => {
+      child.on('error', (error: Error) => {
         reject(
           new SpacesError(
             `Failed to run script: ${error.message}`,

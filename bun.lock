@@ -33,6 +33,12 @@
         "eslint": "^8.57.0",
         "typescript": "^5.3.3",
       },
+      "optionalDependencies": {
+        "@gitspace/darwin-arm64": "0.2.0-rc.5",
+        "@gitspace/darwin-x64": "0.2.0-rc.5",
+        "@gitspace/linux-arm64": "0.2.0-rc.5",
+        "@gitspace/linux-x64": "0.2.0-rc.5",
+      },
     },
   },
   "packages": {
@@ -45,6 +51,8 @@
     "@eslint/eslintrc": ["@eslint/eslintrc@2.1.4", "", { "dependencies": { "ajv": "^6.12.4", "debug": "^4.3.2", "espree": "^9.6.0", "globals": "^13.19.0", "ignore": "^5.2.0", "import-fresh": "^3.2.1", "js-yaml": "^4.1.0", "minimatch": "^3.1.2", "strip-json-comments": "^3.1.1" } }, "sha512-269Z39MS6wVJtsoUl10L60WdkhJVdPG24Q4eZTH3nnF6lpvSShEK3wQjDX9JRWAUPvPh7COouPpU9IrqaZFvtQ=="],
 
     "@eslint/js": ["@eslint/js@8.57.1", "", {}, "sha512-d9zaMRSTIKDLhctzH12MtXvJKSSUhaHcjV+2Z+GK+EEY7XKpP5yR4x+N3TAcHTcu963nIr+TMcCb4DBCYX1z6Q=="],
+
+    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.5", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-jeFMG2y/Ztvlfc9BHm1M4yyTR1P5bDtdpA40DVNSSdhGv4NpsGPifVBo5GUwEQOAO9QTHFuxkdAl+LK5dYS9yQ=="],
 
     "@graphql-typed-document-node/core": ["@graphql-typed-document-node/core@3.2.0", "", { "peerDependencies": { "graphql": "^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0" } }, "sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ=="],
 

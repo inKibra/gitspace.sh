@@ -57,10 +57,10 @@ import {
   projectExists,
   updateProjectConfig,
 } from '../core/config.js';
-import { removeWorkspace, removeProject } from '../commands/remove.js';
 
-// Git and workspace creation
-import { listRemoteBranches, createWorktree, checkRemoteBranch, getDefaultBranch } from '../core/git.js';
+// Git and workspace operations
+import { listRemoteBranches, createWorktree, getDefaultBranch } from '../core/git.js';
+import { deleteWorkspaceCore, deleteProjectCore } from '../core/workspace.js';
 import { fetchUnstartedIssues } from '../core/linear.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, extractRepoName } from '../utils/sanitize.js';
@@ -371,7 +371,33 @@ function App({ relayConfig, onQuit }: AppProps) {
       warning: 'This will delete all workspaces in this project!',
       onConfirm: async () => {
         flow.showLoading({ title: 'Deleting', message: 'Removing project...' });
-        await removeProject(project.name, { force: false });
+
+        try {
+          const result = await deleteProjectCore(project.name, {
+            nonInteractive: true, // TUI is non-interactive for scripts
+          });
+
+          if (!result.success && result.errors.length > 0) {
+            console.error('[tui] Project deletion errors:', result.errors);
+            flow.close();
+            flow.showMessage({
+              title: 'Delete Failed',
+              message: `Failed to delete project "${project.name}". Check logs for details.`,
+              variant: 'error',
+            });
+            return;
+          }
+        } catch (error) {
+          console.error('[tui] Failed to delete project:', error);
+          flow.close();
+          flow.showMessage({
+            title: 'Delete Failed',
+            message: `An unexpected error occurred while deleting project "${project.name}".`,
+            variant: 'error',
+          });
+          return;
+        }
+
         flow.close();
         await refreshProjects();
       },
@@ -492,7 +518,33 @@ function App({ relayConfig, onQuit }: AppProps) {
       onConfirm: async () => {
         if (!state.currentProject) return;
         flow.showLoading({ title: 'Deleting', message: 'Removing workspace...' });
-        await removeWorkspace(workspace.name, { force: false });
+
+        try {
+          const result = await deleteWorkspaceCore(state.currentProject, workspace.name, {
+            nonInteractive: true, // TUI is non-interactive for scripts
+          });
+
+          if (!result.success) {
+            console.error('[tui] Failed to delete workspace:', result.error);
+            flow.close();
+            flow.showMessage({
+              title: 'Delete Failed',
+              message: result.error ?? `Failed to delete workspace "${workspace.name}".`,
+              variant: 'error',
+            });
+            return;
+          }
+        } catch (error) {
+          console.error('[tui] Failed to delete workspace:', error);
+          flow.close();
+          flow.showMessage({
+            title: 'Delete Failed',
+            message: error instanceof Error ? error.message : `Failed to delete workspace "${workspace.name}".`,
+            variant: 'error',
+          });
+          return;
+        }
+
         flow.close();
         await refreshWorkspaces();
       },
