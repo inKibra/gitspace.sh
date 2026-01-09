@@ -84,6 +84,70 @@ export function isValidWorkspaceName(name: string): boolean {
 }
 
 /**
+ * Validate a git branch name according to git-check-ref-format rules
+ * See: https://git-scm.com/docs/git-check-ref-format
+ *
+ * @param name Branch name to validate
+ * @returns true if valid, false otherwise
+ */
+export function isValidBranchName(name: string): boolean {
+  if (!name || name.length === 0) {
+    return false;
+  }
+
+  // Cannot have two consecutive dots
+  if (name.includes('..')) {
+    return false;
+  }
+
+  // Cannot have ASCII control characters, space, tilde, caret, colon,
+  // question mark, asterisk, open bracket, or backslash
+  if (/[\x00-\x1f\x7f ~^:?*\[\\]/.test(name)) {
+    return false;
+  }
+
+  // Cannot start or end with a slash, or have consecutive slashes
+  if (name.startsWith('/') || name.endsWith('/') || name.includes('//')) {
+    return false;
+  }
+
+  // Cannot end with a dot
+  if (name.endsWith('.')) {
+    return false;
+  }
+
+  // Cannot contain @{
+  if (name.includes('@{')) {
+    return false;
+  }
+
+  // Cannot be exactly @
+  if (name === '@') {
+    return false;
+  }
+
+  // Cannot end with .lock
+  if (name.endsWith('.lock')) {
+    return false;
+  }
+
+  // Cannot start with a dash
+  if (name.startsWith('-')) {
+    return false;
+  }
+
+  // Each component cannot start with a dot
+  const components = name.split('/');
+  for (const component of components) {
+    if (component.startsWith('.') || component.length === 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
  * Extract repository name from owner/repo format
  *
  * @param repository Repository in "owner/repo" format

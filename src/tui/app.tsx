@@ -63,7 +63,7 @@ import { listRemoteBranches, createWorktree, getDefaultBranch } from '../core/gi
 import { deleteWorkspaceCore, deleteProjectCore } from '../core/workspace.js';
 import { fetchUnstartedIssues } from '../core/linear.js';
 import { generateMarkdown } from '../utils/markdown.js';
-import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, extractRepoName } from '../utils/sanitize.js';
+import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, isValidBranchName, extractRepoName } from '../utils/sanitize.js';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { LinearIssue } from '../types/workspace.js';
@@ -710,21 +710,26 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // Handle manual workspace name submission (advances to branch input)
   const handleManualNameSubmit = useCallback((name: string) => {
-    if (!name || name.trim().length === 0) {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
       setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Workspace name is required' } : prev);
       return;
     }
-    if (!isValidWorkspaceName(name)) {
+    if (!isValidWorkspaceName(trimmedName)) {
       setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Use only letters, numbers, hyphens, underscores' } : prev);
       return;
     }
     // Advance to branch input step, pre-fill with workspace name
-    setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: name, inputValue: name });
+    setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: trimmedName, inputValue: trimmedName });
   }, []);
 
   // Handle manual branch name submission (creates the workspace)
   const handleManualBranchSubmit = useCallback(async (workspaceName: string, branchName: string) => {
     const finalBranch = branchName.trim() || workspaceName;
+    if (!isValidBranchName(finalBranch)) {
+      setWorkspaceFlow(prev => prev.type === 'manual-branch-input' ? { ...prev, error: 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)' } : prev);
+      return;
+    }
     await createWorkspaceAndOpenSession(workspaceName, finalBranch, false);
   }, [createWorkspaceAndOpenSession]);
 
