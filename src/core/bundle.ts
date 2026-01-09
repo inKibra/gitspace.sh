@@ -23,7 +23,7 @@ import type { SpacesBundle, LoadedBundle } from '../types/bundle.js';
 import { getScriptsPhaseDir } from './config.js';
 
 const BUNDLE_FILENAME = 'bundle.json';
-const BUNDLE_SUBDIRS = ['.gitspace', '.gitspace-config', 'gitspace-config', '.spaces-config', 'spaces-config', '.spaces'];
+const BUNDLE_SUBDIRS = ['.gitspace'];
 const SCRIPT_PHASES = ['pre', 'setup', 'select', 'remove'] as const;
 
 function assertSafeExtractedPaths(rootDir: string): void {

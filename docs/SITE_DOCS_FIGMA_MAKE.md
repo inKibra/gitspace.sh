@@ -311,18 +311,18 @@ git status
 
 ### Repo Config Bundles
 
-Bundles allow repository owners to share onboarding configurations. Place in `.gitspace-config/` in your repo:
+Bundles allow repository owners to share onboarding configurations. Place in `.gitspace/` in your repo:
 
 ```
-.gitspace-config/
-├── gitspace-bundle.json    # Bundle manifest with onboarding steps
+.gitspace/
+├── bundle.json           # Bundle manifest with onboarding steps
 ├── pre/                  # Scripts to run before setup
 ├── setup/                # Scripts to run on first workspace creation
 ├── select/               # Scripts to run every time workspace is opened
 └── remove/               # Scripts to run before workspace deletion
 ```
 
-Bundle manifest example (`gitspace-bundle.json`):
+Bundle manifest example (`bundle.json`):
 ```json
 {
   "version": "1.0",
@@ -388,7 +388,7 @@ fi
 ```
 
 Bundle sources:
-- **In-repo** (automatic): `.gitspace-config/`, `gitspace-config/`, or `.gitspace/` in the cloned repository
+- **In-repo** (automatic): `.gitspace/` directory in the cloned repository
 - **Local path**: `gssh add project --bundle-path /path/to/bundle/`
 - **Remote URL**: `gssh add project --bundle-url https://example.com/bundle.zip`
 
@@ -920,11 +920,11 @@ git status
 
 SECTION: Local Workflow - Repo Config Bundles
 
-Bundles allow teams to share onboarding configurations. Place in `.gitspace-config/`:
+Bundles allow teams to share onboarding configurations. Place in `.gitspace/`:
 
 ```
-.gitspace-config/
-├── gitspace-bundle.json    # Manifest
+.gitspace/
+├── bundle.json           # Manifest
 ├── pre/                  # Pre-setup scripts
 ├── setup/                # Setup scripts
 └── select/               # Select scripts

@@ -208,7 +208,7 @@ fi
 
 Bundles can be loaded from:
 
-1. **In-repo** (automatic): `.gitspace/`, `.gitspace-config/`, `.spaces-config/`, or `.spaces/` in the cloned repository
+1. **In-repo** (automatic): `.gitspace/` directory in the cloned repository
 2. **Local path**: `gssh add project --bundle-path /path/to/bundle/`
 3. **Remote URL**: `gssh add project --bundle-url https://example.com/bundle.zip`
 
