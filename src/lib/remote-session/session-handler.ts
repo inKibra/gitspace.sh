@@ -31,10 +31,8 @@ import {
 // Import project loading
 import { loadProjects } from "../../tui/state";
 
-// Import workspace removal
-import { removeWorktree, deleteLocalBranch, getWorktreeInfo } from "../../core/git";
-import { getProjectWorkspacesDir, getProjectBaseDir, getScriptsPhaseDir, readProjectConfig } from "../../core/config";
-import { runScriptsInTerminal } from "../../utils/run-scripts";
+// Import workspace operations
+import { deleteWorkspaceCore } from "../../core/workspace";
 
 /**
  * Session state for a connected client
@@ -450,35 +448,14 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     try {
-      const workspacesDir = getProjectWorkspacesDir(projectName);
-      const baseDir = getProjectBaseDir(projectName);
-      const workspacePath = `${workspacesDir}/${workspaceId}`;
+      const result = await deleteWorkspaceCore(projectName, workspaceId, {
+        nonInteractive: true, // Remote context - scripts can't prompt for input
+      });
 
-      // Get workspace info for branch name
-      const info = await getWorktreeInfo(workspacePath);
-      if (!info) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
+      if (!result.success) {
+        const errorCode = result.error?.includes("not found") ? "NOT_FOUND" : "DELETE_FAILED";
+        await this.sendError(session, sendResponse, errorCode, result.error || "Failed to delete workspace");
         return;
-      }
-
-      // Run remove scripts (cleanup before deletion)
-      try {
-        const projectConfig = readProjectConfig(projectName);
-        const removeScriptsDir = getScriptsPhaseDir(projectName, 'remove');
-        await runScriptsInTerminal(removeScriptsDir, workspacePath, workspaceId, projectConfig.repository);
-      } catch (e) {
-        // Log but don't fail - scripts are best-effort
-        console.error("[remote-session] Remove scripts failed:", e);
-      }
-
-      // Remove worktree
-      await removeWorktree(baseDir, workspacePath, true);
-
-      // Try to delete the local branch
-      try {
-        await deleteLocalBranch(baseDir, info.branch, true);
-      } catch {
-        // Branch deletion is best-effort
       }
 
       await this.sendMessage(session, sendResponse, {

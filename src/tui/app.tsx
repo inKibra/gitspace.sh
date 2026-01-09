@@ -53,22 +53,18 @@ import {
   readProjectConfig,
   getProjectBaseDir,
   getProjectWorkspacesDir,
-  getProjectDir,
-  getScriptsPhaseDir,
   createProject,
   projectExists,
   updateProjectConfig,
-  readGlobalConfig,
-  updateGlobalConfig,
 } from '../core/config.js';
 
-// Git and workspace creation
-import { listRemoteBranches, createWorktree, checkRemoteBranch, getDefaultBranch, removeWorktree, deleteLocalBranch, getWorktreeInfo } from '../core/git.js';
-import { runScriptsInTerminal } from '../utils/run-scripts.js';
+// Git and workspace operations
+import { listRemoteBranches, createWorktree, getDefaultBranch } from '../core/git.js';
+import { deleteWorkspaceCore, deleteProjectCore } from '../core/workspace.js';
 import { fetchUnstartedIssues } from '../core/linear.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, extractRepoName } from '../utils/sanitize.js';
-import { existsSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { LinearIssue } from '../types/workspace.js';
 
@@ -376,14 +372,16 @@ function App({ relayConfig, onQuit }: AppProps) {
       onConfirm: async () => {
         flow.showLoading({ title: 'Deleting', message: 'Removing project...' });
 
-        // Remove entire project directory
-        const projectDir = getProjectDir(project.name);
-        rmSync(projectDir, { recursive: true, force: true });
+        try {
+          const result = await deleteProjectCore(project.name, {
+            nonInteractive: true, // TUI is non-interactive for scripts
+          });
 
-        // Update global config if this was the current project
-        const globalConfig = readGlobalConfig();
-        if (globalConfig.currentProject === project.name) {
-          updateGlobalConfig({ currentProject: null });
+          if (!result.success && result.errors.length > 0) {
+            console.error('[tui] Project deletion errors:', result.errors);
+          }
+        } catch (error) {
+          console.error('[tui] Failed to delete project:', error);
         }
 
         flow.close();
@@ -507,32 +505,16 @@ function App({ relayConfig, onQuit }: AppProps) {
         if (!state.currentProject) return;
         flow.showLoading({ title: 'Deleting', message: 'Removing workspace...' });
 
-        const workspacesDir = getProjectWorkspacesDir(state.currentProject);
-        const baseDir = getProjectBaseDir(state.currentProject);
-        const workspacePath = join(workspacesDir, workspace.name);
-
-        // Get workspace info for branch name
-        const info = await getWorktreeInfo(workspacePath);
-
-        // Run remove scripts (cleanup before deletion)
         try {
-          const projectConfig = readProjectConfig(state.currentProject);
-          const removeScriptsDir = getScriptsPhaseDir(state.currentProject, 'remove');
-          await runScriptsInTerminal(removeScriptsDir, workspacePath, workspace.name, projectConfig.repository);
-        } catch {
-          // Scripts are best-effort
-        }
+          const result = await deleteWorkspaceCore(state.currentProject, workspace.name, {
+            nonInteractive: true, // TUI is non-interactive for scripts
+          });
 
-        // Remove worktree
-        await removeWorktree(baseDir, workspacePath, true);
-
-        // Try to delete the local branch
-        if (info?.branch) {
-          try {
-            await deleteLocalBranch(baseDir, info.branch, true);
-          } catch {
-            // Branch deletion is best-effort
+          if (!result.success) {
+            console.error('[tui] Failed to delete workspace:', result.error);
           }
+        } catch (error) {
+          console.error('[tui] Failed to delete workspace:', error);
         }
 
         flow.close();
