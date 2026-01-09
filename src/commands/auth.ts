@@ -12,6 +12,7 @@ import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
 import { promptPassword } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
 import { NoIdentityError, SpacesError } from '../types/errors.js';
+import { syncHostConfig } from './host.js';
 
 // API Configuration
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
@@ -194,6 +195,10 @@ export async function authLogin(): Promise<void> {
   logger.success('Authentication complete');
   logger.success(`Logged in as ${user.github_username}`);
   logger.success('Token saved to keychain');
+
+  // Step 6: Sync host config (fetches existing subdomains from API)
+  // Interactive mode will prompt user to select primary or reserve a subdomain
+  await syncHostConfig(true);
 }
 
 // ============================================================================

@@ -85,9 +85,11 @@ function writeHostConfig(config: HostConfig): void {
 }
 
 /**
- * Update host config after subdomain changes
+ * Sync host config from gitspace.sh API
+ * Called after login and subdomain changes to keep local config in sync
+ * @param interactive - If true, prompt user to select primary if needed
  */
-async function syncHostConfig(): Promise<void> {
+export async function syncHostConfig(interactive: boolean = false): Promise<void> {
   const token = await getSecret('GITSPACE_TOKEN');
   if (!token) return;
 
@@ -99,7 +101,40 @@ async function syncHostConfig(): Promise<void> {
 
     const subdomains: SubdomainInfo[] = await res.json();
     const activeSubdomains = subdomains.filter((s) => s.status === 'active');
-    const primary = activeSubdomains.find((s) => s.is_primary);
+
+    // No subdomains - tell user to reserve one
+    if (activeSubdomains.length === 0) {
+      if (interactive) {
+        logger.log('');
+        logger.dim('No subdomains reserved yet.');
+        logger.dim('To enable remote access, reserve a subdomain:');
+        logger.command('  gssh host reserve <name>');
+      }
+      return;
+    }
+
+    // Check for primary
+    let primary = activeSubdomains.find((s) => s.is_primary);
+
+    // If no primary set and interactive, ask user to pick one
+    if (!primary && interactive && activeSubdomains.length > 0) {
+      logger.log('');
+      logger.log('Your subdomains:');
+      activeSubdomains.forEach((s, i) => {
+        logger.log(`  ${i + 1}. ${s.subdomain}.gitspace.sh`);
+      });
+
+      if (activeSubdomains.length === 1) {
+        // Auto-set the only one as primary
+        primary = activeSubdomains[0];
+        logger.dim(`Setting ${primary.subdomain}.gitspace.sh as primary...`);
+        await hostSetPrimary(primary.subdomain);
+      } else {
+        logger.log('');
+        logger.dim('Select a primary subdomain for this machine:');
+        logger.command('  gssh host set-primary <name>');
+      }
+    }
 
     if (primary) {
       writeHostConfig({
@@ -107,6 +142,26 @@ async function syncHostConfig(): Promise<void> {
         subdomains: activeSubdomains.map((s) => s.subdomain),
         createdAt: primary.created_at,
       });
+
+      // Sync tunnel token if not present (e.g., new machine with existing account)
+      const existingToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+      if (!existingToken) {
+        if (interactive) {
+          logger.dim(`Fetching tunnel credentials for ${primary.subdomain}.gitspace.sh...`);
+        }
+        try {
+          const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
+          if (tokenRes.ok) {
+            const { tunnelToken } = await tokenRes.json();
+            await setSecret(`TUNNEL_TOKEN_${primary.subdomain}`, tunnelToken);
+            if (interactive) {
+              logger.success('Tunnel credentials saved');
+            }
+          }
+        } catch {
+          // Ignore token fetch errors
+        }
+      }
     }
   } catch {
     // Ignore sync errors
@@ -378,11 +433,28 @@ export async function hostStatus(): Promise<void> {
     logger.log(`Status: ${primary.status}`);
 
     // Check if tunnel token exists locally
-    const tunnelToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+    let tunnelToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+
+    // Auto-fetch token if missing
+    if (!tunnelToken) {
+      logger.dim('Tunnel credentials missing, fetching...');
+      try {
+        const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
+        if (tokenRes.ok) {
+          const { tunnelToken: newToken } = await tokenRes.json();
+          await setSecret(`TUNNEL_TOKEN_${primary.subdomain}`, newToken);
+          tunnelToken = newToken;
+          logger.success('Tunnel credentials synced');
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
     logger.log(`Tunnel token: ${tunnelToken ? 'configured' : 'missing'}`);
 
     if (!tunnelToken) {
-      logger.dim('Run: gssh host reserve ' + primary.subdomain + ' (to refresh token)');
+      logger.warning('Could not fetch tunnel credentials');
     }
   } catch {
     logger.log('Could not verify status (API unreachable)');

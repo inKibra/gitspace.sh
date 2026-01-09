@@ -67,9 +67,22 @@ if (isTestMode) {
   process.env.TMUX_LITE_SESSION_DIR = "/tmp/tmux-lite-test";
 }
 
-const getServerCommand = (): string[] => (
-  isTestMode ? ["bun", "run", SERVER_SCRIPT, "--test"] : ["bun", "run", SERVER_SCRIPT]
-);
+const getServerCommand = (): string[] => {
+  // Detect if we're running as a compiled binary (not bun)
+  const isCompiled = !process.execPath.endsWith('bun');
+
+  if (isCompiled) {
+    // Use the binary with internal flag
+    return isTestMode
+      ? [process.execPath, '--internal-tmux-server', '--test']
+      : [process.execPath, '--internal-tmux-server'];
+  }
+
+  // Dev mode: use bun run
+  return isTestMode
+    ? ['bun', 'run', SERVER_SCRIPT, '--test']
+    : ['bun', 'run', SERVER_SCRIPT];
+};
 
 // Check if we're already inside a tmux-lite session
 export function isNested(): boolean {

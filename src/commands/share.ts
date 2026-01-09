@@ -28,11 +28,6 @@ import chalk from 'chalk';
 import { createHash } from 'crypto';
 
 /**
- * Default relay URL
- */
-const DEFAULT_RELAY_URL = 'wss://relay.gitspace.sh';
-
-/**
  * Duration string formats supported:
  * - "1h" -> 1 hour
  * - "24h" -> 24 hours

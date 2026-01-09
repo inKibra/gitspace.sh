@@ -215,10 +215,11 @@ src/
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start relay server |
-| `gssh relay token` | Create account JWT (HMAC) |
-| `gssh relay authorize <pubkey>` | Authorize a client on relay |
-| `gssh relay revoke <id>` | Revoke client authorization |
+| `gssh relay authorize <pubkey>` | Authorize a machine on relay |
+| `gssh relay revoke <id>` | Revoke machine authorization |
 | `gssh relay machines` | List authorized machines |
+| `gssh relay trusted` | List trusted relays |
+| `gssh relay untrust <url>` | Remove relay from trusted list |
 
 ### tmux-lite Daemon
 | Command | Description |
@@ -263,10 +264,19 @@ src/
 └─────────────────┘       └─────────────────┘       └─────────────────┘
 ```
 
-### Connection Flow
+### Connection Flow (gitspace.sh Hosting)
 
-1. Machine runs `gssh serve --relay <url> --token <jwt>`
-2. Machine registers with relay (sends public keys)
+1. User logs in: `gssh auth login` (GitHub OAuth)
+2. User reserves subdomain: `gssh host reserve <name>`
+3. Machine runs `gssh serve start` (auto-starts local relay + cloudflared tunnel)
+4. Client connects via web: `https://<name>.gitspace.sh`
+5. X3DH handshake establishes session keys
+6. All terminal I/O is E2E encrypted
+
+### Connection Flow (Self-Hosted Relay)
+
+1. Machine runs `gssh serve start --relay ws://relay:4480/ws`
+2. Machine registers with relay (Ed25519 challenge-response auth)
 3. Machine creates invite: `gssh share create`
 4. Client connects with invite: `gssh connect <token>`
 5. X3DH handshake establishes session keys
@@ -280,7 +290,7 @@ src/
 | Key exchange | X25519 |
 | Symmetric encryption | AES-256-GCM |
 | Key derivation | HKDF-SHA256 |
-| JWT signing | HMAC-SHA256 |
+| Relay authentication | Ed25519 challenge-response |
 
 ## TUI/Web Shared Component Pattern
 
@@ -322,11 +332,14 @@ bun run build
 # Run TUI
 bun src/index.ts
 
-# Run relay
-RELAY_SIGNING_SECRET=secret bun src/index.ts relay start
+# Run relay (uses Ed25519 identity from keychain)
+bun src/index.ts relay start
 
-# Run serve
-bun src/index.ts serve --relay ws://localhost:8080/ws --token <jwt>
+# Run serve with gitspace.sh hosting (requires auth login + host reserve)
+bun src/index.ts serve start
+
+# Run serve with self-hosted relay
+bun src/index.ts serve start --relay ws://localhost:4480/ws
 ```
 
 ### Code Style
@@ -409,6 +422,7 @@ bun src/index.ts serve --relay ws://localhost:8080/ws --token <jwt>
 | Access list | `~/gitspace/.access.json` | Authorized client public keys |
 | Machine info | `~/gitspace/.machine.json` | Machine registration |
 | Relay config | `~/gitspace/.relay.json` | Relay configuration cache |
+| Host config | `~/gitspace/host.json` | gitspace.sh subdomain config |
 | Daemon state | `~/gitspace/.serve/` | PID files, status sockets |
 | tmux-lite state | `/tmp/` | Session data (configurable via `TMUX_LITE_SESSION_DIR`) |
 
@@ -418,9 +432,8 @@ bun src/index.ts serve --relay ws://localhost:8080/ws --token <jwt>
 |----------|-------------|---------|
 | `RELAY_PORT` | Relay server port | `4480` |
 | `RELAY_BIND` | Relay bind address | `0.0.0.0` |
-| `RELAY_SIGNING_SECRET` | Secret for HMAC JWT signing | Required |
 | `RELAY_PRIVATE_KEY` | Base64 Ed25519 private key | Uses keychain |
-| `SPACES_CURRENT_PROJECT` | Override current project | From config |
+| `RELAY_LABEL` | Label for relay identity | None |
 | `GITSPACE_API_URL` | gitspace.sh API URL | `https://api.gitspace.sh` |
 
 ### Default Values
@@ -431,9 +444,8 @@ bun src/index.ts serve --relay ws://localhost:8080/ws --token <jwt>
 | Base branch | `main` | Global/project config |
 | Stale workspace days | `30` | Global config |
 | Relay port | `4480` | CLI/env |
-| Default relay URL | `wss://relay.gitspace.sh` | CLI |
 
 ---
 
-**Last Updated**: 2025-01
-**Runtime**: Bun / Node.js 18+
+**Last Updated**: 2026-01
+**Runtime**: Bun 1.3+

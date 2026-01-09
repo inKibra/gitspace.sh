@@ -68,25 +68,27 @@ function getContentType(pathname: string): string {
  * Serve a static file - tries embedded assets first, falls back to filesystem
  */
 async function serveStaticFile(pathname: string): Promise<Response | null> {
+  // Normalize path for content type (/ -> /index.html)
+  const normalizedPath = pathname === "/" ? "/index.html" : pathname;
+
   // Try embedded assets first (compiled binary)
   if (hasEmbeddedAssets() && embeddedAssets) {
     const blob = embeddedAssets.getEmbeddedFile(pathname);
     if (blob) {
       return new Response(blob, {
-        headers: { "Content-Type": getContentType(pathname) },
+        headers: { "Content-Type": getContentType(normalizedPath) },
       });
     }
   }
 
   // Fall back to filesystem (development mode)
-  const filePath = pathname === "/" ? "/index.html" : pathname;
-  const resolvedPath = resolveAssetPath(filePath);
+  const resolvedPath = resolveAssetPath(normalizedPath);
   if (!resolvedPath) return null;
 
   const file = Bun.file(resolvedPath);
   if (await file.exists()) {
     return new Response(file, {
-      headers: { "Content-Type": getContentType(pathname) },
+      headers: { "Content-Type": getContentType(normalizedPath) },
     });
   }
 

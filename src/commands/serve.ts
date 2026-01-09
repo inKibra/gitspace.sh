@@ -66,7 +66,7 @@ import {
 const PACKAGE_VERSION = '1.0.0';
 
 /** Default relay URL */
-const DEFAULT_RELAY_URL = 'wss://relay.gitspace.sh';
+// No default relay - must use hosting or explicit --relay
 
 /** Local relay port for gitspace.sh hosting */
 const LOCAL_RELAY_PORT = 4480;
@@ -503,21 +503,36 @@ export async function serve(options: {
   const entries = readAccessList();
   accessList.import(entries);
 
-  // Step 3: Display info
+  // Step 3: Check for gitspace.sh hosting or explicit relay
+  const hostConfig = readHostConfig();
+  const relayUrl = options.relay; // No default - must use hosting or explicit --relay
+
+  // If no hosting config and no explicit relay, error out
+  if (!hostConfig?.subdomain && !relayUrl) {
+    throw new SpacesError(
+      'No relay configured.\n\n' +
+      'Either set up gitspace.sh hosting:\n' +
+      '  gssh auth login\n' +
+      '  gssh host reserve <subdomain>\n\n' +
+      'Or specify a relay explicitly:\n' +
+      '  gssh serve start --relay ws://localhost:4480/ws',
+      'USER_ERROR'
+    );
+  }
+
+  // Display info
   const machineIdentity = readMachineIdentity();
   const machineId = machineIdentity?.machineId ?? identity.id;
-  const relayUrl = options.relay ?? DEFAULT_RELAY_URL;
 
   logger.log('');
   logger.bold('Machine Identity:');
   logger.log(`  ID:    ${machineId}`);
-  logger.log(`  Relay: ${relayUrl}`);
+  if (relayUrl) {
+    logger.log(`  Relay: ${relayUrl}`);
+  }
   logger.log('');
   logger.dim(`Access list: ${entries.length} authorized ${entries.length === 1 ? 'client' : 'clients'}`);
   logger.log('');
-
-  // Step 3b: Check for gitspace.sh hosting
-  const hostConfig = readHostConfig();
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
   let localRelayIdentity: ReturnType<typeof generateRelayIdentity> | null = null;
 
@@ -606,6 +621,11 @@ export async function serve(options: {
     // Keep process alive
     await new Promise(() => {});
     return;
+  }
+
+  // If we get here, relayUrl must be defined (checked earlier)
+  if (!relayUrl) {
+    throw new SpacesError('No relay URL configured', 'USER_ERROR');
   }
 
   // Step 4: Create session manager
@@ -1208,10 +1228,18 @@ export async function serveStart(options: {
     logger.log('Starting serve daemon...');
 
     // Build args for background process
-    const args = [process.argv[1], 'serve', 'start', '--foreground'];
-    if (options.relay) args.push('--relay', options.relay);
-    if (options.relayPubkey) args.push('--relay-pubkey', options.relayPubkey);
-    args.push('--password-stdin');
+    // Detect if we're running as a compiled binary vs dev mode
+    const isCompiled = !process.execPath.endsWith('bun');
+
+    const serveArgs = ['serve', 'start', '--foreground'];
+    if (options.relay) serveArgs.push('--relay', options.relay);
+    if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
+    serveArgs.push('--password-stdin');
+
+    // Build command: compiled binary runs directly, dev mode uses bun
+    const cmd = isCompiled
+      ? [process.execPath, ...serveArgs]
+      : ['bun', process.argv[1], ...serveArgs];
 
     // Write output to log file for debugging
     const logFile = getServeLogFile();
@@ -1221,7 +1249,7 @@ export async function serveStart(options: {
     await Bun.write(logFile, `[${new Date().toISOString()}] Starting serve daemon...\n`);
 
     const child = spawn({
-      cmd: ['bun', ...args],
+      cmd,
       stdin: 'pipe',
       stdout: Bun.file(logFile),
       stderr: Bun.file(logFile),
@@ -1269,20 +1297,35 @@ export async function serveStart(options: {
   // Get config
   const machineIdentity = readMachineIdentity();
   const machineId = machineIdentity?.machineId ?? identity.id;
-  const relayUrl = options.relay ?? DEFAULT_RELAY_URL;
 
   // Check for gitspace.sh hosting
   const hostConfig = readHostConfig();
+  const relayUrl = options.relay; // No default - must use hosting or explicit --relay
+
+  // If no hosting config and no explicit relay, error out
+  if (!hostConfig?.subdomain && !relayUrl) {
+    cleanupServeFiles();
+    throw new SpacesError(
+      'No relay configured.\n\n' +
+      'Either set up gitspace.sh hosting:\n' +
+      '  gssh auth login\n' +
+      '  gssh host reserve <subdomain>\n\n' +
+      'Or specify a relay explicitly:\n' +
+      '  gssh serve start --relay ws://localhost:4480/ws',
+      'USER_ERROR'
+    );
+  }
+
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
   let localRelayIdentity: ReturnType<typeof generateRelayIdentity> | null = null;
-  let effectiveRelayUrl = relayUrl;
+  let effectiveRelayUrl = relayUrl || '';
 
   // Initialize daemon state
   setDaemonState({
     version: PACKAGE_VERSION,
     startTime: Date.now(),
     relay: {
-      url: relayUrl,
+      url: effectiveRelayUrl,
       status: 'connecting',
     },
     clients: 0,
@@ -1373,7 +1416,7 @@ export async function serveStart(options: {
 
   // Save relay config for share/access commands
   writeRelayConfig({
-    relayUrl,
+    relayUrl: effectiveRelayUrl,
     machineId,
     savedAt: Date.now(),
   });

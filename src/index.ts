@@ -5,6 +5,22 @@
  * Manages GitHub workspaces with git worktrees and secure remote terminal access
  */
 
+// Internal command: run tmux-lite server directly (for compiled binary)
+// This must be checked before any other imports to avoid loading unnecessary modules
+if (process.argv.includes('--internal-tmux-server')) {
+	// Pass through --test flag if present
+	if (process.argv.includes('--test')) {
+		process.env.TMUX_LITE_SOCKET = '/tmp/tmux-lite-test.sock';
+		process.env.TMUX_LITE_SESSION_DIR = '/tmp/tmux-lite-test';
+		process.env.TMUX_LITE_PID_FILE = '/tmp/tmux-lite-test.pid';
+	}
+	// Import and run server (module auto-starts on import)
+	await import('./lib/tmux-lite/server.js');
+	// Keep process alive - server runs via Bun.listen() which is async
+	// We need to prevent the rest of this file from executing
+	await new Promise(() => {}); // Block forever
+}
+
 import { Command } from 'commander'
 import { readFileSync } from 'fs'
 import { join } from 'path'
