@@ -379,9 +379,23 @@ function App({ relayConfig, onQuit }: AppProps) {
 
           if (!result.success && result.errors.length > 0) {
             console.error('[tui] Project deletion errors:', result.errors);
+            flow.close();
+            flow.showMessage({
+              title: 'Delete Failed',
+              message: `Failed to delete project "${project.name}". Check logs for details.`,
+              variant: 'error',
+            });
+            return;
           }
         } catch (error) {
           console.error('[tui] Failed to delete project:', error);
+          flow.close();
+          flow.showMessage({
+            title: 'Delete Failed',
+            message: `An unexpected error occurred while deleting project "${project.name}".`,
+            variant: 'error',
+          });
+          return;
         }
 
         flow.close();
@@ -512,9 +526,23 @@ function App({ relayConfig, onQuit }: AppProps) {
 
           if (!result.success) {
             console.error('[tui] Failed to delete workspace:', result.error);
+            flow.close();
+            flow.showMessage({
+              title: 'Delete Failed',
+              message: result.error ?? `Failed to delete workspace "${workspace.name}".`,
+              variant: 'error',
+            });
+            return;
           }
         } catch (error) {
           console.error('[tui] Failed to delete workspace:', error);
+          flow.close();
+          flow.showMessage({
+            title: 'Delete Failed',
+            message: error instanceof Error ? error.message : `Failed to delete workspace "${workspace.name}".`,
+            variant: 'error',
+          });
+          return;
         }
 
         flow.close();

@@ -5,7 +5,7 @@
  * without requiring a running tmux-lite server or actual git repos.
  */
 
-import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -125,6 +125,7 @@ describe('integration behavior', () => {
     // This is more of a code review verification - the test ensures
     // that the function signature accepts nonInteractive option
     const { deleteWorkspaceCore } = await import('../workspace');
+    expect(typeof deleteWorkspaceCore).toBe('function');
 
     // Verify the function accepts the option without type errors
     const options = { nonInteractive: true };
@@ -136,6 +137,7 @@ describe('integration behavior', () => {
 
   it('deleteProjectCore should pass nonInteractive to deleteWorkspaceCore', async () => {
     const { deleteProjectCore } = await import('../workspace');
+    expect(typeof deleteProjectCore).toBe('function');
 
     // Verify the function accepts the option without type errors
     const options = { nonInteractive: true };
