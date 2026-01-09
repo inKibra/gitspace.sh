@@ -76,6 +76,12 @@ export async function deleteWorkspaceCore(
     sessionsKilled: 0,
   };
 
+  // Validate workspace exists before attempting deletion
+  if (!existsSync(workspacePath)) {
+    result.error = `Workspace "${workspaceName}" does not exist`;
+    return result;
+  }
+
   // Get workspace info before deletion
   const info = await getWorktreeInfo(workspacePath);
   if (info) {
@@ -185,6 +191,12 @@ export async function deleteProjectCore(
     wasCurrentProject: false,
     errors: [],
   };
+
+  // Validate project directory exists before attempting deletion
+  if (!existsSync(projectDir)) {
+    result.errors.push(`Project "${projectName}" does not exist`);
+    return result;
+  }
 
   // Get list of workspaces
   let workspaceNames: string[] = [];

@@ -233,6 +233,14 @@ export async function removeProject(
 		)
 	}
 
+	// Log any partial errors that occurred during cleanup (even on success)
+	if (result.errors.length > 0) {
+		logger.warning('Some cleanup operations had issues:')
+		for (const error of result.errors) {
+			logger.warning(`  ${error}`)
+		}
+	}
+
 	logger.success(`Removed project: ${projectName}`)
 
 	if (result.sessionsKilled > 0) {

@@ -121,26 +121,29 @@ describe('deleteProjectCore', () => {
 });
 
 describe('integration behavior', () => {
-  it('deleteWorkspaceCore should pass nonInteractive to runScriptsInTerminal', async () => {
-    // This is more of a code review verification - the test ensures
-    // that the function signature accepts nonInteractive option
+  it('deleteWorkspaceCore should accept nonInteractive option', async () => {
+    // Verify the function signature accepts nonInteractive option
     const { deleteWorkspaceCore } = await import('../workspace');
     expect(typeof deleteWorkspaceCore).toBe('function');
 
-    // Verify the function accepts the option without type errors
-    const options = { nonInteractive: true };
+    // Verify the function's third parameter accepts the expected options
+    // This is a compile-time check - if it compiles, the type is correct
+    type Options = Parameters<typeof deleteWorkspaceCore>[2];
+    const options: Options = { nonInteractive: true, keepBranch: false };
     expect(options.nonInteractive).toBe(true);
+    expect(options.keepBranch).toBe(false);
 
     // Note: Full integration testing would require mocking many modules
     // For now, we verify the API shape is correct
   });
 
-  it('deleteProjectCore should pass nonInteractive to deleteWorkspaceCore', async () => {
+  it('deleteProjectCore should accept nonInteractive option', async () => {
     const { deleteProjectCore } = await import('../workspace');
     expect(typeof deleteProjectCore).toBe('function');
 
-    // Verify the function accepts the option without type errors
-    const options = { nonInteractive: true };
+    // Verify the function's second parameter accepts the expected options
+    type Options = Parameters<typeof deleteProjectCore>[1];
+    const options: Options = { nonInteractive: true };
     expect(options.nonInteractive).toBe(true);
   });
 });
