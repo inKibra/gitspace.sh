@@ -1,0 +1,342 @@
+/**
+ * Bundle loading, validation, and script management
+ */
+
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  copyFileSync,
+  chmodSync,
+  mkdirSync,
+  statSync,
+  writeFileSync,
+  rmSync,
+} from 'fs';
+import { join, basename, resolve, sep } from 'path';
+import { tmpdir } from 'os';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { SpacesError } from '../types/errors.js';
+import { logger } from '../utils/logger.js';
+import type { SpacesBundle, LoadedBundle } from '../types/bundle.js';
+import { getScriptsPhaseDir } from './config.js';
+
+const BUNDLE_FILENAME = 'bundle.json';
+const BUNDLE_SUBDIRS = ['.gitspace', '.gitspace-config', 'gitspace-config', '.spaces-config', 'spaces-config', '.spaces'];
+const SCRIPT_PHASES = ['pre', 'setup', 'select', 'remove'] as const;
+
+function assertSafeExtractedPaths(rootDir: string): void {
+  const rootResolved = resolve(rootDir);
+  const rootPrefix = rootResolved.endsWith(sep) ? rootResolved : `${rootResolved}${sep}`;
+  const stack: string[] = [''];
+
+  while (stack.length > 0) {
+    const relativeDir = stack.pop() ?? '';
+    const currentDir = join(rootResolved, relativeDir);
+    const entries = readdirSync(currentDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const entryRelative = relativeDir ? join(relativeDir, entry.name) : entry.name;
+      const resolvedPath = resolve(rootResolved, entryRelative);
+
+      if (!resolvedPath.startsWith(rootPrefix)) {
+        throw new Error(`Zip slip detected: ${entryRelative}`);
+      }
+
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Zip slip detected: symlink ${entryRelative}`);
+      }
+
+      if (entry.isDirectory()) {
+        stack.push(entryRelative);
+      }
+    }
+  }
+}
+
+/**
+ * Detect bundle in cloned repository
+ * Checks common subdirectory names for bundle.json
+ */
+export function detectBundleInRepo(baseDir: string): string | null {
+  logger.debug(`Checking for bundle in: ${baseDir}`);
+
+  for (const subdir of BUNDLE_SUBDIRS) {
+    const bundlePath = join(baseDir, subdir, BUNDLE_FILENAME);
+    logger.debug(`  Checking: ${bundlePath}`);
+    if (existsSync(bundlePath)) {
+      logger.debug(`  Found bundle at: ${bundlePath}`);
+      return join(baseDir, subdir);
+    }
+  }
+
+  // Check root level
+  const rootBundlePath = join(baseDir, BUNDLE_FILENAME);
+  logger.debug(`  Checking root: ${rootBundlePath}`);
+  if (existsSync(rootBundlePath)) {
+    logger.debug(`  Found bundle at root`);
+    return baseDir;
+  }
+
+  logger.debug(`  No bundle found`);
+  return null;
+}
+
+/**
+ * Load bundle manifest from local path
+ */
+export function loadBundleFromPath(bundleDir: string): LoadedBundle {
+  const manifestPath = join(bundleDir, BUNDLE_FILENAME);
+
+  if (!existsSync(manifestPath)) {
+    throw new SpacesError(
+      `Bundle manifest not found: ${manifestPath}`,
+      'USER_ERROR',
+      1
+    );
+  }
+
+  try {
+    const content = readFileSync(manifestPath, 'utf-8');
+    const bundle = JSON.parse(content) as SpacesBundle;
+    validateBundle(bundle);
+
+    return {
+      bundle,
+      bundleDir,
+      source: bundleDir,
+    };
+  } catch (error) {
+    if (error instanceof SpacesError) throw error;
+    throw new SpacesError(
+      `Failed to parse bundle manifest: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'USER_ERROR',
+      1
+    );
+  }
+}
+
+/**
+ * Download and extract bundle from remote URL (zip archive)
+ */
+export async function loadBundleFromUrl(url: string): Promise<LoadedBundle> {
+  const tempDir = join(tmpdir(), `spaces-bundle-${Date.now()}`);
+
+  try {
+    logger.info('Downloading bundle...');
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    // Create temp directory
+    mkdirSync(tempDir, { recursive: true });
+
+    // Get the response as array buffer
+    const arrayBuffer = await response.arrayBuffer();
+    const zipPath = join(tempDir, 'bundle.zip');
+
+    // Write zip file
+    writeFileSync(zipPath, Buffer.from(arrayBuffer));
+
+    // Extract using unzip command
+    const execAsync = promisify(exec);
+
+    await execAsync(`unzip -q "${zipPath}" -d "${tempDir}"`);
+    assertSafeExtractedPaths(tempDir);
+
+    // Find the bundle manifest (might be in root or a subdirectory)
+    let bundleDir = tempDir;
+    if (!existsSync(join(tempDir, BUNDLE_FILENAME))) {
+      // Check if there's a single directory that contains the manifest
+      const entries = readdirSync(tempDir);
+      for (const entry of entries) {
+        const entryPath = join(tempDir, entry);
+        if (statSync(entryPath).isDirectory() && existsSync(join(entryPath, BUNDLE_FILENAME))) {
+          bundleDir = entryPath;
+          break;
+        }
+      }
+    }
+
+    const manifestPath = join(bundleDir, BUNDLE_FILENAME);
+    if (!existsSync(manifestPath)) {
+      throw new Error('Bundle manifest (bundle.json) not found in archive');
+    }
+
+    const content = readFileSync(manifestPath, 'utf-8');
+    const bundle = JSON.parse(content) as SpacesBundle;
+    validateBundle(bundle);
+
+    logger.success('Bundle downloaded and extracted');
+
+    return {
+      bundle,
+      bundleDir,
+      source: url,
+    };
+  } catch (error) {
+    // Clean up temp directory on error
+    if (existsSync(tempDir)) {
+      try {
+        rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+
+    if (error instanceof SpacesError) throw error;
+    throw new SpacesError(
+      `Failed to fetch bundle from ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SERVICE_ERROR',
+      3
+    );
+  }
+}
+
+/**
+ * Validate bundle manifest schema
+ */
+export function validateBundle(bundle: SpacesBundle): void {
+  if (!bundle.version || bundle.version !== '1.0') {
+    throw new SpacesError(
+      `Unsupported bundle version: ${bundle.version}. Expected "1.0"`,
+      'USER_ERROR',
+      1
+    );
+  }
+
+  if (!bundle.name) {
+    throw new SpacesError('Bundle must have a name', 'USER_ERROR', 1);
+  }
+
+  // Validate onboarding steps if present
+  if (bundle.onboarding) {
+    const ids = new Set<string>();
+    for (const step of bundle.onboarding) {
+      if (!step.id) {
+        throw new SpacesError('Each onboarding step must have an id', 'USER_ERROR', 1);
+      }
+      if (ids.has(step.id)) {
+        throw new SpacesError(`Duplicate onboarding step id: ${step.id}`, 'USER_ERROR', 1);
+      }
+      ids.add(step.id);
+
+      if (!['info', 'confirm', 'secret', 'input'].includes(step.type)) {
+        throw new SpacesError(`Invalid step type: ${step.type}`, 'USER_ERROR', 1);
+      }
+
+      // Validate configKey for secret/input steps
+      if (step.type === 'secret' || step.type === 'input') {
+        // Cast to access configKey since TypeScript knows these types should have it
+        const stepWithKey = step as { configKey?: string };
+        if (!stepWithKey.configKey) {
+          throw new SpacesError(
+            `Step "${step.id}" of type "${step.type}" must have a configKey`,
+            'USER_ERROR',
+            1
+          );
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Discover executable scripts in a bundle phase directory
+ */
+function discoverBundleScripts(bundleDir: string, phase: string): string[] {
+  const phaseDir = join(bundleDir, phase);
+
+  if (!existsSync(phaseDir)) {
+    return [];
+  }
+
+  try {
+    const files = readdirSync(phaseDir);
+    const scripts: string[] = [];
+
+    for (const file of files) {
+      const filePath = join(phaseDir, file);
+      const stats = statSync(filePath);
+
+      // Include files (check execute permission for Unix)
+      if (stats.isFile()) {
+        scripts.push(file);
+      }
+    }
+
+    // Sort alphabetically for predictable order
+    scripts.sort();
+    return scripts;
+  } catch (error) {
+    logger.debug(`Error discovering bundle scripts in ${phase}: ${error}`);
+    return [];
+  }
+}
+
+/**
+ * Copy scripts from bundle to project scripts directory
+ */
+export function copyBundleScripts(
+  bundleDir: string,
+  projectName: string
+): { copied: number; skipped: number } {
+  let copied = 0;
+  let skipped = 0;
+
+  for (const phase of SCRIPT_PHASES) {
+    const scripts = discoverBundleScripts(bundleDir, phase);
+    if (scripts.length === 0) continue;
+
+    const targetDir = getScriptsPhaseDir(projectName, phase);
+
+    // Ensure target directory exists
+    if (!existsSync(targetDir)) {
+      mkdirSync(targetDir, { recursive: true });
+    }
+
+    for (const scriptFile of scripts) {
+      const sourcePath = join(bundleDir, phase, scriptFile);
+      const targetPath = join(targetDir, scriptFile);
+
+      // Skip if target already exists
+      if (existsSync(targetPath)) {
+        logger.debug(`Script already exists, skipping: ${scriptFile}`);
+        skipped++;
+        continue;
+      }
+
+      copyFileSync(sourcePath, targetPath);
+      chmodSync(targetPath, 0o755);
+      logger.debug(`Copied script: ${scriptFile} -> ${phase}/`);
+      copied++;
+    }
+  }
+
+  if (copied > 0) {
+    logger.success(`Copied ${copied} bundle script${copied === 1 ? '' : 's'}`);
+  }
+  if (skipped > 0) {
+    logger.dim(`Skipped ${skipped} existing script${skipped === 1 ? '' : 's'}`);
+  }
+
+  return { copied, skipped };
+}
+
+/**
+ * Clean up temporary bundle directory (for URL bundles)
+ */
+export function cleanupBundleDir(bundleDir: string): void {
+  // Only clean up if it's in the temp directory
+  if (bundleDir.startsWith(tmpdir())) {
+    try {
+      rmSync(bundleDir, { recursive: true, force: true });
+      logger.debug('Cleaned up temporary bundle directory');
+    } catch (error) {
+      logger.debug(`Failed to clean up bundle directory: ${error}`);
+    }
+  }
+}

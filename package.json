@@ -1,0 +1,75 @@
+{
+  "name": "gitspace",
+  "version": "0.2.0-rc.2",
+  "description": "CLI for managing GitHub workspaces with git worktrees and secure remote terminal access",
+  "bin": {
+    "gssh": "./bin/gssh"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "build:web": "cd src/web && bun install && bun run build",
+    "build": "bun scripts/build.ts",
+    "build:all": "bun scripts/build.ts --all",
+    "build:npm": "bun scripts/build.ts --npm",
+    "relay": "bun src/relay/index.ts"
+  },
+  "optionalDependencies": {
+    "@gitspace/darwin-arm64": "0.2.0-rc.2",
+    "@gitspace/darwin-x64": "0.2.0-rc.2",
+    "@gitspace/linux-x64": "0.2.0-rc.2",
+    "@gitspace/linux-arm64": "0.2.0-rc.2"
+  },
+  "keywords": [
+    "cli",
+    "git",
+    "worktree",
+    "workspace",
+    "terminal",
+    "remote",
+    "ssh",
+    "tui"
+  ],
+  "homepage": "https://gitspace.sh",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/inkibra/gitspace.sh.git"
+  },
+  "author": "inKibra, Inc.",
+  "license": "SEE LICENSE IN LICENSE",
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.0",
+    "@linear/sdk": "^29.0.0",
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
+    "@opentui/core": "^0.1.60",
+    "@opentui/react": "^0.1.60",
+    "@types/ws": "^8.18.1",
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/headless": "^5.5.0",
+    "ansi-escapes": "^7.2.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "conf": "^12.0.0",
+    "ghostty-opentui": "^1.3.11",
+    "open": "^11.0.0",
+    "ora": "^8.0.1",
+    "react": "^19.2.3",
+    "simple-git": "^3.23.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "@types/node": "^20.11.20",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^8.57.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "bun": ">=1.3.5"
+  },
+  "packageManager": "pnpm@10.12.1+sha512.f0dda8580f0ee9481c5c79a1d927b9164f2c478e90992ad268bbb2465a736984391d6333d2c327913578b2804af33474ca554ba29c04a8b13060a717675ae3ac"
+}

@@ -1,0 +1,822 @@
+#!/usr/bin/env bun
+
+/**
+ * GitSpace CLI (gssh) - Main entry point
+ * Manages GitHub workspaces with git worktrees and secure remote terminal access
+ */
+
+import { Command } from 'commander'
+import { readFileSync } from 'fs'
+import { join } from 'path'
+import { isFirstTimeSetup, initializeSpaces } from './core/config.js'
+import { VERSION as GENERATED_VERSION } from './version.generated.js'
+
+// Read version from package.json in dev, fall back to generated for compiled binary
+let VERSION = GENERATED_VERSION
+try {
+	const pkgPath = join(import.meta.dir, '../package.json')
+	const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+	VERSION = pkg.version
+} catch {
+	// Compiled binary - use generated version
+}
+import { logger } from './utils/logger.js'
+import { SpacesError } from './types/errors.js'
+import { addProject, addWorkspace } from './commands/add.js'
+import { switchProject, switchWorkspace } from './commands/switch.js'
+import { listProjects, listWorkspaces } from './commands/list.js'
+import { removeWorkspace, removeProject } from './commands/remove.js'
+import { ensureDependencies } from './utils/deps.js'
+import { getProjectDirectory } from './commands/directory.js'
+import { launchTUI } from './tui/index.js'
+import { addAccessKey, listAccessKeys, removeAccessKey } from './commands/access.js'
+import { createShare } from './commands/share.js'
+import { initIdentity, showIdentity } from './commands/identity.js'
+import { connectToRemote } from './commands/connect.js'
+import { serve, serveStart, serveStop, serveStatus } from './commands/serve.js'
+import { startRelay, authorizeMachine, revokeMachine, listMachines, listTrustedRelays, untrustRelay } from './commands/relay.js'
+import { authLogin, authLogout, authStatus } from './commands/auth.js'
+import { hostReserve, hostRelease, hostList, hostSetPrimary, hostStatus } from './commands/host.js'
+import { startTmux, stopTmux, statusTmux, listTmux, newTmux, attachTmux, killTmux } from './commands/tmux.js'
+import { showStatus } from './commands/status.js'
+
+const program = new Command()
+
+// Package info
+program
+	.name('gssh')
+	.description('GitSpace CLI - Manage GitHub workspaces with secure remote terminal access')
+	.version(VERSION)
+
+// First-time setup check
+async function checkFirstTimeSetup(): Promise<void> {
+	if (isFirstTimeSetup()) {
+		logger.bold('Welcome to GitSpace CLI!\n')
+		logger.log('Initializing gitspace directory...\n')
+
+		// Check dependencies
+		try {
+			await ensureDependencies()
+		} catch (error) {
+			if (error instanceof SpacesError) {
+				logger.error(error.message)
+				process.exit(error.exitCode)
+			}
+			throw error
+		}
+
+		// Initialize spaces
+		initializeSpaces()
+
+		logger.success('GitSpace initialized!\n')
+		logger.log('Get started by adding a project:')
+		logger.command('  gssh add project\n')
+	}
+}
+
+// ============================================================================
+// Add Commands
+// ============================================================================
+
+const addCommand = program
+	.command('add')
+	.description('Add a new project or workspace')
+
+addCommand
+	.command('project')
+	.description('Add a new project from GitHub')
+	.option('--no-clone', 'Create project structure without cloning')
+	.option('--org <org>', 'Filter repos to specific organization')
+	.option('--linear-key <key>', 'Provide Linear API key via flag')
+	.option('--bundle-url <url>', 'Load bundle from remote URL (zip archive)')
+	.option('--bundle-path <path>', 'Load bundle from local directory')
+	.option('--skip-bundle', 'Skip bundle detection and onboarding')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addProject(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+addCommand
+	.argument('[workspace-name]', 'Name of the workspace to create')
+	.option(
+		'--branch <name>',
+		'Specify different branch name from workspace name'
+	)
+	.option('--from <branch>', 'Create from specific branch instead of base')
+	.option('--no-shell', "Don't open interactive shell after creating workspace")
+	.option('--no-setup', 'Skip setup commands')
+	.action(async (workspaceName, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addWorkspace(workspaceName, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Switch Commands
+// ============================================================================
+
+const switchCommand = program
+	.command('switch')
+	.alias('sw')
+	.description('Switch to a different project or workspace')
+
+switchCommand
+	.command('project')
+	.description('Switch to a different project')
+	.argument('[project-name]', 'Name of the project to switch to')
+	.action(async (projectName) => {
+		await checkFirstTimeSetup()
+		try {
+			await switchProject(projectName)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+switchCommand
+	.argument('[workspace-name]', 'Name of the workspace to switch to')
+	.option('--no-shell', "Don't open interactive shell, just print path")
+	.option('-f, --force', 'Jump to first fuzzy match without confirmation')
+	.action(async (workspaceName, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await switchWorkspace(workspaceName, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// List Commands
+// ============================================================================
+
+const listCommand = program
+	.command('list')
+	.alias('ls')
+	.description('List projects or workspaces')
+
+listCommand
+	.command('projects')
+	.description('List all projects')
+	.option('--json', 'Output in JSON format')
+	.option('--verbose', 'Show additional details')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await listProjects(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+listCommand
+	.command('workspaces')
+	.description('List workspaces in current project')
+	.option('--json', 'Output in JSON format')
+	.option('--verbose', 'Show additional details')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await listWorkspaces(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// Default list command (alias for list workspaces)
+listCommand.action(async (options) => {
+	await checkFirstTimeSetup()
+	try {
+		await listWorkspaces(options)
+	} catch (error) {
+		handleError(error)
+	}
+})
+
+// ============================================================================
+// Remove Commands
+// ============================================================================
+
+const removeCommand = program
+	.command('remove')
+	.alias('rm')
+	.description('Remove a workspace or project')
+
+removeCommand
+	.command('workspace')
+	.description('Remove a workspace')
+	.argument('[workspace-name]', 'Name of the workspace to remove')
+	.option('--force', 'Skip confirmation prompts')
+	.option('--keep-branch', "Don't delete git branch when removing workspace")
+	.action(async (workspaceName, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await removeWorkspace(workspaceName, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+removeCommand
+	.command('project')
+	.description('Remove a project')
+	.argument('[project-name]', 'Name of the project to remove')
+	.option('--force', 'Skip confirmation prompts')
+	.action(async (projectName, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await removeProject(projectName, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// Default remove command (alias for remove workspace)
+removeCommand.action(async (options) => {
+	await checkFirstTimeSetup()
+	try {
+		await removeWorkspace(undefined, options)
+	} catch (error) {
+		handleError(error)
+	}
+})
+
+// ============================================================================
+// Directory Commands
+// ============================================================================
+
+const directoryCommand = program
+	.command('directory')
+	.alias('dir')
+	.description('Manage directories')
+
+directoryCommand.action(async (options) => {
+	await checkFirstTimeSetup()
+	try {
+		await getProjectDirectory(options)
+	} catch (error) {
+		handleError(error)
+	}
+})
+
+// ============================================================================
+// Identity Commands
+// ============================================================================
+
+const identityCommand = program
+	.command('identity')
+	.description('Manage machine identity for secure remote connections')
+
+identityCommand
+	.command('init')
+	.description('Initialize a new identity keypair')
+	.option('--force', 'Overwrite existing identity')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await initIdentity(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+identityCommand
+	.command('show')
+	.description('Show identity information')
+	.option('--fingerprint', 'Show only fingerprint')
+	.option('--json', 'Output in JSON format')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await showIdentity(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Access Commands
+// ============================================================================
+
+const accessCommand = program
+	.command('access')
+	.description('Manage access control for remote connections')
+
+accessCommand
+	.command('add')
+	.description('Add a new access key (grants full access)')
+	.argument('<pubkey>', 'Public key (gssh-pub:SIGNING:KEYEXCHANGE or just SIGNING)')
+	.option('--label <name>', 'Human-readable label for this key')
+	.action(async (pubkey, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addAccessKey(pubkey, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+accessCommand
+	.command('list')
+	.alias('ls')
+	.description('List all access keys')
+	.option('--json', 'Output in JSON format')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await listAccessKeys(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+accessCommand
+	.command('remove')
+	.alias('rm')
+	.description('Remove an access key')
+	.argument('<pubkey|label>', 'Public key, identity ID prefix, or label')
+	.option('--force', 'Skip confirmation prompt')
+	.action(async (pubkeyOrLabel, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await removeAccessKey(pubkeyOrLabel, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Share Commands
+// ============================================================================
+
+const shareCommand = program
+	.command('share')
+	.description('Share workspace access via invite tokens')
+
+shareCommand
+	.command('create')
+	.description('Create a share invite token (view-only session access)')
+	.option('--expires <duration>', 'Token validity duration (e.g., 1h, 24h, 7d, 1w)', '24h')
+	.option('--session <id>', 'Specific session ID to share (defaults to current session)')
+	.option('--relay <url>', 'Relay server URL', 'wss://relay.gitspace.sh')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await createShare(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Connect Command
+// ============================================================================
+
+program
+	.command('connect')
+	.description('Connect to a remote machine via invite token')
+	.argument('[invite]', 'Invite token or URL (https://gitspace.sh/join#...)')
+	.option('--relay <url>', 'Override relay URL from invite token')
+	.action(async (invite, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await connectToRemote(invite, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Serve Command
+// ============================================================================
+
+const serveCommand = program
+	.command('serve')
+	.description('Manage remote access daemon')
+
+serveCommand
+	.command('start')
+	.description('Start the serve daemon')
+	.option('--relay <url>', 'Override default relay URL')
+	.option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
+	.option('--password-stdin', 'Read password from stdin')
+	.option('--foreground', 'Run in foreground (don\'t daemonize)')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await serveStart(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+serveCommand
+	.command('stop')
+	.description('Stop the serve daemon')
+	.action(async () => {
+		try {
+			await serveStop()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+serveCommand
+	.command('status')
+	.description('Show serve daemon status')
+	.action(async () => {
+		try {
+			await serveStatus()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// Default action for 'gssh serve' (backwards compatibility - same as start)
+serveCommand
+	.option('--relay <url>', 'Override default relay URL')
+	.option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			// Default to interactive (non-daemon) mode for backwards compatibility
+			await serve(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Relay Commands
+// ============================================================================
+
+const relayCommand = program
+	.command('relay')
+	.description('Manage relay server')
+
+relayCommand
+	.command('start')
+	.description('Start the relay server')
+	.option('--port <port>', 'Port to listen on', '4480')
+	.option('--bind <address>', 'Address to bind to', '0.0.0.0')
+	.option('--hostname <host>', 'Only serve requests for this domain (optional)')
+	.option('--label <label>', 'Human-readable label for this relay')
+	.action(async (options) => {
+		try {
+			await startRelay({
+				port: parseInt(options.port, 10),
+				bind: options.bind,
+				hostname: options.hostname,
+				label: options.label,
+			})
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+relayCommand
+	.command('authorize')
+	.description('Authorize a machine to connect to this relay')
+	.argument('<pubkey>', 'Machine public key in gssh-pub:SIGNING:KEYEXCHANGE format')
+	.option('--label <label>', 'Human-readable label for this machine')
+	.action(async (pubkey, options) => {
+		try {
+			await authorizeMachine(pubkey, { label: options.label })
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+relayCommand
+	.command('revoke')
+	.description("Revoke a machine's authorization")
+	.argument('<fingerprint-or-label>', 'Fingerprint or label of machine to revoke')
+	.action(async (fingerprintOrLabel) => {
+		try {
+			await revokeMachine(fingerprintOrLabel)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+relayCommand
+	.command('machines')
+	.description('List authorized machines')
+	.action(async () => {
+		try {
+			await listMachines()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+relayCommand
+	.command('trusted')
+	.description('List trusted relays (machine-side)')
+	.action(async () => {
+		try {
+			await listTrustedRelays()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+relayCommand
+	.command('untrust')
+	.description('Remove trust for a relay (machine-side)')
+	.argument('<url-or-fingerprint>', 'URL, fingerprint, or label of relay to untrust')
+	.action(async (urlOrFingerprint) => {
+		try {
+			await untrustRelay(urlOrFingerprint)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+
+// ============================================================================
+// Tmux Commands (tmux-lite daemon management)
+// ============================================================================
+
+const tmuxCommand = program
+	.command('tmux')
+	.description('Manage tmux-lite terminal session daemon')
+
+tmuxCommand
+	.command('start')
+	.description('Start the tmux-lite server daemon')
+	.action(async () => {
+		try {
+			await startTmux()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+tmuxCommand
+	.command('stop')
+	.description('Stop the tmux-lite server daemon')
+	.option('--force', 'Stop even if sessions are active')
+	.action(async (options) => {
+		try {
+			await stopTmux({ force: options.force })
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+tmuxCommand
+	.command('status')
+	.description('Show tmux-lite server status')
+	.action(async () => {
+		try {
+			await statusTmux()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+tmuxCommand
+	.command('list')
+	.description('List active tmux-lite sessions')
+	.action(async () => {
+		try {
+			await listTmux()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+tmuxCommand
+	.command('new [name]')
+	.description('Create and attach to a new session')
+	.action(async (name) => {
+		try {
+			await newTmux(name)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+tmuxCommand
+	.command('attach <id>')
+	.description('Attach to a session (by id or name)')
+	.option('--force', 'Take over if attached elsewhere')
+	.action(async (id, options) => {
+		try {
+			await attachTmux(id, { force: options.force })
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+tmuxCommand
+	.command('kill <id>')
+	.description('Kill a session (by id or name)')
+	.action(async (id) => {
+		try {
+			await killTmux(id)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Auth Commands (gitspace.sh)
+// ============================================================================
+
+const authCommand = program
+	.command('auth')
+	.description('Manage gitspace.sh authentication')
+
+authCommand
+	.command('login')
+	.description('Login with GitHub')
+	.action(async () => {
+		await checkFirstTimeSetup()
+		try {
+			await authLogin()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+authCommand
+	.command('logout')
+	.description('Logout and clear credentials')
+	.action(async () => {
+		try {
+			await authLogout()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+authCommand
+	.command('status')
+	.description('Show login status')
+	.action(async () => {
+		try {
+			await authStatus()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Host Commands (gitspace.sh hosting)
+// ============================================================================
+
+const hostCommand = program
+	.command('host')
+	.description('Manage gitspace.sh hosting')
+
+hostCommand
+	.command('reserve <subdomain>')
+	.description('Reserve a subdomain (e.g., brad.gitspace.sh)')
+	.action(async (subdomain) => {
+		await checkFirstTimeSetup()
+		try {
+			await hostReserve(subdomain)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+hostCommand
+	.command('release [subdomain]')
+	.description('Release a subdomain')
+	.action(async (subdomain) => {
+		try {
+			await hostRelease(subdomain)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+hostCommand
+	.command('list')
+	.alias('ls')
+	.description('List your subdomains')
+	.action(async () => {
+		try {
+			await hostList()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+hostCommand
+	.command('set-primary <subdomain>')
+	.description('Set primary subdomain for `gssh serve`')
+	.action(async (subdomain) => {
+		try {
+			await hostSetPrimary(subdomain)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+hostCommand
+	.command('status')
+	.description('Show hosting status')
+	.action(async () => {
+		try {
+			await hostStatus()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Status Command (unified daemon status)
+// ============================================================================
+
+program
+	.command('status')
+	.description('Show status of all spaces daemons')
+	.action(async () => {
+		try {
+			await showStatus()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Error Handling
+// ============================================================================
+
+function handleError(error: unknown): never {
+	if (error instanceof SpacesError) {
+		logger.error(error.message)
+		process.exit(error.exitCode)
+	}
+
+	if (error instanceof Error) {
+		logger.error(`Unexpected error: ${error.message}`)
+		logger.debug(error.stack || '')
+		process.exit(1)
+	}
+
+	logger.error('An unexpected error occurred')
+	process.exit(1)
+}
+
+// ============================================================================
+// Parse and Execute
+// ============================================================================
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+	logger.error(`Uncaught exception: ${error.message}`)
+	logger.debug(error.stack || '')
+	process.exit(1)
+})
+
+process.on('unhandledRejection', (reason) => {
+	logger.error(`Unhandled rejection: ${reason}`)
+	process.exit(1)
+})
+
+// Parse command line arguments
+// Check for global relay options (TUI mode with relay)
+const args = process.argv.slice(2)
+const hasRelayOption = args.includes('--relay')
+const hasOnlyRelayOptions = args.every(arg =>
+	arg === '--relay' ||
+	(args[args.indexOf('--relay') + 1] === arg)
+)
+
+// If no args provided or only relay options, launch TUI
+if (process.argv.length === 2 || (hasRelayOption && hasOnlyRelayOptions)) {
+	// Extract options manually instead of using commander.parse() which shows help
+	const relayIndex = args.indexOf('--relay')
+	const relayUrl = relayIndex >= 0 ? args[relayIndex + 1] : undefined
+
+	// Build relay config if provided (auth now via challenge-response, not token)
+	const relayConfig = relayUrl ? {
+		url: relayUrl,
+	} : undefined
+
+	// Launch TUI
+	checkFirstTimeSetup()
+		.then(() => launchTUI(relayConfig))
+		.catch((error) => {
+			if (error instanceof SpacesError) {
+				logger.error(error.message)
+				process.exit(error.exitCode)
+			}
+			logger.error(`Failed to launch TUI: ${error instanceof Error ? error.message : 'Unknown error'}`)
+			process.exit(1)
+		})
+} else {
+	program.parse()
+}

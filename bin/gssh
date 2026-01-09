@@ -1,0 +1,78 @@
+#!/bin/sh
+#
+# gssh - GitSpace CLI Launcher
+#
+# Tries to run the compiled binary first, falls back to bun for development.
+#
+# Priority:
+# 1. Compiled binary in dist/gssh-{platform}
+# 2. Platform-specific npm package (@gitspace/darwin-arm64, etc.)
+# 3. Development mode via bun src/index.ts
+#
+
+set -e
+
+# Resolve symlinks to find the real script location
+resolve_symlink() {
+  file="$1"
+  while [ -L "$file" ]; do
+    dir="$(cd "$(dirname "$file")" && pwd)"
+    file="$(readlink "$file")"
+    # Handle relative symlinks
+    case "$file" in
+      /*) ;;
+      *) file="$dir/$file" ;;
+    esac
+  done
+  echo "$file"
+}
+
+REAL_SCRIPT="$(resolve_symlink "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$REAL_SCRIPT")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Get platform identifier
+get_platform() {
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) echo "darwin-arm64" ;;
+    Darwin-x86_64) echo "darwin-x64" ;;
+    Linux-x86_64) echo "linux-x64" ;;
+    Linux-aarch64) echo "linux-arm64" ;;
+    *) echo "" ;;
+  esac
+}
+
+PLATFORM=$(get_platform)
+
+# 1. Check for local compiled binary (dev builds)
+if [ -n "$PLATFORM" ] && [ -x "$ROOT_DIR/dist/gssh-$PLATFORM" ]; then
+  exec "$ROOT_DIR/dist/gssh-$PLATFORM" "$@"
+fi
+if [ -x "$ROOT_DIR/dist/gssh" ]; then
+  exec "$ROOT_DIR/dist/gssh" "$@"
+fi
+
+# 2. Check for platform-specific npm package
+if [ -n "$PLATFORM" ]; then
+  for DIR in \
+    "$ROOT_DIR/node_modules/@gitspace/$PLATFORM" \
+    "$SCRIPT_DIR/../node_modules/@gitspace/$PLATFORM" \
+    "$SCRIPT_DIR/../../@gitspace/$PLATFORM" \
+    "$SCRIPT_DIR/../../../@gitspace/$PLATFORM"
+  do
+    if [ -x "$DIR/bin/gssh" ]; then
+      exec "$DIR/bin/gssh" "$@"
+    fi
+  done
+fi
+
+# 3. Fall back to bun for development (only if src/index.ts exists)
+if [ -f "$ROOT_DIR/src/index.ts" ] && command -v bun >/dev/null 2>&1; then
+  exec bun "$ROOT_DIR/src/index.ts" "$@"
+fi
+
+echo "Error: Could not find gssh binary."
+echo ""
+echo "For development, install bun: https://bun.sh"
+echo "For production, ensure @gitspace/$PLATFORM is installed."
+exit 1

@@ -1,0 +1,69 @@
+/**
+ * Relay types - connection and pipe types
+ *
+ * The relay is a dumb pipe. It doesn't know about users, sessions, or encryption.
+ * All it does is:
+ * 1. Verify machine identity via Ed25519 challenge-response
+ * 2. Manage pipes (machineId -> connections)
+ * 3. Broadcast bytes between machine and clients
+ */
+
+import type { ServerWebSocket } from "bun";
+import type { RelayIdentity } from "./identity.js";
+
+/**
+ * WebSocket data attached to each connection
+ */
+export interface WebSocketData {
+  /** Machine ID this connection belongs to (empty until registered/connected) */
+  machineId: string;
+  /** Role of the connection */
+  role: "machine" | "client";
+  /** Connection ID (for routing) */
+  connectionId: string;
+  /** Account ID derived from machine authorization (machines only) */
+  accountId?: string;
+  /** Client identity ID (for clients, set during connect_with_invite/connect_to_machine) */
+  clientIdentityId?: string;
+  /** Permissions (for clients) */
+  permissions?: ("read" | "write")[];
+}
+
+/**
+ * A pipe represents a machine and all clients connected to it
+ */
+export interface Pipe {
+  /** Machine ID */
+  machineId: string;
+  /** Machine's WebSocket connection (null if not connected) */
+  machine: ServerWebSocket<WebSocketData> | null;
+  /** All client WebSocket connections */
+  clients: Set<ServerWebSocket<WebSocketData>>;
+  /** When the pipe was opened */
+  openedAt: number;
+}
+
+/**
+ * Relay configuration
+ */
+export interface RelayConfig {
+  /** Port to listen on */
+  port: number;
+  /** Address to bind to (default: 0.0.0.0) */
+  bind?: string;
+  /** Allowed hostname - only serve requests with matching Host header (optional) */
+  hostname?: string;
+  /**
+   * Disable best-effort in-memory connection rate limiting.
+   * Intended for tests (Bun test runs many short-lived WS connections quickly).
+   */
+  disableRateLimit?: boolean;
+  /** Relay identity (Ed25519 keypair for signing and verification) */
+  identity: RelayIdentity;
+  /**
+   * Pre-authorized machine signing keys (base64 Ed25519 public keys).
+   * These machines can connect without being in the on-disk authorized list.
+   * Used for ephemeral local relays where the creating process knows which machine will connect.
+   */
+  preAuthorizedMachines?: string[] | Set<string>;
+}

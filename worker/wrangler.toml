@@ -1,0 +1,26 @@
+name = "gitspace-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Custom domain
+routes = [
+  { pattern = "api.gitspace.sh", custom_domain = true }
+]
+
+[vars]
+PORTAL_URL = "https://gitspace.sh"
+MAX_ACCOUNTS = "17"
+# GITHUB_CLIENT_ID set via wrangler secret or here for dev
+
+[[d1_databases]]
+binding = "DB"
+database_name = "gitspace"
+database_id = "54552f6a-a846-4a4c-97a9-40f185b07451"
+
+# Secrets (set via: wrangler secret put SECRET_NAME)
+# GITHUB_CLIENT_ID
+# GITHUB_CLIENT_SECRET
+# CF_API_TOKEN
+# CF_ACCOUNT_ID
+# CF_ZONE_ID
+# ENCRYPTION_KEY
