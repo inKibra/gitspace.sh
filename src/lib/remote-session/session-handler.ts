@@ -33,6 +33,14 @@ import { loadProjects } from "../../tui/state";
 
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
+// Import workspace removal
+import { removeWorktree, deleteLocalBranch, getWorktreeInfo } from "../../core/git";
+import { getProjectWorkspacesDir, getProjectBaseDir, getScriptsPhaseDir, readProjectConfig } from "../../core/config";
+
+// Import script execution
+import { runScriptsInTerminal, type RunScriptsOptions } from "../../utils/run-scripts";
+import { hasSetupBeenRun, markSetupComplete } from "../../utils/workspace-state";
+import { getProjectSecrets } from "../../utils/secrets";
 
 /**
  * Session state for a connected client
@@ -323,6 +331,46 @@ export class RemoteSessionHandler {
         if (!workspace) {
           await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
           return;
+        }
+
+        // Run setup or select scripts for the workspace
+        try {
+          const config = readProjectConfig(workspace.projectName);
+
+          // Build script options with bundle values and secrets
+          // nonInteractive: true prevents scripts from blocking on stdin in remote context
+          const scriptOptions: RunScriptsOptions = {
+            bundleValues: config.bundleValues,
+            nonInteractive: true, // Remote context - scripts can't prompt for input
+          };
+
+          // Fetch secrets from OS keychain if we have secret keys
+          if (config.bundleSecretKeys && config.bundleSecretKeys.length > 0) {
+            scriptOptions.bundleSecrets = await getProjectSecrets(workspace.projectName, config.bundleSecretKeys);
+          }
+
+          // Check if setup has been run for this workspace
+          const setupAlreadyRun = hasSetupBeenRun(workspace.path);
+
+          if (setupAlreadyRun) {
+            // Run select scripts for existing workspace
+            console.log(`[remote-session] Running select scripts for workspace: ${workspace.id}`);
+            const selectScriptsDir = getScriptsPhaseDir(workspace.projectName, 'select');
+            await runScriptsInTerminal(selectScriptsDir, workspace.path, workspace.id, config.repository, scriptOptions);
+          } else {
+            // First time accessing this workspace - run pre scripts, then setup scripts
+            console.log(`[remote-session] Running pre scripts for workspace: ${workspace.id}`);
+            const preScriptsDir = getScriptsPhaseDir(workspace.projectName, 'pre');
+            await runScriptsInTerminal(preScriptsDir, workspace.path, workspace.id, config.repository, scriptOptions);
+
+            console.log(`[remote-session] Running setup scripts for workspace: ${workspace.id}`);
+            const setupScriptsDir = getScriptsPhaseDir(workspace.projectName, 'setup');
+            await runScriptsInTerminal(setupScriptsDir, workspace.path, workspace.id, config.repository, scriptOptions);
+            markSetupComplete(workspace.path);
+          }
+        } catch (scriptError) {
+          console.error("[remote-session] Script execution failed:", scriptError);
+          // Continue with session creation even if scripts fail
         }
 
         // Create session name: use provided name or auto-generate
