@@ -98,7 +98,8 @@ type WorkspaceFlowState =
   | { type: 'loading'; title: string; message: string }
   | { type: 'branch-select'; branches: string[]; selectedIndex: number }
   | { type: 'linear-select'; issues: LinearIssue[]; selectedIndex: number }
-  | { type: 'manual-input'; inputValue: string; error: string | null }
+  | { type: 'manual-name-input'; inputValue: string; error: string | null }
+  | { type: 'manual-branch-input'; workspaceName: string; inputValue: string }
   | { type: 'creating'; workspaceName: string };
 
 /** Project flow states - explicit state machine for project creation */
@@ -691,7 +692,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         setWorkspaceFlow({ type: 'closed' });
       }
     } else if (source === 'manual') {
-      setWorkspaceFlow({ type: 'manual-input', inputValue: '', error: null });
+      setWorkspaceFlow({ type: 'manual-name-input', inputValue: '', error: null });
     }
   }, [state.currentProject, flow]);
 
@@ -707,17 +708,24 @@ function App({ relayConfig, onQuit }: AppProps) {
     await createWorkspaceAndOpenSession(workspaceName, workspaceName, false, issue);
   }, [createWorkspaceAndOpenSession]);
 
-  // Handle manual name submission
-  const handleManualSubmit = useCallback(async (name: string) => {
+  // Handle manual workspace name submission (advances to branch input)
+  const handleManualNameSubmit = useCallback((name: string) => {
     if (!name || name.trim().length === 0) {
-      setWorkspaceFlow(prev => prev.type === 'manual-input' ? { ...prev, error: 'Workspace name is required' } : prev);
+      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Workspace name is required' } : prev);
       return;
     }
     if (!isValidWorkspaceName(name)) {
-      setWorkspaceFlow(prev => prev.type === 'manual-input' ? { ...prev, error: 'Use only letters, numbers, hyphens, underscores' } : prev);
+      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Use only letters, numbers, hyphens, underscores' } : prev);
       return;
     }
-    await createWorkspaceAndOpenSession(name, name, false);
+    // Advance to branch input step, pre-fill with workspace name
+    setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: name, inputValue: name });
+  }, []);
+
+  // Handle manual branch name submission (creates the workspace)
+  const handleManualBranchSubmit = useCallback(async (workspaceName: string, branchName: string) => {
+    const finalBranch = branchName.trim() || workspaceName;
+    await createWorkspaceAndOpenSession(workspaceName, finalBranch, false);
   }, [createWorkspaceAndOpenSession]);
 
   // Main handler to start new workspace flow
@@ -1207,9 +1215,9 @@ function App({ relayConfig, onQuit }: AppProps) {
         return;
       }
 
-      if (workspaceFlow.type === 'manual-input') {
+      if (workspaceFlow.type === 'manual-name-input') {
         if (key.name === 'return') {
-          await handleManualSubmit(workspaceFlow.inputValue);
+          handleManualNameSubmit(workspaceFlow.inputValue);
         } else if (key.name === 'backspace') {
           setWorkspaceFlow({
             ...workspaceFlow,
@@ -1221,6 +1229,23 @@ function App({ relayConfig, onQuit }: AppProps) {
             ...workspaceFlow,
             inputValue: workspaceFlow.inputValue + key.raw,
             error: null,
+          });
+        }
+        return;
+      }
+
+      if (workspaceFlow.type === 'manual-branch-input') {
+        if (key.name === 'return') {
+          await handleManualBranchSubmit(workspaceFlow.workspaceName, workspaceFlow.inputValue);
+        } else if (key.name === 'backspace') {
+          setWorkspaceFlow({
+            ...workspaceFlow,
+            inputValue: workspaceFlow.inputValue.slice(0, -1),
+          });
+        } else if (key.raw && key.raw.length === 1 && !key.ctrl && !key.meta) {
+          setWorkspaceFlow({
+            ...workspaceFlow,
+            inputValue: workspaceFlow.inputValue + key.raw,
           });
         }
         return;
@@ -1536,8 +1561,10 @@ function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
   // Calculate modal height based on content:
   // - source-select: title + spacer + (options * 2 lines each) + (spacers between) + spacer + hint + border/padding
   // - branch/linear-select: title + items (scrollable) + hint + border/padding
-  // - manual-input: title + label + input box + error? + hint + border/padding
-  const modalHeight = flow.type === 'manual-input' ? 10 :
+  // - manual-name-input: title + label + input box + error? + hint + border/padding
+  // - manual-branch-input: title + label + input box + workspace display + hint + border/padding
+  const modalHeight = flow.type === 'manual-name-input' ? 10 :
+                      flow.type === 'manual-branch-input' ? 12 :
                       flow.type === 'loading' || flow.type === 'creating' ? 6 :
                       flow.type === 'source-select' ? 6 + flow.options.length * 3 :
                       flow.type === 'branch-select' ? Math.min(16, 6 + flow.branches.length) :
@@ -1636,10 +1663,10 @@ function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
           </>
         )}
 
-        {/* Manual input */}
-        {flow.type === 'manual-input' && (
+        {/* Manual workspace name input */}
+        {flow.type === 'manual-name-input' && (
           <>
-            <text fg={COLORS.title} height={1}>New Workspace</text>
+            <text fg={COLORS.title} height={1}>New Workspace (1/2)</text>
             <text fg={COLORS.text} height={1} marginTop={1}>Enter workspace name:</text>
             <box
               marginTop={1}
@@ -1651,6 +1678,25 @@ function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
               <text fg={COLORS.text} height={1}>{flow.inputValue || ' '}_</text>
             </box>
             {flow.error && <text fg={COLORS.error} height={1} marginTop={1}>{flow.error}</text>}
+            <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Next  [Esc] Cancel</text>
+          </>
+        )}
+
+        {/* Manual branch name input */}
+        {flow.type === 'manual-branch-input' && (
+          <>
+            <text fg={COLORS.title} height={1}>New Workspace (2/2)</text>
+            <text fg={COLORS.text} height={1} marginTop={1}>Enter branch name (slashes allowed):</text>
+            <box
+              marginTop={1}
+              borderStyle="rounded"
+              borderColor={COLORS.border}
+              padding={0}
+              width="100%"
+            >
+              <text fg={COLORS.text} height={1}>{flow.inputValue || ' '}_</text>
+            </box>
+            <text fg={COLORS.textDim} height={1} marginTop={1}>Workspace: {flow.workspaceName}</text>
             <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Create  [Esc] Cancel</text>
           </>
         )}
