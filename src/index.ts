@@ -128,7 +128,13 @@ addCommand
 	.action(async (workspaceName, options) => {
 		await checkFirstTimeSetup()
 		try {
-			await addWorkspace(workspaceName, options)
+			// Map commander option names to CreateWorkspaceOptions property names
+			await addWorkspace(workspaceName, {
+				branchName: options.branch,
+				fromBranch: options.from,
+				noShell: options.shell === false,
+				noSetup: options.setup === false,
+			})
 		} catch (error) {
 			handleError(error)
 		}
