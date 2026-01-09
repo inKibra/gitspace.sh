@@ -1161,7 +1161,11 @@ Bun.listen({
             res = { type: "ok" };
             if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
             else socket.write(encodeRouterMessage(res));
-            setTimeout(() => process.exit(0), 100);
+            // Clean up socket file after sending response, before exit
+            setTimeout(() => {
+              try { unlinkSync(ROUTER_SOCKET); } catch {}
+              process.exit(0);
+            }, 100);
             return;
 
           case "inbox":

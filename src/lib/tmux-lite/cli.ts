@@ -605,8 +605,10 @@ async function main() {
     console.log("Starting server...");
     spawn({
       cmd: getServerCommand(),
-      stdout: "inherit",
-      stderr: "inherit",
+      // Use "ignore" so server doesn't inherit CLI's stdout/stderr
+      // This allows CLI to exit cleanly when piped
+      stdout: "ignore",
+      stderr: "ignore",
     });
     await Bun.sleep(300);
     if (!(await isServerRunning())) {
@@ -787,10 +789,23 @@ In session:
   }
 }
 
+// Commands that are non-interactive and should exit immediately after completion
+const NON_INTERACTIVE_COMMANDS = new Set([
+  "list", "ls", "kill", "kill-server", "inbox", "inbox-clear", "status", "version"
+]);
+
 // Only run CLI when executed directly, not when imported as a module
 if (import.meta.main) {
-  main().catch(e => {
-    console.error(e.message);
-    process.exit(1);
-  });
+  main()
+    .then(() => {
+      // Force exit after non-interactive commands complete
+      // Some socket references may keep the event loop alive otherwise
+      if (NON_INTERACTIVE_COMMANDS.has(cmd)) {
+        process.exit(0);
+      }
+    })
+    .catch(e => {
+      console.error(e.message);
+      process.exit(1);
+    });
 }
