@@ -3,7 +3,7 @@
  * Tracks whether setup commands have been run for a workspace
  */
 
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 
@@ -52,7 +52,6 @@ export function markSetupComplete(workspacePath: string): void {
  */
 export function clearSetupMarker(workspacePath: string): void {
   const markerPath = join(workspacePath, SETUP_MARKER_FILE);
-  const { unlinkSync } = require('fs');
 
   try {
     if (existsSync(markerPath)) {

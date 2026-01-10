@@ -53,7 +53,6 @@ import {
   readProjectConfig,
   getProjectBaseDir,
   getProjectWorkspacesDir,
-  getScriptsPhaseDir,
   createProject,
   projectExists,
   updateProjectConfig,
