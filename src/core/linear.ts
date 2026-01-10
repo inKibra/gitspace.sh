@@ -10,8 +10,15 @@ import type { LinearTeamInfo } from '../types/config.js'
 import { readGlobalConfig, readProjectConfig, getCurrentProject } from './config.js'
 import { getSecret } from '../utils/secrets.js'
 
-/** Key used to store Linear API key in keychain */
+/** Key used to store Linear API key in keychain (user-level) */
 export const LINEAR_API_KEY_SECRET = 'linear-api-key'
+
+/**
+ * Get the secret key name for a project-specific Linear API key
+ */
+export function getProjectLinearSecretKey(projectName: string): string {
+	return `linear-api-key-${projectName}`
+}
 
 /**
  * Singleton Linear client instance
@@ -283,36 +290,56 @@ export interface ResolvedLinearConfig {
 	teams: LinearTeamInfo[]
 	/** Whether config came from project or user level */
 	scope: 'project' | 'user' | 'none'
+	/** Whether project has its own API key (vs inheriting from user) */
+	hasProjectApiKey: boolean
 }
 
 /**
  * Get Linear configuration with project -> user fallback
  *
- * Resolution order:
+ * Resolution order for API key:
+ * 1. Project-level API key (if set)
+ * 2. User-level API key
+ *
+ * Resolution order for teams:
  * 1. Project-level linearTeams (if set)
  * 2. User-level linearDefaultTeam (if set)
  * 3. First team in user's linearTeams
- *
- * API key always comes from user-level keychain.
  */
 export async function getLinearConfig(projectName?: string): Promise<ResolvedLinearConfig> {
 	const project = projectName || getCurrentProject()
-
-	// Get API key from keychain (user-level)
-	const apiKey = await getSecret(LINEAR_API_KEY_SECRET)
 
 	// Get user-level config
 	const globalConfig = readGlobalConfig()
 	const userTeams = globalConfig.linearTeams || []
 	const userDefaultTeam = globalConfig.linearDefaultTeam
 
-	// If no API key or no teams, return empty config
-	if (!apiKey || userTeams.length === 0) {
+	// Check for project-level API key first
+	let apiKey: string | null = null
+	let hasProjectApiKey = false
+
+	if (project) {
+		const projectSecretKey = getProjectLinearSecretKey(project)
+		const projectApiKey = await getSecret(projectSecretKey)
+		if (projectApiKey) {
+			apiKey = projectApiKey
+			hasProjectApiKey = true
+		}
+	}
+
+	// Fall back to user-level API key
+	if (!apiKey) {
+		apiKey = await getSecret(LINEAR_API_KEY_SECRET)
+	}
+
+	// If no API key, return empty config
+	if (!apiKey) {
 		return {
-			apiKey,
+			apiKey: null,
 			teamKeys: [],
 			teams: userTeams,
 			scope: 'none',
+			hasProjectApiKey: false,
 		}
 	}
 
@@ -331,6 +358,7 @@ export async function getLinearConfig(projectName?: string): Promise<ResolvedLin
 						teamKeys: [legacyTeamKey],
 						teams: userTeams,
 						scope: 'project',
+						hasProjectApiKey,
 					}
 				}
 			}
@@ -342,6 +370,7 @@ export async function getLinearConfig(projectName?: string): Promise<ResolvedLin
 					teamKeys: projectConfig.linearTeams,
 					teams: userTeams,
 					scope: 'project',
+					hasProjectApiKey,
 				}
 			}
 		} catch {
@@ -361,6 +390,7 @@ export async function getLinearConfig(projectName?: string): Promise<ResolvedLin
 		teamKeys,
 		teams: userTeams,
 		scope: teamKeys.length > 0 ? 'user' : 'none',
+		hasProjectApiKey,
 	}
 }
 

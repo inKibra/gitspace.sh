@@ -18,6 +18,7 @@ import {
 	getLinearConfig,
 	resetLinearClient,
 	LINEAR_API_KEY_SECRET,
+	getProjectLinearSecretKey,
 } from '../core/linear.js'
 import {
 	readGlobalConfig,
@@ -322,43 +323,184 @@ async function setupProjectLinear(projectName: string): Promise<void> {
 		throw new SpacesError(`Project '${projectName}' not found`, 'USER_ERROR', 1)
 	}
 
+	// Check for existing project-level API key
+	const projectSecretKey = getProjectLinearSecretKey(projectName)
+	const existingProjectApiKey = await getSecret(projectSecretKey)
+
 	// Check for user-level API key
-	const apiKey = await getSecret(LINEAR_API_KEY_SECRET)
-	const globalConfig = readGlobalConfig()
-	const userTeams = globalConfig.linearTeams || []
+	const userApiKey = await getSecret(LINEAR_API_KEY_SECRET)
 
-	if (!apiKey) {
-		logger.log('\nNo Linear API key configured. Setting up now...\n')
+	logger.log(`\n── Linear Setup (Project: ${projectName}) ──\n`)
 
-		// Fall through to user setup first
-		await setupUserLinear()
-
-		// Check if setup was successful
-		const newApiKey = await getSecret(LINEAR_API_KEY_SECRET)
-		if (!newApiKey) {
-			logger.info('User setup cancelled')
-			return
-		}
-
-		// Refresh config
-		const newConfig = readGlobalConfig()
-		const newTeams = newConfig.linearTeams || []
-
-		if (newTeams.length === 0) {
-			logger.info('No teams configured')
-			return
-		}
-
-		// Continue to project setup
+	// If project already has its own API key, show menu
+	if (existingProjectApiKey) {
+		const maskedKey = maskApiKey(existingProjectApiKey)
+		logger.log(`  Current API key: ${maskedKey} (project-specific)`)
 		logger.log('')
-		await selectProjectTeams(projectName, newTeams)
-	} else if (userTeams.length === 0) {
-		logger.warning('No teams configured at user level.')
-		logger.log("Run 'gssh linear setup' to configure teams first.")
+
+		const action = await selectOne(
+			[
+				{ label: 'Update project API key', value: 'update-key' },
+				{ label: 'Switch to user-level API key', value: 'use-user' },
+				{ label: 'Modify teams', value: 'teams' },
+				{ label: 'Cancel', value: 'cancel' },
+			],
+			'What would you like to do?'
+		)
+
+		if (action === null || action === 'cancel') {
+			logger.info('Cancelled')
+			return
+		}
+
+		if (action === 'update-key') {
+			await setupProjectWithOwnKey(projectName)
+		} else if (action === 'use-user') {
+			// Clear project API key, fall back to user
+			await deleteSecret(projectSecretKey)
+			resetLinearClient()
+			logger.success(`\nProject '${projectName}' will now use user-level API key`)
+
+			// Let user configure teams
+			const globalConfig = readGlobalConfig()
+			const userTeams = globalConfig.linearTeams || []
+			if (userTeams.length > 0) {
+				await selectProjectTeams(projectName, userTeams)
+			}
+		} else if (action === 'teams') {
+			// Use existing project API key to fetch teams
+			await updateProjectTeamsWithKey(projectName, existingProjectApiKey)
+		}
 		return
-	} else {
-		await selectProjectTeams(projectName, userTeams)
 	}
+
+	// No project API key - ask what they want to do
+	if (userApiKey) {
+		const choice = await selectOne(
+			[
+				{ label: 'Use user-level API key', value: 'user', description: 'Inherit from user config' },
+				{ label: 'Use project-specific API key', value: 'project', description: 'Enter a different API key for this project' },
+				{ label: 'Cancel', value: 'cancel' },
+			],
+			'Which API key would you like to use?'
+		)
+
+		if (choice === null || choice === 'cancel') {
+			logger.info('Cancelled')
+			return
+		}
+
+		if (choice === 'project') {
+			await setupProjectWithOwnKey(projectName)
+		} else {
+			// Use user-level key, just configure teams
+			const globalConfig = readGlobalConfig()
+			const userTeams = globalConfig.linearTeams || []
+
+			if (userTeams.length === 0) {
+				logger.warning('No teams configured at user level.')
+				logger.log("Run 'gssh linear setup' to configure teams first.")
+				return
+			}
+
+			await selectProjectTeams(projectName, userTeams)
+		}
+	} else {
+		// No user API key - must set up project-specific key or user key first
+		const choice = await selectOne(
+			[
+				{ label: 'Set up user-level API key first', value: 'user', description: 'Recommended - share across projects' },
+				{ label: 'Use project-specific API key', value: 'project', description: 'Only for this project' },
+				{ label: 'Cancel', value: 'cancel' },
+			],
+			'No user-level API key configured. What would you like to do?'
+		)
+
+		if (choice === null || choice === 'cancel') {
+			logger.info('Cancelled')
+			return
+		}
+
+		if (choice === 'user') {
+			await setupUserLinear()
+
+			// Check if setup was successful, then configure project teams
+			const newApiKey = await getSecret(LINEAR_API_KEY_SECRET)
+			if (newApiKey) {
+				const newConfig = readGlobalConfig()
+				const newTeams = newConfig.linearTeams || []
+				if (newTeams.length > 0) {
+					logger.log('')
+					await selectProjectTeams(projectName, newTeams)
+				}
+			}
+		} else {
+			await setupProjectWithOwnKey(projectName)
+		}
+	}
+}
+
+/**
+ * Set up a project with its own API key
+ */
+async function setupProjectWithOwnKey(projectName: string): Promise<void> {
+	const apiKey = await promptAndValidateApiKey('Enter Linear API key for this project:')
+	if (!apiKey) return
+
+	// Fetch teams with this key
+	logger.info('Fetching teams...')
+	const teams = await fetchLinearTeams(apiKey)
+
+	if (teams.length === 0) {
+		logger.warning('No teams found for this API key')
+		// Still save the key
+		const projectSecretKey = getProjectLinearSecretKey(projectName)
+		await setSecret(projectSecretKey, apiKey)
+		resetLinearClient()
+		updateProjectConfig(projectName, { linearTeams: [] })
+		logger.success(`\nProject API key saved for '${projectName}' (no teams available)`)
+		return
+	}
+
+	const result = await selectAndConfigureTeams(teams, undefined, `Select teams for '${projectName}':`)
+	if (!result) return
+
+	// Save project-specific API key
+	const projectSecretKey = getProjectLinearSecretKey(projectName)
+	await setSecret(projectSecretKey, apiKey)
+	resetLinearClient()
+
+	// Save selected teams
+	const teamKeys = result.selectedTeams.map((t) => t.key)
+	updateProjectConfig(projectName, { linearTeams: teamKeys })
+
+	const teamList = teamKeys.join(', ')
+	logger.success(`\nProject '${projectName}' configured with its own API key (teams: ${teamList})`)
+}
+
+/**
+ * Update project teams using an existing project API key
+ */
+async function updateProjectTeamsWithKey(projectName: string, apiKey: string): Promise<void> {
+	const projectConfig = readProjectConfig(projectName)
+	const currentTeamKeys = new Set(projectConfig.linearTeams || [])
+
+	logger.info('Fetching teams...')
+	const teams = await fetchLinearTeams(apiKey)
+
+	if (teams.length === 0) {
+		logger.warning('No teams found for this API key')
+		return
+	}
+
+	const result = await selectAndConfigureTeams(teams, currentTeamKeys, `Select teams for '${projectName}':`)
+	if (!result) return
+
+	const teamKeys = result.selectedTeams.map((t) => t.key)
+	updateProjectConfig(projectName, { linearTeams: teamKeys })
+
+	const teamList = teamKeys.join(', ')
+	logger.success(`\nProject '${projectName}' teams updated: ${teamList}`)
 }
 
 /**
@@ -468,16 +610,16 @@ async function showProjectConfig(projectName: string): Promise<void> {
 		return
 	}
 
-	logger.log(`  API key: ${maskApiKey(config.apiKey)}`)
-	logger.log(`  Scope: ${config.scope}`)
+	const apiKeySource = config.hasProjectApiKey ? '(project-specific)' : '(from user config)'
+	logger.log(`  API key: ${maskApiKey(config.apiKey)} ${apiKeySource}`)
 
 	if (config.scope === 'project') {
 		const teams = projectConfig.linearTeams || []
 		if (teams.length > 0) {
-			logger.log(`  Project teams: ${teams.join(', ')}`)
+			logger.log(`  Teams: ${teams.join(', ')}`)
 		}
 	} else {
-		logger.log(`  Using default: ${config.teamKeys.join(', ')}`)
+		logger.log(`  Teams: ${config.teamKeys.join(', ')} (inherited from user config)`)
 	}
 
 	// Show legacy config warning if present
@@ -542,14 +684,25 @@ async function clearProjectConfig(projectName: string): Promise<void> {
 		throw new SpacesError(`Project '${projectName}' not found`, 'USER_ERROR', 1)
 	}
 
-	const confirmed = await promptConfirm(
-		`Clear Linear configuration for project '${projectName}'?`,
-		false
-	)
+	// Check if project has its own API key
+	const projectSecretKey = getProjectLinearSecretKey(projectName)
+	const hasProjectApiKey = await getSecret(projectSecretKey)
+
+	const message = hasProjectApiKey
+		? `Clear Linear configuration for project '${projectName}' (including project-specific API key)?`
+		: `Clear Linear configuration for project '${projectName}'?`
+
+	const confirmed = await promptConfirm(message, false)
 
 	if (!confirmed) {
 		logger.info('Cancelled')
 		return
+	}
+
+	// Clear project-specific API key if present
+	if (hasProjectApiKey) {
+		await deleteSecret(projectSecretKey)
+		resetLinearClient()
 	}
 
 	updateProjectConfig(projectName, {

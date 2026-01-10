@@ -740,21 +740,25 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4">Project-Level Configuration</h3>
           <p className="text-zinc-400 mb-4">
-            Override the default team for a specific project:
+            Configure Linear for a specific project:
           </p>
           <CodeBlock code="gssh linear setup --project myapp" />
 
-          <p className="text-zinc-400 mb-8">
-            Project configuration uses your user-level API key but can restrict to a subset of your teams.
+          <p className="text-zinc-400 mb-4">
+            You can choose to:
           </p>
+          <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-8 ml-2">
+            <li><strong className="text-zinc-300">Use user-level API key</strong> - Inherit from your global config and select which teams to use</li>
+            <li><strong className="text-zinc-300">Use project-specific API key</strong> - Enter a different API key for this project (useful for different Linear workspaces)</li>
+          </ul>
 
           <h3 className="text-xl font-semibold text-white mb-4">Commands</h3>
           <CodeBlock code={`gssh linear setup                 # User-level setup wizard
-gssh linear setup --project app   # Project-specific team selection
+gssh linear setup --project app   # Project-specific config (key + teams)
 gssh linear show                  # Show user-level config
 gssh linear show --project app    # Show project config
 gssh linear clear                 # Clear user-level config
-gssh linear clear --project app   # Clear project config`} multiLine language="bash" />
+gssh linear clear --project app   # Clear project config (including API key)`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Creating Workspaces from Issues</h3>
           <p className="text-zinc-400 mb-4">
