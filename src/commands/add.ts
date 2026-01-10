@@ -18,7 +18,7 @@ import {
   updateProjectConfig,
 } from '../core/config.js';
 import { checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
-import { selectItem, promptConfirm, promptPassword, promptInput } from '../utils/prompts.js';
+import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
 import { listAllRepos, cloneRepository } from '../core/github.js';
 import {
@@ -28,7 +28,7 @@ import {
   listRemoteBranches,
 } from '../core/git.js';
 import { openWorkspaceShell } from '../core/shell.js';
-import { fetchUnstartedIssues } from '../core/linear.js';
+import { fetchUnstartedIssues, getLinearConfig } from '../core/linear.js';
 import {
   sanitizeForFileSystem,
   generateWorkspaceName,
@@ -177,29 +177,11 @@ export async function addProject(options: {
     }
   }
 
-  // Ask about Linear integration
-  const useLinear = await promptConfirm('Does this project use Linear?', false);
-
-  let linearApiKey: string | undefined;
-  let linearTeamKey: string | undefined;
-
-  if (useLinear) {
-    if (!options.linearKey) {
-      linearApiKey = await promptPassword('Enter Linear API key:') || undefined;
-    } else {
-      linearApiKey = options.linearKey;
-    }
-
-    linearTeamKey = await promptInput('Enter Linear team key (optional, e.g., ENG):') || undefined;
-  }
-
   // Create project configuration
   createProject(
     projectName,
     selectedRepo,
-    baseBranch,
-    linearApiKey,
-    linearTeamKey
+    baseBranch
   );
 
   // Copy bundle scripts if bundle was loaded
@@ -273,7 +255,8 @@ export async function addWorkspace(
     const sourceOptions = ['Create from GitHub branch', 'Create with manual name'];
 
     // Add Linear option if configured
-    if (projectConfig.linearApiKey) {
+    const linearConfig = await getLinearConfig(currentProject);
+    if (linearConfig.apiKey && linearConfig.teamKeys.length > 0) {
       sourceOptions.splice(1, 0, 'Create from Linear issue');
     }
 
@@ -315,10 +298,11 @@ export async function addWorkspace(
       // Fetch unstarted issues from Linear
       logger.info('Fetching Linear issues...');
 
-      const issues = await fetchUnstartedIssues(
-        projectConfig.linearApiKey!,
-        projectConfig.linearTeamKey
-      );
+      const teamKey = linearConfig.teamKeys[0];
+      if (!teamKey) {
+        throw new SpacesError('No Linear team configured', 'USER_ERROR', 1);
+      }
+      const issues = await fetchUnstartedIssues(linearConfig.apiKey!, teamKey);
 
       if (issues.length === 0) {
         throw new SpacesError(
@@ -417,14 +401,17 @@ export async function addWorkspace(
 
   // If workspace was created from a Linear issue, save issue details as markdown
   if (selectedLinearIssue) {
-    const promptDir = join(workspacePath, '.prompt');
-    mkdirSync(promptDir, { recursive: true });
+    const issueLinearConfig = await getLinearConfig(currentProject);
+    if (issueLinearConfig.apiKey) {
+      const promptDir = join(workspacePath, '.prompt');
+      mkdirSync(promptDir, { recursive: true });
 
-    const markdown = await generateMarkdown(selectedLinearIssue, promptDir, projectConfig.linearApiKey);
-    const issueMarkdownPath = join(promptDir, 'issue.md');
-    writeFileSync(issueMarkdownPath, markdown, 'utf-8');
+      const markdown = await generateMarkdown(selectedLinearIssue, promptDir, issueLinearConfig.apiKey);
+      const issueMarkdownPath = join(promptDir, 'issue.md');
+      writeFileSync(issueMarkdownPath, markdown, 'utf-8');
 
-    logger.debug('Saved Linear issue details to .prompt/issue.md');
+      logger.debug('Saved Linear issue details to .prompt/issue.md');
+    }
   }
 
   // Check if this is first-time setup (no marker exists)

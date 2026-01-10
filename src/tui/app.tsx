@@ -61,7 +61,7 @@ import {
 // Git and workspace operations
 import { listRemoteBranches, createWorktree, getDefaultBranch } from '../core/git.js';
 import { deleteWorkspaceCore, deleteProjectCore } from '../core/workspace.js';
-import { fetchUnstartedIssues } from '../core/linear.js';
+import { fetchUnstartedIssues, getLinearConfig } from '../core/linear.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, isValidBranchName, extractRepoName } from '../utils/sanitize.js';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
@@ -602,11 +602,14 @@ function App({ relayConfig, onQuit }: AppProps) {
       await createWorktree(baseDir, workspacePath, branchName, config.baseBranch, existsRemotely);
 
       // Save Linear issue if present
-      if (linearIssue && config.linearApiKey) {
-        const promptDir = join(workspacePath, '.prompt');
-        mkdirSync(promptDir, { recursive: true });
-        const markdown = await generateMarkdown(linearIssue, promptDir, config.linearApiKey);
-        writeFileSync(join(promptDir, 'issue.md'), markdown, 'utf-8');
+      if (linearIssue) {
+        const linearConfig = await getLinearConfig(state.currentProject);
+        if (linearConfig.apiKey) {
+          const promptDir = join(workspacePath, '.prompt');
+          mkdirSync(promptDir, { recursive: true });
+          const markdown = await generateMarkdown(linearIssue, promptDir, linearConfig.apiKey);
+          writeFileSync(join(promptDir, 'issue.md'), markdown, 'utf-8');
+        }
       }
 
       setWorkspaceFlow({ type: 'closed' });
@@ -656,11 +659,11 @@ function App({ relayConfig, onQuit }: AppProps) {
         setWorkspaceFlow({ type: 'closed' });
       }
     } else if (source === 'linear') {
-      const config = readProjectConfig(state.currentProject);
-      if (!config.linearApiKey) {
+      const linearConfig = await getLinearConfig(state.currentProject);
+      if (!linearConfig.apiKey || linearConfig.teamKeys.length === 0) {
         flow.showMessage({
           title: 'Not Configured',
-          message: 'Linear is not configured for this project',
+          message: "Linear is not configured. Run 'gssh linear setup' to configure.",
           variant: 'warning',
         });
         setWorkspaceFlow({ type: 'closed' });
@@ -670,7 +673,14 @@ function App({ relayConfig, onQuit }: AppProps) {
       setWorkspaceFlow({ type: 'loading', title: 'Loading', message: 'Fetching Linear issues...' });
 
       try {
-        const issues = await fetchUnstartedIssues(config.linearApiKey, config.linearTeamKey);
+        // Fetch issues from first configured team
+        // Note: teamKeys[0] is guaranteed to exist due to the length check above
+        const teamKey = linearConfig.teamKeys[0];
+        if (!teamKey) {
+          // Defensive check - should never happen due to earlier length check
+          throw new Error('No team key available');
+        }
+        const issues = await fetchUnstartedIssues(linearConfig.apiKey, teamKey);
 
         if (issues.length === 0) {
           flow.showMessage({
@@ -734,11 +744,11 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [createWorkspaceAndOpenSession]);
 
   // Main handler to start new workspace flow
-  const handleNewWorkspaceFlow = useCallback(() => {
+  const handleNewWorkspaceFlow = useCallback(async () => {
     if (!state.currentProject) return;
 
-    const config = readProjectConfig(state.currentProject);
-    const hasLinear = !!config.linearApiKey;
+    const linearConfig = await getLinearConfig(state.currentProject);
+    const hasLinear = linearConfig.apiKey !== null && linearConfig.teamKeys.length > 0;
 
     const options: Array<{ label: string; description: string; value: WorkspaceSource }> = [
       { label: 'GitHub Branch', description: 'Create from existing remote branch', value: 'branch' },

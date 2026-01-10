@@ -261,7 +261,6 @@ gssh status      # Show daemon statuses`} multiLine language="bash" />
             <li><code className="text-zinc-300">--skip-bundle</code> - Skip bundle detection and onboarding</li>
             <li><code className="text-zinc-300">--no-clone</code> - Create project structure without cloning</li>
             <li><code className="text-zinc-300">--org &lt;org&gt;</code> - Filter repos to specific organization</li>
-            <li><code className="text-zinc-300">--linear-key &lt;key&gt;</code> - Provide Linear API key via flag</li>
           </ul>
 
           <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh add [workspace-name]</code></h4>
@@ -710,6 +709,77 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
               <dd className="text-zinc-400 text-sm">Your custom URL on gitspace.sh (e.g., <code className="text-zinc-300">yourname.gitspace.sh</code>)</dd>
             </div>
           </dl>
+        </div>
+      );
+
+    case "linear-integration":
+      return (
+        <div className="max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <h1 className="text-4xl font-bold mb-6">Linear Integration</h1>
+
+          <p className="text-zinc-400 mb-8">
+            GitSpace integrates with Linear to create workspaces directly from issues. Configure Linear at the user level,
+            then optionally customize per-project.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Setup</h3>
+          <p className="text-zinc-400 mb-4">
+            Run the setup wizard to configure your Linear API key and select teams:
+          </p>
+          <CodeBlock code="gssh linear setup" />
+
+          <p className="text-zinc-400 mb-4">
+            The wizard will:
+          </p>
+          <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-8 ml-2">
+            <li>Prompt for your Linear API key (stored securely in OS keychain)</li>
+            <li>Fetch available teams from Linear</li>
+            <li>Let you select which teams to work with</li>
+            <li>Set a default team for new projects</li>
+          </ul>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Project-Level Configuration</h3>
+          <p className="text-zinc-400 mb-4">
+            Override the default team for a specific project:
+          </p>
+          <CodeBlock code="gssh linear setup --project myapp" />
+
+          <p className="text-zinc-400 mb-8">
+            Project configuration uses your user-level API key but can restrict to a subset of your teams.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Commands</h3>
+          <CodeBlock code={`gssh linear setup                 # User-level setup wizard
+gssh linear setup --project app   # Project-specific team selection
+gssh linear show                  # Show user-level config
+gssh linear show --project app    # Show project config
+gssh linear clear                 # Clear user-level config
+gssh linear clear --project app   # Clear project config`} multiLine language="bash" />
+
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Creating Workspaces from Issues</h3>
+          <p className="text-zinc-400 mb-4">
+            Once configured, you can create workspaces from Linear issues:
+          </p>
+          <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-8 ml-2">
+            <li>In the TUI, select "Create from Linear issue" when adding a workspace</li>
+            <li>Or use the CLI: <code className="text-zinc-300">gssh add</code> and select "Create from Linear issue"</li>
+          </ul>
+
+          <p className="text-zinc-400 mb-4">
+            The workspace will be named using the issue identifier and title, and issue details will be saved
+            to <code className="text-zinc-300">.prompt/issue.md</code> in the workspace.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Getting Your API Key</h3>
+          <p className="text-zinc-400 mb-4">
+            To get your Linear API key:
+          </p>
+          <ol className="list-decimal list-inside space-y-2 text-zinc-400 mb-8 ml-2">
+            <li>Go to Linear → Settings → API</li>
+            <li>Under "Personal API keys", click "Create key"</li>
+            <li>Give it a name (e.g., "GitSpace")</li>
+            <li>Copy the key and paste it when prompted by <code className="text-zinc-300">gssh linear setup</code></li>
+          </ol>
         </div>
       );
 

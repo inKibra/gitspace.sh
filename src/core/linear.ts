@@ -6,6 +6,12 @@ import { LinearClient, LinearError, type Issue } from '@linear/sdk'
 import { SpacesError } from '../types/errors.js'
 import { logger } from '../utils/logger.js'
 import type { LinearIssue } from '../types/workspace.js'
+import type { LinearTeamInfo } from '../types/config.js'
+import { readGlobalConfig, readProjectConfig, getCurrentProject } from './config.js'
+import { getSecret } from '../utils/secrets.js'
+
+/** Key used to store Linear API key in keychain */
+export const LINEAR_API_KEY_SECRET = 'linear-api-key'
 
 /**
  * Singleton Linear client instance
@@ -212,14 +218,156 @@ export async function fetchUnstartedIssues(
 }
 
 /**
- * Validate a Linear API key
+ * Validate a Linear API key by fetching the viewer (authenticated user)
  */
 export async function validateLinearApiKey(apiKey: string): Promise<boolean> {
 	try {
+		logger.debug('Validating Linear API key...')
 		const testClient = new LinearClient({ apiKey })
 		await testClient.viewer
+		logger.debug('Linear API key validation successful')
 		return true
-	} catch {
+	} catch (error) {
+		logger.debug(
+			`Linear API key validation failed: ${
+				error instanceof Error ? error.message : 'Unknown error'
+			}`
+		)
 		return false
 	}
+}
+
+/**
+ * Fetch all teams accessible with the API key
+ */
+export async function fetchLinearTeams(apiKey: string): Promise<LinearTeamInfo[]> {
+	try {
+		return await fetchWithRetry(async () => {
+			const client = getLinearClient(apiKey)
+			const teamsConnection = await client.teams()
+			const teams = await fetchAllPages(teamsConnection)
+
+			return teams.map((team) => ({
+				id: team.id,
+				key: team.key,
+				name: team.name,
+			}))
+		})
+	} catch (error) {
+		if (error instanceof LinearAPIError) {
+			throw error
+		}
+
+		if (error instanceof LinearError) {
+			throw new LinearAPIError(`Linear API error: ${error.message}`, error)
+		}
+
+		throw new LinearAPIError(
+			`Failed to fetch Linear teams: ${
+				error instanceof Error ? error.message : 'Unknown error'
+			}`,
+			error
+		)
+	}
+}
+
+/**
+ * Resolved Linear configuration with API key and team info
+ */
+export interface ResolvedLinearConfig {
+	/** API key from keychain (null if not configured) */
+	apiKey: string | null
+	/** Team keys to use (from project or user default) */
+	teamKeys: string[]
+	/** Full team info from user config */
+	teams: LinearTeamInfo[]
+	/** Whether config came from project or user level */
+	scope: 'project' | 'user' | 'none'
+}
+
+/**
+ * Get Linear configuration with project -> user fallback
+ *
+ * Resolution order:
+ * 1. Project-level linearTeams (if set)
+ * 2. User-level linearDefaultTeam (if set)
+ * 3. First team in user's linearTeams
+ *
+ * API key always comes from user-level keychain.
+ */
+export async function getLinearConfig(projectName?: string): Promise<ResolvedLinearConfig> {
+	const project = projectName || getCurrentProject()
+
+	// Get API key from keychain (user-level)
+	const apiKey = await getSecret(LINEAR_API_KEY_SECRET)
+
+	// Get user-level config
+	const globalConfig = readGlobalConfig()
+	const userTeams = globalConfig.linearTeams || []
+	const userDefaultTeam = globalConfig.linearDefaultTeam
+
+	// If no API key or no teams, return empty config
+	if (!apiKey || userTeams.length === 0) {
+		return {
+			apiKey,
+			teamKeys: [],
+			teams: userTeams,
+			scope: 'none',
+		}
+	}
+
+	// Check for project-level override
+	if (project) {
+		try {
+			const projectConfig = readProjectConfig(project)
+
+			// Handle legacy config (deprecated linearApiKey/linearTeamKey)
+			if (projectConfig.linearApiKey || projectConfig.linearTeamKey) {
+				// Legacy config exists - use linearTeamKey if set
+				const legacyTeamKey = projectConfig.linearTeamKey
+				if (legacyTeamKey) {
+					return {
+						apiKey,
+						teamKeys: [legacyTeamKey],
+						teams: userTeams,
+						scope: 'project',
+					}
+				}
+			}
+
+			// New config - project-level team override
+			if (projectConfig.linearTeams && projectConfig.linearTeams.length > 0) {
+				return {
+					apiKey,
+					teamKeys: projectConfig.linearTeams,
+					teams: userTeams,
+					scope: 'project',
+				}
+			}
+		} catch {
+			// Project doesn't exist, fall through to user config
+		}
+	}
+
+	// Fall back to user-level config
+	const teamKeys = userDefaultTeam
+		? [userDefaultTeam]
+		: userTeams.length > 0
+			? [userTeams[0].key]
+			: []
+
+	return {
+		apiKey,
+		teamKeys,
+		teams: userTeams,
+		scope: teamKeys.length > 0 ? 'user' : 'none',
+	}
+}
+
+/**
+ * Check if Linear is configured (has API key and at least one team)
+ */
+export async function isLinearConfigured(): Promise<boolean> {
+	const config = await getLinearConfig()
+	return config.apiKey !== null && config.teamKeys.length > 0
 }

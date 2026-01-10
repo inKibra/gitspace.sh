@@ -1,7 +1,7 @@
 import { cn } from "../../lib/utils";
 import { Button } from "../../app/components/ui/button";
 import { ScrollArea } from "../../app/components/ui/scroll-area";
-import { ChevronRight, Terminal, Book, Server, Layers, Settings, Shield, Zap, Globe, Key, Users, FileCode, HelpCircle } from "lucide-react";
+import { ChevronRight, Terminal, Book, Server, Layers, Settings, Shield, Zap, Globe, Key, Users, FileCode, HelpCircle, Link } from "lucide-react";
 
 interface DocsSidebarProps extends React.HTMLAttributes<HTMLDivElement> {
   activeSection: string;
@@ -34,6 +34,12 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
         { id: "self-hosted-relay", label: "Self-Hosted Relay", icon: Server },
         { id: "identity-management", label: "Identity Management", icon: Key },
         { id: "access-control", label: "Access Control", icon: Users },
+      ]
+    },
+    {
+      title: "Integrations",
+      items: [
+        { id: "linear-integration", label: "Linear", icon: Link },
       ]
     },
     {
