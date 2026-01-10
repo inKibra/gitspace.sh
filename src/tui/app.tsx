@@ -66,6 +66,9 @@ import { generateMarkdown } from '../utils/markdown.js';
 import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, isValidBranchName, extractRepoName } from '../utils/sanitize.js';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
+
+// Script execution
+import { runWorkspaceScripts } from '../utils/run-workspace-scripts.js';
 import type { LinearIssue } from '../types/workspace.js';
 
 // Project creation
@@ -446,7 +449,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     } else if (params.workspaceId) {
       // Create new session
       const workspace = state.workspaces.find(w => w.name === params.workspaceId);
-      if (workspace) {
+      if (workspace && state.currentProject) {
         flow.showInput({
           title: 'New Session',
           label: 'Session name (optional):',
@@ -454,12 +457,36 @@ function App({ relayConfig, onQuit }: AppProps) {
           onSubmit: async (name) => {
             const sessionName = name || `${state.currentProject}:${workspace.name}:${Date.now()}`;
             try {
+              const config = readProjectConfig(state.currentProject!);
+
+              // Run workspace scripts (pre+setup for first time, select for existing)
+              const scriptResult = await runWorkspaceScripts({
+                projectName: state.currentProject!,
+                workspacePath: workspace.path,
+                workspaceName: workspace.name,
+                repository: config.repository,
+                interactive: false, // TUI context - scripts can't prompt for input
+              });
+
+              if (!scriptResult.success) {
+                flow.showMessage({
+                  title: 'Script Failed',
+                  message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
+                  variant: 'error',
+                });
+                return;
+              }
+
               const session = await createSession(sessionName, workspace.path);
               // Attach to newly created session
               dispatch({ type: 'SET_ATTACHED_SESSION', session });
               dispatch({ type: 'SET_VIEW', view: 'terminal' });
             } catch (err) {
-              dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to create session' });
+              flow.showMessage({
+                title: 'Session Failed',
+                message: err instanceof Error ? err.message : 'Failed to create session',
+                variant: 'error',
+              });
             }
           },
         });
@@ -609,6 +636,25 @@ function App({ relayConfig, onQuit }: AppProps) {
         writeFileSync(join(promptDir, 'issue.md'), markdown, 'utf-8');
       }
 
+      // Run workspace scripts (pre+setup for new workspace)
+      const scriptResult = await runWorkspaceScripts({
+        projectName: state.currentProject,
+        workspacePath,
+        workspaceName,
+        repository: config.repository,
+        interactive: false, // TUI context - scripts can't prompt for input
+      });
+
+      if (!scriptResult.success) {
+        setWorkspaceFlow({ type: 'closed' });
+        flow.showMessage({
+          title: 'Script Failed',
+          message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
+          variant: 'error',
+        });
+        return;
+      }
+
       setWorkspaceFlow({ type: 'closed' });
       await refreshWorkspaces();
 
@@ -619,7 +665,11 @@ function App({ relayConfig, onQuit }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     } catch (err) {
       setWorkspaceFlow({ type: 'closed' });
-      dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to create workspace' });
+      flow.showMessage({
+        title: 'Workspace Failed',
+        message: err instanceof Error ? err.message : 'Failed to create workspace',
+        variant: 'error',
+      });
     }
   }, [state.currentProject, refreshWorkspaces]);
 

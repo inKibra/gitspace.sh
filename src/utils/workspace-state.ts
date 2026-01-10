@@ -3,7 +3,7 @@
  * Tracks whether setup commands have been run for a workspace
  */
 
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 
@@ -43,5 +43,21 @@ export function markSetupComplete(workspacePath: string): void {
       'SYSTEM_ERROR',
       2
     );
+  }
+}
+
+/**
+ * Clear the setup marker for a workspace (for testing)
+ * @param workspacePath Absolute path to the workspace directory
+ */
+export function clearSetupMarker(workspacePath: string): void {
+  const markerPath = join(workspacePath, SETUP_MARKER_FILE);
+
+  try {
+    if (existsSync(markerPath)) {
+      unlinkSync(markerPath);
+    }
+  } catch {
+    // Ignore errors - this is just for testing
   }
 }

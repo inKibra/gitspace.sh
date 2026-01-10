@@ -33,6 +33,10 @@ import { loadProjects } from "../../tui/state";
 
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
+import { readProjectConfig } from "../../core/config";
+
+// Import script execution
+import { runWorkspaceScripts } from "../../utils/run-workspace-scripts";
 
 /**
  * Session state for a connected client
@@ -322,6 +326,24 @@ export class RemoteSessionHandler {
 
         if (!workspace) {
           await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
+          return;
+        }
+
+        // Run setup or select scripts for the workspace
+        const config = readProjectConfig(workspace.projectName);
+
+        console.log(`[remote-session] Running workspace scripts for: ${workspace.id}`);
+        const scriptResult = await runWorkspaceScripts({
+          projectName: workspace.projectName,
+          workspacePath: workspace.path,
+          workspaceName: workspace.id,
+          repository: config.repository,
+          interactive: false, // Remote context - scripts can't prompt for input
+        });
+
+        if (!scriptResult.success) {
+          console.error(`[remote-session] ${scriptResult.phase} scripts failed:`, scriptResult.error);
+          await this.sendError(session, sendResponse, "SCRIPT_FAILED", `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`);
           return;
         }
 
