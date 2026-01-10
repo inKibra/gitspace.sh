@@ -69,9 +69,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 // Script execution
-import { runScriptsInTerminal, type RunScriptsOptions } from '../utils/run-scripts.js';
-import { hasSetupBeenRun, markSetupComplete } from '../utils/workspace-state.js';
-import { getProjectSecrets } from '../utils/secrets.js';
+import { runWorkspaceScripts } from '../utils/run-workspace-scripts.js';
 import type { LinearIssue } from '../types/workspace.js';
 
 // Project creation
@@ -461,33 +459,22 @@ function App({ relayConfig, onQuit }: AppProps) {
             try {
               const config = readProjectConfig(state.currentProject!);
 
-              // Build script options with bundle values and secrets
-              // nonInteractive: true prevents scripts from blocking on stdin in TUI context
-              const scriptOptions: RunScriptsOptions = {
-                bundleValues: config.bundleValues,
-                nonInteractive: true, // TUI context - scripts can't prompt for input
-              };
+              // Run workspace scripts (pre+setup for first time, select for existing)
+              const scriptResult = await runWorkspaceScripts({
+                projectName: state.currentProject!,
+                workspacePath: workspace.path,
+                workspaceName: workspace.name,
+                repository: config.repository,
+                interactive: false, // TUI context - scripts can't prompt for input
+              });
 
-              // Fetch secrets from OS keychain if we have secret keys
-              if (config.bundleSecretKeys && config.bundleSecretKeys.length > 0) {
-                scriptOptions.bundleSecrets = await getProjectSecrets(state.currentProject!, config.bundleSecretKeys);
-              }
-
-              // Check if setup has been run for this workspace
-              const setupAlreadyRun = hasSetupBeenRun(workspace.path);
-
-              if (setupAlreadyRun) {
-                // Run select scripts for existing workspace
-                const selectScriptsDir = getScriptsPhaseDir(state.currentProject!, 'select');
-                await runScriptsInTerminal(selectScriptsDir, workspace.path, workspace.name, config.repository, scriptOptions);
-              } else {
-                // First time accessing this workspace - run pre scripts, then setup scripts
-                const preScriptsDir = getScriptsPhaseDir(state.currentProject!, 'pre');
-                await runScriptsInTerminal(preScriptsDir, workspace.path, workspace.name, config.repository, scriptOptions);
-
-                const setupScriptsDir = getScriptsPhaseDir(state.currentProject!, 'setup');
-                await runScriptsInTerminal(setupScriptsDir, workspace.path, workspace.name, config.repository, scriptOptions);
-                markSetupComplete(workspace.path);
+              if (!scriptResult.success) {
+                flow.showMessage({
+                  title: 'Script Failed',
+                  message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
+                  variant: 'error',
+                });
+                return;
               }
 
               const session = await createSession(sessionName, workspace.path);
@@ -495,7 +482,11 @@ function App({ relayConfig, onQuit }: AppProps) {
               dispatch({ type: 'SET_ATTACHED_SESSION', session });
               dispatch({ type: 'SET_VIEW', view: 'terminal' });
             } catch (err) {
-              dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to create session' });
+              flow.showMessage({
+                title: 'Session Failed',
+                message: err instanceof Error ? err.message : 'Failed to create session',
+                variant: 'error',
+              });
             }
           },
         });
@@ -645,28 +636,24 @@ function App({ relayConfig, onQuit }: AppProps) {
         writeFileSync(join(promptDir, 'issue.md'), markdown, 'utf-8');
       }
 
-      // Build script options with bundle values and secrets
-      // nonInteractive: true prevents scripts from blocking on stdin in TUI context
-      const scriptOptions: RunScriptsOptions = {
-        bundleValues: config.bundleValues,
-        nonInteractive: true, // TUI context - scripts can't prompt for input
-      };
+      // Run workspace scripts (pre+setup for new workspace)
+      const scriptResult = await runWorkspaceScripts({
+        projectName: state.currentProject,
+        workspacePath,
+        workspaceName,
+        repository: config.repository,
+        interactive: false, // TUI context - scripts can't prompt for input
+      });
 
-      // Fetch secrets from OS keychain if we have secret keys
-      if (config.bundleSecretKeys && config.bundleSecretKeys.length > 0) {
-        scriptOptions.bundleSecrets = await getProjectSecrets(state.currentProject, config.bundleSecretKeys);
+      if (!scriptResult.success) {
+        setWorkspaceFlow({ type: 'closed' });
+        flow.showMessage({
+          title: 'Script Failed',
+          message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
+          variant: 'error',
+        });
+        return;
       }
-
-      // Run pre scripts (before session creation)
-      const preScriptsDir = getScriptsPhaseDir(state.currentProject, 'pre');
-      await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, config.repository, scriptOptions);
-
-      // Run setup scripts (first-time setup)
-      const setupScriptsDir = getScriptsPhaseDir(state.currentProject, 'setup');
-      await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, config.repository, scriptOptions);
-
-      // Mark setup as complete
-      markSetupComplete(workspacePath);
 
       setWorkspaceFlow({ type: 'closed' });
       await refreshWorkspaces();
@@ -678,7 +665,11 @@ function App({ relayConfig, onQuit }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     } catch (err) {
       setWorkspaceFlow({ type: 'closed' });
-      dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to create workspace' });
+      flow.showMessage({
+        title: 'Workspace Failed',
+        message: err instanceof Error ? err.message : 'Failed to create workspace',
+        variant: 'error',
+      });
     }
   }, [state.currentProject, refreshWorkspaces]);
 

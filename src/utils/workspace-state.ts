@@ -45,3 +45,20 @@ export function markSetupComplete(workspacePath: string): void {
     );
   }
 }
+
+/**
+ * Clear the setup marker for a workspace (for testing)
+ * @param workspacePath Absolute path to the workspace directory
+ */
+export function clearSetupMarker(workspacePath: string): void {
+  const markerPath = join(workspacePath, SETUP_MARKER_FILE);
+  const { unlinkSync } = require('fs');
+
+  try {
+    if (existsSync(markerPath)) {
+      unlinkSync(markerPath);
+    }
+  } catch {
+    // Ignore errors - this is just for testing
+  }
+}
