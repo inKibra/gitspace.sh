@@ -772,6 +772,11 @@ function App({ relayConfig, onQuit }: AppProps) {
       setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Name must contain at least one letter or number' } : prev);
       return;
     }
+    // Validate it can be used as a branch name (no spaces, special chars, etc.)
+    if (!isValidBranchName(trimmedName)) {
+      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)' } : prev);
+      return;
+    }
     // Advance to branch input step, pre-fill with original input (allows branch names with slashes)
     setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: sanitizedName, inputValue: trimmedName });
   }, []);

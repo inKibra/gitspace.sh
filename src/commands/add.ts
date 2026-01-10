@@ -33,6 +33,7 @@ import {
   sanitizeForFileSystem,
   generateWorkspaceName,
   extractRepoName,
+  isValidBranchName,
 } from '../utils/sanitize.js';
 import {
   SpacesError,
@@ -269,6 +270,15 @@ export async function addWorkspace(
     workspaceName = sanitizedName;
     // Use original input as branch name if no explicit branch specified (preserves slashes)
     branchName = options.branchName || workspaceNameArg;
+
+    // Validate the branch name is a valid git ref
+    if (!isValidBranchName(branchName)) {
+      throw new SpacesError(
+        `Invalid branch name: ${branchName}\nBranch names cannot contain spaces, .., or special characters like : ? * [ \\ ~`,
+        'USER_ERROR',
+        1
+      );
+    }
   } else {
     // No workspace name provided, prompt for source
     const sourceOptions = ['Create from GitHub branch', 'Create with manual name'];
@@ -366,6 +376,10 @@ export async function addWorkspace(
           const sanitized = sanitizeForFileSystem(input);
           if (!sanitized) {
             return 'Name must contain at least one letter or number';
+          }
+          // Validate it can be used as a branch name
+          if (!isValidBranchName(input)) {
+            return 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)';
           }
           return true;
         },
