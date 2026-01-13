@@ -55,6 +55,7 @@ import { authLogin, authLogout, authStatus } from './commands/auth.js'
 import { hostReserve, hostRelease, hostList, hostSetPrimary, hostStatus } from './commands/host.js'
 import { startTmux, stopTmux, statusTmux, listTmux, newTmux, attachTmux, killTmux } from './commands/tmux.js'
 import { showStatus } from './commands/status.js'
+import { linearSetup, linearShow, linearClear } from './commands/linear.js'
 
 const program = new Command()
 
@@ -645,6 +646,54 @@ tmuxCommand
 	.action(async (id) => {
 		try {
 			await killTmux(id)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Linear Commands
+// ============================================================================
+
+const linearCommand = program
+	.command('linear')
+	.description('Manage Linear integration')
+
+linearCommand
+	.command('setup')
+	.description('Configure Linear integration')
+	.option('--project <name>', 'Configure for specific project (uses user API key)')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await linearSetup(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+linearCommand
+	.command('show')
+	.description('Show Linear configuration')
+	.option('--project <name>', 'Show project-specific configuration')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await linearShow(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+linearCommand
+	.command('clear')
+	.description('Clear Linear configuration')
+	.option('--global', 'Clear user-level configuration')
+	.option('--project <name>', 'Clear project-specific configuration')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await linearClear(options)
 		} catch (error) {
 			handleError(error)
 		}

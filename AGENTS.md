@@ -50,7 +50,7 @@ This document provides comprehensive information for AI assistants working on th
 ```
 src/
 ├── index.ts                    # Entry point (TUI or CLI dispatch)
-├── commands/                   # CLI command implementations (16 files)
+├── commands/                   # CLI command implementations (17 files)
 │   ├── access.ts               # Access control list (add/list/remove)
 │   ├── add.ts                  # Add projects/workspaces
 │   ├── auth.ts                 # GitHub OAuth for gitspace.sh
@@ -58,6 +58,7 @@ src/
 │   ├── directory.ts            # Get project directory path
 │   ├── host.ts                 # Subdomain hosting (reserve/release/list)
 │   ├── identity.ts             # Identity management (init/show)
+│   ├── linear.ts               # Linear integration (setup/show/clear)
 │   ├── list.ts                 # List projects/workspaces
 │   ├── machine.ts              # Remote machine management (invite/list)
 │   ├── relay.ts                # Relay server (start/token)
@@ -251,6 +252,16 @@ src/
 | `gssh host list` | List your subdomains |
 | `gssh host set-primary <name>` | Set primary subdomain |
 | `gssh host status` | Show hosting status |
+
+### Linear Integration
+| Command | Description |
+|---------|-------------|
+| `gssh linear setup` | Configure Linear integration (API key + teams) |
+| `gssh linear setup --project <name>` | Configure Linear for a specific project |
+| `gssh linear show` | Show user-level Linear configuration |
+| `gssh linear show --project <name>` | Show project-specific Linear configuration |
+| `gssh linear clear` | Clear user-level Linear configuration |
+| `gssh linear clear --project <name>` | Clear project-specific Linear configuration |
 
 ## Remote Access Architecture
 

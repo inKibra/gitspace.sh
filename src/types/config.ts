@@ -3,6 +3,18 @@
  */
 
 /**
+ * Linear team info stored in config
+ */
+export interface LinearTeamInfo {
+  /** Team ID from Linear */
+  id: string;
+  /** Team key (e.g., "ENG") */
+  key: string;
+  /** Team name (e.g., "Engineering") */
+  name: string;
+}
+
+/**
  * Global configuration stored in ~/gitspace/.config.json
  */
 export interface GlobalConfig {
@@ -14,6 +26,10 @@ export interface GlobalConfig {
   defaultBaseBranch: string;
   /** Number of days before a workspace is considered stale (default: 30) */
   staleDays: number;
+  /** Linear teams the user has access to (user-level config) */
+  linearTeams?: LinearTeamInfo[];
+  /** Default Linear team key for new projects */
+  linearDefaultTeam?: string;
 }
 
 /**
@@ -40,10 +56,18 @@ export interface ProjectConfig {
   repository: string;
   /** Base branch for creating worktrees */
   baseBranch: string;
-  /** Optional Linear API key for issue integration */
+  /**
+   * @deprecated Use user-level Linear config instead.
+   * Kept for backwards compatibility - will be migrated on first access.
+   */
   linearApiKey?: string;
-  /** Optional Linear team key for filtering issues (e.g., "ENG") */
+  /**
+   * @deprecated Use linearTeams instead.
+   * Kept for backwards compatibility - will be migrated on first access.
+   */
   linearTeamKey?: string;
+  /** Linear teams this project uses (subset of user's teams) */
+  linearTeams?: string[];
   /** ISO timestamp when project was created */
   createdAt: string;
   /** ISO timestamp when project was last accessed */
@@ -72,17 +96,13 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
 export function createDefaultProjectConfig(
   name: string,
   repository: string,
-  baseBranch: string,
-  linearApiKey?: string,
-  linearTeamKey?: string
+  baseBranch: string
 ): ProjectConfig {
   const now = new Date().toISOString();
   return {
     name,
     repository,
     baseBranch,
-    linearApiKey,
-    linearTeamKey,
     createdAt: now,
     lastAccessed: now,
   };

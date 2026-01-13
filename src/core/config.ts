@@ -329,16 +329,12 @@ export function projectExists(projectName: string): boolean {
 export function createProject(
 	projectName: string,
 	repository: string,
-	baseBranch: string,
-	linearApiKey?: string,
-	linearTeamKey?: string
+	baseBranch: string
 ): ProjectConfig {
 	const config = createDefaultProjectConfig(
 		projectName,
 		repository,
-		baseBranch,
-		linearApiKey,
-		linearTeamKey
+		baseBranch
 	)
 
 	// Create project directories

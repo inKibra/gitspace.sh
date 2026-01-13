@@ -2,7 +2,7 @@
  * User prompt utilities using @inquirer/prompts
  */
 
-import { search, input, confirm, password } from '@inquirer/prompts';
+import { search, input, confirm, password, checkbox, select } from '@inquirer/prompts';
 
 /**
  * Select an item from a searchable list
@@ -107,6 +107,68 @@ export async function promptPassword(
     });
 
     return value;
+  } catch (error) {
+    // User cancelled (Ctrl+C)
+    return null;
+  }
+}
+
+/**
+ * Multi-select from a list of options
+ * @param options Array of options with label and value
+ * @param message Prompt message
+ * @returns Array of selected values or null if cancelled
+ */
+export async function selectMultiple<T>(
+  options: Array<{ label: string; value: T; checked?: boolean }>,
+  message: string
+): Promise<T[] | null> {
+  if (options.length === 0) {
+    return [];
+  }
+
+  try {
+    const selected = await checkbox({
+      message,
+      choices: options.map((opt) => ({
+        name: opt.label,
+        value: opt.value,
+        checked: opt.checked ?? false,
+      })),
+    });
+
+    return selected;
+  } catch (error) {
+    // User cancelled (Ctrl+C)
+    return null;
+  }
+}
+
+/**
+ * Select a single item from a list (non-searchable)
+ * @param options Array of options with label and value
+ * @param message Prompt message
+ * @returns Selected value or null if cancelled
+ */
+export async function selectOne<T>(
+  options: Array<{ label: string; value: T; description?: string }>,
+  message: string
+): Promise<T | null> {
+  if (options.length === 0) {
+    return null;
+  }
+
+  try {
+    const selected = await select({
+      message,
+      choices: options.map((opt) => ({
+        name: opt.label,
+        value: opt.value,
+        description: opt.description,
+      })),
+    });
+
+    return selected;
   } catch (error) {
     // User cancelled (Ctrl+C)
     return null;
