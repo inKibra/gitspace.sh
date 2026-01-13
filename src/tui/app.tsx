@@ -1340,7 +1340,24 @@ function App({ relayConfig, onQuit }: AppProps) {
         return;
       }
 
-      // Handle other modals
+      // Handle text input modals FIRST (before j/k navigation)
+      // This ensures typing 'j' or 'k' adds the character instead of navigating
+      if (isFlowInput(flow.flow) || isFlowConfirmTyped(flow.flow)) {
+        if (key.name === 'escape') {
+          flow.handleCancel();
+        } else if (key.name === 'return') {
+          await flow.handleConfirm();
+        } else if (key.name === 'backspace') {
+          const current = flow.flow.inputValue || '';
+          flow.handleInput(current.slice(0, -1));
+        } else if (key.raw && key.raw.length === 1 && !key.ctrl && !key.meta) {
+          const current = flow.flow.inputValue || '';
+          flow.handleInput(current + key.raw);
+        }
+        return;
+      }
+
+      // Handle other modals (select, message, etc.) - j/k navigation works here
       if (key.name === 'escape') {
         flow.handleCancel();
       } else if (key.name === 'return') {
@@ -1349,24 +1366,6 @@ function App({ relayConfig, onQuit }: AppProps) {
         flow.moveUp();
       } else if (key.name === 'down' || key.raw === 'j') {
         flow.moveDown();
-      } else if (key.raw && isFlowInput(flow.flow)) {
-        // Handle text input (now properly typed)
-        if (key.name === 'backspace') {
-          const current = flow.flow.inputValue || '';
-          flow.handleInput(current.slice(0, -1));
-        } else if (key.raw.length === 1 && !key.ctrl && !key.meta) {
-          const current = flow.flow.inputValue || '';
-          flow.handleInput(current + key.raw);
-        }
-      } else if (key.raw && isFlowConfirmTyped(flow.flow)) {
-        // Handle typed confirmation input (now properly typed)
-        if (key.name === 'backspace') {
-          const current = flow.flow.inputValue || '';
-          flow.handleInput(current.slice(0, -1));
-        } else if (key.raw.length === 1 && !key.ctrl && !key.meta) {
-          const current = flow.flow.inputValue || '';
-          flow.handleInput(current + key.raw);
-        }
       }
       return;
     }
