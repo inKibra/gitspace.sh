@@ -63,7 +63,7 @@ import { listRemoteBranches, createWorktree, getDefaultBranch } from '../core/gi
 import { deleteWorkspaceCore, deleteProjectCore } from '../core/workspace.js';
 import { fetchUnstartedIssues, getLinearConfig } from '../core/linear.js';
 import { generateMarkdown } from '../utils/markdown.js';
-import { sanitizeForFileSystem, generateWorkspaceName, isValidWorkspaceName, isValidBranchName, extractRepoName } from '../utils/sanitize.js';
+import { sanitizeForFileSystem, generateWorkspaceName, isValidBranchName, extractRepoName } from '../utils/sanitize.js';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
@@ -769,18 +769,26 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [createWorkspaceAndOpenSession]);
 
   // Handle manual workspace name submission (advances to branch input)
+  // Accepts branch-like names (e.g., fix/bla-bla-blah) and sanitizes them for workspace name
   const handleManualNameSubmit = useCallback((name: string) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Workspace name is required' } : prev);
       return;
     }
-    if (!isValidWorkspaceName(trimmedName)) {
-      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Use only letters, numbers, hyphens, underscores' } : prev);
+    // Sanitize the input to create a valid workspace name (converts slashes to hyphens, etc.)
+    const sanitizedName = sanitizeForFileSystem(trimmedName);
+    if (!sanitizedName) {
+      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Name must contain at least one letter or number' } : prev);
       return;
     }
-    // Advance to branch input step, pre-fill with workspace name
-    setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: trimmedName, inputValue: trimmedName });
+    // Validate it can be used as a branch name (no spaces, special chars, etc.)
+    if (!isValidBranchName(trimmedName)) {
+      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)' } : prev);
+      return;
+    }
+    // Advance to branch input step, pre-fill with original input (allows branch names with slashes)
+    setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: sanitizedName, inputValue: trimmedName });
   }, []);
 
   // Handle manual branch name submission (creates the workspace)

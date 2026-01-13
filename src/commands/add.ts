@@ -32,8 +32,8 @@ import { fetchUnstartedIssues, getLinearConfig } from '../core/linear.js';
 import {
   sanitizeForFileSystem,
   generateWorkspaceName,
-  isValidWorkspaceName,
   extractRepoName,
+  isValidBranchName,
 } from '../utils/sanitize.js';
 import {
   SpacesError,
@@ -239,17 +239,28 @@ export async function addWorkspace(
   let selectedLinearIssue: Awaited<ReturnType<typeof fetchUnstartedIssues>>[0] | undefined;
 
   if (workspaceNameArg) {
-    // Workspace name provided as argument
-    if (!isValidWorkspaceName(workspaceNameArg)) {
+    // Workspace name provided as argument - sanitize it (allows branch-like names like fix/bla-bla-blah)
+    const sanitizedName = sanitizeForFileSystem(workspaceNameArg);
+    if (!sanitizedName) {
       throw new SpacesError(
-        `Invalid workspace name: ${workspaceNameArg}\nWorkspace names must contain only alphanumeric characters, hyphens, and underscores (no spaces).`,
+        `Invalid workspace name: ${workspaceNameArg}\nName must contain at least one letter or number.`,
         'USER_ERROR',
         1
       );
     }
 
-    workspaceName = workspaceNameArg;
-    branchName = options.branchName || workspaceName;
+    workspaceName = sanitizedName;
+    // Use original input as branch name if no explicit branch specified (preserves slashes)
+    branchName = options.branchName || workspaceNameArg;
+
+    // Validate the branch name is a valid git ref
+    if (!isValidBranchName(branchName)) {
+      throw new SpacesError(
+        `Invalid branch name: ${branchName}\nBranch names cannot contain spaces, .., or special characters like : ? * [ \\ ~`,
+        'USER_ERROR',
+        1
+      );
+    }
   } else {
     // No workspace name provided, prompt for source
     const sourceOptions = ['Create from GitHub branch', 'Create with manual name'];
@@ -340,14 +351,19 @@ export async function addWorkspace(
       workspaceName = generateWorkspaceName(selectedLinearIssue.identifier, selectedLinearIssue.title);
       branchName = options.branchName || workspaceName;
     } else {
-      // Manual entry
-      const name = await promptInput('Enter workspace name:', {
+      // Manual entry - accepts branch-like names (e.g., fix/bla-bla-blah) and sanitizes them
+      const name = await promptInput('Enter workspace name (branch-like names will be sanitized):', {
         validate: (input) => {
           if (!input || input.trim().length === 0) {
             return 'Workspace name is required';
           }
-          if (!isValidWorkspaceName(input)) {
-            return 'Workspace name must contain only alphanumeric characters, hyphens, and underscores (no spaces)';
+          const sanitized = sanitizeForFileSystem(input);
+          if (!sanitized) {
+            return 'Name must contain at least one letter or number';
+          }
+          // Validate it can be used as a branch name
+          if (!isValidBranchName(input)) {
+            return 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)';
           }
           return true;
         },
@@ -358,8 +374,10 @@ export async function addWorkspace(
         return;
       }
 
-      workspaceName = name;
-      branchName = options.branchName || workspaceName;
+      const sanitizedName = sanitizeForFileSystem(name);
+      workspaceName = sanitizedName;
+      // Use original input as branch name (preserves slashes)
+      branchName = options.branchName || name;
     }
   }
 
