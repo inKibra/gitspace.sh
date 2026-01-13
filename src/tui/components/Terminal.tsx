@@ -508,23 +508,12 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
         >
           <ghostty-terminal
             ref={(el: GhosttyTerminalRenderable | null) => {
+              const wasNull = terminalRef.current === null;
               terminalRef.current = el;
-              if (el) {
+              if (el && wasNull) {
                 debugLog('Terminal mounted with initial data');
-                setTerminalMounted(true);
-                // Scroll to cursor position after mount
-                requestAnimationFrame(() => {
-                  if (el && scrollBoxRef.current) {
-                    try {
-                      const [, cursorY] = el.getCursor();
-                      const scrollPos = el.getScrollPositionForLine(cursorY);
-                      scrollBoxRef.current.scrollTo(scrollPos);
-                      debugLog(`Scrolled to cursor position: line ${cursorY}, scrollPos ${scrollPos}`);
-                    } catch (err) {
-                      debugLog(`Failed to scroll to cursor: ${err}`);
-                    }
-                  }
-                });
+                // Defer state update to avoid setState during render
+                queueMicrotask(() => setTerminalMounted(true));
               }
             }}
             persistent={true}
