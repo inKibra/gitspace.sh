@@ -1,9 +1,12 @@
 /** @jsxImportSource react */
-import { useState, useEffect } from "react";
-import { Terminal } from "./components/Terminal";
+import { useState, useEffect, useRef } from "react";
+import { Terminal, type TerminalHandle } from "./components/Terminal";
+import { TerminalControls } from "./components/TerminalControls";
 import { useTerminal } from "./hooks/useTerminal";
 import { useRelayConnection } from "./hooks/useRelayConnection";
+import { useVisualViewport } from "./hooks/useVisualViewport";
 import { parseInviteFromHash } from "./lib/invite";
+import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/device";
 
 // Import shared components and hooks
 import {
@@ -26,6 +29,10 @@ export default function App() {
   const [selectedMachine, setSelectedMachine] = useState<MachineInfo | null>(null);
   const [showInbox, setShowInbox] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showMobileControls, setShowMobileControls] = useState(false);
+
+  // Terminal ref for external control (focus, sendData)
+  const terminalRef = useRef<TerminalHandle>(null);
 
   // Invite params from URL
   const [inviteParams, setInviteParams] = useState<{
@@ -39,6 +46,24 @@ export default function App() {
 
   // Terminal connection (for PTY)
   const terminal = useTerminal();
+
+  // Visual viewport hook for keyboard detection
+  useVisualViewport();
+
+  // Apply device-specific CSS classes and detect mobile on mount
+  useEffect(() => {
+    applyDeviceClasses();
+    // Show mobile controls on touch devices or mobile layout
+    setShowMobileControls(isTouchDevice() || isMobileLayout());
+
+    // Listen for layout changes
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const handleChange = (e: MediaQueryListEvent) => {
+      setShowMobileControls(e.matches || isTouchDevice());
+    };
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
 
   // Flow/Modal system
   const flow = useFlow({
@@ -438,6 +463,16 @@ export default function App() {
 
   // ========== Terminal View (attached mode) ==========
   if (view === "terminal" && terminal.status === "established" && terminal.mode === "attached") {
+    // Handler for sending data from mobile controls
+    const handleSendData = (data: string) => {
+      terminal.send(new TextEncoder().encode(data));
+    };
+
+    // Handler for focusing terminal from mobile controls
+    const handleFocusTerminal = () => {
+      terminalRef.current?.focus();
+    };
+
     return (
       <div className="h-screen w-screen flex flex-col bg-gray-900">
         <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
@@ -469,13 +504,21 @@ export default function App() {
             </button>
           </div>
         </div>
-        <div className="flex-1">
+        <div className={`flex-1 ${showMobileControls ? 'terminal-with-controls' : ''}`}>
           <Terminal
+            ref={terminalRef}
             onData={terminal.send}
             setWriteCallback={terminal.setWriteCallback}
             onResize={terminal.resize}
           />
         </div>
+        {/* Mobile controls toolbar */}
+        {showMobileControls && (
+          <TerminalControls
+            onSendData={handleSendData}
+            onFocusTerminal={handleFocusTerminal}
+          />
+        )}
       </div>
     );
   }

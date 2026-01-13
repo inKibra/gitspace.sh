@@ -4,14 +4,28 @@
   font-family: 'JetBrains Mono', 'SF Mono', Monaco, 'Cascadia Code', monospace;
   /* Prevent iOS from zooming on input focus */
   touch-action: manipulation;
+
+  /* Catppuccin Mocha theme colors */
+  --color-base: #1e1e2e;
+  --color-mantle: #181825;
+  --color-surface0: #313244;
+  --color-surface1: #45475a;
+  --color-surface2: #585b70;
+  --color-text: #cdd6f4;
+  --color-subtext0: #6c7086;
+  --color-blue: #89b4fa;
+  --color-yellow: #f9e2af;
+
+  /* Keyboard inset (set by useVisualViewport hook) */
+  --keyboard-inset: 0px;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
   min-height: 100dvh; /* Dynamic viewport height for mobile browsers */
-  background-color: #1e1e2e;
-  color: #cdd6f4;
+  background-color: var(--color-base);
+  color: var(--color-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   /* Prevent pull-to-refresh on mobile */
@@ -52,4 +66,128 @@ body {
 }
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
+}
+
+/* ============================================
+   Mobile Controls Styles
+   ============================================ */
+
+/* Terminal controls bar */
+.terminal-controls {
+  position: fixed;
+  bottom: var(--keyboard-inset, 0px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  transition: bottom 0.1s ease-out;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* Terminal key buttons */
+.terminal-key {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+
+.terminal-key:active {
+  transform: scale(0.95);
+}
+
+/* D-Pad and NumPad overlays */
+.dpad-overlay,
+.numpad-overlay {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+
+/* iOS-specific fixes */
+.ios-device {
+  /* Prevent iOS from adjusting font size */
+  -webkit-text-size-adjust: 100%;
+}
+
+.ios-device .terminal-controls {
+  /* Account for iOS safe area */
+  padding-bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* PWA-specific styles */
+.ios-pwa {
+  /* Ensure full height in PWA mode */
+  min-height: 100vh;
+  min-height: -webkit-fill-available;
+}
+
+/* Touch device optimizations */
+.touch-device .terminal-key {
+  /* Larger touch targets on touch devices */
+  min-height: 36px;
+  min-width: 36px;
+}
+
+/* Coarse pointer (finger) optimizations */
+.coarse-pointer .terminal-key {
+  /* Even larger for coarse pointers */
+  min-height: 40px;
+  min-width: 40px;
+}
+
+/* Terminal container when controls are shown
+   Note: safe-area-inset-bottom is handled by terminal-controls itself */
+.terminal-with-controls {
+  padding-bottom: calc(52px + var(--keyboard-inset, 0px));
+}
+
+/* xterm viewport touch optimizations */
+.xterm .xterm-viewport {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* iOS native text selection support */
+.ios-native-term-selection .xterm .xterm-accessibility-tree {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Prevent iOS double-tap zoom on controls */
+.terminal-controls button {
+  touch-action: manipulation;
+}
+
+/* Momentum scrolling for session switcher */
+.session-switcher {
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+}
+
+.session-switcher > * {
+  scroll-snap-align: start;
+}
+
+/* Fade indicators for horizontal scroll */
+.scroll-fade-left::before,
+.scroll-fade-right::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.scroll-fade-left::before {
+  left: 0;
+  background: linear-gradient(to right, var(--color-mantle), transparent);
+}
+
+.scroll-fade-right::after {
+  right: 0;
+  background: linear-gradient(to left, var(--color-mantle), transparent);
 }

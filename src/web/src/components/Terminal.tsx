@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import { init, Terminal as GhosttyTerminal, FitAddon } from "ghostty-web";
 
 interface Props {
@@ -7,23 +7,61 @@ interface Props {
   onResize?: (cols: number, rows: number) => void;
 }
 
-export function Terminal({ onData, setWriteCallback, onResize }: Props) {
+/** Methods exposed via ref for external control */
+export interface TerminalHandle {
+  focus: () => void;
+  sendData: (data: string) => void;
+  isFocused: () => boolean;
+}
+
+// Touch scrolling constants (agentboard-inspired accumulated delta pattern)
+const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
+const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before sending scroll
+const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
+
+export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
+  { onData, setWriteCallback, onResize },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<GhosttyTerminal | null>(null);
   const initializedRef = useRef(false);
   const onDataRef = useRef(onData);
+
+  // Touch state with accumulated delta pattern
   const touchStateRef = useRef<{
     startY: number;
     lastY: number;
     isTwoFinger: boolean;
-    totalDeltaY: number;
+    totalMovement: number; // total absolute movement (for tap detection)
+    accumulatedDelta: number; // accumulated scroll delta (for batched scrolling)
     isScrolling: boolean;
+    hasSelection: boolean; // whether user is selecting text
   } | null>(null);
 
   // Keep ref up to date
   useEffect(() => {
     onDataRef.current = onData;
   }, [onData]);
+
+  // Expose methods via ref for external control (e.g., from TerminalControls)
+  useImperativeHandle(
+    ref,
+    () => ({
+      focus: () => {
+        terminalRef.current?.focus();
+      },
+      sendData: (data: string) => {
+        onDataRef.current(new TextEncoder().encode(data));
+      },
+      isFocused: () => {
+        if (!containerRef.current) return false;
+        const textarea = containerRef.current.querySelector('.xterm-helper-textarea');
+        return textarea ? document.activeElement === textarea : false;
+      },
+    }),
+    []
+  );
 
   useEffect(() => {
     if (!containerRef.current || initializedRef.current) return;
@@ -85,49 +123,81 @@ export function Terminal({ onData, setWriteCallback, onResize }: Props) {
       };
       containerRef.current.addEventListener('keydown', handleKeyDown, true); // capture phase
 
-      // Mobile touch scrolling
+      // Mobile touch scrolling with accumulated delta pattern (agentboard-inspired)
+      // Benefits: reduces terminal I/O, feels more natural, prevents accidental scrolls
       // Single finger vertical swipe = scroll terminal history
       // Tap (no movement) = focus terminal / show keyboard
-      const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
 
       const handleTouchStart = (e: TouchEvent) => {
+        // Check if user has text selected (don't scroll during selection)
+        const selection = window.getSelection();
+        const hasSelection = selection ? selection.toString().length > 0 : false;
+
         touchStateRef.current = {
           startY: e.touches[0].clientY,
           lastY: e.touches[0].clientY,
           isTwoFinger: e.touches.length >= 2,
-          totalDeltaY: 0,
+          totalMovement: 0,
+          accumulatedDelta: 0,
           isScrolling: false,
+          hasSelection,
         };
       };
 
       const handleTouchMove = (e: TouchEvent) => {
         if (!touchStateRef.current) return;
 
+        // Don't scroll while text is selected
+        if (touchStateRef.current.hasSelection) return;
+
+        // Don't handle two-finger gestures (could be pinch zoom)
+        if (touchStateRef.current.isTwoFinger) return;
+
         const currentY = e.touches[0].clientY;
         const deltaY = touchStateRef.current.lastY - currentY;
-        touchStateRef.current.totalDeltaY += Math.abs(deltaY);
+
+        // Track total movement for tap detection
+        touchStateRef.current.totalMovement += Math.abs(deltaY);
 
         // Once we've moved enough, consider it a scroll gesture
-        if (touchStateRef.current.totalDeltaY > SCROLL_THRESHOLD) {
+        if (touchStateRef.current.totalMovement > SCROLL_THRESHOLD) {
           touchStateRef.current.isScrolling = true;
 
           // Prevent page scroll and pull-to-refresh
           e.preventDefault();
 
-          // Calculate lines to scroll (accumulate fractional lines)
-          const lineHeight = 18; // approximate line height in pixels
-          const linesToScroll = Math.round(deltaY / lineHeight);
+          // Accumulate delta for batched scrolling
+          touchStateRef.current.accumulatedDelta += deltaY;
 
-          if (linesToScroll !== 0 && terminalRef.current) {
-            terminalRef.current.scrollLines(linesToScroll);
+          // Only send scroll when accumulated delta crosses threshold
+          const scrollEvents = Math.trunc(
+            touchStateRef.current.accumulatedDelta / SCROLL_ACCUMULATOR_THRESHOLD
+          );
+
+          if (scrollEvents !== 0 && terminalRef.current) {
+            // Send scroll events
+            terminalRef.current.scrollLines(scrollEvents);
+
+            // Keep remainder for smooth continuation without relying on % sign behavior
+            touchStateRef.current.accumulatedDelta -=
+              scrollEvents * SCROLL_ACCUMULATOR_THRESHOLD;
           }
-
-          touchStateRef.current.lastY = currentY;
         }
+
+        touchStateRef.current.lastY = currentY;
       };
 
       const handleTouchEnd = () => {
-        // If it was a tap (not a scroll), default behavior handles focus/keyboard
+        // Check if it was a tap (minimal movement)
+        const wasTap =
+          touchStateRef.current &&
+          touchStateRef.current.totalMovement < TAP_MOVE_THRESHOLD;
+
+        // If it was a tap, focus the terminal
+        if (wasTap && terminalRef.current) {
+          terminalRef.current.focus();
+        }
+
         touchStateRef.current = null;
       };
 
@@ -204,4 +274,4 @@ export function Terminal({ onData, setWriteCallback, onResize }: Props) {
       }}
     />
   );
-}
+});
