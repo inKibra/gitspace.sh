@@ -178,9 +178,9 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
             // Send scroll events
             terminalRef.current.scrollLines(scrollEvents);
 
-            // Keep remainder for smooth continuation
-            touchStateRef.current.accumulatedDelta =
-              touchStateRef.current.accumulatedDelta % SCROLL_ACCUMULATOR_THRESHOLD;
+            // Keep remainder for smooth continuation without relying on % sign behavior
+            touchStateRef.current.accumulatedDelta -=
+              scrollEvents * SCROLL_ACCUMULATOR_THRESHOLD;
           }
         }
 

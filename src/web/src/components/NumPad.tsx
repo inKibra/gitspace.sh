@@ -80,7 +80,22 @@ export function NumPad({
   const [activeNum, setActiveNum] = useState<number | null>(null);
   const padRef = useRef<HTMLDivElement>(null);
 
-  // Handle touch start/move
+  // Handle touch start - detect initial number for tap support
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    if (!padRef.current) return;
+
+    const touch = e.touches[0];
+    const rect = padRef.current.getBoundingClientRect();
+    const num = getNumAtPoint(touch.clientX, touch.clientY, rect);
+
+    setActiveNum(num);
+    if (num !== null) {
+      triggerHaptic(5);
+    }
+  }, []);
+
+  // Handle touch move - update selection as finger moves
   const handleTouchMove = useCallback(
     (e: React.TouchEvent) => {
       e.preventDefault();
@@ -163,6 +178,7 @@ export function NumPad({
           width: PAD_WIDTH,
           padding: PADDING,
         }}
+        onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
