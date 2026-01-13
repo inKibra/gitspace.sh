@@ -10,7 +10,8 @@
 
 import { createCliRenderer } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { useState, useEffect, useCallback, useReducer } from 'react';
+import { useState, useEffect, useCallback, useReducer, Fragment } from 'react';
+import { Toaster } from '@opentui-ui/toast/react';
 
 // Terminal component
 import { Terminal, useTerminalSession } from './components/Terminal.js';
@@ -1497,55 +1498,74 @@ function App({ relayConfig, onQuit }: AppProps) {
   // Loading state
   if (state.isLoading) {
     return (
-      <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
-        <text fg={COLORS.loading}>Loading...</text>
-      </box>
+      <Fragment>
+        <Toaster position="top-right" />
+        <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
+          <text fg={COLORS.loading}>Loading...</text>
+        </box>
+      </Fragment>
     );
   }
 
   // Error state
   if (state.error) {
     return (
-      <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
-        <text fg={COLORS.error}>Error: {state.error}</text>
-        <text fg={COLORS.textDim} marginTop={1}>Press 'q' to quit</text>
-      </box>
+      <Fragment>
+        <Toaster position="top-right" />
+        <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
+          <text fg={COLORS.error}>Error: {state.error}</text>
+          <text fg={COLORS.textDim} marginTop={1}>Press 'q' to quit</text>
+        </box>
+      </Fragment>
     );
   }
 
   // Machine list view (remote mode)
   if (state.view === 'machines') {
     return (
-      <box flexDirection="column" flexGrow={1}>
-        <MachineListTUI {...machineListProps} focused={true} />
-        <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" />
-        <FlowTUI flow={flow} />
-      </box>
+      <Fragment>
+        <Toaster position="top-right" />
+        <box flexDirection="column" flexGrow={1}>
+          <MachineListTUI {...machineListProps} focused={true} />
+          <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" />
+          <FlowTUI flow={flow} />
+        </box>
+      </Fragment>
     );
   }
 
   // Terminal view (attached to session)
   if (state.view === 'terminal' && state.attachedSession) {
     return (
-      <Terminal
-        session={state.attachedSession}
-        onDetach={handleTerminalDetach}
-        onExit={handleTerminalExit}
-        onKicked={handleTerminalKicked}
-        onError={handleTerminalError}
-      />
+      <Fragment>
+        <Toaster position="top-right" />
+        <Terminal
+          session={state.attachedSession}
+          onDetach={handleTerminalDetach}
+          onExit={handleTerminalExit}
+          onKicked={handleTerminalKicked}
+          onError={handleTerminalError}
+        />
+      </Fragment>
     );
   }
 
   // Inbox view (full-screen)
   if (state.view === 'inbox') {
-    return <InboxTUI {...inboxProps} focused={true} />;
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <InboxTUI {...inboxProps} focused={true} />
+      </Fragment>
+    );
   }
 
   // Main project/workspace view
   return (
-    <box flexDirection="column" flexGrow={1} width="100%">
-      {/* ASCII Art Header */}
+    <Fragment>
+      <Toaster position="top-right" />
+      <box flexDirection="column" flexGrow={1} width="100%">
+        {/* ASCII Art Header */}
       <box flexDirection="row" width="100%" height={13}>
         {/* ASCII art on left - fixed width */}
         <box flexDirection="column" alignItems="flex-start" paddingLeft={1} width={68}>
@@ -1616,7 +1636,8 @@ function App({ relayConfig, onQuit }: AppProps) {
 
       {/* Project creation flow modal */}
       <ProjectFlowModal flow={projectFlow} />
-    </box>
+      </box>
+    </Fragment>
   );
 }
 
@@ -1961,6 +1982,7 @@ export async function launchTUI(relayConfig?: RelayConfig): Promise<void> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 30,
+    useMouse: true,
   });
   const root = createRoot(renderer);
 

@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
-import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core';
+import type { PasteEvent, ScrollBoxRenderable, MouseEvent } from '@opentui/core';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import { appendFileSync } from 'fs';
 import type { Session, SessionEvent } from '../../lib/tmux-lite/protocol.js';
@@ -15,6 +15,8 @@ import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType } from 
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { BracketedPasteModeTracker, wrapPaste } from '../terminal-bracketed-paste.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
+import { toast } from '@opentui-ui/toast';
+import { copyToClipboard } from '../../utils/clipboard.js';
 
 // Debug logging to file (TUI-safe)
 const DEBUG_TERMINAL = process.env.DEBUG_TERMINAL === '1';
@@ -462,6 +464,24 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
     }
   });
 
+  // Handle mouse up to detect selection completion and copy to clipboard
+  const handleMouseUp = useCallback(async (event: MouseEvent) => {
+    // Check if we were selecting (isSelecting is set during drag selection)
+    if (event.isSelecting && terminalRef.current) {
+      const selectedText = terminalRef.current.getSelectedText();
+      if (selectedText && selectedText.length > 0) {
+        try {
+          await copyToClipboard(selectedText);
+          toast.success('Copied to clipboard');
+        } catch {
+          toast.error('Failed to copy to clipboard');
+        }
+        // Clear selection after copying
+        renderer.clearSelection();
+      }
+    }
+  }, [renderer]);
+
   // Render
   return (
     <box flexDirection="column" flexGrow={1}>
@@ -505,6 +525,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
           viewportCulling={true}
           stickyScroll={true}
           stickyStart="bottom"
+          onMouseUp={handleMouseUp}
         >
           <ghostty-terminal
             ref={(el: GhosttyTerminalRenderable | null) => {
