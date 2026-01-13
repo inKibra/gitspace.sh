@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
-import type { PasteEvent } from '@opentui/core';
+import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import { appendFileSync } from 'fs';
 import type { Session, SessionEvent } from '../../lib/tmux-lite/protocol.js';
@@ -104,6 +104,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
 
   // Refs
   const terminalRef = useRef<GhosttyTerminalRenderable | null>(null);
+  const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null);
   const socketRef = useRef<Awaited<ReturnType<typeof Bun.connect>> | null>(null);
   const socketWriterRef = useRef<ReturnType<typeof createBufferedSocketWriter> | null>(null);
   const bufferRef = useRef<Buffer>(Buffer.alloc(0));
@@ -133,6 +134,17 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  // Reset refs when session changes to prevent stale state
+  useEffect(() => {
+    bufferRef.current = Buffer.alloc(0);
+    ptyUtf8BufferRef.current = Buffer.alloc(0);
+    pendingPtyDataRef.current = [];
+    initialDataReceivedRef.current = false;
+    bracketedPasteRef.current = new BracketedPasteModeTracker();
+    setInitialData(null);
+    setTerminalMounted(false);
+  }, [session.socketPath]);
 
   const updateBracketedPasteMode = useCallback((chunk: Buffer) => {
     bracketedPasteRef.current.update(chunk);
@@ -485,21 +497,33 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
 
       {/* Only render terminal once we have initial data */}
       {initialData !== null && (
-        <ghostty-terminal
-          ref={(el: GhosttyTerminalRenderable | null) => {
-            terminalRef.current = el;
-            if (el) {
-              debugLog('Terminal mounted with initial data');
-              setTerminalMounted(true);
-            }
+        <scrollbox
+          ref={(el: ScrollBoxRenderable | null) => {
+            scrollBoxRef.current = el;
           }}
-          persistent={true}
-          showCursor={true}
-          cursorStyle="block"
-          cols={termSize.cols}
-          rows={termSize.rows}
-          ansi={initialData}
-        />
+          flexGrow={1}
+          viewportCulling={true}
+          stickyScroll={true}
+          stickyStart="bottom"
+        >
+          <ghostty-terminal
+            ref={(el: GhosttyTerminalRenderable | null) => {
+              const wasNull = terminalRef.current === null;
+              terminalRef.current = el;
+              if (el && wasNull) {
+                debugLog('Terminal mounted with initial data');
+                // Defer state update to avoid setState during render
+                queueMicrotask(() => setTerminalMounted(true));
+              }
+            }}
+            persistent={true}
+            showCursor={true}
+            cursorStyle="block"
+            cols={termSize.cols}
+            rows={termSize.rows}
+            ansi={initialData}
+          />
+        </scrollbox>
       )}
     </box>
   );
