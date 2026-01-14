@@ -57,6 +57,8 @@ export interface TerminalProps {
   onError: (error: string) => void;
   /** When true, Shift+Tab is intercepted by parent for toast attach */
   interceptShiftTab?: boolean;
+  /** Called when user interacts with terminal (for activity tracking) */
+  onActivity?: () => void;
 }
 
 type TerminalStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -96,7 +98,7 @@ function getTerminalSize() {
   };
 }
 
-export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab }: TerminalProps) {
+export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab, onActivity }: TerminalProps) {
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [termSize, setTermSize] = useState(getTerminalSize);
@@ -165,6 +167,9 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
       const text = e.text ?? '';
       if (text.length === 0) return;
 
+      // Track user activity for notification hold/flush
+      onActivity?.();
+
       const payload = wrapPaste(text, bracketedPasteRef.current.isEnabled);
 
       const frame = encodePTY(Buffer.from(payload));
@@ -178,7 +183,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
     return () => {
       renderer.keyInput.off('paste', handlePaste);
     };
-  }, [renderer]);
+  }, [renderer, onActivity]);
 
   // Track when terminal ref changes to flush pending data
   const [terminalMounted, setTerminalMounted] = useState(false);
@@ -400,6 +405,9 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
 
     const socket = socketRef.current;
     if (!socket) return;
+
+    // Track user activity for notification hold/flush
+    onActivity?.();
 
     // Check for Ctrl+Esc (detach) - key.name is 'escape' with ctrl modifier
     if (key.name === 'escape' && key.ctrl) {

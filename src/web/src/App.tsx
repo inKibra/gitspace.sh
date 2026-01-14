@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Terminal, type TerminalHandle } from "./components/Terminal";
 import { TerminalControls } from "./components/TerminalControls";
 import { useTerminal } from "./hooks/useTerminal";
@@ -214,7 +214,37 @@ export default function App() {
     onClose: () => setShowInbox(false),
   });
 
-  // Notification toasts hook
+  // ========== Activity Tracking for Notifications ==========
+
+  // Track last activity time for idle detection
+  const [lastActivityAt, setLastActivityAt] = useState(Date.now());
+  const [activityTick, setActivityTick] = useState(0); // Forces re-evaluation
+
+  // Callback to update activity timestamp (passed to Terminal)
+  const handleTerminalActivity = useCallback(() => {
+    setLastActivityAt(Date.now());
+  }, []);
+
+  // Re-evaluate isUserActive periodically (every 1 second)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActivityTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Compute whether user is active based on view and last activity
+  const holdWhenIdleMs = DEFAULT_NOTIFICATION_CONFIG.toast.holdWhenIdleMs || 15000;
+  const isUserActive = useMemo(() => {
+    // Always "active" when not in attached terminal mode
+    if (view !== "terminal" || terminal.mode !== "attached") return true;
+    // In attached mode, check if activity is recent
+    return Date.now() - lastActivityAt < holdWhenIdleMs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, terminal.mode, lastActivityAt, holdWhenIdleMs, activityTick]);
+
+  // ========== Notification Toasts ==========
+
   const handleShowToast = useCallback((notification: ToastNotification) => {
     const description = notification.preview
       ? `${notification.preview} · Shift+Tab to attach`
@@ -239,12 +269,17 @@ export default function App() {
     onAttachSession: (sessionId) => {
       terminal.attachSession({ sessionId });
     },
-    pollIntervalMs: 5000, // Poll every 5 seconds
+    onMarkRead: async (itemId) => {
+      terminal.markInboxItemRead(itemId);
+    },
+    pollIntervalMs: 5000,
     onRefreshInbox: async () => {
       if (terminal.status === "established") {
         terminal.requestInbox();
       }
     },
+    isUserActive,
+    currentSessionId: terminal.attachedSessionId ?? undefined,
   });
 
   // Request workspaces when connection is established and view is "terminal"
@@ -571,6 +606,7 @@ export default function App() {
               onData={terminal.send}
               setWriteCallback={terminal.setWriteCallback}
               onResize={terminal.resize}
+              onActivity={handleTerminalActivity}
             />
           </div>
           {/* Mobile controls toolbar */}

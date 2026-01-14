@@ -10,7 +10,7 @@
 
 import { createCliRenderer } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { useState, useEffect, useCallback, useReducer, Fragment } from 'react';
+import { useState, useEffect, useCallback, useReducer, Fragment, useMemo } from 'react';
 import { Toaster } from '@opentui-ui/toast/react';
 
 // Terminal component
@@ -1159,7 +1159,37 @@ function App({ relayConfig, onQuit }: AppProps) {
     },
   });
 
-  // Notification toasts hook
+  // ========== Activity Tracking for Notifications ==========
+
+  // Track last activity time for idle detection
+  const [lastActivityAt, setLastActivityAt] = useState(Date.now());
+  const [activityTick, setActivityTick] = useState(0); // Forces re-evaluation
+
+  // Callback to update activity timestamp (passed to Terminal)
+  const handleTerminalActivity = useCallback(() => {
+    setLastActivityAt(Date.now());
+  }, []);
+
+  // Re-evaluate isUserActive periodically (every 1 second)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActivityTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Compute whether user is active based on view and last activity
+  const holdWhenIdleMs = DEFAULT_NOTIFICATION_CONFIG.toast.holdWhenIdleMs || 15000;
+  const isUserActive = useMemo(() => {
+    // Always "active" when not in terminal view (browsing projects/workspaces)
+    if (state.view !== 'terminal') return true;
+    // In terminal view, check if activity is recent
+    return Date.now() - lastActivityAt < holdWhenIdleMs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.view, lastActivityAt, holdWhenIdleMs, activityTick]);
+
+  // ========== Notification Toasts ==========
+
   const handleShowToast = useCallback((notification: ToastNotification) => {
     const description = notification.preview
       ? `${notification.preview}\n[Shift+Tab to attach]`
@@ -1177,8 +1207,13 @@ function App({ relayConfig, onQuit }: AppProps) {
     onAttachSession: (sessionId) => {
       handleAttachSession({ sessionId });
     },
-    pollIntervalMs: 5000, // Poll every 5 seconds
+    onMarkRead: async (itemId) => {
+      await markInboxRead(itemId);
+    },
+    pollIntervalMs: 5000,
     onRefreshInbox: refreshInbox,
+    isUserActive,
+    currentSessionId: state.attachedSession?.id,
   });
 
   // ========== Keyboard Handlers ==========
@@ -1581,6 +1616,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           onKicked={handleTerminalKicked}
           onError={handleTerminalError}
           interceptShiftTab={!!notifications.activeToast}
+          onActivity={handleTerminalActivity}
         />
       </Fragment>
     );

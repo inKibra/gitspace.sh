@@ -43,6 +43,7 @@ function createConfig(overrides: Partial<NotificationConfig> = {}): Notification
     },
     toast: {
       enabled: true,
+      holdWhenIdleMs: 15000,
     },
     ...overrides,
   };
@@ -311,7 +312,7 @@ describe('getToastableItems', () => {
 
   it('should return empty array when toasts disabled', () => {
     const items = [createInboxItem()];
-    const config = createConfig({ toast: { enabled: false } });
+    const config = createConfig({ toast: { enabled: false, holdWhenIdleMs: 15000 } });
 
     expect(getToastableItems(items, config)).toEqual([]);
   });

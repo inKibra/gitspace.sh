@@ -23,6 +23,8 @@ export interface NotificationConfig {
   };
   toast: {
     enabled: boolean;
+    /** Hold toasts when user is idle for this duration (ms). 0 = disabled. (default: 15000) */
+    holdWhenIdleMs: number;
   };
 }
 
@@ -41,6 +43,7 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
   },
   toast: {
     enabled: true,
+    holdWhenIdleMs: 15000,
   },
 };
 

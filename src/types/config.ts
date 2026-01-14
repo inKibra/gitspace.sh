@@ -24,6 +24,8 @@ export interface NotificationTypeConfig {
 export interface NotificationToastConfig {
   /** Whether toast notifications are enabled (default: true) */
   enabled: boolean;
+  /** Hold toasts when user is idle for this duration (ms). 0 = disabled. (default: 15000) */
+  holdWhenIdleMs: number;
 }
 
 /**
@@ -58,7 +60,7 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
   enabled: true,
   minCommandDurationMs: 10000,
   types: { ...DEFAULT_NOTIFICATION_TYPES },
-  toast: { enabled: true },
+  toast: { enabled: true, holdWhenIdleMs: 15000 },
 };
 
 /**
