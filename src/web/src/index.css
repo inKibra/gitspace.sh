@@ -16,6 +16,8 @@
   --color-blue: #89b4fa;
   --color-yellow: #f9e2af;
 
+  /* Visual viewport sizing (set by useVisualViewport hook) */
+  --visual-viewport-height: 100dvh;
   /* Keyboard inset (set by useVisualViewport hook) */
   --keyboard-inset: 0px;
 }
@@ -41,6 +43,11 @@ body {
 .h-screen {
   height: 100vh;
   height: 100dvh;
+}
+
+/* Use visual viewport height for terminal containers (shrinks with keyboard) */
+.h-visual-viewport {
+  height: var(--visual-viewport-height, 100dvh);
 }
 
 /* Touch-friendly minimum tap targets */

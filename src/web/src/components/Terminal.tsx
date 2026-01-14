@@ -7,11 +7,14 @@ interface Props {
   onResize?: (cols: number, rows: number) => void;
   /** Called when user interacts with terminal (for activity tracking) */
   onActivity?: () => void;
+  /** Whether tapping the terminal should focus it (opens keyboard on mobile). Default: true */
+  allowTapFocus?: boolean;
 }
 
 /** Methods exposed via ref for external control */
 export interface TerminalHandle {
   focus: () => void;
+  blur: () => void;
   sendData: (data: string) => void;
   isFocused: () => boolean;
 }
@@ -22,7 +25,7 @@ const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before s
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 
 export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
-  { onData, setWriteCallback, onResize, onActivity },
+  { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -30,6 +33,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
   const initializedRef = useRef(false);
   const onDataRef = useRef(onData);
   const onActivityRef = useRef(onActivity);
+  const allowTapFocusRef = useRef(allowTapFocus);
 
   // Touch state with accumulated delta pattern
   const touchStateRef = useRef<{
@@ -51,12 +55,23 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
     onActivityRef.current = onActivity;
   }, [onActivity]);
 
+  useEffect(() => {
+    allowTapFocusRef.current = allowTapFocus;
+  }, [allowTapFocus]);
+
   // Expose methods via ref for external control (e.g., from TerminalControls)
   useImperativeHandle(
     ref,
     () => ({
       focus: () => {
         terminalRef.current?.focus();
+      },
+      blur: () => {
+        // Blur the hidden textarea to dismiss keyboard on mobile
+        if (containerRef.current) {
+          const textarea = containerRef.current.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+          textarea?.blur();
+        }
       },
       sendData: (data: string) => {
         onDataRef.current(new TextEncoder().encode(data));
@@ -201,10 +216,13 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
           touchStateRef.current &&
           touchStateRef.current.totalMovement < TAP_MOVE_THRESHOLD;
 
-        // If it was a tap, focus the terminal and track activity
+        // If it was a tap, track activity and focus if allowed
         if (wasTap && terminalRef.current) {
-          onActivityRef.current?.(); // Track user activity
-          terminalRef.current.focus();
+          onActivityRef.current?.();
+          // When allowTapFocus is false, taps won't open the keyboard on mobile
+          if (allowTapFocusRef.current) {
+            terminalRef.current.focus();
+          }
         }
 
         touchStateRef.current = null;
@@ -257,8 +275,10 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
         }, 50);
       });
 
-      // Focus terminal
-      term.focus();
+      // Focus terminal only if tap focus is allowed (don't auto-open keyboard on mobile)
+      if (allowTapFocusRef.current) {
+        term.focus();
+      }
 
       return () => {
         containerRef.current?.removeEventListener('keydown', handleKeyDown, true);

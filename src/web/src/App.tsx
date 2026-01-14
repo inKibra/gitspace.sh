@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Terminal, type TerminalHandle } from "./components/Terminal";
 import { TerminalControls } from "./components/TerminalControls";
+import { FloatingJogWheel } from "./components/FloatingJogWheel";
 import { useTerminal } from "./hooks/useTerminal";
 import { useRelayConnection } from "./hooks/useRelayConnection";
 import { useVisualViewport } from "./hooks/useVisualViewport";
@@ -36,6 +37,7 @@ export default function App() {
   const [showInbox, setShowInbox] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
+  const [inputMode, setInputMode] = useState(false);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<TerminalHandle>(null);
@@ -54,7 +56,7 @@ export default function App() {
   const terminal = useTerminal();
 
   // Visual viewport hook for keyboard detection
-  useVisualViewport();
+  const keyboardVisible = useVisualViewport();
 
   // Apply device-specific CSS classes and detect mobile on mount
   useEffect(() => {
@@ -138,6 +140,7 @@ export default function App() {
   const handleBackToMachines = () => {
     terminal.disconnect();
     setSelectedMachine(null);
+    setInputMode(false); // Reset input mode when leaving terminal
     setView("machines");
   };
 
@@ -568,9 +571,25 @@ export default function App() {
       terminalRef.current?.focus();
     };
 
+    // Toggle input mode - focus/blur terminal accordingly
+    const toggleInputMode = () => {
+      const newInputMode = !inputMode;
+      setInputMode(newInputMode);
+      if (newInputMode) {
+        // Entering input mode - focus terminal to show keyboard
+        terminalRef.current?.focus();
+      } else {
+        // Exiting input mode - blur to hide keyboard
+        terminalRef.current?.blur();
+      }
+    };
+
+    // Show floating jog wheel when in input mode but keyboard is hidden
+    const showFloatingJogWheel = showMobileControls && inputMode && !keyboardVisible;
+
     return (
       <>
-        <div className="h-screen w-screen flex flex-col bg-gray-900">
+        <div className={`w-screen flex flex-col bg-gray-900 ${inputMode ? 'h-visual-viewport' : 'h-screen'}`}>
           <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
             <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
               <button
@@ -591,6 +610,19 @@ export default function App() {
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
+              {/* Input mode toggle for mobile */}
+              {showMobileControls && (
+                <button
+                  onClick={toggleInputMode}
+                  className={`px-3 py-2 text-sm rounded min-h-[44px] transition-colors ${
+                    inputMode
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  Input
+                </button>
+              )}
               <span className="text-xs text-gray-500 hidden sm:inline">Ctrl+Esc</span>
               <button
                 onClick={terminal.detachSession}
@@ -599,22 +631,34 @@ export default function App() {
                 Detach
               </button>
             </div>
+            {/* Mobile controls toolbar */}
+            {showMobileControls && (
+              <TerminalControls
+                onSendData={handleSendData}
+                onFocusTerminal={handleFocusTerminal}
+              />
+            )}
           </div>
-          <div className={`flex-1 ${showMobileControls ? 'terminal-with-controls' : ''}`}>
+          <div className={`flex-1 ${showMobileControls && inputMode ? 'terminal-with-controls' : ''}`}>
             <Terminal
               ref={terminalRef}
               onData={terminal.send}
               setWriteCallback={terminal.setWriteCallback}
               onResize={terminal.resize}
+              allowTapFocus={inputMode || !showMobileControls}
               onActivity={handleTerminalActivity}
             />
           </div>
-          {/* Mobile controls toolbar */}
-          {showMobileControls && (
+          {/* Mobile controls toolbar - only show in input mode */}
+          {showMobileControls && inputMode && (
             <TerminalControls
               onSendData={handleSendData}
               onFocusTerminal={handleFocusTerminal}
             />
+          )}
+          {/* Floating jog wheel - show when input mode is on but keyboard is hidden */}
+          {showFloatingJogWheel && (
+            <FloatingJogWheel onDirection={handleSendData} />
           )}
         </div>
         <Toaster theme="dark" position="top-right" richColors />

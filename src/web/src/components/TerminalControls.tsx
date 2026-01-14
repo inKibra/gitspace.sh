@@ -25,6 +25,12 @@ const BACKTAB = '\x1b[Z'; // CSI Z - Shift+Tab
 const BACKSPACE = '\x7f';
 const CTRL_W = '\x17'; // Ctrl+W for word delete
 const ENTER = '\r';
+const CTRL_C = '\x03'; // ETX - interrupt
+const SHIFT_ENTER = '\x1b[13;2u'; // CSI u - Shift+Enter
+const PAGE_UP = '\x1b[5~'; // CSI 5 ~
+const PAGE_DOWN = '\x1b[6~'; // CSI 6 ~
+const HOME = '\x1b[H'; // CSI H
+const END = '\x1b[F'; // CSI F
 
 /** Delay in ms before long-press triggers D-Pad or NumPad overlay */
 const LONG_PRESS_DELAY = 150;
@@ -141,9 +147,38 @@ export function TerminalControls({
     }
   }, [modifiers.ctrl, sendKey]);
 
-  // Handle Enter
+  // Handle Enter (Shift+Enter sends CSI u sequence)
   const handleEnter = useCallback(() => {
-    sendKey(ENTER);
+    if (modifiers.shift) {
+      sendKey(SHIFT_ENTER);
+    } else {
+      sendKey(ENTER);
+    }
+  }, [modifiers.shift, sendKey]);
+
+  // Handle Ctrl+C
+  const handleCtrlC = useCallback(() => {
+    sendKey(CTRL_C);
+  }, [sendKey]);
+
+  // Handle Page Up
+  const handlePageUp = useCallback(() => {
+    sendKey(PAGE_UP);
+  }, [sendKey]);
+
+  // Handle Page Down
+  const handlePageDown = useCallback(() => {
+    sendKey(PAGE_DOWN);
+  }, [sendKey]);
+
+  // Handle Home
+  const handleHome = useCallback(() => {
+    sendKey(HOME);
+  }, [sendKey]);
+
+  // Handle End
+  const handleEnd = useCallback(() => {
+    sendKey(END);
   }, [sendKey]);
 
   // Handle arrow key from D-Pad
@@ -275,8 +310,8 @@ export function TerminalControls({
         {/* Separator */}
         <div className="w-px h-6 bg-[#313244] mx-1" />
 
-        {/* Quick keys */}
-        <div className="flex items-center gap-1">
+        {/* Quick keys - scrollable on small screens */}
+        <div className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
           <TerminalKey label="Esc" onPress={handleEscape} />
           <TerminalKey
             label="Tab"
@@ -289,14 +324,32 @@ export function TerminalControls({
             highlight={modifiers.ctrl}
             title={modifiers.ctrl ? 'Ctrl+W (delete word)' : 'Backspace'}
           />
-          <TerminalKey label="↵" onPress={handleEnter} />
-        </div>
+          <TerminalKey
+            label="↵"
+            onPress={handleEnter}
+            highlight={modifiers.shift}
+            title={modifiers.shift ? 'Shift+Enter' : 'Enter'}
+          />
+          <TerminalKey
+            label="^C"
+            onPress={handleCtrlC}
+            title="Ctrl+C (interrupt)"
+            small
+          />
 
-        {/* Separator */}
-        <div className="w-px h-6 bg-[#313244] mx-1" />
+          {/* Separator */}
+          <div className="w-px h-6 bg-[#313244] mx-1 flex-shrink-0" />
 
-        {/* D-Pad and NumPad triggers */}
-        <div className="flex items-center gap-1">
+          {/* Navigation keys */}
+          <TerminalKey label="PgUp" onPress={handlePageUp} small />
+          <TerminalKey label="PgDn" onPress={handlePageDown} small />
+          <TerminalKey label="Home" onPress={handleHome} small />
+          <TerminalKey label="End" onPress={handleEnd} small />
+
+          {/* Separator */}
+          <div className="w-px h-6 bg-[#313244] mx-1 flex-shrink-0" />
+
+          {/* D-Pad and NumPad triggers */}
           <TerminalKey
             label="↕"
             onTouchStart={handleDPadTouchStart}
