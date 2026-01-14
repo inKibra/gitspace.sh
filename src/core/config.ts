@@ -13,9 +13,10 @@ import {
 } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
-import type { GlobalConfig, ProjectConfig } from '../types/config.js'
+import type { GlobalConfig, ProjectConfig, NotificationConfig } from '../types/config.js'
 import {
 	DEFAULT_GLOBAL_CONFIG,
+	DEFAULT_NOTIFICATION_CONFIG,
 	createDefaultProjectConfig,
 } from '../types/config.js'
 import { SpacesError } from '../types/errors.js'
@@ -503,4 +504,59 @@ echo "Running Spaces cleanup on: $WORKSPACE_NAME from $REPOSITORY"
 	writeProjectConfig(projectName, config)
 
 	return config
+}
+
+// ============================================================================
+// Notification Config Helpers
+// ============================================================================
+
+/**
+ * Get notification configuration (with defaults for missing fields)
+ */
+export function getNotificationConfig(): NotificationConfig {
+	const globalConfig = readGlobalConfig()
+	const userConfig = globalConfig.notifications
+
+	if (!userConfig) {
+		return { ...DEFAULT_NOTIFICATION_CONFIG }
+	}
+
+	// Merge with defaults to ensure all fields exist
+	return {
+		enabled: userConfig.enabled ?? DEFAULT_NOTIFICATION_CONFIG.enabled,
+		minCommandDurationMs:
+			userConfig.minCommandDurationMs ??
+			DEFAULT_NOTIFICATION_CONFIG.minCommandDurationMs,
+		types: {
+			...DEFAULT_NOTIFICATION_CONFIG.types,
+			...userConfig.types,
+		},
+		toast: {
+			...DEFAULT_NOTIFICATION_CONFIG.toast,
+			...userConfig.toast,
+		},
+	}
+}
+
+/**
+ * Update notification configuration
+ */
+export function updateNotificationConfig(
+	updates: Partial<NotificationConfig>
+): NotificationConfig {
+	const current = getNotificationConfig()
+	const updated: NotificationConfig = {
+		...current,
+		...updates,
+		types: {
+			...current.types,
+			...(updates.types || {}),
+		},
+		toast: {
+			...current.toast,
+			...(updates.toast || {}),
+		},
+	}
+	updateGlobalConfig({ notifications: updated })
+	return updated
 }

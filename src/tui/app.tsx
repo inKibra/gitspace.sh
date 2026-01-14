@@ -38,6 +38,12 @@ import { ProjectListTUI } from '../shared/components/ProjectList.tui.js';
 import { InboxTUI } from '../shared/components/Inbox.tui.js';
 import { useInbox } from '../shared/components/Inbox.js';
 import { clearInbox, markInboxRead } from '../lib/tmux-lite/cli.js';
+import { toast } from '@opentui-ui/toast';
+import {
+  useNotifications,
+  type ToastNotification,
+  DEFAULT_NOTIFICATION_CONFIG,
+} from '../shared/notifications/index.js';
 
 // Local state and config
 import {
@@ -1153,6 +1159,25 @@ function App({ relayConfig, onQuit }: AppProps) {
     },
   });
 
+  // Notification toasts hook
+  const handleShowToast = useCallback((notification: ToastNotification) => {
+    toast.info(`${notification.icon} ${notification.title}`, {
+      description: notification.preview,
+      duration: 8000,
+    });
+  }, []);
+
+  const notifications = useNotifications({
+    items: state.inbox,
+    config: DEFAULT_NOTIFICATION_CONFIG,
+    onShowToast: handleShowToast,
+    onAttachSession: (sessionId) => {
+      handleAttachSession({ sessionId });
+    },
+    pollIntervalMs: 5000, // Poll every 5 seconds
+    onRefreshInbox: refreshInbox,
+  });
+
   // ========== Keyboard Handlers ==========
 
   useKeyboard(async (key) => {
@@ -1385,6 +1410,12 @@ function App({ relayConfig, onQuit }: AppProps) {
     // Inbox shortcut (global) - open full-screen inbox view
     if (key.raw === 'i') {
       dispatch({ type: 'SET_VIEW', view: 'inbox' });
+      return;
+    }
+
+    // Toast-only attach hotkey (Shift+Tab)
+    if (key.shift && key.name === 'tab' && notifications.activeToast) {
+      notifications.attachToActiveToast();
       return;
     }
 

@@ -11,6 +11,8 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
+import { getNotificationConfig, type NotificationConfig } from "../../core/config.js";
+import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
   getRouterSocket,
   getSessionSocketPath,
@@ -50,6 +52,35 @@ if (rawArgs.includes("--test")) {
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
 const SERVER_START_TIME = Date.now();
+
+// Load notification config (with fallback to defaults)
+let notificationConfig: NotificationConfig;
+try {
+  notificationConfig = getNotificationConfig();
+} catch {
+  // If config can't be loaded (e.g., gitspace not initialized), use defaults
+  notificationConfig = { ...DEFAULT_NOTIFICATION_CONFIG };
+}
+
+/**
+ * Check if a notification type is enabled
+ */
+function isNotificationTypeEnabled(type: InboxItem['type']): boolean {
+  if (!notificationConfig.enabled) return false;
+
+  switch (type) {
+    case 'exit':
+      return notificationConfig.types.exit;
+    case 'idle':
+      return notificationConfig.types.idle;
+    case 'bell':
+      return notificationConfig.types.bell;
+    case 'title':
+      return notificationConfig.types.title;
+    default:
+      return notificationConfig.types.osc;
+  }
+}
 
 // Clean up old socket
 try { unlinkSync(ROUTER_SOCKET); } catch {}
@@ -288,6 +319,11 @@ function genInboxId(): string {
 }
 
 function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
+  // Check if this notification type is enabled in config
+  if (!isNotificationTypeEnabled(item.type)) {
+    return;
+  }
+
   inbox.push({
     ...item,
     id: genInboxId(),
@@ -477,6 +513,7 @@ function setupXtermEventHandlers(
  */
 interface Osc133State {
   commandRunning: boolean;
+  commandStartTime: number;  // Timestamp when command started (for duration filter)
 }
 
 /**
@@ -536,6 +573,7 @@ function createPtyDataHandler(
     // Command start
     if (OSC_133_CMD_START.test(str)) {
       osc133State.commandRunning = true;
+      osc133State.commandStartTime = now;
       OSC_133_CMD_START.lastIndex = 0; // Reset regex state
     }
 
@@ -544,8 +582,19 @@ function createPtyDataHandler(
     const osc133DoneMatches = [...str.matchAll(OSC_133_DONE_PATTERN)];
     for (const match of osc133DoneMatches) {
       const exitCode = match[1] ? parseInt(match[1], 10) : 0;
-      // Only notify for background sessions with non-zero exit or if command was tracked
-      if (!activelyUsing && (exitCode !== 0 || osc133State.commandRunning)) {
+      const commandDuration = osc133State.commandStartTime > 0
+        ? now - osc133State.commandStartTime
+        : 0;
+
+      // Only notify for background sessions if:
+      // - Non-zero exit (always notify on errors)
+      // - OR command duration >= minCommandDurationMs
+      const shouldNotify = !activelyUsing && (
+        exitCode !== 0 ||
+        (osc133State.commandRunning && commandDuration >= notificationConfig.minCommandDurationMs)
+      );
+
+      if (shouldNotify) {
         const context = getLastLines(xterm, 2) || `Command finished (exit ${exitCode})`;
         addInboxItem(createInboxNotification(
           id,
@@ -555,9 +604,10 @@ function createPtyDataHandler(
           currentProcessTitle,
           exitCode !== 0 ? exitCode : undefined
         ));
-        console.log(`[${sessionName}] OSC 133 command done: exit ${exitCode}`);
+        console.log(`[${sessionName}] OSC 133 command done: exit ${exitCode}, duration ${commandDuration}ms`);
       }
       osc133State.commandRunning = false;
+      osc133State.commandStartTime = 0;
     }
 
     // Pass original data through unchanged to preserve all escape sequences
@@ -984,6 +1034,7 @@ function createSession(name: string | undefined, cwd: string): Session {
   // Initialize OSC 133 state for shell integration
   const osc133State: Osc133State = {
     commandRunning: false,
+    commandStartTime: 0,
   };
 
   // Create the idle checker function

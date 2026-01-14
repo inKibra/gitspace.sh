@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Terminal, type TerminalHandle } from "./components/Terminal";
 import { TerminalControls } from "./components/TerminalControls";
 import { useTerminal } from "./hooks/useTerminal";
@@ -7,6 +7,7 @@ import { useRelayConnection } from "./hooks/useRelayConnection";
 import { useVisualViewport } from "./hooks/useVisualViewport";
 import { parseInviteFromHash } from "./lib/invite";
 import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/device";
+import { Toaster, toast } from "sonner";
 
 // Import shared components and hooks
 import {
@@ -21,6 +22,11 @@ import { SpacesBrowserWeb } from "../../shared/components/SpacesBrowser.web.js";
 import { FlowWeb } from "../../shared/components/Flow.web.js";
 import { useInbox } from "../../shared/components/Inbox.js";
 import { InboxWeb } from "../../shared/components/Inbox.web.js";
+import {
+  useNotifications,
+  type ToastNotification,
+  DEFAULT_NOTIFICATION_CONFIG,
+} from "../../shared/notifications/index.js";
 
 type View = "machines" | "terminal";
 
@@ -206,6 +212,36 @@ export default function App() {
       terminal.attachSession({ sessionId });
     },
     onClose: () => setShowInbox(false),
+  });
+
+  // Notification toasts hook
+  const handleShowToast = useCallback((notification: ToastNotification) => {
+    toast(notification.title, {
+      description: notification.preview,
+      icon: notification.icon,
+      duration: 8000,
+      action: {
+        label: "Attach",
+        onClick: () => {
+          terminal.attachSession({ sessionId: notification.sessionId });
+        },
+      },
+    });
+  }, [terminal]);
+
+  const notifications = useNotifications({
+    items: terminal.inbox,
+    config: DEFAULT_NOTIFICATION_CONFIG,
+    onShowToast: handleShowToast,
+    onAttachSession: (sessionId) => {
+      terminal.attachSession({ sessionId });
+    },
+    pollIntervalMs: 5000, // Poll every 5 seconds
+    onRefreshInbox: async () => {
+      if (terminal.status === "established") {
+        terminal.requestInbox();
+      }
+    },
   });
 
   // Request workspaces when connection is established and view is "terminal"
@@ -399,6 +435,25 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [view, terminal.status, terminal.mode, terminal.detachSession]);
 
+  // Global hotkey for toast-only attach (Shift+Tab)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip if in an input field
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      // Shift+Tab: attach to active toast's session
+      if (e.shiftKey && e.key === "Tab" && notifications.activeToast) {
+        e.preventDefault();
+        notifications.attachToActiveToast();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [notifications.activeToast, notifications.attachToActiveToast]);
+
   // ========== Spaces Browser View (browsing mode) ==========
   if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
     // Show inbox if open
@@ -407,6 +462,7 @@ export default function App() {
         <>
           <InboxWeb {...inboxProps} />
           <FlowWeb flow={flow} />
+          <Toaster theme="dark" position="top-right" richColors />
         </>
       );
     }
@@ -457,6 +513,7 @@ export default function App() {
           </div>
         </div>
         <FlowWeb flow={flow} />
+        <Toaster theme="dark" position="top-right" richColors />
       </>
     );
   }
@@ -474,52 +531,55 @@ export default function App() {
     };
 
     return (
-      <div className="h-screen w-screen flex flex-col bg-gray-900">
-        <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
-          <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-            <button
-              onClick={terminal.detachSession}
-              className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
-            >
-              ← <span className="hidden sm:inline ml-1">Workspaces</span>
-            </button>
-            <div className="text-sm text-gray-400 truncate">
-              <span className="text-green-400">●</span>{" "}
-              <span className="hidden sm:inline">{selectedMachine?.label || selectedMachine?.machineId}</span>
-              {terminal.attachedSessionName && (
-                <span className="text-gray-300">
-                  <span className="hidden sm:inline text-gray-500 mx-1">/</span>
-                  {terminal.attachedSessionName.split(':').pop()}
-                </span>
-              )}
+      <>
+        <div className="h-screen w-screen flex flex-col bg-gray-900">
+          <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
+              <button
+                onClick={terminal.detachSession}
+                className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+              >
+                ← <span className="hidden sm:inline ml-1">Workspaces</span>
+              </button>
+              <div className="text-sm text-gray-400 truncate">
+                <span className="text-green-400">●</span>{" "}
+                <span className="hidden sm:inline">{selectedMachine?.label || selectedMachine?.machineId}</span>
+                {terminal.attachedSessionName && (
+                  <span className="text-gray-300">
+                    <span className="hidden sm:inline text-gray-500 mx-1">/</span>
+                    {terminal.attachedSessionName.split(':').pop()}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="text-xs text-gray-500 hidden sm:inline">Ctrl+Esc</span>
+              <button
+                onClick={terminal.detachSession}
+                className="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded text-white min-h-[44px]"
+              >
+                Detach
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <span className="text-xs text-gray-500 hidden sm:inline">Ctrl+Esc</span>
-            <button
-              onClick={terminal.detachSession}
-              className="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded text-white min-h-[44px]"
-            >
-              Detach
-            </button>
+          <div className={`flex-1 ${showMobileControls ? 'terminal-with-controls' : ''}`}>
+            <Terminal
+              ref={terminalRef}
+              onData={terminal.send}
+              setWriteCallback={terminal.setWriteCallback}
+              onResize={terminal.resize}
+            />
           </div>
+          {/* Mobile controls toolbar */}
+          {showMobileControls && (
+            <TerminalControls
+              onSendData={handleSendData}
+              onFocusTerminal={handleFocusTerminal}
+            />
+          )}
         </div>
-        <div className={`flex-1 ${showMobileControls ? 'terminal-with-controls' : ''}`}>
-          <Terminal
-            ref={terminalRef}
-            onData={terminal.send}
-            setWriteCallback={terminal.setWriteCallback}
-            onResize={terminal.resize}
-          />
-        </div>
-        {/* Mobile controls toolbar */}
-        {showMobileControls && (
-          <TerminalControls
-            onSendData={handleSendData}
-            onFocusTerminal={handleFocusTerminal}
-          />
-        )}
-      </div>
+        <Toaster theme="dark" position="top-right" richColors />
+      </>
     );
   }
 
@@ -535,22 +595,25 @@ export default function App() {
     }[terminal.status];
 
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-gray-900 px-4">
-        <div className="text-center">
-          <div className="text-lg text-white mb-2 break-words">
-            Connecting to {selectedMachine?.label || selectedMachine?.machineId}
+      <>
+        <div className="h-screen w-screen flex flex-col items-center justify-center bg-gray-900 px-4">
+          <div className="text-center">
+            <div className="text-lg text-white mb-2 break-words">
+              Connecting to {selectedMachine?.label || selectedMachine?.machineId}
+            </div>
+            <div className="text-sm text-gray-400">{statusMessage}</div>
+            {terminal.status === "error" && (
+              <button
+                onClick={handleBackToMachines}
+                className="mt-4 px-6 py-3 text-base bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded-lg text-white min-h-[48px]"
+              >
+                Back to Machines
+              </button>
+            )}
           </div>
-          <div className="text-sm text-gray-400">{statusMessage}</div>
-          {terminal.status === "error" && (
-            <button
-              onClick={handleBackToMachines}
-              className="mt-4 px-6 py-3 text-base bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded-lg text-white min-h-[48px]"
-            >
-              Back to Machines
-            </button>
-          )}
         </div>
-      </div>
+        <Toaster theme="dark" position="top-right" richColors />
+      </>
     );
   }
 
@@ -642,6 +705,7 @@ export default function App() {
         </div>
       </div>
       <FlowWeb flow={flow} />
+      <Toaster theme="dark" position="top-right" richColors />
     </>
   );
 }
