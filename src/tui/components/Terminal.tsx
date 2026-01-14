@@ -55,6 +55,8 @@ export interface TerminalProps {
   onExit: (code: number) => void;
   onKicked: () => void;
   onError: (error: string) => void;
+  /** When true, Shift+Tab is intercepted by parent for toast attach */
+  interceptShiftTab?: boolean;
 }
 
 type TerminalStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -94,7 +96,7 @@ function getTerminalSize() {
   };
 }
 
-export function Terminal({ session, onDetach, onExit, onKicked, onError }: TerminalProps) {
+export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab }: TerminalProps) {
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [termSize, setTermSize] = useState(getTerminalSize);
@@ -437,7 +439,10 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
       const charCode = key.name.toLowerCase().charCodeAt(0) - 96;
       data = String.fromCharCode(charCode);
     } else if (key.shift && key.name === 'tab') {
-      // Shift+Tab (backtab) - send CSI Z
+      // Shift+Tab (backtab) - send CSI Z, unless intercepted by parent for toast
+      if (interceptShiftTab) {
+        return; // Parent handles this for toast attach
+      }
       data = '\x1b[Z';
     } else if (hasModifier && key.name && specialKeys[key.name]) {
       // Special keys with modifiers - construct proper CSI sequence

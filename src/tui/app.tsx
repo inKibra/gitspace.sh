@@ -1184,6 +1184,13 @@ function App({ relayConfig, onQuit }: AppProps) {
   // ========== Keyboard Handlers ==========
 
   useKeyboard(async (key) => {
+    // Toast-only attach hotkey (Shift+Tab) - check FIRST, even in terminal view
+    // This allows attaching to a different session while in a terminal
+    if (key.shift && key.name === 'tab' && notifications.activeToast) {
+      notifications.attachToActiveToast();
+      return;
+    }
+
     // Don't handle keys when in terminal view (Terminal component handles input)
     if (state.view === 'terminal') {
       return;
@@ -1416,12 +1423,6 @@ function App({ relayConfig, onQuit }: AppProps) {
       return;
     }
 
-    // Toast-only attach hotkey (Shift+Tab)
-    if (key.shift && key.name === 'tab' && notifications.activeToast) {
-      notifications.attachToActiveToast();
-      return;
-    }
-
     // Inbox view keyboard handling
     if (state.view === 'inbox') {
       if (key.name === 'escape') {
@@ -1579,6 +1580,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           onExit={handleTerminalExit}
           onKicked={handleTerminalKicked}
           onError={handleTerminalError}
+          interceptShiftTab={!!notifications.activeToast}
         />
       </Fragment>
     );
