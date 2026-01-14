@@ -1161,8 +1161,11 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // Notification toasts hook
   const handleShowToast = useCallback((notification: ToastNotification) => {
+    const description = notification.preview
+      ? `${notification.preview}\n[Shift+Tab to attach]`
+      : '[Shift+Tab to attach]';
     toast.info(`${notification.icon} ${notification.title}`, {
-      description: notification.preview,
+      description,
       duration: 8000,
     });
   }, []);

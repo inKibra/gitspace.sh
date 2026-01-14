@@ -216,8 +216,11 @@ export default function App() {
 
   // Notification toasts hook
   const handleShowToast = useCallback((notification: ToastNotification) => {
+    const description = notification.preview
+      ? `${notification.preview} · Shift+Tab to attach`
+      : 'Shift+Tab to attach';
     toast(notification.title, {
-      description: notification.preview,
+      description,
       icon: notification.icon,
       duration: 8000,
       action: {
