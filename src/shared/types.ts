@@ -86,7 +86,7 @@ export interface Workspace {
 // ============================================================================
 
 /** Inbox notification types */
-export type InboxItemType = 'bell' | 'exit' | 'title' | 'idle';
+export type InboxItemType = 'bell' | 'exit' | 'title' | 'idle' | 'osc';
 
 /** Inbox notification item */
 export interface InboxItem {

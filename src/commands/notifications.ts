@@ -158,47 +158,67 @@ export function isHookInstalled(filePath: string): boolean {
  * Install hook in a file (idempotent)
  */
 export function installHook(filePath: string, hook: string): { installed: boolean; created: boolean } {
-  // Check if already installed
-  if (isHookInstalled(filePath)) {
+  try {
+    // Check if already installed
+    if (isHookInstalled(filePath)) {
+      return { installed: false, created: false };
+    }
+
+    // Create parent directories if needed
+    const dir = join(filePath, '..');
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    // Create file if it doesn't exist
+    const created = !existsSync(filePath);
+    if (created) {
+      writeFileSync(filePath, '', 'utf-8');
+    }
+
+    // Check for existing DEBUG trap in Bash
+    if (!created && filePath.endsWith('bashrc') || filePath.endsWith('.bash_profile')) {
+      const content = readFileSync(filePath, 'utf-8');
+      if (content.includes('trap') && content.includes('DEBUG')) {
+        logger.warning(`Warning: Existing DEBUG trap found in ${filePath}. The GitSpace hook may overwrite it.`);
+      }
+    }
+
+    // Append hook
+    appendFileSync(filePath, '\n' + hook + '\n', 'utf-8');
+    return { installed: true, created };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error(`Failed to install hook in ${filePath}: ${msg}`);
     return { installed: false, created: false };
   }
-
-  // Create parent directories if needed
-  const dir = join(filePath, '..');
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-
-  // Create file if it doesn't exist
-  const created = !existsSync(filePath);
-  if (created) {
-    writeFileSync(filePath, '', 'utf-8');
-  }
-
-  // Append hook
-  appendFileSync(filePath, '\n' + hook + '\n', 'utf-8');
-  return { installed: true, created };
 }
 
 /**
  * Remove hook from a file
  */
 export function uninstallHook(filePath: string): boolean {
-  if (!existsSync(filePath)) return false;
+  try {
+    if (!existsSync(filePath)) return false;
 
-  const content = readFileSync(filePath, 'utf-8');
-  if (!content.includes(MARKER_START)) {
+    const content = readFileSync(filePath, 'utf-8');
+    if (!content.includes(MARKER_START)) {
+      return false;
+    }
+
+    // Remove the hook block (including surrounding newlines)
+    const pattern = new RegExp(
+      `\\n?${escapeRegExp(MARKER_START)}[\\s\\S]*?${escapeRegExp(MARKER_END)}\\n?`,
+      'g'
+    );
+    const newContent = content.replace(pattern, '\n');
+    writeFileSync(filePath, newContent, 'utf-8');
+    return true;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error(`Failed to uninstall hook from ${filePath}: ${msg}`);
     return false;
   }
-
-  // Remove the hook block (including surrounding newlines)
-  const pattern = new RegExp(
-    `\\n?${escapeRegExp(MARKER_START)}[\\s\\S]*?${escapeRegExp(MARKER_END)}\\n?`,
-    'g'
-  );
-  const newContent = content.replace(pattern, '\n');
-  writeFileSync(filePath, newContent, 'utf-8');
-  return true;
 }
 
 function escapeRegExp(s: string): string {

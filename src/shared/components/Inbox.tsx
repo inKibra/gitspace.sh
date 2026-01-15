@@ -12,7 +12,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 // ============================================================================
 
 /** Inbox item type */
-export type InboxItemType = 'exit' | 'title' | 'idle' | 'bell';
+export type InboxItemType = 'exit' | 'title' | 'idle' | 'bell' | 'osc';
 
 /** Inbox item from tmux-lite */
 export interface InboxItem {
@@ -122,6 +122,7 @@ export function getInboxIcon(item: InboxItem): string {
   if (item.type === 'exit') return item.exitCode === 0 ? '✅' : '❌';
   if (item.type === 'title') return '📝';
   if (item.type === 'idle') return '⏸️';
+  if (item.type === 'osc') return '📟';
   return '🔔';
 }
 
@@ -130,6 +131,7 @@ export function getInboxTypeLabel(item: InboxItem): string {
   if (item.type === 'exit') return item.exitCode === 0 ? 'Completed' : `Exit code ${item.exitCode}`;
   if (item.type === 'title') return 'Title Change';
   if (item.type === 'idle') return 'Activity Complete';
+  if (item.type === 'osc') return 'OSC Notification';
   return 'Bell';
 }
 

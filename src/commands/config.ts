@@ -225,6 +225,7 @@ async function interactiveNotificationSetup(): Promise<void> {
 	})
 
 	logger.success('\nNotification settings saved')
+	logger.warning('Note: You must restart "gssh serve" (or "gssh tmux") for changes to take effect.')
 
 	// Show summary
 	const enabledTypes = Object.entries(types)
