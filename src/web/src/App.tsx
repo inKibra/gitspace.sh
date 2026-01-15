@@ -31,6 +31,7 @@ import {
   useNotifications,
   type ToastNotification,
   DEFAULT_NOTIFICATION_CONFIG,
+  getSessionLabel,
 } from "../../shared/notifications/index.js";
 
 type View = "machines" | "terminal";
@@ -493,16 +494,24 @@ export default function App() {
         return;
       }
 
-      // Shift+Tab: attach to active toast's session
+      // Shift+Tab: attach to active toast's session (with confirmation)
       if (e.shiftKey && e.key === "Tab" && notifications.activeToast) {
         e.preventDefault();
-        notifications.attachToActiveToast();
+        const sessionLabel = getSessionLabel(notifications.activeToast.sessionName);
+        flow.showConfirm({
+          title: 'Switch Session',
+          message: `Switch to "${sessionLabel}"?`,
+          confirmLabel: 'Switch',
+          onConfirm: () => {
+            notifications.attachToActiveToast();
+          },
+        });
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [notifications.activeToast, notifications.attachToActiveToast]);
+  }, [notifications.activeToast, notifications.attachToActiveToast, flow]);
 
   // ========== Spaces Browser View (browsing mode) ==========
   if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
