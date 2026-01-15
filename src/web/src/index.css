@@ -49,8 +49,15 @@ body {
   color: var(--color-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* Prevent pull-to-refresh on mobile */
-  overscroll-behavior-y: contain;
+  /* Prevent pull-to-refresh and overscroll effects on mobile */
+  overscroll-behavior: none;
+  overflow: hidden;
+}
+
+html {
+  /* Prevent pull-to-refresh on iOS Safari */
+  overscroll-behavior: none;
+  overflow: hidden;
 }
 
 /* Glow effect utility */
@@ -171,6 +178,22 @@ body {
    Note: safe-area-inset-bottom is handled by terminal-controls itself */
 .terminal-with-controls {
   padding-bottom: calc(52px + var(--keyboard-inset, 0px));
+}
+
+/* Terminal container when floating controls are visible (PgUp/PgDn buttons)
+   Reserve space at bottom so terminal doesn't overlap with floating buttons */
+.terminal-with-floating-controls {
+  padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+}
+
+/* Input mode container - fixed height that reserves space for keyboard
+   This prevents layout shift when keyboard opens/closes
+   Terminal takes ~45% of screen, leaving room for keyboard (~40%) + controls (~15%) */
+.terminal-input-mode-container {
+  /* Fixed height reserves space for keyboard */
+  height: 45dvh;
+  min-height: 180px;
+  overflow: hidden;
 }
 
 /* xterm viewport touch optimizations */

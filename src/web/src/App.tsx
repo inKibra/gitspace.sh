@@ -1,8 +1,12 @@
 /** @jsxImportSource react */
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Terminal, type TerminalHandle } from "./components/Terminal";
-import { TerminalControls } from "./components/TerminalControls";
-import { FloatingJogWheel } from "./components/FloatingJogWheel";
+import {
+  TerminalControls,
+  applyModifiersToInput,
+  type ModifierState,
+} from "./components/TerminalControls";
+import { FloatingControls } from "./components/FloatingControls";
 import { useTerminal } from "./hooks/useTerminal";
 import { useRelayConnection } from "./hooks/useRelayConnection";
 import { useVisualViewport } from "./hooks/useVisualViewport";
@@ -38,6 +42,11 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
+  const [modifiers, setModifiers] = useState<ModifierState>({
+    ctrl: false,
+    shift: false,
+    alt: false,
+  });
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<TerminalHandle>(null);
@@ -561,9 +570,22 @@ export default function App() {
 
   // ========== Terminal View (attached mode) ==========
   if (view === "terminal" && terminal.status === "established" && terminal.mode === "attached") {
-    // Handler for sending data from mobile controls
+    // Handler for sending data from mobile controls (already processed)
     const handleSendData = (data: string) => {
       terminal.send(new TextEncoder().encode(data));
+    };
+
+    // Handler for keyboard input - applies virtual modifiers then resets them
+    const handleKeyboardData = (data: Uint8Array) => {
+      const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
+      if (hasModifiers) {
+        // Apply modifiers and reset
+        const modified = applyModifiersToInput(data, modifiers);
+        terminal.send(modified);
+        setModifiers({ ctrl: false, shift: false, alt: false });
+      } else {
+        terminal.send(data);
+      }
     };
 
     // Handler for focusing terminal from mobile controls
@@ -584,13 +606,27 @@ export default function App() {
       }
     };
 
-    // Show floating jog wheel when in input mode but keyboard is hidden
-    const showFloatingJogWheel = showMobileControls && inputMode && !keyboardVisible;
+    // Show floating controls when keyboard is hidden on mobile
+    const showFloatingControls = showMobileControls && !keyboardVisible;
+
+    // Determine terminal container classes based on mode
+    const getTerminalContainerClass = () => {
+      if (!showMobileControls) {
+        // Desktop - simple flex
+        return 'flex-1';
+      }
+      if (inputMode) {
+        // Input mode - has padding for TerminalControls bar
+        return 'terminal-input-mode-container';
+      }
+      // Not input mode - add bottom padding for floating controls
+      return 'flex-1 terminal-with-floating-controls';
+    };
 
     return (
       <>
-        <div className={`w-screen flex flex-col bg-[#0d1117] ${inputMode ? 'h-visual-viewport' : 'h-screen'}`}>
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
+        <div className="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden">
+          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0">
             <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
               <button
                 onClick={terminal.detachSession}
@@ -631,34 +667,34 @@ export default function App() {
                 Detach
               </button>
             </div>
-            {/* Mobile controls toolbar */}
-            {showMobileControls && (
-              <TerminalControls
-                onSendData={handleSendData}
-                onFocusTerminal={handleFocusTerminal}
-              />
-            )}
           </div>
-          <div className={`flex-1 ${showMobileControls && inputMode ? 'terminal-with-controls' : ''}`}>
+          <div className={getTerminalContainerClass()}>
             <Terminal
               ref={terminalRef}
-              onData={terminal.send}
+              onData={handleKeyboardData}
               setWriteCallback={terminal.setWriteCallback}
               onResize={terminal.resize}
               allowTapFocus={inputMode || !showMobileControls}
+              allowTouchScroll={!inputMode}
               onActivity={handleTerminalActivity}
             />
           </div>
-          {/* Mobile controls toolbar - only show in input mode */}
+          {/* Mobile controls toolbar - show in input mode */}
           {showMobileControls && inputMode && (
             <TerminalControls
               onSendData={handleSendData}
               onFocusTerminal={handleFocusTerminal}
+              keyboardVisible={keyboardVisible}
+              modifiers={modifiers}
+              onModifiersChange={setModifiers}
             />
           )}
-          {/* Floating jog wheel - show when input mode is on but keyboard is hidden */}
-          {showFloatingJogWheel && (
-            <FloatingJogWheel onDirection={handleSendData} />
+          {/* Floating controls - show when keyboard is hidden on mobile */}
+          {showFloatingControls && (
+            <FloatingControls
+              onSendData={handleSendData}
+              showJogWheel={inputMode}
+            />
           )}
         </div>
         <Toaster theme="dark" position="top-right" richColors />

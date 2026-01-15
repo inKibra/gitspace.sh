@@ -9,6 +9,8 @@ interface Props {
   onActivity?: () => void;
   /** Whether tapping the terminal should focus it (opens keyboard on mobile). Default: true */
   allowTapFocus?: boolean;
+  /** Whether touch scrolling is enabled. Default: true. Disable when using floating controls. */
+  allowTouchScroll?: boolean;
 }
 
 /** Methods exposed via ref for external control */
@@ -25,7 +27,7 @@ const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before s
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 
 export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
-  { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true },
+  { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true, allowTouchScroll = true },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -58,6 +60,12 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
   useEffect(() => {
     allowTapFocusRef.current = allowTapFocus;
   }, [allowTapFocus]);
+
+  // Ref for touch scroll prop (accessed in event handlers)
+  const allowTouchScrollRef = useRef(allowTouchScroll);
+  useEffect(() => {
+    allowTouchScrollRef.current = allowTouchScroll;
+  }, [allowTouchScroll]);
 
   // Expose methods via ref for external control (e.g., from TerminalControls)
   useImperativeHandle(
@@ -146,12 +154,28 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
       };
       containerRef.current.addEventListener('keydown', handleKeyDown, true); // capture phase
 
+      // Prevent ghostty-web from auto-focusing on tap when input mode is off (mobile only)
+      // ghostty-web's canvas touchend handler calls textarea.focus()
+      // We intercept in capture phase, stop propagation, and preventDefault to also block synthetic mouse events
+      const handlePreventTouchFocus = (e: Event) => {
+        if (!allowTapFocusRef.current) {
+          e.stopPropagation();
+          e.preventDefault();
+          // Clean up touch state since our bubble-phase touchend handler won't fire
+          touchStateRef.current = null;
+        }
+      };
+      containerRef.current.addEventListener('touchend', handlePreventTouchFocus, { capture: true });
+
       // Mobile touch scrolling with accumulated delta pattern (agentboard-inspired)
       // Benefits: reduces terminal I/O, feels more natural, prevents accidental scrolls
       // Single finger vertical swipe = scroll terminal history
       // Tap (no movement) = focus terminal / show keyboard
 
       const handleTouchStart = (e: TouchEvent) => {
+        // Skip if touch scrolling is disabled (using floating controls instead)
+        if (!allowTouchScrollRef.current) return;
+
         // Check if user has text selected (don't scroll during selection)
         const selection = window.getSelection();
         const hasSelection = selection ? selection.toString().length > 0 : false;
@@ -168,7 +192,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
       };
 
       const handleTouchMove = (e: TouchEvent) => {
-        if (!touchStateRef.current) return;
+        if (!allowTouchScrollRef.current || !touchStateRef.current) return;
 
         // Don't scroll while text is selected
         if (touchStateRef.current.hasSelection) return;
@@ -282,6 +306,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
 
       return () => {
         containerRef.current?.removeEventListener('keydown', handleKeyDown, true);
+        containerRef.current?.removeEventListener('touchend', handlePreventTouchFocus, { capture: true });
         containerRef.current?.removeEventListener('touchstart', handleTouchStart);
         containerRef.current?.removeEventListener('touchmove', handleTouchMove);
         containerRef.current?.removeEventListener('touchend', handleTouchEnd);
