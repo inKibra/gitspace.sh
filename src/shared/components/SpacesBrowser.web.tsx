@@ -28,12 +28,12 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
   // Empty state
   if (isEmpty) {
     return (
-      <div className="h-screen flex flex-col bg-gray-900">
+      <div className="h-screen flex flex-col bg-[#0d1117]">
         <Header machineName={machineName} onBack={back} onRefresh={refresh} />
-        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 px-4">
+        <div className="flex-1 flex flex-col items-center justify-center text-[#8b949e] px-4">
           <div className="text-lg mb-2 text-center">No workspaces found</div>
-          <div className="text-sm text-gray-500 text-center">
-            Create workspaces with <code className="text-green-400">gssh add</code>
+          <div className="text-sm text-[#6e7681] text-center">
+            Create workspaces with <code className="text-[#3fb950]">gssh add</code>
           </div>
         </div>
         <Footer />
@@ -42,7 +42,7 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-900">
+    <div className="h-screen flex flex-col bg-[#0d1117]">
       <Header machineName={machineName} onBack={back} onRefresh={refresh} />
 
       {/* Tree list */}
@@ -54,7 +54,7 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
             return (
               <div
                 key={`project-${item.name}`}
-                className="px-4 py-3 text-xs text-gray-500 uppercase tracking-wide bg-gray-800 border-b border-gray-700 min-h-[44px] flex items-center"
+                className="px-4 py-3 text-xs text-[#6e7681] uppercase tracking-wide bg-[#161b22] border-b border-[#30363d] min-h-[44px] flex items-center"
               >
                 {item.name} ({item.workspaceCount})
               </div>
@@ -73,27 +73,27 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
                   toggleWorkspace(ws.id);
                 }}
                 className={`
-                  px-4 py-4 cursor-pointer border-b border-gray-800 flex items-center justify-between min-h-[56px]
-                  ${isSelected ? 'bg-gray-700 border-l-4 border-l-blue-500' : 'hover:bg-gray-800 active:bg-gray-700'}
+                  px-4 py-4 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[56px]
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
                   ${ws.isStale ? 'opacity-60' : ''}
                 `}
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <span className="text-gray-500 w-5 flex-shrink-0 text-center">
+                  <span className="text-[#6e7681] w-5 flex-shrink-0 text-center">
                     {item.expanded ? '▼' : '▶'}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="text-white font-medium truncate">{ws.name}</div>
+                    <div className="text-[#e6edf3] font-medium truncate">{ws.name}</div>
                     {ws.branch && (
-                      <div className="text-xs text-gray-500 truncate">
-                        <span className="text-purple-400">{ws.branch}</span>
+                      <div className="text-xs text-[#8b949e] truncate">
+                        <span className="text-[#d2a8ff]">{ws.branch}</span>
                       </div>
                     )}
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0 ml-2">
                   {ws.sessionCount > 0 && (
-                    <span className="text-xs px-2 py-1 rounded bg-green-900 text-green-300">
+                    <span className="text-xs px-2 py-1 rounded bg-[#238636] text-[#e6edf3]">
                       {ws.sessionCount}
                     </span>
                   )}
@@ -114,20 +114,20 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
                   attachSession({ sessionId: session.id });
                 }}
                 className={`
-                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-gray-800 flex items-center justify-between min-h-[52px]
-                  ${isSelected ? 'bg-gray-700 border-l-4 border-l-blue-500' : 'hover:bg-gray-800 active:bg-gray-700'}
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px]
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
                 `}
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${session.attached ? 'bg-yellow-500' : 'bg-green-500'}`} />
+                  <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${session.attached ? 'bg-[#d29922]' : 'bg-[#3fb950]'}`} />
                   <div className="min-w-0 flex-1">
-                    <span className="text-gray-300 truncate block">{session.name.split(':').pop()}</span>
+                    <span className="text-[#8b949e] truncate block">{session.name.split(':').pop()}</span>
                     {session.processTitle && (
-                      <span className="text-xs text-yellow-400 truncate block">{session.processTitle}</span>
+                      <span className="text-xs text-[#d29922] truncate block">{session.processTitle}</span>
                     )}
                   </div>
                 </div>
-                <div className="text-xs text-gray-500 flex-shrink-0 ml-2">
+                <div className="text-xs text-[#6e7681] flex-shrink-0 ml-2">
                   {session.attached ? 'attached' : formatTime(session.createdAt)}
                 </div>
               </div>
@@ -145,11 +145,11 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
                   attachSession({ workspaceId: item.workspaceId });
                 }}
                 className={`
-                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-gray-800 min-h-[48px] flex items-center
-                  ${isSelected ? 'bg-gray-700 border-l-4 border-l-blue-500' : 'hover:bg-gray-800 active:bg-gray-700'}
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
                 `}
               >
-                <span className="text-blue-400">+ New Session</span>
+                <span className="text-[#58a6ff]">+ New Session</span>
               </div>
             );
           }
@@ -177,21 +177,21 @@ function Header({
   onRefresh: () => void;
 }) {
   return (
-    <div className="bg-gray-800 px-4 py-3 flex items-center justify-between border-b border-gray-700 min-h-[52px]">
+    <div className="bg-[#161b22] px-4 py-3 flex items-center justify-between border-b border-[#30363d] min-h-[52px]">
       <div className="flex items-center gap-3 min-w-0 flex-1">
         <button
           onClick={onBack}
-          className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+          className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
         >
           ← <span className="hidden sm:inline ml-1">Back</span>
         </button>
-        <div className="text-white font-medium truncate">
+        <div className="text-[#e6edf3] font-medium truncate">
           {machineName || 'Workspaces'}
         </div>
       </div>
       <button
         onClick={onRefresh}
-        className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pl-2 -mr-2 min-h-[44px] flex items-center flex-shrink-0"
+        className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pl-2 -mr-2 min-h-[44px] flex items-center flex-shrink-0"
       >
         Refresh
       </button>
@@ -201,9 +201,9 @@ function Header({
 
 function Footer() {
   return (
-    <div className="bg-gray-800 px-4 py-2 border-t border-gray-700 safe-bottom">
+    <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d] safe-bottom">
       {/* Desktop keyboard hints */}
-      <div className="hidden sm:flex gap-4 text-xs text-gray-500 flex-wrap">
+      <div className="hidden sm:flex gap-4 text-xs text-[#6e7681] flex-wrap">
         <span>↑↓ Navigate</span>
         <span>Enter Select</span>
         <span>n New</span>
@@ -213,7 +213,7 @@ function Footer() {
         <span>Esc Back</span>
       </div>
       {/* Mobile hint */}
-      <div className="sm:hidden text-xs text-gray-500 text-center">
+      <div className="sm:hidden text-xs text-[#6e7681] text-center">
         Tap to expand • Tap session to attach
       </div>
     </div>

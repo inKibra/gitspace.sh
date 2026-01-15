@@ -10,7 +10,7 @@
 
 import { createCliRenderer } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { useState, useEffect, useCallback, useReducer, Fragment, useMemo } from 'react';
+import { useState, useEffect, useCallback, useReducer, Fragment, useMemo, useRef } from 'react';
 import { Toaster } from '@opentui-ui/toast/react';
 
 // Terminal component
@@ -43,6 +43,7 @@ import {
   useNotifications,
   type ToastNotification,
   DEFAULT_NOTIFICATION_CONFIG,
+  getSessionLabel,
 } from '../shared/notifications/index.js';
 
 // Local state and config
@@ -229,7 +230,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case 'SET_WORKSPACES':
       return { ...state, workspaces: action.workspaces };
     case 'SET_CURRENT_PROJECT':
-      return { ...state, currentProject: action.project };
+      return {
+        ...state,
+        currentProject: action.project,
+        // Update isCurrent flag on all projects to reflect the new selection
+        projects: state.projects.map(p => ({
+          ...p,
+          isCurrent: p.name === action.project,
+        })),
+      };
     case 'SET_INBOX':
       return { ...state, inbox: action.inbox, unreadCount: action.unreadCount };
     case 'SET_LOADING':
@@ -291,6 +300,9 @@ function App({ relayConfig, onQuit }: AppProps) {
     error: null,
     attachedSession: null,
   });
+
+  // Track when we're switching sessions (to prevent detach handler from navigating away)
+  const sessionSwitchingRef = useRef(false);
 
   // Shared Flow hook (for non-workspace flows)
   const flow = useFlow({
@@ -453,17 +465,25 @@ function App({ relayConfig, onQuit }: AppProps) {
           variant: 'warning',
           confirmLabel: 'Steal',
           onConfirm: async () => {
+            // Mark that we're switching sessions (prevents detach handler from navigating away)
+            sessionSwitchingRef.current = true;
             // Attach using embedded terminal (will kick the other client)
             dispatch({ type: 'SET_ATTACHED_SESSION', session: sessionInfo });
             dispatch({ type: 'SET_VIEW', view: 'terminal' });
+            // Clear flag after a short delay (allows old Terminal to cleanup)
+            setTimeout(() => { sessionSwitchingRef.current = false; }, 200);
           },
         });
         return;
       }
 
+      // Mark that we're switching sessions (prevents detach handler from navigating away)
+      sessionSwitchingRef.current = true;
       // Attach using embedded terminal
       dispatch({ type: 'SET_ATTACHED_SESSION', session: sessionInfo });
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      // Clear flag after a short delay (allows old Terminal to cleanup)
+      setTimeout(() => { sessionSwitchingRef.current = false; }, 200);
     } else if (params.workspaceId) {
       // Create new session
       const workspace = state.workspaces.find(w => w.name === params.workspaceId);
@@ -473,7 +493,9 @@ function App({ relayConfig, onQuit }: AppProps) {
           label: 'Session name (optional):',
           placeholder: 'Leave empty for auto-generated name',
           onSubmit: async (name) => {
-            const sessionName = name || `${state.currentProject}:${workspace.name}:${Date.now()}`;
+            // Always use project:workspace:session format for proper parsing
+            const sessionSuffix = name || String(Date.now());
+            const sessionName = `${state.currentProject}:${workspace.name}:${sessionSuffix}`;
             try {
               const config = readProjectConfig(state.currentProject!);
 
@@ -496,9 +518,13 @@ function App({ relayConfig, onQuit }: AppProps) {
               }
 
               const session = await createSession(sessionName, workspace.path);
+              // Mark that we're switching sessions (prevents detach handler from navigating away)
+              sessionSwitchingRef.current = true;
               // Attach to newly created session
               dispatch({ type: 'SET_ATTACHED_SESSION', session });
               dispatch({ type: 'SET_VIEW', view: 'terminal' });
+              // Clear flag after a short delay (allows old Terminal to cleanup)
+              setTimeout(() => { sessionSwitchingRef.current = false; }, 200);
             } catch (err) {
               flow.showMessage({
                 title: 'Session Failed',
@@ -514,6 +540,9 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // Handle terminal detach
   const handleTerminalDetach = useCallback(async () => {
+    // Don't navigate away if we're in the middle of switching sessions
+    if (sessionSwitchingRef.current) return;
+
     dispatch({ type: 'SET_ATTACHED_SESSION', session: null });
     dispatch({ type: 'SET_VIEW', view: 'projects' });
     await refreshWorkspaces();
@@ -1199,7 +1228,7 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   const handleShowToast = useCallback((notification: ToastNotification) => {
     const description = notification.preview
-      ? `${notification.preview}\n[Shift+Tab to attach]`
+      ? `${notification.preview} · [Shift+Tab to attach]`
       : '[Shift+Tab to attach]';
     toast.info(`${notification.icon} ${notification.title}`, {
       description,
@@ -1226,10 +1255,61 @@ function App({ relayConfig, onQuit }: AppProps) {
   // ========== Keyboard Handlers ==========
 
   useKeyboard(async (key) => {
-    // Toast-only attach hotkey (Shift+Tab) - check FIRST, even in terminal view
+    // Handle flow modals FIRST - even in terminal view
+    // This ensures y/n work in confirmation modals when terminal is underneath
+    if (flow.isOpen) {
+      // Handle confirm modal with y/n shortcuts
+      if (flow.flow.type === 'confirm') {
+        if (key.raw === 'y' || key.name === 'return') {
+          await flow.handleConfirm();
+        } else if (key.raw === 'n' || key.name === 'escape') {
+          flow.handleCancel();
+        }
+        return;
+      }
+
+      // Handle text input modals (before j/k navigation)
+      if (isFlowInput(flow.flow) || isFlowConfirmTyped(flow.flow)) {
+        if (key.name === 'escape') {
+          flow.handleCancel();
+        } else if (key.name === 'return') {
+          await flow.handleConfirm();
+        } else if (key.name === 'backspace') {
+          const current = flow.flow.inputValue || '';
+          flow.handleInput(current.slice(0, -1));
+        } else if (key.raw && key.raw.length === 1 && !key.ctrl && !key.meta) {
+          const current = flow.flow.inputValue || '';
+          flow.handleInput(current + key.raw);
+        }
+        return;
+      }
+
+      // Handle other modals (select, message, etc.)
+      if (key.name === 'escape') {
+        flow.handleCancel();
+      } else if (key.name === 'return') {
+        await flow.handleConfirm();
+      } else if (key.name === 'up' || key.raw === 'k') {
+        flow.moveUp();
+      } else if (key.name === 'down' || key.raw === 'j') {
+        flow.moveDown();
+      }
+      return;
+    }
+
+    // Shift+Tab attach hotkey - check FIRST, even in terminal view
     // This allows attaching to a different session while in a terminal
     if (key.shift && key.name === 'tab' && notifications.activeToast) {
-      notifications.attachToActiveToast();
+      // Show confirmation before switching sessions
+      const sessionLabel = getSessionLabel(notifications.activeToast.sessionName);
+      flow.showConfirm({
+        title: 'Switch Session',
+        message: `Switch to "${sessionLabel}"?`,
+        confirmLabel: 'Switch',
+        onConfirm: () => {
+          notifications.attachToActiveToast();
+        },
+      });
       return;
     }
 
@@ -1403,48 +1483,6 @@ function App({ relayConfig, onQuit }: AppProps) {
       }
 
       // For loading/creating states, just wait (escape to cancel handled above)
-      return;
-    }
-
-    // Don't handle keys when flow is open
-    if (flow.isOpen) {
-      // Handle confirm modal with y/n shortcuts
-      if (flow.flow.type === 'confirm') {
-        if (key.raw === 'y' || key.name === 'return') {
-          await flow.handleConfirm();
-        } else if (key.raw === 'n' || key.name === 'escape') {
-          flow.handleCancel();
-        }
-        return;
-      }
-
-      // Handle text input modals FIRST (before j/k navigation)
-      // This ensures typing 'j' or 'k' adds the character instead of navigating
-      if (isFlowInput(flow.flow) || isFlowConfirmTyped(flow.flow)) {
-        if (key.name === 'escape') {
-          flow.handleCancel();
-        } else if (key.name === 'return') {
-          await flow.handleConfirm();
-        } else if (key.name === 'backspace') {
-          const current = flow.flow.inputValue || '';
-          flow.handleInput(current.slice(0, -1));
-        } else if (key.raw && key.raw.length === 1 && !key.ctrl && !key.meta) {
-          const current = flow.flow.inputValue || '';
-          flow.handleInput(current + key.raw);
-        }
-        return;
-      }
-
-      // Handle other modals (select, message, etc.) - j/k navigation works here
-      if (key.name === 'escape') {
-        flow.handleCancel();
-      } else if (key.name === 'return') {
-        await flow.handleConfirm();
-      } else if (key.name === 'up' || key.raw === 'k') {
-        flow.moveUp();
-      } else if (key.name === 'down' || key.raw === 'j') {
-        flow.moveDown();
-      }
       return;
     }
 
@@ -1755,6 +1793,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           onKicked={handleTerminalKicked}
           onError={handleTerminalError}
           interceptShiftTab={!!notifications.activeToast}
+          modalOpen={flow.isOpen}
           onActivity={handleTerminalActivity}
         />
         {/* Flow modal overlay (e.g. "steal session" confirm) */}

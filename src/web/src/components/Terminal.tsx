@@ -7,11 +7,16 @@ interface Props {
   onResize?: (cols: number, rows: number) => void;
   /** Called when user interacts with terminal (for activity tracking) */
   onActivity?: () => void;
+  /** Whether tapping the terminal should focus it (opens keyboard on mobile). Default: true */
+  allowTapFocus?: boolean;
+  /** Whether touch scrolling is enabled. Default: true. Disable when using floating controls. */
+  allowTouchScroll?: boolean;
 }
 
 /** Methods exposed via ref for external control */
 export interface TerminalHandle {
   focus: () => void;
+  blur: () => void;
   sendData: (data: string) => void;
   isFocused: () => boolean;
 }
@@ -22,7 +27,7 @@ const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before s
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 
 export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
-  { onData, setWriteCallback, onResize, onActivity },
+  { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true, allowTouchScroll = true },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -30,6 +35,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
   const initializedRef = useRef(false);
   const onDataRef = useRef(onData);
   const onActivityRef = useRef(onActivity);
+  const allowTapFocusRef = useRef(allowTapFocus);
 
   // Touch state with accumulated delta pattern
   const touchStateRef = useRef<{
@@ -51,12 +57,29 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
     onActivityRef.current = onActivity;
   }, [onActivity]);
 
+  useEffect(() => {
+    allowTapFocusRef.current = allowTapFocus;
+  }, [allowTapFocus]);
+
+  // Ref for touch scroll prop (accessed in event handlers)
+  const allowTouchScrollRef = useRef(allowTouchScroll);
+  useEffect(() => {
+    allowTouchScrollRef.current = allowTouchScroll;
+  }, [allowTouchScroll]);
+
   // Expose methods via ref for external control (e.g., from TerminalControls)
   useImperativeHandle(
     ref,
     () => ({
       focus: () => {
         terminalRef.current?.focus();
+      },
+      blur: () => {
+        // Blur the hidden textarea to dismiss keyboard on mobile
+        if (containerRef.current) {
+          const textarea = containerRef.current.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+          textarea?.blur();
+        }
       },
       sendData: (data: string) => {
         onDataRef.current(new TextEncoder().encode(data));
@@ -81,29 +104,29 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
         fontSize: 14,
         fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
         theme: {
-          background: "#1e1e2e",
-          foreground: "#cdd6f4",
-          cursor: "#f5e0dc",
-          cursorAccent: "#1e1e2e",
-          selectionBackground: "#585b70",
-          selectionForeground: "#cdd6f4",
-          // Catppuccin Mocha colors
-          black: "#45475a",
-          red: "#f38ba8",
-          green: "#a6e3a1",
-          yellow: "#f9e2af",
-          blue: "#89b4fa",
-          magenta: "#f5c2e7",
-          cyan: "#94e2d5",
-          white: "#bac2de",
-          brightBlack: "#585b70",
-          brightRed: "#f38ba8",
-          brightGreen: "#a6e3a1",
-          brightYellow: "#f9e2af",
-          brightBlue: "#89b4fa",
-          brightMagenta: "#f5c2e7",
-          brightCyan: "#94e2d5",
-          brightWhite: "#a6adc8",
+          background: "#0d1117",
+          foreground: "#e6edf3",
+          cursor: "#22c55e",
+          cursorAccent: "#0d1117",
+          selectionBackground: "#22c55e33",
+          selectionForeground: "#e6edf3",
+          // GitHub Dark colors
+          black: "#484f58",
+          red: "#ff7b72",
+          green: "#3fb950",
+          yellow: "#d29922",
+          blue: "#58a6ff",
+          magenta: "#bc8cff",
+          cyan: "#39c5cf",
+          white: "#b1bac4",
+          brightBlack: "#6e7681",
+          brightRed: "#ffa198",
+          brightGreen: "#56d364",
+          brightYellow: "#e3b341",
+          brightBlue: "#79c0ff",
+          brightMagenta: "#d2a8ff",
+          brightCyan: "#56d4dd",
+          brightWhite: "#f0f6fc",
         },
       });
 
@@ -131,12 +154,28 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
       };
       containerRef.current.addEventListener('keydown', handleKeyDown, true); // capture phase
 
+      // Prevent ghostty-web from auto-focusing on tap when input mode is off (mobile only)
+      // ghostty-web's canvas touchend handler calls textarea.focus()
+      // We intercept in capture phase, stop propagation, and preventDefault to also block synthetic mouse events
+      const handlePreventTouchFocus = (e: Event) => {
+        if (!allowTapFocusRef.current) {
+          e.stopPropagation();
+          e.preventDefault();
+          // Clean up touch state since our bubble-phase touchend handler won't fire
+          touchStateRef.current = null;
+        }
+      };
+      containerRef.current.addEventListener('touchend', handlePreventTouchFocus, { capture: true });
+
       // Mobile touch scrolling with accumulated delta pattern (agentboard-inspired)
       // Benefits: reduces terminal I/O, feels more natural, prevents accidental scrolls
       // Single finger vertical swipe = scroll terminal history
       // Tap (no movement) = focus terminal / show keyboard
 
       const handleTouchStart = (e: TouchEvent) => {
+        // Skip if touch scrolling is disabled (using floating controls instead)
+        if (!allowTouchScrollRef.current) return;
+
         // Check if user has text selected (don't scroll during selection)
         const selection = window.getSelection();
         const hasSelection = selection ? selection.toString().length > 0 : false;
@@ -153,7 +192,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
       };
 
       const handleTouchMove = (e: TouchEvent) => {
-        if (!touchStateRef.current) return;
+        if (!allowTouchScrollRef.current || !touchStateRef.current) return;
 
         // Don't scroll while text is selected
         if (touchStateRef.current.hasSelection) return;
@@ -201,10 +240,13 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
           touchStateRef.current &&
           touchStateRef.current.totalMovement < TAP_MOVE_THRESHOLD;
 
-        // If it was a tap, focus the terminal and track activity
+        // If it was a tap, track activity and focus if allowed
         if (wasTap && terminalRef.current) {
-          onActivityRef.current?.(); // Track user activity
-          terminalRef.current.focus();
+          onActivityRef.current?.();
+          // When allowTapFocus is false, taps won't open the keyboard on mobile
+          if (allowTapFocusRef.current) {
+            terminalRef.current.focus();
+          }
         }
 
         touchStateRef.current = null;
@@ -257,11 +299,14 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
         }, 50);
       });
 
-      // Focus terminal
-      term.focus();
+      // Focus terminal only if tap focus is allowed (don't auto-open keyboard on mobile)
+      if (allowTapFocusRef.current) {
+        term.focus();
+      }
 
       return () => {
         containerRef.current?.removeEventListener('keydown', handleKeyDown, true);
+        containerRef.current?.removeEventListener('touchend', handlePreventTouchFocus, { capture: true });
         containerRef.current?.removeEventListener('touchstart', handleTouchStart);
         containerRef.current?.removeEventListener('touchmove', handleTouchMove);
         containerRef.current?.removeEventListener('touchend', handleTouchEnd);
@@ -275,12 +320,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
   return (
     <div
       ref={containerRef}
-      className="w-full h-full bg-[#1e1e2e]"
-      style={{
-        minHeight: "100%",
-        touchAction: "none", // Disable browser touch handling
-        overscrollBehavior: "none", // Prevent pull-to-refresh
-      }}
+      className="w-full h-full bg-[#0d1117]"
     />
   );
 });

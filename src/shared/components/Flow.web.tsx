@@ -70,7 +70,7 @@ export function FlowWeb({ flow }: FlowWebProps) {
     >
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/80"
+        className="absolute inset-0 bg-[#0d1117]/80 backdrop-blur-sm"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
         onClick={handleCancel}
       />
@@ -103,7 +103,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
           <div className="flex justify-end">
             <button
               onClick={flow.handleConfirm}
-              className="px-5 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
             >
               OK
             </button>
@@ -115,8 +115,8 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
       return (
         <Modal title={state.title}>
           <div className="flex items-center gap-3">
-            <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full" />
-            <span className="text-gray-300">{state.message}</span>
+            <div className="animate-spin w-5 h-5 border-2 border-[#22c55e] border-t-transparent rounded-full shadow-glow" />
+            <span className="text-[#8b949e]">{state.message}</span>
           </div>
         </Modal>
       );
@@ -127,15 +127,15 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
           <div className="space-y-3">
             {state.shortcuts.map((shortcut, idx) => (
               <div key={idx} className="flex py-1">
-                <span className="w-20 sm:w-24 text-blue-400 font-mono text-sm">{shortcut.key}</span>
-                <span className="text-gray-300 text-sm">{shortcut.description}</span>
+                <span className="w-20 sm:w-24 text-[#58a6ff] font-mono text-sm">{shortcut.key}</span>
+                <span className="text-[#8b949e] text-sm">{shortcut.description}</span>
               </div>
             ))}
           </div>
           <div className="mt-6 text-right">
             <button
               onClick={flow.handleCancel}
-              className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
             >
               Close
             </button>
@@ -152,16 +152,16 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
           <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
             <button
               onClick={flow.handleCancel}
-              className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
             >
               {state.cancelLabel || 'Cancel'}
             </button>
             <button
               onClick={flow.handleConfirm}
-              className={`px-5 py-3 rounded-lg text-white min-h-[48px] ${
+              className={`px-5 py-3 rounded-lg text-white min-h-[48px] font-medium ${
                 state.variant === 'danger'
-                  ? 'bg-red-600 hover:bg-red-700 active:bg-red-800'
-                  : 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800'
+                  ? 'bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] border border-[#f85149]'
+                  : 'bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] shadow-glow'
               }`}
             >
               {state.confirmLabel || 'Confirm'}
@@ -173,31 +173,31 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
     case 'confirm-typed':
       return (
         <Modal title={state.title}>
-          <p className="mb-2 text-yellow-400">{state.message}</p>
+          <p className="mb-2 text-[#d29922]">{state.message}</p>
           {state.warning && (
-            <p className="mb-4 text-red-400">⚠️ {state.warning}</p>
+            <p className="mb-4 text-[#f85149]">⚠️ {state.warning}</p>
           )}
-          <p className="mb-2 text-gray-400">
-            Type "<span className="text-white font-mono">{state.confirmText}</span>" to confirm:
+          <p className="mb-2 text-[#8b949e]">
+            Type "<span className="text-[#e6edf3] font-mono">{state.confirmText}</span>" to confirm:
           </p>
           <input
             type="text"
             value={state.inputValue}
             onChange={(e) => flow.handleInput(e.target.value)}
-            className="w-full p-3 text-base bg-gray-700 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none"
+            className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
             autoFocus
           />
           <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
             <button
               onClick={flow.handleCancel}
-              className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
             >
               Cancel
             </button>
             <button
               onClick={flow.handleConfirm}
               disabled={state.inputValue !== state.confirmText}
-              className="px-5 py-3 bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] disabled:bg-[#21262d] disabled:border-[#30363d] disabled:text-[#6e7681] disabled:cursor-not-allowed text-white border border-[#f85149] rounded-lg min-h-[48px]"
             >
               Confirm
             </button>
@@ -209,29 +209,29 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
       const validationError = state.validation?.(state.inputValue);
       return (
         <Modal title={state.title}>
-          <label className="block mb-2 text-gray-300">{state.label}</label>
+          <label className="block mb-2 text-[#8b949e]">{state.label}</label>
           <input
             type="text"
             value={state.inputValue}
             onChange={(e) => flow.handleInput(e.target.value)}
             placeholder={state.placeholder}
-            className="w-full p-3 text-base bg-gray-700 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none"
+            className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
             autoFocus
           />
           {validationError && (
-            <p className="mt-2 text-red-400 text-sm">{validationError}</p>
+            <p className="mt-2 text-[#f85149] text-sm">{validationError}</p>
           )}
           <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
             <button
               onClick={flow.handleCancel}
-              className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
             >
               Cancel
             </button>
             <button
               onClick={flow.handleConfirm}
               disabled={!!validationError && state.inputValue !== ''}
-              className="px-5 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] disabled:bg-[#21262d] disabled:border-[#30363d] disabled:text-[#6e7681] disabled:cursor-not-allowed disabled:shadow-none text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
             >
               Submit
             </button>
@@ -252,15 +252,15 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
                     flow.handleSelect(idx);
                     flow.handleConfirm();
                   }}
-                  className={`p-4 rounded-lg cursor-pointer min-h-[52px] ${
+                  className={`p-4 rounded-lg cursor-pointer min-h-[52px] border ${
                     isSelected
-                      ? 'bg-gray-700 border-l-4 border-l-blue-500'
-                      : 'hover:bg-gray-800 active:bg-gray-700'
+                      ? 'bg-[#21262d] border-[#58a6ff] border-l-4'
+                      : 'border-[#30363d] hover:bg-[#161b22] active:bg-[#21262d]'
                   }`}
                 >
-                  <div className="text-white">{option.label}</div>
+                  <div className="text-[#e6edf3]">{option.label}</div>
                   {option.description && (
-                    <div className="text-sm text-gray-400 mt-1">{option.description}</div>
+                    <div className="text-sm text-[#8b949e] mt-1">{option.description}</div>
                   )}
                 </div>
               );
@@ -269,7 +269,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
           <div className="flex justify-end gap-3 mt-6">
             <button
               onClick={flow.handleCancel}
-              className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
             >
               Cancel
             </button>
@@ -290,10 +290,10 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
                 key={idx}
                 className={`h-1.5 flex-1 rounded ${
                   idx < state.currentStep
-                    ? 'bg-green-500'
+                    ? 'bg-[#22c55e]'
                     : idx === state.currentStep
-                    ? 'bg-blue-500'
-                    : 'bg-gray-700'
+                    ? 'bg-[#58a6ff]'
+                    : 'bg-[#30363d]'
                 }`}
               />
             ))}
@@ -301,13 +301,13 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
 
           {/* Step content */}
           <div className="mb-6">
-            <h3 className="text-lg font-medium text-green-400 mb-2">{step.title}</h3>
+            <h3 className="text-lg font-medium text-[#22c55e] mb-2">{step.title}</h3>
             {step.description && (
-              <p className="text-gray-400 mb-4">{step.description}</p>
+              <p className="text-[#8b949e] mb-4">{step.description}</p>
             )}
 
             {step.type === 'info' && (
-              <p className="text-gray-300">Tap Continue to proceed.</p>
+              <p className="text-[#e6edf3]">Tap Continue to proceed.</p>
             )}
 
             {(step.type === 'input' || step.type === 'secret') && (
@@ -316,31 +316,31 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
                 value={state.inputValue}
                 onChange={(e) => flow.handleInput(e.target.value)}
                 placeholder={step.placeholder}
-                className="w-full p-3 text-base bg-gray-700 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none"
+                className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
                 autoFocus
               />
             )}
 
             {step.type === 'confirm' && (
-              <div className="p-4 bg-gray-800 rounded-lg">
+              <div className="p-4 bg-[#161b22] border border-[#30363d] rounded-lg">
                 {step.checkStatus === 'checking' && (
-                  <div className="flex items-center gap-2 text-yellow-400">
-                    <div className="animate-spin w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full" />
+                  <div className="flex items-center gap-2 text-[#d29922]">
+                    <div className="animate-spin w-4 h-4 border-2 border-[#d29922] border-t-transparent rounded-full" />
                     Checking...
                   </div>
                 )}
                 {step.checkStatus === 'found' && (
-                  <div className="text-green-400">✅ Found and ready</div>
+                  <div className="text-[#3fb950]">✅ Found and ready</div>
                 )}
                 {step.checkStatus === 'missing' && (
                   <div>
-                    <div className="text-red-400 mb-2">❌ Not found</div>
+                    <div className="text-[#f85149] mb-2">❌ Not found</div>
                     {step.installUrl && (
                       <a
                         href={step.installUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-blue-400 hover:underline active:text-blue-300"
+                        className="text-[#58a6ff] hover:underline active:text-[#79c0ff]"
                       >
                         Install from {step.installUrl}
                       </a>
@@ -355,7 +355,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
                 {step.options.map((option, idx) => (
                   <div
                     key={idx}
-                    className="p-4 bg-gray-800 rounded-lg hover:bg-gray-700 active:bg-gray-600 cursor-pointer min-h-[48px]"
+                    className="p-4 bg-[#161b22] border border-[#30363d] rounded-lg hover:bg-[#21262d] active:bg-[#161b22] cursor-pointer min-h-[48px]"
                   >
                     {option.label}
                   </div>
@@ -369,20 +369,20 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
             <button
               onClick={flow.prevStep}
               disabled={state.currentStep === 0}
-              className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 disabled:bg-gray-800 disabled:text-gray-500 text-white rounded-lg min-h-[48px]"
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] disabled:bg-[#161b22] disabled:text-[#6e7681] disabled:border-transparent text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
             >
               ← Back
             </button>
             <div className="flex flex-col-reverse sm:flex-row gap-3">
               <button
                 onClick={flow.handleCancel}
-                className="px-5 py-3 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white rounded-lg min-h-[48px]"
+                className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
               >
                 Cancel
               </button>
               <button
                 onClick={flow.handleConfirm}
-                className="px-5 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-lg min-h-[48px]"
+                className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
               >
                 {state.currentStep === state.steps.length - 1 ? 'Finish' : 'Continue →'}
               </button>
@@ -415,13 +415,13 @@ function Modal({ title, children, width = 'md' }: ModalProps) {
   }[width];
 
   return (
-    <div className={`bg-gray-900 shadow-xl w-full mx-0 sm:mx-4 p-5 sm:p-6 border-0 sm:border border-gray-700
+    <div className={`bg-[#161b22] shadow-xl w-full mx-0 sm:mx-4 p-5 sm:p-6 border-0 sm:border border-[#30363d]
       fixed sm:relative inset-0 sm:inset-auto sm:rounded-lg
       flex flex-col sm:block max-h-screen sm:max-h-[90vh] overflow-y-auto
       ${widthClass}`}
     >
-      <h2 className="text-xl font-semibold text-green-400 mb-4 flex-shrink-0">{title}</h2>
-      <div className="flex-1 min-h-0">{children}</div>
+      <h2 className="text-xl font-semibold text-[#22c55e] mb-4 flex-shrink-0">{title}</h2>
+      <div className="flex-1 min-h-0 text-[#e6edf3]">{children}</div>
     </div>
   );
 }
@@ -432,11 +432,11 @@ function Modal({ title, children, width = 'md' }: ModalProps) {
 
 function getVariantClass(variant?: 'info' | 'success' | 'warning' | 'error' | 'danger'): string {
   switch (variant) {
-    case 'success': return 'text-green-400';
-    case 'warning': return 'text-yellow-400';
+    case 'success': return 'text-[#3fb950]';
+    case 'warning': return 'text-[#d29922]';
     case 'error':
-    case 'danger': return 'text-red-400';
+    case 'danger': return 'text-[#f85149]';
     case 'info':
-    default: return 'text-gray-300';
+    default: return 'text-[#8b949e]';
   }
 }

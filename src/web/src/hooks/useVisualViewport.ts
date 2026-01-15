@@ -1,54 +1,84 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
+
+/** Threshold in pixels to consider the keyboard visible */
+const KEYBOARD_THRESHOLD = 100;
 
 /**
  * Hook to track the visual viewport and detect keyboard visibility.
- * Sets CSS custom property --keyboard-inset for dynamic layout adjustment.
+ * Sets CSS custom properties for dynamic layout adjustment:
+ * - --visual-viewport-height: actual visible height (shrinks when keyboard shows)
+ * - --keyboard-inset: keyboard height for positioning elements above it
  *
- * The Visual Viewport API accounts for the on-screen keyboard on mobile devices.
- * When the keyboard appears, visualViewport.height shrinks while window.innerHeight
- * may or may not change depending on the browser. The difference gives us keyboard height.
+ * On iOS Safari, visualViewport.height shrinks when the keyboard appears,
+ * but window.innerHeight may stay the same. We use visualViewport directly
+ * for accurate sizing.
+ *
+ * @returns Whether the keyboard is currently visible
  */
-export function useVisualViewport(): void {
-  const updateKeyboardInset = useCallback(() => {
+export function useVisualViewport(): boolean {
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  const updateViewport = useCallback(() => {
     if (typeof window === 'undefined') return;
 
     const viewport = window.visualViewport;
     if (!viewport) {
       // Fallback for browsers without Visual Viewport API
+      document.documentElement.style.setProperty('--visual-viewport-height', '100dvh');
       document.documentElement.style.setProperty('--keyboard-inset', '0px');
+      setKeyboardVisible(false);
       return;
     }
 
-    // Calculate keyboard height from the difference between window and viewport
-    const keyboardHeight = window.innerHeight - viewport.height;
+    // Use visualViewport.height directly - this is the actual visible area
+    // On iOS Safari this shrinks when the keyboard appears
+    const viewportHeight = viewport.height;
 
-    // Only set positive values (keyboard visible) or zero
-    const inset = Math.max(0, keyboardHeight);
-    document.documentElement.style.setProperty('--keyboard-inset', `${inset}px`);
+    // Account for any offset (e.g., when page is scrolled with keyboard)
+    const offsetTop = viewport.offsetTop || 0;
+
+    // Calculate keyboard height from the difference between window and viewport
+    // On iOS Safari, window.innerHeight may not change, but visualViewport.height does
+    const keyboardHeight = Math.max(0, window.innerHeight - viewportHeight - offsetTop);
+
+    // Set CSS custom properties
+    document.documentElement.style.setProperty('--visual-viewport-height', `${viewportHeight}px`);
+    document.documentElement.style.setProperty('--keyboard-inset', `${keyboardHeight}px`);
+
+    // Update keyboard visibility state
+    setKeyboardVisible(keyboardHeight > KEYBOARD_THRESHOLD);
   }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const viewport = window.visualViewport;
-    if (!viewport) return;
+    // Initial update (works even without visualViewport)
+    updateViewport();
 
-    // Initial update
-    updateKeyboardInset();
+    const viewport = window.visualViewport;
+    if (!viewport) {
+      // No Visual Viewport API - just listen to window resize
+      window.addEventListener('resize', updateViewport);
+      return () => {
+        window.removeEventListener('resize', updateViewport);
+      };
+    }
 
     // Listen for viewport changes (keyboard show/hide, resize, scroll)
-    viewport.addEventListener('resize', updateKeyboardInset);
-    viewport.addEventListener('scroll', updateKeyboardInset);
+    viewport.addEventListener('resize', updateViewport);
+    viewport.addEventListener('scroll', updateViewport);
 
     // Also listen to window resize as fallback
-    window.addEventListener('resize', updateKeyboardInset);
+    window.addEventListener('resize', updateViewport);
 
     return () => {
-      viewport.removeEventListener('resize', updateKeyboardInset);
-      viewport.removeEventListener('scroll', updateKeyboardInset);
-      window.removeEventListener('resize', updateKeyboardInset);
+      viewport.removeEventListener('resize', updateViewport);
+      viewport.removeEventListener('scroll', updateViewport);
+      window.removeEventListener('resize', updateViewport);
     };
-  }, [updateKeyboardInset]);
+  }, [updateViewport]);
+
+  return keyboardVisible;
 }
 
 /**
@@ -61,7 +91,8 @@ export function getKeyboardHeight(): number {
   const viewport = window.visualViewport;
   if (!viewport) return 0;
 
-  return Math.max(0, window.innerHeight - viewport.height);
+  const offsetTop = viewport.offsetTop || 0;
+  return Math.max(0, window.innerHeight - viewport.height - offsetTop);
 }
 
 /**

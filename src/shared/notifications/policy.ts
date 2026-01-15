@@ -77,10 +77,13 @@ export function itemToToast(item: InboxItem): ToastNotification {
   const icon = getInboxIcon(item);
   const typeLabel = getInboxTypeLabel(item);
 
-  // Build a concise title
-  let title = typeLabel;
+  // Parse session name for display
+  const sessionLabel = getSessionLabel(item.sessionName);
+
+  // Build a concise title with session context
+  let title = `${sessionLabel}: ${typeLabel}`;
   if (item.processTitle) {
-    title = `${typeLabel}: ${item.processTitle}`;
+    title = `${sessionLabel}: ${typeLabel} - ${item.processTitle}`;
   }
 
   // Preview is the first line of context, truncated

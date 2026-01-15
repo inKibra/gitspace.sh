@@ -1,21 +1,26 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { triggerHaptic } from '../utils/device';
-import { DPad } from './DPad';
 import { NumPad } from './NumPad';
+
+export interface ModifierState {
+  ctrl: boolean;
+  shift: boolean;
+  alt: boolean;
+}
 
 export interface TerminalControlsProps {
   /** Callback to send data to terminal */
   onSendData: (data: string) => void;
   /** Callback to focus the terminal */
   onFocusTerminal?: () => void;
+  /** Whether keyboard is visible - positions bar above floating controls when false */
+  keyboardVisible?: boolean;
+  /** Modifier state (lifted to parent for keyboard integration) */
+  modifiers: ModifierState;
+  /** Callback to update modifier state */
+  onModifiersChange: (modifiers: ModifierState) => void;
   /** Custom class name */
   className?: string;
-}
-
-interface ModifierState {
-  ctrl: boolean;
-  shift: boolean;
-  alt: boolean;
 }
 
 // Escape sequences for special keys
@@ -25,84 +30,94 @@ const BACKTAB = '\x1b[Z'; // CSI Z - Shift+Tab
 const BACKSPACE = '\x7f';
 const CTRL_W = '\x17'; // Ctrl+W for word delete
 const ENTER = '\r';
+const CTRL_C = '\x03'; // ETX - interrupt
+const SHIFT_ENTER = '\x1b[13;2u'; // CSI u - Shift+Enter
+const PAGE_UP = '\x1b[5~'; // CSI 5 ~
+const PAGE_DOWN = '\x1b[6~'; // CSI 6 ~
+const HOME = '\x1b[H'; // CSI H
+const END = '\x1b[F'; // CSI F
 
-/** Delay in ms before long-press triggers D-Pad or NumPad overlay */
+/** Delay in ms before long-press triggers NumPad overlay */
 const LONG_PRESS_DELAY = 150;
 
 /**
- * Calculate modifier value for CSI sequences.
- * Formula: 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
+ * Apply virtual modifiers to keyboard input.
+ * Used when user selects modifiers from TerminalControls then types on mobile keyboard.
  */
-function getModifierValue(modifiers: ModifierState): number {
-  return (
-    1 +
-    (modifiers.shift ? 1 : 0) +
-    (modifiers.alt ? 2 : 0) +
-    (modifiers.ctrl ? 4 : 0)
-  );
-}
-
-/**
- * Generate escape sequence for arrow key with modifiers.
- * Plain: \x1b[A
- * With modifier: \x1b[1;{modifier}A
- */
-function getArrowSequence(
-  direction: 'up' | 'down' | 'left' | 'right',
+export function applyModifiersToInput(
+  data: Uint8Array,
   modifiers: ModifierState
-): string {
-  const codes: Record<string, string> = {
-    up: 'A',
-    down: 'B',
-    right: 'C',
-    left: 'D',
-  };
-
-  const code = codes[direction];
-  const modifier = getModifierValue(modifiers);
-
-  if (modifier === 1) {
-    // No modifiers - plain arrow key
-    return `\x1b[${code}`;
+): Uint8Array {
+  // If no modifiers active, return as-is
+  if (!modifiers.ctrl && !modifiers.shift && !modifiers.alt) {
+    return data;
   }
 
-  // With modifiers: CSI 1;{modifier}{code}
-  return `\x1b[1;${modifier}${code}`;
+  const result: number[] = [];
+
+  for (const byte of data) {
+    let modified = byte;
+
+    // Handle Ctrl modifier for printable ASCII characters
+    if (modifiers.ctrl) {
+      // For letters a-z or A-Z, convert to control character (0x01-0x1A)
+      if (byte >= 0x61 && byte <= 0x7a) {
+        // lowercase a-z
+        modified = byte - 0x60; // a=0x61 -> 0x01, z=0x7a -> 0x1a
+      } else if (byte >= 0x41 && byte <= 0x5a) {
+        // uppercase A-Z
+        modified = byte - 0x40; // A=0x41 -> 0x01, Z=0x5a -> 0x1a
+      }
+      // For other characters, Ctrl doesn't have standard behavior
+    }
+
+    // Handle Shift modifier (uppercase)
+    // Note: Mobile keyboards usually handle shift themselves, but if not:
+    if (modifiers.shift && !modifiers.ctrl) {
+      if (byte >= 0x61 && byte <= 0x7a) {
+        // lowercase a-z -> uppercase A-Z
+        modified = byte - 0x20;
+      }
+    }
+
+    // Handle Alt modifier (send ESC prefix)
+    if (modifiers.alt) {
+      result.push(0x1b); // ESC
+    }
+
+    result.push(modified);
+  }
+
+  return new Uint8Array(result);
 }
 
 export function TerminalControls({
   onSendData,
   onFocusTerminal,
+  keyboardVisible = true,
+  modifiers,
+  onModifiersChange,
   className = '',
 }: TerminalControlsProps): React.ReactElement {
-  // Modifier toggle states (sticky until used)
-  const [modifiers, setModifiers] = useState<ModifierState>({
-    ctrl: false,
-    shift: false,
-    alt: false,
-  });
-
-  // D-Pad and NumPad visibility
-  const [showDPad, setShowDPad] = useState(false);
+  // NumPad visibility
   const [showNumPad, setShowNumPad] = useState(false);
 
-  // Separate timer refs to prevent conflicts when both are triggered
-  const dpadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Timer ref for long press
   const numpadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reset modifiers after sending a key
   const resetModifiers = useCallback(() => {
-    setModifiers({ ctrl: false, shift: false, alt: false });
-  }, []);
+    onModifiersChange({ ctrl: false, shift: false, alt: false });
+  }, [onModifiersChange]);
 
   // Toggle a modifier
   const toggleModifier = useCallback(
     (mod: keyof ModifierState) => {
       triggerHaptic(8);
-      setModifiers((prev) => ({ ...prev, [mod]: !prev[mod] }));
+      onModifiersChange({ ...modifiers, [mod]: !modifiers[mod] });
       onFocusTerminal?.();
     },
-    [onFocusTerminal]
+    [modifiers, onModifiersChange, onFocusTerminal]
   );
 
   // Send a key with current modifiers applied
@@ -141,20 +156,39 @@ export function TerminalControls({
     }
   }, [modifiers.ctrl, sendKey]);
 
-  // Handle Enter
+  // Handle Enter (Shift+Enter sends CSI u sequence)
   const handleEnter = useCallback(() => {
-    sendKey(ENTER);
+    if (modifiers.shift) {
+      sendKey(SHIFT_ENTER);
+    } else {
+      sendKey(ENTER);
+    }
+  }, [modifiers.shift, sendKey]);
+
+  // Handle Ctrl+C
+  const handleCtrlC = useCallback(() => {
+    sendKey(CTRL_C);
   }, [sendKey]);
 
-  // Handle arrow key from D-Pad
-  const handleArrow = useCallback(
-    (direction: 'up' | 'down' | 'left' | 'right') => {
-      const sequence = getArrowSequence(direction, modifiers);
-      // Preserve modifiers for repeated arrow presses
-      sendKey(sequence, true);
-    },
-    [modifiers, sendKey]
-  );
+  // Handle Page Up
+  const handlePageUp = useCallback(() => {
+    sendKey(PAGE_UP);
+  }, [sendKey]);
+
+  // Handle Page Down
+  const handlePageDown = useCallback(() => {
+    sendKey(PAGE_DOWN);
+  }, [sendKey]);
+
+  // Handle Home
+  const handleHome = useCallback(() => {
+    sendKey(HOME);
+  }, [sendKey]);
+
+  // Handle End
+  const handleEnd = useCallback(() => {
+    sendKey(END);
+  }, [sendKey]);
 
   // Handle number from NumPad
   const handleNumber = useCallback(
@@ -170,30 +204,6 @@ export function TerminalControls({
     },
     [modifiers, sendKey]
   );
-
-  // Long press handlers for D-Pad trigger
-  const handleDPadTouchStart = useCallback(() => {
-    dpadTimerRef.current = setTimeout(() => {
-      triggerHaptic(15);
-      setShowDPad(true);
-    }, LONG_PRESS_DELAY);
-  }, []);
-
-  const handleDPadTouchEnd = useCallback(() => {
-    if (dpadTimerRef.current) {
-      clearTimeout(dpadTimerRef.current);
-      dpadTimerRef.current = null;
-    }
-  }, []);
-
-  // Keyboard accessibility for D-Pad trigger
-  const handleDPadKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      triggerHaptic(15);
-      setShowDPad(true);
-    }
-  }, []);
 
   // Long press handlers for NumPad trigger
   const handleNumPadTouchStart = useCallback(() => {
@@ -219,25 +229,16 @@ export function TerminalControls({
     }
   }, []);
 
-  // Close overlays
-  const closeDPad = useCallback(() => {
-    setShowDPad(false);
-    resetModifiers();
-    onFocusTerminal?.();
-  }, [resetModifiers, onFocusTerminal]);
-
+  // Close NumPad overlay
   const closeNumPad = useCallback(() => {
     setShowNumPad(false);
     resetModifiers();
     onFocusTerminal?.();
   }, [resetModifiers, onFocusTerminal]);
 
-  // Clean up timers on unmount
+  // Clean up timer on unmount
   useEffect(() => {
     return () => {
-      if (dpadTimerRef.current) {
-        clearTimeout(dpadTimerRef.current);
-      }
       if (numpadTimerRef.current) {
         clearTimeout(numpadTimerRef.current);
       }
@@ -246,15 +247,19 @@ export function TerminalControls({
 
   return (
     <>
-      {/* Main controls bar */}
+      {/* Main controls bar - two rows for more space */}
       <div
-        className={`terminal-controls flex items-center gap-1 p-2 bg-[#181825] border-t border-[#313244] ${className}`}
+        className={`terminal-controls flex flex-col gap-2 p-3 bg-[#161b22] border-t border-[#30363d] ${className}`}
         style={{
-          paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))',
+          paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+          // When keyboard is hidden, position above floating controls (jog wheel area)
+          bottom: keyboardVisible
+            ? 'var(--keyboard-inset, 0px)'
+            : 'calc(130px + env(safe-area-inset-bottom, 0px))',
         }}
       >
-        {/* Modifier toggles */}
-        <div className="flex items-center gap-1 mr-2">
+        {/* Row 1: Modifier toggles - larger buttons */}
+        <div className="flex items-center justify-center gap-2">
           <ModifierButton
             label="Ctrl"
             active={modifiers.ctrl}
@@ -270,13 +275,22 @@ export function TerminalControls({
             active={modifiers.alt}
             onToggle={() => toggleModifier('alt')}
           />
+
+          {/* Separator */}
+          <div className="w-px h-8 bg-[#30363d] mx-1" />
+
+          {/* NumPad trigger - D-Pad removed since jog wheel handles arrows */}
+          <TerminalKey
+            label="123"
+            onTouchStart={handleNumPadTouchStart}
+            onTouchEnd={handleNumPadTouchEnd}
+            onKeyDown={handleNumPadKeyDown}
+            title="Hold for number pad"
+          />
         </div>
 
-        {/* Separator */}
-        <div className="w-px h-6 bg-[#313244] mx-1" />
-
-        {/* Quick keys */}
-        <div className="flex items-center gap-1">
+        {/* Row 2: Quick keys - full width, evenly spaced */}
+        <div className="flex items-center justify-between gap-1.5">
           <TerminalKey label="Esc" onPress={handleEscape} />
           <TerminalKey
             label="Tab"
@@ -289,40 +303,23 @@ export function TerminalControls({
             highlight={modifiers.ctrl}
             title={modifiers.ctrl ? 'Ctrl+W (delete word)' : 'Backspace'}
           />
-          <TerminalKey label="↵" onPress={handleEnter} />
-        </div>
-
-        {/* Separator */}
-        <div className="w-px h-6 bg-[#313244] mx-1" />
-
-        {/* D-Pad and NumPad triggers */}
-        <div className="flex items-center gap-1">
           <TerminalKey
-            label="↕"
-            onTouchStart={handleDPadTouchStart}
-            onTouchEnd={handleDPadTouchEnd}
-            onKeyDown={handleDPadKeyDown}
-            title="Hold for arrow keys (or press Enter)"
+            label="↵"
+            onPress={handleEnter}
+            highlight={modifiers.shift}
+            title={modifiers.shift ? 'Shift+Enter' : 'Enter'}
           />
           <TerminalKey
-            label="123"
-            onTouchStart={handleNumPadTouchStart}
-            onTouchEnd={handleNumPadTouchEnd}
-            onKeyDown={handleNumPadKeyDown}
-            title="Hold for number pad (or press Enter)"
-            small
+            label="^C"
+            onPress={handleCtrlC}
+            title="Ctrl+C (interrupt)"
           />
+          <TerminalKey label="PgUp" onPress={handlePageUp} />
+          <TerminalKey label="PgDn" onPress={handlePageDown} />
+          <TerminalKey label="Home" onPress={handleHome} />
+          <TerminalKey label="End" onPress={handleEnd} />
         </div>
       </div>
-
-      {/* D-Pad overlay */}
-      {showDPad && (
-        <DPad
-          onDirection={handleArrow}
-          onClose={closeDPad}
-          modifiers={modifiers}
-        />
-      )}
 
       {/* NumPad overlay */}
       {showNumPad && (
@@ -353,12 +350,12 @@ function ModifierButton({
       type="button"
       onClick={onToggle}
       className={`
-        terminal-key px-2 py-1 rounded text-xs font-medium
+        terminal-key px-3 py-2 rounded text-sm font-medium
         transition-colors duration-75
         ${
           active
-            ? 'bg-[#89b4fa] text-[#1e1e2e]'
-            : 'bg-[#313244] text-[#cdd6f4] hover:bg-[#45475a]'
+            ? 'bg-[#22c55e] text-[#0d1117] shadow-glow'
+            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
         }
       `}
       style={{
@@ -366,8 +363,8 @@ function ModifierButton({
         WebkitTouchCallout: 'none',
         WebkitUserSelect: 'none',
         userSelect: 'none',
-        minWidth: '40px',
-        minHeight: '32px',
+        minWidth: '52px',
+        minHeight: '40px',
       }}
     >
       {label}
@@ -384,7 +381,6 @@ interface TerminalKeyProps {
   onKeyDown?: (e: React.KeyboardEvent) => void;
   highlight?: boolean;
   title?: string;
-  small?: boolean;
 }
 
 function TerminalKey({
@@ -395,7 +391,6 @@ function TerminalKey({
   onKeyDown,
   highlight = false,
   title,
-  small = false,
 }: TerminalKeyProps): React.ReactElement {
   const handleTouchStart = useCallback(
     (e: React.TouchEvent) => {
@@ -445,13 +440,12 @@ function TerminalKey({
       onKeyDown={handleKeyDown}
       title={title}
       className={`
-        terminal-key px-2 py-1 rounded font-medium
+        terminal-key px-2 py-1.5 rounded text-xs font-medium flex-1
         transition-all duration-75 active:scale-95
-        ${small ? 'text-[10px]' : 'text-sm'}
         ${
           highlight
-            ? 'bg-[#f9e2af] text-[#1e1e2e]'
-            : 'bg-[#313244] text-[#cdd6f4] hover:bg-[#45475a]'
+            ? 'bg-[#d29922] text-[#0d1117] shadow-glow'
+            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
         }
       `}
       style={{
@@ -459,8 +453,8 @@ function TerminalKey({
         WebkitTouchCallout: 'none',
         WebkitUserSelect: 'none',
         userSelect: 'none',
-        minWidth: small ? '36px' : '40px',
-        minHeight: '32px',
+        minWidth: '32px',
+        minHeight: '36px',
         WebkitTapHighlightColor: 'transparent',
       }}
     >

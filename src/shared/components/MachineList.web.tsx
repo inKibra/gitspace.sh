@@ -33,7 +33,7 @@ export function MachineListWeb(props: UseMachineListReturn) {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64 px-4">
-        <div className="text-gray-400 text-center">Connecting to relay...</div>
+        <div className="text-[#8b949e] text-center">Connecting to relay...</div>
       </div>
     );
   }
@@ -42,10 +42,10 @@ export function MachineListWeb(props: UseMachineListReturn) {
   if (hasError) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4 px-4">
-        <div className="text-red-400 text-center">{error}</div>
+        <div className="text-[#f85149] text-center">{error}</div>
         <button
           onClick={refresh}
-          className="px-6 py-3 text-base bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded-lg min-h-[48px]"
+          className="px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg min-h-[48px] text-[#e6edf3]"
         >
           Retry
         </button>
@@ -67,19 +67,19 @@ export function MachineListWeb(props: UseMachineListReturn) {
 
     return (
       <div className="flex flex-col items-center justify-center h-full py-8 sm:py-12 gap-6 px-4">
-        <div className="text-gray-400 text-lg text-center">No machines available</div>
+        <div className="text-[#8b949e] text-lg text-center">No machines available</div>
 
         <div className="text-center w-full max-w-xl">
-          <p className="text-gray-500 text-sm mb-3">
+          <p className="text-[#6e7681] text-sm mb-3">
             To connect, run this command on your machine:
           </p>
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-gray-800 rounded-lg p-3">
-            <code className="flex-1 text-yellow-400 px-2 py-2 font-mono text-xs sm:text-sm break-all text-left">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+            <code className="flex-1 text-[#d29922] px-2 py-2 font-mono text-xs sm:text-sm break-all text-left">
               {accessCommand}
             </code>
             <button
               onClick={copyCommand}
-              className="px-4 py-3 text-sm bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded-lg whitespace-nowrap min-h-[48px]"
+              className="px-4 py-3 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg whitespace-nowrap min-h-[48px] text-[#e6edf3]"
             >
               {commandCopied ? 'Copied!' : 'Copy'}
             </button>
@@ -88,10 +88,10 @@ export function MachineListWeb(props: UseMachineListReturn) {
 
         {publicKey && (
           <details className="text-center w-full max-w-xl">
-            <summary className="text-gray-500 text-xs cursor-pointer hover:text-gray-400 py-2">
+            <summary className="text-[#6e7681] text-xs cursor-pointer hover:text-[#8b949e] py-2">
               Show public key
             </summary>
-            <code className="text-green-400 bg-gray-900 px-3 py-2 rounded font-mono text-xs break-all block mt-2">
+            <code className="text-[#3fb950] bg-[#0d1117] border border-[#30363d] px-3 py-2 rounded font-mono text-xs break-all block mt-2">
               {publicKey}
             </code>
           </details>
@@ -99,7 +99,7 @@ export function MachineListWeb(props: UseMachineListReturn) {
 
         <button
           onClick={refresh}
-          className="px-6 py-3 text-base bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-lg min-h-[48px]"
+          className="px-6 py-3 text-base bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium shadow-glow rounded-lg min-h-[48px]"
         >
           Refresh
         </button>
@@ -111,11 +111,11 @@ export function MachineListWeb(props: UseMachineListReturn) {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-        <h2 className="text-lg font-medium text-white">Machines</h2>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d] bg-[#161b22]">
+        <h2 className="text-lg font-medium text-[#e6edf3]">Machines</h2>
         <button
           onClick={refresh}
-          className="text-sm text-gray-400 hover:text-white active:text-blue-400 px-3 py-2 -mr-3 min-h-[44px] flex items-center"
+          className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] px-3 py-2 -mr-3 min-h-[44px] flex items-center"
         >
           Refresh
         </button>
@@ -139,8 +139,8 @@ export function MachineListWeb(props: UseMachineListReturn) {
               }}
               onDoubleClick={() => isConnectable && connectSelected()}
               className={`
-                px-4 py-4 cursor-pointer border-b border-gray-800 min-h-[60px]
-                ${isSelected ? 'bg-gray-700' : 'hover:bg-gray-800 active:bg-gray-700'}
+                px-4 py-4 cursor-pointer border-b border-[#30363d] min-h-[60px]
+                ${isSelected ? 'bg-[#21262d]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
                 ${!isConnectable ? 'opacity-50' : ''}
               `}
             >
@@ -149,19 +149,19 @@ export function MachineListWeb(props: UseMachineListReturn) {
                   {/* Status indicator */}
                   <div
                     className={`w-3 h-3 rounded-full flex-shrink-0 ${
-                      statusColor === 'green' ? 'bg-green-500' :
-                      statusColor === 'yellow' ? 'bg-yellow-500' :
-                      statusColor === 'red' ? 'bg-red-500' :
-                      'bg-gray-500'
+                      statusColor === 'green' ? 'bg-[#3fb950] shadow-glow' :
+                      statusColor === 'yellow' ? 'bg-[#d29922]' :
+                      statusColor === 'red' ? 'bg-[#f85149]' :
+                      'bg-[#6e7681]'
                     }`}
                   />
                   {/* Machine name */}
                   <div className="min-w-0">
-                    <div className="text-white font-medium truncate">
+                    <div className="text-[#e6edf3] font-medium truncate">
                       {getMachineLabel(machine)}
                     </div>
                     {machine.label && (
-                      <div className="text-xs text-gray-500 font-mono truncate">
+                      <div className="text-xs text-[#8b949e] font-mono truncate">
                         {machine.machineId}
                       </div>
                     )}
@@ -170,7 +170,7 @@ export function MachineListWeb(props: UseMachineListReturn) {
 
                 {/* Status text and connect button on mobile */}
                 <div className="flex items-center gap-3 flex-shrink-0">
-                  <div className="text-sm text-gray-400 hidden sm:block">
+                  <div className="text-sm text-[#8b949e] hidden sm:block">
                     {machine.online ? 'Online' : 'Offline'}
                   </div>
                   {isConnectable && (
@@ -180,7 +180,7 @@ export function MachineListWeb(props: UseMachineListReturn) {
                         selectIndex(index);
                         connectSelected();
                       }}
-                      className="sm:hidden px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded text-white"
+                      className="sm:hidden px-3 py-1.5 text-sm bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded shadow-glow"
                     >
                       Connect
                     </button>
@@ -193,15 +193,15 @@ export function MachineListWeb(props: UseMachineListReturn) {
       </div>
 
       {/* Footer - keyboard hints on desktop, action buttons on mobile */}
-      <div className="px-4 py-2 border-t border-gray-700 safe-bottom">
+      <div className="px-4 py-2 border-t border-[#30363d] bg-[#161b22] safe-bottom">
         {/* Desktop keyboard hints */}
-        <div className="hidden sm:flex gap-4 text-xs text-gray-500">
+        <div className="hidden sm:flex gap-4 text-xs text-[#6e7681]">
           <span>↑↓ Navigate</span>
           <span>Enter Connect</span>
           <span>r Refresh</span>
         </div>
         {/* Mobile hint */}
-        <div className="sm:hidden text-xs text-gray-500 text-center">
+        <div className="sm:hidden text-xs text-[#6e7681] text-center">
           Tap a machine to connect
         </div>
       </div>

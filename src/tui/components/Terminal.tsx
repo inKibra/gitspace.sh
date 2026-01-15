@@ -57,6 +57,8 @@ export interface TerminalProps {
   onError: (error: string) => void;
   /** When true, Shift+Tab is intercepted by parent for toast attach */
   interceptShiftTab?: boolean;
+  /** When true, suppress all keyboard input (modal is open) */
+  modalOpen?: boolean;
   /** Called when user interacts with terminal (for activity tracking) */
   onActivity?: () => void;
 }
@@ -98,7 +100,7 @@ function getTerminalSize() {
   };
 }
 
-export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab, onActivity }: TerminalProps) {
+export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab, modalOpen, onActivity }: TerminalProps) {
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [termSize, setTermSize] = useState(getTerminalSize);
@@ -401,6 +403,9 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
 
   // Handle keyboard input using OpenTUI's useKeyboard
   useKeyboard((key) => {
+    // Don't send keys to PTY when a modal is open
+    if (modalOpen) return;
+
     if (status !== 'connected') return;
 
     const socket = socketRef.current;
