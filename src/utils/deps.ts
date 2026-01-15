@@ -2,13 +2,14 @@
  * Dependency checking utilities
  */
 
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import type { Dependency } from '../types/workspace.js';
 import { DependencyError, GitHubAuthError } from '../types/errors.js';
 import { logger } from './logger.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * Required system dependencies
@@ -64,7 +65,7 @@ export async function checkCommandExists(command: string): Promise<boolean> {
   }
 
   try {
-    await execAsync(`which ${command}`);
+    await execFileAsync('which', [command]);
     return true;
   } catch {
     return false;
