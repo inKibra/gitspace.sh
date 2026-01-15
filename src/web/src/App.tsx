@@ -510,17 +510,17 @@ export default function App() {
 
     return (
       <>
-        <div className="h-screen w-screen flex flex-col bg-gray-900">
-          <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
+        <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
+          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
             <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
               <button
                 onClick={handleBackToMachines}
-                className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
               >
                 ← <span className="hidden sm:inline ml-1">Machines</span>
               </button>
-              <div className="text-sm text-gray-400 truncate hidden sm:block">
-                <span className="text-green-400">●</span>{" "}
+              <div className="text-sm text-[#8b949e] truncate hidden sm:block">
+                <span className="text-[#3fb950] shadow-glow">●</span>{" "}
                 {selectedMachine?.label || selectedMachine?.machineId}
               </div>
             </div>
@@ -530,19 +530,19 @@ export default function App() {
                   terminal.requestInbox();
                   setShowInbox(true);
                 }}
-                className="text-sm text-gray-400 hover:text-white active:text-blue-400 flex items-center gap-1 py-2 px-2 min-h-[44px]"
+                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] flex items-center gap-1 py-2 px-2 min-h-[44px]"
               >
-                <span className="hidden sm:inline text-xs text-gray-500">[i]</span>
+                <span className="hidden sm:inline text-xs text-[#6e7681]">[i]</span>
                 <span>Inbox</span>
                 {terminal.inboxUnreadCount > 0 && (
-                  <span className="ml-1 px-1.5 py-0.5 text-xs bg-blue-600 rounded-full text-white">
+                  <span className="ml-1 px-1.5 py-0.5 text-xs bg-[#58a6ff] rounded-full text-[#0d1117] font-medium">
                     {terminal.inboxUnreadCount}
                   </span>
                 )}
               </button>
               <button
                 onClick={handleDisconnect}
-                className="px-3 py-2 text-sm bg-red-600 hover:bg-red-700 active:bg-red-800 rounded text-white min-h-[44px]"
+                className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
               >
                 <span className="hidden sm:inline">Disconnect</span>
                 <span className="sm:hidden">×</span>
@@ -589,21 +589,21 @@ export default function App() {
 
     return (
       <>
-        <div className={`w-screen flex flex-col bg-gray-900 ${inputMode ? 'h-visual-viewport' : 'h-screen'}`}>
-          <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
+        <div className={`w-screen flex flex-col bg-[#0d1117] ${inputMode ? 'h-visual-viewport' : 'h-screen'}`}>
+          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
             <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
               <button
                 onClick={terminal.detachSession}
-                className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
               >
                 ← <span className="hidden sm:inline ml-1">Workspaces</span>
               </button>
-              <div className="text-sm text-gray-400 truncate">
-                <span className="text-green-400">●</span>{" "}
+              <div className="text-sm text-[#8b949e] truncate">
+                <span className="text-[#3fb950] shadow-glow">●</span>{" "}
                 <span className="hidden sm:inline">{selectedMachine?.label || selectedMachine?.machineId}</span>
                 {terminal.attachedSessionName && (
-                  <span className="text-gray-300">
-                    <span className="hidden sm:inline text-gray-500 mx-1">/</span>
+                  <span className="text-[#e6edf3]">
+                    <span className="hidden sm:inline text-[#6e7681] mx-1">/</span>
                     {terminal.attachedSessionName.split(':').pop()}
                   </span>
                 )}
@@ -614,19 +614,19 @@ export default function App() {
               {showMobileControls && (
                 <button
                   onClick={toggleInputMode}
-                  className={`px-3 py-2 text-sm rounded min-h-[44px] transition-colors ${
+                  className={`px-3 py-2 text-sm rounded min-h-[44px] transition-all ${
                     inputMode
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                      ? 'bg-[#22c55e] text-[#0d1117] shadow-glow font-medium'
+                      : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
                   }`}
                 >
                   Input
                 </button>
               )}
-              <span className="text-xs text-gray-500 hidden sm:inline">Ctrl+Esc</span>
+              <span className="text-xs text-[#6e7681] hidden sm:inline">Ctrl+Esc</span>
               <button
                 onClick={terminal.detachSession}
-                className="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded text-white min-h-[44px]"
+                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
               >
                 Detach
               </button>
@@ -679,16 +679,16 @@ export default function App() {
 
     return (
       <>
-        <div className="h-screen w-screen flex flex-col items-center justify-center bg-gray-900 px-4">
+        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
           <div className="text-center">
-            <div className="text-lg text-white mb-2 break-words">
+            <div className="text-lg text-[#e6edf3] mb-2 break-words">
               Connecting to {selectedMachine?.label || selectedMachine?.machineId}
             </div>
-            <div className="text-sm text-gray-400">{statusMessage}</div>
+            <div className="text-sm text-[#8b949e]">{statusMessage}</div>
             {terminal.status === "error" && (
               <button
                 onClick={handleBackToMachines}
-                className="mt-4 px-6 py-3 text-base bg-gray-700 hover:bg-gray-600 active:bg-gray-500 rounded-lg text-white min-h-[48px]"
+                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
               >
                 Back to Machines
               </button>
@@ -704,19 +704,19 @@ export default function App() {
   // This is now the main/default view - shows machines and your identity
   return (
     <>
-      <div className="h-screen w-screen flex flex-col bg-gray-900">
+      <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
         {/* Header with identity info */}
-        <div className="bg-gray-800 px-4 py-3 border-b border-gray-700">
+        <div className="bg-[#161b22] px-4 py-3 border-b border-[#30363d]">
           <div className="max-w-2xl mx-auto">
             {/* Connection status */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full ${
-                  relay.status === "connected" ? "bg-green-400" :
-                  relay.status === "connecting" ? "bg-yellow-400 animate-pulse" :
-                  "bg-red-400"
+                  relay.status === "connected" ? "bg-[#3fb950] shadow-glow" :
+                  relay.status === "connecting" ? "bg-[#d29922] animate-pulse" :
+                  "bg-[#f85149]"
                 }`} />
-                <span className="text-sm text-gray-400">
+                <span className="text-sm text-[#8b949e]">
                   {relay.status === "connected" ? "Connected" :
                    relay.status === "connecting" ? "Connecting..." :
                    "Disconnected"}
@@ -724,7 +724,7 @@ export default function App() {
               </div>
               <button
                 onClick={relay.refreshMachines}
-                className="text-xs text-gray-500 hover:text-white px-2 py-1"
+                className="text-xs text-[#6e7681] hover:text-[#e6edf3] px-2 py-1"
               >
                 Refresh
               </button>
@@ -732,23 +732,23 @@ export default function App() {
 
             {/* Your identity - prominent display */}
             {relay.publicKey && (
-              <div className="bg-gray-900 rounded-lg p-3">
+              <div className="bg-[#0d1117] rounded-lg p-3 border border-[#30363d]">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-gray-400">Your Browser Identity</span>
+                  <span className="text-xs text-[#8b949e]">Your Browser Identity</span>
                 </div>
-                <code className="block text-xs text-green-400 break-all font-mono leading-relaxed mb-3">
+                <code className="block text-xs text-[#3fb950] break-all font-mono leading-relaxed mb-3">
                   {relay.publicKey}
                 </code>
-                <p className="text-xs text-gray-500 mb-2">
+                <p className="text-xs text-[#6e7681] mb-2">
                   To get access, have the machine owner run:
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 text-xs text-gray-300 bg-gray-800 px-2 py-2 rounded font-mono overflow-x-auto">
+                  <code className="flex-1 text-xs text-[#e6edf3] bg-[#161b22] px-2 py-2 rounded font-mono overflow-x-auto border border-[#30363d]">
                     gssh access add "{relay.publicKey.slice(0, 20)}..."
                   </code>
                   <button
                     onClick={copyAccessCommand}
-                    className="text-xs text-blue-400 hover:text-blue-300 bg-gray-800 px-3 py-2 rounded whitespace-nowrap"
+                    className="text-xs text-[#22c55e] hover:text-[#3fb950] bg-[#161b22] border border-[#30363d] px-3 py-2 rounded whitespace-nowrap hover:border-[#22c55e] transition-colors"
                   >
                     {copied ? "Copied!" : "Copy Command"}
                   </button>
@@ -762,13 +762,13 @@ export default function App() {
         <div className="flex-1 overflow-auto">
           {relay.status === "connecting" ? (
             <div className="flex items-center justify-center h-full">
-              <div className="text-gray-400">Connecting to relay...</div>
+              <div className="text-[#8b949e]">Connecting to relay...</div>
             </div>
           ) : relay.machines.length === 0 ? (
             <div className="flex items-center justify-center h-full p-4">
               <div className="text-center max-w-md">
-                <div className="text-gray-400 mb-2">No machines available</div>
-                <p className="text-sm text-gray-500">
+                <div className="text-[#8b949e] mb-2">No machines available</div>
+                <p className="text-sm text-[#6e7681]">
                   {relay.status === "connected"
                     ? "The machine may not be online. Check if 'gssh serve' is running."
                     : "Unable to connect to relay."}
@@ -781,8 +781,8 @@ export default function App() {
         </div>
 
         {/* Footer */}
-        <div className="bg-gray-800 px-4 py-2 border-t border-gray-700">
-          <p className="text-xs text-gray-500 text-center">
+        <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d]">
+          <p className="text-xs text-[#6e7681] text-center">
             End-to-end encrypted via X3DH
           </p>
         </div>

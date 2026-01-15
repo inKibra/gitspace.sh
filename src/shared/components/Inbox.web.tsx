@@ -46,7 +46,7 @@ export function InboxWeb(props: UseInboxReturn) {
       : 'Session';
 
     return (
-      <div className="h-full flex flex-col bg-gray-900">
+      <div className="h-full flex flex-col bg-[#0d1117]">
         <Header
           title={`📥 ${sessionLabel}`}
           subtitle={
@@ -67,24 +67,24 @@ export function InboxWeb(props: UseInboxReturn) {
               const remainingLines = Math.max(0, item.context.split('\n').length - 10);
 
               return (
-                <div key={item.id} className="border border-gray-700 rounded p-3">
+                <div key={item.id} className="border border-[#30363d] rounded p-3 bg-[#161b22]">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-lg">{icon}</span>
-                    <span className="text-white font-medium">{typeLabel}</span>
-                    <span className="text-gray-500">·</span>
-                    <span className="text-gray-400 text-sm">{timeAgo}</span>
+                    <span className="text-[#e6edf3] font-medium">{typeLabel}</span>
+                    <span className="text-[#6e7681]">·</span>
+                    <span className="text-[#8b949e] text-sm">{timeAgo}</span>
                   </div>
                   {item.processTitle && (
-                    <div className="text-yellow-400 text-sm mb-2">
+                    <div className="text-[#d29922] text-sm mb-2">
                       Process: {item.processTitle}
                     </div>
                   )}
-                  <div className="bg-gray-800 rounded p-2 font-mono text-sm text-gray-300">
+                  <div className="bg-[#0d1117] rounded p-2 font-mono text-sm text-[#e6edf3] border border-[#30363d]">
                     {lines.map((line, idx) => (
                       <div key={idx}>{line}</div>
                     ))}
                     {remainingLines > 0 && (
-                      <div className="text-gray-500">
+                      <div className="text-[#6e7681]">
                         ... ({remainingLines} more lines)
                       </div>
                     )}
@@ -93,7 +93,7 @@ export function InboxWeb(props: UseInboxReturn) {
               );
             })
           ) : (
-            <div className="text-gray-400 text-center py-8">
+            <div className="text-[#8b949e] text-center py-8">
               No notifications for this session.
             </div>
           )}
@@ -113,9 +113,9 @@ export function InboxWeb(props: UseInboxReturn) {
   // Empty state
   if (isEmpty) {
     return (
-      <div className="h-full flex flex-col bg-gray-900">
+      <div className="h-full flex flex-col bg-[#0d1117]">
         <Header title="📥 Inbox" onBack={close} />
-        <div className="flex-1 flex items-center justify-center text-gray-400">
+        <div className="flex-1 flex items-center justify-center text-[#8b949e]">
           No notifications
         </div>
         <Footer items={[{ key: 'Esc', label: 'Back', onClick: close }]} />
@@ -125,7 +125,7 @@ export function InboxWeb(props: UseInboxReturn) {
 
   // List view
   return (
-    <div className="h-full flex flex-col bg-gray-900">
+    <div className="h-full flex flex-col bg-[#0d1117]">
       <Header
         title="📥 Inbox"
         subtitle={unreadCount > 0 ? `${unreadCount} unread` : undefined}
@@ -141,10 +141,10 @@ export function InboxWeb(props: UseInboxReturn) {
             return (
               <div
                 key={`project-${displayIdx}-${displayItem.project}`}
-                className="px-4 py-3 bg-gray-800 border-b border-gray-700 text-green-400 font-medium min-h-[44px] flex items-center"
+                className="px-4 py-3 bg-[#161b22] border-b border-[#30363d] text-[#3fb950] font-medium min-h-[44px] flex items-center"
               >
                 📁 {displayItem.project}
-                <span className="text-gray-500 text-sm ml-2">
+                <span className="text-[#6e7681] text-sm ml-2">
                   ({displayItem.totalItems})
                 </span>
               </div>
@@ -155,7 +155,7 @@ export function InboxWeb(props: UseInboxReturn) {
             return (
               <div
                 key={`workspace-${displayIdx}-${displayItem.workspace}`}
-                className="px-5 sm:px-6 py-2 bg-gray-850 text-yellow-400 text-sm min-h-[36px] flex items-center"
+                className="px-5 sm:px-6 py-2 bg-[#21262d] text-[#d29922] text-sm min-h-[36px] flex items-center"
               >
                 📂 {displayItem.workspace}
               </div>
@@ -166,7 +166,7 @@ export function InboxWeb(props: UseInboxReturn) {
             return (
               <div
                 key={`session-${displayIdx}-${displayItem.session}`}
-                className="px-6 sm:px-8 py-1.5 text-gray-500 text-xs min-h-[28px] flex items-center"
+                className="px-6 sm:px-8 py-1.5 text-[#6e7681] text-xs min-h-[28px] flex items-center"
               >
                 💻 {displayItem.session}
               </div>
@@ -189,24 +189,24 @@ export function InboxWeb(props: UseInboxReturn) {
                 openThread();
               }}
               className={`
-                px-4 sm:px-10 py-3 cursor-pointer border-b border-gray-800 flex items-start gap-3 min-h-[56px]
-                ${isSelected ? 'bg-blue-600 border-l-4 border-l-blue-400 text-white' : 'hover:bg-gray-800 active:bg-gray-700'}
+                px-4 sm:px-10 py-3 cursor-pointer border-b border-[#30363d] flex items-start gap-3 min-h-[56px]
+                ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
               `}
             >
               <div className="flex-shrink-0 flex items-center gap-2 pt-0.5">
                 {!item.read && (
-                  <span className="w-2 h-2 rounded-full bg-blue-500" />
+                  <span className="w-2 h-2 rounded-full bg-[#58a6ff]" />
                 )}
                 <span className="text-lg">{icon}</span>
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 text-sm flex-wrap">
                   {processInfo && (
-                    <span className="text-yellow-400 truncate max-w-[150px]">{processInfo}</span>
+                    <span className="text-[#d29922] truncate max-w-[150px]">{processInfo}</span>
                   )}
-                  <span className="text-gray-500 flex-shrink-0">{timeAgo}</span>
+                  <span className="text-[#6e7681] flex-shrink-0">{timeAgo}</span>
                 </div>
-                <div className="text-gray-400 text-sm truncate">{context}</div>
+                <div className="text-[#8b949e] text-sm truncate">{context}</div>
               </div>
               <button
                 onClick={(e) => {
@@ -214,7 +214,7 @@ export function InboxWeb(props: UseInboxReturn) {
                   selectIndex(displayItem.flatIndex);
                   deleteSelected();
                 }}
-                className="text-gray-600 hover:text-red-400 active:text-red-500 p-2 -mr-2 min-w-[44px] min-h-[44px] flex items-center justify-center"
+                className="text-[#6e7681] hover:text-[#f85149] active:text-[#da3633] p-2 -mr-2 min-w-[44px] min-h-[44px] flex items-center justify-center"
               >
                 ×
               </button>
@@ -252,18 +252,18 @@ function Header({
   actions?: Array<{ label: string; onClick: () => void }>;
 }) {
   return (
-    <div className="bg-gray-800 px-4 py-3 flex items-center justify-between border-b border-gray-700 min-h-[52px] gap-2">
+    <div className="bg-[#161b22] px-4 py-3 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
       <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
         <button
           onClick={onBack}
-          className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+          className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
         >
           ← <span className="hidden sm:inline ml-1">Back</span>
         </button>
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-white font-medium truncate">{title}</span>
+          <span className="text-[#e6edf3] font-medium truncate">{title}</span>
           {subtitle && (
-            <span className="text-xs px-2 py-0.5 rounded bg-blue-900 text-blue-300 flex-shrink-0">
+            <span className="text-xs px-2 py-0.5 rounded bg-[#1f6feb] text-[#e6edf3] flex-shrink-0">
               {subtitle}
             </span>
           )}
@@ -275,7 +275,7 @@ function Header({
             <button
               key={idx}
               onClick={action.onClick}
-              className="text-sm text-gray-400 hover:text-white active:text-blue-400 py-2 px-2 min-h-[44px] flex items-center"
+              className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 px-2 min-h-[44px] flex items-center"
             >
               {action.label}
             </button>
@@ -295,13 +295,13 @@ function Footer({
   const clickableItems = items.filter(item => item.onClick);
 
   return (
-    <div className="bg-gray-800 px-4 py-2 border-t border-gray-700 safe-bottom">
+    <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d] safe-bottom">
       {/* Desktop keyboard hints */}
-      <div className="hidden sm:flex gap-4 text-xs text-gray-500 flex-wrap">
+      <div className="hidden sm:flex gap-4 text-xs text-[#6e7681] flex-wrap">
         {items.map((item, idx) => (
           <span key={idx}>
             {item.onClick ? (
-              <button onClick={item.onClick} className="hover:text-white">
+              <button onClick={item.onClick} className="hover:text-[#e6edf3]">
                 {item.key} {item.label}
               </button>
             ) : (
@@ -318,7 +318,7 @@ function Footer({
           <button
             key={idx}
             onClick={item.onClick}
-            className="px-4 py-2 text-sm text-gray-400 hover:text-white active:text-blue-400"
+            className="px-4 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e]"
           >
             {item.label}
           </button>

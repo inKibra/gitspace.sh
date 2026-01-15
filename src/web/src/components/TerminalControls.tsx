@@ -283,7 +283,7 @@ export function TerminalControls({
     <>
       {/* Main controls bar */}
       <div
-        className={`terminal-controls flex items-center gap-1 p-2 bg-[#181825] border-t border-[#313244] ${className}`}
+        className={`terminal-controls flex items-center gap-1 p-2 bg-[#161b22] border-t border-[#30363d] ${className}`}
         style={{
           paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))',
         }}
@@ -308,7 +308,7 @@ export function TerminalControls({
         </div>
 
         {/* Separator */}
-        <div className="w-px h-6 bg-[#313244] mx-1" />
+        <div className="w-px h-6 bg-[#30363d] mx-1" />
 
         {/* Quick keys - scrollable on small screens */}
         <div className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
@@ -338,7 +338,7 @@ export function TerminalControls({
           />
 
           {/* Separator */}
-          <div className="w-px h-6 bg-[#313244] mx-1 flex-shrink-0" />
+          <div className="w-px h-6 bg-[#30363d] mx-1 flex-shrink-0" />
 
           {/* Navigation keys */}
           <TerminalKey label="PgUp" onPress={handlePageUp} small />
@@ -347,7 +347,7 @@ export function TerminalControls({
           <TerminalKey label="End" onPress={handleEnd} small />
 
           {/* Separator */}
-          <div className="w-px h-6 bg-[#313244] mx-1 flex-shrink-0" />
+          <div className="w-px h-6 bg-[#30363d] mx-1 flex-shrink-0" />
 
           {/* D-Pad and NumPad triggers */}
           <TerminalKey
@@ -410,8 +410,8 @@ function ModifierButton({
         transition-colors duration-75
         ${
           active
-            ? 'bg-[#89b4fa] text-[#1e1e2e]'
-            : 'bg-[#313244] text-[#cdd6f4] hover:bg-[#45475a]'
+            ? 'bg-[#22c55e] text-[#0d1117] shadow-glow'
+            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
         }
       `}
       style={{
@@ -503,8 +503,8 @@ function TerminalKey({
         ${small ? 'text-[10px]' : 'text-sm'}
         ${
           highlight
-            ? 'bg-[#f9e2af] text-[#1e1e2e]'
-            : 'bg-[#313244] text-[#cdd6f4] hover:bg-[#45475a]'
+            ? 'bg-[#d29922] text-[#0d1117] shadow-glow'
+            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
         }
       `}
       style={{

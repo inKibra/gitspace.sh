@@ -5,16 +5,35 @@
   /* Prevent iOS from zooming on input focus */
   touch-action: manipulation;
 
-  /* Catppuccin Mocha theme colors */
-  --color-base: #1e1e2e;
-  --color-mantle: #181825;
-  --color-surface0: #313244;
-  --color-surface1: #45475a;
-  --color-surface2: #585b70;
-  --color-text: #cdd6f4;
-  --color-subtext0: #6c7086;
-  --color-blue: #89b4fa;
-  --color-yellow: #f9e2af;
+  /* GitHub Dark + GitSpace Green Theme */
+  --color-bg: #0d1117;           /* GitHub Dark (Page BG) */
+  --color-bg-elevated: #161b22;  /* Cards, Headers, Controls */
+  --color-bg-surface: #161b22;   /* Elevated surfaces */
+  --color-bg-overlay: #1c2128;   /* Modals, overlays */
+  
+  --color-border: #30363d;       /* Standard borders */
+  --color-border-active: #8b949e; /* Active borders */
+  --color-border-muted: #21262d; /* Subtle borders */
+  
+  --color-text: #e6edf3;         /* Primary text */
+  --color-text-muted: #8b949e;   /* Secondary text */
+  --color-text-dim: #6e7681;     /* Disabled/placeholder */
+  
+  --color-accent: #22c55e;       /* GitSpace Green (Primary) */
+  --color-accent-hover: #16a34a; /* Darker green */
+  --color-accent-glow: rgba(34, 197, 94, 0.5); /* For shadow-glow */
+  
+  --color-success: #3fb950;      /* GitHub Green (Status) */
+  --color-warning: #d29922;      /* GitHub Yellow */
+  --color-danger: #f85149;       /* GitHub Red */
+  --color-info: #58a6ff;         /* GitHub Blue */
+
+  /* Legacy Catppuccin mappings (for backward compatibility during migration) */
+  --color-base: var(--color-bg);
+  --color-mantle: var(--color-bg-elevated);
+  --color-surface0: var(--color-bg-surface);
+  --color-text-main: var(--color-text);
+  --color-blue: var(--color-accent);
 
   /* Visual viewport sizing (set by useVisualViewport hook) */
   --visual-viewport-height: 100dvh;
@@ -26,12 +45,17 @@ body {
   margin: 0;
   min-height: 100vh;
   min-height: 100dvh; /* Dynamic viewport height for mobile browsers */
-  background-color: var(--color-base);
+  background-color: var(--color-bg);
   color: var(--color-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   /* Prevent pull-to-refresh on mobile */
   overscroll-behavior-y: contain;
+}
+
+/* Glow effect utility */
+.shadow-glow {
+  box-shadow: 0 0 10px var(--color-accent-glow);
 }
 
 #root {
@@ -191,10 +215,10 @@ body {
 
 .scroll-fade-left::before {
   left: 0;
-  background: linear-gradient(to right, var(--color-mantle), transparent);
+  background: linear-gradient(to right, var(--color-bg-elevated), transparent);
 }
 
 .scroll-fade-right::after {
   right: 0;
-  background: linear-gradient(to left, var(--color-mantle), transparent);
+  background: linear-gradient(to left, var(--color-bg-elevated), transparent);
 }

@@ -96,29 +96,29 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
         fontSize: 14,
         fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
         theme: {
-          background: "#1e1e2e",
-          foreground: "#cdd6f4",
-          cursor: "#f5e0dc",
-          cursorAccent: "#1e1e2e",
-          selectionBackground: "#585b70",
-          selectionForeground: "#cdd6f4",
-          // Catppuccin Mocha colors
-          black: "#45475a",
-          red: "#f38ba8",
-          green: "#a6e3a1",
-          yellow: "#f9e2af",
-          blue: "#89b4fa",
-          magenta: "#f5c2e7",
-          cyan: "#94e2d5",
-          white: "#bac2de",
-          brightBlack: "#585b70",
-          brightRed: "#f38ba8",
-          brightGreen: "#a6e3a1",
-          brightYellow: "#f9e2af",
-          brightBlue: "#89b4fa",
-          brightMagenta: "#f5c2e7",
-          brightCyan: "#94e2d5",
-          brightWhite: "#a6adc8",
+          background: "#0d1117",
+          foreground: "#e6edf3",
+          cursor: "#22c55e",
+          cursorAccent: "#0d1117",
+          selectionBackground: "#22c55e33",
+          selectionForeground: "#e6edf3",
+          // GitHub Dark colors
+          black: "#484f58",
+          red: "#ff7b72",
+          green: "#3fb950",
+          yellow: "#d29922",
+          blue: "#58a6ff",
+          magenta: "#bc8cff",
+          cyan: "#39c5cf",
+          white: "#b1bac4",
+          brightBlack: "#6e7681",
+          brightRed: "#ffa198",
+          brightGreen: "#56d364",
+          brightYellow: "#e3b341",
+          brightBlue: "#79c0ff",
+          brightMagenta: "#d2a8ff",
+          brightCyan: "#56d4dd",
+          brightWhite: "#f0f6fc",
         },
       });
 
@@ -295,12 +295,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
   return (
     <div
       ref={containerRef}
-      className="w-full h-full bg-[#1e1e2e]"
-      style={{
-        minHeight: "100%",
-        touchAction: "none", // Disable browser touch handling
-        overscrollBehavior: "none", // Prevent pull-to-refresh
-      }}
+      className="w-full h-full bg-[#0d1117]"
     />
   );
 });
