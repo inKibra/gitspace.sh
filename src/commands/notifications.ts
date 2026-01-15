@@ -177,7 +177,7 @@ export function installHook(filePath: string, hook: string): { installed: boolea
     }
 
     // Check for existing DEBUG trap in Bash
-    if (!created && filePath.endsWith('bashrc') || filePath.endsWith('.bash_profile')) {
+    if (!created && (filePath.endsWith('.bashrc') || filePath.endsWith('.bash_profile'))) {
       const content = readFileSync(filePath, 'utf-8');
       if (content.includes('trap') && content.includes('DEBUG')) {
         logger.warning(`Warning: Existing DEBUG trap found in ${filePath}. The GitSpace hook may overwrite it.`);
