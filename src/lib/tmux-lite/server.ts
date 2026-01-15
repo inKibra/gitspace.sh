@@ -77,6 +77,8 @@ function isNotificationTypeEnabled(type: InboxItem['type']): boolean {
       return notificationConfig.types.bell;
     case 'title':
       return notificationConfig.types.title;
+    case 'osc':
+      return notificationConfig.types.osc;
     default:
       return notificationConfig.types.osc;
   }
@@ -202,20 +204,20 @@ const OSC_PATTERNS: OscPattern[] = [
     // iTerm2/Growl notification: ESC ] 9 ; message BEL
     name: 'osc9',
     pattern: /\x1b\]9;([^\x07]*)\x07/g,
-    extract: (match) => match[1] ? { type: 'bell', context: match[1] } : null,
+    extract: (match) => match[1] ? { type: 'osc', context: match[1] } : null,
   },
   {
     // Kitty notification: ESC ] 99 ; i=id:d=0; body BEL (simplified)
     name: 'osc99',
     pattern: /\x1b\]99;[^;]*;([^\x07]*)\x07/g,
-    extract: (match) => match[1] ? { type: 'bell', context: match[1] } : null,
+    extract: (match) => match[1] ? { type: 'osc', context: match[1] } : null,
   },
   {
     // rxvt notification: ESC ] 777 ; notify ; title ; body BEL
     name: 'osc777notify',
     pattern: /\x1b\]777;notify;([^;]*);([^\x07]*)\x07/g,
     extract: (match) => ({
-      type: 'bell',
+      type: 'osc',
       context: match[2] || match[1] || 'Notification',
     }),
   },
@@ -630,7 +632,7 @@ function createPtyDataHandler(
         addInboxItem(createInboxNotification(
           id,
           sessionName,
-          exitCode !== 0 ? 'exit' : 'idle',
+          exitCode !== 0 ? 'exit' : 'osc',
           context,
           currentProcessTitle,
           exitCode !== 0 ? exitCode : undefined

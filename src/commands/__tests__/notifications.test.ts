@@ -11,6 +11,8 @@ import {
   BASH_ZSH_HOOK_EXPORT as BASH_ZSH_HOOK,
   FISH_HOOK_EXPORT as FISH_HOOK,
 } from '../notifications';
+import { logger } from '../../utils/logger';
+import { spyOn } from 'bun:test';
 
 // ============================================================================
 // Test Setup
@@ -140,15 +142,17 @@ describe('installHook', () => {
     expect(content).toContain('fish_preexec');
   });
 
-  it('should install fish hook with correct syntax', () => {
-    const filePath = join(tempDir, 'config.fish');
+  it('should warn if existing DEBUG trap is found in bashrc', () => {
+    const filePath = join(tempDir, '.bashrc');
+    const existingContent = 'trap "echo debug" DEBUG\n';
+    writeFileSync(filePath, existingContent);
 
-    installHook(filePath, FISH_HOOK);
+    const warnSpy = spyOn(logger, 'warning');
+    installHook(filePath, BASH_ZSH_HOOK);
 
-    const content = readFileSync(filePath, 'utf-8');
-    expect(content).toContain('set -q TMUX_LITE');
-    expect(content).toContain('function __gitspace_preexec --on-event fish_preexec');
-    expect(content).toContain('function __gitspace_postexec --on-event fish_postexec');
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0][0]).toContain('Existing DEBUG trap found');
+    warnSpy.mockRestore();
   });
 });
 

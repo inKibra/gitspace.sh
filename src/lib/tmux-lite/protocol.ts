@@ -121,7 +121,7 @@ export interface InboxItem {
   id: string;
   sessionId: string;
   sessionName: string;
-  type: 'bell' | 'exit' | 'title' | 'idle';
+  type: 'bell' | 'exit' | 'title' | 'idle' | 'osc';
   timestamp: number;
   exitCode?: number;
   context: string;  // The actual message/output
