@@ -66,14 +66,16 @@ describe('isNotificationTypeEnabled', () => {
     expect(isNotificationTypeEnabled('idle', config)).toBe(true);
     expect(isNotificationTypeEnabled('bell', config)).toBe(true);
     expect(isNotificationTypeEnabled('title', config)).toBe(true);
+    expect(isNotificationTypeEnabled('osc', config)).toBe(true);
   });
 
   it('should return false for disabled notification types', () => {
     const config = createConfig({
-      types: { exit: false, idle: false, bell: true, title: true, osc: true },
+      types: { exit: false, idle: false, bell: true, title: true, osc: false },
     });
     expect(isNotificationTypeEnabled('exit', config)).toBe(false);
     expect(isNotificationTypeEnabled('idle', config)).toBe(false);
+    expect(isNotificationTypeEnabled('osc', config)).toBe(false);
     expect(isNotificationTypeEnabled('bell', config)).toBe(true);
   });
 
@@ -286,6 +288,19 @@ describe('itemToToast', () => {
 
     expect(toast.icon).toBe('📝');
     expect(toast.title).toBe('Title Change: bash');
+  });
+
+  it('should convert osc item', () => {
+    const item = createInboxItem({
+      type: 'osc',
+      processTitle: 'app',
+      context: 'Custom notification',
+    });
+
+    const toast = itemToToast(item);
+
+    expect(toast.icon).toBe('📟');
+    expect(toast.title).toBe('OSC Notification: app');
   });
 
   it('should truncate long preview text', () => {
