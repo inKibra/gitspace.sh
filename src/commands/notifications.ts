@@ -12,7 +12,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } fr
 import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from '../utils/logger.js';
-import { getNotificationConfig, updateNotificationConfig } from '../core/config.js';
+import { getNotificationConfig } from '../core/config.js';
 
 // ============================================================================
 // Shell Hook Snippets
