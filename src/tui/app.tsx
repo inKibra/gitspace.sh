@@ -1618,6 +1618,8 @@ function App({ relayConfig, onQuit }: AppProps) {
           interceptShiftTab={!!notifications.activeToast}
           onActivity={handleTerminalActivity}
         />
+        {/* Flow modal overlay (e.g. "steal session" confirm) */}
+        <FlowTUI flow={flow} />
       </Fragment>
     );
   }

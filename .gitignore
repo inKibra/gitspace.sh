@@ -10,6 +10,7 @@ npm/
 *.tsbuildinfo
 src/relay/embedded-assets.generated.js
 src/version.generated.ts
+src/version.generated.js
 
 # Environment
 .env

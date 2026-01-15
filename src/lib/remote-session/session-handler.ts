@@ -492,18 +492,33 @@ export class RemoteSessionHandler {
 
   /**
    * Handle get_inbox request
+   * Returns unread count bounded by active sessions (one per session max).
    */
   private async handleGetInbox(
     session: RemoteClientSession,
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     try {
-      const items = await getInbox();
-      const unreadCount = items.filter(i => !i.read).length;
+      const [items, activeSessions] = await Promise.all([
+        getInbox(),
+        listSessions(),
+      ]);
+      
+      // Build a set of active session IDs
+      const activeSessionIds = new Set(activeSessions.map(s => s.id));
+      
+      // Count unique sessions that have unread items AND are still active
+      const activeSessionsWithUnread = new Set<string>();
+      for (const item of items) {
+        if (!item.read && activeSessionIds.has(item.sessionId)) {
+          activeSessionsWithUnread.add(item.sessionId);
+        }
+      }
+      
       await this.sendMessage(session, sendResponse, {
         type: "inbox_list",
         items,
-        unreadCount,
+        unreadCount: activeSessionsWithUnread.size,
       });
     } catch (e) {
       console.error("[remote-session] Failed to get inbox:", e);

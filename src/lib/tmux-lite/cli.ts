@@ -306,9 +306,30 @@ export async function getInbox(): Promise<InboxItem[]> {
   throw new Error("Unexpected response");
 }
 
+/**
+ * Get count of unread inbox items, bounded by active sessions.
+ * Returns the number of unique active sessions that have unread notifications,
+ * not the total number of unread items. This prevents the count from growing
+ * unboundedly and caps it at one per active session.
+ */
 export async function getUnreadCount(): Promise<number> {
-  const items = await getInbox();
-  return items.filter(i => !i.read).length;
+  const [items, activeSessions] = await Promise.all([
+    getInbox(),
+    listSessions(),
+  ]);
+  
+  // Build a set of active session IDs
+  const activeSessionIds = new Set(activeSessions.map(s => s.id));
+  
+  // Count unique sessions that have unread items AND are still active
+  const activeSessionsWithUnread = new Set<string>();
+  for (const item of items) {
+    if (!item.read && activeSessionIds.has(item.sessionId)) {
+      activeSessionsWithUnread.add(item.sessionId);
+    }
+  }
+  
+  return activeSessionsWithUnread.size;
 }
 
 export async function clearInbox(id?: string): Promise<void> {

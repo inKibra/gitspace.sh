@@ -335,6 +335,22 @@ function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
   broadcastTitleUpdate();
 }
 
+/**
+ * Prune inbox items for a destroyed session.
+ * This removes all notifications associated with a session when it exits,
+ * keeping the inbox clean and ensuring the count only reflects active sessions.
+ */
+function pruneInboxForSession(sessionId: string): void {
+  // Find and remove all inbox items for this session
+  let i = inbox.length;
+  while (i--) {
+    if (inbox[i].sessionId === sessionId) {
+      inbox.splice(i, 1);
+    }
+  }
+  console.log(`[inbox] Pruned notifications for session ${sessionId}`);
+}
+
 function getLastLines(xterm: XTerminal, count: number): string {
   const buffer = xterm.buffer.active;
   const lines: string[] = [];
@@ -353,8 +369,23 @@ function getCurrentLine(xterm: XTerminal): string {
   return buffer.getLine(buffer.cursorY)?.translateToString(true)?.trim() || '';
 }
 
+/**
+ * Get count of unread inbox items, bounded by active sessions.
+ * Returns the number of unique active sessions that have unread notifications,
+ * not the total number of unread items. This prevents the count from growing
+ * unboundedly (e.g., to 3000) and instead caps it at one per active session.
+ */
 function getUnreadInboxCount(): number {
-  return inbox.filter(i => !i.read).length;
+  // Get unique session IDs that have unread items AND are still active
+  const activeSessionsWithUnread = new Set<string>();
+  
+  for (const item of inbox) {
+    if (!item.read && sessions.has(item.sessionId)) {
+      activeSessionsWithUnread.add(item.sessionId);
+    }
+  }
+  
+  return activeSessionsWithUnread.size;
 }
 
 function buildTitle(sessionName: string, processTitle?: string): string {
@@ -646,6 +677,10 @@ function handleProcessExit(
 
     // Clean up parser hooks
     try { disposeDsr(); } catch {}
+
+    // Prune old inbox items for this session so inbox stays bounded to active sessions.
+    // Do this before adding the final exit notification so the user still sees the exit event.
+    pruneInboxForSession(id);
 
     // Capture last lines for inbox before disposing xterm
     const context = getLastLines(xterm, 3);
