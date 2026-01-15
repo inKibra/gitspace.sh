@@ -11,6 +11,8 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
+import { getNotificationConfig, type NotificationConfig } from "../../core/config.js";
+import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
   getRouterSocket,
   getSessionSocketPath,
@@ -50,6 +52,35 @@ if (rawArgs.includes("--test")) {
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
 const SERVER_START_TIME = Date.now();
+
+// Load notification config (with fallback to defaults)
+let notificationConfig: NotificationConfig;
+try {
+  notificationConfig = getNotificationConfig();
+} catch {
+  // If config can't be loaded (e.g., gitspace not initialized), use defaults
+  notificationConfig = { ...DEFAULT_NOTIFICATION_CONFIG };
+}
+
+/**
+ * Check if a notification type is enabled
+ */
+function isNotificationTypeEnabled(type: InboxItem['type']): boolean {
+  if (!notificationConfig.enabled) return false;
+
+  switch (type) {
+    case 'exit':
+      return notificationConfig.types.exit;
+    case 'idle':
+      return notificationConfig.types.idle;
+    case 'bell':
+      return notificationConfig.types.bell;
+    case 'title':
+      return notificationConfig.types.title;
+    default:
+      return notificationConfig.types.osc;
+  }
+}
 
 // Clean up old socket
 try { unlinkSync(ROUTER_SOCKET); } catch {}
@@ -288,6 +319,11 @@ function genInboxId(): string {
 }
 
 function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
+  // Check if this notification type is enabled in config
+  if (!isNotificationTypeEnabled(item.type)) {
+    return;
+  }
+
   inbox.push({
     ...item,
     id: genInboxId(),
@@ -297,6 +333,22 @@ function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
 
   // Update titles for all attached sessions to show new inbox count
   broadcastTitleUpdate();
+}
+
+/**
+ * Prune inbox items for a destroyed session.
+ * This removes all notifications associated with a session when it exits,
+ * keeping the inbox clean and ensuring the count only reflects active sessions.
+ */
+function pruneInboxForSession(sessionId: string): void {
+  // Find and remove all inbox items for this session
+  let i = inbox.length;
+  while (i--) {
+    if (inbox[i].sessionId === sessionId) {
+      inbox.splice(i, 1);
+    }
+  }
+  console.log(`[inbox] Pruned notifications for session ${sessionId}`);
 }
 
 function getLastLines(xterm: XTerminal, count: number): string {
@@ -317,8 +369,23 @@ function getCurrentLine(xterm: XTerminal): string {
   return buffer.getLine(buffer.cursorY)?.translateToString(true)?.trim() || '';
 }
 
+/**
+ * Get count of unread inbox items, bounded by active sessions.
+ * Returns the number of unique active sessions that have unread notifications,
+ * not the total number of unread items. This prevents the count from growing
+ * unboundedly (e.g., to 3000) and instead caps it at one per active session.
+ */
 function getUnreadInboxCount(): number {
-  return inbox.filter(i => !i.read).length;
+  // Get unique session IDs that have unread items AND are still active
+  const activeSessionsWithUnread = new Set<string>();
+  
+  for (const item of inbox) {
+    if (!item.read && sessions.has(item.sessionId)) {
+      activeSessionsWithUnread.add(item.sessionId);
+    }
+  }
+  
+  return activeSessionsWithUnread.size;
 }
 
 function buildTitle(sessionName: string, processTitle?: string): string {
@@ -477,6 +544,7 @@ function setupXtermEventHandlers(
  */
 interface Osc133State {
   commandRunning: boolean;
+  commandStartTime: number;  // Timestamp when command started (for duration filter)
 }
 
 /**
@@ -536,6 +604,7 @@ function createPtyDataHandler(
     // Command start
     if (OSC_133_CMD_START.test(str)) {
       osc133State.commandRunning = true;
+      osc133State.commandStartTime = now;
       OSC_133_CMD_START.lastIndex = 0; // Reset regex state
     }
 
@@ -544,8 +613,19 @@ function createPtyDataHandler(
     const osc133DoneMatches = [...str.matchAll(OSC_133_DONE_PATTERN)];
     for (const match of osc133DoneMatches) {
       const exitCode = match[1] ? parseInt(match[1], 10) : 0;
-      // Only notify for background sessions with non-zero exit or if command was tracked
-      if (!activelyUsing && (exitCode !== 0 || osc133State.commandRunning)) {
+      const commandDuration = osc133State.commandStartTime > 0
+        ? now - osc133State.commandStartTime
+        : 0;
+
+      // Only notify for background sessions if:
+      // - Non-zero exit (always notify on errors)
+      // - OR command duration >= minCommandDurationMs
+      const shouldNotify = !activelyUsing && (
+        exitCode !== 0 ||
+        (osc133State.commandRunning && commandDuration >= notificationConfig.minCommandDurationMs)
+      );
+
+      if (shouldNotify) {
         const context = getLastLines(xterm, 2) || `Command finished (exit ${exitCode})`;
         addInboxItem(createInboxNotification(
           id,
@@ -555,9 +635,10 @@ function createPtyDataHandler(
           currentProcessTitle,
           exitCode !== 0 ? exitCode : undefined
         ));
-        console.log(`[${sessionName}] OSC 133 command done: exit ${exitCode}`);
+        console.log(`[${sessionName}] OSC 133 command done: exit ${exitCode}, duration ${commandDuration}ms`);
       }
       osc133State.commandRunning = false;
+      osc133State.commandStartTime = 0;
     }
 
     // Pass original data through unchanged to preserve all escape sequences
@@ -596,6 +677,10 @@ function handleProcessExit(
 
     // Clean up parser hooks
     try { disposeDsr(); } catch {}
+
+    // Prune old inbox items for this session so inbox stays bounded to active sessions.
+    // Do this before adding the final exit notification so the user still sees the exit event.
+    pruneInboxForSession(id);
 
     // Capture last lines for inbox before disposing xterm
     const context = getLastLines(xterm, 3);
@@ -984,6 +1069,7 @@ function createSession(name: string | undefined, cwd: string): Session {
   // Initialize OSC 133 state for shell integration
   const osc133State: Osc133State = {
     commandRunning: false,
+    commandStartTime: 0,
   };
 
   // Create the idle checker function

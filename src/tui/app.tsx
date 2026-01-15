@@ -10,7 +10,7 @@
 
 import { createCliRenderer } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { useState, useEffect, useCallback, useReducer, Fragment } from 'react';
+import { useState, useEffect, useCallback, useReducer, Fragment, useMemo } from 'react';
 import { Toaster } from '@opentui-ui/toast/react';
 
 // Terminal component
@@ -38,6 +38,12 @@ import { ProjectListTUI } from '../shared/components/ProjectList.tui.js';
 import { InboxTUI } from '../shared/components/Inbox.tui.js';
 import { useInbox } from '../shared/components/Inbox.js';
 import { clearInbox, markInboxRead } from '../lib/tmux-lite/cli.js';
+import { toast } from '@opentui-ui/toast';
+import {
+  useNotifications,
+  type ToastNotification,
+  DEFAULT_NOTIFICATION_CONFIG,
+} from '../shared/notifications/index.js';
 
 // Local state and config
 import {
@@ -1153,9 +1159,73 @@ function App({ relayConfig, onQuit }: AppProps) {
     },
   });
 
+  // ========== Activity Tracking for Notifications ==========
+
+  // Track last activity time for idle detection
+  const [lastActivityAt, setLastActivityAt] = useState(Date.now());
+  const [activityTick, setActivityTick] = useState(0); // Forces re-evaluation
+
+  // Callback to update activity timestamp (passed to Terminal)
+  const handleTerminalActivity = useCallback(() => {
+    setLastActivityAt(Date.now());
+  }, []);
+
+  // Re-evaluate isUserActive periodically (every 1 second)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActivityTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Compute whether user is active based on view and last activity
+  const holdWhenIdleMs = DEFAULT_NOTIFICATION_CONFIG.toast.holdWhenIdleMs || 15000;
+  const isUserActive = useMemo(() => {
+    // Always "active" when not in terminal view (browsing projects/workspaces)
+    if (state.view !== 'terminal') return true;
+    // In terminal view, check if activity is recent
+    return Date.now() - lastActivityAt < holdWhenIdleMs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.view, lastActivityAt, holdWhenIdleMs, activityTick]);
+
+  // ========== Notification Toasts ==========
+
+  const handleShowToast = useCallback((notification: ToastNotification) => {
+    const description = notification.preview
+      ? `${notification.preview}\n[Shift+Tab to attach]`
+      : '[Shift+Tab to attach]';
+    toast.info(`${notification.icon} ${notification.title}`, {
+      description,
+      duration: 8000,
+    });
+  }, []);
+
+  const notifications = useNotifications({
+    items: state.inbox,
+    config: DEFAULT_NOTIFICATION_CONFIG,
+    onShowToast: handleShowToast,
+    onAttachSession: (sessionId) => {
+      handleAttachSession({ sessionId });
+    },
+    onMarkRead: async (itemId) => {
+      await markInboxRead(itemId);
+    },
+    pollIntervalMs: 5000,
+    onRefreshInbox: refreshInbox,
+    isUserActive,
+    currentSessionId: state.attachedSession?.id,
+  });
+
   // ========== Keyboard Handlers ==========
 
   useKeyboard(async (key) => {
+    // Toast-only attach hotkey (Shift+Tab) - check FIRST, even in terminal view
+    // This allows attaching to a different session while in a terminal
+    if (key.shift && key.name === 'tab' && notifications.activeToast) {
+      notifications.attachToActiveToast();
+      return;
+    }
+
     // Don't handle keys when in terminal view (Terminal component handles input)
     if (state.view === 'terminal') {
       return;
@@ -1545,7 +1615,11 @@ function App({ relayConfig, onQuit }: AppProps) {
           onExit={handleTerminalExit}
           onKicked={handleTerminalKicked}
           onError={handleTerminalError}
+          interceptShiftTab={!!notifications.activeToast}
+          onActivity={handleTerminalActivity}
         />
+        {/* Flow modal overlay (e.g. "steal session" confirm) */}
+        <FlowTUI flow={flow} />
       </Fragment>
     );
   }

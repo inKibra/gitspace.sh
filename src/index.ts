@@ -56,6 +56,7 @@ import { hostReserve, hostRelease, hostList, hostSetPrimary, hostStatus } from '
 import { startTmux, stopTmux, statusTmux, listTmux, newTmux, attachTmux, killTmux } from './commands/tmux.js'
 import { showStatus } from './commands/status.js'
 import { linearSetup, linearShow, linearClear } from './commands/linear.js'
+import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
 
 const program = new Command()
 
@@ -694,6 +695,60 @@ linearCommand
 		await checkFirstTimeSetup()
 		try {
 			await linearClear(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Notifications Commands
+// ============================================================================
+
+const notificationsCommand = program
+	.command('notifications')
+	.alias('notify')
+	.description('Manage notification settings and shell hooks')
+
+notificationsCommand
+	.command('install')
+	.description('Install shell hooks for notification integration')
+	.action(async () => {
+		try {
+			await notificationsInstall()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+notificationsCommand
+	.command('uninstall')
+	.description('Remove shell hooks from shell config files')
+	.action(async () => {
+		try {
+			await notificationsUninstall()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+notificationsCommand
+	.command('hook')
+	.description('Print shell hook snippet for manual installation')
+	.option('--shell <shell>', 'Shell type (bash, zsh, fish)')
+	.action(async (options) => {
+		try {
+			await notificationsHook(options.shell)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+notificationsCommand
+	.command('status')
+	.description('Show notification settings and hook installation status')
+	.action(async () => {
+		try {
+			await notificationsStatus()
 		} catch (error) {
 			handleError(error)
 		}

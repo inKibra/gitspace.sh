@@ -5,6 +5,8 @@ interface Props {
   onData: (data: Uint8Array) => void;
   setWriteCallback: (fn: (data: Uint8Array) => void) => void;
   onResize?: (cols: number, rows: number) => void;
+  /** Called when user interacts with terminal (for activity tracking) */
+  onActivity?: () => void;
 }
 
 /** Methods exposed via ref for external control */
@@ -20,13 +22,14 @@ const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before s
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 
 export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
-  { onData, setWriteCallback, onResize },
+  { onData, setWriteCallback, onResize, onActivity },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<GhosttyTerminal | null>(null);
   const initializedRef = useRef(false);
   const onDataRef = useRef(onData);
+  const onActivityRef = useRef(onActivity);
 
   // Touch state with accumulated delta pattern
   const touchStateRef = useRef<{
@@ -39,10 +42,14 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
     hasSelection: boolean; // whether user is selecting text
   } | null>(null);
 
-  // Keep ref up to date
+  // Keep refs up to date
   useEffect(() => {
     onDataRef.current = onData;
   }, [onData]);
+
+  useEffect(() => {
+    onActivityRef.current = onActivity;
+  }, [onActivity]);
 
   // Expose methods via ref for external control (e.g., from TerminalControls)
   useImperativeHandle(
@@ -109,6 +116,7 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
 
       // Wire up input
       term.onData((data: string) => {
+        onActivityRef.current?.(); // Track user activity
         onDataRef.current(new TextEncoder().encode(data));
       });
 
@@ -193,8 +201,9 @@ export const Terminal = forwardRef<TerminalHandle, Props>(function Terminal(
           touchStateRef.current &&
           touchStateRef.current.totalMovement < TAP_MOVE_THRESHOLD;
 
-        // If it was a tap, focus the terminal
+        // If it was a tap, focus the terminal and track activity
         if (wasTap && terminalRef.current) {
+          onActivityRef.current?.(); // Track user activity
           terminalRef.current.focus();
         }
 

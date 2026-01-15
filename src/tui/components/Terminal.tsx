@@ -55,6 +55,10 @@ export interface TerminalProps {
   onExit: (code: number) => void;
   onKicked: () => void;
   onError: (error: string) => void;
+  /** When true, Shift+Tab is intercepted by parent for toast attach */
+  interceptShiftTab?: boolean;
+  /** Called when user interacts with terminal (for activity tracking) */
+  onActivity?: () => void;
 }
 
 type TerminalStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -94,7 +98,7 @@ function getTerminalSize() {
   };
 }
 
-export function Terminal({ session, onDetach, onExit, onKicked, onError }: TerminalProps) {
+export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab, onActivity }: TerminalProps) {
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [termSize, setTermSize] = useState(getTerminalSize);
@@ -163,6 +167,9 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
       const text = e.text ?? '';
       if (text.length === 0) return;
 
+      // Track user activity for notification hold/flush
+      onActivity?.();
+
       const payload = wrapPaste(text, bracketedPasteRef.current.isEnabled);
 
       const frame = encodePTY(Buffer.from(payload));
@@ -176,7 +183,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
     return () => {
       renderer.keyInput.off('paste', handlePaste);
     };
-  }, [renderer]);
+  }, [renderer, onActivity]);
 
   // Track when terminal ref changes to flush pending data
   const [terminalMounted, setTerminalMounted] = useState(false);
@@ -399,6 +406,9 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
     const socket = socketRef.current;
     if (!socket) return;
 
+    // Track user activity for notification hold/flush
+    onActivity?.();
+
     // Check for Ctrl+Esc (detach) - key.name is 'escape' with ctrl modifier
     if (key.name === 'escape' && key.ctrl) {
       const frame = encodeControl({ type: 'detach' });
@@ -437,7 +447,10 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError }: Termi
       const charCode = key.name.toLowerCase().charCodeAt(0) - 96;
       data = String.fromCharCode(charCode);
     } else if (key.shift && key.name === 'tab') {
-      // Shift+Tab (backtab) - send CSI Z
+      // Shift+Tab (backtab) - send CSI Z, unless intercepted by parent for toast
+      if (interceptShiftTab) {
+        return; // Parent handles this for toast attach
+      }
       data = '\x1b[Z';
     } else if (hasModifier && key.name && specialKeys[key.name]) {
       // Special keys with modifiers - construct proper CSI sequence

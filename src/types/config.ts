@@ -3,6 +3,67 @@
  */
 
 /**
+ * Notification type toggles
+ */
+export interface NotificationTypeConfig {
+  /** Notify on process exit (default: true) */
+  exit: boolean;
+  /** Notify when terminal goes idle after activity (default: true) */
+  idle: boolean;
+  /** Notify on terminal bell (default: true) */
+  bell: boolean;
+  /** Notify on terminal title change (default: true) */
+  title: boolean;
+  /** Notify on OSC sequences (9, 99, 777) (default: true) */
+  osc: boolean;
+}
+
+/**
+ * Toast notification settings
+ */
+export interface NotificationToastConfig {
+  /** Whether toast notifications are enabled (default: true) */
+  enabled: boolean;
+  /** Hold toasts when user is idle for this duration (ms). 0 = disabled. (default: 15000) */
+  holdWhenIdleMs: number;
+}
+
+/**
+ * Notification configuration
+ */
+export interface NotificationConfig {
+  /** Whether notifications are enabled globally (default: true) */
+  enabled: boolean;
+  /** Minimum command duration (ms) before notifying on completion (default: 10000) */
+  minCommandDurationMs: number;
+  /** Which notification types are enabled */
+  types: NotificationTypeConfig;
+  /** Toast notification settings */
+  toast: NotificationToastConfig;
+}
+
+/**
+ * Default notification type config
+ */
+export const DEFAULT_NOTIFICATION_TYPES: NotificationTypeConfig = {
+  exit: true,
+  idle: true,
+  bell: true,
+  title: true,
+  osc: true,
+};
+
+/**
+ * Default notification config
+ */
+export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
+  enabled: true,
+  minCommandDurationMs: 10000,
+  types: { ...DEFAULT_NOTIFICATION_TYPES },
+  toast: { enabled: true, holdWhenIdleMs: 15000 },
+};
+
+/**
  * Linear team info stored in config
  */
 export interface LinearTeamInfo {
@@ -30,6 +91,8 @@ export interface GlobalConfig {
   linearTeams?: LinearTeamInfo[];
   /** Default Linear team key for new projects */
   linearDefaultTeam?: string;
+  /** Notification settings */
+  notifications?: NotificationConfig;
 }
 
 /**
@@ -88,6 +151,7 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
   projectsDir: '', // Will be set to ~/gitspace at runtime
   defaultBaseBranch: 'main',
   staleDays: 30,
+  notifications: { ...DEFAULT_NOTIFICATION_CONFIG },
 };
 
 /**
