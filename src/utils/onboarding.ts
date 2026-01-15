@@ -3,10 +3,9 @@
  * Runs interactive onboarding steps from bundle manifests
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { logger } from './logger.js';
 import { promptInput, promptConfirm, promptPassword } from './prompts.js';
+import { checkCommandExists } from './deps.js';
 import type {
   OnboardingStep,
   OnboardingResult,
@@ -15,8 +14,6 @@ import type {
   SecretStep,
   InputStep,
 } from '../types/bundle.js';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Execute all onboarding steps
@@ -194,22 +191,6 @@ async function executeInputStep(step: InputStep): Promise<string | null> {
   });
 
   return value;
-}
-
-/**
- * Check if a command exists in PATH
- */
-async function checkCommandExists(command: string): Promise<boolean> {
-  if (!/^[a-zA-Z0-9_-]+$/.test(command)) {
-    return false;
-  }
-
-  try {
-    await execFileAsync('which', [command]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
