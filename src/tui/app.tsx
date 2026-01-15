@@ -63,7 +63,10 @@ import {
   createProject,
   projectExists,
   updateProjectConfig,
+  getNotificationConfig,
+  updateNotificationConfig,
 } from '../core/config.js';
+import type { NotificationConfig, NotificationTypeConfig } from '../types/config.js';
 
 // Git and workspace operations
 import { listRemoteBranches, createWorktree, getDefaultBranch } from '../core/git.js';
@@ -132,6 +135,14 @@ type ProjectFlowState =
       confirmStatus?: 'checking' | 'found' | 'missing' | null;
     }
   | { type: 'creating'; projectName: string };
+
+/** Settings flow states - explicit state machine for settings modal */
+type SettingsFlowState =
+  | { type: 'closed' }
+  | { type: 'main-menu'; selectedIndex: number; config: NotificationConfig }
+  | { type: 'types-menu'; selectedIndex: number; config: NotificationConfig }
+  | { type: 'edit-duration'; value: string; config: NotificationConfig }
+  | { type: 'edit-hold-duration'; value: string; config: NotificationConfig };
 
 // ============================================================================
 // Constants
@@ -294,6 +305,9 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // Project creation flow (custom state machine)
   const [projectFlow, setProjectFlow] = useState<ProjectFlowState>({ type: 'closed' });
+
+  // Settings flow (custom state machine)
+  const [settingsFlow, setSettingsFlow] = useState<SettingsFlowState>({ type: 'closed' });
 
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
@@ -1458,6 +1472,138 @@ function App({ relayConfig, onQuit }: AppProps) {
       return;
     }
 
+    // Settings shortcut (global) - open settings modal
+    if (key.raw === ',') {
+      const config = getNotificationConfig();
+      setSettingsFlow({ type: 'main-menu', selectedIndex: 0, config });
+      return;
+    }
+
+    // Settings flow keyboard handling
+    if (settingsFlow.type !== 'closed') {
+      if (key.name === 'escape') {
+        if (settingsFlow.type === 'types-menu') {
+          // Go back to main menu
+          setSettingsFlow({ type: 'main-menu', selectedIndex: 4, config: settingsFlow.config });
+        } else if (settingsFlow.type === 'edit-duration' || settingsFlow.type === 'edit-hold-duration') {
+          // Go back to main menu
+          setSettingsFlow({ type: 'main-menu', selectedIndex: settingsFlow.type === 'edit-duration' ? 2 : 3, config: settingsFlow.config });
+        } else {
+          setSettingsFlow({ type: 'closed' });
+        }
+        return;
+      }
+
+      if (settingsFlow.type === 'main-menu') {
+        const menuItems = [
+          'notifications-enabled',
+          'toast-enabled',
+          'min-duration',
+          'hold-duration',
+          'types',
+          'reset',
+        ];
+
+        if (key.name === 'up' || key.raw === 'k') {
+          setSettingsFlow({
+            ...settingsFlow,
+            selectedIndex: Math.max(0, settingsFlow.selectedIndex - 1),
+          });
+        } else if (key.name === 'down' || key.raw === 'j') {
+          setSettingsFlow({
+            ...settingsFlow,
+            selectedIndex: Math.min(menuItems.length - 1, settingsFlow.selectedIndex + 1),
+          });
+        } else if (key.name === 'return') {
+          const selected = menuItems[settingsFlow.selectedIndex];
+          if (selected === 'notifications-enabled') {
+            const newConfig = { ...settingsFlow.config, enabled: !settingsFlow.config.enabled };
+            updateNotificationConfig(newConfig);
+            setSettingsFlow({ ...settingsFlow, config: newConfig });
+          } else if (selected === 'toast-enabled') {
+            const newConfig = {
+              ...settingsFlow.config,
+              toast: { ...settingsFlow.config.toast, enabled: !settingsFlow.config.toast.enabled },
+            };
+            updateNotificationConfig(newConfig);
+            setSettingsFlow({ ...settingsFlow, config: newConfig });
+          } else if (selected === 'min-duration') {
+            const currentSec = Math.round(settingsFlow.config.minCommandDurationMs / 1000);
+            setSettingsFlow({ type: 'edit-duration', value: String(currentSec), config: settingsFlow.config });
+          } else if (selected === 'hold-duration') {
+            const currentSec = Math.round(settingsFlow.config.toast.holdWhenIdleMs / 1000);
+            setSettingsFlow({ type: 'edit-hold-duration', value: String(currentSec), config: settingsFlow.config });
+          } else if (selected === 'types') {
+            setSettingsFlow({ type: 'types-menu', selectedIndex: 0, config: settingsFlow.config });
+          } else if (selected === 'reset') {
+            updateNotificationConfig(DEFAULT_NOTIFICATION_CONFIG);
+            setSettingsFlow({ ...settingsFlow, config: DEFAULT_NOTIFICATION_CONFIG });
+          }
+        }
+        return;
+      }
+
+      if (settingsFlow.type === 'types-menu') {
+        const typeKeys: (keyof NotificationTypeConfig)[] = ['exit', 'idle', 'bell', 'title', 'osc'];
+        const menuItems = [...typeKeys, 'back'];
+
+        if (key.name === 'up' || key.raw === 'k') {
+          setSettingsFlow({
+            ...settingsFlow,
+            selectedIndex: Math.max(0, settingsFlow.selectedIndex - 1),
+          });
+        } else if (key.name === 'down' || key.raw === 'j') {
+          setSettingsFlow({
+            ...settingsFlow,
+            selectedIndex: Math.min(menuItems.length - 1, settingsFlow.selectedIndex + 1),
+          });
+        } else if (key.name === 'return') {
+          if (settingsFlow.selectedIndex === menuItems.length - 1) {
+            // Back
+            setSettingsFlow({ type: 'main-menu', selectedIndex: 4, config: settingsFlow.config });
+          } else {
+            // Toggle type
+            const typeKey = typeKeys[settingsFlow.selectedIndex];
+            if (typeKey) {
+              const newConfig = {
+                ...settingsFlow.config,
+                types: { ...settingsFlow.config.types, [typeKey]: !settingsFlow.config.types[typeKey] },
+              };
+              updateNotificationConfig(newConfig);
+              setSettingsFlow({ ...settingsFlow, config: newConfig });
+            }
+          }
+        }
+        return;
+      }
+
+      if (settingsFlow.type === 'edit-duration' || settingsFlow.type === 'edit-hold-duration') {
+        if (key.name === 'return') {
+          const num = parseInt(settingsFlow.value, 10);
+          if (!isNaN(num) && num >= 0) {
+            const newConfig = settingsFlow.type === 'edit-duration'
+              ? { ...settingsFlow.config, minCommandDurationMs: num * 1000 }
+              : { ...settingsFlow.config, toast: { ...settingsFlow.config.toast, holdWhenIdleMs: num * 1000 } };
+            updateNotificationConfig(newConfig);
+            setSettingsFlow({ type: 'main-menu', selectedIndex: settingsFlow.type === 'edit-duration' ? 2 : 3, config: newConfig });
+          }
+        } else if (key.name === 'backspace') {
+          setSettingsFlow({
+            ...settingsFlow,
+            value: settingsFlow.value.slice(0, -1),
+          });
+        } else if (key.raw && /^[0-9]$/.test(key.raw)) {
+          setSettingsFlow({
+            ...settingsFlow,
+            value: settingsFlow.value + key.raw,
+          });
+        }
+        return;
+      }
+
+      return;
+    }
+
     // Inbox view keyboard handling
     if (state.view === 'inbox') {
       if (key.name === 'escape') {
@@ -1697,8 +1843,8 @@ function App({ relayConfig, onQuit }: AppProps) {
       {/* Status bar */}
       <StatusBar
         hint={state.panelFocus === 'projects'
-          ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [?] Help  [q] Quit'
-          : '[Tab] Switch  [Enter] Open/Join  [n] New Workspace  [d] Delete  [x] Kill  [?] Help  [q] Quit'
+          ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
+          : '[Tab] Switch  [Enter] Open/Join  [n] New Workspace  [d] Delete  [x] Kill  [,] Settings  [?] Help  [q] Quit'
         }
       />
 
@@ -1710,6 +1856,9 @@ function App({ relayConfig, onQuit }: AppProps) {
 
       {/* Project creation flow modal */}
       <ProjectFlowModal flow={projectFlow} />
+
+      {/* Settings flow modal */}
+      <SettingsFlowModal flow={settingsFlow} />
       </box>
     </Fragment>
   );
@@ -2026,6 +2175,131 @@ function ProjectFlowModal({ flow }: { flow: ProjectFlowState }) {
           <>
             <text fg={COLORS.title} height={1}>Creating Project</text>
             <text fg={COLORS.loading} height={1} marginTop={1}>Setting up {flow.projectName}...</text>
+          </>
+        )}
+      </box>
+    </box>
+  );
+}
+
+// ============================================================================
+// Settings Flow Modal Component
+// ============================================================================
+
+function SettingsFlowModal({ flow }: { flow: SettingsFlowState }) {
+  if (flow.type === 'closed') {
+    return null;
+  }
+
+  const modalWidth = 50;
+  const modalHeight = flow.type === 'main-menu' ? 14 :
+                      flow.type === 'types-menu' ? 12 :
+                      8;
+
+  const typeLabels: Record<keyof NotificationTypeConfig, string> = {
+    exit: 'Exit (process completion)',
+    idle: 'Idle (terminal idle)',
+    bell: 'Bell (terminal bell)',
+    title: 'Title (title change)',
+    osc: 'OSC (escape sequences)',
+  };
+
+  return (
+    <box
+      position="absolute"
+      width="100%"
+      height="100%"
+      justifyContent="center"
+      alignItems="center"
+    >
+      <box
+        flexDirection="column"
+        width={modalWidth}
+        height={modalHeight}
+        borderStyle="rounded"
+        borderColor={COLORS.borderFocused}
+        backgroundColor="#1a1a2e"
+        padding={1}
+      >
+        {/* Main menu */}
+        {flow.type === 'main-menu' && (
+          <>
+            <text fg={COLORS.title} height={1}>Notification Settings</text>
+            <box height={1} />
+            <text fg={flow.selectedIndex === 0 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 0 ? '▸ ' : '  '}{flow.config.enabled ? '✓' : '✗'} Notifications Enabled
+            </text>
+            <text fg={flow.selectedIndex === 1 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 1 ? '▸ ' : '  '}{flow.config.toast.enabled ? '✓' : '✗'} Toast Notifications
+            </text>
+            <text fg={flow.selectedIndex === 2 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 2 ? '▸ ' : '  '}Min Command Duration: {Math.round(flow.config.minCommandDurationMs / 1000)}s
+            </text>
+            <text fg={flow.selectedIndex === 3 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 3 ? '▸ ' : '  '}Toast Hold Duration: {Math.round(flow.config.toast.holdWhenIdleMs / 1000)}s
+            </text>
+            <text fg={flow.selectedIndex === 4 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 4 ? '▸ ' : '  '}Notification Types...
+            </text>
+            <text fg={flow.selectedIndex === 5 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 5 ? '▸ ' : '  '}↺ Reset to Defaults
+            </text>
+            <box height={1} />
+            <text fg={COLORS.textDim} height={1}>[↑↓] Navigate  [Enter] Toggle/Select  [Esc] Close</text>
+          </>
+        )}
+
+        {/* Types submenu */}
+        {flow.type === 'types-menu' && (
+          <>
+            <text fg={COLORS.title} height={1}>Notification Types</text>
+            <box height={1} />
+            {(Object.keys(typeLabels) as Array<keyof NotificationTypeConfig>).map((key, i) => (
+              <text key={key} fg={flow.selectedIndex === i ? COLORS.selected : COLORS.text} height={1}>
+                {flow.selectedIndex === i ? '▸ ' : '  '}{flow.config.types[key] ? '✓' : '✗'} {typeLabels[key]}
+              </text>
+            ))}
+            <text fg={flow.selectedIndex === 5 ? COLORS.selected : COLORS.text} height={1}>
+              {flow.selectedIndex === 5 ? '▸ ' : '  '}← Back
+            </text>
+            <box height={1} />
+            <text fg={COLORS.textDim} height={1}>[↑↓] Navigate  [Enter] Toggle  [Esc] Back</text>
+          </>
+        )}
+
+        {/* Edit duration */}
+        {flow.type === 'edit-duration' && (
+          <>
+            <text fg={COLORS.title} height={1}>Min Command Duration</text>
+            <text fg={COLORS.text} height={1} marginTop={1}>Duration in seconds before exit notification:</text>
+            <box
+              marginTop={1}
+              borderStyle="rounded"
+              borderColor={COLORS.border}
+              padding={0}
+              width="100%"
+            >
+              <text fg={COLORS.text} height={1}>{flow.value || '0'}_</text>
+            </box>
+            <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Save  [Esc] Cancel</text>
+          </>
+        )}
+
+        {/* Edit hold duration */}
+        {flow.type === 'edit-hold-duration' && (
+          <>
+            <text fg={COLORS.title} height={1}>Toast Hold Duration</text>
+            <text fg={COLORS.text} height={1} marginTop={1}>Hold toasts when idle (seconds, 0 to disable):</text>
+            <box
+              marginTop={1}
+              borderStyle="rounded"
+              borderColor={COLORS.border}
+              padding={0}
+              width="100%"
+            >
+              <text fg={COLORS.text} height={1}>{flow.value || '0'}_</text>
+            </box>
+            <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Save  [Esc] Cancel</text>
           </>
         )}
       </box>

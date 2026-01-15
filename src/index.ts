@@ -55,7 +55,7 @@ import { authLogin, authLogout, authStatus } from './commands/auth.js'
 import { hostReserve, hostRelease, hostList, hostSetPrimary, hostStatus } from './commands/host.js'
 import { startTmux, stopTmux, statusTmux, listTmux, newTmux, attachTmux, killTmux } from './commands/tmux.js'
 import { showStatus } from './commands/status.js'
-import { linearSetup, linearShow, linearClear } from './commands/linear.js'
+import { configNotifications, linearSetup, linearShow, linearClear } from './commands/config.js'
 import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
 
 const program = new Command()
@@ -653,14 +653,34 @@ tmuxCommand
 	})
 
 // ============================================================================
-// Linear Commands
+// Config Commands
 // ============================================================================
 
-const linearCommand = program
-	.command('linear')
-	.description('Manage Linear integration')
+const configCommand = program
+	.command('config')
+	.description('Configure gitspace settings')
 
-linearCommand
+// gssh config notifications
+configCommand
+	.command('notifications')
+	.description('Configure notification settings')
+	.option('--show', 'Show current settings')
+	.option('--reset', 'Reset to defaults')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await configNotifications(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// gssh config linear
+const configLinearCommand = configCommand
+	.command('linear')
+	.description('Configure Linear integration')
+
+configLinearCommand
 	.command('setup')
 	.description('Configure Linear integration')
 	.option('--project <name>', 'Configure for specific project (uses user API key)')
@@ -673,7 +693,7 @@ linearCommand
 		}
 	})
 
-linearCommand
+configLinearCommand
 	.command('show')
 	.description('Show Linear configuration')
 	.option('--project <name>', 'Show project-specific configuration')
@@ -686,7 +706,7 @@ linearCommand
 		}
 	})
 
-linearCommand
+configLinearCommand
 	.command('clear')
 	.description('Clear Linear configuration')
 	.option('--global', 'Clear user-level configuration')
