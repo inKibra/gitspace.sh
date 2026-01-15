@@ -43,11 +43,28 @@ export const REQUIRED_DEPS: Dependency[] = [
 ];
 
 /**
- * Check if a command exists
+ * Check if a command exists by running it with args
  */
 async function commandExists(command: string, checkArgs: string[]): Promise<boolean> {
   try {
     await execAsync(`${command} ${checkArgs.join(' ')}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a command exists in PATH using `which`
+ * Validates command name to prevent injection
+ */
+export async function checkCommandExists(command: string): Promise<boolean> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(command)) {
+    return false;
+  }
+
+  try {
+    await execAsync(`which ${command}`);
     return true;
   } catch {
     return false;

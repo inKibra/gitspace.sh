@@ -76,11 +76,8 @@ import type { LinearIssue } from '../types/workspace.js';
 import { listAllRepos, cloneRepository } from '../core/github.js';
 import { detectBundleInRepo, loadBundleFromPath, copyBundleScripts } from '../core/bundle.js';
 import { setProjectSecret } from '../utils/secrets.js';
+import { checkCommandExists } from '../utils/deps.js';
 import type { OnboardingStep } from '../types/bundle.js';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
 
 // TUI hooks
 import { useRemoteMachines, type RelayConfig } from './hooks/useRemoteMachines.js';
@@ -833,14 +830,10 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [refreshProjects, flow]);
 
   // Check if a command exists (for onboarding confirm steps)
-  const checkCommand = useCallback(async (command: string): Promise<boolean> => {
-    try {
-      await execAsync(command);
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
+  const checkCommand = useCallback(
+    (command: string) => checkCommandExists(command),
+    []
+  );
 
   // Advance to the next onboarding step
   const advanceOnboardingStep = useCallback(async () => {
