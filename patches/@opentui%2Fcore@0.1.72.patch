@@ -1,0 +1,42 @@
+diff --git a/index.js b/index.js
+index 203629db1bb318b131d77cd8ee32cc691453a2ec..8f6fce756d1e8bdce4284262bb00abfeb21970c9 100644
+--- a/index.js
++++ b/index.js
+@@ -6552,9 +6552,18 @@ class ScrollBoxRenderable extends BoxRenderable {
+     if (this.scrollTop <= 0) {
+       this._stickyScrollTop = true;
+       this._stickyScrollBottom = false;
++      // Reset manual scroll when back at sticky position
++      // When maxScrollTop is 0, content fits in viewport - we're at both top AND bottom
++      if (this._stickyStart === "top" || (this._stickyStart === "bottom" && maxScrollTop === 0)) {
++        this._hasManualScroll = false;
++      }
+     } else if (this.scrollTop >= maxScrollTop) {
+       this._stickyScrollTop = false;
+       this._stickyScrollBottom = true;
++      // Reset manual scroll when back at sticky position
++      if (this._stickyStart === "bottom") {
++        this._hasManualScroll = false;
++      }
+     } else {
+       this._stickyScrollTop = false;
+       this._stickyScrollBottom = false;
+@@ -6562,9 +6571,18 @@ class ScrollBoxRenderable extends BoxRenderable {
+     if (this.scrollLeft <= 0) {
+       this._stickyScrollLeft = true;
+       this._stickyScrollRight = false;
++      // Reset manual scroll when back at sticky position
++      // When maxScrollLeft is 0, content fits in viewport - we're at both left AND right
++      if (this._stickyStart === "left" || (this._stickyStart === "right" && maxScrollLeft === 0)) {
++        this._hasManualScroll = false;
++      }
+     } else if (this.scrollLeft >= maxScrollLeft) {
+       this._stickyScrollLeft = false;
+       this._stickyScrollRight = true;
++      // Reset manual scroll when back at sticky position
++      if (this._stickyStart === "right") {
++        this._hasManualScroll = false;
++      }
+     } else {
+       this._stickyScrollLeft = false;
+       this._stickyScrollRight = false;
