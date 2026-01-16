@@ -104,6 +104,7 @@ export function useTerminal() {
   const modeRef = useRef<SessionMode>("browsing"); // For use in callbacks
   const utf8BufferRef = useRef<Uint8Array>(new Uint8Array(0)); // Buffer for incomplete UTF-8 sequences
   const handleDataMessageRef = useRef<((data: string) => void) | null>(null); // For use in handleMessage
+  const scriptOutputBufferRef = useRef<Uint8Array[]>([]); // Buffer for script output before terminal mounts
 
   const connect = useCallback(async (params: ConnectionParams) => {
     try {
@@ -432,9 +433,14 @@ export function useTerminal() {
   /**
    * Write PTY data to terminal with UTF-8 boundary handling
    * Buffers incomplete UTF-8 sequences to prevent garbled output
+   * Also buffers data if terminal hasn't mounted yet (script output during attach)
    */
   const writePtyData = useCallback((data: Uint8Array) => {
-    if (!writeCallbackRef.current) return;
+    if (!writeCallbackRef.current) {
+      // Buffer data until terminal mounts (for script output during attach)
+      scriptOutputBufferRef.current.push(data);
+      return;
+    }
 
     // Combine with any buffered incomplete UTF-8 bytes
     let combined: Uint8Array;
@@ -679,7 +685,15 @@ export function useTerminal() {
 
   const setWriteCallback = useCallback((fn: (data: Uint8Array) => void) => {
     writeCallbackRef.current = fn;
-  }, []);
+    // Flush any buffered script output that arrived before terminal mounted
+    if (scriptOutputBufferRef.current.length > 0) {
+      console.log(`[useTerminal] Flushing ${scriptOutputBufferRef.current.length} buffered script output chunks`);
+      for (const chunk of scriptOutputBufferRef.current) {
+        writePtyData(chunk);
+      }
+      scriptOutputBufferRef.current = [];
+    }
+  }, [writePtyData]);
 
   const disconnect = useCallback(() => {
     wsRef.current?.close();
@@ -687,6 +701,7 @@ export function useTerminal() {
     sessionKeysRef.current = null;
     handshakeStateRef.current = null;
     utf8BufferRef.current = new Uint8Array(0); // Clear UTF-8 buffer
+    scriptOutputBufferRef.current = []; // Clear script output buffer
     setStatus("disconnected");
     setMode("browsing");
     modeRef.current = "browsing";

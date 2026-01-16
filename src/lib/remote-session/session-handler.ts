@@ -37,6 +37,7 @@ import { readProjectConfig } from "../../core/config";
 
 // Import script execution
 import { runWorkspaceScripts } from "../../utils/run-workspace-scripts";
+import { logger } from "../../utils/logger.js";
 
 /**
  * Session state for a connected client
@@ -343,12 +344,15 @@ export class RemoteSessionHandler {
           workspaceName: workspace.id,
           repository: config.repository,
           interactive: false, // Remote context - scripts can't prompt for input
-          onOutput: async (data) => {
+          onOutput: (data) => {
             // Stream script output to client (base64 encode for binary safety)
-            await this.sendMessage(session, sendResponse, {
+            // Use void + catch to avoid unhandled promise rejections since this callback isn't awaited
+            void this.sendMessage(session, sendResponse, {
               type: 'script_output',
               phase: currentPhase,
               data: data.toString('base64'),
+            }).catch((error) => {
+              logger.debug(`[remote-session] Failed to stream script output: ${error instanceof Error ? error.message : String(error)}`);
             });
           },
           onPhaseStart: (phase) => {
