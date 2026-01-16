@@ -38,6 +38,16 @@ export interface DeleteWorkspaceOptions {
   nonInteractive?: boolean;
   /** Keep the local branch after removing worktree */
   keepBranch?: boolean;
+  /**
+   * Callback to receive ANSI output from remove scripts (for TUI/Web terminal display).
+   * Called with raw output from stdout/stderr.
+   */
+  onScriptOutput?: (data: Buffer) => void;
+  /**
+   * Callback to report progress on deletion steps (for TUI loading indicator).
+   * Called with a human-readable message for each step.
+   */
+  onProgress?: (message: string) => void;
 }
 
 /**
@@ -93,6 +103,9 @@ export async function deleteWorkspaceCore(
     if (await isServerRunning()) {
       const sessions = await listSessions();
       const workspaceSessions = sessions.filter(s => s.cwd === workspacePath);
+      if (workspaceSessions.length > 0) {
+        options.onProgress?.(`Killing ${workspaceSessions.length} session(s)...`);
+      }
       for (const session of workspaceSessions) {
         try {
           await killSession(session.id);
@@ -111,12 +124,16 @@ export async function deleteWorkspaceCore(
   try {
     const projectConfig = readProjectConfig(projectName);
     const removeScriptsDir = getScriptsPhaseDir(projectName, 'remove');
+    options.onProgress?.('Running cleanup scripts...');
     await runScriptsInTerminal(
       removeScriptsDir,
       workspacePath,
       workspaceName,
       projectConfig.repository,
-      { nonInteractive: options.nonInteractive }
+      {
+        nonInteractive: options.nonInteractive,
+        onOutput: options.onScriptOutput,
+      }
     );
   } catch (e) {
     // Scripts are best-effort, log but continue
@@ -124,6 +141,7 @@ export async function deleteWorkspaceCore(
   }
 
   // Remove worktree
+  options.onProgress?.('Removing worktree...');
   try {
     await removeWorktree(baseDir, workspacePath, true);
   } catch (e) {
@@ -133,6 +151,7 @@ export async function deleteWorkspaceCore(
 
   // Try to delete the local branch
   if (!options.keepBranch && info?.branch) {
+    options.onProgress?.(`Deleting branch ${info.branch}...`);
     try {
       await deleteLocalBranch(baseDir, info.branch, true);
       result.branchDeleted = true;
@@ -155,6 +174,11 @@ export interface DeleteProjectOptions {
    * When true, remove scripts run with stdin closed.
    */
   nonInteractive?: boolean;
+  /**
+   * Callback to report progress on deletion steps (for TUI loading indicator).
+   * Called with a human-readable message for each step.
+   */
+  onProgress?: (message: string) => void;
 }
 
 /**
@@ -209,11 +233,14 @@ export async function deleteProjectCore(
   }
 
   // Delete each workspace (this handles session teardown and remove scripts)
-  for (const workspaceName of workspaceNames) {
+  for (let i = 0; i < workspaceNames.length; i++) {
+    const workspaceName = workspaceNames[i];
+    options.onProgress?.(`Removing workspace ${i + 1}/${workspaceNames.length}: ${workspaceName}...`);
     try {
       const wsResult = await deleteWorkspaceCore(projectName, workspaceName, {
         nonInteractive: options.nonInteractive,
         keepBranch: true, // Don't try to delete branches, we're removing the whole repo
+        onProgress: options.onProgress,
       });
       if (wsResult.success) {
         result.workspacesDeleted++;
@@ -229,6 +256,7 @@ export async function deleteProjectCore(
   }
 
   // Remove entire project directory
+  options.onProgress?.('Removing project directory...');
   try {
     rmSync(projectDir, { recursive: true, force: true });
   } catch (e) {

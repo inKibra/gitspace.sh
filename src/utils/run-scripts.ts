@@ -60,6 +60,11 @@ export interface RunScriptsOptions {
    * - Prevents scripts from blocking indefinitely
    */
   nonInteractive?: boolean;
+  /**
+   * Callback to receive ANSI output as it arrives (for TUI/Web terminal display).
+   * Called with raw output from stdout/stderr. Only works when nonInteractive is true.
+   */
+  onOutput?: (data: Buffer) => void;
 }
 
 /**
@@ -125,10 +130,17 @@ export async function runScriptsInTerminal(
       });
 
       // Capture output in non-interactive mode for logging on failure
+      // Also stream to onOutput callback if provided (for TUI/Web terminal display)
       let output = '';
       if (options?.nonInteractive && child.stdout && child.stderr) {
-        child.stdout.on('data', (data: Buffer) => { output += data.toString(); });
-        child.stderr.on('data', (data: Buffer) => { output += data.toString(); });
+        child.stdout.on('data', (data: Buffer) => {
+          output += data.toString();
+          options?.onOutput?.(data);
+        });
+        child.stderr.on('data', (data: Buffer) => {
+          output += data.toString();
+          options?.onOutput?.(data);
+        });
       }
 
       child.on('close', (code: number | null) => {

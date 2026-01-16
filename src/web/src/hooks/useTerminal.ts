@@ -58,6 +58,14 @@ export interface SessionInfo {
   exitCode?: number;
 }
 
+/** Script execution state (during workspace attach) */
+export interface ScriptState {
+  phase: 'pre' | 'setup' | 'select' | 'remove';
+  isRunning: boolean;
+  error?: string;
+  exitCode?: number;
+}
+
 /** Project information from machine */
 export interface ProjectInfo {
   name: string;
@@ -85,6 +93,7 @@ export function useTerminal() {
   const [selectedProjectName, setSelectedProjectName] = useState<string | null>(null);
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
+  const [scriptState, setScriptState] = useState<ScriptState | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const identityRef = useRef<Identity | null>(null);
@@ -421,6 +430,37 @@ export function useTerminal() {
   }, [requestWorkspaces]);
 
   /**
+   * Write PTY data to terminal with UTF-8 boundary handling
+   * Buffers incomplete UTF-8 sequences to prevent garbled output
+   */
+  const writePtyData = useCallback((data: Uint8Array) => {
+    if (!writeCallbackRef.current) return;
+
+    // Combine with any buffered incomplete UTF-8 bytes
+    let combined: Uint8Array;
+    if (utf8BufferRef.current.length > 0) {
+      combined = new Uint8Array(utf8BufferRef.current.length + data.length);
+      combined.set(utf8BufferRef.current, 0);
+      combined.set(data, utf8BufferRef.current.length);
+      utf8BufferRef.current = new Uint8Array(0);
+    } else {
+      combined = data;
+    }
+
+    // Find UTF-8 boundary
+    const boundary = findUtf8Boundary(combined);
+    if (boundary < combined.length) {
+      // Buffer incomplete sequence for next time
+      utf8BufferRef.current = combined.slice(boundary);
+      combined = combined.slice(0, boundary);
+    }
+
+    if (combined.length > 0) {
+      writeCallbackRef.current(combined);
+    }
+  }, []);
+
+  /**
    * Handle a decrypted browse response (workspace_list, session_list, etc.)
    */
   const handleBrowseResponse = useCallback((msg: Record<string, unknown>) => {
@@ -497,45 +537,50 @@ export function useTerminal() {
         requestInbox();
         break;
 
+      case "script_output": {
+        // Handle script output streaming during attach_session
+        const phase = msg.phase as ScriptState['phase'];
+        const done = msg.done as boolean | undefined;
+        const error = msg.error as string | undefined;
+        const exitCode = msg.exitCode as number | undefined;
+
+        // Update script state
+        if (done) {
+          if (error) {
+            setScriptState({ phase, isRunning: false, error, exitCode });
+          } else {
+            // Scripts completed successfully - clear state (attach response will follow)
+            setScriptState(null);
+          }
+        } else {
+          setScriptState({ phase, isRunning: true });
+        }
+
+        // Decode base64 output data and write to terminal
+        const data = msg.data as string;
+        if (data && data.length > 0) {
+          const ptyData = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+          writePtyData(ptyData);
+        }
+        break;
+      }
+
       case "error":
         console.error("Machine error:", msg.code, msg.message);
+        // If we were running scripts, mark as failed
+        if (scriptState?.isRunning) {
+          setScriptState({
+            ...scriptState,
+            isRunning: false,
+            error: msg.message as string,
+          });
+        }
         break;
 
       default:
         console.log("Unknown browse response:", msg.type);
     }
-  }, [requestWorkspaces, requestSessions, requestInbox]);
-
-  /**
-   * Write PTY data to terminal with UTF-8 boundary handling
-   * Buffers incomplete UTF-8 sequences to prevent garbled output
-   */
-  const writePtyData = useCallback((data: Uint8Array) => {
-    if (!writeCallbackRef.current) return;
-
-    // Combine with any buffered incomplete UTF-8 bytes
-    let combined: Uint8Array;
-    if (utf8BufferRef.current.length > 0) {
-      combined = new Uint8Array(utf8BufferRef.current.length + data.length);
-      combined.set(utf8BufferRef.current, 0);
-      combined.set(data, utf8BufferRef.current.length);
-      utf8BufferRef.current = new Uint8Array(0);
-    } else {
-      combined = data;
-    }
-
-    // Find UTF-8 boundary
-    const boundary = findUtf8Boundary(combined);
-    if (boundary < combined.length) {
-      // Buffer incomplete sequence for next time
-      utf8BufferRef.current = combined.slice(boundary);
-      combined = combined.slice(0, boundary);
-    }
-
-    if (combined.length > 0) {
-      writeCallbackRef.current(combined);
-    }
-  }, []);
+  }, [requestWorkspaces, requestSessions, requestInbox, writePtyData, scriptState]);
 
   const handleDataMessage = useCallback(async (base64Data: string) => {
     const sessionKeys = sessionKeysRef.current;
@@ -653,6 +698,7 @@ export function useTerminal() {
     setSelectedProjectName(null);
     setInbox([]);
     setInboxUnreadCount(0);
+    setScriptState(null);
   }, []);
 
   return {
@@ -695,5 +741,8 @@ export function useTerminal() {
     requestInbox,
     clearInboxItem,
     markInboxItemRead,
+
+    // Script execution state (during attach)
+    scriptState,
   };
 }

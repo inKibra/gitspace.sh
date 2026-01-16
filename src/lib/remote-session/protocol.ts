@@ -194,6 +194,21 @@ export interface InboxMarkedReadResponse {
   id: string;
 }
 
+/** Script output during attach_session (streams lifecycle script output) */
+export interface ScriptOutputResponse {
+  type: "script_output";
+  /** Current script phase (pre, setup, select, remove) */
+  phase: "pre" | "setup" | "select" | "remove";
+  /** ANSI output data (base64 encoded for binary safety) */
+  data: string;
+  /** Whether scripts are complete */
+  done?: boolean;
+  /** Exit code if scripts failed (only when done=true) */
+  exitCode?: number;
+  /** Error message if scripts failed (only when done=true) */
+  error?: string;
+}
+
 // ============================================================================
 // Union Types
 // ============================================================================
@@ -223,7 +238,8 @@ export type MachineToClientMessage =
   | WorkspaceDeletedResponse
   | InboxListResponse
   | InboxClearedResponse
-  | InboxMarkedReadResponse;
+  | InboxMarkedReadResponse
+  | ScriptOutputResponse;
 
 /** All remote session messages */
 export type RemoteSessionMessage =
