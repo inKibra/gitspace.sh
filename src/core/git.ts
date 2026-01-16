@@ -106,6 +106,16 @@ export async function checkLocalBranch(
 }
 
 /**
+ * Options for creating a worktree
+ */
+export interface CreateWorktreeOptions {
+  /** Whether the branch exists on the remote */
+  existsRemotely?: boolean;
+  /** Callback to report progress (for TUI loading indicator) */
+  onProgress?: (message: string) => void;
+}
+
+/**
  * Create a git worktree
  */
 export async function createWorktree(
@@ -113,8 +123,14 @@ export async function createWorktree(
   workspacePath: string,
   branchName: string,
   baseBranch: string,
-  existsRemotely?: boolean
+  existsRemotelyOrOptions?: boolean | CreateWorktreeOptions
 ): Promise<void> {
+  // Handle both old signature (boolean) and new signature (options object)
+  const options: CreateWorktreeOptions = typeof existsRemotelyOrOptions === 'boolean'
+    ? { existsRemotely: existsRemotelyOrOptions }
+    : existsRemotelyOrOptions ?? {};
+  const { existsRemotely, onProgress } = options;
+
   try {
     // Check if worktree path already exists
     if (existsSync(workspacePath)) {
@@ -126,10 +142,12 @@ export async function createWorktree(
     }
 
     // Fetch latest changes
+    onProgress?.('Fetching latest changes...');
     logger.debug('Fetching latest changes...');
     await execAsync('git fetch --all --prune', { cwd: repoPath });
 
     // Pull latest base branch
+    onProgress?.(`Updating ${baseBranch}...`);
     try {
       await execAsync(`git pull --ff-only origin ${escapeShellArg(baseBranch)}`, {
         cwd: repoPath,
@@ -141,6 +159,7 @@ export async function createWorktree(
     // Determine how to create the worktree
     if (existsRemotely) {
       // Branch exists on remote, create from remote branch
+      onProgress?.(`Creating worktree from ${branchName}...`);
       logger.debug(`Creating worktree from remote branch: ${branchName}`);
       await execAsync(
         `git worktree add ${escapeShellArg(workspacePath)} -b ${escapeShellArg(branchName)} ${escapeShellArg(`origin/${branchName}`)}`,
@@ -148,6 +167,7 @@ export async function createWorktree(
       );
     } else if (await checkLocalBranch(repoPath, branchName)) {
       // Branch exists locally, attach worktree to it
+      onProgress?.(`Creating worktree from ${branchName}...`);
       logger.debug(`Creating worktree from local branch: ${branchName}`);
       await execAsync(`git worktree add ${escapeShellArg(workspacePath)} ${escapeShellArg(branchName)}`, {
         cwd: repoPath,
@@ -155,6 +175,7 @@ export async function createWorktree(
     } else {
       // Branch doesn't exist, create new from base
       // Use --no-track to avoid setting upstream to baseBranch (user should push -u to set correct upstream)
+      onProgress?.(`Creating new branch ${branchName}...`);
       logger.debug(`Creating new branch from ${baseBranch}: ${branchName}`);
       await execAsync(
         `git worktree add -b ${escapeShellArg(branchName)} ${escapeShellArg(workspacePath)} ${escapeShellArg(`origin/${baseBranch}`)} --no-track`,

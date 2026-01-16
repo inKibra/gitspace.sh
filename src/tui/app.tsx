@@ -13,8 +13,9 @@ import { createRoot, useKeyboard } from '@opentui/react';
 import { useState, useEffect, useCallback, useReducer, Fragment, useMemo, useRef } from 'react';
 import { Toaster } from '@opentui-ui/toast/react';
 
-// Terminal component
+// Terminal components
 import { Terminal, useTerminalSession } from './components/Terminal.js';
+import { ScriptTerminal, type ScriptTerminalHandle } from './components/ScriptTerminal.js';
 import type { Session } from '../lib/tmux-lite/protocol.js';
 import { listSessions, createSession, ensureServer, killSession } from '../lib/tmux-lite/cli.js';
 import { getSessionSocketPath } from '../lib/tmux-lite/protocol.js';
@@ -79,7 +80,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 // Script execution
-import { runWorkspaceScripts } from '../utils/run-workspace-scripts.js';
+import { runWorkspaceScripts, type ScriptPhase } from '../utils/run-workspace-scripts.js';
 import type { LinearIssue } from '../types/workspace.js';
 
 // Project creation
@@ -111,7 +112,7 @@ type WorkspaceFlowState =
   | { type: 'linear-select'; issues: LinearIssue[]; selectedIndex: number }
   | { type: 'manual-name-input'; inputValue: string; error: string | null }
   | { type: 'manual-branch-input'; workspaceName: string; inputValue: string }
-  | { type: 'creating'; workspaceName: string };
+  | { type: 'creating'; workspaceName: string; message?: string };
 
 /** Project flow states - explicit state machine for project creation */
 type ProjectFlowState =
@@ -187,8 +188,29 @@ const ASCII_LINES = [
 // App State
 // ============================================================================
 
-type AppView = 'machines' | 'projects' | 'workspaces' | 'terminal' | 'inbox';
+type AppView = 'machines' | 'projects' | 'workspaces' | 'terminal' | 'inbox' | 'scripts';
 type PanelFocus = 'projects' | 'workspaces';
+
+/** Info about what to do after scripts complete */
+interface ScriptCompletionAction {
+  /** Create a new session after scripts complete */
+  type: 'create-session';
+  sessionName: string;
+  workspacePath: string;
+}
+
+/** State for script runner view */
+interface ScriptRunnerState {
+  phase: ScriptPhase | 'remove';
+  workspaceName: string;
+  workspacePath: string;
+  projectName: string;
+  isRunning: boolean;
+  error?: string;
+  exitCode?: number;
+  /** What to do when scripts complete successfully */
+  onComplete?: ScriptCompletionAction;
+}
 
 interface AppState {
   view: AppView;
@@ -202,6 +224,8 @@ interface AppState {
   isLoading: boolean;
   error: string | null;
   attachedSession: Session | null;
+  /** Script runner state for 'scripts' view */
+  scriptRunner: ScriptRunnerState | null;
 }
 
 type AppAction =
@@ -215,7 +239,10 @@ type AppAction =
   | { type: 'SET_LOADING'; loading: boolean }
   | { type: 'SET_ERROR'; error: string | null }
   | { type: 'SWITCH_PANEL' }
-  | { type: 'SET_ATTACHED_SESSION'; session: Session | null };
+  | { type: 'SET_ATTACHED_SESSION'; session: Session | null }
+  | { type: 'SET_SCRIPT_RUNNER'; scriptRunner: ScriptRunnerState | null }
+  | { type: 'UPDATE_SCRIPT_PHASE'; phase: ScriptPhase | 'remove' }
+  | { type: 'SCRIPT_COMPLETE'; success: boolean; error?: string; exitCode?: number };
 
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
@@ -249,6 +276,24 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, panelFocus: state.panelFocus === 'projects' ? 'workspaces' : 'projects' };
     case 'SET_ATTACHED_SESSION':
       return { ...state, attachedSession: action.session };
+    case 'SET_SCRIPT_RUNNER':
+      return { ...state, scriptRunner: action.scriptRunner };
+    case 'UPDATE_SCRIPT_PHASE':
+      return state.scriptRunner
+        ? { ...state, scriptRunner: { ...state.scriptRunner, phase: action.phase } }
+        : state;
+    case 'SCRIPT_COMPLETE':
+      return state.scriptRunner
+        ? {
+            ...state,
+            scriptRunner: {
+              ...state.scriptRunner,
+              isRunning: false,
+              error: action.success ? undefined : action.error,
+              exitCode: action.exitCode,
+            },
+          }
+        : state;
     default:
       return state;
   }
@@ -299,10 +344,14 @@ function App({ relayConfig, onQuit }: AppProps) {
     isLoading: true,
     error: null,
     attachedSession: null,
+    scriptRunner: null,
   });
 
   // Track when we're switching sessions (to prevent detach handler from navigating away)
   const sessionSwitchingRef = useRef(false);
+
+  // Ref for ScriptTerminal to feed output data
+  const scriptTerminalRef = useRef<ScriptTerminalHandle>(null);
 
   // Shared Flow hook (for non-workspace flows)
   const flow = useFlow({
@@ -404,11 +453,14 @@ function App({ relayConfig, onQuit }: AppProps) {
       confirmText: project.name,
       warning: 'This will delete all workspaces in this project!',
       onConfirm: async () => {
-        flow.showLoading({ title: 'Deleting', message: 'Removing project...' });
+        flow.showLoading({ title: 'Deleting', message: 'Preparing...' });
 
         try {
           const result = await deleteProjectCore(project.name, {
             nonInteractive: true, // TUI is non-interactive for scripts
+            onProgress: (message) => {
+              flow.showLoading({ title: 'Deleting', message });
+            },
           });
 
           if (!result.success && result.errors.length > 0) {
@@ -496,41 +548,79 @@ function App({ relayConfig, onQuit }: AppProps) {
             // Always use project:workspace:session format for proper parsing
             const sessionSuffix = name || String(Date.now());
             const sessionName = `${state.currentProject}:${workspace.name}:${sessionSuffix}`;
-            try {
-              const config = readProjectConfig(state.currentProject!);
+            const config = readProjectConfig(state.currentProject!);
 
-              // Run workspace scripts (pre+setup for first time, select for existing)
-              const scriptResult = await runWorkspaceScripts({
-                projectName: state.currentProject!,
-                workspacePath: workspace.path,
+            // Set up script runner state and switch to scripts view
+            dispatch({
+              type: 'SET_SCRIPT_RUNNER',
+              scriptRunner: {
+                phase: 'pre', // Will be updated as scripts run
                 workspaceName: workspace.name,
-                repository: config.repository,
-                interactive: false, // TUI context - scripts can't prompt for input
-              });
+                workspacePath: workspace.path,
+                projectName: state.currentProject!,
+                isRunning: true,
+                onComplete: {
+                  type: 'create-session',
+                  sessionName,
+                  workspacePath: workspace.path,
+                },
+              },
+            });
+            dispatch({ type: 'SET_VIEW', view: 'scripts' });
 
-              if (!scriptResult.success) {
+            // Run workspace scripts with output streaming
+            const scriptResult = await runWorkspaceScripts({
+              projectName: state.currentProject!,
+              workspacePath: workspace.path,
+              workspaceName: workspace.name,
+              repository: config.repository,
+              interactive: false, // TUI context - scripts can't prompt for input
+              onOutput: (data) => {
+                // Feed output to ScriptTerminal via ref
+                scriptTerminalRef.current?.feed(data);
+              },
+              onPhaseStart: (phase) => {
+                dispatch({ type: 'UPDATE_SCRIPT_PHASE', phase });
+              },
+            });
+
+            // Handle script completion
+            if (scriptResult.success) {
+              dispatch({ type: 'SCRIPT_COMPLETE', success: true });
+              // Create session and attach
+              try {
+                const session = await createSession(sessionName, workspace.path);
+                sessionSwitchingRef.current = true;
+                dispatch({ type: 'SET_SCRIPT_RUNNER', scriptRunner: null });
+                dispatch({ type: 'SET_ATTACHED_SESSION', session });
+                dispatch({ type: 'SET_VIEW', view: 'terminal' });
+                setTimeout(() => { sessionSwitchingRef.current = false; }, 200);
+              } catch (err) {
+                dispatch({ type: 'SET_SCRIPT_RUNNER', scriptRunner: null });
+                dispatch({ type: 'SET_VIEW', view: 'projects' });
+                flow.showMessage({
+                  title: 'Session Failed',
+                  message: err instanceof Error ? err.message : 'Failed to create session',
+                  variant: 'error',
+                });
+              }
+            } else {
+              dispatch({
+                type: 'SCRIPT_COMPLETE',
+                success: false,
+                error: scriptResult.error,
+              });
+              // Show error and wait for user to acknowledge
+              // After a short delay, go back to projects view
+              setTimeout(() => {
+                dispatch({ type: 'SET_SCRIPT_RUNNER', scriptRunner: null });
+                dispatch({ type: 'SET_VIEW', view: 'projects' });
                 flow.showMessage({
                   title: 'Script Failed',
                   message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
                   variant: 'error',
                 });
-                return;
-              }
-
-              const session = await createSession(sessionName, workspace.path);
-              // Mark that we're switching sessions (prevents detach handler from navigating away)
-              sessionSwitchingRef.current = true;
-              // Attach to newly created session
-              dispatch({ type: 'SET_ATTACHED_SESSION', session });
-              dispatch({ type: 'SET_VIEW', view: 'terminal' });
-              // Clear flag after a short delay (allows old Terminal to cleanup)
-              setTimeout(() => { sessionSwitchingRef.current = false; }, 200);
-            } catch (err) {
-              flow.showMessage({
-                title: 'Session Failed',
-                message: err instanceof Error ? err.message : 'Failed to create session',
-                variant: 'error',
-              });
+              }, 2000); // Show error in terminal for 2 seconds
             }
           },
         });
@@ -592,11 +682,14 @@ function App({ relayConfig, onQuit }: AppProps) {
       warning: workspace.sessions.length > 0 ? `This will kill ${workspace.sessions.length} active session(s)!` : undefined,
       onConfirm: async () => {
         if (!state.currentProject) return;
-        flow.showLoading({ title: 'Deleting', message: 'Removing workspace...' });
+        flow.showLoading({ title: 'Deleting', message: 'Preparing...' });
 
         try {
           const result = await deleteWorkspaceCore(state.currentProject, workspace.name, {
             nonInteractive: true, // TUI is non-interactive for scripts
+            onProgress: (message) => {
+              flow.showLoading({ title: 'Deleting', message });
+            },
           });
 
           if (!result.success) {
@@ -673,7 +766,12 @@ function App({ relayConfig, onQuit }: AppProps) {
       setWorkspaceFlow({ type: 'creating', workspaceName });
 
       // Create worktree
-      await createWorktree(baseDir, workspacePath, branchName, config.baseBranch, existsRemotely);
+      await createWorktree(baseDir, workspacePath, branchName, config.baseBranch, {
+        existsRemotely,
+        onProgress: (message) => {
+          setWorkspaceFlow({ type: 'creating', workspaceName, message });
+        },
+      });
 
       // Save Linear issue if present
       if (linearIssue) {
@@ -686,31 +784,68 @@ function App({ relayConfig, onQuit }: AppProps) {
         }
       }
 
-      // Run workspace scripts (pre+setup for new workspace)
+      // Set up script runner and show scripts view for workspace setup
+      setWorkspaceFlow({ type: 'closed' });
+      const sessionName = `${state.currentProject}:${workspaceName}:${Date.now()}`;
+
+      dispatch({
+        type: 'SET_SCRIPT_RUNNER',
+        scriptRunner: {
+          phase: 'pre',
+          workspaceName,
+          workspacePath,
+          projectName: state.currentProject,
+          isRunning: true,
+          onComplete: {
+            type: 'create-session',
+            sessionName,
+            workspacePath,
+          },
+        },
+      });
+      dispatch({ type: 'SET_VIEW', view: 'scripts' });
+
+      // Run workspace scripts (pre+setup for new workspace) with output streaming
       const scriptResult = await runWorkspaceScripts({
         projectName: state.currentProject,
         workspacePath,
         workspaceName,
         repository: config.repository,
         interactive: false, // TUI context - scripts can't prompt for input
+        onOutput: (data) => {
+          scriptTerminalRef.current?.feed(data);
+        },
+        onPhaseStart: (phase) => {
+          dispatch({ type: 'UPDATE_SCRIPT_PHASE', phase });
+        },
       });
 
       if (!scriptResult.success) {
-        setWorkspaceFlow({ type: 'closed' });
-        flow.showMessage({
-          title: 'Script Failed',
-          message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
-          variant: 'error',
+        dispatch({
+          type: 'SCRIPT_COMPLETE',
+          success: false,
+          error: scriptResult.error,
         });
+        // Show error for 2 seconds then go back
+        setTimeout(() => {
+          dispatch({ type: 'SET_SCRIPT_RUNNER', scriptRunner: null });
+          dispatch({ type: 'SET_VIEW', view: 'projects' });
+          flow.showMessage({
+            title: 'Script Failed',
+            message: `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`,
+            variant: 'error',
+          });
+        }, 2000);
         return;
       }
 
-      setWorkspaceFlow({ type: 'closed' });
+      dispatch({ type: 'SCRIPT_COMPLETE', success: true });
       await refreshWorkspaces();
 
       // Create session and attach
       await ensureServer();
-      const session = await createSession(`${state.currentProject}:${workspaceName}:${Date.now()}`, workspacePath);
+      const session = await createSession(sessionName, workspacePath);
+      dispatch({ type: 'SET_SCRIPT_RUNNER', scriptRunner: null });
       dispatch({ type: 'SET_ATTACHED_SESSION', session });
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     } catch (err) {
@@ -1318,6 +1453,11 @@ function App({ relayConfig, onQuit }: AppProps) {
       return;
     }
 
+    // Don't handle keys when in scripts view (output-only, no interaction)
+    if (state.view === 'scripts') {
+      return;
+    }
+
     // Handle project creation flow (custom state machine)
     if (projectFlow.type !== 'closed') {
       if (key.name === 'escape') {
@@ -1802,6 +1942,23 @@ function App({ relayConfig, onQuit }: AppProps) {
     );
   }
 
+  // Scripts view (running lifecycle scripts)
+  if (state.view === 'scripts' && state.scriptRunner) {
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <ScriptTerminal
+          ref={scriptTerminalRef}
+          phase={state.scriptRunner.phase}
+          workspaceName={state.scriptRunner.workspaceName}
+          isRunning={state.scriptRunner.isRunning}
+          error={state.scriptRunner.error}
+          exitCode={state.scriptRunner.exitCode}
+        />
+      </Fragment>
+    );
+  }
+
   // Inbox view (full-screen)
   if (state.view === 'inbox') {
     return (
@@ -1947,7 +2104,7 @@ function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
         {flow.type === 'creating' && (
           <>
             <text fg={COLORS.title} height={1}>Creating Workspace</text>
-            <text fg={COLORS.loading} height={1} marginTop={1}>Creating {flow.workspaceName}...</text>
+            <text fg={COLORS.loading} height={1} marginTop={1}>{flow.message ?? `Creating ${flow.workspaceName}...`}</text>
           </>
         )}
 

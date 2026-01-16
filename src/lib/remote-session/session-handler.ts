@@ -37,6 +37,7 @@ import { readProjectConfig } from "../../core/config";
 
 // Import script execution
 import { runWorkspaceScripts } from "../../utils/run-workspace-scripts";
+import { logger } from "../../utils/logger.js";
 
 /**
  * Session state for a connected client
@@ -329,23 +330,57 @@ export class RemoteSessionHandler {
           return;
         }
 
-        // Run setup or select scripts for the workspace
+        // Run setup or select scripts for the workspace with output streaming
         const config = readProjectConfig(workspace.projectName);
 
         console.log(`[remote-session] Running workspace scripts for: ${workspace.id}`);
+
+        // Track current phase for script_output messages
+        let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+
         const scriptResult = await runWorkspaceScripts({
           projectName: workspace.projectName,
           workspacePath: workspace.path,
           workspaceName: workspace.id,
           repository: config.repository,
           interactive: false, // Remote context - scripts can't prompt for input
+          onOutput: (data) => {
+            // Stream script output to client (base64 encode for binary safety)
+            // Use void + catch to avoid unhandled promise rejections since this callback isn't awaited
+            void this.sendMessage(session, sendResponse, {
+              type: 'script_output',
+              phase: currentPhase,
+              data: data.toString('base64'),
+            }).catch((error) => {
+              logger.debug(`[remote-session] Failed to stream script output: ${error instanceof Error ? error.message : String(error)}`);
+            });
+          },
+          onPhaseStart: (phase) => {
+            currentPhase = phase;
+          },
         });
 
         if (!scriptResult.success) {
           console.error(`[remote-session] ${scriptResult.phase} scripts failed:`, scriptResult.error);
+          // Send final script_output with error info
+          await this.sendMessage(session, sendResponse, {
+            type: 'script_output',
+            phase: scriptResult.phase,
+            data: '',
+            done: true,
+            error: scriptResult.error,
+          });
           await this.sendError(session, sendResponse, "SCRIPT_FAILED", `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`);
           return;
         }
+
+        // Send final script_output indicating success
+        await this.sendMessage(session, sendResponse, {
+          type: 'script_output',
+          phase: currentPhase,
+          data: '',
+          done: true,
+        });
 
         // Create session name: use provided name or auto-generate
         let sessionName: string;

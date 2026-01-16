@@ -303,4 +303,59 @@ echo "$SPACE_SECRET_TOKEN" >> "${outputFile}"
       // Should not throw
     });
   });
+
+  describe('onOutput callback', () => {
+    it('should call onOutput with script stdout in nonInteractive mode', async () => {
+      const scriptPath = join(scriptsDir, '01-output.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "Hello from script"
+echo "Line 2"
+`);
+      chmodSync(scriptPath, 0o755);
+
+      const chunks: Buffer[] = [];
+      await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+        nonInteractive: true,
+        onOutput: (data) => chunks.push(data),
+      });
+
+      const output = Buffer.concat(chunks).toString();
+      expect(output).toContain('Hello from script');
+      expect(output).toContain('Line 2');
+    });
+
+    it('should call onOutput with script stderr in nonInteractive mode', async () => {
+      const scriptPath = join(scriptsDir, '01-stderr.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "Error message" >&2
+`);
+      chmodSync(scriptPath, 0o755);
+
+      const chunks: Buffer[] = [];
+      await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+        nonInteractive: true,
+        onOutput: (data) => chunks.push(data),
+      });
+
+      const output = Buffer.concat(chunks).toString();
+      expect(output).toContain('Error message');
+    });
+
+    it('should not call onOutput in interactive mode (stdio: inherit)', async () => {
+      const scriptPath = join(scriptsDir, '01-simple.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "Output"
+`);
+      chmodSync(scriptPath, 0o755);
+
+      const chunks: Buffer[] = [];
+      await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+        nonInteractive: false, // Interactive mode
+        onOutput: (data) => chunks.push(data),
+      });
+
+      // In interactive mode, stdio is inherited, so onOutput won't be called
+      expect(chunks).toHaveLength(0);
+    });
+  });
 });

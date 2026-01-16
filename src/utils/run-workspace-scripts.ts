@@ -19,6 +19,15 @@ export interface RunWorkspaceScriptsOptions {
   repository: string;
   /** If true, scripts can prompt for input. If false (default), stdin is closed. */
   interactive?: boolean;
+  /**
+   * Callback to receive ANSI output as it arrives (for TUI/Web terminal display).
+   * Called with raw output from stdout/stderr.
+   */
+  onOutput?: (data: Buffer) => void;
+  /**
+   * Callback when a new phase starts (for displaying phase name in UI).
+   */
+  onPhaseStart?: (phase: ScriptPhase) => void;
 }
 
 export type RunWorkspaceScriptsResult =
@@ -36,7 +45,15 @@ export type RunWorkspaceScriptsResult =
 export async function runWorkspaceScripts(
   options: RunWorkspaceScriptsOptions
 ): Promise<RunWorkspaceScriptsResult> {
-  const { projectName, workspacePath, workspaceName, repository, interactive = false } = options;
+  const {
+    projectName,
+    workspacePath,
+    workspaceName,
+    repository,
+    interactive = false,
+    onOutput,
+    onPhaseStart,
+  } = options;
 
   // Read project config for bundle values and secrets
   const config = readProjectConfig(projectName);
@@ -45,6 +62,7 @@ export async function runWorkspaceScripts(
   const scriptOptions: RunScriptsOptions = {
     bundleValues: config.bundleValues,
     nonInteractive: !interactive,
+    onOutput,
   };
 
   // Fetch secrets from OS keychain if we have secret keys
@@ -59,6 +77,7 @@ export async function runWorkspaceScripts(
     // Run select scripts for existing workspace
     const selectScriptsDir = getScriptsPhaseDir(projectName, 'select');
     try {
+      onPhaseStart?.('select');
       await runScriptsInTerminal(selectScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
       return { success: true };
     } catch (error) {
@@ -70,10 +89,12 @@ export async function runWorkspaceScripts(
     let preScriptsSucceeded = false;
 
     try {
+      onPhaseStart?.('pre');
       const preScriptsDir = getScriptsPhaseDir(projectName, 'pre');
       await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
       preScriptsSucceeded = true;
 
+      onPhaseStart?.('setup');
       const setupScriptsDir = getScriptsPhaseDir(projectName, 'setup');
       await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
 
