@@ -20,18 +20,11 @@ const mockProjectConfig = {
 
 mock.module('../../core/config', () => ({
   readProjectConfig: () => mockProjectConfig,
-  getScriptsPhaseDir: (projectName: string, phase: string) => {
-    // Return the test scripts directory based on phase
-    return join(globalTestDir, 'scripts', phase);
-  },
 }));
 
 mock.module('./secrets', () => ({
   getProjectSecrets: async () => ({}),
 }));
-
-// Track the test directory globally so the mock can access it
-let globalTestDir: string;
 
 // Import after mocking
 import { runWorkspaceScripts } from '../run-workspace-scripts';
@@ -46,16 +39,15 @@ describe('runWorkspaceScripts', () => {
 
   beforeEach(() => {
     testDir = join(tmpdir(), `workspace-scripts-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    globalTestDir = testDir;
     workspacePath = join(testDir, 'workspace');
-    preScriptsDir = join(testDir, 'scripts', 'pre');
-    setupScriptsDir = join(testDir, 'scripts', 'setup');
-    selectScriptsDir = join(testDir, 'scripts', 'select');
+    // Scripts are now in workspace/.gitspace/<phase>/
+    preScriptsDir = join(workspacePath, '.gitspace', 'pre');
+    setupScriptsDir = join(workspacePath, '.gitspace', 'setup');
+    selectScriptsDir = join(workspacePath, '.gitspace', 'select');
 
     mkdirSync(preScriptsDir, { recursive: true });
     mkdirSync(setupScriptsDir, { recursive: true });
     mkdirSync(selectScriptsDir, { recursive: true });
-    mkdirSync(workspacePath, { recursive: true });
   });
 
   afterEach(() => {

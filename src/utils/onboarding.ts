@@ -16,17 +16,39 @@ import type {
 } from '../types/bundle.js';
 
 /**
+ * Marker value returned when user chooses to keep an existing secret
+ */
+export const KEEP_EXISTING_SECRET = '__KEEP_EXISTING_SECRET__';
+
+/**
+ * Options for running onboarding
+ */
+export interface OnboardingOptions {
+  /** Previous values from a prior onboarding run (for refresh) */
+  previousValues?: Record<string, string>;
+  /** Previous secret keys that exist in keychain */
+  previousSecretKeys?: string[];
+  /** Title to show (default: "Project Onboarding") */
+  title?: string;
+  /** Whether this is a refresh (shows different messaging) */
+  isRefresh?: boolean;
+}
+
+/**
  * Execute all onboarding steps
  */
 export async function runOnboarding(
-  steps: OnboardingStep[]
+  steps: OnboardingStep[],
+  options: OnboardingOptions = {}
 ): Promise<OnboardingResult> {
   const result: OnboardingResult = {
     configValues: {},
     completed: false,
   };
 
-  logger.bold('\n=== Project Onboarding ===\n');
+  const title = options.title || 'Project Onboarding';
+  const refreshNote = options.isRefresh ? ' (refreshing - press Enter to keep existing values)' : '';
+  logger.bold(`\n=== ${title}${refreshNote} ===\n`);
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -37,7 +59,7 @@ export async function runOnboarding(
     logger.dim(step.description);
     logger.log('');
 
-    const stepResult = await executeStep(step);
+    const stepResult = await executeStep(step, options);
 
     if (stepResult === null) {
       // User cancelled
@@ -62,16 +84,16 @@ export async function runOnboarding(
  * Execute a single onboarding step
  * Returns collected value or null if cancelled
  */
-async function executeStep(step: OnboardingStep): Promise<string | null> {
+async function executeStep(step: OnboardingStep, options: OnboardingOptions): Promise<string | null> {
   switch (step.type) {
     case 'info':
       return executeInfoStep(step);
     case 'confirm':
       return executeConfirmStep(step);
     case 'secret':
-      return executeSecretStep(step);
+      return executeSecretStep(step, options);
     case 'input':
-      return executeInputStep(step);
+      return executeInputStep(step, options);
     default:
       logger.warning('Unknown step type, skipping');
       return '';
@@ -117,7 +139,9 @@ async function executeConfirmStep(step: ConfirmStep): Promise<string | null> {
           logger.warning('This step is required. Please install and try again.');
           continue;
         }
-        return null;
+        // Optional step - skip it
+        logger.dim('Skipping optional step');
+        return '';
       }
 
       // Re-check if they say yes
@@ -134,16 +158,33 @@ async function executeConfirmStep(step: ConfirmStep): Promise<string | null> {
   // No command check, just confirm
   const prompt = step.confirmPrompt || 'Continue?';
   const confirmed = await promptConfirm(prompt, true);
+  if (!confirmed && step.required === false) {
+    // Optional step - skip it instead of cancelling
+    logger.dim('Skipping optional step');
+    return '';
+  }
   return confirmed ? '' : null;
 }
 
 /**
  * Execute secret step - collect masked input
  */
-async function executeSecretStep(step: SecretStep): Promise<string | null> {
+async function executeSecretStep(step: SecretStep, options: OnboardingOptions): Promise<string | null> {
   const validator = step.validationPattern
     ? createValidator(step.validationPattern, step.validationMessage)
     : undefined;
+
+  // Check if we have an existing secret for this key
+  const hasExistingSecret = options.previousSecretKeys?.includes(step.configKey);
+
+  if (hasExistingSecret && options.isRefresh) {
+    logger.dim('  (existing secret found)');
+    const keepExisting = await promptConfirm('Keep existing secret? (Enter to keep, n to change)', true);
+    if (keepExisting) {
+      // Return special marker that means "keep existing"
+      return KEEP_EXISTING_SECRET;
+    }
+  }
 
   while (true) {
     const value = await promptPassword(`Enter ${step.title}:`);
@@ -172,13 +213,21 @@ async function executeSecretStep(step: SecretStep): Promise<string | null> {
 /**
  * Execute input step - collect plain text input
  */
-async function executeInputStep(step: InputStep): Promise<string | null> {
+async function executeInputStep(step: InputStep, options: OnboardingOptions): Promise<string | null> {
   const validator = step.validationPattern
     ? createValidator(step.validationPattern, step.validationMessage)
     : undefined;
 
+  // Use previous value as default if available (for refresh), otherwise use step's default
+  const previousValue = options.previousValues?.[step.configKey];
+  const defaultValue = previousValue ?? step.defaultValue;
+
+  if (previousValue && options.isRefresh) {
+    logger.dim(`  (current value: ${previousValue})`);
+  }
+
   const value = await promptInput(`Enter ${step.title}:`, {
-    default: step.defaultValue,
+    default: defaultValue,
     validate: (input) => {
       if (!input && step.required !== false) {
         return 'This field is required';
@@ -195,16 +244,22 @@ async function executeInputStep(step: InputStep): Promise<string | null> {
 
 /**
  * Create a validator function from regex pattern
+ * Returns undefined if the pattern is invalid
  */
 function createValidator(
   pattern: string,
   message?: string
-): (value: string) => boolean | string {
-  const regex = new RegExp(pattern);
-  return (value: string) => {
-    if (regex.test(value)) {
-      return true;
-    }
-    return message || `Value must match pattern: ${pattern}`;
-  };
+): ((value: string) => boolean | string) | undefined {
+  try {
+    const regex = new RegExp(pattern);
+    return (value: string) => {
+      if (regex.test(value)) {
+        return true;
+      }
+      return message || `Value must match pattern: ${pattern}`;
+    };
+  } catch (error) {
+    logger.warning(`Invalid validation pattern '${pattern}', skipping validation`);
+    return undefined;
+  }
 }

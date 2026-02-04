@@ -57,6 +57,7 @@ import { startTmux, stopTmux, statusTmux, listTmux, newTmux, attachTmux, killTmu
 import { showStatus } from './commands/status.js'
 import { configNotifications, linearSetup, linearShow, linearClear } from './commands/config.js'
 import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
+import { bundleRefresh, bundleStatus } from './commands/bundle.js'
 
 const program = new Command()
 
@@ -769,6 +770,41 @@ notificationsCommand
 	.action(async () => {
 		try {
 			await notificationsStatus()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Bundle Commands
+// ============================================================================
+
+const bundleCommand = program
+	.command('bundle')
+	.description('Manage bundle configuration')
+
+bundleCommand
+	.command('refresh')
+	.description('Re-run bundle onboarding (keeps previous values as defaults)')
+	.option('--force', 'Force refresh even if no changes detected')
+	.option('--project <name>', 'Specify project name')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await bundleRefresh(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+bundleCommand
+	.command('status')
+	.description('Show bundle status for current project')
+	.option('--project <name>', 'Specify project name')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await bundleStatus(options)
 		} catch (error) {
 			handleError(error)
 		}

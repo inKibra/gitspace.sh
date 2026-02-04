@@ -14,7 +14,6 @@ import {
   getCurrentProject,
   getAllProjectNames,
   projectExists,
-  getScriptsPhaseDir,
   updateProjectConfig,
 } from '../core/config.js';
 import { checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
@@ -49,9 +48,9 @@ import {
   detectBundleInRepo,
   loadBundleFromPath,
   loadBundleFromUrl,
-  copyBundleScripts,
   cleanupBundleDir,
 } from '../core/bundle.js';
+import { checkAndRefreshBundle } from '../core/bundle-refresh.js';
 import { runOnboarding } from '../utils/onboarding.js';
 import type { LoadedBundle, OnboardingResult } from '../types/bundle.js';
 
@@ -184,10 +183,8 @@ export async function addProject(options: {
     baseBranch
   );
 
-  // Copy bundle scripts if bundle was loaded
+  // Store bundle info if bundle was loaded (scripts are read from workspace .gitspace/)
   if (loadedBundle) {
-    copyBundleScripts(loadedBundle.bundleDir, projectName);
-
     // Store bundle values and info in project config
     const configUpdates: Record<string, unknown> = {};
 
@@ -417,6 +414,9 @@ export async function addWorkspace(
 
   logger.success(`Created worktree from ${baseBranch}`);
 
+  // Check if bundle has changed and run refresh if needed
+  await checkAndRefreshBundle(currentProject, workspacePath);
+
   // If workspace was created from a Linear issue, save issue details as markdown
   if (selectedLinearIssue) {
     const issueLinearConfig = await getLinearConfig(currentProject);
@@ -437,7 +437,7 @@ export async function addWorkspace(
 
   // Run pre scripts if this is the first time (before tmux/setup)
   if (isFirstTime && !options.noSetup) {
-    const preScriptsDir = getScriptsPhaseDir(currentProject, 'pre');
+    const preScriptsDir = join(workspacePath, '.gitspace', 'pre');
     await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, projectConfig.repository);
   }
 

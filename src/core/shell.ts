@@ -4,10 +4,11 @@
  */
 
 import { spawn, spawnSync } from 'child_process'
+import { join } from 'path'
 import { logger } from '../utils/logger.js'
 import { hasSetupBeenRun, markSetupComplete } from '../utils/workspace-state.js'
 import { runScriptsInTerminal, type RunScriptsOptions } from '../utils/run-scripts.js'
-import { getScriptsPhaseDir, readProjectConfig } from './config.js'
+import { readProjectConfig } from './config.js'
 import { getProjectSecrets } from '../utils/secrets.js'
 import {
 	listSessions,
@@ -58,7 +59,7 @@ export async function openWorkspaceShell(
 
 	if (selectOnly) {
 		// TUI mode: setup was done during creation, just run select scripts
-		const selectScriptsDir = getScriptsPhaseDir(projectName, 'select')
+		const selectScriptsDir = join(workspacePath, '.gitspace', 'select')
 		await runScriptsInTerminal(
 			selectScriptsDir,
 			workspacePath,
@@ -72,7 +73,7 @@ export async function openWorkspaceShell(
 		// Determine which scripts to run based on setup status
 		if (setupAlreadyRun) {
 			// Setup has been run before, run select scripts
-			const selectScriptsDir = getScriptsPhaseDir(projectName, 'select')
+			const selectScriptsDir = join(workspacePath, '.gitspace', 'select')
 			await runScriptsInTerminal(
 				selectScriptsDir,
 				workspacePath,
@@ -83,7 +84,7 @@ export async function openWorkspaceShell(
 		} else if (!noSetup) {
 			// First time setup, run setup scripts
 			printToTerminal('Running setup scripts (first time)...')
-			const setupScriptsDir = getScriptsPhaseDir(projectName, 'setup')
+			const setupScriptsDir = join(workspacePath, '.gitspace', 'setup')
 			await runScriptsInTerminal(
 				setupScriptsDir,
 				workspacePath,

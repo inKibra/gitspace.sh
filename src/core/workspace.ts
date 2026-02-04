@@ -10,7 +10,6 @@ import {
   getProjectWorkspacesDir,
   getProjectBaseDir,
   getProjectDir,
-  getScriptsPhaseDir,
   readGlobalConfig,
   updateGlobalConfig,
 } from './config.js';
@@ -123,7 +122,7 @@ export async function deleteWorkspaceCore(
   // Run remove scripts (cleanup before deletion)
   try {
     const projectConfig = readProjectConfig(projectName);
-    const removeScriptsDir = getScriptsPhaseDir(projectName, 'remove');
+    const removeScriptsDir = join(workspacePath, '.gitspace', 'remove');
     options.onProgress?.('Running cleanup scripts...');
     await runScriptsInTerminal(
       removeScriptsDir,
