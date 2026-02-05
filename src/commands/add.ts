@@ -52,6 +52,7 @@ import {
 } from '../core/bundle.js';
 import { checkAndRefreshBundle } from '../core/bundle-refresh.js';
 import { runOnboarding } from '../utils/onboarding.js';
+import { preloadProjectSecrets } from '../utils/secrets.js';
 import type { LoadedBundle, OnboardingResult } from '../types/bundle.js';
 
 /**
@@ -413,6 +414,12 @@ export async function addWorkspace(
   );
 
   logger.success(`Created worktree from ${baseBranch}`);
+
+  // Preload project secrets into cache to minimize keychain prompts
+  // This ensures subsequent getProjectSecret calls use cached values
+  if (projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0) {
+    await preloadProjectSecrets(currentProject, projectConfig.bundleSecretKeys);
+  }
 
   // Check if bundle has changed and run refresh if needed
   await checkAndRefreshBundle(currentProject, workspacePath);

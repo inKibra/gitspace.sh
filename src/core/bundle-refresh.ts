@@ -66,9 +66,27 @@ export interface BundleRefreshResult {
  * Compute a hash of the full bundle content for change detection
  */
 function hashBundle(bundle: SpacesBundle): string {
-  // Hash the full bundle content (sorted keys for consistency)
-  const content = JSON.stringify(bundle, Object.keys(bundle).sort());
+  // Hash the full bundle content (deep-sorted keys for consistency)
+  const stable = deepSortForHash(bundle);
+  const content = JSON.stringify(stable);
   return createHash('sha256').update(content).digest('hex').slice(0, 16);
+}
+
+function deepSortForHash(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => deepSortForHash(item));
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = deepSortForHash(record[key]);
+    }
+    return sorted;
+  }
+
+  return value;
 }
 
 /**

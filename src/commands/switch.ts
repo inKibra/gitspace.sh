@@ -20,6 +20,7 @@ import { SpacesError, NoProjectError } from '../types/errors.js';
 import { join } from 'path';
 import { runCommandsInTerminal } from '../utils/run-commands.js';
 import { fuzzyMatch } from '../utils/fuzzy-match.js';
+import { preloadProjectSecrets } from '../utils/secrets.js';
 import type {
   WorkspaceCandidate,
   RankedWorkspace,
@@ -206,6 +207,11 @@ export async function switchWorkspace(
   }
 
   const workspacePath = join(workspacesDir, workspaceName);
+
+  // Preload project secrets into cache to minimize keychain prompts
+  if (projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0) {
+    await preloadProjectSecrets(currentProject, projectConfig.bundleSecretKeys);
+  }
 
   // Switch to workspace
   if (options.noShell) {

@@ -212,6 +212,46 @@ describe('bundle-refresh', () => {
       expect(result.hasBundle).toBe(true);
       expect(result.hasChanged).toBe(true);
     });
+
+    it('should detect changes when onboarding step details change', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+
+      // Initial bundle with a single step
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify({
+        version: '1.0' as const,
+        name: 'Test Bundle',
+        onboarding: [
+          { id: 'step1', type: 'input', title: 'Name', description: 'Enter name', configKey: 'name' },
+        ],
+      }));
+
+      const { detectBundleChanges } = await import('../bundle-refresh');
+      const firstResult = detectBundleChanges('test-project');
+
+      // Set up as if bundle was applied
+      mockProjectConfig.appliedBundle = {
+        name: 'Test Bundle',
+        version: '1.0' as const,
+        source: bundleDir,
+        appliedAt: new Date().toISOString(),
+      };
+      mockProjectConfig.appliedBundleHash = firstResult.currentHash;
+
+      // Change onboarding step details only (same step count)
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify({
+        version: '1.0' as const,
+        name: 'Test Bundle',
+        onboarding: [
+          { id: 'step1', type: 'input', title: 'Project Name', description: 'Enter project name', configKey: 'name' },
+        ],
+      }));
+
+      const result = detectBundleChanges('test-project');
+
+      expect(result.hasBundle).toBe(true);
+      expect(result.hasChanged).toBe(true);
+    });
   });
 
   describe('refreshBundle', () => {
