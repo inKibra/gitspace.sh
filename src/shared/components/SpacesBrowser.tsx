@@ -11,6 +11,19 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 // Types
 // ============================================================================
 
+/** Process summary for workspace */
+export interface WorkspaceProcessInfo {
+  name: string;
+  instances?: number;
+  ports?: WorkspaceProcessPort[];
+}
+
+export interface WorkspaceProcessPort {
+  port: number;
+  name?: string;
+  protocol?: 'http' | 'tcp';
+}
+
 /** Workspace info from machine */
 export interface WorkspaceInfo {
   id: string;
@@ -20,6 +33,8 @@ export interface WorkspaceInfo {
   branch?: string;
   sessionCount: number;
   isStale?: boolean;
+  processes?: WorkspaceProcessInfo[];
+  serveDomain?: string;
 }
 
 /** Session info from machine */
@@ -30,6 +45,9 @@ export interface SessionInfo {
   attached: boolean;
   createdAt: number;
   processTitle?: string;
+  processName?: string;
+  processInstance?: number;
+  exitCode?: number;
 }
 
 /** Tree item types for flattened list */
@@ -37,6 +55,8 @@ export type TreeItem =
   | { type: 'project'; name: string; workspaceCount: number }
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
+  | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
+  | { type: 'events'; workspaceId: string }
   | { type: 'new-session'; workspaceId: string };
 
 /** Tree item with selection state */
@@ -51,6 +71,10 @@ export interface UseSpacesBrowserProps {
   sessions: SessionInfo[];
   onRequestSessions: (workspaceId: string) => void;
   onAttachSession: (params: { sessionId?: string; workspaceId?: string }) => void;
+  onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
+  onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
+  onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
+  onOpenEvents: (workspaceId: string) => void;
   onRefresh: () => void;
   /** Called to refresh sessions for specific workspaces (e.g., on manual refresh) */
   onRefreshSessions?: (workspaceIds: string[]) => void;
@@ -82,9 +106,14 @@ export interface UseSpacesBrowserReturn {
   activateSelected: () => void;
   /** Direct attach - bypasses state timing issues on mobile */
   attachSession: (params: { sessionId?: string; workspaceId?: string }) => void;
+  startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
+  startProcess: (params: { workspaceId: string; processName: string }) => void;
+  stopProcess: (params: { workspaceId: string; processName: string }) => void;
+
   createNewSession: () => void;
   createWorkspace: () => void;
   refresh: () => void;
+  openEvents: (workspaceId: string) => void;
   back: () => void;
 }
 
@@ -144,14 +173,77 @@ function buildTree(
 
       // If expanded, show sessions and new session action
       if (isExpanded) {
-        const workspaceSessions = sessions.filter(s => s.workspaceId === ws.id);
-        for (const session of workspaceSessions) {
+        const workspaceSessions = sessions
+          .filter(s => s.workspaceId === ws.id)
+          .sort((a, b) => {
+            const aProcess = a.processName ? 0 : 1;
+            const bProcess = b.processName ? 0 : 1;
+            if (aProcess !== bProcess) return aProcess - bProcess;
+            return a.name.localeCompare(b.name);
+          });
+        const processSessions = workspaceSessions.filter(s => s.processName);
+        const adHocSessions = workspaceSessions.filter(s => !s.processName);
+
+        const processEntries = ws.processes ?? [];
+        const processInstances = new Map<string, Set<number>>();
+        for (const session of processSessions) {
+          const instance = session.processInstance ?? 1;
+          const set = processInstances.get(session.processName ?? '') || new Set<number>();
+          set.add(instance);
+          processInstances.set(session.processName ?? '', set);
+        }
+
+        for (const process of processEntries) {
+          const knownInstances = processInstances.get(process.name) ?? new Set<number>();
+          const configuredCount = process.instances ?? 1;
+          const configuredInstances = Array.from({ length: configuredCount }, (_, idx) => idx + 1);
+          const instanceList = configuredInstances.length > 0 ? configuredInstances : [1];
+          for (const instance of instanceList) {
+            const sessionMatch = processSessions.find(
+              (session) => session.processName === process.name && (session.processInstance ?? 1) === instance
+            );
+            const exitCode = sessionMatch?.exitCode;
+            const status = exitCode !== undefined
+              ? exitCode === 0
+                ? 'stopped'
+                : 'failed'
+              : knownInstances.has(instance)
+                ? 'running'
+                : 'stopped';
+            items.push({
+              type: 'process',
+              processName: process.name,
+              instance,
+              workspaceId: ws.id,
+              status,
+              ports: process.ports,
+              serveDomain: ws.serveDomain,
+            });
+          }
+        }
+
+        for (const session of processSessions) {
           items.push({
             type: 'session',
             session,
             workspaceId: ws.id,
           });
         }
+
+        for (const session of adHocSessions) {
+          items.push({
+            type: 'session',
+            session,
+            workspaceId: ws.id,
+          });
+        }
+
+        // Events action
+        items.push({
+          type: 'events',
+          workspaceId: ws.id,
+        });
+
         // New session action
         items.push({
           type: 'new-session',
@@ -182,6 +274,10 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     sessions,
     onRequestSessions,
     onAttachSession,
+    onStartProcess,
+    onStartProcessAttach,
+    onStopProcess,
+    onOpenEvents,
     onRefresh,
     onRefreshSessions,
     onBack,
@@ -208,6 +304,17 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   // Selected item
   const selectedItem = tree[selectedIndex] ?? null;
+
+  const findSessionForProcess = useCallback(
+    (workspaceId: string, processName: string, instance: number) =>
+      sessions.find(
+        (session) =>
+          session.workspaceId === workspaceId &&
+          session.processName === processName &&
+          (session.processInstance ?? 1) === instance
+      ),
+    [sessions]
+  );
 
   // Computed
   const isEmpty = workspaces.length === 0;
@@ -256,10 +363,29 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       toggleWorkspace(selectedItem.workspace.id);
     } else if (selectedItem.type === 'session') {
       onAttachSession({ sessionId: selectedItem.session.id });
+    } else if (selectedItem.type === 'process') {
+      if (selectedItem.status === 'running') {
+        const session = findSessionForProcess(
+          selectedItem.workspaceId,
+          selectedItem.processName,
+          selectedItem.instance
+        );
+        if (session) {
+          onAttachSession({ sessionId: session.id });
+        }
+      } else {
+        onStartProcessAttach({
+          workspaceId: selectedItem.workspaceId,
+          processName: selectedItem.processName,
+          instance: selectedItem.instance,
+        });
+      }
+    } else if (selectedItem.type === 'events') {
+      onOpenEvents(selectedItem.workspaceId);
     } else if (selectedItem.type === 'new-session') {
       onAttachSession({ workspaceId: selectedItem.workspaceId });
     }
-  }, [selectedItem, toggleWorkspace, onAttachSession]);
+  }, [selectedItem, toggleWorkspace, onAttachSession, onStartProcess, onStartProcessAttach, findSessionForProcess, onOpenEvents]);
 
   const createNewSession = useCallback(() => {
     if (!selectedItem) return;
@@ -294,28 +420,29 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   }, [onBack]);
 
   return {
-    // Display data
     items,
     selectedIndex,
     selectedItem,
     expandedWorkspaces,
-    machineName: machineName ?? null,
-
-    // Computed flags
+    machineName: machineName || null,
     isEmpty,
-
-    // Actions
     moveUp,
     moveDown,
     selectIndex,
     toggleWorkspace,
     activateSelected,
     attachSession: onAttachSession,
+    startProcessAttach: (params) =>
+      onStartProcessAttach(params),
+    startProcess: (params) => onStartProcess?.(params),
+    stopProcess: (params) => onStopProcess?.(params),
     createNewSession,
     createWorkspace,
     refresh,
+    openEvents: (workspaceId) => onOpenEvents(workspaceId),
     back,
   };
+
 }
 
 // ============================================================================

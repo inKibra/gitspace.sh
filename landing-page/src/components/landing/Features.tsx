@@ -81,10 +81,11 @@ export function Features() {
                         </li>
                         <li className="flex items-start">
                             <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />
-                            <div className="flex flex-col">
-                                <span className="text-zinc-300">Public subdomains & port forwarding</span>
-                                <span className="text-xs font-semibold text-blue-500 mt-1 uppercase tracking-wider">Coming Soon</span>
-                            </div>
+                            <span>Public subdomains + per-process URLs (HTTP/TCP)</span>
+                        </li>
+                        <li className="flex items-start">
+                            <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />
+                            <span>Workspace-wide event timeline with correlated snapshots</span>
                         </li>
                         <li className="flex items-start">
                             <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />
@@ -92,11 +93,7 @@ export function Features() {
                         </li>
                         <li className="flex items-start">
                             <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />
-                            <span>Share sessions (view-only or full access)</span>
-                        </li>
-                        <li className="flex items-start">
-                            <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />
-                            <span>Inbox tracks what happened while you were away</span>
+                            <span>Share sessions + inbox updates while you're away</span>
                         </li>
                     </ul>
                 </div>

@@ -51,6 +51,8 @@ export function extractSessionInfoList(
         attached: session.attached,
         createdAt: session.createdAt,
         processTitle: session.processTitle,
+        processName: session.processName,
+        processInstance: session.processInstance,
       });
     }
   }

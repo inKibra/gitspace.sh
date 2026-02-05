@@ -65,7 +65,7 @@ export default function DocsPage() {
             
             {/* Simple footer within docs for "Next" navigation could go here */}
             <div className="mt-20 pt-8 border-t border-zinc-800 flex justify-between text-sm text-zinc-500">
-               <span>Last updated: Jan 8, 2026</span>
+               <span>Last updated: Feb 3, 2026</span>
                <a href="#" className="hover:text-green-500 transition-colors">Edit this page on GitHub</a>
             </div>
           </div>

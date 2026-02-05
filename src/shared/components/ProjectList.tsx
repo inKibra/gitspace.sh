@@ -50,8 +50,10 @@ export interface UseProjectListReturn {
   moveDown: () => void;
   selectIndex: (index: number) => void;
   selectProject: () => void;
+  selectProjectAtIndex: (index: number) => void;
   createNew: () => void;
   deleteSelected: () => void;
+  deleteAtIndex: (index: number) => void;
   refresh: () => void;
 }
 
@@ -118,6 +120,15 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
     }
   }, [selectedProject, onSelect]);
 
+  const selectProjectAtIndex = useCallback((index: number) => {
+    const clamped = Math.max(0, Math.min(index, projects.length - 1));
+    const project = projects[clamped];
+    if (project) {
+      setSelectedIndex(clamped);
+      onSelect(project);
+    }
+  }, [projects, onSelect]);
+
   const createNew = useCallback(() => {
     onCreateNew();
   }, [onCreateNew]);
@@ -127,6 +138,15 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
       onDelete(selectedProject);
     }
   }, [selectedProject, onDelete]);
+
+  const deleteAtIndex = useCallback((index: number) => {
+    const clamped = Math.max(0, Math.min(index, projects.length - 1));
+    const project = projects[clamped];
+    if (project) {
+      setSelectedIndex(clamped);
+      onDelete(project);
+    }
+  }, [projects, onDelete]);
 
   const refresh = useCallback(() => {
     console.log("[ProjectList] refresh() called");
@@ -147,8 +167,10 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
     moveDown,
     selectIndex,
     selectProject,
+    selectProjectAtIndex,
     createNew,
     deleteSelected,
+    deleteAtIndex,
     refresh,
   };
 }

@@ -1,6 +1,8 @@
 /**
  * Cloudflare Worker environment bindings
  */
+import type { D1Database } from '@cloudflare/workers-types';
+
 export interface Env {
   // D1 Database
   DB: D1Database;
@@ -53,8 +55,13 @@ export interface Subdomain {
   subdomain: string;
   user_id: string;
   tunnel_id: string;
+  serve_tunnel_id: string | null;
   dns_record_ids: string;
+  serve_dns_record_ids: string | null;
   tunnel_token_encrypted: string;
+  serve_tunnel_token_encrypted: string | null;
+  custom_hostname_id?: string | null;
+  serve_custom_hostname_id?: string | null;
   status: 'active' | 'suspended' | 'deleted';
   is_primary: number;
   created_at: number;

@@ -6,7 +6,11 @@
  */
 
 import type { Context, Next } from 'hono';
+import type { D1Database } from '@cloudflare/workers-types';
 import type { Env, User, Token } from '../types';
+import { and, eq, gt, isNull, or } from 'drizzle-orm';
+import { getDb } from '../db/client';
+import { tokens as tokensTable, users as usersTable, sessions as sessionsTable } from '../db/schema';
 
 export interface AuthContext {
   user: User;
@@ -48,20 +52,37 @@ export async function authMiddleware(
   const tokenHash = await hashToken(tokenPlain);
 
   // Look up token and join with user
-  const result = await c.env.DB.prepare(`
-    SELECT
-      t.id as token_id, t.prefix, t.user_id, t.device_name, t.device_fingerprint,
-      t.created_at as token_created_at, t.expires_at, t.last_used_at, t.revoked_at,
-      u.id, u.github_id, u.github_username, u.email, u.name, u.avatar_url,
-      u.created_at, u.updated_at
-    FROM tokens t
-    JOIN users u ON t.user_id = u.id
-    WHERE t.id = ?
-      AND t.revoked_at IS NULL
-      AND (t.expires_at IS NULL OR t.expires_at > ?)
-  `)
-    .bind(tokenHash, Date.now())
-    .first();
+  const db = getDb(c.env);
+  const result = await db
+    .select({
+      token_id: tokensTable.id,
+      prefix: tokensTable.prefix,
+      user_id: tokensTable.userId,
+      device_name: tokensTable.deviceName,
+      device_fingerprint: tokensTable.deviceFingerprint,
+      token_created_at: tokensTable.createdAt,
+      expires_at: tokensTable.expiresAt,
+      last_used_at: tokensTable.lastUsedAt,
+      revoked_at: tokensTable.revokedAt,
+      id: usersTable.id,
+      github_id: usersTable.githubId,
+      github_username: usersTable.githubUsername,
+      email: usersTable.email,
+      name: usersTable.name,
+      avatar_url: usersTable.avatarUrl,
+      created_at: usersTable.createdAt,
+      updated_at: usersTable.updatedAt,
+    })
+    .from(tokensTable)
+    .innerJoin(usersTable, eq(tokensTable.userId, usersTable.id))
+    .where(
+      and(
+        eq(tokensTable.id, tokenHash),
+        isNull(tokensTable.revokedAt),
+        or(isNull(tokensTable.expiresAt), gt(tokensTable.expiresAt, Date.now()))
+      )
+    )
+    .get();
 
   if (!result) {
     return c.json({ error: 'Invalid or expired token' }, 401);
@@ -108,8 +129,10 @@ export async function authMiddleware(
 
   // Update last_used_at (fire-and-forget)
   c.executionCtx.waitUntil(
-    c.env.DB.prepare('UPDATE tokens SET last_used_at = ? WHERE id = ?')
-      .bind(Date.now(), tokenHash)
+    db
+      .update(tokensTable)
+      .set({ lastUsedAt: Date.now() })
+      .where(eq(tokensTable.id, tokenHash))
       .run()
   );
 
@@ -123,17 +146,22 @@ export async function validateSession(
   db: D1Database,
   sessionId: string
 ): Promise<User | null> {
-  const result = await db
-    .prepare(
-      `
-    SELECT u.*
-    FROM sessions s
-    JOIN users u ON s.user_id = u.id
-    WHERE s.id = ? AND s.expires_at > ?
-  `
-    )
-    .bind(sessionId, Date.now())
-    .first();
+  const drizzleDb = getDb({ DB: db } as Env);
+  const result = await drizzleDb
+    .select({
+      id: usersTable.id,
+      github_id: usersTable.githubId,
+      github_username: usersTable.githubUsername,
+      email: usersTable.email,
+      name: usersTable.name,
+      avatar_url: usersTable.avatarUrl,
+      created_at: usersTable.createdAt,
+      updated_at: usersTable.updatedAt,
+    })
+    .from(sessionsTable)
+    .innerJoin(usersTable, eq(sessionsTable.userId, usersTable.id))
+    .where(and(eq(sessionsTable.id, sessionId), gt(sessionsTable.expiresAt, Date.now())))
+    .get();
 
   if (!result) {
     return null;

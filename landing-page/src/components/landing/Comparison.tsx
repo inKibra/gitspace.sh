@@ -8,6 +8,7 @@ export function Comparison() {
         { text: "Git worktree management", checked: true },
         { text: "Instant branch switching", checked: true },
         { text: "Custom setup/select scripts", checked: true },
+        { text: "Wide event timeline & snapshots", checked: true },
         { text: "Linear issue integration", checked: true },
         { text: "Interactive TUI", checked: true },
         { text: "Project templates", checked: true }
@@ -20,7 +21,7 @@ export function Comparison() {
         { text: "End-to-end encryption", checked: true },
         { text: "Session sharing (view/write)", checked: true },
         { text: "Inbox notifications", checked: true },
-        { text: "Public subdomains (planned)", checked: false },
+        { text: "Public subdomains + per-process URLs", checked: true },
         { text: "Self-host option", checked: true }
       ]
     },

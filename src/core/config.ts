@@ -17,6 +17,7 @@ import type { GlobalConfig, ProjectConfig, NotificationConfig } from '../types/c
 import {
 	DEFAULT_GLOBAL_CONFIG,
 	DEFAULT_NOTIFICATION_CONFIG,
+	DEFAULT_EVENTS_CONFIG,
 	createDefaultProjectConfig,
 } from '../types/config.js'
 import { SpacesError } from '../types/errors.js'
@@ -178,7 +179,22 @@ export function readProjectConfig(projectName: string): ProjectConfig {
 
 	try {
 		const content = readFileSync(configPath, 'utf-8')
-		return JSON.parse(content) as ProjectConfig
+		const parsed = JSON.parse(content) as ProjectConfig
+		return {
+			...parsed,
+			events: {
+				...DEFAULT_EVENTS_CONFIG,
+				...(parsed.events || {}),
+				fields: {
+					...DEFAULT_EVENTS_CONFIG.fields,
+					...(parsed.events?.fields || {}),
+				},
+				rotation: {
+					...DEFAULT_EVENTS_CONFIG.rotation,
+					...(parsed.events?.rotation || {}),
+				},
+			},
+		}
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to read project config for "${projectName}": ${
@@ -559,4 +575,27 @@ export function updateNotificationConfig(
 	}
 	updateGlobalConfig({ notifications: updated })
 	return updated
+}
+
+// ============================================================================
+// Wide Events Config Helpers
+// ============================================================================
+
+/**
+ * Get wide events configuration for a project
+ */
+export function getProjectEventsConfig(projectName: string) {
+	const config = readProjectConfig(projectName)
+	return {
+		...DEFAULT_EVENTS_CONFIG,
+		...(config.events || {}),
+		fields: {
+			...DEFAULT_EVENTS_CONFIG.fields,
+			...(config.events?.fields || {}),
+		},
+		rotation: {
+			...DEFAULT_EVENTS_CONFIG.rotation,
+			...(config.events?.rotation || {}),
+		},
+	}
 }

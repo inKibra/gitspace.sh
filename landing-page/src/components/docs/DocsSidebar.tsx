@@ -1,7 +1,7 @@
 import { cn } from "../../lib/utils";
 import { Button } from "../../app/components/ui/button";
 import { ScrollArea } from "../../app/components/ui/scroll-area";
-import { ChevronRight, Terminal, Book, Server, Layers, Settings, Shield, Zap, Globe, Key, Users, FileCode, HelpCircle, Link } from "lucide-react";
+import { ChevronRight, Terminal, Book, Server, Layers, Settings, Shield, Zap, Globe, Key, Users, FileCode, HelpCircle, Link, Activity } from "lucide-react";
 
 interface DocsSidebarProps extends React.HTMLAttributes<HTMLDivElement> {
   activeSection: string;
@@ -31,6 +31,7 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
       title: "Remote Access",
       items: [
         { id: "gitspace-managed", label: "gitspace.sh (Managed)", icon: Globe },
+        { id: "process-hosting", label: "Process Hosting", icon: Globe },
         { id: "self-hosted-relay", label: "Self-Hosted Relay", icon: Server },
         { id: "identity-management", label: "Identity Management", icon: Key },
         { id: "access-control", label: "Access Control", icon: Users },
@@ -45,6 +46,7 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
     {
       title: "Reference",
       items: [
+        { id: "wide-events", label: "Wide Events", icon: Activity },
         { id: "configuration", label: "Configuration", icon: Settings },
         { id: "troubleshooting", label: "Troubleshooting", icon: HelpCircle },
         { id: "security", label: "Security", icon: Shield },

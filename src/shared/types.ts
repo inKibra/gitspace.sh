@@ -57,6 +57,12 @@ export interface WorkspaceSession {
   createdAt: number;
   /** Current process title */
   processTitle?: string;
+  /** Process name (if managed) */
+  processName?: string;
+  /** Process instance (if managed) */
+  processInstance?: number;
+  /** Exit code if session exited */
+  exitCode?: number;
 }
 
 /** Workspace state for display */
@@ -79,6 +85,9 @@ export interface Workspace {
   isStale: boolean;
   /** Active sessions in this workspace */
   sessions: WorkspaceSession[];
+  /** Configured processes in this workspace */
+  serveDomain?: string;
+  processes?: { name: string; instances?: number; ports?: import("../types/processes.js").ProcessPortConfig[] }[];
 }
 
 // ============================================================================

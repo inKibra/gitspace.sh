@@ -241,6 +241,9 @@ export class RemoteMachineProvider implements MachineProvider {
       workspaceName,
       sessionName: options?.sessionName,
       shell: options?.shell,
+      command: options?.command,
+      args: options?.args,
+      env: options?.env,
     });
     return response.sessionId;
   }

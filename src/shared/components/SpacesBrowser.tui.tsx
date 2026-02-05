@@ -120,14 +120,34 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             );
           }
 
+          if (item.type === 'process') {
+            const textColor = isSelected ? COLORS.selected : COLORS.session;
+            const indicator = item.status === 'running' ? '●' : item.status === 'failed' ? '×' : '○';
+            const indicatorColor = item.status === 'running' ? COLORS.sessionCount : item.status === 'failed' ? COLORS.sessionAttached : COLORS.textDim;
+            const prefix = isSelected ? '>' : ' ';
+            const statusLabel = item.status;
+
+            return (
+              <box key={`proc-${item.workspaceId}-${item.processName}-${item.instance}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}   </text>
+                <text fg={indicatorColor}>{indicator}</text>
+                <text fg={textColor}> {item.processName}#{item.instance}</text>
+                <text fg={COLORS.textDim}> [{statusLabel}]</text>
+              </box>
+            );
+          }
+
           if (item.type === 'session') {
             const session = item.session;
             const textColor = isSelected ? COLORS.selected : session.attached ? COLORS.sessionAttached : COLORS.session;
             const indicator = session.attached ? '○' : '●';
             const indicatorColor = session.attached ? COLORS.sessionAttached : COLORS.sessionCount;
-            const displayName = session.name.split(':').pop() || session.name;
+            const displayName = session.processName
+              ? `${session.processName}#${session.processInstance ?? 1}`
+              : session.name.split(':').pop() || session.name;
             const prefix = isSelected ? '>' : ' ';
             const processInfo = session.processTitle ? ` [${session.processTitle}]` : '';
+            const runnerInfo = session.processName ? ' [runner]' : '';
             const timeInfo = session.attached ? '(attached)' : formatTime(session.createdAt);
 
             return (
@@ -136,8 +156,18 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
                 <text fg={indicatorColor}>{indicator}</text>
                 <text fg={textColor}> {displayName}</text>
                 {session.processTitle && <text fg={COLORS.sessionAttached}>{processInfo}</text>}
+                {session.processName && <text fg={COLORS.textDim}>{runnerInfo}</text>}
                 <text fg={COLORS.textDim}> {timeInfo}</text>
               </box>
+            );
+          }
+
+          if (item.type === 'events') {
+            const textColor = isSelected ? COLORS.selected : COLORS.textDim;
+            return (
+              <text key={`events-${item.workspaceId}`} fg={textColor} height={1}>
+                {isSelected ? '>' : ' '}   ▸ Events
+              </text>
             );
           }
 
@@ -156,7 +186,7 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
 
       {/* Footer hint */}
       <text fg={COLORS.textDim} height={1} paddingLeft={1}>
-        [↑↓] Navigate  [Enter] Select  [n] New  [r] Refresh  [q] Back
+        [↑↓] Navigate  [Enter] Select  [s] Start  [x] Stop  [n] New  [r] Refresh  [q] Back
       </text>
     </box>
   );

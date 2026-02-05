@@ -7,6 +7,10 @@
 import { Hono } from 'hono';
 import { ed25519 } from '@noble/curves/ed25519';
 import type { Env, User, GitHubUser } from '../types';
+import type { D1Database } from '@cloudflare/workers-types';
+import { and, desc, eq, gt, isNull, sql } from 'drizzle-orm';
+import { getDb } from '../db/client';
+import { sessions as sessionsTable, tokens as tokensTable, users as usersTable } from '../db/schema';
 import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -84,20 +88,17 @@ app.get('/github/callback', async (c) => {
     const sessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
 
-    await c.env.DB.prepare(
-      `
-      INSERT INTO sessions (id, user_id, created_at, expires_at, ip_address, user_agent)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `
-    )
-      .bind(
-        sessionId,
-        user.id,
-        Date.now(),
+    const db = getDb(c.env);
+    await db
+      .insert(sessionsTable)
+      .values({
+        id: sessionId,
+        userId: user.id,
+        createdAt: Date.now(),
         expiresAt,
-        c.req.header('CF-Connecting-IP'),
-        c.req.header('User-Agent')
-      )
+        ipAddress: c.req.header('CF-Connecting-IP') ?? null,
+        userAgent: c.req.header('User-Agent') ?? null,
+      })
       .run();
 
     // Redirect with session cookie
@@ -248,22 +249,19 @@ app.post('/github/device', async (c) => {
   const tokenHash = await hashToken(tokenPlain);
   const expiresAt = now + 90 * 24 * 60 * 60 * 1000; // 90 days
 
-  await c.env.DB.prepare(
-    `
-    INSERT INTO tokens (id, prefix, user_id, device_name, device_fingerprint, created_at, expires_at, last_used_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `
-  )
-    .bind(
-      tokenHash, // Store hash, not plain token
-      tokenPrefix,
-      user.id,
-      normalizedDeviceName,
-      machine_pubkey,
-      now,
+  const db = getDb(c.env);
+  await db
+    .insert(tokensTable)
+    .values({
+      id: tokenHash,
+      prefix: tokenPrefix,
+      userId: user.id,
+      deviceName: normalizedDeviceName,
+      deviceFingerprint: machine_pubkey,
+      createdAt: now,
       expiresAt,
-      now
-    )
+      lastUsedAt: now,
+    })
     .run();
 
   // ========================================================================
@@ -291,9 +289,8 @@ app.post('/logout', async (c) => {
   const sessionCookie = c.req.header('Cookie')?.match(/session=([^;]+)/)?.[1];
 
   if (sessionCookie) {
-    await c.env.DB.prepare('DELETE FROM sessions WHERE id = ?')
-      .bind(sessionCookie)
-      .run();
+    const db = getDb(c.env);
+    await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionCookie)).run();
   }
 
   return new Response(null, {
@@ -363,48 +360,62 @@ async function findOrCreateUser(
 ): Promise<User> {
   const now = Date.now();
   const githubId = String(githubUser.id);
+  const drizzleDb = getDb({ DB: db } as Env);
+
+  const toUser = (row: {
+    id: string;
+    githubId: string;
+    githubUsername: string;
+    email: string | null;
+    name: string | null;
+    avatarUrl: string | null;
+    createdAt: number;
+    updatedAt: number;
+  }): User => ({
+    id: row.id,
+    github_id: row.githubId,
+    github_username: row.githubUsername,
+    email: row.email,
+    name: row.name,
+    avatar_url: row.avatarUrl,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  });
 
   // Try to find existing user
-  let user = await db
-    .prepare('SELECT * FROM users WHERE github_id = ?')
-    .bind(githubId)
-    .first<User>();
+  let user = await drizzleDb
+    .select()
+    .from(usersTable)
+    .where(eq(usersTable.githubId, githubId))
+    .get();
 
   if (user) {
     // Update user info
-    await db
-      .prepare(
-        `
-      UPDATE users SET
-        github_username = ?,
-        email = COALESCE(?, email),
-        name = ?,
-        avatar_url = ?,
-        updated_at = ?
-      WHERE id = ?
-    `
-      )
-      .bind(
-        githubUser.login,
-        githubUser.email,
-        githubUser.name,
-        githubUser.avatar_url,
-        now,
-        user.id
-      )
+    await drizzleDb
+      .update(usersTable)
+      .set({
+        githubUsername: githubUser.login,
+        email: githubUser.email ?? user.email,
+        name: githubUser.name ?? user.name,
+        avatarUrl: githubUser.avatar_url ?? user.avatarUrl,
+        updatedAt: now,
+      })
+      .where(eq(usersTable.id, user.id))
       .run();
 
     // Refresh user data
-    user = await db
-      .prepare('SELECT * FROM users WHERE id = ?')
-      .bind(user.id)
-      .first<User>();
+    user = await drizzleDb
+      .select()
+      .from(usersTable)
+      .where(eq(usersTable.id, user.id))
+      .get();
   } else {
     // Check account limit before creating new user
     if (maxAccounts !== undefined) {
-      const countResult = await db
-        .prepare('SELECT COUNT(*) as count FROM users')
-        .first<{ count: number }>();
+      const countResult = await drizzleDb
+        .select({ count: sql<number>`count(*)` })
+        .from(usersTable)
+        .get();
 
       if (countResult && countResult.count >= maxAccounts) {
         throw new Error('ACCOUNT_LIMIT_REACHED');
@@ -414,38 +425,33 @@ async function findOrCreateUser(
     // Create new user
     const userId = crypto.randomUUID();
 
-    await db
-      .prepare(
-        `
-      INSERT INTO users (id, github_id, github_username, email, name, avatar_url, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `
-      )
-      .bind(
-        userId,
+    await drizzleDb
+      .insert(usersTable)
+      .values({
+        id: userId,
         githubId,
-        githubUser.login,
-        githubUser.email,
-        githubUser.name,
-        githubUser.avatar_url,
-        now,
-        now
-      )
+        githubUsername: githubUser.login,
+        email: githubUser.email,
+        name: githubUser.name,
+        avatarUrl: githubUser.avatar_url,
+        createdAt: now,
+        updatedAt: now,
+      })
       .run();
 
     user = {
       id: userId,
-      github_id: githubId,
-      github_username: githubUser.login,
+      githubId,
+      githubUsername: githubUser.login,
       email: githubUser.email,
       name: githubUser.name,
-      avatar_url: githubUser.avatar_url,
-      created_at: now,
-      updated_at: now,
+      avatarUrl: githubUser.avatar_url,
+      createdAt: now,
+      updatedAt: now,
     };
   }
 
-  return user!;
+  return toUser(user!);
 }
 
 export default app;

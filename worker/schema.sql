@@ -52,9 +52,13 @@ CREATE TABLE IF NOT EXISTS subdomains (
   subdomain TEXT UNIQUE NOT NULL,         -- "brad" (not full domain)
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   tunnel_id TEXT NOT NULL,                -- Cloudflare tunnel UUID
+  serve_tunnel_id TEXT,                   -- Cloudflare tunnel UUID for .serve
   dns_record_ids TEXT NOT NULL,           -- JSON array of DNS record IDs for cleanup
+  serve_dns_record_ids TEXT,              -- JSON array of DNS record IDs for .serve
   custom_hostname_id TEXT,                -- Cloudflare for SaaS hostname ID (for *.subdomain.gitspace.sh)
+  serve_custom_hostname_id TEXT,          -- Cloudflare for SaaS hostname ID for *.subdomain.serve.gitspace.sh
   tunnel_token_encrypted TEXT NOT NULL,   -- Encrypted tunnel token
+  serve_tunnel_token_encrypted TEXT,      -- Encrypted tunnel token for .serve
   status TEXT NOT NULL DEFAULT 'active',  -- active, suspended, deleted
   is_primary INTEGER DEFAULT 0,           -- 1 = Primary subdomain for this user
   created_at INTEGER NOT NULL,
@@ -78,7 +82,7 @@ INSERT OR IGNORE INTO reserved_subdomains (subdomain, reason) VALUES
   ('login', 'system'), ('status', 'system'), ('docs', 'system'),
   ('help', 'system'), ('support', 'system'), ('billing', 'system'),
   ('app', 'system'), ('dashboard', 'system'), ('console', 'system'),
-  ('git', 'system'), ('ssh', 'system'), ('sftp', 'system'),
+  ('git', 'system'), ('ssh', 'system'), ('sftp', 'system'), ('serve', 'system'),
   ('test', 'system'), ('dev', 'system'), ('staging', 'system'),
   ('prod', 'system'), ('production', 'system');
 

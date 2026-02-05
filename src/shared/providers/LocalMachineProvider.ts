@@ -42,6 +42,8 @@ import type {
   InboxItem,
   SessionStream,
 } from '../types.js';
+import { loadProcessesConfig } from '../../lib/processes/config.js';
+import { parseProcessSessionName } from '../../lib/processes/names.js';
 
 const STALE_DAYS = 30;
 const LOCAL_MACHINE_ID = 'local';
@@ -56,6 +58,9 @@ function toWorkspaceSession(session: TmuxSession): WorkspaceSession {
     attached: session.attached,
     createdAt: session.createdAt,
     processTitle: session.processTitle,
+    processName: session.processName,
+    processInstance: session.processInstance,
+    exitCode: session.exitCode,
   };
 }
 
@@ -148,11 +153,25 @@ export class LocalMachineProvider implements EventedMachineProvider {
           (now.getTime() - info.lastCommitDate.getTime()) / (1000 * 60 * 60 * 24)
         );
 
-        // Find sessions for this workspace (name pattern: project:workspace:n)
-        const sessionPrefix = `${projectName}:${name}:`;
+        // Find sessions for this workspace by cwd or process name
         const workspaceSessions = allSessions
-          .filter(s => s.name.startsWith(sessionPrefix))
-          .map(toWorkspaceSession);
+          .filter(s => {
+            const parsed = parseProcessSessionName(s.name);
+            if (parsed) return parsed.workspaceId === name;
+            if (s.cwd === workspacePath) return true;
+            if (s.cwd.startsWith(workspacePath)) return true;
+            return s.name.startsWith(`${projectName}:${name}:`);
+          })
+          .map((session) => {
+            const parsed = parseProcessSessionName(session.name);
+            return {
+              ...toWorkspaceSession(session),
+              processName: parsed?.processName ?? session.processName,
+              processInstance: parsed?.instance ?? session.processInstance,
+            };
+          });
+
+        const processConfig = loadProcessesConfig(workspacePath);
 
         workspaces.push({
           name: info.name,
@@ -164,6 +183,11 @@ export class LocalMachineProvider implements EventedMachineProvider {
           lastCommitDate: info.lastCommitDate,
           isStale: daysSinceCommit > STALE_DAYS,
           sessions: workspaceSessions,
+          processes: processConfig.processes.map((process) => ({
+            name: process.name,
+            instances: process.instances,
+            ports: process.ports,
+          })),
         });
       }
     }
@@ -195,7 +219,11 @@ export class LocalMachineProvider implements EventedMachineProvider {
     const sessionName = `${sessionPrefix}${existingCount + 1}`;
 
     const cwd = options?.cwd ?? workspacePath;
-    const session = await tmuxCreateSession(sessionName, cwd);
+    const session = await tmuxCreateSession(sessionName, cwd, {
+      command: options?.command,
+      args: options?.args,
+      env: options?.env,
+    });
 
     return session.id;
   }

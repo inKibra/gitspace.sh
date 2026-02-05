@@ -25,6 +25,10 @@ export interface CreateSessionOptions {
   cwd?: string;
   /** Shell to use (defaults to $SHELL or /bin/bash) */
   shell?: string;
+  /** Command to run (process sessions) */
+  command?: string;
+  /** Command arguments */
+  args?: string[];
   /** Environment variables */
   env?: Record<string, string>;
   /** Initial terminal size */

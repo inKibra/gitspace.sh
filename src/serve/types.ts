@@ -7,6 +7,7 @@
 import type { PTYSession } from "./pty-session.js";
 import type { Identity, SessionKeys, AccessType } from "../types/identity.js";
 import type { AccessControlList } from "../lib/tmux-lite/crypto/access-control.js";
+import type { RemoteSessionHandlerOptions } from "../lib/remote-session/index.js";
 import { FrameType } from "../lib/tmux-lite/protocol.js";
 
 // ============================================================================
@@ -63,6 +64,8 @@ export interface ServeOptions {
   identity: Identity;
   /** Access control list for authorized clients */
   accessList: AccessControlList;
+  /** Remote session handler configuration */
+  remoteSessionOptions?: RemoteSessionHandlerOptions;
   /** Shell to spawn (default: $SHELL or /bin/bash) */
   shell?: string;
   /** Extra environment variables for PTY sessions */

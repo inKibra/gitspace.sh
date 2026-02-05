@@ -11,8 +11,13 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
-import { getNotificationConfig, type NotificationConfig } from "../../core/config.js";
+import { getNotificationConfig, getProjectEventsConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
+import { WideEventCollector } from "../events/collector.js";
+import { resolveWorkspaceRef } from "../events/paths.js";
+import { parseProcessSessionName } from "../processes/names.js";
+import { loadProcessesConfig, getProcessDefinition } from "../processes/config.js";
+import { buildProcessEventsConfig } from "../processes/events-config.js";
 import {
   getRouterSocket,
   getSessionSocketPath,
@@ -576,31 +581,76 @@ function createPtyDataHandler(
     const str = data.toString();
     const now = Date.now();
 
+
     // Only create inbox notifications if user is not actively using the session
     const activelyUsing = session.attaching || isActivelyUsing(session);
     const currentProcessTitle = session.processTitle || getProcessTitle();
 
-    // Process OSC patterns for notifications (only if not actively using)
-    if (!activelyUsing) {
-      const oscContext: OscMatchContext = {
-        sessionId: id,
-        sessionName,
-        processTitle: currentProcessTitle,
-        xterm,
-        now,
-      };
-
-      processOscPatterns(str, oscContext, (notifData) => {
-        addInboxItem(createInboxNotification(
-          id,
+    if (!processName) {
+      // Process OSC patterns for notifications (only if not actively using)
+      if (!activelyUsing) {
+        const oscContext: OscMatchContext = {
+          sessionId: id,
           sessionName,
-          notifData.type,
-          notifData.context,
-          currentProcessTitle,
-          notifData.exitCode
-        ));
-      });
+          processTitle: currentProcessTitle,
+          xterm,
+          now,
+        };
+
+        processOscPatterns(str, oscContext, (notifData) => {
+          addInboxItem(createInboxNotification(
+            id,
+            sessionName,
+            notifData.type,
+            notifData.context,
+            currentProcessTitle,
+            notifData.exitCode
+          ));
+        });
+      }
+
+      // Check for semantic shell integration (OSC 133)
+      // Command start
+      if (OSC_133_CMD_START.test(str)) {
+        osc133State.commandRunning = true;
+        osc133State.commandStartTime = now;
+        OSC_133_CMD_START.lastIndex = 0; // Reset regex state
+      }
+
+      // Command done - only notify if not actively using and command was running
+      OSC_133_DONE_PATTERN.lastIndex = 0;
+      const osc133DoneMatches = [...str.matchAll(OSC_133_DONE_PATTERN)];
+      for (const match of osc133DoneMatches) {
+        const exitCode = match[1] ? parseInt(match[1], 10) : 0;
+        const commandDuration = osc133State.commandStartTime > 0
+          ? now - osc133State.commandStartTime
+          : 0;
+
+        // Only notify for background sessions if:
+        // - Non-zero exit (always notify on errors)
+        // - OR command duration >= minCommandDurationMs
+        const shouldNotify = !activelyUsing && (
+          exitCode !== 0 ||
+          (osc133State.commandRunning && commandDuration >= notificationConfig.minCommandDurationMs)
+        );
+
+        if (shouldNotify) {
+          addInboxItem(createInboxNotification(
+            id,
+            sessionName,
+            exitCode === 0 ? 'command' : 'error',
+            `Command completed (exit ${exitCode})`,
+            currentProcessTitle,
+            exitCode
+          ));
+        }
+
+        // Reset command state
+        osc133State.commandRunning = false;
+        osc133State.commandStartTime = 0;
+      }
     }
+
 
     // Check for semantic shell integration (OSC 133)
     // Command start
@@ -685,15 +735,17 @@ function handleProcessExit(
     pruneInboxForSession(id);
 
     // Capture last lines for inbox before disposing xterm
-    const context = getLastLines(xterm, 3);
-    addInboxItem(createInboxNotification(
-      id,
-      sessionName,
-      'exit',
-      context || `Session ended (exit ${code})`,
-      session?.processTitle || getProcessTitle(),
-      code
-    ));
+    if (session?.info.processName) {
+      const context = getLastLines(xterm, 3);
+      addInboxItem(createInboxNotification(
+        id,
+        sessionName,
+        code === 0 ? 'exit' : 'error',
+        context || `Process ended (exit ${code})`,
+        session?.processTitle || getProcessTitle(),
+        code
+      ));
+    }
 
     // Update session info with exit code
     if (session) {
@@ -704,6 +756,7 @@ function handleProcessExit(
       writeToClient(session, encodeControl({ type: "exited", code }));
       session.client.end();
     }
+
 
     xterm.dispose();
     try { unlinkSync(socketPath); } catch {}
@@ -854,6 +907,14 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
         session.attaching = false;
 
         writeToClient(session, encodeControl({ type: "attached" }));
+
+        if (session.eventsBuffer && session.eventsBuffer.length > 0) {
+          const buffered = session.eventsBuffer;
+          session.eventsBuffer = [];
+          for (const event of buffered) {
+            writeToClient(session, encodeControl({ type: "wide_event", event }));
+          }
+        }
 
         // Set terminal title
         sendTitle(session, sessionName, session.processTitle);
@@ -1033,7 +1094,13 @@ function buildShellEnvironment(id: string, shell: string): Record<string, string
 // Main Session Creation
 // ============================================================================
 
-function createSession(name: string | undefined, cwd: string): Session {
+function createSession(
+  name: string | undefined,
+  cwd: string,
+  command?: string,
+  args?: string[],
+  envOverride?: Record<string, string>
+): Session {
   const id = genId();
   const sessionName = name || `session-${id}`;
   const socketPath = getSessionSocketPath(id);
@@ -1102,12 +1169,33 @@ function createSession(name: string | undefined, cwd: string): Session {
   // Spawn shell process
   const shell = process.env.SHELL || "/bin/bash";
   const shellEnv = buildShellEnvironment(id, shell);
+  const commandArgs = command ? [command, ...(args || [])] : [shell];
+  const env = {
+    ...shellEnv,
+    ...(envOverride || {}),
+  };
 
-  const proc = Bun.spawn([shell], {
+  let processName: string | undefined;
+  let processInstance: number | undefined;
+  if (name) {
+    const parsedProcess = parseProcessSessionName(name);
+    if (parsedProcess) {
+      processName = parsedProcess.processName;
+      processInstance = parsedProcess.instance;
+    }
+  }
+
+  if (command) {
+    env.GITSPACE_PROCESS_NAME = processName ?? '';
+    env.GITSPACE_PROCESS_INSTANCE = processInstance ? String(processInstance) : '';
+  }
+
+  const proc = Bun.spawn(commandArgs, {
     terminal: ptyTerminal,
     cwd,
-    env: shellEnv,
+    env,
   });
+
 
   // Handle process exit
   proc.exited.then(handleProcessExit(id, sessionName, xterm, socketPath, disposeDsr, getProcessTitle));
@@ -1190,10 +1278,15 @@ Bun.listen({
         let res: Response;
 
         // Helper to get session info with current processTitle
-        const getSessionInfo = (s: SessionData): Session => ({
-          ...s.info,
-          processTitle: s.processTitle || undefined,
-        });
+        const getSessionInfo = (s: SessionData): Session => {
+          const parsed = parseProcessSessionName(s.info.name);
+          return {
+            ...s.info,
+            processTitle: s.processTitle || undefined,
+            processName: parsed?.processName,
+            processInstance: parsed?.instance,
+          };
+        };
 
         switch (cmd.type) {
           case "list":
@@ -1205,7 +1298,7 @@ Bun.listen({
 
           case "new":
             try {
-              const session = createSession(cmd.name, cmd.cwd);
+              const session = createSession(cmd.name, cmd.cwd, cmd.command, cmd.args, cmd.env);
               res = { type: "session", session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

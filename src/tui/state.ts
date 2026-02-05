@@ -20,6 +20,8 @@ import {
   type Session,
   type InboxItem,
 } from '../lib/tmux-lite/cli.js';
+import { loadProcessesConfig } from '../lib/processes/config.js';
+import { parseProcessSessionName } from '../lib/processes/names.js';
 
 export interface ProjectState {
   name: string;
@@ -34,11 +36,15 @@ export interface WorkspaceSession {
   attached: boolean;
   createdAt: number;
   processTitle?: string;
+  processName?: string;
+  processInstance?: number;
+  exitCode?: number;
 }
 
 export interface WorkspaceState extends WorktreeInfo {
   isStale: boolean;
   sessions: WorkspaceSession[];
+  processes?: { name: string; instances?: number; ports?: import("../types/processes.js").ProcessPortConfig[] }[];
 }
 
 // Tree item for flat list rendering
@@ -162,26 +168,44 @@ export async function loadWorkspaces(projectName: string): Promise<WorkspaceStat
         (now.getTime() - info.lastCommitDate.getTime()) / (1000 * 60 * 60 * 24)
       );
 
-      // Find sessions for this workspace by matching cwd.
-      // Note: Session cwd is set once at creation time and does NOT change
-      // as users navigate within the shell. This is intentional - we want to
-      // show sessions that were *created for* this workspace, not sessions
-      // that happen to currently be in this directory.
+      // Find sessions for this workspace by cwd or process name.
+      // Session cwd is set once at creation time and does NOT change
+      // as users navigate within the shell.
       const workspaceSessions = allSessions
-        .filter(s => s.cwd === workspacePath)
-        .map(s => ({
-          id: s.id,
-          name: s.name,
-          attached: s.attached,
-          createdAt: s.createdAt,
-          processTitle: s.processTitle,
-        }));
+        .filter((session) => {
+          const parsed = parseProcessSessionName(session.name);
+          if (parsed) return parsed.workspaceId === name;
+          if (session.cwd === workspacePath) return true;
+          if (session.cwd.startsWith(workspacePath)) return true;
+          return session.name.startsWith(`${projectName}:${name}:`);
+        })
+        .map((session) => {
+          const parsed = parseProcessSessionName(session.name);
+          return {
+            id: session.id,
+            name: session.name,
+            attached: session.attached,
+            createdAt: session.createdAt,
+            processTitle: session.processTitle,
+            processName: session.processName ?? parsed?.processName,
+            processInstance: session.processInstance ?? parsed?.instance,
+            exitCode: session.exitCode,
+          };
+        });
 
-      workspaces.push({
-        ...info,
-        isStale: daysSinceCommit > STALE_DAYS,
-        sessions: workspaceSessions,
-      });
+        const processConfig = loadProcessesConfig(workspacePath);
+
+        workspaces.push({
+          ...info,
+          isStale: daysSinceCommit > STALE_DAYS,
+          sessions: workspaceSessions,
+          processes: processConfig.processes.map((process) => ({
+            name: process.name,
+            instances: process.instances,
+            ports: process.ports,
+          })),
+        });
+
     }
   }
 

@@ -17,16 +17,23 @@ import { Toaster, toast } from "sonner";
 // Import shared components and hooks
 import {
   useMachineList,
-  useSpacesBrowser,
-  useFlow,
-  getDefaultShortcuts,
-  type MachineInfo,
-} from "../../shared/components/index.js";
+    useSpacesBrowser,
+    useProjectList,
+    useFlow,
+    getDefaultShortcuts,
+    type MachineInfo,
+    type ProjectInfo,
+  } from "../../shared/components/index.js";
+
 import { MachineListWeb } from "../../shared/components/MachineList.web.js";
 import { SpacesBrowserWeb } from "../../shared/components/SpacesBrowser.web.js";
+import { ProjectListWeb } from "../../shared/components/ProjectList.web.js";
 import { FlowWeb } from "../../shared/components/Flow.web.js";
 import { useInbox } from "../../shared/components/Inbox.js";
 import { InboxWeb } from "../../shared/components/Inbox.web.js";
+import { useEvents } from "../../shared/components/Events.js";
+import { EventsWeb } from "../../shared/components/Events.web.js";
+import type { WideEvent } from "../../types/events.js";
 import {
   useNotifications,
   type ToastNotification,
@@ -40,9 +47,14 @@ export default function App() {
   const [view, setView] = useState<View>("machines");
   const [selectedMachine, setSelectedMachine] = useState<MachineInfo | null>(null);
   const [showInbox, setShowInbox] = useState(false);
+  const [showEvents, setShowEvents] = useState(false);
+  const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
+  const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
+  const [showProjectsDrawer, setShowProjectsDrawer] = useState(false);
+  const [showProjectsPanel, setShowProjectsPanel] = useState(!isMobileLayout());
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
     shift: false,
@@ -72,12 +84,15 @@ export default function App() {
   useEffect(() => {
     applyDeviceClasses();
     // Show mobile controls on touch devices or mobile layout
-    setShowMobileControls(isTouchDevice() || isMobileLayout());
+    const mobileLayout = isMobileLayout();
+    setShowMobileControls(isTouchDevice() || mobileLayout);
+    setShowProjectsPanel(!mobileLayout);
 
     // Listen for layout changes
     const mediaQuery = window.matchMedia('(max-width: 767px)');
     const handleChange = (e: MediaQueryListEvent) => {
       setShowMobileControls(e.matches || isTouchDevice());
+      setShowProjectsPanel(!e.matches);
     };
     mediaQuery.addEventListener('change', handleChange);
     return () => mediaQuery.removeEventListener('change', handleChange);
@@ -151,6 +166,7 @@ export default function App() {
     terminal.disconnect();
     setSelectedMachine(null);
     setInputMode(false); // Reset input mode when leaving terminal
+    setShowEvents(false);
     setView("machines");
   };
 
@@ -159,6 +175,7 @@ export default function App() {
     terminal.disconnect();
     relay.disconnect();
     setSelectedMachine(null);
+    setShowEvents(false);
     setView("machines");
     // Reconnect automatically
     relay.connect();
@@ -175,6 +192,61 @@ export default function App() {
     onConnect: handleMachineConnect,
     onRefresh: relay.refreshMachines,
   });
+
+  const projectListProps = useProjectList({
+    projects: terminal.projects,
+    onSelect: (project: ProjectInfo) => {
+      terminal.selectProject(project.name);
+      terminal.requestWorkspaces();
+      terminal.requestSessions();
+      setShowProjectsDrawer(false);
+      setShowProjectsPanel(true);
+    },
+    onCreateNew: () => {
+      flow.showMessage({
+        title: 'New Project',
+        message: 'Use "gssh add project" from the CLI to add a project.',
+        variant: 'info',
+      });
+    },
+    onDelete: (project: ProjectInfo) => {
+      flow.showMessage({
+        title: 'Delete Project',
+        message: `Delete ${project.name} from the CLI for now.`,
+        variant: 'warning',
+      });
+    },
+    onRefresh: terminal.requestProjects,
+  });
+
+  const activeProjectName = useMemo(() => {
+    return terminal.selectedProjectName ?? terminal.projects.find((project) => project.isCurrent)?.name ?? null;
+  }, [terminal.selectedProjectName, terminal.projects]);
+
+  useEffect(() => {
+    if (!terminal.selectedProjectName && activeProjectName) {
+      terminal.selectProject(activeProjectName);
+      terminal.requestSessions();
+    }
+  }, [terminal.selectedProjectName, activeProjectName, terminal.selectProject, terminal.requestSessions]);
+
+  const visibleWorkspaces = useMemo(() => {
+    if (!activeProjectName) return terminal.workspaces;
+    return terminal.workspaces.filter((workspace) => workspace.projectName === activeProjectName);
+  }, [terminal.workspaces, activeProjectName]);
+
+  const visibleWorkspaceIds = useMemo(() => new Set(visibleWorkspaces.map((workspace) => workspace.id)), [visibleWorkspaces]);
+
+  const visibleSessions = useMemo(() => {
+    if (!activeProjectName) return terminal.sessions;
+    return terminal.sessions.filter((session) => visibleWorkspaceIds.has(session.workspaceId));
+  }, [terminal.sessions, visibleWorkspaceIds, activeProjectName]);
+
+  useEffect(() => {
+    if (terminal.status === "established" && showProjectsDrawer) {
+      terminal.requestProjects();
+    }
+  }, [terminal.status, showProjectsDrawer, terminal.requestProjects]);
 
   // Handle attach session - show modal for new sessions
   const handleAttachSession = (params: { sessionId?: string; workspaceId?: string }) => {
@@ -201,16 +273,38 @@ export default function App() {
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
-    workspaces: terminal.workspaces,
-    sessions: terminal.sessions,
+    workspaces: visibleWorkspaces,
+    sessions: visibleSessions,
     onRequestSessions: terminal.requestSessions,
     onAttachSession: handleAttachSession,
+    onStartProcess: ({ workspaceId, processName }) => {
+      terminal.startProcess(workspaceId, processName);
+    },
+    onStartProcessAttach: ({ workspaceId, processName, instance }) => {
+      void instance;
+      terminal.startProcess(workspaceId, processName);
+    },
+    onStopProcess: ({ workspaceId, processName }) => {
+      terminal.stopProcess(workspaceId, processName);
+    },
+    onOpenEvents: (workspaceId) => {
+      const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
+      const label = workspace ? `${workspace.projectName}/${workspace.name}` : workspaceId;
+      setEventsWorkspacePath(workspace?.path ?? null);
+      setEventsWorkspaceLabel(label);
+      setShowEvents(true);
+      terminal.resetEvents();
+      if (workspace?.path) {
+        terminal.requestEvents(workspace.path, { kind: 'wide' }, 200);
+      }
+    },
     onRefresh: terminal.requestWorkspaces,
     onRefreshSessions: (workspaceIds) => {
       workspaceIds.forEach(id => terminal.requestSessions(id));
     },
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
+    showProjectHeaders: false,
   });
 
   // Inbox hook
@@ -225,6 +319,35 @@ export default function App() {
       terminal.attachSession({ sessionId });
     },
     onClose: () => setShowInbox(false),
+  });
+
+  const eventsProps = useEvents({
+    events: (terminal.events as unknown as WideEvent[]).map((event) => ({
+      eventId: event.eventId,
+      eventName: event.eventName,
+      level: event.level,
+      timestamp: event.timestamp,
+      timestampMs: event.timestampMs,
+      message: event.message,
+      processName: event.processName,
+      processInstance: event.processInstance,
+      sessionId: event.sessionId,
+      raw: event.raw,
+      kind: event.kind,
+      correlationId: event.correlationId,
+      timeline: event.timeline,
+      timelineMap: event.timelineMap,
+      timelineOrder: event.timelineOrder,
+    })),
+    liveEventIds: terminal.liveEventIds,
+    savedFilters: terminal.savedEventFilters,
+    onSelectFilter: (filter) => {
+      if (!eventsWorkspacePath) return;
+      terminal.resetEvents();
+      const sinceMs = filter?.sinceMinutes ? Date.now() - filter.sinceMinutes * 60_000 : undefined;
+      terminal.requestEvents(eventsWorkspacePath, { ...filter?.filter, kind: 'wide' }, 200, sinceMs);
+    },
+    onClose: () => setShowEvents(false),
   });
 
   // ========== Activity Tracking for Notifications ==========
@@ -391,9 +514,41 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showInbox, inboxProps.moveUp, inboxProps.moveDown, inboxProps.openThread, inboxProps.closeThread, inboxProps.deleteSelected, inboxProps.deleteThread, inboxProps.clearAll, inboxProps.attachToSession, inboxProps.isViewingThread]);
 
+  useEffect(() => {
+    if (!showEvents) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (e.key === "Escape" || e.key === "q") {
+        e.preventDefault();
+        setShowEvents(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showEvents]);
+
+  useEffect(() => {
+    if (!showEvents || !eventsWorkspacePath) return;
+    const pollIntervalMs = 2000;
+
+    const poll = () => {
+      terminal.requestEvents(eventsWorkspacePath, { kind: 'wide' }, 200);
+    };
+
+    poll();
+    const interval = window.setInterval(poll, pollIntervalMs);
+    return () => window.clearInterval(interval);
+  }, [showEvents, eventsWorkspacePath, terminal.requestEvents]);
+
+
   // Spaces browser keyboard navigation
   useEffect(() => {
-    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox) {
+    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox || showEvents) {
       return;
     }
 
@@ -526,23 +681,33 @@ export default function App() {
       );
     }
 
-    return (
+    if (showEvents) {
+        return (
+          <>
+            <div className="h-visual-viewport overflow-hidden">
+              <EventsWeb {...eventsProps} workspaceLabel={eventsWorkspaceLabel} />
+            </div>
+            <FlowWeb flow={flow} />
+            <Toaster theme="dark" position="top-right" richColors />
+          </>
+        );
+
+    }
+
+        return (
       <>
         <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
+          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-end border-b border-[#30363d] min-h-[52px] gap-2">
+            <div className="flex items-center gap-2 sm:gap-4">
               <button
-                onClick={handleBackToMachines}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+                onClick={() => {
+                  setShowProjectsDrawer(true);
+                  terminal.requestProjects();
+                }}
+                className="sm:hidden text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] flex items-center gap-1 py-2 px-2 min-h-[44px]"
               >
-                ← <span className="hidden sm:inline ml-1">Machines</span>
+                Projects
               </button>
-              <div className="text-sm text-[#8b949e] truncate hidden sm:block">
-                <span className="text-[#3fb950] shadow-glow">●</span>{" "}
-                {selectedMachine?.label || selectedMachine?.machineId}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
               <button
                 onClick={() => {
                   terminal.requestInbox();
@@ -568,13 +733,37 @@ export default function App() {
             </div>
           </div>
           <div className="flex-1 overflow-hidden">
-            <SpacesBrowserWeb {...spacesBrowserProps} />
+            <div className="h-full flex flex-col sm:flex-row">
+              {showProjectsPanel && (
+                <div className="hidden sm:flex sm:w-[320px] sm:border-r sm:border-[#30363d] sm:bg-[#0d1117]">
+                  <ProjectListWeb {...projectListProps} />
+                </div>
+              )}
+              <div className="flex-1">
+                <SpacesBrowserWeb {...spacesBrowserProps} />
+              </div>
+            </div>
           </div>
         </div>
+        {showProjectsDrawer && (
+          <div className="fixed inset-0 z-40 sm:hidden">
+            <div
+              className="absolute inset-0 bg-black/60"
+              onClick={() => setShowProjectsDrawer(false)}
+            />
+            <div className="absolute inset-y-0 left-0 w-[85%] max-w-[320px] bg-[#0d1117] border-r border-[#30363d] shadow-xl animate-[drawerIn_160ms_ease-out]">
+              <ProjectListWeb
+                {...projectListProps}
+                onClose={() => setShowProjectsDrawer(false)}
+              />
+            </div>
+          </div>
+        )}
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );
+
   }
 
   // ========== Terminal View (attached mode) ==========

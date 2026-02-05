@@ -106,6 +106,21 @@ html {
   display: none;
 }
 
+.events-root {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.events-column {
+  min-height: 0;
+}
+
+.events-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* ============================================
    Mobile Controls Styles
    ============================================ */
@@ -244,4 +259,15 @@ html {
 .scroll-fade-right::after {
   right: 0;
   background: linear-gradient(to left, var(--color-bg-elevated), transparent);
+}
+
+@keyframes drawerIn {
+  from {
+    transform: translateX(-100%);
+    opacity: 0.8;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }

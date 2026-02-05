@@ -15,6 +15,7 @@ import {
 	isNested,
 	type Session,
 } from '../lib/tmux-lite/cli.js'
+import { autostartProcesses, getProcessSpecs, startProcessScheduler } from '../lib/processes/index.js'
 
 /**
  * Print a message to terminal using echo (same mechanism as scripts)
@@ -142,6 +143,9 @@ async function openTmuxLiteSession(
 		// Create new session
 		const session = await createSession(fullSessionName, workspacePath)
 
+		const specs = getProcessSpecs(workspacePath)
+		await autostartProcesses(workspacePath, specs)
+
 		// Spawn the CLI attach command as a subprocess with inherited stdio
 		// This works better with TUI suspension than direct attach() call
 		const cliPath = new URL('../lib/tmux-lite/cli.ts', import.meta.url).pathname
@@ -150,10 +154,15 @@ async function openTmuxLiteSession(
 			cwd: workspacePath,
 		})
 
-		await new Promise<void>((resolve, reject) => {
-			proc.on('exit', () => resolve())
-			proc.on('error', (err) => reject(err))
-		})
+		const scheduler = startProcessScheduler(workspacePath)
+		try {
+			await new Promise<void>((resolve, reject) => {
+				proc.on('exit', () => resolve())
+				proc.on('error', (err) => reject(err))
+			})
+		} finally {
+			clearInterval(scheduler)
+		}
 	} catch (error) {
 		logger.error(`Failed to open tmux-lite session: ${(error as Error).message}`)
 		throw error

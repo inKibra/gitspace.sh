@@ -217,6 +217,8 @@ describe('diffInbox', () => {
 // ============================================================================
 
 describe('itemToToast', () => {
+  const sessionLabel = 'my-project / my-workspace / default';
+
   it('should convert exit item with zero exit code', () => {
     const item = createInboxItem({
       id: 'exit-0',
@@ -232,7 +234,7 @@ describe('itemToToast', () => {
     expect(toast.sessionId).toBe('session-1');
     expect(toast.sessionName).toBe('my-project:my-workspace:default');
     expect(toast.icon).toBe('✅');
-    expect(toast.title).toBe('Completed: npm test');
+    expect(toast.title).toBe(`${sessionLabel}: Completed - npm test`);
     expect(toast.preview).toBe('Tests passed');
     expect(toast.item).toBe(item);
   });
@@ -248,7 +250,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('❌');
-    expect(toast.title).toBe('Exit code 1: npm build');
+    expect(toast.title).toBe(`${sessionLabel}: Exit code 1 - npm build`);
   });
 
   it('should convert bell item', () => {
@@ -261,7 +263,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('🔔');
-    expect(toast.title).toBe('Bell');
+    expect(toast.title).toBe(`${sessionLabel}: Bell`);
   });
 
   it('should convert idle item', () => {
@@ -274,7 +276,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('⏸️');
-    expect(toast.title).toBe('Activity Complete: vim');
+    expect(toast.title).toBe(`${sessionLabel}: Activity Complete - vim`);
   });
 
   it('should convert title item', () => {
@@ -287,7 +289,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('📝');
-    expect(toast.title).toBe('Title Change: bash');
+    expect(toast.title).toBe(`${sessionLabel}: Title Change - bash`);
   });
 
   it('should convert osc item', () => {
@@ -300,7 +302,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('📟');
-    expect(toast.title).toBe('OSC Notification: app');
+    expect(toast.title).toBe(`${sessionLabel}: OSC Notification - app`);
   });
 
   it('should truncate long preview text', () => {

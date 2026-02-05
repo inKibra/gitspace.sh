@@ -66,11 +66,11 @@ export function Workflow() {
               </div>
               
               <code className="bg-black/50 px-3 py-1 rounded text-sm font-mono text-green-400/80 mb-2 border border-white/5 w-full md:w-auto truncate max-w-[200px]">
-                  Check in from your phone
+                  View live event timeline
               </code>
               
               <p className="text-zinc-500 text-sm">
-                  Get notified when done
+                  See correlated events while agents run
               </p>
 
               {/* Mobile Arrow */}

@@ -76,6 +76,17 @@ export {
   formatWorkspaceCount,
 } from './ProjectList.js';
 
+// Events
+export type {
+  WideEventItem,
+  UseEventsProps,
+  UseEventsReturn,
+} from './Events.js';
+
+export {
+  useEvents,
+} from './Events.js';
+
 // Flow (Modal System)
 export type {
   FlowNone,

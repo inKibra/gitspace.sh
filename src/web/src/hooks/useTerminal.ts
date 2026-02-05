@@ -20,6 +20,7 @@ import { createFrame, openFrame, MASTER_STREAM_ID } from "../lib/crypto/frames";
 import { signRelayMessage } from "../lib/crypto/relay-signing";
 import type { Identity, SessionKeys } from "../types/identity";
 import type { InboxItem } from "../../../lib/remote-session/protocol";
+import type { SavedEventFilter, WideEventFilter } from "../../../types/events";
 import { findUtf8Boundary } from "../../../utils/utf8";
 
 /** Stream ID for control messages (resize, detach, etc.) */
@@ -45,6 +46,8 @@ export interface WorkspaceInfo {
   branch?: string;
   sessionCount: number;
   isStale?: boolean;
+  serveDomain?: string;
+  processes?: { name: string; instances?: number; ports?: import("../../../types/processes").ProcessPortConfig[] }[];
 }
 
 /** Session information from machine */
@@ -56,6 +59,8 @@ export interface SessionInfo {
   createdAt: number;
   processTitle?: string;
   exitCode?: number;
+  processName?: string;
+  processInstance?: number;
 }
 
 /** Script execution state (during workspace attach) */
@@ -64,6 +69,53 @@ export interface ScriptState {
   isRunning: boolean;
   error?: string;
   exitCode?: number;
+}
+
+function getEventTimestamp(event: Record<string, unknown>): number {
+  const timestampMs = event.timestampMs;
+  if (typeof timestampMs === 'number' && !Number.isNaN(timestampMs)) {
+    return timestampMs;
+  }
+  const timestamp = event.timestamp;
+  if (typeof timestamp === 'string') {
+    const parsed = Date.parse(timestamp);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function mergeEvents(
+  existing: Record<string, unknown>[],
+  incoming: Record<string, unknown>[]
+): Record<string, unknown>[] {
+  if (incoming.length === 0) return existing;
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const event of existing) {
+    const eventId = typeof event.eventId === 'string' ? event.eventId : undefined;
+    if (eventId) {
+      merged.set(eventId, event);
+    }
+  }
+  for (const event of incoming) {
+    const eventId = typeof event.eventId === 'string' ? event.eventId : undefined;
+    if (eventId) {
+      merged.set(eventId, event);
+    }
+  }
+  const list = Array.from(merged.values());
+  list.sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
+  return list.slice(0, 500);
+}
+
+function mergeLiveEventIds(existing: string[], incoming: string[] | undefined): string[] {
+  if (!incoming || incoming.length === 0) return existing;
+  const merged = new Set(existing);
+  for (const id of incoming) {
+    merged.add(id);
+  }
+  return Array.from(merged).slice(0, 100);
 }
 
 /** Project information from machine */
@@ -87,6 +139,7 @@ export function useTerminal() {
   const [mode, setMode] = useState<SessionMode>("browsing");
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
+  const [savedEventFilters, setSavedEventFilters] = useState<SavedEventFilter[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [attachedSessionId, setAttachedSessionId] = useState<string | null>(null);
   const [attachedSessionName, setAttachedSessionName] = useState<string | null>(null);
@@ -94,6 +147,8 @@ export function useTerminal() {
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
   const [scriptState, setScriptState] = useState<ScriptState | null>(null);
+  const [events, setEvents] = useState<Record<string, unknown>[]>([]);
+  const [liveEventIds, setLiveEventIds] = useState<string[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const identityRef = useRef<Identity | null>(null);
@@ -300,6 +355,7 @@ export function useTerminal() {
 
         // Request workspace list now that handshake is complete
         requestWorkspaces();
+        requestProjects();
         break;
       }
 
@@ -364,6 +420,44 @@ export function useTerminal() {
   }, [sendCommand]);
 
   /**
+   * Request events for a session
+   */
+  const requestEvents = useCallback(
+    (
+      workspaceId: string,
+      filter?: WideEventFilter,
+      limit?: number,
+      sinceMs?: number,
+      processName?: string,
+      processInstance?: number
+    ) => {
+      sendCommand({
+        type: "get_events",
+        workspacePath: workspaceId,
+        processName,
+        processInstance,
+        filter,
+        limit,
+        sinceMs,
+      });
+    },
+    [sendCommand]
+  );
+
+  const resetEvents = useCallback(() => {
+    setEvents([]);
+    setLiveEventIds([]);
+  }, []);
+
+  const startProcess = useCallback((workspaceId: string, processName: string) => {
+    sendCommand({ type: "start_process", workspaceId, processName });
+  }, [sendCommand]);
+
+  const stopProcess = useCallback((workspaceId: string, processName: string) => {
+    sendCommand({ type: "stop_process", workspaceId, processName });
+  }, [sendCommand]);
+
+  /**
    * Detach from current session (return to browsing)
    */
   const detachSession = useCallback(() => {
@@ -404,6 +498,7 @@ export function useTerminal() {
   const requestInbox = useCallback(() => {
     sendCommand({ type: "get_inbox" });
   }, [sendCommand]);
+
 
   /**
    * Clear inbox item(s)
@@ -476,14 +571,36 @@ export function useTerminal() {
         setProjects(msg.projects as ProjectInfo[]);
         break;
 
-      case "workspace_list":
-        console.log("[useTerminal] Received workspace_list:", (msg.workspaces as WorkspaceInfo[]).length, "workspaces");
-        setWorkspaces(msg.workspaces as WorkspaceInfo[]);
-        break;
+       case "workspace_list":
+         console.log("[useTerminal] Received workspace_list:", (msg.workspaces as WorkspaceInfo[]).length, "workspaces");
+         setWorkspaces(msg.workspaces as WorkspaceInfo[]);
+         if (Array.isArray(msg.savedEventFilters)) {
+           setSavedEventFilters(msg.savedEventFilters as SavedEventFilter[]);
+         }
+         break;
 
-      case "session_list":
-        setSessions(msg.sessions as SessionInfo[]);
-        break;
+
+       case "session_list":
+         setSessions(msg.sessions as SessionInfo[]);
+         break;
+
+        case "process_started": {
+          const sessionId = msg.sessionId as string | undefined;
+          const workspaceId = msg.workspaceId as string | undefined;
+          if (sessionId) {
+            attachSession({ sessionId });
+            requestSessions(workspaceId);
+          } else {
+            requestSessions(workspaceId ?? undefined);
+          }
+          break;
+        }
+
+        case "process_stopped":
+          requestSessions((msg.workspaceId as string) ?? undefined);
+          break;
+
+
 
       case "session_killed":
         console.log("Session killed:", msg.sessionId, "in workspace:", msg.workspaceId);
@@ -501,13 +618,18 @@ export function useTerminal() {
         requestWorkspaces();
         break;
 
-      case "attached":
-        console.log("Attached to session:", msg.sessionId, msg.sessionName);
-        setMode("attached");
-        modeRef.current = "attached";
-        setAttachedSessionId(msg.sessionId as string);
-        setAttachedSessionName(msg.sessionName as string || null);
-        break;
+       case "attached":
+         console.log("Attached to session:", msg.sessionId, msg.sessionName);
+         setMode("attached");
+         modeRef.current = "attached";
+         setAttachedSessionId(msg.sessionId as string);
+         setAttachedSessionName(msg.sessionName as string || null);
+          if (typeof msg.workspaceId === "string") {
+            requestEvents(msg.workspaceId, undefined, 200);
+          }
+
+         break;
+
 
       case "detached":
         console.log("Detached from session");
@@ -538,38 +660,63 @@ export function useTerminal() {
         requestInbox();
         break;
 
-      case "inbox_marked_read":
-        // Refresh inbox after marking read
-        requestInbox();
-        break;
+       case "inbox_marked_read":
+         // Refresh inbox after marking read
+         requestInbox();
+         break;
 
-      case "script_output": {
-        // Handle script output streaming during attach_session
-        const phase = msg.phase as ScriptState['phase'];
-        const done = msg.done as boolean | undefined;
-        const error = msg.error as string | undefined;
-        const exitCode = msg.exitCode as number | undefined;
+       case "script_output": {
+         // Handle script output streaming during attach_session
+         const phase = msg.phase as ScriptState['phase'];
+         const done = msg.done as boolean | undefined;
+         const error = msg.error as string | undefined;
+         const exitCode = msg.exitCode as number | undefined;
 
-        // Update script state
-        if (done) {
-          if (error) {
-            setScriptState({ phase, isRunning: false, error, exitCode });
-          } else {
-            // Scripts completed successfully - clear state (attach response will follow)
-            setScriptState(null);
-          }
-        } else {
-          setScriptState({ phase, isRunning: true });
+         // Update script state
+         if (done) {
+           if (error) {
+             setScriptState({ phase, isRunning: false, error, exitCode });
+           } else {
+             // Scripts completed successfully - clear state (attach response will follow)
+             setScriptState(null);
+           }
+         } else {
+           setScriptState({ phase, isRunning: true });
+         }
+
+         // Decode base64 output data and write to terminal
+         const data = msg.data as string;
+         if (data && data.length > 0) {
+           const ptyData = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+           writePtyData(ptyData);
+         }
+         break;
+       }
+
+        case "events_list": {
+          const list = msg.events as Record<string, unknown>[];
+          const live = msg.liveEventIds as string[] | undefined;
+          setEvents((prev) => mergeEvents(prev, list));
+          setLiveEventIds((prev) => mergeLiveEventIds(prev, live));
+          break;
         }
 
-        // Decode base64 output data and write to terminal
-        const data = msg.data as string;
-        if (data && data.length > 0) {
-          const ptyData = Uint8Array.from(atob(data), c => c.charCodeAt(0));
-          writePtyData(ptyData);
-        }
-        break;
-      }
+
+       case "wide_event": {
+         const event = msg.event as Record<string, unknown> | undefined;
+         if (event) {
+           const eventId = event.eventId as string | undefined;
+           setEvents((prev) => mergeEvents(prev, [event]));
+           if (eventId) {
+             setLiveEventIds((prev) => mergeLiveEventIds(prev, [eventId]));
+           }
+         }
+         break;
+       }
+
+
+
+
 
       case "error":
         console.error("Machine error:", msg.code, msg.message);
@@ -586,7 +733,7 @@ export function useTerminal() {
       default:
         console.log("Unknown browse response:", msg.type);
     }
-  }, [requestWorkspaces, requestSessions, requestInbox, writePtyData, scriptState]);
+  }, [requestWorkspaces, requestSessions, requestInbox, writePtyData, scriptState, requestEvents, attachSession]);
 
   const handleDataMessage = useCallback(async (base64Data: string) => {
     const sessionKeys = sessionKeysRef.current;
@@ -622,22 +769,35 @@ export function useTerminal() {
         return;
       }
 
-      // Try to parse as JSON - could be a browse response or PTY output message
-      try {
-        const jsonStr = new TextDecoder().decode(result.data);
-        const msg = JSON.parse(jsonStr);
+       // Try to parse as JSON - could be a browse response or PTY output message
+        try {
+          const jsonStr = new TextDecoder().decode(result.data);
+          const msg = JSON.parse(jsonStr);
 
-        // Check if it's a browse response or pty_output
-        if (msg.type === "pty_output") {
-          // Decode base64 PTY data and forward to terminal with UTF-8 handling
-          const ptyData = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
-          writePtyData(ptyData);
+          // Check if it's a browse response or pty_output
+          if (msg.type === "pty_output") {
+            // Decode base64 PTY data and forward to terminal with UTF-8 handling
+            const ptyData = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+            writePtyData(ptyData);
+            return;
+          }
+
+          if (msg.type === "wide_event") {
+            const event = msg.event as Record<string, unknown> | undefined;
+            if (event) {
+              const eventId = event.eventId as string | undefined;
+              setEvents((prev) => [event, ...prev].slice(0, 500));
+              if (eventId) {
+                setLiveEventIds((prev) => (prev.includes(eventId) ? prev : [eventId, ...prev].slice(0, 100)));
+              }
+            }
+            return;
+          }
+
+          // Handle as browse response
+          handleBrowseResponse(msg);
           return;
-        }
 
-        // Handle as browse response
-        handleBrowseResponse(msg);
-        return;
       } catch {
         // Not JSON - in attached mode, this is raw PTY data
         if (modeRef.current === "attached") {
@@ -714,6 +874,8 @@ export function useTerminal() {
     setInbox([]);
     setInboxUnreadCount(0);
     setScriptState(null);
+    setEvents([]);
+    setLiveEventIds([]);
   }, []);
 
   return {
@@ -759,5 +921,17 @@ export function useTerminal() {
 
     // Script execution state (during attach)
     scriptState,
+
+    // Wide events
+    events,
+    liveEventIds,
+    requestEvents,
+    resetEvents,
+    savedEventFilters,
+
+    // Processes
+    startProcess,
+    stopProcess,
   };
+
 }

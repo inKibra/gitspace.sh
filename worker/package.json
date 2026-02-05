@@ -8,15 +8,18 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "db:init": "wrangler d1 execute gitspace --local --file=schema.sql",
-    "db:migrate": "wrangler d1 execute gitspace --file=schema.sql"
+    "db:migrate": "wrangler d1 execute gitspace --file=schema.sql",
+    "db:push": "bunx drizzle-kit push"
   },
   "dependencies": {
     "hono": "^4.6.0",
-    "@noble/curves": "^1.7.0"
+    "@noble/curves": "^1.7.0",
+    "drizzle-orm": "^0.36.4"
   },
   "devDependencies": {
     "wrangler": "^3.95.0",
     "@cloudflare/workers-types": "^4.20241127.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "drizzle-kit": "^0.25.0"
   }
 }

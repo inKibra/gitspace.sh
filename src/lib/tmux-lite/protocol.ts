@@ -84,7 +84,7 @@ export function decodeRouterMessages(buffer: Buffer): {
 // Router commands
 export type Command =
   | { type: "list" }
-  | { type: "new"; name?: string; cwd: string }
+  | { type: "new"; name?: string; cwd: string; command?: string; args?: string[]; env?: Record<string, string> }
   | { type: "attach"; id: string; force?: boolean }
   | { type: "kill"; id: string }
   | { type: "kill-server" }
@@ -114,6 +114,8 @@ export interface Session {
   createdAt: number;
   exitCode?: number;  // undefined = running, number = exited
   processTitle?: string;  // Title set by running process (e.g., vim, npm run dev)
+  processName?: string;
+  processInstance?: number;
 }
 
 // Inbox item - things that need attention
@@ -162,7 +164,8 @@ export type SessionEvent =
   | { type: "attach-ready"; cols: number; rows: number }
   | { type: "attached" }
   | { type: "exited"; code: number }
-  | { type: "kicked" };
+  | { type: "kicked" }
+  | { type: "wide_event"; event: import("../../types/events.js").WideEvent };
 
 /** A decoded frame from the session socket */
 export interface SessionFrame {
@@ -263,4 +266,11 @@ export function parseFrames(buffer: Buffer): FrameParseResult {
  */
 export function decodeControl(payload: Buffer): SessionCtrl | SessionEvent {
   return JSON.parse(payload.toString());
+}
+
+/**
+ * Encode a wide event into a control frame
+ */
+export function encodeWideEvent(event: import("../../types/events.js").WideEvent): Buffer {
+  return encodeControl({ type: "wide_event", event });
 }

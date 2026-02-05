@@ -4,15 +4,16 @@
  * Handles the encrypted messages between client and machine after X3DH handshake.
  */
 
-import { createFrame, openFrame } from "../tmux-lite/crypto/frames";
-import { scanWorkspaces } from "./workspace-scanner";
+import { createFrame, openFrame } from "../tmux-lite/crypto/frames.js";
 import {
   parseRemoteMessage,
   serializeRemoteMessage,
   type ClientToMachineMessage,
   type MachineToClientMessage,
   type SessionInfo,
-} from "./protocol";
+} from "./protocol.js";
+import { scanWorkspaces } from "./workspace-scanner.js";
+import { parseProcessSessionName } from "../processes/names.js";
 import type { SessionKeys, AccessType } from "../../types/identity.js";
 
 // Import tmux-lite API for session management
@@ -26,17 +27,25 @@ import {
   clearInbox,
   markInboxRead,
   type Session,
-} from "../tmux-lite/cli";
+} from "../tmux-lite/cli.js";
 
 // Import project loading
-import { loadProjects } from "../../tui/state";
+import { loadProjects } from "../../tui/state.js";
 
 // Import workspace operations
-import { deleteWorkspaceCore } from "../../core/workspace";
-import { readProjectConfig } from "../../core/config";
+import { deleteWorkspaceCore } from "../../core/workspace.js";
+import { readProjectConfig } from "../../core/config.js";
+import { readWorkspaceSnapshots } from "../events/reader.js";
+import { resolveWorkspaceRef } from "../events/paths.js";
+import { loadSavedEventFilters } from "../events/filters.js";
+import { getProcessSpecs, startProcessInstance, stopProcessInstance } from "../processes/manager.js";
+import { autostartProcesses } from "../processes/autostart.js";
+import { startProcessScheduler } from "../processes/scheduler.js";
+import { loadProcessesConfig } from "../processes/config.js";
+import { existsSync } from "fs";
 
 // Import script execution
-import { runWorkspaceScripts } from "../../utils/run-workspace-scripts";
+import { runWorkspaceScripts } from "../../utils/run-workspace-scripts.js";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -56,6 +65,11 @@ export interface RemoteClientSession {
   attachedSessionId?: string;
   /** Path to tmux-lite session socket (set after attach_session) */
   sessionSocketPath?: string;
+}
+
+export interface RemoteSessionHandlerOptions {
+  processHostDomain?: string;
+  onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
 }
 
 // ============================================================================
@@ -89,6 +103,14 @@ function canAttachSession(
  */
 export class RemoteSessionHandler {
   private tmuxLiteAvailable = false;
+  private processSchedulers = new Map<string, NodeJS.Timer>();
+  private processHostDomain?: string;
+  private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
+
+  constructor(options: RemoteSessionHandlerOptions = {}) {
+    this.processHostDomain = options.processHostDomain;
+    this.onProcessesChanged = options.onProcessesChanged;
+  }
 
   /**
    * Initialize - check if tmux-lite is available
@@ -197,6 +219,27 @@ export class RemoteSessionHandler {
         await this.handleGetInbox(session, sendResponse);
         break;
 
+      case "get_events":
+        await this.handleGetEvents(
+          session,
+          msg.workspacePath,
+          msg.processName,
+          msg.processInstance,
+          msg.filter,
+          msg.limit,
+          msg.sinceMs,
+          sendResponse
+        );
+        break;
+
+      case "start_process":
+        await this.handleStartProcess(session, msg.workspaceId, msg.processName, sendResponse);
+        break;
+
+      case "stop_process":
+        await this.handleStopProcess(session, msg.workspaceId, msg.processName, sendResponse);
+        break;
+
       case "clear_inbox":
         await this.handleClearInbox(session, msg.id, sendResponse);
         break;
@@ -231,17 +274,33 @@ export class RemoteSessionHandler {
           // Note: Session cwd is set once at creation time and does NOT change
           // as users navigate within the shell. This is intentional - we want to
           // show sessions that were *created for* this workspace.
-          workspace.sessionCount = sessions.filter(s => s.cwd === workspace.path).length;
+          const workspaceSessions = sessions.filter(s => s.cwd === workspace.path);
+          workspace.sessionCount = workspaceSessions.length;
+
+          const processConfig = loadProcessesConfig(workspace.path);
+          workspace.processes = processConfig.processes.map((process) => ({
+            name: process.name,
+            instances: process.instances,
+            ports: process.ports,
+          }));
         }
       } catch {
         // Ignore errors - just use 0 session counts
       }
     }
 
-    await this.sendMessage(session, sendResponse, {
-      type: "workspace_list",
-      workspaces,
-    });
+    if (this.processHostDomain) {
+      for (const workspace of workspaces) {
+        workspace.serveDomain = this.processHostDomain;
+      }
+    }
+
+     await this.sendMessage(session, sendResponse, {
+       type: "workspace_list",
+       workspaces,
+       savedEventFilters: workspaces.length > 0 ? loadSavedEventFilters(workspaces[0].path) : [],
+     });
+
   }
 
   /**
@@ -265,23 +324,31 @@ export class RemoteSessionHandler {
         sessions = allSessions
           .filter(s => {
             if (!workspaceId) return true;
-            // Filter by workspace using cwd matching
-            // Note: Session cwd is set once at creation time and does NOT change
-            // as users navigate within the shell.
+            const parsed = parseProcessSessionName(s.name);
+            if (parsed) return parsed.workspaceId === workspaceId;
             const ws = workspacePathMap.get(s.cwd);
-            return ws?.id === workspaceId;
+            if (ws) return ws.id === workspaceId;
+            return workspaces.some(workspace => s.cwd.startsWith(workspace.path));
           })
           .map(s => {
-            // Find workspace info by cwd
-            const ws = workspacePathMap.get(s.cwd);
+            const parsed = parseProcessSessionName(s.name);
+            let ws = workspacePathMap.get(s.cwd);
+            if (!ws && parsed) {
+              ws = workspaces.find(workspace => workspace.id === parsed.workspaceId);
+            }
+            if (!ws) {
+              ws = workspaces.find(workspace => s.cwd.startsWith(workspace.path));
+            }
             return {
               id: s.id,
               name: s.name,
-              workspaceId: ws?.id ?? "unknown",
+              workspaceId: ws?.id ?? parsed?.workspaceId ?? "unknown",
               attached: s.attached,
               createdAt: s.createdAt,
               processTitle: s.processTitle,
               exitCode: s.exitCode,
+              processName: s.processName ?? parsed?.processName,
+              processInstance: s.processInstance ?? parsed?.instance,
             };
           });
       } catch (e) {
@@ -300,7 +367,7 @@ export class RemoteSessionHandler {
    */
   private async handleAttachSession(
     session: RemoteClientSession,
-    msg: { sessionId?: string; workspaceId?: string; sessionName?: string; cols?: number; rows?: number },
+    msg: { sessionId?: string; workspaceId?: string; sessionName?: string; command?: string; args?: string[]; env?: Record<string, string>; cols?: number; rows?: number },
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     console.log("[remote-session] handleAttachSession:", JSON.stringify(msg));
@@ -398,8 +465,21 @@ export class RemoteSessionHandler {
           console.log(`[remote-session] Auto-generated session name: ${sessionName}`);
         }
 
-        targetSession = await createSession(sessionName, workspace.path);
+        targetSession = await createSession(sessionName, workspace.path, {
+          command: msg.command,
+          args: msg.args,
+          env: msg.env,
+        });
         console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`)
+
+        const specs = getProcessSpecs(workspace.path)
+        await autostartProcesses(workspace.path, specs)
+        if (this.onProcessesChanged) {
+          Promise.resolve(this.onProcessesChanged(workspace.path)).catch(() => undefined);
+        }
+        if (!this.processSchedulers.has(workspace.path)) {
+          this.processSchedulers.set(workspace.path, startProcessScheduler(workspace.path))
+        }
       } else if (msg.sessionId) {
         // Security: Check if client can attach to this session
         if (!canAttachSession(session.accessType, session.grantedSessionId, msg.sessionId)) {
@@ -538,26 +618,213 @@ export class RemoteSessionHandler {
         getInbox(),
         listSessions(),
       ]);
-      
+
       // Build a set of active session IDs
       const activeSessionIds = new Set(activeSessions.map(s => s.id));
-      
-      // Count unique sessions that have unread items AND are still active
+
+      // Filter inbox items to active sessions only
+      const filteredItems = items.filter(item => activeSessionIds.has(item.sessionId));
+
+      // Count unique sessions with unread items
       const activeSessionsWithUnread = new Set<string>();
-      for (const item of items) {
+      for (const item of filteredItems) {
         if (!item.read && activeSessionIds.has(item.sessionId)) {
           activeSessionsWithUnread.add(item.sessionId);
         }
       }
-      
+
       await this.sendMessage(session, sendResponse, {
         type: "inbox_list",
-        items,
+        items: filteredItems,
         unreadCount: activeSessionsWithUnread.size,
       });
     } catch (e) {
       console.error("[remote-session] Failed to get inbox:", e);
       await this.sendError(session, sendResponse, "INBOX_FAILED", "Failed to get inbox");
+    }
+  }
+
+  /**
+   * Handle get_events request
+   */
+  private async handleGetEvents(
+    session: RemoteClientSession,
+    workspacePath: string,
+    processName: string | undefined,
+    processInstance: number | undefined,
+    filter: import("../../types/events.js").WideEventFilter | undefined,
+    limit: number | undefined,
+    sinceMs: number | undefined,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspaceRef = resolveWorkspaceRef(workspacePath);
+      if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
+        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
+        return;
+      }
+
+      const projectConfig = readProjectConfig(workspaceRef.projectName);
+      const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
+        maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
+        maxTimeline: projectConfig.events?.maxTimeline,
+      });
+
+      const resolvedFilter = { ...filter };
+      if (processName && !resolvedFilter.processName) {
+        resolvedFilter.processName = processName;
+      }
+
+      const filtered = snapshots
+        .filter((snapshot) => {
+          if (!resolvedFilter) return true;
+          if (resolvedFilter.processName && snapshot.processName !== resolvedFilter.processName) return false;
+          if (resolvedFilter.level && snapshot.level !== resolvedFilter.level) return false;
+          if (resolvedFilter.message && !snapshot.message.includes(resolvedFilter.message)) return false;
+          if (resolvedFilter.eventName && snapshot.eventName !== resolvedFilter.eventName) return false;
+          if (resolvedFilter.correlationId && snapshot.correlationId !== resolvedFilter.correlationId) return false;
+          return true;
+        })
+        .slice(0, limit ?? 200);
+
+      const events = filtered.map((snapshot) => ({
+        eventId: snapshot.lastEventId,
+        eventName: snapshot.eventName,
+        level: snapshot.level,
+        timestamp: new Date(snapshot.updatedAt).toISOString(),
+        timestampMs: snapshot.updatedAt,
+        message: snapshot.message,
+        sessionId: '',
+        workspaceId: workspaceRef.workspaceId,
+        projectName: workspaceRef.projectName,
+        processName: snapshot.processName,
+        processInstance: snapshot.processInstance,
+        raw: snapshot.raw ?? {},
+        kind: 'wide' as const,
+        correlationId: snapshot.correlationId,
+        timeline: Object.values(snapshot.timelineMap),
+        timelineMap: snapshot.timelineMap,
+        timelineOrder: snapshot.timelineOrder,
+      }));
+
+      const maxPayloadBytes = 900_000;
+      const buildPayload = (chunk: import("../../types/events.js").WideEvent[]) => ({
+        type: "events_list" as const,
+        workspaceId: workspaceRef.workspaceId,
+        events: chunk,
+        liveEventIds: [],
+      });
+
+      if (events.length === 0) {
+        await this.sendMessage(session, sendResponse, buildPayload([]));
+        return;
+      }
+
+      let chunk: import("../../types/events.js").WideEvent[] = [];
+      for (const event of events) {
+        chunk.push(event);
+        const payloadSize = Buffer.byteLength(JSON.stringify(buildPayload(chunk)));
+        if (payloadSize > maxPayloadBytes) {
+          if (chunk.length === 1) {
+            await this.sendMessage(session, sendResponse, buildPayload(chunk));
+            chunk = [];
+            continue;
+          }
+          const last = chunk.pop();
+          await this.sendMessage(session, sendResponse, buildPayload(chunk));
+          chunk = last ? [last] : [];
+        }
+      }
+
+      if (chunk.length > 0) {
+        await this.sendMessage(session, sendResponse, buildPayload(chunk));
+      }
+    } catch (e) {
+      console.error("[remote-session] Failed to get events:", e);
+      await this.sendError(session, sendResponse, "EVENTS_FAILED", "Failed to get events");
+    }
+  }
+
+  private async handleStartProcess(
+    session: RemoteClientSession,
+    workspaceId: string,
+    processName: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspaces = await scanWorkspaces();
+      const workspace = workspaces.find(w => w.id === workspaceId);
+      if (!workspace) {
+        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
+        return;
+      }
+
+      const specs = getProcessSpecs(workspace.path).filter(spec => spec.name === processName);
+      if (specs.length === 0) {
+        await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
+        return;
+      }
+
+      const sessions = [] as string[];
+      for (const spec of specs) {
+        const result = await startProcessInstance(workspace.path, spec);
+        sessions.push(result.sessionId);
+      }
+      if (this.onProcessesChanged) {
+        Promise.resolve(this.onProcessesChanged(workspace.path)).catch(() => undefined);
+      }
+      if (!this.processSchedulers.has(workspace.path)) {
+        this.processSchedulers.set(workspace.path, startProcessScheduler(workspace.path));
+      }
+
+      await this.sendMessage(session, sendResponse, {
+        type: "process_started",
+        workspaceId,
+        processName,
+        sessionId: sessions[0],
+      });
+    } catch (e) {
+      console.error("[remote-session] Failed to start process:", e);
+      await this.sendError(session, sendResponse, "PROCESS_FAILED", "Failed to start process");
+    }
+  }
+
+  private async handleStopProcess(
+    session: RemoteClientSession,
+    workspaceId: string,
+    processName: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspaces = await scanWorkspaces();
+      const workspace = workspaces.find(w => w.id === workspaceId);
+      if (!workspace) {
+        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
+        return;
+      }
+
+      const specs = getProcessSpecs(workspace.path).filter(spec => spec.name === processName);
+      if (specs.length === 0) {
+        await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
+        return;
+      }
+
+      for (const spec of specs) {
+        await stopProcessInstance(workspace.path, spec);
+      }
+
+      if (this.onProcessesChanged) {
+        Promise.resolve(this.onProcessesChanged(workspace.path)).catch(() => undefined);
+      }
+
+      await this.sendMessage(session, sendResponse, {
+        type: "process_stopped",
+        workspaceId,
+        processName,
+      });
+    } catch (e) {
+      console.error("[remote-session] Failed to stop process:", e);
+      await this.sendError(session, sendResponse, "PROCESS_FAILED", "Failed to stop process");
     }
   }
 
@@ -636,6 +903,10 @@ export class RemoteSessionHandler {
    */
   async cleanup(): Promise<void> {
     // No persistent connection to clean up with the new API
+    for (const timer of this.processSchedulers.values()) {
+      clearInterval(timer);
+    }
+    this.processSchedulers.clear();
     this.tmuxLiteAvailable = false;
   }
 }

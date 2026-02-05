@@ -280,9 +280,20 @@ export async function listSessions(): Promise<Session[]> {
   throw new Error("Unexpected response");
 }
 
-export async function createSession(name: string, cwd: string): Promise<Session> {
+export async function createSession(
+  name: string,
+  cwd: string,
+  options?: { command?: string; args?: string[]; env?: Record<string, string> }
+): Promise<Session> {
   await ensureServer();
-  const res = await send({ type: "new", name, cwd });
+  const res = await send({
+    type: "new",
+    name,
+    cwd,
+    command: options?.command,
+    args: options?.args,
+    env: options?.env,
+  });
   if (res.type === "session") return res.session;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");

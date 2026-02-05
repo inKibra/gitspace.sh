@@ -59,7 +59,7 @@ export class ClientSessionManager {
       accessList: options.accessList,
       handshakeTimeoutMs: options.handshakeTimeoutMs,
     });
-    this.remoteSessionHandler = new RemoteSessionHandler();
+    this.remoteSessionHandler = new RemoteSessionHandler(options.remoteSessionOptions);
   }
 
   private writeToTmuxSocket(session: ClientSession, frame: Buffer): void {
@@ -499,6 +499,12 @@ export class ClientSessionManager {
                 } else if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
                   this.handleDisconnect(connectionId, "Session kicked");
+                  return;
+                } else if (event.type === "wide_event") {
+                  const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });
+                  const eventData = new TextEncoder().encode(eventMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, eventData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                   return;
                 }
                 // Ignore attach-ready and attached - handled by client

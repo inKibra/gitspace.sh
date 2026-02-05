@@ -86,6 +86,7 @@ export function DocsContent({ section }: { section: string }) {
             <li>Work on multiple branches simultaneously without stashing</li>
             <li>Interactive TUI for visual workspace management</li>
             <li>Convention-based scripts for automation</li>
+            <li>Wide event timeline for long-running processes</li>
             <li>Team onboarding via repo config bundles</li>
           </ul>
 
@@ -94,6 +95,7 @@ export function DocsContent({ section }: { section: string }) {
             <li>E2E encrypted terminal access from any browser or CLI</li>
             <li>Zero-trust relay: routes traffic but cannot decrypt content</li>
             <li>Identity-based auth using Ed25519/X25519 cryptographic keys</li>
+            <li>Per-process public URLs via your .serve subdomain</li>
             <li>Instant hosting via gitspace.sh subdomains</li>
           </ul>
         </div>
@@ -490,6 +492,100 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
           <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 font-mono text-sm text-green-400 break-all">
             gssh-pub:&lt;BASE64_SIGNING_PUBLIC_KEY&gt;:&lt;BASE64_KEY_EXCHANGE_PUBLIC_KEY&gt;
           </div>
+        </div>
+      );
+
+    case "process-hosting":
+      return (
+        <div className="max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <h1 className="text-4xl font-bold mb-6">Process Hosting</h1>
+
+          <p className="text-zinc-400 mb-6">
+            Expose local services running inside a workspace with a dedicated <code className="text-zinc-300">.serve</code> subdomain.
+            Each process instance gets deterministic URLs for HTTP or TCP ports.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Configure Ports</h3>
+          <p className="text-zinc-400 mb-4">
+            Add ports to <code className="text-zinc-300">.gitspace/processes.json</code> in your workspace to publish them.
+          </p>
+          <JsonBlock
+            code={`{
+  "processes": [
+    {
+      "name": "api",
+      "command": "bun",
+      "args": ["run", "dev"],
+      "ports": [
+        { "port": 3000, "name": "http", "protocol": "http" },
+        { "port": 9229, "name": "debug", "protocol": "tcp" }
+      ]
+    }
+  ]
+}`}
+          />
+
+          <h3 className="text-xl font-semibold text-white mb-4">Hostname Format</h3>
+          <CodeBlock code={`https://<portLabel>.<process>-<instance>.<workspace>.<user>.serve.gitspace.sh`} />
+          <p className="text-zinc-500 text-sm mb-6">
+            Use <code className="text-zinc-300">tcp://</code> for TCP ports. Hostnames update automatically as processes start and stop.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Enable Hosting</h3>
+          <CodeBlock
+            code={`gssh auth login
+gssh host reserve yourname
+gssh serve`}
+            multiLine
+          />
+          <p className="text-zinc-500 text-sm mt-4">
+            Serve tokens are stored in the keychain as <code className="text-zinc-300">TUNNEL_TOKEN_&lt;subdomain&gt;_serve</code>.
+          </p>
+        </div>
+      );
+
+    case "wide-events":
+      return (
+        <div className="max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <h1 className="text-4xl font-bold mb-6">Wide Events</h1>
+
+          <p className="text-zinc-400 mb-6">
+            Emit structured events from long-running processes and GitSpace will aggregate them into a workspace-wide timeline.
+            Correlated events are grouped into snapshots so you can follow progress across processes.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Emit Events</h3>
+          <CodeBlock
+            code={`@event {"event":"db.query","eventId":"evt_123","level":"info","timestamp":"2026-02-03T12:00:00Z","message":"Query complete","requestId":"req_42"}`}
+            multiLine
+          />
+
+          <h3 className="text-xl font-semibold text-white mb-4">Enable Aggregation</h3>
+          <JsonBlock
+            code={`{
+  "events": {
+    "enabled": true,
+    "mode": "prefix",
+    "prefix": "@event",
+    "correlationField": "requestId",
+    "aggregateMode": "stream",
+    "maxTimeline": 200
+  }
+}`}
+          />
+          <p className="text-zinc-500 text-sm mt-4">
+            Events config lives in your project config at <code className="text-zinc-300">~/gitspace/&lt;project&gt;/.config.json</code>.
+          </p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Snapshot Storage</h3>
+          <p className="text-zinc-400 mb-2">
+            Snapshots are stored per process at:
+          </p>
+          <CodeBlock code=".events/processes/&lt;process&gt;-&lt;instance&gt;/wide-snapshots.ndjson" />
+          <p className="text-zinc-500 text-sm mt-4">
+            The workspace view merges snapshots across all processes and preserves timeline ordering via
+            <code className="text-zinc-300">timelineMap</code> and <code className="text-zinc-300">timelineOrder</code>.
+          </p>
         </div>
       );
 

@@ -43,6 +43,9 @@ export interface AttachSessionRequest {
   sessionId?: string;     // Attach to existing session
   workspaceId?: string;   // Create new session in workspace
   sessionName?: string;   // Name for new session (optional)
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
   cols?: number;          // Terminal dimensions
   rows?: number;
 }
@@ -70,6 +73,31 @@ export interface GetInboxRequest {
   type: "get_inbox";
 }
 
+/** Request wide events */
+export interface GetEventsRequest {
+  type: "get_events";
+  workspacePath: string;
+  processName?: string;
+  processInstance?: number;
+  filter?: import("../../types/events.js").WideEventFilter;
+  limit?: number;
+  sinceMs?: number;
+}
+
+/** Start a workspace process */
+export interface StartProcessRequest {
+  type: "start_process";
+  workspaceId: string;
+  processName: string;
+}
+
+/** Stop a workspace process */
+export interface StopProcessRequest {
+  type: "stop_process";
+  workspaceId: string;
+  processName: string;
+}
+
 /** Clear inbox item(s) */
 export interface ClearInboxRequest {
   type: "clear_inbox";
@@ -95,6 +123,8 @@ export interface WorkspaceInfo {
   branch?: string;      // Git branch if available
   sessionCount: number; // Number of active sessions
   isStale?: boolean;    // No activity for 30+ days
+  serveDomain?: string;
+  processes?: { name: string; instances?: number; ports?: import("../../types/processes.js").ProcessPortConfig[] }[];
 }
 
 /** Session information */
@@ -106,12 +136,28 @@ export interface SessionInfo {
   createdAt: number;
   processTitle?: string;  // Current process (e.g., "vim", "npm run dev")
   exitCode?: number;      // If session has exited
+  processName?: string;
+  processInstance?: number;
 }
 
 /** Response with workspace list */
 export interface WorkspaceListResponse {
   type: "workspace_list";
   workspaces: WorkspaceInfo[];
+  savedEventFilters?: import("../../types/events.js").SavedEventFilter[];
+}
+
+export interface ProcessStartedResponse {
+  type: "process_started";
+  workspaceId: string;
+  processName: string;
+  sessionId?: string;
+}
+
+export interface ProcessStoppedResponse {
+  type: "process_stopped";
+  workspaceId: string;
+  processName: string;
 }
 
 /** Response with session list */
@@ -182,6 +228,14 @@ export interface InboxListResponse {
   unreadCount: number;
 }
 
+/** Response with wide events */
+export interface EventsListResponse {
+  type: "events_list";
+  workspaceId: string;
+  events: import("../../types/events.js").WideEvent[];
+  liveEventIds: string[];
+}
+
 /** Inbox item(s) cleared response */
 export interface InboxClearedResponse {
   type: "inbox_cleared";
@@ -222,8 +276,11 @@ export type ClientToMachineMessage =
   | KillSessionRequest
   | DeleteWorkspaceRequest
   | GetInboxRequest
+  | GetEventsRequest
   | ClearInboxRequest
-  | MarkInboxReadRequest;
+  | MarkInboxReadRequest
+  | StartProcessRequest
+  | StopProcessRequest;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
@@ -237,9 +294,12 @@ export type MachineToClientMessage =
   | SessionKilledResponse
   | WorkspaceDeletedResponse
   | InboxListResponse
+  | EventsListResponse
   | InboxClearedResponse
   | InboxMarkedReadResponse
-  | ScriptOutputResponse;
+  | ScriptOutputResponse
+  | ProcessStartedResponse
+  | ProcessStoppedResponse;
 
 /** All remote session messages */
 export type RemoteSessionMessage =
@@ -278,6 +338,7 @@ export function serializeRemoteMessage(msg: RemoteSessionMessage): string {
 export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListWorkspacesRequest
   | ListSessionsRequest
-  | AttachSessionRequest {
-  return ["list_workspaces", "list_sessions", "attach_session"].includes(msg.type);
+  | AttachSessionRequest
+  | GetEventsRequest {
+  return ["list_workspaces", "list_sessions", "attach_session", "get_events"].includes(msg.type);
 }

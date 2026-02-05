@@ -17,11 +17,15 @@ export interface TunnelResult {
 /**
  * Find an existing tunnel by name
  */
+function getTunnelName(name: string): string {
+  return `gitspace-${name.replace(/\./g, '-')}`;
+}
+
 async function findTunnelByName(
   env: Env,
   name: string
 ): Promise<{ id: string; name: string } | null> {
-  const tunnelName = `gitspace-${name}`;
+  const tunnelName = getTunnelName(name);
 
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel?name=${encodeURIComponent(tunnelName)}`,
@@ -85,7 +89,7 @@ export async function createTunnel(
   env: Env,
   name: string
 ): Promise<TunnelResult> {
-  const tunnelName = `gitspace-${name}`;
+  const tunnelName = getTunnelName(name);
 
   // Check if tunnel already exists
   const existingTunnel = await findTunnelByName(env, name);

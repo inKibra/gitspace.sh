@@ -18,6 +18,7 @@ import { Terminal, useTerminalSession } from './components/Terminal.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './components/ScriptTerminal.js';
 import type { Session } from '../lib/tmux-lite/protocol.js';
 import { listSessions, createSession, ensureServer, killSession } from '../lib/tmux-lite/cli.js';
+import { getProcessSpecs, startProcessInstance, startProcessScheduler, stopProcessInstance } from '../lib/processes/index.js';
 import { getSessionSocketPath } from '../lib/tmux-lite/protocol.js';
 
 // Shared components and hooks
@@ -39,6 +40,10 @@ import { ProjectListTUI } from '../shared/components/ProjectList.tui.js';
 import { InboxTUI } from '../shared/components/Inbox.tui.js';
 import { useInbox } from '../shared/components/Inbox.js';
 import { clearInbox, markInboxRead } from '../lib/tmux-lite/cli.js';
+import { EventsTui } from '../shared/components/Events.tui.js';
+import { useEvents } from '../shared/components/Events.js';
+import type { WideEvent, WideEventFilter } from '../types/events.js';
+import { listProcessEventsDirs, readWideEvents, readWorkspaceSnapshots } from '../lib/events/index.js';
 import { toast } from '@opentui-ui/toast';
 import {
   useNotifications,
@@ -52,7 +57,6 @@ import {
   loadProjects,
   loadWorkspaces,
   loadInbox,
-  buildTree,
   type ProjectState,
   type WorkspaceState,
 } from './state.js';
@@ -188,7 +192,7 @@ const ASCII_LINES = [
 // App State
 // ============================================================================
 
-type AppView = 'machines' | 'projects' | 'workspaces' | 'terminal' | 'inbox' | 'scripts';
+type AppView = 'machines' | 'projects' | 'workspaces' | 'terminal' | 'inbox' | 'scripts' | 'events';
 type PanelFocus = 'projects' | 'workspaces';
 
 /** Info about what to do after scripts complete */
@@ -349,6 +353,7 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // Track when we're switching sessions (to prevent detach handler from navigating away)
   const sessionSwitchingRef = useRef(false);
+  const processSchedulersRef = useRef<Map<string, NodeJS.Timer>>(new Map());
 
   // Ref for ScriptTerminal to feed output data
   const scriptTerminalRef = useRef<ScriptTerminalHandle>(null);
@@ -366,6 +371,9 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // Settings flow (custom state machine)
   const [settingsFlow, setSettingsFlow] = useState<SettingsFlowState>({ type: 'closed' });
+  const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
+  const [wideEvents, setWideEvents] = useState<WideEvent[]>([]);
+  const [liveEventIds, setLiveEventIds] = useState<string[]>([]);
 
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
@@ -489,6 +497,95 @@ function App({ relayConfig, onQuit }: AppProps) {
       },
     });
   }, [flow, refreshProjects]);
+
+  const startProcessLocal = useCallback(async (workspaceId: string, processName: string) => {
+    if (!state.currentProject) return;
+    const workspacesDir = getProjectWorkspacesDir(state.currentProject);
+    const workspacePath = join(workspacesDir, workspaceId);
+    const specs = getProcessSpecs(workspacePath).filter(spec => spec.name === processName);
+    if (specs.length === 0) return;
+
+    for (const spec of specs) {
+      try {
+        const result = await startProcessInstance(workspacePath, spec);
+        if (!result.sessionId) {
+          flow.showMessage({
+            title: 'Process Failed',
+            message: `Failed to start ${processName}.`,
+            variant: 'error',
+          });
+          continue;
+        }
+      } catch (error) {
+        flow.showMessage({
+          title: 'Process Failed',
+          message: error instanceof Error ? error.message : `Failed to start ${processName}.`,
+          variant: 'error',
+        });
+      }
+    }
+    if (!processSchedulersRef.current.has(workspacePath)) {
+      processSchedulersRef.current.set(workspacePath, startProcessScheduler(workspacePath));
+    }
+
+    await refreshWorkspaces();
+  }, [state.currentProject, refreshWorkspaces, flow]);
+
+  const startProcessAndAttachLocal = useCallback(async (
+    workspaceId: string,
+    processName: string,
+    instance = 1
+  ) => {
+    if (!state.currentProject) return;
+    const workspacesDir = getProjectWorkspacesDir(state.currentProject);
+    const workspacePath = join(workspacesDir, workspaceId);
+    const specs = getProcessSpecs(workspacePath).filter(
+      spec => spec.name === processName && spec.instance === instance
+    );
+    if (specs.length === 0) return;
+
+    for (const spec of specs) {
+      try {
+        const result = await startProcessInstance(workspacePath, spec);
+        await refreshWorkspaces();
+        await ensureServer();
+        const liveSessions = await listSessions();
+        const sessionInfo = liveSessions.find(s => s.id === result.sessionId);
+        if (sessionInfo) {
+          sessionSwitchingRef.current = true;
+          dispatch({ type: 'SET_ATTACHED_SESSION', session: sessionInfo });
+          dispatch({ type: 'SET_VIEW', view: 'terminal' });
+          setTimeout(() => { sessionSwitchingRef.current = false; }, 200);
+        } else {
+          flow.showMessage({
+            title: 'Process Started',
+            message: `Started ${processName} but could not attach to session.`,
+            variant: 'warning',
+          });
+        }
+      } catch (error) {
+        flow.showMessage({
+          title: 'Process Failed',
+          message: error instanceof Error ? error.message : `Failed to start ${processName}.`,
+          variant: 'error',
+        });
+      }
+    }
+  }, [state.currentProject, refreshWorkspaces, flow]);
+
+  const stopProcessLocal = useCallback(async (workspaceId: string, processName: string) => {
+    if (!state.currentProject) return;
+    const workspacesDir = getProjectWorkspacesDir(state.currentProject);
+    const workspacePath = join(workspacesDir, workspaceId);
+    const specs = getProcessSpecs(workspacePath).filter(spec => spec.name === processName);
+    if (specs.length === 0) return;
+
+    for (const spec of specs) {
+      await stopProcessInstance(workspacePath, spec);
+    }
+
+    await refreshWorkspaces();
+  }, [state.currentProject, refreshWorkspaces]);
 
   // Attach to session using embedded terminal
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string }) => {
@@ -1265,19 +1362,24 @@ function App({ relayConfig, onQuit }: AppProps) {
     branch: w.branch,
     sessionCount: w.sessions.length,
     isStale: w.isStale,
+    processes: w.processes ?? [],
   }));
 
   // Extract sessions
-  const sessionInfos = state.workspaces.flatMap(w =>
-    w.sessions.map(s => ({
-      id: s.id,
-      name: s.name,
-      workspaceId: w.name,
-      attached: s.attached,
-      createdAt: s.createdAt,
-      processTitle: s.processTitle,
-    }))
-  );
+    const sessionInfos = state.workspaces.flatMap(w =>
+      w.sessions.map(s => ({
+        id: s.id,
+        name: s.name,
+        workspaceId: w.name,
+        attached: s.attached,
+        createdAt: s.createdAt,
+        processTitle: s.processTitle,
+        processName: s.processName,
+        processInstance: s.processInstance,
+        exitCode: s.exitCode,
+      }))
+    );
+
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -1285,6 +1387,20 @@ function App({ relayConfig, onQuit }: AppProps) {
     sessions: sessionInfos,
     onRequestSessions: () => {}, // Sessions already loaded
     onAttachSession: handleAttachSession,
+    onStartProcess: ({ workspaceId, processName }) => {
+      startProcessLocal(workspaceId, processName);
+    },
+    onStartProcessAttach: ({ workspaceId, processName, instance }) => {
+      startProcessAndAttachLocal(workspaceId, processName, instance);
+    },
+    onStopProcess: ({ workspaceId, processName }) => {
+      stopProcessLocal(workspaceId, processName);
+    },
+    onOpenEvents: (workspaceId) => {
+      setEventsWorkspaceId(workspaceId);
+      dispatch({ type: 'SET_VIEW', view: 'events' });
+      loadWideEventsForWorkspace(workspaceId);
+    },
     onRefresh: refreshWorkspaces,
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,
@@ -1324,6 +1440,71 @@ function App({ relayConfig, onQuit }: AppProps) {
     onAttachSession: async (sessionId) => {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
       await handleAttachSession({ sessionId });
+    },
+    onClose: () => {
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
+    },
+  });
+
+  const loadWideEventsForWorkspace = useCallback((workspaceId: string, filter?: WideEventFilter) => {
+    const workspace = state.workspaces.find((ws) => ws.name === workspaceId);
+    if (!workspace) return;
+    const snapshots = readWorkspaceSnapshots(workspace.path);
+    const filtered = snapshots.filter((snapshot) => {
+      if (!filter) return true;
+      if (filter.processName && snapshot.processName !== filter.processName) return false;
+      if (filter.level && snapshot.level !== filter.level) return false;
+      if (filter.message && !snapshot.message.includes(filter.message)) return false;
+      if (filter.eventName && snapshot.eventName !== filter.eventName) return false;
+      if (filter.correlationId && snapshot.correlationId !== filter.correlationId) return false;
+      return true;
+    });
+
+    const events = filtered.map((snapshot) => ({
+      eventId: snapshot.lastEventId,
+      eventName: snapshot.eventName,
+      level: snapshot.level,
+      timestamp: new Date(snapshot.updatedAt).toISOString(),
+      timestampMs: snapshot.updatedAt,
+      message: snapshot.message,
+      sessionId: '',
+      workspaceId: workspace.name,
+      projectName: state.currentProject ?? '',
+      processName: snapshot.processName,
+      processInstance: snapshot.processInstance,
+      raw: snapshot.raw ?? {},
+      kind: 'wide' as const,
+      correlationId: snapshot.correlationId,
+      timeline: Object.values(snapshot.timelineMap),
+      timelineMap: snapshot.timelineMap,
+      timelineOrder: snapshot.timelineOrder,
+    }));
+
+    setWideEvents(events.sort((a, b) => b.timestampMs - a.timestampMs).slice(0, 500));
+    setLiveEventIds([]);
+  }, [state.workspaces, state.currentProject]);
+
+  const eventsProps = useEvents({
+    events: wideEvents.map((event) => ({
+      eventId: event.eventId,
+      eventName: event.eventName,
+      level: event.level,
+      timestamp: event.timestamp,
+      timestampMs: event.timestampMs,
+      message: event.message,
+      processName: event.processName,
+      processInstance: event.processInstance,
+      sessionId: event.sessionId,
+      raw: event.raw,
+      kind: event.kind,
+      correlationId: event.correlationId,
+      timeline: event.timeline,
+    })),
+    liveEventIds,
+    savedFilters: [],
+    onSelectFilter: (filter) => {
+      if (!eventsWorkspaceId) return;
+      loadWideEventsForWorkspace(eventsWorkspaceId, filter?.filter);
     },
     onClose: () => {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
@@ -1386,6 +1567,19 @@ function App({ relayConfig, onQuit }: AppProps) {
     isUserActive,
     currentSessionId: state.attachedSession?.id,
   });
+
+  useEffect(() => {
+    if (state.view !== 'events' || !eventsWorkspaceId) return;
+    const pollIntervalMs = 2000;
+
+    const poll = () => {
+      loadWideEventsForWorkspace(eventsWorkspaceId, undefined);
+    };
+
+    poll();
+    const interval = setInterval(poll, pollIntervalMs);
+    return () => clearInterval(interval);
+  }, [state.view, eventsWorkspaceId, loadWideEventsForWorkspace]);
 
   // ========== Keyboard Handlers ==========
 
@@ -1452,6 +1646,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     if (state.view === 'terminal') {
       return;
     }
+
 
     // Don't handle keys when in scripts view (output-only, no interaction)
     if (state.view === 'scripts') {
@@ -1803,6 +1998,17 @@ function App({ relayConfig, onQuit }: AppProps) {
       return;
     }
 
+    if (state.view === 'events') {
+      if (key.name === 'escape') {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      } else if (key.name === 'up' || key.raw === 'k') {
+        eventsProps.selectIndex(Math.max(0, eventsProps.selectedIndex - 1));
+      } else if (key.name === 'down' || key.raw === 'j') {
+        eventsProps.selectIndex(Math.min(eventsProps.filtered.length - 1, eventsProps.selectedIndex + 1));
+      }
+      return;
+    }
+
     // View-specific shortcuts
     if (state.view === 'machines') {
       if (key.name === 'up' || key.raw === 'k') {
@@ -1864,11 +2070,18 @@ function App({ relayConfig, onQuit }: AppProps) {
               handleDeleteWorkspace(workspace);
             }
           }
+        } else if (key.raw === 's') {
+          const selected = spacesBrowserProps.selectedItem;
+          if (selected?.type === 'process') {
+            startProcessLocal(selected.workspaceId, selected.processName);
+          }
         } else if (key.raw === 'x') {
-          // Kill session
+          // Kill session or stop process
           const selected = spacesBrowserProps.selectedItem;
           if (selected?.type === 'session') {
             handleDeleteSession(selected.session.id, selected.session.name);
+          } else if (selected?.type === 'process') {
+            stopProcessLocal(selected.workspaceId, selected.processName);
           }
         } else if (key.raw === 'r') {
           spacesBrowserProps.refresh();
@@ -1969,6 +2182,15 @@ function App({ relayConfig, onQuit }: AppProps) {
     );
   }
 
+  if (state.view === 'events') {
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <EventsTui {...eventsProps} />
+      </Fragment>
+    );
+  }
+
   // Main project/workspace view
   return (
     <Fragment>
@@ -2033,7 +2255,7 @@ function App({ relayConfig, onQuit }: AppProps) {
       <StatusBar
         hint={state.panelFocus === 'projects'
           ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
-          : '[Tab] Switch  [Enter] Open/Join  [n] New Workspace  [d] Delete  [x] Kill  [,] Settings  [?] Help  [q] Quit'
+          : '[Tab] Switch  [Enter] Open/Join  [s] Start  [x] Stop/Kill  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit'
         }
       />
 
