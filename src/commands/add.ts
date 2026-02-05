@@ -50,7 +50,7 @@ import {
   loadBundleFromUrl,
   cleanupBundleDir,
 } from '../core/bundle.js';
-import { checkAndRefreshBundle } from '../core/bundle-refresh.js';
+import { checkAndRefreshBundle, hashBundle } from '../core/bundle-refresh.js';
 import { runOnboarding } from '../utils/onboarding.js';
 import { preloadProjectSecrets } from '../utils/secrets.js';
 import type { LoadedBundle, OnboardingResult } from '../types/bundle.js';
@@ -199,6 +199,9 @@ export async function addProject(options: {
       source: loadedBundle.source,
       appliedAt: new Date().toISOString(),
     };
+
+    // Store the bundle hash to prevent false "bundle has changed" on first workspace
+    configUpdates.appliedBundleHash = hashBundle(loadedBundle.bundle);
 
     updateProjectConfig(projectName, configUpdates);
 

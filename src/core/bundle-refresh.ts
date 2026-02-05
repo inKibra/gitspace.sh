@@ -65,7 +65,7 @@ export interface BundleRefreshResult {
 /**
  * Compute a hash of the full bundle content for change detection
  */
-function hashBundle(bundle: SpacesBundle): string {
+export function hashBundle(bundle: SpacesBundle): string {
   // Hash the full bundle content (deep-sorted keys for consistency)
   const stable = deepSortForHash(bundle);
   const content = JSON.stringify(stable);

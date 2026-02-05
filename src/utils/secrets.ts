@@ -113,13 +113,43 @@ export async function setProjectSecret(
 
 /**
  * Retrieve a secret for a project
+ *
+ * Checks the consolidated blob first, then falls back to old per-secret
+ * format for seamless migration from older versions.
  */
 export async function getProjectSecret(
   projectName: string,
   key: string
 ): Promise<string | null> {
   const secrets = await loadProjectSecretsBlob(projectName);
-  return secrets[key] ?? null;
+
+  // Found in new format
+  if (secrets[key] !== undefined) {
+    return secrets[key];
+  }
+
+  // Try old format: ${projectName}:${key}
+  const oldKeychainName = `${projectName}:${key}`;
+  const oldValue = await Bun.secrets.get({
+    service: SERVICE_NAME,
+    name: oldKeychainName,
+  });
+
+  if (oldValue) {
+    // Migrate to new format automatically
+    secrets[key] = oldValue;
+    await saveProjectSecretsBlob(projectName, secrets);
+
+    // Delete old entry
+    await Bun.secrets.delete({
+      service: SERVICE_NAME,
+      name: oldKeychainName,
+    });
+
+    return oldValue;
+  }
+
+  return null;
 }
 
 /**
@@ -268,10 +298,39 @@ export async function setSecret(key: string, value: string): Promise<void> {
 
 /**
  * Retrieve a global secret
+ *
+ * Checks the consolidated blob first, then falls back to old per-secret
+ * format for seamless migration from older versions.
  */
 export async function getSecret(key: string): Promise<string | null> {
   const secrets = await loadGlobalSecretsBlob();
-  return secrets[key] ?? null;
+
+  // Found in new format
+  if (secrets[key] !== undefined) {
+    return secrets[key];
+  }
+
+  // Try old format: direct key name
+  const oldValue = await Bun.secrets.get({
+    service: SERVICE_NAME,
+    name: key,
+  });
+
+  if (oldValue) {
+    // Migrate to new format automatically
+    secrets[key] = oldValue;
+    await saveGlobalSecretsBlob(secrets);
+
+    // Delete old entry
+    await Bun.secrets.delete({
+      service: SERVICE_NAME,
+      name: key,
+    });
+
+    return oldValue;
+  }
+
+  return null;
 }
 
 /**
