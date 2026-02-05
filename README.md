@@ -356,10 +356,11 @@ Located at `~/gitspace/<project-name>/.config.json`:
 
 ### Custom Scripts
 
-GitSpace uses **convention over configuration** for custom scripts:
+GitSpace uses **convention over configuration** for custom scripts. Scripts live
+inside each workspace so they can vary by branch:
 
 ```
-~/gitspace/<project-name>/scripts/
+~/gitspace/<project-name>/workspaces/<workspace-name>/.gitspace/
 ├── pre/           # Run before setup (terminal)
 ├── setup/         # Run once on workspace creation
 ├── select/        # Run every time workspace is opened
@@ -407,7 +408,13 @@ export SPACES_CURRENT_PROJECT="my-app"
 │   │       ├── gitspace.lock    # Setup completion marker
 │   │       └── .prompt/         # Linear issue details (if applicable)
 │   │           └── issue.md
-│   └── scripts/                 # Custom scripts
+│   └── workspaces/
+│       └── <workspace-name>/
+│           └── .gitspace/       # Custom scripts (per worktree)
+│               ├── pre/
+│               ├── setup/
+│               ├── select/
+│               └── remove/
 │       ├── pre/
 │       ├── setup/
 │       ├── select/
