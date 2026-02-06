@@ -102,6 +102,18 @@ function getTerminalSize() {
   };
 }
 
+/**
+ * Renders an interactive terminal UI that attaches to a tmux-lite session over a Unix socket, streams PTY output to a persistent terminal renderer, and forwards user input (keys, paste, mouse selection) back to the session.
+ *
+ * @param session - Session descriptor (includes socketPath, name, cwd) to attach to
+ * @param onDetach - Called when the user detaches from the session (e.g., via Ctrl+Esc)
+ * @param onExit - Called with the remote process exit code when the session exits
+ * @param onKicked - Called when the session is terminated/kicked by the server
+ * @param onError - Called with an error message for connection or protocol errors
+ * @param interceptShiftTab - If true, prevents sending Shift+Tab to the PTY so a parent component can handle it
+ * @param modalOpen - When true, suppresses sending keyboard input to the remote PTY
+ * @param onActivity - Optional callback invoked on user activity (keypress or paste) to signal activity
+ */
 export function Terminal({ session, onDetach, onExit, onKicked, onError, interceptShiftTab, modalOpen, onActivity }: TerminalProps) {
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [errorMsg, setErrorMsg] = useState<string>('');
