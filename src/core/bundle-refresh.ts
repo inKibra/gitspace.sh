@@ -174,8 +174,8 @@ export function detectBundleChanges(
   const config = readProjectConfig(projectName);
   if (config.appliedBundle) {
     // Compare hashes if we have one stored, otherwise compare versions
-    if ((config as any).appliedBundleHash) {
-      result.previousHash = (config as any).appliedBundleHash;
+    if (config.appliedBundleHash) {
+      result.previousHash = config.appliedBundleHash;
       result.hasChanged = result.currentHash !== result.previousHash;
     } else {
       // No hash stored, assume changed if version differs
@@ -308,7 +308,7 @@ export async function refreshBundle(
     },
     // Store hash for future change detection
     appliedBundleHash: changes.currentHash,
-  } as any);
+  });
 
   result.refreshed = true;
   result.completed = true;

@@ -141,6 +141,8 @@ export interface ProjectConfig {
   bundleSecretKeys?: string[];
   /** Information about the bundle that was applied */
   appliedBundle?: AppliedBundle;
+  /** Hash of the applied bundle for change detection */
+  appliedBundleHash?: string;
 }
 
 /**
