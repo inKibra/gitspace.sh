@@ -14,7 +14,6 @@ import {
   getCurrentProject,
   getAllProjectNames,
   projectExists,
-  getScriptsPhaseDir,
   updateProjectConfig,
 } from '../core/config.js';
 import { checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
@@ -49,10 +48,11 @@ import {
   detectBundleInRepo,
   loadBundleFromPath,
   loadBundleFromUrl,
-  copyBundleScripts,
   cleanupBundleDir,
 } from '../core/bundle.js';
+import { checkAndRefreshBundle, hashBundle } from '../core/bundle-refresh.js';
 import { runOnboarding } from '../utils/onboarding.js';
+import { preloadProjectSecrets } from '../utils/secrets.js';
 import type { LoadedBundle, OnboardingResult } from '../types/bundle.js';
 
 /**
@@ -184,10 +184,8 @@ export async function addProject(options: {
     baseBranch
   );
 
-  // Copy bundle scripts if bundle was loaded
+  // Store bundle info if bundle was loaded (scripts are read from workspace .gitspace/)
   if (loadedBundle) {
-    copyBundleScripts(loadedBundle.bundleDir, projectName);
-
     // Store bundle values and info in project config
     const configUpdates: Record<string, unknown> = {};
 
@@ -201,6 +199,9 @@ export async function addProject(options: {
       source: loadedBundle.source,
       appliedAt: new Date().toISOString(),
     };
+
+    // Store the bundle hash to prevent false "bundle has changed" on first workspace
+    configUpdates.appliedBundleHash = hashBundle(loadedBundle.bundle);
 
     updateProjectConfig(projectName, configUpdates);
 
@@ -417,6 +418,15 @@ export async function addWorkspace(
 
   logger.success(`Created worktree from ${baseBranch}`);
 
+  // Preload project secrets into cache to minimize keychain prompts
+  // This ensures subsequent getProjectSecret calls use cached values
+  if (projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0) {
+    await preloadProjectSecrets(currentProject, projectConfig.bundleSecretKeys);
+  }
+
+  // Check if bundle has changed and run refresh if needed
+  await checkAndRefreshBundle(currentProject, workspacePath);
+
   // If workspace was created from a Linear issue, save issue details as markdown
   if (selectedLinearIssue) {
     const issueLinearConfig = await getLinearConfig(currentProject);
@@ -437,7 +447,7 @@ export async function addWorkspace(
 
   // Run pre scripts if this is the first time (before tmux/setup)
   if (isFirstTime && !options.noSetup) {
-    const preScriptsDir = getScriptsPhaseDir(currentProject, 'pre');
+    const preScriptsDir = join(workspacePath, '.gitspace', 'pre');
     await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, projectConfig.repository);
   }
 

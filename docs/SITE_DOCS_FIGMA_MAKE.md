@@ -281,10 +281,10 @@ D) CUSTOM SCRIPTS & BUNDLES
 
 ### Custom Scripts
 
-GitSpace uses convention-based scripts located at `~/gitspace/<project>/scripts/`:
+GitSpace uses convention-based scripts stored per workspace in `.gitspace/`:
 
 ```
-scripts/
+~/gitspace/<project>/workspaces/<workspace>/.gitspace/
 ├── pre/      # Run before setup (once, in terminal)
 ├── setup/    # Run on workspace creation (once)
 ├── select/   # Run every time workspace is opened
@@ -298,7 +298,7 @@ Script execution rules:
 - Arguments: `$1` = workspace name, `$2` = repository name
 - Environment: Bundle values available as `SPACE_VALUE_*` and `SPACE_SECRET_*`
 
-Example script (`scripts/select/01-status.sh`):
+Example script (`.gitspace/select/01-status.sh`):
 ```bash
 #!/bin/bash
 WORKSPACE_NAME=$1
@@ -467,11 +467,13 @@ Location: `~/gitspace/.identity/`
 │   │       ├── gitspace.lock       # Setup completion marker
 │   │       └── .prompt/         # Linear issue details (if applicable)
 │   │           └── issue.md
-│   └── scripts/                 # Custom scripts
-│       ├── pre/
-│       ├── setup/
-│       ├── select/
-│       └── remove/
+│   └── workspaces/
+│       └── <workspace-name>/
+│           └── .gitspace/       # Custom scripts (per worktree)
+│               ├── pre/
+│               ├── setup/
+│               ├── select/
+│               └── remove/
 ```
 
 ============================================================
@@ -619,8 +621,8 @@ gssh identity init --label "My Device"
 - Try: `git fetch origin` first
 
 **"Setup scripts failed"**
-- Check script is executable: `chmod +x scripts/setup/*.sh`
-- Run manually to see error: `./scripts/setup/01-script.sh`
+- Check script is executable: `chmod +x .gitspace/setup/*.sh`
+- Run manually to see error: `./.gitspace/setup/01-script.sh`
 - Check environment variables are set
 
 ### Bundle/Secrets Issues
@@ -891,10 +893,10 @@ gssh status      # Show daemon statuses
 
 SECTION: Local Workflow - Custom Scripts
 
-GitSpace uses convention-based scripts in `~/gitspace/<project>/scripts/`:
+GitSpace uses convention-based scripts stored per workspace in `.gitspace/`:
 
 ```
-scripts/
+~/gitspace/<project>/workspaces/<workspace>/.gitspace/
 ├── pre/      # Run before setup (once)
 ├── setup/    # Run on workspace creation (once)
 ├── select/   # Run every time workspace is opened
@@ -910,7 +912,7 @@ scripts/
 **Example:**
 ```bash
 #!/bin/bash
-# scripts/select/01-status.sh
+# .gitspace/select/01-status.sh
 echo "Switching to: $1"
 git fetch origin
 git status

@@ -14,7 +14,7 @@ This document provides comprehensive information for AI assistants working on th
 - **X3DH handshake** for forward-secret session encryption
 - Web terminal interface (React + xterm.js)
 - Linear issue integration for workspace creation
-- Convention-based custom scripts (pre, setup, select phases)
+- Convention-based custom scripts in `.gitspace/` (pre, setup, select, remove phases)
 
 ## Architecture
 
@@ -22,11 +22,12 @@ This document provides comprehensive information for AI assistants working on th
 
 1. **Projects**: Top-level containers for a GitHub repository
    - Located at `~/gitspace/<project-name>/`
-   - Contains: base repo clone, workspaces, scripts, config
+   - Contains: base repo clone, workspaces, config
 
 2. **Workspaces**: Individual git worktrees for features/branches
    - Located at `~/gitspace/<project-name>/workspaces/<workspace-name>/`
    - Each workspace has its own branch
+   - Scripts are sourced from `.gitspace/<phase>/` in the workspace (version-controlled)
 
 3. **Sessions**: PTY terminal sessions managed by tmux-lite
    - Can be attached from multiple clients
@@ -262,6 +263,13 @@ src/
 | `gssh linear show --project <name>` | Show project-specific Linear configuration |
 | `gssh linear clear` | Clear user-level Linear configuration |
 | `gssh linear clear --project <name>` | Clear project-specific Linear configuration |
+
+### Bundle Management
+| Command | Description |
+|---------|-------------|
+| `gssh bundle status` | Show bundle status for current project |
+| `gssh bundle refresh` | Re-run bundle onboarding (keeps previous values as defaults) |
+| `gssh bundle refresh --force` | Force refresh even if no changes detected |
 
 ## Remote Access Architecture
 

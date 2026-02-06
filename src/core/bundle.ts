@@ -6,8 +6,6 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
-  copyFileSync,
-  chmodSync,
   mkdirSync,
   statSync,
   writeFileSync,
@@ -20,11 +18,9 @@ import { promisify } from 'util';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import type { SpacesBundle, LoadedBundle } from '../types/bundle.js';
-import { getScriptsPhaseDir } from './config.js';
 
 const BUNDLE_FILENAME = 'bundle.json';
 const BUNDLE_SUBDIRS = ['.gitspace'];
-const SCRIPT_PHASES = ['pre', 'setup', 'select', 'remove'] as const;
 
 function assertSafeExtractedPaths(rootDir: string): void {
   const rootResolved = resolve(rootDir);
@@ -242,88 +238,6 @@ export function validateBundle(bundle: SpacesBundle): void {
       }
     }
   }
-}
-
-/**
- * Discover executable scripts in a bundle phase directory
- */
-function discoverBundleScripts(bundleDir: string, phase: string): string[] {
-  const phaseDir = join(bundleDir, phase);
-
-  if (!existsSync(phaseDir)) {
-    return [];
-  }
-
-  try {
-    const files = readdirSync(phaseDir);
-    const scripts: string[] = [];
-
-    for (const file of files) {
-      const filePath = join(phaseDir, file);
-      const stats = statSync(filePath);
-
-      // Include files (check execute permission for Unix)
-      if (stats.isFile()) {
-        scripts.push(file);
-      }
-    }
-
-    // Sort alphabetically for predictable order
-    scripts.sort();
-    return scripts;
-  } catch (error) {
-    logger.debug(`Error discovering bundle scripts in ${phase}: ${error}`);
-    return [];
-  }
-}
-
-/**
- * Copy scripts from bundle to project scripts directory
- */
-export function copyBundleScripts(
-  bundleDir: string,
-  projectName: string
-): { copied: number; skipped: number } {
-  let copied = 0;
-  let skipped = 0;
-
-  for (const phase of SCRIPT_PHASES) {
-    const scripts = discoverBundleScripts(bundleDir, phase);
-    if (scripts.length === 0) continue;
-
-    const targetDir = getScriptsPhaseDir(projectName, phase);
-
-    // Ensure target directory exists
-    if (!existsSync(targetDir)) {
-      mkdirSync(targetDir, { recursive: true });
-    }
-
-    for (const scriptFile of scripts) {
-      const sourcePath = join(bundleDir, phase, scriptFile);
-      const targetPath = join(targetDir, scriptFile);
-
-      // Skip if target already exists
-      if (existsSync(targetPath)) {
-        logger.debug(`Script already exists, skipping: ${scriptFile}`);
-        skipped++;
-        continue;
-      }
-
-      copyFileSync(sourcePath, targetPath);
-      chmodSync(targetPath, 0o755);
-      logger.debug(`Copied script: ${scriptFile} -> ${phase}/`);
-      copied++;
-    }
-  }
-
-  if (copied > 0) {
-    logger.success(`Copied ${copied} bundle script${copied === 1 ? '' : 's'}`);
-  }
-  if (skipped > 0) {
-    logger.dim(`Skipped ${skipped} existing script${skipped === 1 ? '' : 's'}`);
-  }
-
-  return { copied, skipped };
 }
 
 /**

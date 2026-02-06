@@ -5,9 +5,10 @@
  * proper error handling and phase identification.
  */
 
+import { join } from 'path';
 import { runScriptsInTerminal, type RunScriptsOptions } from './run-scripts';
 import { hasSetupBeenRun, markSetupComplete } from './workspace-state';
-import { getScriptsPhaseDir, readProjectConfig } from '../core/config';
+import { readProjectConfig } from '../core/config';
 import { getProjectSecrets } from './secrets';
 
 export type ScriptPhase = 'pre' | 'setup' | 'select';
@@ -75,7 +76,7 @@ export async function runWorkspaceScripts(
 
   if (setupAlreadyRun) {
     // Run select scripts for existing workspace
-    const selectScriptsDir = getScriptsPhaseDir(projectName, 'select');
+    const selectScriptsDir = join(workspacePath, '.gitspace', 'select');
     try {
       onPhaseStart?.('select');
       await runScriptsInTerminal(selectScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
@@ -90,12 +91,12 @@ export async function runWorkspaceScripts(
 
     try {
       onPhaseStart?.('pre');
-      const preScriptsDir = getScriptsPhaseDir(projectName, 'pre');
+      const preScriptsDir = join(workspacePath, '.gitspace', 'pre');
       await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
       preScriptsSucceeded = true;
 
       onPhaseStart?.('setup');
-      const setupScriptsDir = getScriptsPhaseDir(projectName, 'setup');
+      const setupScriptsDir = join(workspacePath, '.gitspace', 'setup');
       await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
 
       // Only mark complete if both phases succeeded

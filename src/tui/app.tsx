@@ -85,7 +85,8 @@ import type { LinearIssue } from '../types/workspace.js';
 
 // Project creation
 import { listAllRepos, cloneRepository } from '../core/github.js';
-import { detectBundleInRepo, loadBundleFromPath, copyBundleScripts } from '../core/bundle.js';
+import { detectBundleInRepo, loadBundleFromPath } from '../core/bundle.js';
+import { detectBundleChanges } from '../core/bundle-refresh.js';
 import { setProjectSecret } from '../utils/secrets.js';
 import { checkCommandExists } from '../utils/deps.js';
 import type { OnboardingStep } from '../types/bundle.js';
@@ -784,6 +785,17 @@ function App({ relayConfig, onQuit }: AppProps) {
         }
       }
 
+      // Check if bundle has changed - show message if refresh needed
+      const bundleChanges = detectBundleChanges(state.currentProject, workspacePath);
+      if (bundleChanges.hasBundle && bundleChanges.hasChanged) {
+        // Bundle has changed - user should run refresh
+        // For TUI, we'll show this after scripts complete via the inbox
+        flow.showMessage({
+          title: 'Bundle Updated',
+          message: 'Bundle configuration has changed. Run "gssh bundle refresh" to update settings.',
+        });
+      }
+
       // Set up script runner and show scripts view for workspace setup
       setWorkspaceFlow({ type: 'closed' });
       const sessionName = `${state.currentProject}:${workspaceName}:${Date.now()}`;
@@ -1048,7 +1060,6 @@ function App({ relayConfig, onQuit }: AppProps) {
 
       try {
         createProject(projectFlow.projectName, projectFlow.repo, projectFlow.baseBranch);
-        copyBundleScripts(projectFlow.bundleDir, projectFlow.projectName);
 
         // Update project config with bundle values
         if (Object.keys(newValues).length > 0 || newSecretKeys.length > 0) {
@@ -1182,9 +1193,8 @@ function App({ relayConfig, onQuit }: AppProps) {
           return;
         }
 
-        // No onboarding, just copy scripts and create project
+        // No onboarding, just create project (scripts are in workspace .gitspace/)
         createProject(projectName, repo, baseBranch);
-        copyBundleScripts(bundleDir, projectName);
         updateProjectConfig(projectName, {
           appliedBundle: {
             name: loadedBundle.bundle.name,
