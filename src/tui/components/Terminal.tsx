@@ -78,6 +78,8 @@ const COLORS = {
   error: '#FF4444',
 };
 
+const SCROLLBACK_LIMIT = 2_000;
+
 // ============================================================================
 // Terminal Component
 // ============================================================================
@@ -120,6 +122,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
   const pendingPtyDataRef = useRef<Buffer[]>([]); // Buffer PTY data until "attached" received
   const lastSizeRef = useRef({ cols: 0, rows: 0 });
   const statusRef = useRef<TerminalStatus>(status);
+  const followScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Track bracketed paste mode (DECSET 2004) as requested by the remote program.
   const bracketedPasteRef = useRef(new BracketedPasteModeTracker());
@@ -156,6 +159,53 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
 
   const updateBracketedPasteMode = useCallback((chunk: Buffer) => {
     bracketedPasteRef.current.update(chunk);
+  }, []);
+
+  const scrollToCursorIfFollowing = useCallback(() => {
+    const scrollBox = scrollBoxRef.current;
+    const terminal = terminalRef.current;
+    if (!scrollBox || !terminal) return;
+
+    const maxScrollTop = Math.max(0, scrollBox.scrollHeight - scrollBox.viewport.height);
+    const isAtBottom = scrollBox.scrollTop >= maxScrollTop - 1;
+    if (!isAtBottom) return;
+
+    let cursor: [number, number];
+    try {
+      cursor = terminal.getCursor();
+    } catch {
+      return;
+    }
+
+    const lineCount = terminal.lineCount ?? 0;
+    if (lineCount <= 0) return;
+
+    if (lineCount > SCROLLBACK_LIMIT) {
+      // Drop saved scrollback locally while keeping current screen.
+      // This caps client-side history without affecting the PTY/server state.
+      terminal.feed(Buffer.from("\x1b[3J"));
+    }
+
+    const cursorLine = Math.max(0, lineCount - terminal.rows + cursor[1]);
+    const scrollPos = terminal.getScrollPositionForLine(cursorLine);
+    scrollBox.scrollTo(scrollPos);
+  }, []);
+
+  const scheduleScrollFollow = useCallback(() => {
+    if (followScrollTimeoutRef.current) return;
+    followScrollTimeoutRef.current = setTimeout(() => {
+      followScrollTimeoutRef.current = null;
+      scrollToCursorIfFollowing();
+    }, 0);
+  }, [scrollToCursorIfFollowing]);
+
+  useEffect(() => {
+    return () => {
+      if (followScrollTimeoutRef.current) {
+        clearTimeout(followScrollTimeoutRef.current);
+        followScrollTimeoutRef.current = null;
+      }
+    };
   }, []);
 
   // Handle paste events from OpenTUI (bracketed paste on the *local* terminal).
@@ -197,8 +247,15 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
       const combined = Buffer.concat(pendingPtyDataRef.current);
       pendingPtyDataRef.current = [];
       terminalRef.current.feed(combined);
+      scheduleScrollFollow();
     }
-  }, [terminalMounted]);
+  }, [scheduleScrollFollow, terminalMounted]);
+
+  // Align scroll position after initial snapshot render
+  useEffect(() => {
+    if (!terminalMounted || !initialData) return;
+    scheduleScrollFollow();
+  }, [initialData, scheduleScrollFollow, terminalMounted]);
 
   // Send resize to session
   const sendResize = useCallback((force = false) => {
@@ -224,7 +281,8 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
       terminalRef.current.cols = cols;
       terminalRef.current.rows = rows;
     }
-  }, []);
+    scheduleScrollFollow();
+  }, [scheduleScrollFollow]);
 
   // Connect to session socket
   useEffect(() => {
@@ -324,6 +382,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
                   if (combined.length > 0) {
                     debugLog(`Feeding ${combined.length} bytes to ghostty`, combined);
                     terminalRef.current.feed(combined);
+                    scheduleScrollFollow();
                   }
                 } else {
                   // Terminal not yet mounted - buffer for later
@@ -486,7 +545,7 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
   const handleMouseUp = useCallback(async (event: MouseEvent) => {
     // Check if we were selecting (isSelecting is set during drag selection)
     if (event.isSelecting && terminalRef.current) {
-      const selectedText = terminalRef.current.getSelectedText();
+      const selectedText = (terminalRef.current as any).getSelectedText?.();
       if (selectedText && selectedText.length > 0) {
         try {
           await copyToClipboard(selectedText);
