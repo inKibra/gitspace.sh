@@ -209,7 +209,8 @@ export async function refreshBundle(
   const changes = detectBundleChanges(projectName, workspacePath);
 
   if (!changes.hasBundle) {
-    result.error = 'No bundle found';
+    // Propagate parse error if bundle.json exists but is invalid
+    result.error = changes.parseError || 'No bundle found';
     return result;
   }
 
