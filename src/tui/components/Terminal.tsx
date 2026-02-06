@@ -541,22 +541,25 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
     }
   });
 
-  // Handle mouse up to detect selection completion and copy to clipboard
-  const handleMouseUp = useCallback(async (event: MouseEvent) => {
-    // Check if we were selecting (isSelecting is set during drag selection)
-    if (event.isSelecting && terminalRef.current) {
-      const selectedText = (terminalRef.current as any).getSelectedText?.();
-      if (selectedText && selectedText.length > 0) {
-        try {
-          await copyToClipboard(selectedText);
-          toast.success('Copied to clipboard');
-        } catch {
-          toast.error('Failed to copy to clipboard');
+  // Handle mouse-up after drag selection and copy selected text to clipboard
+  const handleMouseUp = useCallback((event: MouseEvent) => {
+    if (!event.isDragging || !terminalRef.current) return;
+
+    // Wait for renderer to finalize selection state before reading it
+    queueMicrotask(() => {
+      void (async () => {
+        const selectedText = (terminalRef.current as any).getSelectedText?.();
+        if (selectedText && selectedText.length > 0) {
+          try {
+            await copyToClipboard(selectedText);
+            toast.success('Copied to clipboard');
+          } catch {
+            toast.error('Failed to copy to clipboard');
+          }
+          renderer.clearSelection();
         }
-        // Clear selection after copying
-        renderer.clearSelection();
-      }
-    }
+      })();
+    });
   }, [renderer]);
 
   // Render
