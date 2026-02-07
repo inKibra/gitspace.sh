@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
-import type { PasteEvent, ScrollBoxRenderable, MouseEvent } from '@opentui/core';
+import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import { appendFileSync } from 'fs';
 import type { Session, SessionEvent } from '../../lib/tmux-lite/protocol.js';
@@ -542,24 +542,17 @@ export function Terminal({ session, onDetach, onExit, onKicked, onError, interce
   });
 
   // Handle mouse-up after drag selection and copy selected text to clipboard
-  const handleMouseUp = useCallback((event: MouseEvent) => {
-    if (!event.isDragging || !terminalRef.current) return;
-
-    // Wait for renderer to finalize selection state before reading it
-    queueMicrotask(() => {
-      void (async () => {
-        const selectedText = (terminalRef.current as any).getSelectedText?.();
-        if (selectedText && selectedText.length > 0) {
-          try {
-            await copyToClipboard(selectedText);
-            toast.success('Copied to clipboard');
-          } catch {
-            toast.error('Failed to copy to clipboard');
-          }
-          renderer.clearSelection();
-        }
-      })();
-    });
+  const handleMouseUp = useCallback(async () => {
+    const text = renderer.getSelection()?.getSelectedText();
+    if (text && text.length > 0) {
+      try {
+        await copyToClipboard(text);
+        toast.success('Copied to clipboard');
+      } catch {
+        toast.error('Failed to copy to clipboard');
+      }
+      renderer.clearSelection();
+    }
   }, [renderer]);
 
   // Render
