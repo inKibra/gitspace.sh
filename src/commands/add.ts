@@ -184,7 +184,7 @@ export async function addProject(options: {
     baseBranch
   );
 
-  // Store bundle info if bundle was loaded (scripts are read from workspace .gitspace/)
+  // Store bundle info if bundle was loaded (scripts are read from workspace .gitspace/scripts/)
   if (loadedBundle) {
     // Store bundle values and info in project config
     const configUpdates: Record<string, unknown> = {};
@@ -447,7 +447,7 @@ export async function addWorkspace(
 
   // Run pre scripts if this is the first time (before tmux/setup)
   if (isFirstTime && !options.noSetup) {
-    const preScriptsDir = join(workspacePath, '.gitspace', 'pre');
+    const preScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'pre');
     await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, projectConfig.repository);
   }
 

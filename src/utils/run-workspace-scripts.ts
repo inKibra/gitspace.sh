@@ -76,7 +76,7 @@ export async function runWorkspaceScripts(
 
   if (setupAlreadyRun) {
     // Run select scripts for existing workspace
-    const selectScriptsDir = join(workspacePath, '.gitspace', 'select');
+    const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select');
     try {
       onPhaseStart?.('select');
       await runScriptsInTerminal(selectScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
@@ -91,12 +91,12 @@ export async function runWorkspaceScripts(
 
     try {
       onPhaseStart?.('pre');
-      const preScriptsDir = join(workspacePath, '.gitspace', 'pre');
+      const preScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'pre');
       await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
       preScriptsSucceeded = true;
 
       onPhaseStart?.('setup');
-      const setupScriptsDir = join(workspacePath, '.gitspace', 'setup');
+      const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup');
       await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
 
       // Only mark complete if both phases succeeded

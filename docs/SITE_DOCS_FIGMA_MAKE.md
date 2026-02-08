@@ -281,14 +281,15 @@ D) CUSTOM SCRIPTS & BUNDLES
 
 ### Custom Scripts
 
-GitSpace uses convention-based scripts stored per workspace in `.gitspace/`:
+GitSpace uses convention-based scripts stored per workspace in `.gitspace/scripts/`:
 
 ```
 ~/gitspace/<project>/workspaces/<workspace>/.gitspace/
-├── pre/      # Run before setup (once, in terminal)
-├── setup/    # Run on workspace creation (once)
-├── select/   # Run every time workspace is opened
-└── remove/   # Run before workspace deletion
+└── scripts/
+    ├── pre/      # Run before setup (once, in terminal)
+    ├── setup/    # Run on workspace creation (once)
+    ├── select/   # Run every time workspace is opened
+    └── remove/   # Run before workspace deletion
 ```
 
 Script execution rules:
@@ -298,7 +299,7 @@ Script execution rules:
 - Arguments: `$1` = workspace name, `$2` = repository name
 - Environment: Bundle values available as `SPACE_VALUE_*` and `SPACE_SECRET_*`
 
-Example script (`.gitspace/select/01-status.sh`):
+Example script (`.gitspace/scripts/select/01-status.sh`):
 ```bash
 #!/bin/bash
 WORKSPACE_NAME=$1
@@ -316,10 +317,11 @@ Bundles allow repository owners to share onboarding configurations. Place in `.g
 ```
 .gitspace/
 ├── bundle.json           # Bundle manifest with onboarding steps
-├── pre/                  # Scripts to run before setup
-├── setup/                # Scripts to run on first workspace creation
-├── select/               # Scripts to run every time workspace is opened
-└── remove/               # Scripts to run before workspace deletion
+└── scripts/
+    ├── pre/              # Scripts to run before setup
+    ├── setup/            # Scripts to run on first workspace creation
+    ├── select/           # Scripts to run every time workspace is opened
+    └── remove/           # Scripts to run before workspace deletion
 ```
 
 Bundle manifest example (`bundle.json`):
@@ -465,15 +467,15 @@ Location: `~/gitspace/.identity/`
 │   ├── workspaces/              # Git worktrees
 │   │   └── <workspace-name>/
 │   │       ├── gitspace.lock       # Setup completion marker
-│   │       └── .prompt/         # Linear issue details (if applicable)
-│   │           └── issue.md
-│   └── workspaces/
-│       └── <workspace-name>/
-│           └── .gitspace/       # Custom scripts (per worktree)
-│               ├── pre/
-│               ├── setup/
-│               ├── select/
-│               └── remove/
+│   │       ├── .prompt/         # Linear issue details (if applicable)
+│   │       │   └── issue.md
+│   │       └── .gitspace/
+│   │           ├── bundle.json
+│   │           └── scripts/     # Custom scripts (per worktree)
+│   │               ├── pre/
+│   │               ├── setup/
+│   │               ├── select/
+│   │               └── remove/
 ```
 
 ============================================================
@@ -621,8 +623,8 @@ gssh identity init --label "My Device"
 - Try: `git fetch origin` first
 
 **"Setup scripts failed"**
-- Check script is executable: `chmod +x .gitspace/setup/*.sh`
-- Run manually to see error: `./.gitspace/setup/01-script.sh`
+- Check script is executable: `chmod +x .gitspace/scripts/setup/*.sh`
+- Run manually to see error: `./.gitspace/scripts/setup/01-script.sh`
 - Check environment variables are set
 
 ### Bundle/Secrets Issues
@@ -893,14 +895,15 @@ gssh status      # Show daemon statuses
 
 SECTION: Local Workflow - Custom Scripts
 
-GitSpace uses convention-based scripts stored per workspace in `.gitspace/`:
+GitSpace uses convention-based scripts stored per workspace in `.gitspace/scripts/`:
 
 ```
 ~/gitspace/<project>/workspaces/<workspace>/.gitspace/
-├── pre/      # Run before setup (once)
-├── setup/    # Run on workspace creation (once)
-├── select/   # Run every time workspace is opened
-└── remove/   # Run before workspace deletion
+└── scripts/
+    ├── pre/      # Run before setup (once)
+    ├── setup/    # Run on workspace creation (once)
+    ├── select/   # Run every time workspace is opened
+    └── remove/   # Run before workspace deletion
 ```
 
 **Rules:**
@@ -912,7 +915,7 @@ GitSpace uses convention-based scripts stored per workspace in `.gitspace/`:
 **Example:**
 ```bash
 #!/bin/bash
-# .gitspace/select/01-status.sh
+# .gitspace/scripts/select/01-status.sh
 echo "Switching to: $1"
 git fetch origin
 git status
@@ -927,9 +930,11 @@ Bundles allow teams to share onboarding configurations. Place in `.gitspace/`:
 ```
 .gitspace/
 ├── bundle.json           # Manifest
-├── pre/                  # Pre-setup scripts
-├── setup/                # Setup scripts
-└── select/               # Select scripts
+└── scripts/
+    ├── pre/              # Pre-setup scripts
+    ├── setup/            # Setup scripts
+    ├── select/           # Select scripts
+    └── remove/           # Remove scripts
 ```
 
 **Manifest example:**

@@ -22,6 +22,10 @@ async function runCli(command: string): Promise<{ stdout: string; stderr: string
     cmd: ["bun", "run", CLI_SCRIPT, command, "--test"],
     stdout: "pipe",
     stderr: "pipe",
+    env: {
+      ...process.env,
+      TMUX_LITE: "",
+    },
   });
 
   const stdout = await new Response(proc.stdout).text();

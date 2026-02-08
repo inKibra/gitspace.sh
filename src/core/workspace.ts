@@ -122,7 +122,7 @@ export async function deleteWorkspaceCore(
   // Run remove scripts (cleanup before deletion)
   try {
     const projectConfig = readProjectConfig(projectName);
-    const removeScriptsDir = join(workspacePath, '.gitspace', 'remove');
+    const removeScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'remove');
     options.onProgress?.('Running cleanup scripts...');
     await runScriptsInTerminal(
       removeScriptsDir,

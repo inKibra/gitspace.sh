@@ -232,7 +232,7 @@ describe('itemToToast', () => {
     expect(toast.sessionId).toBe('session-1');
     expect(toast.sessionName).toBe('my-project:my-workspace:default');
     expect(toast.icon).toBe('✅');
-    expect(toast.title).toBe('Completed: npm test');
+    expect(toast.title).toBe('my-project / my-workspace / default: Completed - npm test');
     expect(toast.preview).toBe('Tests passed');
     expect(toast.item).toBe(item);
   });
@@ -248,7 +248,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('❌');
-    expect(toast.title).toBe('Exit code 1: npm build');
+    expect(toast.title).toBe('my-project / my-workspace / default: Exit code 1 - npm build');
   });
 
   it('should convert bell item', () => {
@@ -261,7 +261,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('🔔');
-    expect(toast.title).toBe('Bell');
+    expect(toast.title).toBe('my-project / my-workspace / default: Bell');
   });
 
   it('should convert idle item', () => {
@@ -274,7 +274,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('⏸️');
-    expect(toast.title).toBe('Activity Complete: vim');
+    expect(toast.title).toBe('my-project / my-workspace / default: Activity Complete - vim');
   });
 
   it('should convert title item', () => {
@@ -287,7 +287,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('📝');
-    expect(toast.title).toBe('Title Change: bash');
+    expect(toast.title).toBe('my-project / my-workspace / default: Title Change - bash');
   });
 
   it('should convert osc item', () => {
@@ -300,7 +300,7 @@ describe('itemToToast', () => {
     const toast = itemToToast(item);
 
     expect(toast.icon).toBe('📟');
-    expect(toast.title).toBe('OSC Notification: app');
+    expect(toast.title).toBe('my-project / my-workspace / default: OSC Notification - app');
   });
 
   it('should truncate long preview text', () => {
