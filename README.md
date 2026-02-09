@@ -117,14 +117,15 @@ A bundle is a directory (typically `.gitspace/`) containing:
 ```
 .gitspace/
 ├── bundle.json           # Bundle manifest with onboarding steps
-├── pre/                  # Scripts to run before setup
-│   └── 01-copy-env.sh
-├── setup/                # Scripts to run on first workspace creation
-│   └── 01-install-deps.sh
-├── select/               # Scripts to run every time workspace is opened
-│   └── 01-status.sh
-└── remove/               # Scripts to run before workspace deletion
-    └── 01-cleanup.sh
+└── scripts/
+    ├── pre/              # Scripts to run before setup
+    │   └── 01-copy-env.sh
+    ├── setup/            # Scripts to run on first workspace creation
+    │   └── 01-install-deps.sh
+    ├── select/           # Scripts to run every time workspace is opened
+    │   └── 01-status.sh
+    └── remove/           # Scripts to run before workspace deletion
+        └── 01-cleanup.sh
 ```
 
 ### Bundle Manifest (`bundle.json`)
@@ -188,7 +189,7 @@ Bundle values are passed to scripts as environment variables:
 
 ```bash
 #!/bin/bash
-# .gitspace/select/01-status.sh
+# .gitspace/scripts/select/01-status.sh
 
 WORKSPACE_NAME=$1
 REPOSITORY=$2
@@ -361,10 +362,11 @@ inside each workspace so they can vary by branch:
 
 ```
 ~/gitspace/<project-name>/workspaces/<workspace-name>/.gitspace/
-├── pre/           # Run before setup (terminal)
-├── setup/         # Run once on workspace creation
-├── select/        # Run every time workspace is opened
-└── remove/        # Run before workspace deletion
+└── scripts/
+    ├── pre/       # Run before setup (terminal)
+    ├── setup/     # Run once on workspace creation
+    ├── select/    # Run every time workspace is opened
+    └── remove/    # Run before workspace deletion
 ```
 
 #### Script Execution Rules
@@ -406,19 +408,15 @@ export SPACES_CURRENT_PROJECT="my-app"
 │   ├── workspaces/              # Git worktrees
 │   │   └── <workspace-name>/
 │   │       ├── gitspace.lock    # Setup completion marker
-│   │       └── .prompt/         # Linear issue details (if applicable)
-│   │           └── issue.md
-│   └── workspaces/
-│       └── <workspace-name>/
-│           └── .gitspace/       # Custom scripts (per worktree)
-│               ├── pre/
-│               ├── setup/
-│               ├── select/
-│               └── remove/
-│       ├── pre/
-│       ├── setup/
-│       ├── select/
-│       └── remove/
+│   │       ├── .prompt/         # Linear issue details (if applicable)
+│   │       │   └── issue.md
+│   │       └── .gitspace/
+│   │           ├── bundle.json
+│   │           └── scripts/     # Custom scripts (per worktree)
+│   │               ├── pre/
+│   │               ├── setup/
+│   │               ├── select/
+│   │               └── remove/
 ```
 
 ## Remote Access

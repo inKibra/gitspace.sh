@@ -1193,7 +1193,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           return;
         }
 
-        // No onboarding, just create project (scripts are in workspace .gitspace/)
+        // No onboarding, just create project (scripts are in workspace .gitspace/scripts/)
         createProject(projectName, repo, baseBranch);
         updateProjectConfig(projectName, {
           appliedBundle: {

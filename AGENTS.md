@@ -14,7 +14,7 @@ This document provides comprehensive information for AI assistants working on th
 - **X3DH handshake** for forward-secret session encryption
 - Web terminal interface (React + xterm.js)
 - Linear issue integration for workspace creation
-- Convention-based custom scripts in `.gitspace/` (pre, setup, select, remove phases)
+- Convention-based custom scripts in `.gitspace/scripts/` (pre, setup, select, remove phases)
 
 ## Architecture
 
@@ -27,7 +27,7 @@ This document provides comprehensive information for AI assistants working on th
 2. **Workspaces**: Individual git worktrees for features/branches
    - Located at `~/gitspace/<project-name>/workspaces/<workspace-name>/`
    - Each workspace has its own branch
-   - Scripts are sourced from `.gitspace/<phase>/` in the workspace (version-controlled)
+   - Scripts are sourced from `.gitspace/scripts/<phase>/` in the workspace (version-controlled)
 
 3. **Sessions**: PTY terminal sessions managed by tmux-lite
    - Can be attached from multiple clients

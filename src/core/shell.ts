@@ -59,7 +59,7 @@ export async function openWorkspaceShell(
 
 	if (selectOnly) {
 		// TUI mode: setup was done during creation, just run select scripts
-		const selectScriptsDir = join(workspacePath, '.gitspace', 'select')
+		const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select')
 		await runScriptsInTerminal(
 			selectScriptsDir,
 			workspacePath,
@@ -73,7 +73,7 @@ export async function openWorkspaceShell(
 		// Determine which scripts to run based on setup status
 		if (setupAlreadyRun) {
 			// Setup has been run before, run select scripts
-			const selectScriptsDir = join(workspacePath, '.gitspace', 'select')
+			const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select')
 			await runScriptsInTerminal(
 				selectScriptsDir,
 				workspacePath,
@@ -84,7 +84,7 @@ export async function openWorkspaceShell(
 		} else if (!noSetup) {
 			// First time setup, run setup scripts
 			printToTerminal('Running setup scripts (first time)...')
-			const setupScriptsDir = join(workspacePath, '.gitspace', 'setup')
+			const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup')
 			await runScriptsInTerminal(
 				setupScriptsDir,
 				workspacePath,

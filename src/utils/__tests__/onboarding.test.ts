@@ -8,6 +8,11 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 
 describe('onboarding', () => {
+  async function loadOnboardingModule() {
+    const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return import(`../onboarding.ts?cacheBust=${cacheBust}`);
+  }
+
   // Store references to mock functions
   let mockPromptInput: (message: string, options?: { default?: string }) => Promise<string | null>;
   let mockPromptPassword: () => Promise<string | null>;
@@ -58,14 +63,14 @@ describe('onboarding', () => {
 
   describe('KEEP_EXISTING_SECRET constant', () => {
     it('should export the constant', async () => {
-      const { KEEP_EXISTING_SECRET } = await import('../onboarding');
+      const { KEEP_EXISTING_SECRET } = await loadOnboardingModule();
       expect(KEEP_EXISTING_SECRET).toBe('__KEEP_EXISTING_SECRET__');
     });
   });
 
   describe('runOnboarding', () => {
     it('should complete with empty steps', async () => {
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([]);
 
       expect(result.completed).toBe(true);
@@ -75,7 +80,7 @@ describe('onboarding', () => {
     it('should collect input values', async () => {
       mockPromptInput = async () => 'my-input';
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([
         {
           id: 'name-step',
@@ -93,7 +98,7 @@ describe('onboarding', () => {
     it('should collect secret values', async () => {
       mockPromptPassword = async () => 'my-secret';
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([
         {
           id: 'api-key',
@@ -111,7 +116,7 @@ describe('onboarding', () => {
     it('should handle info steps', async () => {
       mockPromptConfirm = async () => true;
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([
         {
           id: 'welcome',
@@ -127,7 +132,7 @@ describe('onboarding', () => {
     it('should handle confirm steps', async () => {
       mockPromptConfirm = async () => true;
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([
         {
           id: 'confirm-install',
@@ -143,7 +148,7 @@ describe('onboarding', () => {
     it('should handle cancelled input', async () => {
       mockPromptInput = async () => null;
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([
         {
           id: 'name-step',
@@ -161,7 +166,7 @@ describe('onboarding', () => {
     it('should handle cancelled info step', async () => {
       mockPromptConfirm = async () => false;
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding([
         {
           id: 'welcome',
@@ -184,7 +189,7 @@ describe('onboarding', () => {
         return options?.default ?? '';
       };
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding(
         [
           {
@@ -209,7 +214,7 @@ describe('onboarding', () => {
     it('should allow overriding previous value', async () => {
       mockPromptInput = async () => 'New Name';
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding(
         [
           {
@@ -234,7 +239,7 @@ describe('onboarding', () => {
       // User confirms to keep existing
       mockPromptConfirm = async () => true;
 
-      const { runOnboarding, KEEP_EXISTING_SECRET } = await import('../onboarding');
+      const { runOnboarding, KEEP_EXISTING_SECRET } = await loadOnboardingModule();
       const result = await runOnboarding(
         [
           {
@@ -268,7 +273,7 @@ describe('onboarding', () => {
       };
       mockPromptPassword = async () => 'new-secret-value';
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding(
         [
           {
@@ -292,7 +297,7 @@ describe('onboarding', () => {
     it('should not show keep existing prompt for new secrets', async () => {
       mockPromptPassword = async () => 'brand-new-secret';
 
-      const { runOnboarding } = await import('../onboarding');
+      const { runOnboarding } = await loadOnboardingModule();
       const result = await runOnboarding(
         [
           {
@@ -319,7 +324,7 @@ describe('onboarding', () => {
       };
       mockPromptConfirm = async () => true;
 
-      const { runOnboarding, KEEP_EXISTING_SECRET } = await import('../onboarding');
+      const { runOnboarding, KEEP_EXISTING_SECRET } = await loadOnboardingModule();
       const result = await runOnboarding(
         [
           {

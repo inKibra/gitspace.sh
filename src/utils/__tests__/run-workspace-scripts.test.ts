@@ -40,10 +40,10 @@ describe('runWorkspaceScripts', () => {
   beforeEach(() => {
     testDir = join(tmpdir(), `workspace-scripts-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     workspacePath = join(testDir, 'workspace');
-    // Scripts are now in workspace/.gitspace/<phase>/
-    preScriptsDir = join(workspacePath, '.gitspace', 'pre');
-    setupScriptsDir = join(workspacePath, '.gitspace', 'setup');
-    selectScriptsDir = join(workspacePath, '.gitspace', 'select');
+    // Scripts are in workspace/.gitspace/scripts/<phase>/
+    preScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'pre');
+    setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup');
+    selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select');
 
     mkdirSync(preScriptsDir, { recursive: true });
     mkdirSync(setupScriptsDir, { recursive: true });

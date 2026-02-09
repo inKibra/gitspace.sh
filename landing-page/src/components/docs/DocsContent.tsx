@@ -284,15 +284,16 @@ gssh status      # Show daemon statuses`} multiLine language="bash" />
           <h1 className="text-4xl font-bold mb-6">Custom Scripts</h1>
 
           <p className="text-zinc-400 mb-4">
-            GitSpace uses convention-based scripts stored per workspace in <code className="text-zinc-300">~/gitspace/&lt;project&gt;/workspaces/&lt;workspace&gt;/.gitspace/</code>:
+            GitSpace uses convention-based scripts stored per workspace in <code className="text-zinc-300">~/gitspace/&lt;project&gt;/workspaces/&lt;workspace&gt;/.gitspace/scripts/</code>:
           </p>
 
           <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 font-mono text-sm mb-8">
             <pre className="text-zinc-300">{`~/gitspace/<project>/workspaces/<workspace>/.gitspace/
-├── pre/      # Run before setup (once)
-├── setup/    # Run on workspace creation (once)
-├── select/   # Run every time workspace is opened
-└── remove/   # Run before workspace deletion`}</pre>
+└── scripts/
+    ├── pre/      # Run before setup (once)
+    ├── setup/    # Run on workspace creation (once)
+    ├── select/   # Run every time workspace is opened
+    └── remove/   # Run before workspace deletion`}</pre>
           </div>
 
           <h3 className="text-xl font-semibold text-white mb-4">Rules</h3>
@@ -304,7 +305,7 @@ gssh status      # Show daemon statuses`} multiLine language="bash" />
           </ul>
 
           <h3 className="text-xl font-semibold text-white mb-4">Example Script</h3>
-          <p className="text-zinc-500 text-sm mb-2">.gitspace/select/01-status.sh</p>
+          <p className="text-zinc-500 text-sm mb-2">.gitspace/scripts/select/01-status.sh</p>
           <JsonBlock code={`#!/bin/bash
 echo "Switching to: $1"
 git fetch origin
@@ -324,9 +325,11 @@ git status`} />
           <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 font-mono text-sm mb-8">
             <pre className="text-zinc-300">{`.gitspace/
 ├── bundle.json           # Manifest
-├── pre/                  # Pre-setup scripts
-├── setup/                # Setup scripts
-└── select/               # Select scripts`}</pre>
+└── scripts/
+    ├── pre/              # Pre-setup scripts
+    ├── setup/            # Setup scripts
+    ├── select/           # Select scripts
+    └── remove/           # Remove scripts`}</pre>
           </div>
 
           <h3 className="text-xl font-semibold text-white mb-4">Manifest Example</h3>
