@@ -1,6 +1,6 @@
 {
   "name": "gitspace",
-  "version": "0.2.0-rc.12",
+  "version": "0.2.0-rc.14",
   "description": "CLI for managing GitHub workspaces with git worktrees and secure remote terminal access",
   "bin": {
     "gssh": "./bin/gssh"
@@ -17,10 +17,10 @@
     "relay": "bun src/relay/index.ts"
   },
   "optionalDependencies": {
-    "@gitspace/darwin-arm64": "0.2.0-rc.12",
-    "@gitspace/darwin-x64": "0.2.0-rc.12",
-    "@gitspace/linux-x64": "0.2.0-rc.12",
-    "@gitspace/linux-arm64": "0.2.0-rc.12"
+    "@gitspace/darwin-arm64": "0.2.0-rc.14",
+    "@gitspace/darwin-x64": "0.2.0-rc.14",
+    "@gitspace/linux-x64": "0.2.0-rc.14",
+    "@gitspace/linux-arm64": "0.2.0-rc.14"
   },
   "keywords": [
     "cli",
