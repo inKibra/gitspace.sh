@@ -47,6 +47,9 @@ import {
 
 type View = "machines" | "terminal";
 
+const PAGE_UP = '\x1b[5~';
+const PAGE_DOWN = '\x1b[6~';
+
 export default function App() {
   const [view, setView] = useState<View>("machines");
   const [selectedMachine, setSelectedMachine] = useState<MachineInfo | null>(null);
@@ -762,6 +765,14 @@ export default function App() {
   if (view === "terminal" && terminal.status === "established" && terminal.mode === "attached") {
     // Handler for sending data from mobile controls (already processed)
     const handleSendData = (data: string) => {
+      if (data === PAGE_UP && terminalRef.current?.pageUp()) {
+        return;
+      }
+
+      if (data === PAGE_DOWN && terminalRef.current?.pageDown()) {
+        return;
+      }
+
       terminal.send(new TextEncoder().encode(data));
     };
 

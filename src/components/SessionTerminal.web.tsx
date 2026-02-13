@@ -1,5 +1,9 @@
-import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
+import { useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from "react";
 import { init, Terminal as GhosttyTerminal, FitAddon } from "ghostty-web";
+import {
+  canConsumePageNavigationInViewport,
+  type PageDirection,
+} from './session-terminal-page-navigation.js';
 
 interface Props {
   onData: (data: Uint8Array) => void;
@@ -20,6 +24,19 @@ export interface SessionTerminalHandle {
   sendData: (data: string) => void;
   isFocused: () => boolean;
   getSize: () => { cols: number; rows: number } | null;
+  pageUp: () => boolean;
+  pageDown: () => boolean;
+}
+
+interface TerminalViewportLike {
+  viewportY?: number;
+  rows?: number;
+  scrollLines: (lines: number) => void;
+  buffer?: {
+    active?: {
+      baseY?: number;
+    };
+  };
 }
 
 // Touch scrolling constants (agentboard-inspired accumulated delta pattern)
@@ -73,6 +90,30 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
     allowTouchScrollRef.current = allowTouchScroll;
   }, [allowTouchScroll]);
 
+  const tryConsumePageNavigation = useCallback((direction: PageDirection): boolean => {
+    const terminal = terminalRef.current as unknown as TerminalViewportLike | null;
+    if (!terminal) {
+      return false;
+    }
+
+    const viewportY = terminal.viewportY ?? 0;
+    const baseY = terminal.buffer?.active?.baseY ?? 0;
+    const canConsume = canConsumePageNavigationInViewport({
+      direction,
+      viewportY,
+      baseY,
+    });
+
+    if (!canConsume) {
+      return false;
+    }
+
+    const linesPerPage = Math.max(1, (terminal.rows ?? 1) - 1);
+    terminal.scrollLines(direction === 'up' ? -linesPerPage : linesPerPage);
+    onActivityRef.current?.();
+    return true;
+  }, []);
+
   // Expose methods via ref for external control (e.g., from TerminalControls)
   useImperativeHandle(
     ref,
@@ -102,8 +143,10 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         }
         return { cols: term.cols, rows: term.rows };
       },
+      pageUp: () => tryConsumePageNavigation('up'),
+      pageDown: () => tryConsumePageNavigation('down'),
     }),
-    []
+    [tryConsumePageNavigation]
   );
 
   useEffect(() => {
@@ -164,6 +207,22 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
             event.preventDefault();
             event.stopPropagation();
             onDataRef.current(new TextEncoder().encode('\x1b[Z'));
+            return;
+          }
+
+          if (event.key === 'PageUp') {
+            if (tryConsumePageNavigation('up')) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+            return;
+          }
+
+          if (event.key === 'PageDown') {
+            if (tryConsumePageNavigation('down')) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
           }
         };
         container.addEventListener('keydown', handleKeyDown, true);
@@ -301,7 +360,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         setWriteCallback(null);
       }
     };
-  }, [setWriteCallback]);
+  }, [setWriteCallback, tryConsumePageNavigation]);
 
   return (
     <div
