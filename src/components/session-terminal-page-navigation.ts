@@ -1,6 +1,8 @@
 export type PageDirection = 'up' | 'down';
 
 interface ScrollboxPageNavigationState {
+  direction: PageDirection;
+  scrollTop: number;
   scrollHeight: number;
   viewportHeight: number;
 }
@@ -12,10 +14,21 @@ interface ViewportPageNavigationState {
 }
 
 export function shouldConsumePageNavigationInScrollbox({
+  direction,
+  scrollTop,
   scrollHeight,
   viewportHeight,
 }: ScrollboxPageNavigationState): boolean {
-  return scrollHeight > viewportHeight;
+  const maxScrollTop = Math.max(0, scrollHeight - viewportHeight);
+  if (maxScrollTop <= 0) {
+    return false;
+  }
+
+  if (direction === 'up') {
+    return scrollTop > 0;
+  }
+
+  return scrollTop < maxScrollTop;
 }
 
 export function canConsumePageNavigationInViewport({
@@ -24,10 +37,10 @@ export function canConsumePageNavigationInViewport({
   baseY,
 }: ViewportPageNavigationState): boolean {
   if (direction === 'up') {
-    return baseY > 0 || viewportY > 0;
+    return viewportY < baseY;
   }
 
-  return viewportY < baseY;
+  return viewportY > 0;
 }
 
 export function getPageNavigationEscapeSequence(direction: PageDirection): string {

@@ -264,6 +264,8 @@ export function SessionTerminal({
       if (
         scrollBox &&
         shouldConsumePageNavigationInScrollbox({
+          direction: 'up',
+          scrollTop: scrollBox.scrollTop,
           scrollHeight: scrollBox.scrollHeight,
           viewportHeight: scrollBox.viewport.height,
         })
@@ -278,6 +280,8 @@ export function SessionTerminal({
       if (
         scrollBox &&
         shouldConsumePageNavigationInScrollbox({
+          direction: 'down',
+          scrollTop: scrollBox.scrollTop,
           scrollHeight: scrollBox.scrollHeight,
           viewportHeight: scrollBox.viewport.height,
         })

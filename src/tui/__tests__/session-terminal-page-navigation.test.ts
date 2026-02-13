@@ -6,32 +6,81 @@ import {
 } from '../../components/session-terminal-page-navigation.js'
 
 describe('session terminal page navigation helpers', () => {
-  it('consumes page navigation only when scrollbox has overflow', () => {
-    expect(shouldConsumePageNavigationInScrollbox({ scrollHeight: 100, viewportHeight: 20 })).toBe(true)
-    expect(shouldConsumePageNavigationInScrollbox({ scrollHeight: 20, viewportHeight: 20 })).toBe(false)
-    expect(shouldConsumePageNavigationInScrollbox({ scrollHeight: 10, viewportHeight: 20 })).toBe(false)
+  it('consumes scrollbox page navigation only when scroll can move', () => {
+    expect(
+      shouldConsumePageNavigationInScrollbox({
+        direction: 'up',
+        scrollTop: 10,
+        scrollHeight: 100,
+        viewportHeight: 20,
+      })
+    ).toBe(true)
+
+    expect(
+      shouldConsumePageNavigationInScrollbox({
+        direction: 'up',
+        scrollTop: 0,
+        scrollHeight: 100,
+        viewportHeight: 20,
+      })
+    ).toBe(false)
+
+    expect(
+      shouldConsumePageNavigationInScrollbox({
+        direction: 'down',
+        scrollTop: 10,
+        scrollHeight: 100,
+        viewportHeight: 20,
+      })
+    ).toBe(true)
+
+    expect(
+      shouldConsumePageNavigationInScrollbox({
+        direction: 'down',
+        scrollTop: 80,
+        scrollHeight: 100,
+        viewportHeight: 20,
+      })
+    ).toBe(false)
+
+    expect(
+      shouldConsumePageNavigationInScrollbox({
+        direction: 'down',
+        scrollTop: 0,
+        scrollHeight: 20,
+        viewportHeight: 20,
+      })
+    ).toBe(false)
   })
 
   it('detects when viewport can consume page up/down', () => {
     expect(
       canConsumePageNavigationInViewport({
         direction: 'up',
+        viewportY: 50,
+        baseY: 200,
+      })
+    ).toBe(true)
+
+    expect(
+      canConsumePageNavigationInViewport({
+        direction: 'down',
+        viewportY: 1,
+        baseY: 200,
+      })
+    ).toBe(true)
+
+    expect(
+      canConsumePageNavigationInViewport({
+        direction: 'down',
         viewportY: 0,
         baseY: 200,
       })
-    ).toBe(true)
+    ).toBe(false)
 
     expect(
       canConsumePageNavigationInViewport({
-        direction: 'down',
-        viewportY: 75,
-        baseY: 200,
-      })
-    ).toBe(true)
-
-    expect(
-      canConsumePageNavigationInViewport({
-        direction: 'down',
+        direction: 'up',
         viewportY: 200,
         baseY: 200,
       })
