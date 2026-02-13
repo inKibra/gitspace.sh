@@ -155,6 +155,20 @@ export default function App() {
         setShowScriptTerminal(false);
       }
     },
+    onAttachError: ({ target, message }) => {
+      const isWorkspaceScriptFailure = message.startsWith('Workspace scripts failed during');
+      const hasScriptRuntimeState = Boolean(terminal.scriptState);
+
+      if (target === 'workspace' && (!isWorkspaceScriptFailure || !hasScriptRuntimeState)) {
+        setShowScriptTerminal(false);
+      }
+
+      flow.showMessage({
+        title: isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
+        message,
+        variant: 'error',
+      });
+    },
   });
 
   useEffect(() => {
@@ -242,12 +256,21 @@ export default function App() {
     }
     lastCommandErrorRef.current = key;
 
-    if (
+    const isScriptFailure =
       terminal.commandError.code === 'SCRIPT_FAILED' ||
       terminal.commandError.code === 'PRE_SCRIPT_FAILED' ||
       terminal.commandError.code === 'SETUP_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SELECT_SCRIPT_FAILED'
-    ) {
+      terminal.commandError.code === 'SELECT_SCRIPT_FAILED';
+
+    if (isScriptFailure) {
+      if (!terminal.scriptState) {
+        flow.showMessage({
+          title: 'Workspace Script Failed',
+          message: terminal.commandError.message,
+          variant: 'error',
+        });
+        setShowScriptTerminal(false);
+      }
       return;
     }
 
@@ -261,7 +284,7 @@ export default function App() {
       variant: 'error',
     });
 
-    if (!terminal.scriptState?.isRunning) {
+    if (terminal.scriptState?.isRunning !== true) {
       setShowScriptTerminal(false);
     }
   }, [flow, terminal.commandError, terminal.scriptState?.isRunning]);
