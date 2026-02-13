@@ -369,7 +369,10 @@ async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<
       return;
     }
 
-      void backend.writePtyData?.(new Uint8Array(data));
+      backend.writePtyData?.(new Uint8Array(data))?.catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`Failed to send PTY input: ${detail}`);
+      });
     };
     process.stdin.on('data', onData);
     handlers.push(() => process.stdin.removeListener('data', onData));
@@ -379,7 +382,10 @@ async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<
       const onResize = () => {
         const cols = process.stdout.columns;
         const rows = process.stdout.rows;
-        void backend.resizePty?.(cols, rows);
+        backend.resizePty?.(cols, rows)?.catch((error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          logger.error(`Failed to send PTY resize: ${detail}`);
+        });
       };
       process.stdout.on('resize', onResize);
       handlers.push(() => process.stdout.removeListener('resize', onResize));
@@ -387,13 +393,19 @@ async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<
     // Send initial size
       const cols = process.stdout.columns;
       const rows = process.stdout.rows;
-      void backend.resizePty?.(cols, rows);
+      backend.resizePty?.(cols, rows)?.catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`Failed to send initial PTY size: ${detail}`);
+      });
   }
 
   // Handle SIGINT (Ctrl+C)
     const onSigInt = () => {
     // Forward Ctrl+C to remote instead of terminating
-      void backend.writePtyData?.(new Uint8Array([0x03]));
+      backend.writePtyData?.(new Uint8Array([0x03]))?.catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`Failed to send Ctrl+C to remote: ${detail}`);
+      });
     };
     process.on('SIGINT', onSigInt);
     handlers.push(() => process.removeListener('SIGINT', onSigInt));

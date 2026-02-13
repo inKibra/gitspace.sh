@@ -131,7 +131,7 @@ function buildValidation(step: BundleRefreshStep): ((value: string) => string | 
       return `Value must be ${MAX_VALIDATION_INPUT_LENGTH} characters or fewer`;
     }
 
-    if (validationRegex && trimmed.length > 0 && !validationRegex.test(value)) {
+    if (validationRegex && trimmed.length > 0 && !validationRegex.test(trimmed)) {
       return step.validationMessage || `Value must match pattern: ${step.validationPattern}`;
     }
 

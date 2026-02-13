@@ -5,6 +5,7 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type { ScriptPhase } from '../types/script-phase.js';
 import { BackendManager } from './backend-manager.js';
 import {
   createInitialSessionEngineState,
@@ -20,7 +21,7 @@ import type { ScriptRuntimeState } from './types.js';
 import { SpacesError } from '../types/errors.js';
 
 function toScriptRuntimeState(event: {
-  phase: 'pre' | 'setup' | 'select' | 'remove';
+  phase: ScriptPhase;
   done?: boolean;
   error?: string;
   exitCode?: number;

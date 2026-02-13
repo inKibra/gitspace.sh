@@ -25,10 +25,15 @@ function createBackendNotFoundError(backendKey: BackendKey): SpacesError {
 }
 
 function isBackendNotFoundError(error: unknown, backendKey: BackendKey): boolean {
-  if (!(error instanceof Error)) {
+  if (!(error instanceof SpacesError)) {
     return false;
   }
-  return error.message.includes(`Backend not found: ${backendKey}`);
+
+  if (error.code !== 'SYSTEM_ERROR') {
+    return false;
+  }
+
+  return error.message === `Backend not found: ${backendKey}`;
 }
 
 export interface UseLocalSessionOptions {

@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
 import { useEffect } from 'react';
 import { SessionTerminal } from './SessionTerminal.web';
+import type { WorkspaceScriptPhase } from '../types/script-phase.js';
 
-type ScriptPhase = 'pre' | 'setup' | 'select' | 'remove';
+type ScriptPhase = WorkspaceScriptPhase | 'remove';
 
 interface Props {
   phase: ScriptPhase;

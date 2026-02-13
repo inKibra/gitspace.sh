@@ -482,6 +482,40 @@ describe('bundle-refresh', () => {
       expect(Object.keys(mockProjectConfig.bundleConfirmHistory || {}).length).toBe(1);
     });
 
+    it('does not persist KEEP_EXISTING_SECRET sentinel values', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const bundle = {
+        version: '1.0' as const,
+        name: 'Sentinel Bundle',
+        onboarding: [
+          {
+            id: 'token',
+            type: 'secret' as const,
+            title: 'API token',
+            description: 'Secret token',
+            configKey: 'API_TOKEN',
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(bundle));
+
+      const workspacePath = join(testDir, 'workspaces', 'feature-sentinel');
+      mkdirSync(workspacePath, { recursive: true });
+
+      savedSecrets.API_TOKEN = 'existing-secret';
+
+      const { applyBundleRefreshSubmission } = await import('../bundle-refresh');
+      await applyBundleRefreshSubmission('test-project', workspacePath, {
+        inputValues: {},
+        secretValues: { API_TOKEN: '__KEEP_EXISTING_SECRET__' },
+        confirmResults: {},
+      });
+
+      expect(savedSecrets.API_TOKEN).toBe('existing-secret');
+      expect(mockProjectConfig.bundleSecretKeys).toContain('API_TOKEN');
+    });
+
     it('includes missing required secrets even when bundle hash is unchanged', async () => {
       const bundleDir = join(testBaseDir, '.gitspace');
       mkdirSync(bundleDir, { recursive: true });

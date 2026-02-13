@@ -40,10 +40,6 @@ function normalizeCommandKey(input: SessionCommandKeyInput): string | null {
     return null
   }
 
-  if (raw.length === 1) {
-    return raw.toLowerCase()
-  }
-
   return raw.toLowerCase()
 }
 

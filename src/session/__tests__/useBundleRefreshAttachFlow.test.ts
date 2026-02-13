@@ -150,6 +150,64 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(applySubmissionCalls[0]?.inputValues).toEqual({ REGION: 'us-east-1' })
   })
 
+  it('validates wizard input against trimmed values for regex checks', async () => {
+    let attachCalls = 0
+    const attachSession = mock(async () => {
+      attachCalls += 1
+      if (attachCalls === 1) {
+        const error = new Error('refresh required') as Error & { code?: string }
+        error.code = 'BUNDLE_REFRESH_REQUIRED'
+        throw error
+      }
+    })
+
+    const getPlan = mock(async () =>
+      makePlan({
+        details: 'Input changed',
+        steps: [
+          {
+            id: 'name-step',
+            type: 'input',
+            title: 'Name',
+            description: 'Simple alpha name',
+            configKey: 'NAME',
+            required: true,
+            validationPattern: '^[a-z]+$',
+          },
+        ],
+      })
+    )
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: (opts) => {
+            void opts.onConfirm()
+          },
+          showWizard: (opts) => {
+            const validation = opts.steps[0]?.validation
+            expect(validation?.('  hello  ')).toBeNull()
+            void opts.onComplete({ 'name-step': 'hello' })
+          },
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+        getBundleRefreshPlan: getPlan,
+        applyBundleRefresh: async () => {},
+      })
+    )
+
+    const attached = await result.current.attachSessionWithBundleRefresh({
+      workspaceId: 'test-project:test-workspace',
+    })
+
+    expect(attached).toBe(true)
+    expect(attachCalls).toBe(2)
+  })
+
   it('runs wizard when unchanged bundle still has missing required steps', async () => {
     let attachCalls = 0
     const attachSession = mock(async () => {

@@ -9,7 +9,7 @@ export function getBackendState(
   state: SessionEngineState,
   backendKey: BackendKey
 ): BackendSessionState | null {
-  return state.backends[backendKey] || null;
+  return state.backends[backendKey] ?? null;
 }
 
 export function getActiveBackendState(state: SessionEngineState): BackendSessionState | null {

@@ -455,7 +455,7 @@ export default function App() {
       } else if (command === 'activate') {
         machineListProps.connectSelected();
       } else if (command === 'refresh') {
-        machineListProps.refresh();
+        void machineListProps.refresh();
       } else if (command === 'copy') {
         machineListProps.copyPublicKey();
       } else if (command === 'help') {

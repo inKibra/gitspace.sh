@@ -42,6 +42,7 @@ import type {
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
+import { SpacesError } from '../../types/errors.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -138,7 +139,7 @@ function toError(error: unknown, fallback: string): Error {
   if (error instanceof Error) {
     return error;
   }
-  return new Error(fallback);
+  return new SpacesError(fallback, 'SYSTEM_ERROR', 2);
 }
 
 function getDefaultTerminalSize(): { cols: number; rows: number } {
@@ -170,7 +171,7 @@ function isAttachRetryableError(error: unknown): boolean {
 
 function toExitedSessionError(session: TmuxSession): Error {
   const suffix = typeof session.exitCode === 'number' ? ` (exit ${session.exitCode})` : '';
-  return new Error(`Session has already exited: ${session.name}${suffix}`);
+  return new SpacesError(`Session has already exited: ${session.name}${suffix}`, 'USER_ERROR', 1);
 }
 
 function scriptFailureCodeForPhase(phase: 'pre' | 'setup' | 'select'): string {
@@ -421,7 +422,7 @@ export class LocalSessionBackend implements SessionBackend {
       const sessions = await this.deps.listSessions();
       targetSession = sessions.find((session) => session.id === params.sessionId) ?? null;
       if (!targetSession) {
-        throw new Error(`Session not found: ${params.sessionId}`);
+        throw new SpacesError(`Session not found: ${params.sessionId}`, 'USER_ERROR', 1);
       }
       if (typeof targetSession.exitCode === 'number') {
         throw toExitedSessionError(targetSession);
@@ -434,7 +435,7 @@ export class LocalSessionBackend implements SessionBackend {
           toCanonicalWorkspaceId(item) === params.workspaceId
       );
       if (!workspace) {
-        throw new Error(`Workspace not found: ${params.workspaceId}`);
+        throw new SpacesError(`Workspace not found: ${params.workspaceId}`, 'USER_ERROR', 1);
       }
 
       let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
@@ -485,7 +486,7 @@ export class LocalSessionBackend implements SessionBackend {
           error: scriptResult.error,
         });
 
-        const error = new Error(
+        const error = new SpacesError(
           `Workspace scripts failed during ${scriptResult.phase}: ${scriptResult.error}`
         ) as Error & { code?: string };
         if (bundleNeedsRefresh) {
@@ -510,7 +511,7 @@ export class LocalSessionBackend implements SessionBackend {
       const fullName = `${sessionPrefix}${suffix}`;
       targetSession = await this.deps.createSession(fullName, workspace.path);
     } else {
-      throw new Error('attachSession requires sessionId or workspaceId');
+      throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
     }
 
     await this.attachToSessionSocketWithRetry(targetSession, params);
@@ -532,7 +533,7 @@ export class LocalSessionBackend implements SessionBackend {
   async writePtyData(data: Uint8Array): Promise<void> {
     const socket = this.sessionSocket;
     if (!socket || !this.attachedSessionId) {
-      throw new Error('No attached local session');
+      throw new SpacesError('No attached local session', 'SYSTEM_ERROR', 2);
     }
     socket.sendPty(data);
   }
@@ -540,7 +541,7 @@ export class LocalSessionBackend implements SessionBackend {
   async resizePty(cols: number, rows: number): Promise<void> {
     const socket = this.sessionSocket;
     if (!socket || !this.attachedSessionId) {
-      throw new Error('No attached local session');
+      throw new SpacesError('No attached local session', 'SYSTEM_ERROR', 2);
     }
     socket.sendControl({ type: 'resize', cols, rows });
   }
@@ -556,7 +557,11 @@ export class LocalSessionBackend implements SessionBackend {
     });
 
     if (!result.success) {
-      throw new Error(result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`);
+      throw new SpacesError(
+        result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`,
+        'USER_ERROR',
+        1
+      );
     }
   }
 
@@ -645,7 +650,7 @@ export class LocalSessionBackend implements SessionBackend {
       };
 
       const timeout = setTimeout(() => {
-        settleReject(new Error(`Timed out attaching to session ${session.name}`));
+        settleReject(new SpacesError(`Timed out attaching to session ${session.name}`, 'SYSTEM_ERROR', 2));
       }, 15000);
 
       void (async () => {
@@ -697,7 +702,7 @@ export class LocalSessionBackend implements SessionBackend {
               this.attachedSessionId = null;
 
               if (!settled) {
-                settleReject(new Error(`Local session socket closed: ${session.name}`));
+                settleReject(new SpacesError(`Local session socket closed: ${session.name}`, 'SYSTEM_ERROR', 2));
                 return;
               }
 
@@ -794,7 +799,7 @@ export class LocalSessionBackend implements SessionBackend {
     );
 
     if (!workspace) {
-      throw new Error(`Workspace not found: ${workspaceId}`);
+      throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
     }
 
     return {

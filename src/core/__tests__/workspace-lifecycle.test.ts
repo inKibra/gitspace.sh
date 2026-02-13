@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 
 let detectResult: any
 let planResult: any
@@ -62,6 +62,10 @@ describe('prepareWorkspaceForSession bundle checks', () => {
       details: 'No changes',
       steps: [],
     }
+  })
+
+  afterEach(() => {
+    mock.restore()
   })
 
   it('returns refresh-required without syncing state when bundle changed', async () => {

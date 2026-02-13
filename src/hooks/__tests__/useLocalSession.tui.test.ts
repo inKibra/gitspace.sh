@@ -4,6 +4,7 @@ import { Window } from 'happy-dom'
 import type { AttachSessionParams, BackendEvent, SessionBackend } from '../../session/index.js'
 import type { NotificationConfig } from '../../notifications/types.js'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
+import { SpacesError } from '../../types/errors.js'
 import {
   useLocalSession,
   type UseLocalSessionOptions,
@@ -467,7 +468,7 @@ describe('useLocalSession', () => {
         attachSession: mock(async () => {
           attachAttempts += 1
           if (attachAttempts === 1) {
-            throw new Error('Backend not found: local')
+            throw new SpacesError('Backend not found: local', 'SYSTEM_ERROR', 2)
           }
         }),
       },
@@ -519,7 +520,7 @@ describe('useLocalSession', () => {
           }
         }),
         attachSession: mock(async () => {
-          throw new Error('Backend not found: local')
+          throw new SpacesError('Backend not found: local', 'SYSTEM_ERROR', 2)
         }),
       },
     })

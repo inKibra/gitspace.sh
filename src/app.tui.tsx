@@ -18,6 +18,7 @@ import { Toaster } from '@opentui-ui/toast/react';
 import { SessionTerminal } from './components/SessionTerminal.tui.js';
 import { RemoteMachineScreen } from './components/RemoteMachineScreen.tui.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './components/ScriptTerminal.tui.js';
+import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
 
 // Shared components and hooks
 import {
@@ -65,6 +66,7 @@ import { deleteProjectCore } from './core/workspace.js';
 import { fetchUnstartedIssues, getLinearConfig } from './core/linear.js';
 import { generateMarkdown } from './utils/markdown.js';
 import { sanitizeForFileSystem, generateWorkspaceName, isValidBranchName, extractRepoName } from './utils/sanitize.js';
+import { logger } from './utils/logger.js';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
@@ -489,7 +491,10 @@ function App({ relayConfig, onQuit }: AppProps) {
       try {
         await refreshProjects();
         // Load inbox in background (don't block initial render)
-        refreshInbox().catch(() => {});
+        refreshInbox().catch((error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          logger.error(`[tui] Background inbox refresh failed: ${detail}`);
+        });
       } catch (err) {
         dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to load' });
       } finally {
@@ -1588,7 +1593,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     }
 
     // Global shortcuts
-    if (key.raw === '?' || (key.shift && key.raw === '?')) {
+    if (key.raw === '?') {
       flow.showHelp(getDefaultShortcuts());
       return;
     }
@@ -2396,85 +2401,9 @@ function ProjectFlowModal({ flow }: { flow: ProjectFlowState }) {
         )}
 
         {/* Onboarding steps */}
-        {flow.type === 'onboarding' && (() => {
-          const step = flow.steps[flow.currentStep];
-          if (!step) return null;
-
-          return (
-            <>
-              <text fg={COLORS.title} height={1}>
-                {flow.bundleName} Setup ({flow.currentStep + 1}/{flow.steps.length})
-              </text>
-              <text fg={COLORS.selected} height={1} marginTop={1}>{step.title}</text>
-              {step.description && (
-                <text fg={COLORS.textDim} height={1} marginTop={1}>{step.description}</text>
-              )}
-
-              {/* Info step */}
-              {step.type === 'info' && (
-                <text fg={COLORS.text} height={1} marginTop={1}>Press Enter to continue</text>
-              )}
-
-              {/* Confirm step */}
-              {step.type === 'confirm' && (
-                <box flexDirection="column" marginTop={1}>
-                  {flow.confirmStatus === 'checking' && (
-                    <text fg={COLORS.loading} height={1}>⏳ Checking...</text>
-                  )}
-                  {flow.confirmStatus === 'found' && (
-                    <text fg={COLORS.title} height={1}>✅ Found</text>
-                  )}
-                  {flow.confirmStatus === 'missing' && (
-                    <>
-                      <text fg={COLORS.error} height={1}>❌ Not found</text>
-                      {(step as { installUrl?: string }).installUrl && (
-                        <text fg={COLORS.selected} height={1} marginTop={1}>
-                          Install: {(step as { installUrl: string }).installUrl}
-                        </text>
-                      )}
-                    </>
-                  )}
-                  {flow.confirmStatus !== 'checking' && (
-                    <text fg={COLORS.text} height={1} marginTop={1}>Press Enter to continue</text>
-                  )}
-                </box>
-              )}
-
-              {/* Input step */}
-              {step.type === 'input' && (
-                <box flexDirection="column" marginTop={1}>
-                  <box
-                    borderStyle="rounded"
-                    borderColor={COLORS.border}
-                    padding={0}
-                    width="100%"
-                  >
-                    <text fg={COLORS.text} height={1}>{flow.inputValue || ' '}_</text>
-                  </box>
-                </box>
-              )}
-
-              {/* Secret step */}
-              {step.type === 'secret' && (
-                <box flexDirection="column" marginTop={1}>
-                  <box
-                    borderStyle="rounded"
-                    borderColor={COLORS.border}
-                    padding={0}
-                    width="100%"
-                  >
-                    <text fg={COLORS.text} height={1}>{'•'.repeat(flow.inputValue.length) || ' '}_</text>
-                  </box>
-                  <text fg={COLORS.textDim} height={1} marginTop={1}>Value will be stored securely in OS keychain</text>
-                </box>
-              )}
-
-              <text fg={COLORS.textDim} height={1} marginTop={1}>
-                [Enter] {flow.currentStep === flow.steps.length - 1 ? 'Finish' : 'Next'}  [Esc] Cancel
-              </text>
-            </>
-          );
-        })()}
+        {flow.type === 'onboarding' && (
+          <ProjectOnboardingStepTUI flow={flow} colors={COLORS} />
+        )}
 
         {/* Creating state */}
         {flow.type === 'creating' && (

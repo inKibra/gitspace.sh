@@ -22,8 +22,9 @@ import { detectBundleChanges } from '../core/bundle-refresh';
 import { getProjectSecrets } from './secrets';
 import { logger } from './logger';
 import type { ConfirmStepResult, OnboardingStep, SpacesBundle } from '../types/bundle.js';
+import type { WorkspaceScriptPhase } from '../types/script-phase';
 
-export type ScriptPhase = 'pre' | 'setup' | 'select';
+export type ScriptPhase = WorkspaceScriptPhase;
 
 export interface RunWorkspaceScriptsOptions {
   projectName: string;

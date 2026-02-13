@@ -215,8 +215,15 @@ export function SessionTerminal({
       onResize(next.cols, next.rows);
     };
 
+    const stdout = process.stdout;
+    if (stdout?.isTTY) {
+      stdout.on('resize', handleResize);
+    }
     process.on('SIGWINCH', handleResize);
     return () => {
+      if (stdout?.isTTY) {
+        stdout.removeListener('resize', handleResize);
+      }
       process.removeListener('SIGWINCH', handleResize);
     };
   }, [onResize]);

@@ -812,7 +812,7 @@ export async function applyBundleRefreshSubmission(
   }
 
   for (const [key, value] of Object.entries(submission.secretValues)) {
-    if (!value) {
+    if (!value || value === KEEP_EXISTING_SECRET) {
       continue;
     }
     await setProjectSecret(projectName, key, value);

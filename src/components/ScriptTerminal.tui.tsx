@@ -6,13 +6,13 @@ import { useState, useRef, useCallback, useEffect, useImperativeHandle, forwardR
 import { extend, useRenderer } from '@opentui/react';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import { toast } from '@opentui-ui/toast';
-import type { ScriptOutputResponse } from '../lib/remote-session/protocol.js';
+import type { WorkspaceScriptPhase } from '../types/script-phase.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { ScriptTerminalBuffer } from './script-terminal-buffer.tui.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
 
-type ScriptPhase = ScriptOutputResponse['phase'];
+type ScriptPhase = WorkspaceScriptPhase | 'remove';
 
 export interface ScriptTerminalProps {
   phase: ScriptPhase;
