@@ -1179,7 +1179,7 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // ========== Activity Tracking for Notifications ==========
 
-  const holdWhenIdleMs = notificationConfig.toast.holdWhenIdleMs || 15000;
+  const holdWhenIdleMs = notificationConfig.toast.holdWhenIdleMs ?? 15000;
   const { isUserActive, markActivity: handleTerminalActivity } = useUserActivity({
     isActivityTracked: state.view === 'terminal',
     holdWhenIdleMs,

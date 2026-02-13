@@ -18,8 +18,26 @@ export function ProjectOnboardingStepWeb({ flow }: ProjectOnboardingStepWebProps
       <p className="text-[#e6edf3] font-medium">{step.title}</p>
       {step.description && <p className="text-[#8b949e] text-sm">{step.description}</p>}
 
-      {step.type === 'confirm' && flow.confirmStatus === 'missing' && step.installUrl && (
-        <p className="text-[#58a6ff] text-sm">Install: {step.installUrl}</p>
+      {step.type === 'confirm' && (
+        <div className="flex flex-col gap-2">
+          {flow.confirmStatus === 'checking' && (
+            <p className="text-[#d29922] text-sm">Checking...</p>
+          )}
+          {flow.confirmStatus === 'found' && (
+            <p className="text-[#3fb950] text-sm">Found</p>
+          )}
+          {flow.confirmStatus === 'missing' && (
+            <>
+              <p className="text-[#f85149] text-sm">Not found</p>
+              {step.installUrl && (
+                <p className="text-[#58a6ff] text-sm">Install: {step.installUrl}</p>
+              )}
+            </>
+          )}
+          {flow.confirmStatus !== 'checking' && (
+            <p className="text-[#8b949e] text-sm">Press Enter to continue</p>
+          )}
+        </div>
       )}
 
       {step.type === 'input' && (

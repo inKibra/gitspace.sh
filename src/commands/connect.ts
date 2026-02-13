@@ -118,8 +118,25 @@ export async function connectToRemote(
     process.stdout.write(Buffer.from(data));
   });
 
+  let backendConnected = false;
+  const disconnectBackend = async () => {
+    if (!backendConnected) {
+      return;
+    }
+
+    try {
+      await backend.disconnect();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to disconnect cleanly: ${detail}`);
+    } finally {
+      backendConnected = false;
+    }
+  };
+
   try {
     await backend.connect();
+    backendConnected = true;
   } catch (error) {
     if (error instanceof Error) {
       throw new SpacesError(
@@ -135,59 +152,62 @@ export async function connectToRemote(
   logger.log('');
   logger.dim(`Access: ${token.accessType === 'full' ? 'Full access' : 'Session invite'}`);
 
-  const terminalSize = getTerminalSize();
-  let attachPromise: Promise<Extract<BackendEvent, { type: 'attached' }>>;
+  try {
+    const terminalSize = getTerminalSize();
+    let attachPromise: Promise<Extract<BackendEvent, { type: 'attached' }>>;
 
-  if (token.accessType === 'session-invite' && token.sessionId) {
-    logger.dim(`Session: ${token.sessionId}`);
-    attachPromise = waitForBackendEvent(
-      backend,
-      (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-      30000,
-      'attach confirmation'
-    );
-    await backend.attachSession({
-      sessionId: token.sessionId,
-      cols: terminalSize.cols,
-      rows: terminalSize.rows,
-    });
-  } else {
-    const workspace = await selectWorkspaceForFullAccess(backend);
-    if (!workspace) {
-      logger.info('Cancelled');
-      await backend.disconnect();
-      return;
+    if (token.accessType === 'session-invite' && token.sessionId) {
+      logger.dim(`Session: ${token.sessionId}`);
+      attachPromise = waitForBackendEvent(
+        backend,
+        (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+        30000,
+        'attach confirmation'
+      );
+      await backend.attachSession({
+        sessionId: token.sessionId,
+        cols: terminalSize.cols,
+        rows: terminalSize.rows,
+      });
+    } else {
+      const workspace = await selectWorkspaceForFullAccess(backend);
+      if (!workspace) {
+        logger.info('Cancelled');
+        return;
+      }
+
+      const sessionName = await promptInput('Session name (optional):');
+      if (sessionName === null) {
+        logger.info('Cancelled');
+        return;
+      }
+
+      attachPromise = waitForBackendEvent(
+        backend,
+        (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+        30000,
+        'attach confirmation'
+      );
+
+      await backend.attachSession({
+        workspaceId: workspace.id,
+        sessionName: sessionName || undefined,
+        cols: terminalSize.cols,
+        rows: terminalSize.rows,
+      });
     }
 
-    const sessionName = await promptInput('Session name (optional):');
-    if (sessionName === null) {
-      logger.info('Cancelled');
-      await backend.disconnect();
-      return;
-    }
+    const attached = await attachPromise;
+    logger.success(`Attached to ${attached.sessionName ?? attached.sessionId}`);
+    logger.log('');
+    logger.dim('Press Ctrl+D to disconnect');
+    logger.log('');
 
-    attachPromise = waitForBackendEvent(
-      backend,
-      (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-      30000,
-      'attach confirmation'
-    );
-
-    await backend.attachSession({
-      workspaceId: workspace.id,
-      sessionName: sessionName || undefined,
-      cols: terminalSize.cols,
-      rows: terminalSize.rows,
-    });
+    await startTerminalSession(backend);
+    backendConnected = false;
+  } finally {
+    await disconnectBackend();
   }
-
-  const attached = await attachPromise;
-  logger.success(`Attached to ${attached.sessionName ?? attached.sessionId}`);
-  logger.log('');
-  logger.dim('Press Ctrl+D to disconnect');
-  logger.log('');
-
-  await startTerminalSession(backend);
 }
 
 /**

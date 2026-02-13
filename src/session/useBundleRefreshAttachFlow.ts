@@ -260,13 +260,13 @@ function applyWizardValues(
 
   for (const step of plan.steps) {
     if (step.type === 'input' && step.configKey) {
-      const value = values[step.id] ?? '';
+      const value = (values[step.id] ?? '').trim();
       next.inputValues[step.configKey] = value;
       continue;
     }
 
     if (step.type === 'secret' && step.configKey) {
-      const value = values[step.id] ?? '';
+      const value = (values[step.id] ?? '').trim();
       if (value.length > 0) {
         next.secretValues[step.configKey] = value;
       }

@@ -208,6 +208,73 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(attachCalls).toBe(2)
   })
 
+  it('does not overwrite existing secret when wizard value is only whitespace', async () => {
+    let attachCalls = 0
+    const attachSession = mock(async () => {
+      attachCalls += 1
+      if (attachCalls === 1) {
+        const error = new Error('refresh required') as Error & { code?: string }
+        error.code = 'BUNDLE_REFRESH_REQUIRED'
+        throw error
+      }
+    })
+
+    const applySubmissionCalls: BundleRefreshSubmission[] = []
+    const applyBundleRefresh = mock(async (
+      _projectName: string,
+      _workspaceId: string,
+      submission: BundleRefreshSubmission
+    ) => {
+      applySubmissionCalls.push(submission)
+    })
+
+    const getPlan = mock(async () =>
+      makePlan({
+        details: 'Secret changed',
+        steps: [
+          {
+            id: 'token-step',
+            type: 'secret',
+            title: 'Token',
+            description: 'API token',
+            configKey: 'API_TOKEN',
+            hasExistingSecret: true,
+            required: false,
+          },
+        ],
+      })
+    )
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: (opts) => {
+            void opts.onConfirm()
+          },
+          showWizard: (opts) => {
+            void opts.onComplete({ 'token-step': '   ' })
+          },
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+        getBundleRefreshPlan: getPlan,
+        applyBundleRefresh,
+      })
+    )
+
+    const attached = await result.current.attachSessionWithBundleRefresh({
+      workspaceId: 'test-project:test-workspace',
+    })
+
+    expect(attached).toBe(true)
+    expect(attachCalls).toBe(2)
+    expect(applySubmissionCalls.length).toBe(1)
+    expect(applySubmissionCalls[0]?.secretValues).toEqual({})
+  })
+
   it('runs wizard when unchanged bundle still has missing required steps', async () => {
     let attachCalls = 0
     const attachSession = mock(async () => {

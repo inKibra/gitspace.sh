@@ -370,7 +370,7 @@ export default function App() {
 
   // ========== Activity Tracking for Notifications ==========
 
-  const holdWhenIdleMs = activeNotificationConfig.toast.holdWhenIdleMs || 15000;
+  const holdWhenIdleMs = activeNotificationConfig.toast.holdWhenIdleMs ?? 15000;
   const { isUserActive, markActivity: handleTerminalActivity } = useUserActivity({
     isActivityTracked: view === "terminal" && terminal.mode === "attached",
     holdWhenIdleMs,
