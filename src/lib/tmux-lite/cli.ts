@@ -357,14 +357,6 @@ const CTRL_ESC_XTERM = Buffer.from([0x1b, 0x5b, 0x32, 0x37, 0x3b, 0x35, 0x3b, 0x
 const BRACKETED_PASTE_START = Buffer.from([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e]); // ESC [ 200 ~
 const BRACKETED_PASTE_END = Buffer.from([0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e]); // ESC [ 201 ~
 
-function containsCtrlEsc(buf: Buffer): number {
-  const idx1 = buf.indexOf(CTRL_ESC_CSI_U);
-  const idx2 = buf.indexOf(CTRL_ESC_XTERM);
-  if (idx1 === -1) return idx2;
-  if (idx2 === -1) return idx1;
-  return Math.min(idx1, idx2);
-}
-
 export type AttachResult =
   | { type: "detached" }
   | { type: "exited"; code: number }
@@ -459,7 +451,7 @@ export async function attach(session: Session, quiet: boolean = false): Promise<
         drain() {
           socketWriter?.flush();
         },
-        data(socket, data) {
+        data(_socket, data) {
           let buf = Buffer.from(data);
 
           if (buffer.length > 0) {

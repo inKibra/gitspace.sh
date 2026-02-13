@@ -17,6 +17,10 @@
 
 // Re-export InboxItem from tmux-lite protocol
 export type { InboxItem } from "../tmux-lite/protocol.js";
+export type {
+  BundleRefreshPlan,
+  BundleRefreshSubmission,
+} from "../../types/bundle-refresh.js";
 
 // Re-export attached mode control types from tmux-lite
 // These are used in attached mode for resize/detach/attach-init
@@ -45,6 +49,7 @@ export interface AttachSessionRequest {
   sessionName?: string;   // Name for new session (optional)
   cols?: number;          // Terminal dimensions
   rows?: number;
+  scriptPolicy?: 'auto' | 'skip';
 }
 
 /** Request list of projects on the machine */
@@ -80,6 +85,32 @@ export interface ClearInboxRequest {
 export interface MarkInboxReadRequest {
   type: "mark_inbox_read";
   id: string;
+}
+
+/** Request current notification configuration */
+export interface GetNotificationConfigRequest {
+  type: "get_notification_config";
+}
+
+/** Update notification configuration */
+export interface UpdateNotificationConfigRequest {
+  type: "update_notification_config";
+  config: import("../../notifications/types.js").NotificationConfig;
+}
+
+/** Request bundle refresh plan for a workspace */
+export interface GetBundleRefreshPlanRequest {
+  type: "get_bundle_refresh_plan";
+  projectName: string;
+  workspaceId: string;
+}
+
+/** Apply bundle refresh submission for a workspace */
+export interface ApplyBundleRefreshRequest {
+  type: "apply_bundle_refresh";
+  projectName: string;
+  workspaceId: string;
+  submission: import("../../types/bundle-refresh.js").BundleRefreshSubmission;
 }
 
 // ============================================================================
@@ -194,6 +225,18 @@ export interface InboxMarkedReadResponse {
   id: string;
 }
 
+/** Current notification configuration */
+export interface NotificationConfigResponse {
+  type: "notification_config";
+  config: import("../../notifications/types.js").NotificationConfig;
+}
+
+/** Notification configuration updated */
+export interface NotificationConfigUpdatedResponse {
+  type: "notification_config_updated";
+  config: import("../../notifications/types.js").NotificationConfig;
+}
+
 /** Script output during attach_session (streams lifecycle script output) */
 export interface ScriptOutputResponse {
   type: "script_output";
@@ -207,6 +250,19 @@ export interface ScriptOutputResponse {
   exitCode?: number;
   /** Error message if scripts failed (only when done=true) */
   error?: string;
+}
+
+/** Bundle refresh plan response */
+export interface BundleRefreshPlanResponse {
+  type: "bundle_refresh_plan";
+  plan: import("../../types/bundle-refresh.js").BundleRefreshPlan;
+}
+
+/** Bundle refresh applied successfully */
+export interface BundleRefreshAppliedResponse {
+  type: "bundle_refresh_applied";
+  projectName: string;
+  workspaceId: string;
 }
 
 // ============================================================================
@@ -223,7 +279,11 @@ export type ClientToMachineMessage =
   | DeleteWorkspaceRequest
   | GetInboxRequest
   | ClearInboxRequest
-  | MarkInboxReadRequest;
+  | MarkInboxReadRequest
+  | GetNotificationConfigRequest
+  | UpdateNotificationConfigRequest
+  | GetBundleRefreshPlanRequest
+  | ApplyBundleRefreshRequest;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
@@ -239,7 +299,11 @@ export type MachineToClientMessage =
   | InboxListResponse
   | InboxClearedResponse
   | InboxMarkedReadResponse
-  | ScriptOutputResponse;
+  | NotificationConfigResponse
+  | NotificationConfigUpdatedResponse
+  | ScriptOutputResponse
+  | BundleRefreshPlanResponse
+  | BundleRefreshAppliedResponse;
 
 /** All remote session messages */
 export type RemoteSessionMessage =

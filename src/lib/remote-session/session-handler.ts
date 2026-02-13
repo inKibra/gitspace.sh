@@ -29,14 +29,17 @@ import {
 } from "../tmux-lite/cli";
 
 // Import project loading
-import { loadProjects } from "../../tui/state";
+import { listProjectSummaries } from "../../core/project-catalog";
 
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
-import { readProjectConfig } from "../../core/config";
+import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
+import { getNotificationConfig, updateNotificationConfig } from "../../core/config";
+import {
+  getBundleRefreshPlan,
+  applyBundleRefreshSubmission,
+} from '../../core/bundle-refresh.js';
 
-// Import script execution
-import { runWorkspaceScripts } from "../../utils/run-workspace-scripts";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -205,6 +208,51 @@ export class RemoteSessionHandler {
         await this.handleMarkInboxRead(session, msg.id, sendResponse);
         break;
 
+      case "get_notification_config":
+        await this.handleGetNotificationConfig(session, sendResponse);
+        break;
+
+      case "update_notification_config":
+        await this.handleUpdateNotificationConfig(session, msg.config, sendResponse);
+        break;
+
+      case 'get_bundle_refresh_plan':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to inspect bundle refresh requirements'
+          );
+          return;
+        }
+        await this.handleGetBundleRefreshPlan(
+          session,
+          msg.projectName,
+          msg.workspaceId,
+          sendResponse
+        );
+        break;
+
+      case 'apply_bundle_refresh':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to apply bundle refresh'
+          );
+          return;
+        }
+        await this.handleApplyBundleRefresh(
+          session,
+          msg.projectName,
+          msg.workspaceId,
+          msg.submission,
+          sendResponse
+        );
+        break;
+
       default: {
         // Exhaustiveness check - log unknown message types
         const unknownMsg = msg as { type: string };
@@ -300,7 +348,14 @@ export class RemoteSessionHandler {
    */
   private async handleAttachSession(
     session: RemoteClientSession,
-    msg: { sessionId?: string; workspaceId?: string; sessionName?: string; cols?: number; rows?: number },
+    msg: {
+      sessionId?: string;
+      workspaceId?: string;
+      sessionName?: string;
+      cols?: number;
+      rows?: number;
+      scriptPolicy?: 'auto' | 'skip';
+    },
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     console.log("[remote-session] handleAttachSession:", JSON.stringify(msg));
@@ -330,23 +385,20 @@ export class RemoteSessionHandler {
           return;
         }
 
-        // Run setup or select scripts for the workspace with output streaming
-        const config = readProjectConfig(workspace.projectName);
-
+        // Run setup/select scripts for the workspace with output streaming.
         console.log(`[remote-session] Running workspace scripts for: ${workspace.id}`);
 
         // Track current phase for script_output messages
         let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
 
-        const scriptResult = await runWorkspaceScripts({
+        const scriptResult = await prepareWorkspaceForSession({
           projectName: workspace.projectName,
           workspacePath: workspace.path,
           workspaceName: workspace.id,
-          repository: config.repository,
-          interactive: false, // Remote context - scripts can't prompt for input
+          interactiveScripts: false,
+          bundleMode: 'error-if-changed',
+          scriptPolicy: msg.scriptPolicy ?? 'auto',
           onOutput: (data) => {
-            // Stream script output to client (base64 encode for binary safety)
-            // Use void + catch to avoid unhandled promise rejections since this callback isn't awaited
             void this.sendMessage(session, sendResponse, {
               type: 'script_output',
               phase: currentPhase,
@@ -362,7 +414,6 @@ export class RemoteSessionHandler {
 
         if (!scriptResult.success) {
           console.error(`[remote-session] ${scriptResult.phase} scripts failed:`, scriptResult.error);
-          // Send final script_output with error info
           await this.sendMessage(session, sendResponse, {
             type: 'script_output',
             phase: scriptResult.phase,
@@ -370,7 +421,20 @@ export class RemoteSessionHandler {
             done: true,
             error: scriptResult.error,
           });
-          await this.sendError(session, sendResponse, "SCRIPT_FAILED", `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`);
+          const code =
+            'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh
+              ? 'BUNDLE_REFRESH_REQUIRED'
+              : scriptResult.phase === 'setup'
+                ? 'SETUP_SCRIPT_FAILED'
+                : scriptResult.phase === 'select'
+                  ? 'SELECT_SCRIPT_FAILED'
+                  : 'PRE_SCRIPT_FAILED';
+          await this.sendError(
+            session,
+            sendResponse,
+            code,
+            `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`
+          );
           return;
         }
 
@@ -443,7 +507,7 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     try {
-      const projects = loadProjects();
+      const projects = listProjectSummaries();
       await this.sendMessage(session, sendResponse, {
         type: "project_list",
         projects: projects.map(p => ({
@@ -599,6 +663,114 @@ export class RemoteSessionHandler {
       console.error("[remote-session] Failed to mark inbox read:", e);
       await this.sendError(session, sendResponse, "INBOX_FAILED", "Failed to mark inbox item as read");
     }
+  }
+
+  /**
+   * Handle get_notification_config request
+   */
+  private async handleGetNotificationConfig(
+    session: RemoteClientSession,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const config = getNotificationConfig();
+      await this.sendMessage(session, sendResponse, {
+        type: "notification_config",
+        config,
+      });
+    } catch (e) {
+      console.error("[remote-session] Failed to read notification config:", e);
+      await this.sendError(session, sendResponse, "CONFIG_FAILED", "Failed to read notification config");
+    }
+  }
+
+  /**
+   * Handle update_notification_config request
+   */
+  private async handleUpdateNotificationConfig(
+    session: RemoteClientSession,
+    config: import("../../notifications/types.js").NotificationConfig,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    // Security: only full-access clients can change machine preferences.
+    if (!canManage(session.accessType)) {
+      await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to update settings");
+      return;
+    }
+
+    try {
+      const updated = updateNotificationConfig(config);
+      await this.sendMessage(session, sendResponse, {
+        type: "notification_config_updated",
+        config: updated,
+      });
+    } catch (e) {
+      console.error("[remote-session] Failed to update notification config:", e);
+      await this.sendError(session, sendResponse, "CONFIG_FAILED", "Failed to update notification config");
+    }
+  }
+
+  private async handleGetBundleRefreshPlan(
+    session: RemoteClientSession,
+    projectName: string,
+    workspaceId: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspace = await this.resolveWorkspace(projectName, workspaceId);
+      const plan = await getBundleRefreshPlan(projectName, workspace.path, `${projectName}:${workspace.id}`);
+      await this.sendMessage(session, sendResponse, {
+        type: 'bundle_refresh_plan',
+        plan,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to build bundle refresh plan';
+      await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_PLAN_FAILED', message);
+    }
+  }
+
+  private async handleApplyBundleRefresh(
+    session: RemoteClientSession,
+    projectName: string,
+    workspaceId: string,
+    submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspace = await this.resolveWorkspace(projectName, workspaceId);
+      await applyBundleRefreshSubmission(projectName, workspace.path, submission);
+      await this.sendMessage(session, sendResponse, {
+        type: 'bundle_refresh_applied',
+        projectName,
+        workspaceId: `${projectName}:${workspace.id}`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to apply bundle refresh';
+      await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_APPLY_FAILED', message);
+    }
+  }
+
+  private async resolveWorkspace(
+    projectName: string,
+    workspaceId: string
+  ): Promise<{ id: string; path: string }> {
+    const normalizedWorkspaceId = workspaceId.startsWith(`${projectName}:`)
+      ? workspaceId.slice(projectName.length + 1)
+      : workspaceId;
+
+    const workspaces = await scanWorkspaces();
+    const workspace = workspaces.find(
+      (item) => item.projectName === projectName && item.id === normalizedWorkspaceId
+    );
+
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+
+    return {
+      id: workspace.id,
+      path: workspace.path,
+    };
   }
 
   /**

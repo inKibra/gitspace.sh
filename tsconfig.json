@@ -19,5 +19,11 @@
     "jsxImportSource": "@opentui/react"
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/web"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/app.web.tsx",
+    "src/**/*.web.ts",
+    "src/**/*.web.tsx"
+  ]
 }

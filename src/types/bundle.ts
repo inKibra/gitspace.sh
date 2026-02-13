@@ -48,7 +48,7 @@ export interface ConfirmStep extends BaseOnboardingStep {
  */
 export interface SecretStep extends BaseOnboardingStep {
   type: 'secret';
-  /** Key to store the value under in project config */
+  /** Key to store the value under in project keychain secrets */
   configKey: string;
   /** Validation regex pattern (optional) */
   validationPattern?: string;
@@ -74,6 +74,20 @@ export interface InputStep extends BaseOnboardingStep {
 export type OnboardingStep = InfoStep | ConfirmStep | SecretStep | InputStep;
 
 /**
+ * Persisted status for a confirm step.
+ */
+export type ConfirmStepStatus = 'passed' | 'skipped';
+
+/**
+ * Result metadata for a confirm step.
+ */
+export interface ConfirmStepResult {
+  status: ConfirmStepStatus;
+  /** Command that was checked (if any) */
+  checkCommand?: string;
+}
+
+/**
  * Bundle manifest schema (bundle.json)
  */
 export interface SpacesBundle {
@@ -91,8 +105,12 @@ export interface SpacesBundle {
  * Result of running onboarding steps
  */
 export interface OnboardingResult {
-  /** Values to store in project config */
-  configValues: Record<string, string>;
+  /** Values from input steps (stored in project config) */
+  inputValues: Record<string, string>;
+  /** Values from secret steps (stored in keychain) */
+  secretValues: Record<string, string>;
+  /** Results from confirm steps, keyed by step id */
+  confirmResults: Record<string, ConfirmStepResult>;
   /** Whether onboarding completed successfully */
   completed: boolean;
   /** Step ID where user cancelled (if applicable) */

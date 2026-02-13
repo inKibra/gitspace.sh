@@ -5,18 +5,12 @@
  */
 
 import { readdir, stat, readFile } from "fs/promises";
-import { join, basename } from "path";
+import { join } from "path";
 import { homedir } from "os";
 import type { WorkspaceInfo } from "./protocol";
 
 const SPACES_DIR = join(homedir(), "gitspace");
 const STALE_DAYS = 30;
-
-interface ProjectConfig {
-  name: string;
-  repository?: string;
-  baseBranch?: string;
-}
 
 /**
  * Scan for all workspaces across all projects

@@ -23,10 +23,16 @@ import { isAuthorized, getAuthorizedMachine } from "./authorization.js";
 import { deriveIdentityId } from "../lib/tmux-lite/crypto/identity.js";
 
 /**
- * Path to web terminal dist files (built by Vite)
- * Used for development mode when assets aren't embedded
+ * Candidate paths to web terminal dist files (built by Vite).
+ *
+ * In source mode, relay runs from src/relay and Vite builds to web/dist at repo root.
+ * In some environments, process.cwd() is a better anchor than import.meta.dir.
  */
-const WEB_DIST_PATH = join(import.meta.dir, "../web/dist");
+const WEB_DIST_CANDIDATES = [
+  join(import.meta.dir, "../web/dist"),
+  join(import.meta.dir, "../../web/dist"),
+  join(process.cwd(), "web/dist"),
+];
 
 /**
  * Try to import embedded assets (only available in compiled binary)
@@ -64,6 +70,16 @@ function getContentType(pathname: string): string {
   return contentTypes[ext || ""] || "application/octet-stream";
 }
 
+function getStaticCacheControl(pathname: string): string {
+  if (pathname === "/" || pathname === "/index.html") {
+    return "no-cache";
+  }
+  if (pathname.startsWith("/assets/")) {
+    return "public, max-age=31536000, immutable";
+  }
+  return "public, max-age=3600";
+}
+
 /**
  * Serve a static file - tries embedded assets first, falls back to filesystem
  */
@@ -76,20 +92,25 @@ async function serveStaticFile(pathname: string): Promise<Response | null> {
     const blob = embeddedAssets.getEmbeddedFile(pathname);
     if (blob) {
       return new Response(blob, {
-        headers: { "Content-Type": getContentType(normalizedPath) },
+        headers: {
+          "Content-Type": getContentType(normalizedPath),
+          "Cache-Control": getStaticCacheControl(pathname),
+        },
       });
     }
   }
 
   // Fall back to filesystem (development mode)
-  const resolvedPath = resolveAssetPath(normalizedPath);
-  if (!resolvedPath) return null;
-
-  const file = Bun.file(resolvedPath);
-  if (await file.exists()) {
-    return new Response(file, {
-      headers: { "Content-Type": getContentType(normalizedPath) },
-    });
+  for (const resolvedPath of resolveAssetPaths(normalizedPath)) {
+    const file = Bun.file(resolvedPath);
+    if (await file.exists()) {
+      return new Response(file, {
+        headers: {
+          "Content-Type": getContentType(normalizedPath),
+          "Cache-Control": getStaticCacheControl(pathname),
+        },
+      });
+    }
   }
 
   return null;
@@ -183,14 +204,22 @@ function consumeConnectionSlot(ip: string): boolean {
   return true;
 }
 
-function resolveAssetPath(pathname: string): string | null {
-  const webRoot = resolve(WEB_DIST_PATH);
+function resolveAssetPaths(pathname: string): string[] {
   const relativePath = pathname.replace(/^\/+/, "");
-  const resolvedPath = resolve(webRoot, relativePath);
-  if (!resolvedPath.startsWith(webRoot + sep)) {
-    return null;
+  const paths: string[] = [];
+
+  for (const candidate of WEB_DIST_CANDIDATES) {
+    const webRoot = resolve(candidate);
+    const resolvedPath = resolve(webRoot, relativePath);
+
+    if (!resolvedPath.startsWith(webRoot + sep)) {
+      continue;
+    }
+
+    paths.push(resolvedPath);
   }
-  return resolvedPath;
+
+  return paths;
 }
 
 type SignedClientMessageType = "list_machines" | "connect_with_invite" | "connect_to_machine";
@@ -406,10 +435,15 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
         return undefined;
       }
 
-      // Serve web terminal UI (embedded or from filesystem)
-      if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname.startsWith("/assets/") || url.pathname === "/vite.svg") {
-        const response = await serveStaticFile(url.pathname);
-        if (response) return response;
+      // Serve web terminal UI/static assets (embedded or from filesystem)
+      const staticResponse = await serveStaticFile(url.pathname);
+      if (staticResponse) return staticResponse;
+
+      if (url.pathname === "/" || url.pathname === "/index.html") {
+        return new Response("Web UI assets not found. Build them with: bun run build:web", {
+          status: 503,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
       }
 
       return new Response("Not Found", { status: 404 });

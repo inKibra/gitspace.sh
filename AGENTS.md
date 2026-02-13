@@ -128,22 +128,21 @@ src/
 │   │   └── ProjectList.tui.tsx
 │   ├── providers/              # Machine access abstraction
 │   │   ├── MachineProvider.ts  # Interface definition
-│   │   ├── LocalMachineProvider.ts  # Direct tmux-lite access
-│   │   └── RemoteMachineProvider.ts # Via relay
+│   │   └── LocalMachineProvider.ts  # Direct tmux-lite access
 │   ├── hooks/
-│   │   └── useNavigation.ts    # Navigation state management
+│   │   └── useUserActivity.ts  # Activity tracking for notifications
 │   └── types.ts                # Shared type definitions
 ├── tui/                        # Terminal UI (OpenTUI)
 │   ├── index.ts                # TUI entry point
 │   ├── app.tsx                 # Main TUI application
-│   ├── state.ts                # State management
-│   ├── adapters.ts             # Local/remote machine adapters
 │   ├── components/
-│   │   └── Terminal.tsx        # Embedded terminal
+│   │   ├── RemoteMachineScreen.tsx # Remote machine browser screen
+│   │   └── RemoteTerminal.tsx  # Embedded session terminal
 │   └── hooks/
-│       ├── useAppState.ts
 │       ├── useRemoteMachines.ts
-│       └── useInboxTUI.ts
+│       ├── useRemoteTerminal.ts
+│       ├── useLocalSession.ts
+│       └── useDaemonStatus.ts
 ├── web/                        # Web application (Vite + React)
 │   └── src/
 │       ├── App.tsx             # Main web app
@@ -335,7 +334,7 @@ interface MachineProvider {
 ```
 
 - `LocalMachineProvider`: Direct filesystem + tmux-lite CLI
-- `RemoteMachineProvider`: Via relay WebSocket
+- Remote machine access in UI now uses shared relay/session hooks + backend adapters (`shared/relay/*`, `shared/session/*`)
 
 ## Development Workflow
 

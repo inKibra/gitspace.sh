@@ -9,7 +9,12 @@ import { promisify } from 'util';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { getCurrentProject, getProjectBaseDir, getProjectWorkspacesDir } from '../core/config.js';
-import { detectBundleChanges, refreshBundle, type BundleRefreshOptions } from '../core/bundle-refresh.js';
+import {
+  detectBundleChanges,
+  formatBundleChangeDetails,
+  refreshBundle,
+  type BundleRefreshOptions,
+} from '../core/bundle-refresh.js';
 import { join, resolve } from 'path';
 import { existsSync } from 'fs';
 
@@ -212,6 +217,7 @@ export async function bundleStatus(options: BundleStatusOptions): Promise<void> 
   logger.log(`Bundle: ${bundle.name}`);
   logger.log(`Version: ${bundle.version}`);
   logger.log(`Path: ${changes.bundlePath}`);
+  logger.log(`Source: ${changes.bundleSource === 'workspace' ? 'workspace .gitspace/bundle.json' : 'base .gitspace/bundle.json'}`);
 
   if (bundle.onboarding && bundle.onboarding.length > 0) {
     logger.log(`Onboarding steps: ${bundle.onboarding.length}`);
@@ -221,6 +227,11 @@ export async function bundleStatus(options: BundleStatusOptions): Promise<void> 
 
   if (changes.hasChanged) {
     logger.warning('Bundle has changed since last applied');
+    const details = formatBundleChangeDetails(changes)
+      .split('\n')
+      .map((line) => `  - ${line}`)
+      .join('\n');
+    logger.log(details);
     logger.log('Run "gssh bundle refresh" to update configuration');
   } else {
     logger.success('Bundle is up to date');

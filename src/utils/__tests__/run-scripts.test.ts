@@ -131,6 +131,54 @@ exit 1
       ).rejects.toThrow(/Script failed with exit code 1/);
     });
 
+    it('should include script output tail in failure message', async () => {
+      const scriptPath = join(scriptsDir, '01-fail-with-output.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "before fail stdout"
+echo "before fail stderr" >&2
+exit 1
+`);
+      chmodSync(scriptPath, 0o755);
+
+      try {
+        await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+        });
+        throw new Error('Expected script failure');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        const message = (error as Error).message;
+        expect(message).toContain('Script failed with exit code 1: 01-fail-with-output.sh');
+        expect(message).toContain('Last output:');
+        expect(message).toContain('before fail stdout');
+        expect(message).toContain('before fail stderr');
+      }
+    });
+
+    it('should truncate large failure output to a bounded tail', async () => {
+      const scriptPath = join(scriptsDir, '01-fail-large-output.sh');
+      const lines = Array.from({ length: 80 }, (_, idx) => `line-${String(idx + 1).padStart(3, '0')}`).join('\n');
+      writeFileSync(scriptPath, `#!/bin/bash
+cat <<'EOF'
+${lines}
+EOF
+exit 1
+`);
+      chmodSync(scriptPath, 0o755);
+
+      try {
+        await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+        });
+        throw new Error('Expected script failure');
+      } catch (error) {
+        const message = (error as Error).message;
+        expect(message).toContain('Last output (truncated):');
+        expect(message).toContain('line-080');
+        expect(message).not.toContain('line-001');
+      }
+    });
+
     it('should pass workspace name and repository as arguments', async () => {
       // Create a script that writes its arguments to a file
       const outputFile = join(testDir, 'args.txt');
@@ -243,20 +291,20 @@ exit 0
   });
 
   describe('environment variables', () => {
-    it('should pass bundle values as SPACE_VALUE_* env vars', async () => {
+    it('passes bundle values using configured key names', async () => {
       const outputFile = join(testDir, 'env.txt');
       const scriptPath = join(scriptsDir, '01-env.sh');
       writeFileSync(scriptPath, `#!/bin/bash
-echo "$SPACE_VALUE_API_KEY" >> "${outputFile}"
-echo "$SPACE_VALUE_DATABASE_URL" >> "${outputFile}"
+echo "$API_KEY" >> "${outputFile}"
+echo "$DATABASE_URL" >> "${outputFile}"
 `);
       chmodSync(scriptPath, 0o755);
 
       await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
         nonInteractive: true,
         bundleValues: {
-          'api-key': 'my-api-key',
-          'database_url': 'postgres://localhost/db',
+          API_KEY: 'my-api-key',
+          DATABASE_URL: 'postgres://localhost/db',
         },
       });
 
@@ -266,11 +314,11 @@ echo "$SPACE_VALUE_DATABASE_URL" >> "${outputFile}"
       expect(lines[1]).toBe('postgres://localhost/db');
     });
 
-    it('should pass bundle secrets as SPACE_SECRET_* env vars', async () => {
+    it('passes bundle secrets using configured key names', async () => {
       const outputFile = join(testDir, 'secrets.txt');
       const scriptPath = join(scriptsDir, '01-secrets.sh');
       writeFileSync(scriptPath, `#!/bin/bash
-echo "$SPACE_SECRET_TOKEN" >> "${outputFile}"
+echo "$TOKEN" >> "${outputFile}"
 `);
       chmodSync(scriptPath, 0o755);
 
@@ -283,6 +331,31 @@ echo "$SPACE_SECRET_TOKEN" >> "${outputFile}"
 
       const output = await Bun.file(outputFile).text();
       expect(output.trim()).toBe('super-secret-token');
+    });
+
+    it('keeps legacy SPACE_* aliases for backwards compatibility', async () => {
+      const outputFile = join(testDir, 'aliases.txt');
+      const scriptPath = join(scriptsDir, '01-aliases.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "$SPACE_VALUE_TEAM_NAME" >> "${outputFile}"
+echo "$SPACE_SECRET_API_TOKEN" >> "${outputFile}"
+`);
+      chmodSync(scriptPath, 0o755);
+
+      await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+        nonInteractive: true,
+        bundleValues: {
+          TEAM_NAME: 'platform',
+        },
+        bundleSecrets: {
+          API_TOKEN: 'shh',
+        },
+      });
+
+      const output = await Bun.file(outputFile).text();
+      const lines = output.trim().split('\n');
+      expect(lines[0]).toBe('platform');
+      expect(lines[1]).toBe('shh');
     });
   });
 

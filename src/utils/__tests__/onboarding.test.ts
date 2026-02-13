@@ -74,7 +74,8 @@ describe('onboarding', () => {
       const result = await runOnboarding([]);
 
       expect(result.completed).toBe(true);
-      expect(result.configValues).toEqual({});
+      expect(result.inputValues).toEqual({});
+      expect(result.secretValues).toEqual({});
     });
 
     it('should collect input values', async () => {
@@ -92,7 +93,7 @@ describe('onboarding', () => {
       ]);
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.userName).toBe('my-input');
+      expect(result.inputValues.userName).toBe('my-input');
     });
 
     it('should collect secret values', async () => {
@@ -110,7 +111,7 @@ describe('onboarding', () => {
       ]);
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.apiKey).toBe('my-secret');
+      expect(result.secretValues.apiKey).toBe('my-secret');
     });
 
     it('should handle info steps', async () => {
@@ -208,7 +209,7 @@ describe('onboarding', () => {
 
       expect(result.completed).toBe(true);
       // Should get the previous value since input returned the default
-      expect(result.configValues.userName).toBe('Previous Name');
+      expect(result.inputValues.userName).toBe('Previous Name');
     });
 
     it('should allow overriding previous value', async () => {
@@ -232,7 +233,7 @@ describe('onboarding', () => {
       );
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.userName).toBe('New Name');
+      expect(result.inputValues.userName).toBe('New Name');
     });
 
     it('should return KEEP_EXISTING_SECRET when user keeps existing secret', async () => {
@@ -257,7 +258,7 @@ describe('onboarding', () => {
       );
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.apiKey).toBe(KEEP_EXISTING_SECRET);
+      expect(result.secretValues.apiKey).toBe(KEEP_EXISTING_SECRET);
     });
 
     it('should prompt for new secret when user declines to keep existing', async () => {
@@ -291,7 +292,7 @@ describe('onboarding', () => {
       );
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.apiKey).toBe('new-secret-value');
+      expect(result.secretValues.apiKey).toBe('new-secret-value');
     });
 
     it('should not show keep existing prompt for new secrets', async () => {
@@ -315,7 +316,7 @@ describe('onboarding', () => {
       );
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.newApiKey).toBe('brand-new-secret');
+      expect(result.secretValues.newApiKey).toBe('brand-new-secret');
     });
 
     it('should handle multiple steps with mixed previous values', async () => {
@@ -350,8 +351,8 @@ describe('onboarding', () => {
       );
 
       expect(result.completed).toBe(true);
-      expect(result.configValues.userName).toBe('Existing Name');
-      expect(result.configValues.apiKey).toBe(KEEP_EXISTING_SECRET);
+      expect(result.inputValues.userName).toBe('Existing Name');
+      expect(result.secretValues.apiKey).toBe(KEEP_EXISTING_SECRET);
     });
   });
 });

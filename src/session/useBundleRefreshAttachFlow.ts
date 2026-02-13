@@ -1,0 +1,526 @@
+import { useCallback, useEffect, useRef } from 'react';
+import type { BundleRefreshPlan, BundleRefreshStep, BundleRefreshSubmission } from '../types/bundle-refresh.js';
+import type { ConfirmStepResult } from '../types/bundle.js';
+import type { FlowWizardStep, UseFlowReturn } from '../components/Flow.js';
+
+export interface BundleRefreshCommandError {
+  code?: string;
+  message: string;
+}
+
+export interface BundleRefreshAttachParams {
+  sessionId?: string;
+  workspaceId?: string;
+  sessionName?: string;
+  cols?: number;
+  rows?: number;
+  scriptPolicy?: 'auto' | 'skip';
+}
+
+interface PendingAttach {
+  params: BundleRefreshAttachParams;
+  workspaceId: string;
+  projectName: string | null;
+  attemptId: number;
+}
+
+const SCRIPT_FAILURE_CODES = new Set([
+  'PRE_SCRIPT_FAILED',
+  'SETUP_SCRIPT_FAILED',
+  'SELECT_SCRIPT_FAILED',
+]);
+
+export interface UseBundleRefreshAttachFlowOptions {
+  flow: Pick<
+    UseFlowReturn,
+    'showLoading' | 'showMessage' | 'showConfirm' | 'showWizard' | 'close'
+  >;
+  commandError: BundleRefreshCommandError | null;
+  attachSession: (params: BundleRefreshAttachParams) => Promise<void> | void;
+  getBundleRefreshPlan?: (projectName: string, workspaceId: string) => Promise<BundleRefreshPlan>;
+  applyBundleRefresh?: (
+    projectName: string,
+    workspaceId: string,
+    submission: BundleRefreshSubmission
+  ) => Promise<void>;
+  resolveProjectName?: (workspaceId: string) => string | null;
+}
+
+function parseProjectNameFromWorkspaceId(workspaceId: string): string | null {
+  const separatorIndex = workspaceId.indexOf(':');
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  return workspaceId.slice(0, separatorIndex) || null;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+
+  const candidate = error as { code?: unknown };
+  return typeof candidate.code === 'string' ? candidate.code : undefined;
+}
+
+function toErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === 'string' && error.length > 0) {
+    return error;
+  }
+
+  return fallback;
+}
+
+function buildValidation(step: BundleRefreshStep): ((value: string) => string | null) | undefined {
+  if (step.type !== 'input' && step.type !== 'secret') {
+    return undefined;
+  }
+
+  let validationRegex: RegExp | null = null;
+  if (step.validationPattern) {
+    try {
+      validationRegex = new RegExp(step.validationPattern);
+    } catch {
+      validationRegex = null;
+    }
+  }
+
+  return (value: string): string | null => {
+    const trimmed = value.trim();
+    const allowEmptySecret = step.type === 'secret' && step.hasExistingSecret;
+    const required = step.required !== false && !allowEmptySecret;
+
+    if (required && trimmed.length === 0) {
+      return 'This field is required';
+    }
+
+    if (validationRegex && trimmed.length > 0 && !validationRegex.test(value)) {
+      return step.validationMessage || `Value must match pattern: ${step.validationPattern}`;
+    }
+
+    return null;
+  };
+}
+
+function toWizardStep(step: BundleRefreshStep): FlowWizardStep {
+  const secretHint =
+    step.type === 'secret' && step.hasExistingSecret
+      ? `${step.description}\n\nLeave blank to keep the existing secret.`
+      : step.description;
+
+  return {
+    id: step.id,
+    title: step.title,
+    type: step.type,
+    description: secretHint,
+    defaultValue: step.defaultValue,
+    validation: buildValidation(step),
+    checkCommand: step.checkCommand,
+    checkStatus: step.type === 'confirm' ? 'missing' : undefined,
+    installUrl: step.installUrl,
+  };
+}
+
+function createBaseSubmission(plan: BundleRefreshPlan): BundleRefreshSubmission {
+  return {
+    inputValues: {},
+    secretValues: {},
+    confirmResults: {
+      ...plan.autoConfirmResults,
+    },
+  };
+}
+
+async function showRefreshPrompt(flow: UseBundleRefreshAttachFlowOptions['flow'], details: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    flow.showConfirm({
+      title: 'Bundle Refresh Required',
+      message: `${details}\n\nRefresh now and retry session attach?`,
+      variant: 'warning',
+      confirmLabel: 'Refresh now',
+      cancelLabel: 'Cancel',
+      onConfirm: () => {
+        resolve(true);
+      },
+      onCancel: () => {
+        resolve(false);
+      },
+    });
+  });
+}
+
+async function showNoChangeRetryPrompt(
+  flow: UseBundleRefreshAttachFlowOptions['flow'],
+  details: string
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    flow.showConfirm({
+      title: 'Refresh State Changed',
+      message:
+        `Backend requested bundle refresh, but no pending refresh steps were found.\n\n${details}\n\nRetry session attach anyway?`,
+      variant: 'warning',
+      confirmLabel: 'Retry attach',
+      cancelLabel: 'Cancel',
+      onConfirm: () => {
+        resolve(true);
+      },
+      onCancel: () => {
+        resolve(false);
+      },
+    });
+  });
+}
+
+async function showScriptFailureRetryPrompt(
+  flow: UseBundleRefreshAttachFlowOptions['flow'],
+  message: string
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    flow.showConfirm({
+      title: 'Workspace Scripts Failed',
+      message: `${message}\n\nAttach anyway and skip scripts for this session?`,
+      variant: 'warning',
+      confirmLabel: 'Attach anyway',
+      cancelLabel: 'Cancel',
+      onConfirm: () => {
+        resolve(true);
+      },
+      onCancel: () => {
+        resolve(false);
+      },
+    });
+  });
+}
+
+async function runRefreshWizard(
+  flow: UseBundleRefreshAttachFlowOptions['flow'],
+  plan: BundleRefreshPlan
+): Promise<Record<string, string> | null> {
+  return new Promise<Record<string, string> | null>((resolve) => {
+    flow.showWizard({
+      title: `Bundle Refresh - ${plan.workspaceName}`,
+      steps: plan.steps.map(toWizardStep),
+      onComplete: async (values) => {
+        resolve(values);
+      },
+      onCancel: () => {
+        resolve(null);
+      },
+    });
+  });
+}
+
+function applyWizardValues(
+  plan: BundleRefreshPlan,
+  values: Record<string, string>,
+  base: BundleRefreshSubmission
+): BundleRefreshSubmission {
+  const next: BundleRefreshSubmission = {
+    inputValues: { ...base.inputValues },
+    secretValues: { ...base.secretValues },
+    confirmResults: { ...base.confirmResults },
+  };
+
+  for (const step of plan.steps) {
+    if (step.type === 'input' && step.configKey) {
+      const value = values[step.id] ?? '';
+      next.inputValues[step.configKey] = value;
+      continue;
+    }
+
+    if (step.type === 'secret' && step.configKey) {
+      const value = values[step.id] ?? '';
+      if (value.length > 0) {
+        next.secretValues[step.configKey] = value;
+      }
+      continue;
+    }
+
+    if (step.type === 'confirm') {
+      const result: ConfirmStepResult = {
+        status: 'passed',
+        checkCommand: step.checkCommand,
+      };
+      next.confirmResults[step.id] = result;
+    }
+  }
+
+  return next;
+}
+
+export interface UseBundleRefreshAttachFlowResult {
+  attachSessionWithBundleRefresh: (
+    params: BundleRefreshAttachParams,
+    options?: { projectName?: string | null }
+  ) => Promise<boolean>;
+}
+
+export function useBundleRefreshAttachFlow(
+  options: UseBundleRefreshAttachFlowOptions
+): UseBundleRefreshAttachFlowResult {
+  const optionsRef = useRef(options);
+  const pendingAttachRef = useRef<PendingAttach | null>(null);
+  const attemptCounterRef = useRef(0);
+  const lastHandledAttemptRef = useRef(0);
+  const refreshInProgressRef = useRef(false);
+
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
+
+  const executeBundleRefresh = useCallback(
+    async (pending: PendingAttach): Promise<boolean> => {
+      const currentOptions = optionsRef.current;
+
+      if (!currentOptions.getBundleRefreshPlan || !currentOptions.applyBundleRefresh) {
+        currentOptions.flow.showMessage({
+          title: 'Bundle Refresh Unsupported',
+          message: 'This backend does not support bundle refresh onboarding yet.',
+          variant: 'error',
+        });
+        return false;
+      }
+
+      if (refreshInProgressRef.current) {
+        return false;
+      }
+
+      refreshInProgressRef.current = true;
+
+      try {
+        const projectName =
+          pending.projectName ||
+          currentOptions.resolveProjectName?.(pending.workspaceId) ||
+          parseProjectNameFromWorkspaceId(pending.workspaceId);
+
+        if (!projectName) {
+          currentOptions.flow.showMessage({
+            title: 'Bundle Refresh Failed',
+            message: `Could not determine project for workspace "${pending.workspaceId}".`,
+            variant: 'error',
+          });
+          return false;
+        }
+
+        currentOptions.flow.showLoading({
+          title: 'Bundle Refresh',
+          message: 'Loading refresh requirements...',
+        });
+
+        const plan = await currentOptions.getBundleRefreshPlan(projectName, pending.workspaceId);
+
+        if (!plan.hasBundle) {
+          currentOptions.flow.showMessage({
+            title: 'Bundle Refresh Failed',
+            message: 'No bundle configuration was found for this workspace.',
+            variant: 'error',
+          });
+          return false;
+        }
+
+        if (!plan.hasChanged && plan.steps.length === 0) {
+          const retryAttach = await showNoChangeRetryPrompt(currentOptions.flow, plan.details);
+          if (!retryAttach) {
+            currentOptions.flow.showMessage({
+              title: 'Session Attach Cancelled',
+              message: 'Bundle refresh was required by backend, and retry was cancelled.',
+              variant: 'warning',
+            });
+            return false;
+          }
+
+          currentOptions.flow.showLoading({
+            title: 'Bundle Refresh',
+            message: 'Retrying session attach...',
+          });
+          await Promise.resolve(currentOptions.attachSession(pending.params));
+          currentOptions.flow.close();
+          return true;
+        }
+
+        const confirmed = await showRefreshPrompt(currentOptions.flow, plan.details);
+        if (!confirmed) {
+          currentOptions.flow.showMessage({
+            title: 'Session Attach Cancelled',
+            message: 'Bundle refresh is required before creating this session.',
+            variant: 'warning',
+          });
+          return false;
+        }
+
+        let submission = createBaseSubmission(plan);
+
+        if (plan.steps.length > 0) {
+          const values = await runRefreshWizard(currentOptions.flow, plan);
+          if (!values) {
+            currentOptions.flow.showMessage({
+              title: 'Session Attach Cancelled',
+              message: 'Bundle refresh was cancelled.',
+              variant: 'warning',
+            });
+            return false;
+          }
+
+          submission = applyWizardValues(plan, values, submission);
+        }
+
+        currentOptions.flow.showLoading({
+          title: 'Bundle Refresh',
+          message: 'Applying refreshed configuration...',
+        });
+
+        await currentOptions.applyBundleRefresh(projectName, pending.workspaceId, submission);
+
+        currentOptions.flow.showLoading({
+          title: 'Bundle Refresh',
+          message: 'Retrying session attach...',
+        });
+
+        await Promise.resolve(currentOptions.attachSession(pending.params));
+        currentOptions.flow.close();
+        return true;
+      } catch (error) {
+        const currentOptions = optionsRef.current;
+        currentOptions.flow.close();
+        currentOptions.flow.showMessage({
+          title: 'Bundle Refresh Failed',
+          message: toErrorMessage(error, 'Failed to refresh bundle configuration.'),
+          variant: 'error',
+        });
+        return false;
+      } finally {
+        lastHandledAttemptRef.current = pending.attemptId;
+        refreshInProgressRef.current = false;
+        pendingAttachRef.current = null;
+      }
+    },
+    []
+  );
+
+  const executeScriptFailureOverride = useCallback(
+    async (pending: PendingAttach, message: string): Promise<boolean> => {
+      const currentOptions = optionsRef.current;
+      const attachAnyway = await showScriptFailureRetryPrompt(currentOptions.flow, message);
+      if (!attachAnyway) {
+        currentOptions.flow.showMessage({
+          title: 'Session Attach Cancelled',
+          message: 'Session attach was cancelled after script failure.',
+          variant: 'warning',
+        });
+        return false;
+      }
+
+      try {
+        currentOptions.flow.showLoading({
+          title: 'Attaching Session',
+          message: 'Retrying without workspace scripts...',
+        });
+        await Promise.resolve(currentOptions.attachSession({
+          ...pending.params,
+          scriptPolicy: 'skip',
+        }));
+        currentOptions.flow.close();
+        return true;
+      } catch (error) {
+        const latestOptions = optionsRef.current;
+        latestOptions.flow.close();
+        latestOptions.flow.showMessage({
+          title: 'Session Attach Failed',
+          message: toErrorMessage(error, 'Failed to attach session after script failure.'),
+          variant: 'error',
+        });
+        return false;
+      } finally {
+        lastHandledAttemptRef.current = pending.attemptId;
+        pendingAttachRef.current = null;
+      }
+    },
+    []
+  );
+
+  const attachSessionWithBundleRefresh = useCallback(
+    async (
+      params: BundleRefreshAttachParams,
+      attachOptions: { projectName?: string | null } = {}
+    ): Promise<boolean> => {
+      const currentOptions = optionsRef.current;
+
+      if (!params.workspaceId) {
+        pendingAttachRef.current = null;
+        await Promise.resolve(currentOptions.attachSession(params));
+        return true;
+      }
+
+      const attemptId = ++attemptCounterRef.current;
+      const pending: PendingAttach = {
+        params,
+        workspaceId: params.workspaceId,
+        projectName:
+          attachOptions.projectName ??
+          currentOptions.resolveProjectName?.(params.workspaceId) ??
+          parseProjectNameFromWorkspaceId(params.workspaceId),
+        attemptId,
+      };
+      pendingAttachRef.current = pending;
+
+      try {
+        await Promise.resolve(currentOptions.attachSession(params));
+        lastHandledAttemptRef.current = pending.attemptId;
+        pendingAttachRef.current = null;
+        return true;
+      } catch (error) {
+        const code = getErrorCode(error);
+        if (code === 'BUNDLE_REFRESH_REQUIRED') {
+          lastHandledAttemptRef.current = pending.attemptId;
+          return executeBundleRefresh(pending);
+        }
+
+        if (code && SCRIPT_FAILURE_CODES.has(code)) {
+          lastHandledAttemptRef.current = pending.attemptId;
+          return executeScriptFailureOverride(
+            pending,
+            toErrorMessage(error, 'Workspace scripts failed while preparing the session.')
+          );
+        }
+
+        pendingAttachRef.current = null;
+        throw error;
+      }
+    },
+    [executeBundleRefresh, executeScriptFailureOverride]
+  );
+
+  useEffect(() => {
+    const commandError = options.commandError;
+    if (!commandError || !commandError.code) {
+      return;
+    }
+
+    const pending = pendingAttachRef.current;
+    if (!pending) {
+      return;
+    }
+
+    if (pending.attemptId <= lastHandledAttemptRef.current) {
+      return;
+    }
+
+    if (commandError.code === 'BUNDLE_REFRESH_REQUIRED') {
+      void executeBundleRefresh(pending);
+      return;
+    }
+
+    if (SCRIPT_FAILURE_CODES.has(commandError.code)) {
+      void executeScriptFailureOverride(pending, commandError.message);
+    }
+  }, [executeBundleRefresh, executeScriptFailureOverride, options.commandError]);
+
+  return {
+    attachSessionWithBundleRefresh,
+  };
+}

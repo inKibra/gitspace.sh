@@ -7,6 +7,7 @@ import { existsSync, readdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import {
   readProjectConfig,
+  updateProjectConfig,
   getProjectWorkspacesDir,
   getProjectBaseDir,
   getProjectDir,
@@ -19,6 +20,7 @@ import {
   getWorktreeInfo,
 } from './git.js';
 import { runScriptsInTerminal } from '../utils/run-scripts.js';
+import { getProjectSecrets } from '../utils/secrets.js';
 import { logger } from '../utils/logger.js';
 import {
   listSessions,
@@ -123,6 +125,10 @@ export async function deleteWorkspaceCore(
   try {
     const projectConfig = readProjectConfig(projectName);
     const removeScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'remove');
+    const bundleSecrets = projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0
+      ? await getProjectSecrets(projectName, projectConfig.bundleSecretKeys)
+      : undefined;
+
     options.onProgress?.('Running cleanup scripts...');
     await runScriptsInTerminal(
       removeScriptsDir,
@@ -130,6 +136,8 @@ export async function deleteWorkspaceCore(
       workspaceName,
       projectConfig.repository,
       {
+        bundleValues: projectConfig.bundleValues,
+        bundleSecrets,
         nonInteractive: options.nonInteractive,
         onOutput: options.onScriptOutput,
       }
@@ -161,6 +169,22 @@ export async function deleteWorkspaceCore(
   }
 
   result.success = true;
+
+  // Remove per-workspace bundle metadata for deleted workspace.
+  try {
+    const projectConfig = readProjectConfig(projectName);
+    if (projectConfig.bundleWorkspaceState && projectConfig.bundleWorkspaceState[workspaceName]) {
+      const nextState = { ...projectConfig.bundleWorkspaceState };
+      delete nextState[workspaceName];
+
+      updateProjectConfig(projectName, {
+        bundleWorkspaceState: Object.keys(nextState).length > 0 ? nextState : undefined,
+      });
+    }
+  } catch (e) {
+    logger.debug(`Failed to update bundle workspace metadata for ${workspaceName}: ${e}`);
+  }
+
   return result;
 }
 

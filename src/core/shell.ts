@@ -4,17 +4,11 @@
  */
 
 import { spawn, spawnSync } from 'child_process'
-import { join } from 'path'
 import { logger } from '../utils/logger.js'
-import { hasSetupBeenRun, markSetupComplete } from '../utils/workspace-state.js'
-import { runScriptsInTerminal, type RunScriptsOptions } from '../utils/run-scripts.js'
-import { readProjectConfig } from './config.js'
-import { getProjectSecrets } from '../utils/secrets.js'
+import { prepareWorkspaceForSession } from './workspace-lifecycle.js'
 import {
-	listSessions,
 	createSession,
 	isNested,
-	type Session,
 } from '../lib/tmux-lite/cli.js'
 
 /**
@@ -33,7 +27,6 @@ function printToTerminal(message: string): void {
  * 3. Spawn an interactive subshell in the workspace directory
  * 4. User gets control of the shell with their environment ready
  *
- * @param selectOnly - If true, only run select scripts (skip setup check). Used by TUI which handles setup during creation.
  * @param sessionName - Custom name for the tmux-lite session (required for new sessions)
  */
 export async function openWorkspaceShell(
@@ -41,62 +34,22 @@ export async function openWorkspaceShell(
 	projectName: string,
 	repository: string,
 	noSetup: boolean = false,
-	selectOnly: boolean = false,
 	sessionName?: string
 ): Promise<void> {
 	const workspaceName = workspacePath.split('/').pop() || 'workspace'
 
-	// Build script options with bundle values and secrets
-	const projectConfig = readProjectConfig(projectName)
-	const scriptOptions: RunScriptsOptions = {
-		bundleValues: projectConfig.bundleValues,
-	}
+	const prepareResult = await prepareWorkspaceForSession({
+		projectName,
+		workspacePath,
+		workspaceName,
+		repository,
+		noSetup,
+		interactiveScripts: true,
+		bundleMode: 'prompt-refresh',
+	})
 
-	// Fetch secrets from OS keychain if we have secret keys
-	if (projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0) {
-		scriptOptions.bundleSecrets = await getProjectSecrets(projectName, projectConfig.bundleSecretKeys)
-	}
-
-	if (selectOnly) {
-		// TUI mode: setup was done during creation, just run select scripts
-		const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select')
-		await runScriptsInTerminal(
-			selectScriptsDir,
-			workspacePath,
-			workspaceName,
-			repository,
-			scriptOptions
-		)
-	} else {
-		const setupAlreadyRun = hasSetupBeenRun(workspacePath)
-
-		// Determine which scripts to run based on setup status
-		if (setupAlreadyRun) {
-			// Setup has been run before, run select scripts
-			const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select')
-			await runScriptsInTerminal(
-				selectScriptsDir,
-				workspacePath,
-				workspaceName,
-				repository,
-				scriptOptions
-			)
-		} else if (!noSetup) {
-			// First time setup, run setup scripts
-			printToTerminal('Running setup scripts (first time)...')
-			const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup')
-			await runScriptsInTerminal(
-				setupScriptsDir,
-				workspacePath,
-				workspaceName,
-				repository,
-				scriptOptions
-			)
-
-			// Mark setup as complete
-			markSetupComplete(workspacePath)
-			printToTerminal('✓ Setup complete')
-		}
+	if (!prepareResult.success) {
+		throw new Error(`Workspace scripts failed during ${prepareResult.phase} phase: ${prepareResult.error}`)
 	}
 
 	printToTerminal('')
@@ -117,7 +70,7 @@ function buildSessionName(projectName: string, workspaceName: string, sessionNam
 /**
  * Open a tmux-lite session for the workspace
  * Creates a new session or attaches to an existing one
- * @param sessionName - Custom name for the session (required)
+ * @param sessionName - Custom suffix for the session name
  */
 async function openTmuxLiteSession(
 	workspacePath: string,
@@ -132,11 +85,10 @@ async function openTmuxLiteSession(
 	}
 
 	try {
-		// Build the full session name
-		if (!sessionName) {
-			throw new Error('Session name is required')
-		}
-		const fullSessionName = buildSessionName(projectName, workspaceName, sessionName)
+		const suffix = sessionName && sessionName.trim().length > 0
+			? sessionName
+			: `${Date.now()}`
+		const fullSessionName = buildSessionName(projectName, workspaceName, suffix)
 
 		logger.debug(`Creating tmux-lite session: ${fullSessionName}`)
 
