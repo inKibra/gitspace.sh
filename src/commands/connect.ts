@@ -344,6 +344,7 @@ async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
+    process.stdin.pause();
   };
 
   await new Promise<void>((resolve) => {
