@@ -12,6 +12,10 @@ import { findUtf8Boundary } from '../utils/utf8.js';
 import { BracketedPasteModeTracker, wrapPaste } from './terminal-bracketed-paste.tui.js';
 import { toast } from '@opentui-ui/toast';
 import { copyToClipboard } from '../utils/clipboard.js';
+import {
+  getPageNavigationEscapeSequence,
+  shouldConsumePageNavigationInScrollbox,
+} from './session-terminal-page-navigation.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
 
@@ -256,13 +260,31 @@ export function SessionTerminal({
     }
 
     if (key.name === 'pageup') {
-      scrollBoxRef.current?.scrollBy(-1, 'viewport');
-      return;
+      const scrollBox = scrollBoxRef.current;
+      if (
+        scrollBox &&
+        shouldConsumePageNavigationInScrollbox({
+          scrollHeight: scrollBox.scrollHeight,
+          viewportHeight: scrollBox.viewport.height,
+        })
+      ) {
+        scrollBox.scrollBy(-1, 'viewport');
+        return;
+      }
     }
 
     if (key.name === 'pagedown') {
-      scrollBoxRef.current?.scrollBy(1, 'viewport');
-      return;
+      const scrollBox = scrollBoxRef.current;
+      if (
+        scrollBox &&
+        shouldConsumePageNavigationInScrollbox({
+          scrollHeight: scrollBox.scrollHeight,
+          viewportHeight: scrollBox.viewport.height,
+        })
+      ) {
+        scrollBox.scrollBy(1, 'viewport');
+        return;
+      }
     }
 
     if (key.name === 'escape' && key.ctrl) {
@@ -298,6 +320,10 @@ export function SessionTerminal({
       } else if (code.length === 1) {
         data = `\x1b[1;${modifier}${code}`;
       }
+    } else if (key.name === 'pageup') {
+      data = getPageNavigationEscapeSequence('up');
+    } else if (key.name === 'pagedown') {
+      data = getPageNavigationEscapeSequence('down');
     } else if (key.sequence) {
       data = key.sequence;
     } else if (key.raw) {
