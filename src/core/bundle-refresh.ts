@@ -18,6 +18,7 @@ import {
 import { runOnboarding, KEEP_EXISTING_SECRET, type OnboardingOptions } from '../utils/onboarding.js';
 import { getProjectSecret, getProjectSecrets, setProjectSecret } from '../utils/secrets.js';
 import { checkCommandExists } from '../utils/deps.js';
+import { SpacesError } from '../types/errors.js';
 import type {
   ConfirmStep,
   ConfirmStepResult,
@@ -448,10 +449,14 @@ export function syncBundleWorkspaceState(projectName: string, workspacePath?: st
   const scope = getBundleScopeKey(projectName, workspacePath);
   const bundleHash = hashBundle(bundle);
   const config = readProjectConfig(projectName);
-  const baseApplied = applyWorkspaceState(config, BASE_SCOPE, bundleHash, bundle);
+  let nextState = config.bundleWorkspaceState || {};
+  let mergedSecretKeys = config.bundleSecretKeys || [];
 
-  let nextState = baseApplied.bundleWorkspaceState;
-  let mergedSecretKeys = baseApplied.mergedSecretKeys;
+  if (bundleSource === 'base' || scope === BASE_SCOPE) {
+    const baseApplied = applyWorkspaceState(config, BASE_SCOPE, bundleHash, bundle);
+    nextState = baseApplied.bundleWorkspaceState;
+    mergedSecretKeys = baseApplied.mergedSecretKeys;
+  }
 
   if (scope !== BASE_SCOPE) {
     const scopedApplied = applyWorkspaceState(
@@ -786,7 +791,7 @@ export async function applyBundleRefreshSubmission(
 ): Promise<void> {
   const changes = detectBundleChanges(projectName, workspacePath);
   if (!changes.hasBundle || !changes.currentBundle || !changes.currentHash) {
-    throw new Error(changes.parseError || 'No bundle found for workspace');
+    throw new SpacesError(changes.parseError || 'No bundle found for workspace', 'USER_ERROR', 1);
   }
 
   const scope = changes.scope || BASE_SCOPE;
@@ -900,6 +905,7 @@ export async function refreshBundle(
     syncBundleWorkspaceState(projectName, workspacePath);
     logger.info('Bundle has changed but running in non-interactive mode, skipping refresh');
     result.refreshed = false;
+    result.completed = true;
     return result;
   }
 

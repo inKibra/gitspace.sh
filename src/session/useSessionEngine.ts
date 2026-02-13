@@ -17,6 +17,7 @@ import {
   getBackendState,
 } from './selectors.js';
 import type { ScriptRuntimeState } from './types.js';
+import { SpacesError } from '../types/errors.js';
 
 function toScriptRuntimeState(event: {
   phase: 'pre' | 'setup' | 'select' | 'remove';
@@ -164,7 +165,7 @@ export function useSessionEngine() {
   const withBackend = useCallback(async (backendKey: BackendKey, fn: (backend: SessionBackend) => Promise<void>) => {
     const backend = manager.get(backendKey);
     if (!backend) {
-      throw new Error(`Backend not found: ${backendKey}`);
+      throw new SpacesError(`Backend not found: ${backendKey}`, 'SYSTEM_ERROR', 2);
     }
     await fn(backend);
   }, [manager]);
@@ -218,7 +219,7 @@ export function useSessionEngine() {
     });
 
     if (!plan) {
-      throw new Error('Bundle refresh plan was not returned by backend');
+      throw new SpacesError('Bundle refresh plan was not returned by backend', 'SYSTEM_ERROR', 2);
     }
 
     return plan;

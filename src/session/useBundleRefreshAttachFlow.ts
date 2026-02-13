@@ -22,6 +22,7 @@ interface PendingAttach {
   workspaceId: string;
   projectName: string | null;
   attemptId: number;
+  createdAt: number;
 }
 
 const SCRIPT_FAILURE_CODES = new Set([
@@ -29,6 +30,40 @@ const SCRIPT_FAILURE_CODES = new Set([
   'SETUP_SCRIPT_FAILED',
   'SELECT_SCRIPT_FAILED',
 ]);
+
+const PENDING_ATTACH_TTL_MS = 30_000;
+const MAX_VALIDATION_PATTERN_LENGTH = 256;
+const MAX_VALIDATION_INPUT_LENGTH = 512;
+
+function isLikelySafeValidationPattern(pattern: string): boolean {
+  if (pattern.length > MAX_VALIDATION_PATTERN_LENGTH) {
+    return false;
+  }
+
+  // Disallow lookarounds and backreferences to reduce catastrophic backtracking risk.
+  if (/\(\?<?[=!]/.test(pattern) || /\\[1-9]/.test(pattern)) {
+    return false;
+  }
+
+  // Disallow nested quantified groups like /(a+)+/ style patterns.
+  if (/\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]/.test(pattern)) {
+    return false;
+  }
+
+  return true;
+}
+
+function buildSafeValidationRegex(pattern?: string): RegExp | null {
+  if (!pattern || !isLikelySafeValidationPattern(pattern)) {
+    return null;
+  }
+
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
 
 export interface UseBundleRefreshAttachFlowOptions {
   flow: Pick<
@@ -81,14 +116,7 @@ function buildValidation(step: BundleRefreshStep): ((value: string) => string | 
     return undefined;
   }
 
-  let validationRegex: RegExp | null = null;
-  if (step.validationPattern) {
-    try {
-      validationRegex = new RegExp(step.validationPattern);
-    } catch {
-      validationRegex = null;
-    }
-  }
+  const validationRegex = buildSafeValidationRegex(step.validationPattern);
 
   return (value: string): string | null => {
     const trimmed = value.trim();
@@ -97,6 +125,10 @@ function buildValidation(step: BundleRefreshStep): ((value: string) => string | 
 
     if (required && trimmed.length === 0) {
       return 'This field is required';
+    }
+
+    if (trimmed.length > MAX_VALIDATION_INPUT_LENGTH) {
+      return `Value must be ${MAX_VALIDATION_INPUT_LENGTH} characters or fewer`;
     }
 
     if (validationRegex && trimmed.length > 0 && !validationRegex.test(value)) {
@@ -265,9 +297,37 @@ export function useBundleRefreshAttachFlow(
 ): UseBundleRefreshAttachFlowResult {
   const optionsRef = useRef(options);
   const pendingAttachRef = useRef<PendingAttach | null>(null);
+  const pendingAttachTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptCounterRef = useRef(0);
   const lastHandledAttemptRef = useRef(0);
   const refreshInProgressRef = useRef(false);
+
+  const clearPendingAttach = useCallback((attemptId?: number) => {
+    if (attemptId !== undefined && pendingAttachRef.current?.attemptId !== attemptId) {
+      return;
+    }
+
+    if (pendingAttachTimeoutRef.current) {
+      clearTimeout(pendingAttachTimeoutRef.current);
+      pendingAttachTimeoutRef.current = null;
+    }
+
+    pendingAttachRef.current = null;
+  }, []);
+
+  const schedulePendingAttachExpiry = useCallback((pending: PendingAttach) => {
+    if (pendingAttachTimeoutRef.current) {
+      clearTimeout(pendingAttachTimeoutRef.current);
+    }
+
+    pendingAttachTimeoutRef.current = setTimeout(() => {
+      if (pendingAttachRef.current?.attemptId === pending.attemptId) {
+        lastHandledAttemptRef.current = pending.attemptId;
+        pendingAttachRef.current = null;
+      }
+      pendingAttachTimeoutRef.current = null;
+    }, PENDING_ATTACH_TTL_MS);
+  }, []);
 
   useEffect(() => {
     optionsRef.current = options;
@@ -396,10 +456,10 @@ export function useBundleRefreshAttachFlow(
       } finally {
         lastHandledAttemptRef.current = pending.attemptId;
         refreshInProgressRef.current = false;
-        pendingAttachRef.current = null;
+        clearPendingAttach(pending.attemptId);
       }
     },
-    []
+    [clearPendingAttach]
   );
 
   const executeScriptFailureOverride = useCallback(
@@ -437,10 +497,10 @@ export function useBundleRefreshAttachFlow(
         return false;
       } finally {
         lastHandledAttemptRef.current = pending.attemptId;
-        pendingAttachRef.current = null;
+        clearPendingAttach(pending.attemptId);
       }
     },
-    []
+    [clearPendingAttach]
   );
 
   const attachSessionWithBundleRefresh = useCallback(
@@ -451,7 +511,7 @@ export function useBundleRefreshAttachFlow(
       const currentOptions = optionsRef.current;
 
       if (!params.workspaceId) {
-        pendingAttachRef.current = null;
+        clearPendingAttach();
         await Promise.resolve(currentOptions.attachSession(params));
         return true;
       }
@@ -465,13 +525,13 @@ export function useBundleRefreshAttachFlow(
           currentOptions.resolveProjectName?.(params.workspaceId) ??
           parseProjectNameFromWorkspaceId(params.workspaceId),
         attemptId,
+        createdAt: Date.now(),
       };
       pendingAttachRef.current = pending;
+      schedulePendingAttachExpiry(pending);
 
       try {
         await Promise.resolve(currentOptions.attachSession(params));
-        lastHandledAttemptRef.current = pending.attemptId;
-        pendingAttachRef.current = null;
         return true;
       } catch (error) {
         const code = getErrorCode(error);
@@ -488,11 +548,12 @@ export function useBundleRefreshAttachFlow(
           );
         }
 
-        pendingAttachRef.current = null;
+        lastHandledAttemptRef.current = pending.attemptId;
+        clearPendingAttach(pending.attemptId);
         throw error;
       }
     },
-    [executeBundleRefresh, executeScriptFailureOverride]
+    [clearPendingAttach, executeBundleRefresh, executeScriptFailureOverride, schedulePendingAttachExpiry]
   );
 
   useEffect(() => {
@@ -510,6 +571,12 @@ export function useBundleRefreshAttachFlow(
       return;
     }
 
+    if (Date.now() - pending.createdAt > PENDING_ATTACH_TTL_MS) {
+      lastHandledAttemptRef.current = pending.attemptId;
+      clearPendingAttach(pending.attemptId);
+      return;
+    }
+
     if (commandError.code === 'BUNDLE_REFRESH_REQUIRED') {
       void executeBundleRefresh(pending);
       return;
@@ -517,8 +584,21 @@ export function useBundleRefreshAttachFlow(
 
     if (SCRIPT_FAILURE_CODES.has(commandError.code)) {
       void executeScriptFailureOverride(pending, commandError.message);
+      return;
     }
-  }, [executeBundleRefresh, executeScriptFailureOverride, options.commandError]);
+
+    lastHandledAttemptRef.current = pending.attemptId;
+    clearPendingAttach(pending.attemptId);
+  }, [clearPendingAttach, executeBundleRefresh, executeScriptFailureOverride, options.commandError]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingAttachTimeoutRef.current) {
+        clearTimeout(pendingAttachTimeoutRef.current);
+        pendingAttachTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   return {
     attachSessionWithBundleRefresh,

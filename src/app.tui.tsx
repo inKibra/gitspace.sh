@@ -114,7 +114,7 @@ type WorkspaceFlowState =
   | { type: 'branch-select'; branches: string[]; selectedIndex: number }
   | { type: 'linear-select'; issues: LinearIssue[]; selectedIndex: number }
   | { type: 'manual-name-input'; inputValue: string; error: string | null }
-  | { type: 'manual-branch-input'; workspaceName: string; inputValue: string }
+  | { type: 'manual-branch-input'; workspaceName: string; inputValue: string; error: string | null }
   | { type: 'creating'; workspaceName: string; message?: string };
 
 /** Project flow states - explicit state machine for project creation */
@@ -526,15 +526,6 @@ function App({ relayConfig, onQuit }: AppProps) {
     dispatch({ type: 'SET_PANEL_FOCUS', focus: 'workspaces' });
   }, [requestLocalProjects, requestLocalSessions, requestLocalWorkspaces]);
 
-  // Create new project - show confirmation
-  const handleCreateProject = useCallback(() => {
-    flow.showMessage({
-      title: 'New Project',
-      message: 'Use "gssh add project" from command line to add a new project.',
-      variant: 'info',
-    });
-  }, [flow]);
-
   // Delete project - show typed confirmation
   const handleDeleteProject = useCallback((project: ProjectInfo) => {
     flow.showConfirmTyped({
@@ -826,7 +817,12 @@ function App({ relayConfig, onQuit }: AppProps) {
       return;
     }
     // Advance to branch input step, pre-fill with original input (allows branch names with slashes)
-    setWorkspaceFlow({ type: 'manual-branch-input', workspaceName: sanitizedName, inputValue: trimmedName });
+    setWorkspaceFlow({
+      type: 'manual-branch-input',
+      workspaceName: sanitizedName,
+      inputValue: trimmedName,
+      error: null,
+    });
   }, []);
 
   // Handle manual branch name submission (creates the workspace)
@@ -1120,7 +1116,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   const projectListProps = useProjectList({
     projects: projectInfos,
     onSelect: handleSelectProject,
-    onCreateNew: handleCreateProject,
+    onCreateNew: handleNewProjectFlow,
     onDelete: handleDeleteProject,
     onRefresh: refreshProjects,
   });
@@ -1282,6 +1278,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         setWorkspaceFlow({
           ...workspaceFlow,
           inputValue: workspaceFlow.inputValue + text,
+          error: null,
         });
         event.preventDefault();
         return;
@@ -1570,6 +1567,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           setWorkspaceFlow({
             ...workspaceFlow,
             inputValue: workspaceFlow.inputValue.slice(0, -1),
+            error: null,
           });
         } else {
           const chunk = getKeyboardInputChunk(key);
@@ -1579,6 +1577,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           setWorkspaceFlow({
             ...workspaceFlow,
             inputValue: workspaceFlow.inputValue + chunk,
+            error: null,
           });
         }
         return;
@@ -2184,9 +2183,9 @@ function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
   // - source-select: title + spacer + (options * 2 lines each) + (spacers between) + spacer + hint + border/padding
   // - branch/linear-select: title + items (scrollable) + hint + border/padding
   // - manual-name-input: title + label + input box + error? + hint + border/padding
-  // - manual-branch-input: title + label + input box + workspace display + hint + border/padding
+  // - manual-branch-input: title + label + input box + workspace display + error? + hint + border/padding
   const modalHeight = flow.type === 'manual-name-input' ? 10 :
-                      flow.type === 'manual-branch-input' ? 12 :
+                      flow.type === 'manual-branch-input' ? 13 :
                       flow.type === 'loading' || flow.type === 'creating' ? 6 :
                       flow.type === 'source-select' ? 6 + flow.options.length * 3 :
                       flow.type === 'branch-select' ? Math.min(16, 6 + flow.branches.length) :
@@ -2319,6 +2318,7 @@ function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
               <text fg={COLORS.text} height={1}>{flow.inputValue || ' '}_</text>
             </box>
             <text fg={COLORS.textDim} height={1} marginTop={1}>Workspace: {flow.workspaceName}</text>
+            {flow.error && <text fg={COLORS.error} height={1} marginTop={1}>{flow.error}</text>}
             <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Create  [Esc] Cancel</text>
           </>
         )}

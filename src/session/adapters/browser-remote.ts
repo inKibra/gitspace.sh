@@ -3,6 +3,7 @@ import type {
   RemoteSessionHandshakeAdapter,
   RemoteSessionSocketAdapter,
 } from '../backends/remote-session-backend.js'
+import { SpacesError } from '../../types/errors.js'
 
 const DEFAULT_CONTROL_STREAM_ID = 1
 
@@ -16,7 +17,7 @@ export const browserRemoteSocketAdapter: RemoteSessionSocketAdapter<WebSocket> =
       handlers.onMessage(String(event.data))
     }
     socket.onerror = () => {
-      handlers.onError(new Error('Connection failed'))
+      handlers.onError(new SpacesError('Connection failed', 'SYSTEM_ERROR', 2))
     }
   },
   clearHandlers: (socket) => {
@@ -88,7 +89,11 @@ export function deriveRelayUrlFromBrowserSocket(socket: Pick<WebSocket, 'url'>):
   try {
     parsedUrl = new URL(socket.url)
   } catch {
-    throw new Error(`Unable to derive relay URL from socket URL: ${socket.url}`)
+    throw new SpacesError(
+      `Unable to derive relay URL from socket URL: ${socket.url}`,
+      'SYSTEM_ERROR',
+      2
+    )
   }
   parsedUrl.search = ''
   parsedUrl.hash = ''

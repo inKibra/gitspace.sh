@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MachineInfo } from '../components/MachineList.js';
+import { SpacesError } from '../types/errors.js';
 import {
   RelayMachineDirectoryClient,
   type RelaySigner,
@@ -44,7 +45,7 @@ function toError(error: unknown, fallback: string): Error {
   if (error instanceof Error) {
     return error;
   }
-  return new Error(fallback);
+  return new SpacesError(fallback, 'SYSTEM_ERROR', 2);
 }
 
 export function useMachineDirectory<TSocket, TIdentity, TContext = undefined>(
@@ -116,7 +117,7 @@ export function useMachineDirectory<TSocket, TIdentity, TContext = undefined>(
         },
         onError: (message) => {
           setError(message);
-          onErrorRef.current?.(new Error(message));
+          onErrorRef.current?.(new SpacesError(message, 'SYSTEM_ERROR', 2));
         },
       });
 

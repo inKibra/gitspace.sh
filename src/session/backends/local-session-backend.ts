@@ -625,7 +625,7 @@ export class LocalSessionBackend implements SessionBackend {
     const expectedSessionId = session.id;
     const expectedGeneration = ++this.sessionSocketGeneration;
 
-    await new Promise<void>(async (resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
       const settleResolve = () => {
         if (settled) {
@@ -648,74 +648,76 @@ export class LocalSessionBackend implements SessionBackend {
         settleReject(new Error(`Timed out attaching to session ${session.name}`));
       }, 15000);
 
-      try {
-        const connection = await this.deps.connectSessionSocket(session.socketPath, {
-          onPtyData: (data) => {
-            if (
-              this.sessionSocketGeneration !== expectedGeneration ||
-              this.sessionSocketSessionId !== expectedSessionId
-            ) {
-              return;
-            }
-            this.emitPtyData(data);
-          },
-          onControl: (event) => {
-            if (
-              this.sessionSocketGeneration !== expectedGeneration ||
-              this.sessionSocketSessionId !== expectedSessionId
-            ) {
-              return;
-            }
-            if (event.type === 'attached') {
-              this.attachedSessionId = session.id;
-              this.emit({
-                type: 'attached',
-                sessionId: session.id,
-                sessionName: session.name,
-              });
-              settleResolve();
-              return;
-            }
-            this.handleSessionControl(event, session.id);
-          },
-          onClose: () => {
-            if (
-              this.sessionSocketGeneration !== expectedGeneration ||
-              this.sessionSocketSessionId !== expectedSessionId
-            ) {
-              return;
-            }
-            if (this.closingSessionSocket) {
-              this.closingSessionSocket = false;
-              return;
-            }
+      void (async () => {
+        try {
+          const connection = await this.deps.connectSessionSocket(session.socketPath, {
+            onPtyData: (data) => {
+              if (
+                this.sessionSocketGeneration !== expectedGeneration ||
+                this.sessionSocketSessionId !== expectedSessionId
+              ) {
+                return;
+              }
+              this.emitPtyData(data);
+            },
+            onControl: (event) => {
+              if (
+                this.sessionSocketGeneration !== expectedGeneration ||
+                this.sessionSocketSessionId !== expectedSessionId
+              ) {
+                return;
+              }
+              if (event.type === 'attached') {
+                this.attachedSessionId = session.id;
+                this.emit({
+                  type: 'attached',
+                  sessionId: session.id,
+                  sessionName: session.name,
+                });
+                settleResolve();
+                return;
+              }
+              this.handleSessionControl(event, session.id);
+            },
+            onClose: () => {
+              if (
+                this.sessionSocketGeneration !== expectedGeneration ||
+                this.sessionSocketSessionId !== expectedSessionId
+              ) {
+                return;
+              }
+              if (this.closingSessionSocket) {
+                this.closingSessionSocket = false;
+                return;
+              }
 
-            const hadAttached = this.attachedSessionId !== null;
-            this.sessionSocket = null;
-            this.sessionSocketSessionId = null;
-            this.attachedSessionId = null;
+              const hadAttached = this.attachedSessionId !== null;
+              this.sessionSocket = null;
+              this.sessionSocketSessionId = null;
+              this.attachedSessionId = null;
 
-            if (!settled) {
-              settleReject(new Error(`Local session socket closed: ${session.name}`));
-              return;
-            }
+              if (!settled) {
+                settleReject(new Error(`Local session socket closed: ${session.name}`));
+                return;
+              }
 
-            if (hadAttached) {
-              this.emit({ type: 'detached' });
-            }
-          },
-          onError: (error) => {
-            this.emit({ type: 'error', message: error.message });
-            settleReject(error);
-          },
-        });
+              if (hadAttached) {
+                this.emit({ type: 'detached' });
+              }
+            },
+            onError: (error) => {
+              this.emit({ type: 'error', message: error.message });
+              settleReject(error);
+            },
+          });
 
-        this.sessionSocket = connection;
-        this.sessionSocketSessionId = expectedSessionId;
-        connection.sendControl({ type: 'attach-init', cols, rows, clientType: 'cli' });
-      } catch (error) {
-        settleReject(toError(error, `Failed to connect to session ${session.name}`));
-      }
+          this.sessionSocket = connection;
+          this.sessionSocketSessionId = expectedSessionId;
+          connection.sendControl({ type: 'attach-init', cols, rows, clientType: 'cli' });
+        } catch (error) {
+          settleReject(toError(error, `Failed to connect to session ${session.name}`));
+        }
+      })();
     });
   }
 

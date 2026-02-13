@@ -33,8 +33,10 @@ export class SpacesError extends Error {
       }
     }
 
-    // Maintains proper stack trace for where error was thrown
-    Error.captureStackTrace(this, this.constructor);
+    // Maintains proper stack trace for where error was thrown (Node/V8).
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, this.constructor);
+    }
   }
 }
 

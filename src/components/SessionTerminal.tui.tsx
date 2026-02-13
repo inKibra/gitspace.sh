@@ -36,7 +36,7 @@ function getTerminalSize() {
   }
   return {
     cols: cols > 0 ? cols : 80,
-    rows: (rows > 0 ? rows : 24) - 1,
+    rows: Math.max(1, (rows > 0 ? rows : 24) - 1),
   };
 }
 

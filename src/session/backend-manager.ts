@@ -1,5 +1,6 @@
 import type { SessionBackend, BackendKey } from './backend.js';
 import type { BackendEvent } from './events.js';
+import { SpacesError } from '../types/errors.js';
 
 export interface BackendManagerEvent {
   backendKey: BackendKey;
@@ -50,7 +51,7 @@ export class BackendManager {
   async connect(backendKey: BackendKey): Promise<void> {
     const backend = this.backends.get(backendKey);
     if (!backend) {
-      throw new Error(`Backend not found: ${backendKey}`);
+      throw new SpacesError(`Backend not found: ${backendKey}`, 'SYSTEM_ERROR', 2);
     }
 
     await backend.connect();

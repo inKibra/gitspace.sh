@@ -9,6 +9,8 @@ import {
 } from '../session/index.js';
 import type { NotificationConfig } from '../notifications/types.js';
 import { createBunLocalSessionBackend } from '../app/session/createSessionBackend.bun.js';
+import { logger } from '../utils/logger.js';
+import { SpacesError } from '../types/errors.js';
 
 const LOCAL_BACKEND_KEY: BackendKey = 'local';
 
@@ -17,6 +19,10 @@ type SessionEngineApi = ReturnType<typeof useSessionEngine>;
 type LocalSessionPtyBackend = SessionBackend & {
   setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void;
 };
+
+function createBackendNotFoundError(backendKey: BackendKey): SpacesError {
+  return new SpacesError(`Backend not found: ${backendKey}`, 'SYSTEM_ERROR', 2);
+}
 
 function isBackendNotFoundError(error: unknown, backendKey: BackendKey): boolean {
   if (!(error instanceof Error)) {
@@ -62,7 +68,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[tui] Failed to recover local backend: ${message}`);
+      logger.error(`[tui] Failed to recover local backend: ${message}`);
       return false;
     }
   }, [backendKey]);
@@ -80,7 +86,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     const sessionEngine = engineRef.current;
     if (!backendRef.current) {
       if (strict) {
-        throw new Error(`Backend not found: ${backendKey}`);
+        throw createBackendNotFoundError(backendKey);
       }
       return;
     }
@@ -101,11 +107,11 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
 
     const recovered = await recoverBackend(sessionEngine);
     if (!recovered) {
-      const missingError = new Error(`Backend not found: ${backendKey}`);
+      const missingError = createBackendNotFoundError(backendKey);
       if (strict) {
         throw missingError;
       }
-      console.error(`[tui] ${missingError.message}`);
+      logger.error(`[tui] ${missingError.message}`);
       return;
     }
 
@@ -116,7 +122,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[tui] Failed local backend operation after recovery: ${message}`);
+      logger.error(`[tui] Failed local backend operation after recovery: ${message}`);
     }
   }, [backendKey, enabled, recoverBackend]);
 
@@ -157,7 +163,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
         await sessionEngine.getNotificationConfig(backendKey);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error(`[tui] Local session backend init failed: ${message}`);
+        logger.error(`[tui] Local session backend init failed: ${message}`);
       }
     })();
 
@@ -260,7 +266,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     }, { strict: true });
 
     if (!plan) {
-      throw new Error('Bundle refresh plan unavailable');
+      throw new SpacesError('Bundle refresh plan unavailable', 'SYSTEM_ERROR', 2);
     }
 
     return plan;
@@ -288,7 +294,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
       if (message.includes('No attached local session')) {
         return;
       }
-      console.error(`[tui] Failed to write PTY data: ${message}`);
+      logger.error(`[tui] Failed to write PTY data: ${message}`);
     });
   }, [enabled]);
 
@@ -302,7 +308,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
       if (message.includes('No attached local session')) {
         return;
       }
-      console.error(`[tui] Failed to resize PTY: ${message}`);
+      logger.error(`[tui] Failed to resize PTY: ${message}`);
     });
   }, [enabled]);
 

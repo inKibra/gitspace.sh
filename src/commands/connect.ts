@@ -136,15 +136,16 @@ export async function connectToRemote(
   logger.dim(`Access: ${token.accessType === 'full' ? 'Full access' : 'Session invite'}`);
 
   const terminalSize = getTerminalSize();
-  const attachPromise = waitForBackendEvent(
-    backend,
-    (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-    30000,
-    'attach confirmation'
-  );
+  let attachPromise: Promise<Extract<BackendEvent, { type: 'attached' }>>;
 
   if (token.accessType === 'session-invite' && token.sessionId) {
     logger.dim(`Session: ${token.sessionId}`);
+    attachPromise = waitForBackendEvent(
+      backend,
+      (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+      30000,
+      'attach confirmation'
+    );
     await backend.attachSession({
       sessionId: token.sessionId,
       cols: terminalSize.cols,
@@ -164,6 +165,13 @@ export async function connectToRemote(
       await backend.disconnect();
       return;
     }
+
+    attachPromise = waitForBackendEvent(
+      backend,
+      (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+      30000,
+      'attach confirmation'
+    );
 
     await backend.attachSession({
       workspaceId: workspace.id,
@@ -317,8 +325,14 @@ async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<
         logger.info(message);
       }
       cleanup();
-      await backend.disconnect();
-      resolve();
+      try {
+        await backend.disconnect();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`Failed to disconnect cleanly: ${detail}`);
+      } finally {
+        resolve();
+      }
     };
 
     const unsubEvents = backend.onEvent((event) => {
@@ -416,6 +430,15 @@ async function waitForBackendEvent<TEvent extends BackendEvent>(
         clearTimeout(timeout);
         unsubscribe();
         resolve(event);
+        return;
+      }
+
+      if (event.type === 'command_error') {
+        clearTimeout(timeout);
+        unsubscribe();
+        const message = event.code ? `[${event.code}] ${event.message}` : event.message;
+        reject(new SpacesError(message, 'SYSTEM_ERROR', 2));
+        return;
       }
 
       if (event.type === 'error') {
