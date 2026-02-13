@@ -21,7 +21,7 @@ import { Glob } from "bun";
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync } from "fs";
 
 const ROOT = join(import.meta.dir, "..");
-const WEB_DIST = join(ROOT, "src/web/dist");
+const WEB_DIST = join(ROOT, "web/dist");
 const EMBEDDED_ASSETS_PATH = join(ROOT, "src/relay/embedded-assets.generated.js");
 const VERSION_PATH = join(ROOT, "src/version.generated.ts");
 const DIST_DIR = join(ROOT, "dist");
@@ -70,7 +70,7 @@ export function getEmbeddedFile(_) { return null; }
 async function buildWeb() {
   console.log("📦 Building web app...");
   restoreStub(); // Ensure stub is in place before web build
-  await $`cd ${join(ROOT, "src/web")} && bun install && bun run build`;
+  await $`cd ${join(ROOT, "web")} && bun install && bun run build`;
   console.log("✓ Web app built");
 }
 
@@ -86,7 +86,7 @@ async function generateEmbeddedAssets() {
 
   // Generate imports for each file with { type: "file" } to embed them
   const imports = files.map((file, i) => {
-    return `import file${i} from "../web/dist/${file}" with { type: "file" };`;
+    return `import file${i} from "../../web/dist/${file}" with { type: "file" };`;
   });
 
   // Generate the assets map: URL path -> embedded file reference

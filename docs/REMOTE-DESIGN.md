@@ -293,14 +293,18 @@ Key responsibilities:
 **Role:** User interface, decryption endpoint
 
 ```
-src/web/src/
-├── App.tsx                     # Main application
+web/
+├── index.html                  # Vite entry document
+└── main.tsx                    # Lightweight web entrypoint
+
+src/
+├── app.web.tsx                 # Main web application
 ├── hooks/
-│   ├── useRelayConnection.ts   # WebSocket + machine list
-│   └── useTerminal.ts          # Terminal session management
+│   ├── useRelayConnection.web.ts
+│   └── useTerminal.web.ts
 ├── components/
-│   └── Terminal.tsx            # xterm.js wrapper
-└── lib/crypto/                 # Client-side X3DH + encryption
+│   └── SessionTerminal.web.tsx
+└── session/crypto/             # Client-side X3DH + encryption
 ```
 
 Key responsibilities:
@@ -319,10 +323,11 @@ src/
 ├── commands/connect.ts         # CLI connect command
 ├── tui/
 │   ├── app.tsx                 # TUI application
-│   ├── adapters.ts             # Machine provider adapters
-│   └── hooks/useRemoteMachines.ts
-└── shared/providers/
-    └── RemoteMachineProvider.ts
+│   ├── hooks/useRemoteMachines.ts
+│   └── hooks/useRemoteTerminal.ts
+└── shared/
+    ├── relay/                  # Shared relay directory client/hooks
+    └── session/                # Shared session backends + engine
 ```
 
 ---

@@ -1,57 +1,228 @@
 /**
- * Workspace state tracking utilities
- * Tracks whether setup commands have been run for a workspace
+ * Workspace state tracking utilities.
+ *
+ * State is persisted in workspace-local gitspace.lock (JSON).
  */
 
-import { existsSync, writeFileSync, unlinkSync } from 'fs';
+import { createHash } from 'crypto';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
+import type {
+  ConfirmStep,
+  InputStep,
+  OnboardingStep,
+  SecretStep,
+  SpacesBundle,
+  ConfirmStepResult,
+} from '../types/bundle.js';
 
-/**
- * Marker file name to indicate setup has been completed
- */
 const SETUP_MARKER_FILE = 'gitspace.lock';
 
-/**
- * Check if setup commands have been run for a workspace
- * @param workspacePath Absolute path to the workspace directory
- * @returns true if setup has been run, false otherwise
- */
-export function hasSetupBeenRun(workspacePath: string): boolean {
-  const markerPath = join(workspacePath, SETUP_MARKER_FILE);
-  return existsSync(markerPath);
+export type WorkspaceLockPhaseStatus = 'never' | 'success' | 'failed';
+
+export interface WorkspaceLockConfirmState {
+  status: ConfirmStepResult['status'];
+  fingerprint: string;
 }
 
-/**
- * Mark setup as complete for a workspace
- * Creates a marker file in the workspace directory
- * @param workspacePath Absolute path to the workspace directory
- */
-export function markSetupComplete(workspacePath: string): void {
-  const markerPath = join(workspacePath, SETUP_MARKER_FILE);
+export interface WorkspaceLockSetupState {
+  status: WorkspaceLockPhaseStatus;
+  ranAt?: string;
+  error?: string;
+  inputsUsed: Record<string, string>;
+  inputFingerprints: Record<string, string>;
+  secretFingerprints: Record<string, string>;
+  confirmsUsed: Record<string, WorkspaceLockConfirmState>;
+  usedOptionalSteps: Record<string, true>;
+  setupFingerprint?: string;
+}
+
+export interface WorkspaceLockSelectState {
+  status: WorkspaceLockPhaseStatus;
+  ranAt?: string;
+  error?: string;
+}
+
+export interface WorkspaceLockBundleState {
+  bundleHash: string;
+  stepFingerprints: Record<string, string>;
+}
+
+export interface WorkspaceLockState {
+  version: 1;
+  bundle?: WorkspaceLockBundleState;
+  setup: WorkspaceLockSetupState;
+  select: WorkspaceLockSelectState;
+}
+
+interface BuildSetupStateOptions {
+  bundle?: SpacesBundle;
+  bundleHash?: string;
+  stepFingerprints?: Record<string, string>;
+  bundleValues?: Record<string, string>;
+  bundleSecrets?: Record<string, string>;
+  confirmResults?: Record<string, ConfirmStepResult>;
+}
+
+export function getWorkspaceLockPath(workspacePath: string): string {
+  return join(workspacePath, SETUP_MARKER_FILE);
+}
+
+export function createEmptyWorkspaceLockState(): WorkspaceLockState {
+  return {
+    version: 1,
+    setup: {
+      status: 'never',
+      inputsUsed: {},
+      inputFingerprints: {},
+      secretFingerprints: {},
+      confirmsUsed: {},
+      usedOptionalSteps: {},
+    },
+    select: {
+      status: 'never',
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeSetupState(value: unknown): WorkspaceLockSetupState {
+  const defaults = createEmptyWorkspaceLockState().setup;
+  if (!isRecord(value)) {
+    return defaults;
+  }
+
+  const status = value.status;
+  const normalizedStatus: WorkspaceLockPhaseStatus =
+    status === 'success' || status === 'failed' || status === 'never'
+      ? status
+      : 'never';
+
+  return {
+    status: normalizedStatus,
+    ranAt: typeof value.ranAt === 'string' ? value.ranAt : undefined,
+    error: typeof value.error === 'string' ? value.error : undefined,
+    inputsUsed: isRecord(value.inputsUsed)
+      ? Object.fromEntries(Object.entries(value.inputsUsed).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+      : {},
+    inputFingerprints: isRecord(value.inputFingerprints)
+      ? Object.fromEntries(Object.entries(value.inputFingerprints).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+      : {},
+    secretFingerprints: isRecord(value.secretFingerprints)
+      ? Object.fromEntries(Object.entries(value.secretFingerprints).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+      : {},
+    confirmsUsed: isRecord(value.confirmsUsed)
+      ? Object.fromEntries(
+          Object.entries(value.confirmsUsed)
+            .filter(([, v]) => isRecord(v) && typeof v.fingerprint === 'string' && (v.status === 'passed' || v.status === 'skipped'))
+            .map(([k, v]) => {
+              const item = v as { status: ConfirmStepResult['status']; fingerprint: string };
+              return [k, { status: item.status, fingerprint: item.fingerprint }];
+            })
+        )
+      : {},
+    usedOptionalSteps: isRecord(value.usedOptionalSteps)
+      ? Object.fromEntries(Object.keys(value.usedOptionalSteps).map((key) => [key, true])) as Record<string, true>
+      : {},
+    setupFingerprint: typeof value.setupFingerprint === 'string' ? value.setupFingerprint : undefined,
+  };
+}
+
+function normalizeSelectState(value: unknown): WorkspaceLockSelectState {
+  const defaults = createEmptyWorkspaceLockState().select;
+  if (!isRecord(value)) {
+    return defaults;
+  }
+
+  const status = value.status;
+  const normalizedStatus: WorkspaceLockPhaseStatus =
+    status === 'success' || status === 'failed' || status === 'never'
+      ? status
+      : 'never';
+
+  return {
+    status: normalizedStatus,
+    ranAt: typeof value.ranAt === 'string' ? value.ranAt : undefined,
+    error: typeof value.error === 'string' ? value.error : undefined,
+  };
+}
+
+function normalizeBundleState(value: unknown): WorkspaceLockBundleState | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  if (typeof value.bundleHash !== 'string') {
+    return undefined;
+  }
+
+  const stepFingerprints = isRecord(value.stepFingerprints)
+    ? Object.fromEntries(Object.entries(value.stepFingerprints).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+    : {};
+
+  return {
+    bundleHash: value.bundleHash,
+    stepFingerprints,
+  };
+}
+
+export function readWorkspaceLockState(workspacePath: string): WorkspaceLockState | null {
+  const markerPath = getWorkspaceLockPath(workspacePath);
+  if (!existsSync(markerPath)) {
+    return null;
+  }
 
   try {
-    const timestamp = new Date().toISOString();
-    writeFileSync(
-      markerPath,
-      `Setup completed: ${timestamp}\nThis file indicates that setup commands have been run for this workspace.\n`,
-      'utf-8'
-    );
+    const raw = readFileSync(markerPath, 'utf-8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed) || parsed.version !== 1) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      bundle: normalizeBundleState(parsed.bundle),
+      setup: normalizeSetupState(parsed.setup),
+      select: normalizeSelectState(parsed.select),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeWorkspaceLockState(workspacePath: string, state: WorkspaceLockState): void {
+  const markerPath = getWorkspaceLockPath(workspacePath);
+
+  try {
+    writeFileSync(markerPath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
   } catch (error) {
     throw new SpacesError(
-      `Failed to mark setup complete: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      `Failed to write workspace lock: ${error instanceof Error ? error.message : 'Unknown error'}`,
       'SYSTEM_ERROR',
       2
     );
   }
 }
 
-/**
- * Clear the setup marker for a workspace (for testing)
- * @param workspacePath Absolute path to the workspace directory
- */
+export function hasSetupBeenRun(workspacePath: string): boolean {
+  const state = readWorkspaceLockState(workspacePath);
+  return state?.setup.status === 'success';
+}
+
+export function markSetupComplete(workspacePath: string): void {
+  const state = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
+  state.setup.status = 'success';
+  state.setup.ranAt = new Date().toISOString();
+  state.setup.error = undefined;
+  writeWorkspaceLockState(workspacePath, state);
+}
+
 export function clearSetupMarker(workspacePath: string): void {
-  const markerPath = join(workspacePath, SETUP_MARKER_FILE);
+  const markerPath = getWorkspaceLockPath(workspacePath);
 
   try {
     if (existsSync(markerPath)) {
@@ -60,4 +231,197 @@ export function clearSetupMarker(workspacePath: string): void {
   } catch {
     // Ignore errors - this is just for testing
   }
+}
+
+function deepSortForHash(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => deepSortForHash(item));
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = deepSortForHash(record[key]);
+    }
+    return sorted;
+  }
+
+  return value;
+}
+
+export function fingerprintValue(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+export function getBundleStepKey(step: OnboardingStep): string {
+  if (step.type === 'input' || step.type === 'secret') {
+    return `${step.type}:${step.configKey}`;
+  }
+
+  return `${step.type}:${step.id}`;
+}
+
+function fingerprintInputStep(step: InputStep): string {
+  return createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      type: step.type,
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      required: step.required !== false,
+      configKey: step.configKey,
+      defaultValue: step.defaultValue ?? null,
+      validationPattern: step.validationPattern ?? null,
+      validationMessage: step.validationMessage ?? null,
+    })))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function fingerprintSecretStep(step: SecretStep): string {
+  return createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      type: step.type,
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      required: step.required !== false,
+      configKey: step.configKey,
+      validationPattern: step.validationPattern ?? null,
+      validationMessage: step.validationMessage ?? null,
+    })))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function fingerprintConfirmStep(step: ConfirmStep): string {
+  return createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      type: step.type,
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      required: step.required !== false,
+      checkCommand: step.checkCommand ?? null,
+      installUrl: step.installUrl ?? null,
+      confirmPrompt: step.confirmPrompt ?? null,
+    })))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function fingerprintStep(step: OnboardingStep): string {
+  if (step.type === 'input') {
+    return fingerprintInputStep(step);
+  }
+  if (step.type === 'secret') {
+    return fingerprintSecretStep(step);
+  }
+  if (step.type === 'confirm') {
+    return fingerprintConfirmStep(step);
+  }
+
+  return createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      type: step.type,
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      required: step.required !== false,
+    })))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+export function buildBundleStepFingerprints(bundle: SpacesBundle): Record<string, string> {
+  const steps = bundle.onboarding || [];
+  const fingerprints: Record<string, string> = {};
+
+  for (const step of steps) {
+    fingerprints[getBundleStepKey(step)] = fingerprintStep(step);
+  }
+
+  return fingerprints;
+}
+
+export function buildSetupState(options: BuildSetupStateOptions): WorkspaceLockSetupState {
+  const {
+    bundle,
+    bundleHash,
+    stepFingerprints,
+    bundleValues = {},
+    bundleSecrets = {},
+    confirmResults = {},
+  } = options;
+
+  const steps = bundle?.onboarding || [];
+  const usedOptionalSteps: Record<string, true> = {};
+  const inputFingerprints: Record<string, string> = {};
+  const secretFingerprints: Record<string, string> = {};
+  const confirmsUsed: Record<string, WorkspaceLockConfirmState> = {};
+  const inputsUsed: Record<string, string> = {};
+
+  for (const step of steps) {
+    const key = getBundleStepKey(step);
+    const isOptional = step.required === false;
+
+    if (step.type === 'input') {
+      const value = bundleValues[step.configKey] ?? '';
+      if (value.length > 0) {
+        inputsUsed[step.configKey] = value;
+      }
+      inputFingerprints[step.configKey] = fingerprintValue(value);
+      if (isOptional && value.length > 0) {
+        usedOptionalSteps[key] = true;
+      }
+      continue;
+    }
+
+    if (step.type === 'secret') {
+      const value = bundleSecrets[step.configKey] ?? '';
+      secretFingerprints[step.configKey] = fingerprintValue(value);
+      if (isOptional && value.length > 0) {
+        usedOptionalSteps[key] = true;
+      }
+      continue;
+    }
+
+    if (step.type === 'confirm') {
+      const result = confirmResults[step.id];
+      if (result) {
+        confirmsUsed[key] = {
+          status: result.status,
+          fingerprint: stepFingerprints?.[key] ?? fingerprintStep(step),
+        };
+        if (isOptional) {
+          usedOptionalSteps[key] = true;
+        }
+      }
+    }
+  }
+
+  const setupFingerprint = createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      bundleHash: bundleHash ?? null,
+      stepFingerprints: stepFingerprints ?? {},
+      inputsUsed,
+      inputFingerprints,
+      secretFingerprints,
+      confirmsUsed,
+      usedOptionalSteps,
+    })))
+    .digest('hex')
+    .slice(0, 16);
+
+  return {
+    status: 'success',
+    ranAt: new Date().toISOString(),
+    inputsUsed,
+    inputFingerprints,
+    secretFingerprints,
+    confirmsUsed,
+    usedOptionalSteps,
+    setupFingerprint,
+  };
 }

@@ -378,8 +378,8 @@ git status`} />
           </div>
 
           <h3 className="text-xl font-semibold text-white mb-4">Using Values in Scripts</h3>
-          <JsonBlock code={`echo "Team: $SPACE_VALUE_TEAMNAME"
-echo "Has API key: $SPACE_SECRET_APIKEY"`} />
+          <JsonBlock code={`echo "Team: $TEAMNAME"
+echo "Has API key: $APIKEY"`} />
         </div>
       );
 

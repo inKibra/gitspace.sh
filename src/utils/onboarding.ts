@@ -9,7 +9,7 @@ import { checkCommandExists } from './deps.js';
 import type {
   OnboardingStep,
   OnboardingResult,
-  InfoStep,
+  ConfirmStepResult,
   ConfirmStep,
   SecretStep,
   InputStep,
@@ -19,6 +19,11 @@ import type {
  * Marker value returned when user chooses to keep an existing secret
  */
 export const KEEP_EXISTING_SECRET = '__KEEP_EXISTING_SECRET__';
+
+/**
+ * Marker value returned when an optional confirm step is skipped.
+ */
+const SKIP_OPTIONAL_CONFIRM = '__SKIP_OPTIONAL_CONFIRM__';
 
 /**
  * Options for running onboarding
@@ -42,7 +47,9 @@ export async function runOnboarding(
   options: OnboardingOptions = {}
 ): Promise<OnboardingResult> {
   const result: OnboardingResult = {
-    configValues: {},
+    inputValues: {},
+    secretValues: {},
+    confirmResults: {},
     completed: false,
   };
 
@@ -68,10 +75,17 @@ export async function runOnboarding(
       return result;
     }
 
-    // Store values for secret/input steps
-    if (step.type === 'secret' || step.type === 'input') {
-      const configKey = (step as SecretStep | InputStep).configKey;
-      result.configValues[configKey] = stepResult;
+    // Store values and metadata by step type
+    if (step.type === 'secret') {
+      result.secretValues[step.configKey] = stepResult;
+    } else if (step.type === 'input') {
+      result.inputValues[step.configKey] = stepResult;
+    } else if (step.type === 'confirm') {
+      const confirmResult: ConfirmStepResult = {
+        status: stepResult === SKIP_OPTIONAL_CONFIRM ? 'skipped' : 'passed',
+        checkCommand: step.checkCommand,
+      };
+      result.confirmResults[step.id] = confirmResult;
     }
   }
 
@@ -87,7 +101,7 @@ export async function runOnboarding(
 async function executeStep(step: OnboardingStep, options: OnboardingOptions): Promise<string | null> {
   switch (step.type) {
     case 'info':
-      return executeInfoStep(step);
+      return executeInfoStep();
     case 'confirm':
       return executeConfirmStep(step);
     case 'secret':
@@ -103,7 +117,7 @@ async function executeStep(step: OnboardingStep, options: OnboardingOptions): Pr
 /**
  * Execute info step - just wait for acknowledgment
  */
-async function executeInfoStep(step: InfoStep): Promise<string | null> {
+async function executeInfoStep(): Promise<string | null> {
   const confirmed = await promptConfirm('Press Enter to continue...', true);
   return confirmed ? '' : null;
 }
@@ -141,7 +155,7 @@ async function executeConfirmStep(step: ConfirmStep): Promise<string | null> {
         }
         // Optional step - skip it
         logger.dim('Skipping optional step');
-        return '';
+        return SKIP_OPTIONAL_CONFIRM;
       }
 
       // Re-check if they say yes
@@ -161,7 +175,7 @@ async function executeConfirmStep(step: ConfirmStep): Promise<string | null> {
   if (!confirmed && step.required === false) {
     // Optional step - skip it instead of cancelling
     logger.dim('Skipping optional step');
-    return '';
+    return SKIP_OPTIONAL_CONFIRM;
   }
   return confirmed ? '' : null;
 }

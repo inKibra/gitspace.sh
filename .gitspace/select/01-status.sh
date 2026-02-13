@@ -3,9 +3,8 @@
 #
 # This runs every time you switch to an existing workspace.
 #
-# Bundle values are available as environment variables:
-#   SPACE_VALUE_<KEY> - Regular values from input steps
-#   SPACE_SECRET_<KEY> - Secret values from secret steps
+# Bundle values are available as environment variables using bundle key names.
+# Example: DEVELOPERNAME, EXAMPLEAPITOKEN
 
 WORKSPACE_NAME=$1
 REPOSITORY=$2
@@ -15,14 +14,14 @@ echo "=== Workspace: $WORKSPACE_NAME ==="
 echo ""
 
 # Show bundle values (proof of concept)
-if [ -n "$SPACE_VALUE_DEVELOPERNAME" ]; then
-  echo "Welcome back, $SPACE_VALUE_DEVELOPERNAME!"
+if [ -n "$DEVELOPERNAME" ]; then
+  echo "Welcome back, $DEVELOPERNAME!"
 fi
 
 # Show that we have access to the secret (masked)
-if [ -n "$SPACE_SECRET_EXAMPLEAPITOKEN" ]; then
+if [ -n "$EXAMPLEAPITOKEN" ]; then
   # Only show first 4 characters to prove we have access
-  TOKEN_PREVIEW="${SPACE_SECRET_EXAMPLEAPITOKEN:0:4}..."
+  TOKEN_PREVIEW="${EXAMPLEAPITOKEN:0:4}..."
   echo "API Token available: $TOKEN_PREVIEW (stored in OS keychain)"
 fi
 

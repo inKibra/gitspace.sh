@@ -9,6 +9,51 @@ import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { logger } from './logger.js';
 
+const FAILURE_OUTPUT_TAIL_MAX_LINES = 25;
+const FAILURE_OUTPUT_TAIL_MAX_CHARS = 4000;
+
+function truncateScriptOutputTail(output: string): { tail: string; truncated: boolean } {
+  if (!output) {
+    return { tail: '', truncated: false };
+  }
+
+  const normalized = output.replace(/\r/g, '');
+
+  let tailByChars = normalized;
+  let truncated = false;
+
+  if (tailByChars.length > FAILURE_OUTPUT_TAIL_MAX_CHARS) {
+    tailByChars = tailByChars.slice(-FAILURE_OUTPUT_TAIL_MAX_CHARS);
+    truncated = true;
+  }
+
+  const lines = tailByChars.split('\n');
+  if (lines.length > FAILURE_OUTPUT_TAIL_MAX_LINES) {
+    tailByChars = lines.slice(-FAILURE_OUTPUT_TAIL_MAX_LINES).join('\n');
+    truncated = true;
+  }
+
+  return {
+    tail: tailByChars.trimEnd(),
+    truncated,
+  };
+}
+
+function formatScriptFailureMessage(scriptName: string, code: number | null, output: string): string {
+  const header = `Script failed with exit code ${code}: ${scriptName}`;
+  if (!output.trim()) {
+    return header;
+  }
+
+  const { tail, truncated } = truncateScriptOutputTail(output);
+  if (!tail) {
+    return header;
+  }
+
+  const intro = truncated ? 'Last output (truncated):' : 'Last output:';
+  return `${header}\n\n${intro}\n${tail}`;
+}
+
 /**
  * Discover executable scripts in a directory
  * Returns scripts sorted alphabetically for predictable execution order
@@ -49,9 +94,9 @@ export function discoverScripts(scriptsDir: string): string[] {
  * Options for running scripts
  */
 export interface RunScriptsOptions {
-  /** Bundle values to pass as SPACE_VALUE_* environment variables */
+  /** Bundle values to pass as environment variables */
   bundleValues?: Record<string, string>;
-  /** Secret values to pass as SPACE_SECRET_* environment variables */
+  /** Secret values to pass as environment variables */
   bundleSecrets?: Record<string, string>;
   /**
    * Run scripts in non-interactive mode (for daemon/remote contexts).
@@ -67,13 +112,33 @@ export interface RunScriptsOptions {
   onOutput?: (data: Buffer) => void;
 }
 
+function normalizeEnvKey(key: string): string {
+  return key.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+}
+
+function setCompatibilityAliases(
+  env: Record<string, string>,
+  key: string,
+  value: string,
+  prefix: 'SPACE_VALUE_' | 'SPACE_SECRET_'
+): void {
+  const normalizedKey = normalizeEnvKey(key);
+
+  // Legacy namespaced key for backwards compatibility.
+  env[`${prefix}${normalizedKey}`] = value;
+
+  // Uppercase normalized alias for shell-friendly access when key contains
+  // non-shell characters (for example, api-key -> API_KEY).
+  env[normalizedKey] = value;
+}
+
 /**
  * Run scripts in the current terminal
  * Used for pre-scripts that run before tmux session
  *
  * Bundle values are passed as environment variables:
- * - SPACE_VALUE_<KEY> for regular values (key is uppercased)
- * - SPACE_SECRET_<KEY> for secret values (key is uppercased)
+ * - <KEY> using the exact bundle config key name
+ * - Backward-compatible aliases: SPACE_VALUE_<KEY>, SPACE_SECRET_<KEY>, and normalized <KEY>
  */
 export async function runScriptsInTerminal(
   scriptsDir: string,
@@ -95,19 +160,19 @@ export async function runScriptsInTerminal(
   // Build environment variables from bundle values
   const scriptEnv: Record<string, string> = { ...process.env } as Record<string, string>;
 
-  // Add bundle values as SPACE_VALUE_<KEY>
+  // Add bundle values using configured key names.
   if (options?.bundleValues) {
     for (const [key, value] of Object.entries(options.bundleValues)) {
-      const envKey = `SPACE_VALUE_${key.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-      scriptEnv[envKey] = value;
+      scriptEnv[key] = value;
+      setCompatibilityAliases(scriptEnv, key, value, 'SPACE_VALUE_');
     }
   }
 
-  // Add bundle secrets as SPACE_SECRET_<KEY>
+  // Add bundle secrets using configured key names.
   if (options?.bundleSecrets) {
     for (const [key, value] of Object.entries(options.bundleSecrets)) {
-      const envKey = `SPACE_SECRET_${key.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-      scriptEnv[envKey] = value;
+      scriptEnv[key] = value;
+      setCompatibilityAliases(scriptEnv, key, value, 'SPACE_SECRET_');
     }
   }
 
@@ -151,7 +216,7 @@ export async function runScriptsInTerminal(
           }
           reject(
             new SpacesError(
-              `Script failed with exit code ${code}: ${scriptName}`,
+              formatScriptFailureMessage(scriptName, code, output),
               'SYSTEM_ERROR',
               2
             )
@@ -175,4 +240,3 @@ export async function runScriptsInTerminal(
 
   logger.success(`${phaseName} scripts completed`);
 }
-

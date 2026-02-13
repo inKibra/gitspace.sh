@@ -96,17 +96,41 @@ export interface GlobalConfig {
 }
 
 /**
- * Information about an applied bundle
+ * Persisted per-workspace bundle metadata.
  */
-export interface AppliedBundle {
-  /** Bundle name */
-  name: string;
-  /** Bundle version */
-  version: string;
-  /** Source of the bundle (path or URL) */
-  source: string;
-  /** ISO timestamp when bundle was applied */
-  appliedAt: string;
+export interface WorkspaceBundleState {
+  /** Key used for this scope (workspace name or "__base__") */
+  scope: string;
+  /** Hash of the bundle that was last processed for this scope */
+  bundleHash: string;
+  /** Input config keys required by this workspace bundle */
+  requiredInputKeys: string[];
+  /** Secret config keys required by this workspace bundle */
+  requiredSecretKeys: string[];
+  /** Confirm-step fingerprints currently referenced by this workspace bundle */
+  confirmFingerprints: string[];
+  /** ISO timestamp when this state was last updated */
+  updatedAt: string;
+}
+
+/**
+ * Persisted history for a confirm/check step.
+ */
+export interface BundleConfirmHistoryEntry {
+  /** Fingerprint hash of the confirm step definition */
+  fingerprint: string;
+  /** Step id from bundle.json */
+  stepId: string;
+  /** checkCommand value, if present */
+  checkCommand?: string;
+  /** Last known status */
+  status: 'passed' | 'skipped';
+  /** Scope that last evaluated this step */
+  scope: string;
+  /** Bundle hash that produced this history entry */
+  bundleHash: string;
+  /** ISO timestamp when this was checked */
+  checkedAt: string;
 }
 
 /**
@@ -139,10 +163,10 @@ export interface ProjectConfig {
   bundleValues?: Record<string, string>;
   /** Keys of secrets stored in OS keychain via Bun.secrets (from secret steps) */
   bundleSecretKeys?: string[];
-  /** Information about the bundle that was applied */
-  appliedBundle?: AppliedBundle;
-  /** Hash of the applied bundle for change detection */
-  appliedBundleHash?: string;
+  /** Per-workspace bundle metadata keyed by workspace scope */
+  bundleWorkspaceState?: Record<string, WorkspaceBundleState>;
+  /** History of confirm/check steps keyed by step fingerprint */
+  bundleConfirmHistory?: Record<string, BundleConfirmHistoryEntry>;
 }
 
 /**

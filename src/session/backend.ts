@@ -1,0 +1,65 @@
+import type { NotificationConfig } from '../notifications/types.js';
+import type { BackendEvent } from './events.js';
+import type {
+  BundleRefreshPlan,
+  BundleRefreshSubmission,
+} from '../types/bundle-refresh.js';
+
+export type BackendKey = string;
+export type BackendKind = 'local' | 'remote';
+
+export interface BackendDescriptor {
+  key: BackendKey;
+  kind: BackendKind;
+  label: string;
+  machineId?: string;
+  relayUrl?: string;
+}
+
+export interface AttachSessionParams {
+  sessionId?: string;
+  workspaceId?: string;
+  sessionName?: string;
+  cols?: number;
+  rows?: number;
+  scriptPolicy?: 'auto' | 'skip';
+}
+
+/**
+ * Canonical backend contract used by shared session engine.
+ */
+export interface SessionBackend {
+  readonly descriptor: BackendDescriptor;
+
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+
+  listProjects(): Promise<void>;
+  listWorkspaces(): Promise<void>;
+  listSessions(workspaceId?: string): Promise<void>;
+
+  attachSession(params: AttachSessionParams): Promise<void>;
+  detachSession(): Promise<void>;
+
+  killSession(sessionId: string): Promise<void>;
+  deleteWorkspace(projectName: string, workspaceId: string): Promise<void>;
+
+  getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan>;
+  applyBundleRefresh(
+    projectName: string,
+    workspaceId: string,
+    submission: BundleRefreshSubmission
+  ): Promise<void>;
+
+  requestInbox(): Promise<void>;
+  clearInbox(id?: string): Promise<void>;
+  markInboxRead(id: string): Promise<void>;
+
+  getNotificationConfig(): Promise<void>;
+  updateNotificationConfig(config: NotificationConfig): Promise<void>;
+
+  writePtyData?(data: Uint8Array): Promise<void>;
+  resizePty?(cols: number, rows: number): Promise<void>;
+
+  onEvent(handler: (event: BackendEvent) => void): () => void;
+}

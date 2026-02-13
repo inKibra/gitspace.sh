@@ -118,11 +118,11 @@ A bundle is a directory (typically `.gitspace/`) containing:
 .gitspace/
 ├── bundle.json           # Bundle manifest with onboarding steps
 └── scripts/
-    ├── pre/              # Scripts to run before setup
+    ├── pre/              # Deprecated: migrate scripts into ordered setup/
     │   └── 01-copy-env.sh
-    ├── setup/            # Scripts to run on first workspace creation
+    ├── setup/            # Scripts for setup runs (when bundle/value state changes)
     │   └── 01-install-deps.sh
-    ├── select/           # Scripts to run every time workspace is opened
+    ├── select/           # Scripts to run on each new terminal attach
     │   └── 01-status.sh
     └── remove/           # Scripts to run before workspace deletion
         └── 01-cleanup.sh
@@ -180,10 +180,10 @@ A bundle is a directory (typically `.gitspace/`) containing:
 
 ### Using Bundle Values in Scripts
 
-Bundle values are passed to scripts as environment variables:
+Bundle values are passed to scripts as environment variables using the configured bundle keys:
 
-- `SPACE_VALUE_<KEY>` - Regular values from input steps
-- `SPACE_SECRET_<KEY>` - Secret values from secret steps (fetched from OS keychain)
+- `<KEY>` - Regular or secret value using the exact `configKey` from `bundle.json`
+- Legacy aliases `SPACE_VALUE_<KEY>` / `SPACE_SECRET_<KEY>` are also provided for compatibility
 
 **Example script:**
 
@@ -195,12 +195,12 @@ WORKSPACE_NAME=$1
 REPOSITORY=$2
 
 # Access bundle values
-if [ -n "$SPACE_VALUE_TEAMNAME" ]; then
-  echo "Welcome, $SPACE_VALUE_TEAMNAME team!"
+if [ -n "$TEAMNAME" ]; then
+  echo "Welcome, $TEAMNAME team!"
 fi
 
 # Access secrets (stored securely in OS keychain)
-if [ -n "$SPACE_SECRET_APIKEY" ]; then
+if [ -n "$APIKEY" ]; then
   echo "API Key configured"
 fi
 ```
@@ -363,9 +363,9 @@ inside each workspace so they can vary by branch:
 ```
 ~/gitspace/<project-name>/workspaces/<workspace-name>/.gitspace/
 └── scripts/
-    ├── pre/       # Run before setup (terminal)
-    ├── setup/     # Run once on workspace creation
-    ├── select/    # Run every time workspace is opened
+    ├── pre/       # Deprecated: run before setup (migrate to setup/)
+    ├── setup/     # Run when setup state requires refresh
+    ├── select/    # Run on each new terminal attach
     └── remove/    # Run before workspace deletion
 ```
 
@@ -375,15 +375,15 @@ inside each workspace so they can vary by branch:
 2. Scripts run **alphabetically** (use `01-`, `02-` prefixes)
 3. **Working directory**: The workspace directory
 4. **Arguments**: `$1` = workspace name, `$2` = repository name
-5. **Environment**: Bundle values available as `SPACE_VALUE_*` and `SPACE_SECRET_*`
+5. **Environment**: Bundle values available by key name (for example `REGION`, `PULUMI_ACCESS_TOKEN`)
 
 #### Script Phases
 
 | Phase | When | Use Case |
 |-------|------|----------|
-| `pre/` | Once, before setup | Copy .env files, create directories |
-| `setup/` | Once, on workspace creation | Install dependencies, initial build |
-| `select/` | Every workspace open | Git fetch, status checks |
+| `pre/` | Deprecated | Move scripts into ordered `setup/` files |
+| `setup/` | When setup state changes | Install dependencies, initial build |
+| `select/` | Every new terminal attach | Git fetch, status checks |
 | `remove/` | Before deletion | Cleanup, notifications |
 
 ### Environment Variables
@@ -393,8 +393,9 @@ inside each workspace so they can vary by branch:
 export SPACES_CURRENT_PROJECT="my-app"
 
 # Available in scripts (from bundle onboarding):
-# SPACE_VALUE_<KEY>    - Regular values
-# SPACE_SECRET_<KEY>   - Secret values (from OS keychain)
+# <KEY>                - Value by bundle config key name
+# SPACE_VALUE_<KEY>    - Legacy alias for regular values
+# SPACE_SECRET_<KEY>   - Legacy alias for secret values
 ```
 
 ## Directory Structure
@@ -592,7 +593,7 @@ Error: GitHub CLI is not authenticated
 
 ### Bundle secrets not available
 
-If `SPACE_SECRET_*` variables are empty, ensure:
+If expected bundle key environment variables are empty, ensure:
 1. You completed the onboarding secret steps
 2. Your OS keychain service is running (libsecret on Linux, Keychain on macOS)
 

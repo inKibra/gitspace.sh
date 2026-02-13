@@ -1,292 +1,138 @@
-# Unified TUI/Web Architecture Plan
+# Unified Architecture
 
-> **Implementation Status: ~90% Complete**
->
-> | Phase | Description | Status |
-> |-------|-------------|--------|
-> | 0 | Simplify access model | ✅ Complete |
-> | 1 | Web PIN encryption | ❌ Not started (optional security feature) |
-> | 2 | Shared component foundation | ✅ Complete |
-> | 3 | Extract SpacesBrowser | ✅ Complete |
-> | 4 | Port SpacesBrowser to TUI | ✅ Complete |
-> | 5 | MachineList component | ✅ Complete |
-> | 6 | TUI relay connection | ✅ Complete |
-> | 7 | TUI terminal with Ghostty | ✅ Complete |
-> | 8 | Inbox & Flows | ✅ Complete |
-> | 9 | Daemon management | ✅ Complete |
+This document describes the canonical shared architecture for CLI/TUI/Web state and session handling.
 
----
+## Status
+
+Implementation is now centered on a shared session engine and backend adapters.
+
+- Completed:
+  - Shared component logic/renderer split (`*.tsx`, `*.web.tsx`, `*.tui.tsx`)
+  - Shared workspace/project lifecycle orchestration (`core/workspace-lifecycle.ts`, `core/project-lifecycle.ts`)
+  - Shared relay machine-directory client (`src/relay-client/machine-directory-client.ts`)
+  - Shared relay machine-directory hook (`src/relay-client/useMachineDirectory.ts`) used by web+tui wrappers
+  - Shared session engine foundation (`src/session/*`)
+  - Shared remote/local backend adapters (`src/session/backends/*`)
+  - Shared remote session hook (`src/session/useRemoteSessionClient.ts`) used by web+tui wrappers
+  - Web remote terminal flow migrated to shared session backend
+  - TUI remote machine screen migrated to shared remote backend + remote terminal transport
+  - TUI local projects/workspaces/sessions/inbox state now sourced from shared local backend via `useLocalSession`
+  - TUI local terminal attach/detach/PTY lifecycle is now backend-driven via `LocalSessionBackend`
+  - TUI project/workspace panels now consume shared local backend state directly (legacy sync bridge removed)
+  - Legacy TUI-only state/adapter modules removed (`tui/state.ts`, `tui/adapters.ts`, `tui/hooks/useInboxTUI.ts`)
+  - Shared project catalog service (`core/project-catalog.ts`) used by CLI list + local backend + remote session handler
 
 ## Goals
 
-1. **Feature parity** between TUI and web interfaces
-2. **Shared logic** - write business logic once, render for each platform
-3. **Remote machine support** in TUI - treat local machine as just another machine
-4. **Unified hierarchy**: Machines → Projects → Workspaces → Sessions
+1. Shared core behavior across platforms.
+2. Platform differences isolated to renderer/input/transport adapters.
+3. Remote and local machines represented through the same backend contract.
 
-## Current State
+## Canonical Model
 
-### TUI (`src/tui/`)
-- OpenTUI (React-like API for terminal)
-- `state.ts` - reducer-based state management
-- `app.tsx` - 2200+ line monolithic component with:
-  - Project list panel
-  - Workspace tree panel (expandable sessions)
-  - Inbox system (notifications from tmux-lite)
-  - Flow states for modals (help, confirm-delete, new-project, new-workspace, etc.)
-  - Local-only operation
+### 1) Session Engine (Shared)
 
-### Web (`src/web/src/`)
-- React + Vite
-- `hooks/useRelayConnection.ts` - WebSocket to relay, machine list
-- `hooks/useTerminal.ts` - terminal session management
-- `components/MachineList.tsx` - machine selection
-- `components/SpacesBrowser.tsx` - workspace/session browser
-- Remote-only operation (no local support)
+`src/session/`
 
-## Architecture Pattern
+- `types.ts`: canonical backend/session state
+- `events.ts`: normalized backend event contract
+- `reducer.ts`: deterministic state transitions
+- `backend-manager.ts`: backend registration + event routing
+- `useSessionEngine.ts`: React hook API for platform UIs
+- `useRemoteSessionClient.ts`: shared remote terminal/session orchestration hook used by platform wrappers
 
-### File Structure
-```
-src/shared/components/
-├── MachineList.tsx          # Logic + hooks
-├── MachineList.web.tsx      # Web rendering
-├── MachineList.tui.tsx      # TUI rendering
-├── SpacesBrowser.tsx        # Logic + hooks
-├── SpacesBrowser.web.tsx    # Web rendering
-├── SpacesBrowser.tui.tsx    # TUI rendering
-├── Inbox.tsx                # Logic + hooks
-├── Inbox.web.tsx            # Web rendering
-├── Inbox.tui.tsx            # TUI rendering
-└── types.ts                 # Shared types
-```
+Key state shape:
 
-### Component Pattern
+- Backends keyed by descriptor (`local`, `remote:<relay>:<machine>`)
+- Per-backend status, projects, workspaces, sessions, inbox, notification config, attach/script runtime state
+- Active backend selection for UI focus
 
-Each component has three files:
+### 2) Backend Contract (Shared)
 
-**1. Logic file (`Component.tsx`)**
-- Contains React hooks (works in both OpenTUI and React)
-- Pure TypeScript logic (no JSX rendering)
-- Exports `useComponent()` hook returning state + actions
-- Exports shared types
+`src/session/backend.ts`
 
-**2. Web renderer (`Component.web.tsx`)**
-- React JSX only
-- Imports and uses the hook from logic file
-- Web-specific event handling (click, DOM events)
+All local/remote machine operations are expressed through `SessionBackend`:
 
-**3. TUI renderer (`Component.tui.tsx`)**
-- OpenTUI JSX only
-- Imports and uses the hook from logic file
-- TUI-specific rendering (box, text, select elements)
+- connect/disconnect
+- list projects/workspaces/sessions
+- attach/detach/kill/delete
+- inbox read/clear/fetch
+- notification config get/update
+- PTY write/resize (optional)
+- event subscription
 
-## Hierarchy: Machines → Projects → Workspaces → Sessions
+### 3) Backend Implementations
 
-### Unified Flow
-```
-Launch → Machines → [Select Machine] → Projects → [Select Project] → Workspaces → [Expand] → Sessions → [Attach] → Terminal/Shell
-```
+#### Remote backend
 
-Where "Local" is just another machine in the list.
+`src/session/backends/remote-session-backend.ts`
 
-## Access Model (Simplified)
+- Owns relay handshake lifecycle (X3DH adapters)
+- Owns encrypted frame encode/decode adapters
+- Speaks canonical remote-session protocol (`list_*`, `attach_session`, inbox/config/script-output, etc.)
+- Emits normalized backend events
 
-Only two access levels:
+#### Local backend
 
-### 1. Full Access
-- Granted via `gssh access add <public-key>`
-- Can browse all projects, workspaces, sessions
-- Can create/attach/kill sessions
-- Can perform all operations on the machine
-- Identity is stored in machine's access list
+`src/session/backends/local-session-backend.ts`
 
-### 2. Session Invite (View-Only)
-- One-time link to view a specific session
-- Cannot browse projects/workspaces
-- Cannot interact with terminal (read-only)
-- Useful for: pair programming demos, showing progress, debugging help
+- Wraps local tmux/config/workspace lifecycle operations
+- Maps local operations to the same backend event model as remote
 
-**Removed:** Per-project and per-workspace permission levels (read/write/manage). These add complexity without real enforceability - if someone can connect to your machine, granular permissions are hard to enforce meaningfully.
+## Platform Integration
 
-### Current Code to Simplify
+### Web
 
-The `AccessPermissions` type in `src/types/identity.ts` currently has:
-```typescript
-interface AccessPermissions {
-  read: boolean;
-  write: boolean;
-  manage: boolean;
-}
-```
+- Relay directory: `src/hooks/useRelayConnection.web.ts`
+- Terminal/session: `src/hooks/useTerminal.web.ts`
 
-**Simplify to:**
-```typescript
-type AccessType = 'full' | 'session-invite';
+`useRelayConnection` and `useTerminal` are now thin adapters over shared relay/session hooks.
 
-interface AccessEntry {
-  identityId: string;
-  signingPublicKey: string;
-  keyExchangePublicKey: string;
-  label?: string;
-  grantedAt: number;
-  accessType: AccessType;
-  // For session invites only:
-  sessionId?: string;
-  expiresAt?: number;
-}
-```
+### TUI
 
-**Files affected by simplification:**
-- `src/types/identity.ts` - Remove AccessPermissions, simplify to AccessType
-- `src/lib/tmux-lite/crypto/access-control.ts` - Remove permission checks
-- `src/core/access.ts` - Simplify addAccess, remove formatPermissions
-- `src/commands/access.ts` - Remove permission flags
-- `src/web/src/components/MachineList.tsx` - Remove permission badges
-- `src/web/src/hooks/useRelayConnection.ts` - Simplify MachineInfo type
-- `src/relay/server.ts` - Remove permission-based routing
-- `src/serve/client-session-manager.ts` - Remove permission checks
+- Relay directory: `src/hooks/useRemoteMachines.tui.ts`
+- Remote terminal/session: `src/hooks/useRemoteTerminal.tui.ts`
+- Remote attached renderer: `src/components/SessionTerminal.tui.tsx`
+- Remote machine screen: `src/components/RemoteMachineScreen.tui.tsx`
 
-## Key Implementation Decisions
+Current TUI state split:
 
-### 1. Terminal Handling (TUI)
+- Remote machine path uses shared remote backend.
+- Local machine path uses shared local backend for projects/workspaces/sessions/inbox and terminal attach lifecycle.
+- Project/workspace panel rendering reads backend state directly; local reducer now tracks only UI view/focus/loading/error state.
 
-Use **ghostty-opentui** (`github.com/remorses/ghostty-opentui`) for both:
-- **Local sessions**: Connect directly to tmux-lite
-- **Remote sessions**: Connect through relay with encryption
+### CLI
 
-### 2. TUI Relay Connection
+- Project listing now shares project catalog logic through `src/core/project-catalog.ts`.
+- Remote connect now uses shared remote backend adapters (`RemoteSessionBackend` + node adapters), matching TUI/Web session protocol flow.
 
-TUI can be started with flags to connect to a relay:
+## Data Flow
 
-```bash
-# Connect to relay
-gssh --relay wss://relay.example.com
+1. Platform creates backend(s) with descriptor + transport/crypto/handshake adapters.
+2. Backend registers with `useSessionEngine`.
+3. UI calls engine actions (`listWorkspaces`, `attachSession`, `requestInbox`, etc.).
+4. Backend emits canonical events.
+5. Engine reducer updates state.
+6. Renderer consumes normalized state.
 
-# Or just start TUI locally (default)
-gssh
-```
+## Testing
 
-### 3. Key Storage & Encryption
+Added/updated tests around the shared architecture:
 
-**TUI (Bun)**:
-- Use Bun's native keychain access
-- Store signing key and key exchange key in system keychain
+- `src/session/__tests__/reducer.test.ts`
+- `src/session/__tests__/backend-manager.test.ts`
+- `src/session/__tests__/remote-session-backend.test.ts`
+- `src/session/__tests__/local-session-backend.test.ts`
+- `src/hooks/__tests__/useLocalSession.tui.test.ts`
+- `src/tui/__tests__/local-terminal-sync.test.ts`
 
-**Web (Browser)**:
-- Store keys in localStorage, **encrypted with user-defined PIN**
-- Use PBKDF2 to derive encryption key from PIN
-- Encrypt with AES-GCM
+## Final Migration Target
 
-## Implementation Phases
+When migration is complete:
 
-### Phase 0: Simplify Access Model ✅
-- [x] Replace `AccessPermissions` with `AccessType` enum ('full' | 'session-invite')
-- [x] Update `AccessEntry` type in `src/types/identity.ts`
-- [x] Permission helpers in `src/serve/types.ts`: `canWrite()`, `canManage()`, `canAttachSession()`
-- [x] Update handshake to use simplified access
-- [x] Update all permission checks to just check access type
-
-### Phase 1: Web PIN Encryption ❌
-- [ ] Add PIN setup flow to web auth
-- [ ] Encrypt identity keys with PIN in localStorage
-- [ ] Add PIN unlock on app load
-- [ ] Create `src/shared/crypto/pin-encryption.ts`
-
-### Phase 2: Shared Component Foundation ✅
-- [x] Create `src/shared/` directory structure
-- [x] Define `MachineProvider` interface in `src/shared/providers/MachineProvider.ts`
-- [x] Create `LocalMachineProvider` in `src/shared/providers/LocalMachineProvider.ts`
-- [x] Create `RemoteMachineProvider` in `src/shared/providers/RemoteMachineProvider.ts`
-- [x] Create shared types in `src/shared/types.ts`
-
-### Phase 3: Extract SpacesBrowser ✅
-- [x] Extract `SpacesBrowser.tsx` logic from web component
-- [x] Create `SpacesBrowser.web.tsx` using the hook
-
-### Phase 4: Port SpacesBrowser to TUI ✅
-- [x] Create `SpacesBrowser.tui.tsx`
-- [x] Integrate into existing TUI app.tsx
-
-### Phase 5: MachineList Component ✅
-- [x] Create `MachineList.tsx` logic
-- [x] Create web and TUI renderers
-- [x] Add "Local" as first machine in TUI
-
-### Phase 6: TUI Relay Connection ✅
-- [x] Add `--relay` CLI flag
-- [x] Add relay WebSocket connection to TUI
-- [x] Create `RemoteMachineProvider` for TUI
-- [x] `useRemoteMachines` hook in `src/tui/hooks/`
-
-### Phase 7: TUI Terminal with Ghostty ✅ Complete
-- [x] Add ghostty-opentui dependency
-- [x] Integrate into Terminal component for local sessions
-- [x] Handle remote stream with ghostty
-- [x] Persistent terminal mode with proper cleanup
-
-### Phase 8: Inbox & Flows ✅
-- [x] Extract inbox logic to shared component (`Inbox.tsx`, `Inbox.web.tsx`, `Inbox.tui.tsx`)
-- [x] Create Flow component (`Flow.tsx`, `Flow.web.tsx`, `Flow.tui.tsx`)
-- [x] TUI inbox via `useInboxTUI` hook
-
-## File Structure
-
-```
-src/shared/
-├── components/
-│   ├── MachineList.tsx
-│   ├── MachineList.web.tsx
-│   ├── MachineList.tui.tsx
-│   ├── SpacesBrowser.tsx
-│   ├── SpacesBrowser.web.tsx
-│   ├── SpacesBrowser.tui.tsx
-│   ├── Inbox.tsx
-│   ├── Inbox.web.tsx
-│   ├── Inbox.tui.tsx
-│   └── types.ts
-├── providers/
-│   ├── MachineProvider.ts       # Interface
-│   ├── LocalMachineProvider.ts  # Filesystem + tmux-lite
-│   └── RemoteMachineProvider.ts # Relay + encryption
-├── crypto/
-│   └── pin-encryption.ts        # Web PIN-based key encryption
-└── hooks/
-    ├── useNavigation.ts
-    └── useMachineConnection.ts
-```
-
-## Dependencies
-
-```json
-{
-  "ghostty-opentui": "^x.x.x"   // TUI terminal rendering
-}
-```
-
-Note: Keychain access via Bun native API (no additional deps needed).
-
----
-
-## Recent Additions (2025-01)
-
-### Phase 9: Daemon Management ✅
-
-Added daemon lifecycle management for `gssh serve`:
-
-- [x] PID file management (`~/gitspace/.serve/serve.pid`)
-- [x] Unix socket status server (`~/gitspace/.serve/serve.sock`)
-- [x] `gssh serve start` - background daemon
-- [x] `gssh serve stop` - graceful shutdown
-- [x] `gssh status` - query all daemons
-- [x] Access command forwarding to running daemon
-- [x] `useDaemonStatus` hook in TUI
-
-**Files:**
-- `src/serve/daemon.ts` - Daemon lifecycle
-- `src/commands/status.ts` - Status CLI
-- `src/tui/hooks/useDaemonStatus.ts` - TUI integration
-
----
-
-*Last updated: 2025-01*
+- TUI and Web both run entirely on shared session engine state.
+- Local and remote use the same backend contract.
+- Platform-specific code is limited to:
+  - renderers (`*.web.tsx`, `*.tui.tsx`)
+  - UI input handling
+  - transport/crypto adapter wiring.

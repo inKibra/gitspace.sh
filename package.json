@@ -10,7 +10,7 @@
     "dev": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
-    "build:web": "cd src/web && bun install && bun run build",
+    "build:web": "cd web && bun install && bun run build",
     "build": "bun scripts/build.ts",
     "build:all": "bun scripts/build.ts --all",
     "build:npm": "bun scripts/build.ts --npm",

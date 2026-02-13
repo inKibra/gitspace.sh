@@ -14,7 +14,6 @@ import {
   getCurrentProject,
   getAllProjectNames,
   projectExists,
-  updateProjectConfig,
 } from '../core/config.js';
 import { checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
@@ -41,8 +40,6 @@ import {
   WorkspaceExistsError,
 } from '../types/errors.js';
 import type { CreateWorkspaceOptions } from '../types/workspace.js';
-import { runScriptsInTerminal } from '../utils/run-scripts.js';
-import { hasSetupBeenRun } from '../utils/workspace-state.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import {
   detectBundleInRepo,
@@ -50,9 +47,11 @@ import {
   loadBundleFromUrl,
   cleanupBundleDir,
 } from '../core/bundle.js';
-import { checkAndRefreshBundle, hashBundle } from '../core/bundle-refresh.js';
-import { runOnboarding } from '../utils/onboarding.js';
-import { preloadProjectSecrets } from '../utils/secrets.js';
+import {
+  syncBundleWorkspaceState,
+} from '../core/bundle-refresh.js';
+import { KEEP_EXISTING_SECRET, runOnboarding } from '../utils/onboarding.js';
+import { applyProjectBundleState } from '../core/project-lifecycle.js';
 import type { LoadedBundle, OnboardingResult } from '../types/bundle.js';
 
 /**
@@ -186,24 +185,25 @@ export async function addProject(options: {
 
   // Store bundle info if bundle was loaded (scripts are read from workspace .gitspace/scripts/)
   if (loadedBundle) {
-    // Store bundle values and info in project config
-    const configUpdates: Record<string, unknown> = {};
+    if (onboardingResult?.completed) {
+      const secretValues = Object.fromEntries(
+        Object.entries(onboardingResult.secretValues)
+          .filter(([, value]) => value && value !== KEEP_EXISTING_SECRET)
+      );
 
-    if (onboardingResult?.completed && Object.keys(onboardingResult.configValues).length > 0) {
-      configUpdates.bundleValues = onboardingResult.configValues;
+      await applyProjectBundleState({
+        projectName,
+        bundle: loadedBundle.bundle,
+        inputValues: onboardingResult.inputValues,
+        secretValues,
+        confirmResults: onboardingResult.confirmResults,
+      });
+    } else {
+      await applyProjectBundleState({
+        projectName,
+        bundle: loadedBundle.bundle,
+      });
     }
-
-    configUpdates.appliedBundle = {
-      name: loadedBundle.bundle.name,
-      version: loadedBundle.bundle.version,
-      source: loadedBundle.source,
-      appliedAt: new Date().toISOString(),
-    };
-
-    // Store the bundle hash to prevent false "bundle has changed" on first workspace
-    configUpdates.appliedBundleHash = hashBundle(loadedBundle.bundle);
-
-    updateProjectConfig(projectName, configUpdates);
 
     // Clean up temp directory if bundle was from URL
     cleanupBundleDir(loadedBundle.bundleDir);
@@ -418,14 +418,11 @@ export async function addWorkspace(
 
   logger.success(`Created worktree from ${baseBranch}`);
 
-  // Preload project secrets into cache to minimize keychain prompts
-  // This ensures subsequent getProjectSecret calls use cached values
-  if (projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0) {
-    await preloadProjectSecrets(currentProject, projectConfig.bundleSecretKeys);
+  // Register workspace bundle requirements in project-level metadata.
+  const bundleSync = syncBundleWorkspaceState(currentProject, workspacePath);
+  if (bundleSync.parseError) {
+    logger.warning(`Bundle parse error: ${bundleSync.parseError}`);
   }
-
-  // Check if bundle has changed and run refresh if needed
-  await checkAndRefreshBundle(currentProject, workspacePath);
 
   // If workspace was created from a Linear issue, save issue details as markdown
   if (selectedLinearIssue) {
@@ -440,15 +437,6 @@ export async function addWorkspace(
 
       logger.debug('Saved Linear issue details to .prompt/issue.md');
     }
-  }
-
-  // Check if this is first-time setup (no marker exists)
-  const isFirstTime = !hasSetupBeenRun(workspacePath);
-
-  // Run pre scripts if this is the first time (before tmux/setup)
-  if (isFirstTime && !options.noSetup) {
-    const preScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'pre');
-    await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, projectConfig.repository);
   }
 
   // Open workspace shell unless --no-shell

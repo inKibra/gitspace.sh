@@ -6,12 +6,11 @@
 import { existsSync, readdirSync } from 'fs'
 import { join } from 'path'
 import {
-	getAllProjectNames,
-	readProjectConfig,
 	getCurrentProject,
 	getProjectWorkspacesDir,
 	readGlobalConfig,
 } from '../core/config.js'
+import { listProjectSummaries } from '../core/project-catalog.js'
 import { getWorktreeInfo } from '../core/git.js'
 import { logger } from '../utils/logger.js'
 import { SpacesError, NoProjectError } from '../types/errors.js'
@@ -26,33 +25,15 @@ export async function listProjects(
 		verbose?: boolean
 	} = {}
 ): Promise<void> {
-	const projectNames = getAllProjectNames()
+	const projects = listProjectSummaries().map((project) => ({
+		...project,
+		path: getProjectWorkspacesDir(project.name),
+	}))
 
-	if (projectNames.length === 0) {
+	if (projects.length === 0) {
 		logger.info('No projects found')
 		logger.log('\nCreate a project:\n  gssh add project')
 		return
-	}
-
-	const currentProject = getCurrentProject()
-	const projects: ProjectInfo[] = []
-
-	for (const name of projectNames) {
-		const config = readProjectConfig(name)
-		const workspacesDir = getProjectWorkspacesDir(name)
-
-		let workspaceCount = 0
-		if (existsSync(workspacesDir)) {
-			workspaceCount = readdirSync(workspacesDir).length
-		}
-
-		projects.push({
-			name,
-			repository: config.repository,
-			path: workspacesDir,
-			workspaceCount,
-			isCurrent: name === currentProject,
-		})
 	}
 
 	if (options.json) {

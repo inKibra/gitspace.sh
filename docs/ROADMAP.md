@@ -159,7 +159,7 @@ VM-per-workspace isolation using Lima. Works on all Apple Silicon (M1/M2/M3+).
 - `src/core/lima/manager.ts` - VM lifecycle (start/stop/status)
 - `src/core/lima/config.ts` - Generate Lima YAML from workspace config
 - `src/core/lima/connection.ts` - Connect to tmux-lite inside VM
-- `src/shared/providers/LimaMachineProvider.ts` - MachineProvider implementation
+- `src/session/backends/lima-session-backend.ts` - Session backend implementation
 
 **Session Lifecycle:**
 1. User selects workspace in TUI

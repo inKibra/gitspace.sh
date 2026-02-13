@@ -297,7 +297,7 @@ Script execution rules:
 - Scripts run alphabetically (use `01-`, `02-` prefixes)
 - Working directory: The workspace directory
 - Arguments: `$1` = workspace name, `$2` = repository name
-- Environment: Bundle values available as `SPACE_VALUE_*` and `SPACE_SECRET_*`
+- Environment: Bundle values available by key name (for example `REGION`, `PULUMI_ACCESS_TOKEN`)
 
 Example script (`.gitspace/scripts/select/01-status.sh`):
 ```bash
@@ -377,14 +377,15 @@ Using bundle values in scripts:
 ```bash
 #!/bin/bash
 # Values available as environment variables:
-# SPACE_VALUE_<KEY>   - Regular values from input steps
-# SPACE_SECRET_<KEY>  - Secret values from secret steps (from OS keychain)
+# <KEY>               - Value by bundle config key name
+# SPACE_VALUE_<KEY>   - Legacy alias for regular values
+# SPACE_SECRET_<KEY>  - Legacy alias for secret values
 
-if [ -n "$SPACE_VALUE_TEAMNAME" ]; then
-  echo "Welcome, $SPACE_VALUE_TEAMNAME team!"
+if [ -n "$TEAMNAME" ]; then
+  echo "Welcome, $TEAMNAME team!"
 fi
 
-if [ -n "$SPACE_SECRET_APIKEY" ]; then
+if [ -n "$APIKEY" ]; then
   echo "API Key configured"
 fi
 ```
@@ -629,7 +630,7 @@ gssh identity init --label "My Device"
 
 ### Bundle/Secrets Issues
 
-**"SPACE_SECRET_* variables are empty"**
+**"Bundle key variables are empty"**
 1. Ensure you completed onboarding secret steps
 2. Check OS keychain is accessible:
    - macOS: Keychain Access should be running
@@ -959,8 +960,8 @@ Bundles allow teams to share onboarding configurations. Place in `.gitspace/`:
 
 **Using values in scripts:**
 ```bash
-echo "Team: $SPACE_VALUE_TEAMNAME"
-echo "Has API key: $SPACE_SECRET_APIKEY"
+echo "Team: $TEAMNAME"
+echo "Has API key: $APIKEY"
 ```
 
 ---

@@ -4,7 +4,7 @@ This document describes how GitSpace handles WebSocket connections, disconnectio
 
 > **Related:** See [PROTOCOL.md](./PROTOCOL.md) for message/frame format, [REMOTE-DESIGN.md](./REMOTE-DESIGN.md) for security model.
 
-> **Implementation Note:** The web client (`src/web/`) currently lacks the
+> **Implementation Note:** The web client tooling (`web/`) currently lacks the
 > auto-reconnection logic described below. While the relay connection has a
 > 15-second heartbeat, neither the relay nor terminal connections implement
 > exponential backoff reconnection. This is a known gap - disconnections
