@@ -154,21 +154,29 @@ export async function connectToRemote(
 
   try {
     const terminalSize = getTerminalSize();
-    let attachPromise: Promise<Extract<BackendEvent, { type: 'attached' }>>;
+    let attachWait: {
+      promise: Promise<Extract<BackendEvent, { type: 'attached' }>>;
+      cancel: () => void;
+    };
 
     if (token.accessType === 'session-invite' && token.sessionId) {
       logger.dim(`Session: ${token.sessionId}`);
-      attachPromise = waitForBackendEvent(
+      attachWait = waitForBackendEvent(
         backend,
         (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
         30000,
         'attach confirmation'
       );
-      await backend.attachSession({
-        sessionId: token.sessionId,
-        cols: terminalSize.cols,
-        rows: terminalSize.rows,
-      });
+      try {
+        await backend.attachSession({
+          sessionId: token.sessionId,
+          cols: terminalSize.cols,
+          rows: terminalSize.rows,
+        });
+      } catch (error) {
+        attachWait.cancel();
+        throw error;
+      }
     } else {
       const workspace = await selectWorkspaceForFullAccess(backend);
       if (!workspace) {
@@ -182,22 +190,27 @@ export async function connectToRemote(
         return;
       }
 
-      attachPromise = waitForBackendEvent(
+      attachWait = waitForBackendEvent(
         backend,
         (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
         30000,
         'attach confirmation'
       );
 
-      await backend.attachSession({
-        workspaceId: workspace.id,
-        sessionName: sessionName || undefined,
-        cols: terminalSize.cols,
-        rows: terminalSize.rows,
-      });
+      try {
+        await backend.attachSession({
+          workspaceId: workspace.id,
+          sessionName: sessionName || undefined,
+          cols: terminalSize.cols,
+          rows: terminalSize.rows,
+        });
+      } catch (error) {
+        attachWait.cancel();
+        throw error;
+      }
     }
 
-    const attached = await attachPromise;
+    const attached = await attachWait.promise;
     logger.success(`Attached to ${attached.sessionName ?? attached.sessionId}`);
     logger.log('');
     logger.dim('Press Ctrl+D to disconnect');
@@ -445,41 +458,77 @@ function getTerminalSize(): { cols: number; rows: number } {
   return { cols, rows };
 }
 
-async function waitForBackendEvent<TEvent extends BackendEvent>(
+function waitForBackendEvent<TEvent extends BackendEvent>(
   backend: { onEvent: (handler: (event: BackendEvent) => void) => () => void },
   predicate: (event: BackendEvent) => event is TEvent,
   timeoutMs: number,
   label: string
-): Promise<TEvent> {
-  return new Promise<TEvent>((resolve, reject) => {
-    const timeout = setTimeout(() => {
+): { promise: Promise<TEvent>; cancel: () => void } {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let settled = false;
+
+  const cleanup = () => {
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+
+    if (unsubscribe) {
       unsubscribe();
-      reject(new SpacesError(`Timed out waiting for ${label}`, 'SYSTEM_ERROR', 2));
+      unsubscribe = null;
+    }
+  };
+
+  const settle = (done: () => void) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    cleanup();
+    done();
+  };
+
+  const promise = new Promise<TEvent>((resolve, reject) => {
+    timeout = setTimeout(() => {
+      settle(() => {
+        reject(new SpacesError(`Timed out waiting for ${label}`, 'SYSTEM_ERROR', 2));
+      });
     }, timeoutMs);
 
-    const unsubscribe = backend.onEvent((event) => {
+    unsubscribe = backend.onEvent((event) => {
       if (predicate(event)) {
-        clearTimeout(timeout);
-        unsubscribe();
-        resolve(event);
+        settle(() => {
+          resolve(event);
+        });
         return;
       }
 
       if (event.type === 'command_error') {
-        clearTimeout(timeout);
-        unsubscribe();
-        const message = event.code ? `[${event.code}] ${event.message}` : event.message;
-        reject(new SpacesError(message, 'SYSTEM_ERROR', 2));
+        settle(() => {
+          const message = event.code ? `[${event.code}] ${event.message}` : event.message;
+          reject(new SpacesError(message, 'SYSTEM_ERROR', 2));
+        });
         return;
       }
 
       if (event.type === 'error') {
-        clearTimeout(timeout);
-        unsubscribe();
-        reject(new SpacesError(event.message, 'SYSTEM_ERROR', 2));
+        settle(() => {
+          reject(new SpacesError(event.message, 'SYSTEM_ERROR', 2));
+        });
       }
     });
   });
+
+  const cancel = () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    cleanup();
+  };
+
+  return { promise, cancel };
 }
 
 async function selectWorkspaceForFullAccess(
@@ -488,15 +537,21 @@ async function selectWorkspaceForFullAccess(
     onEvent: (handler: (event: BackendEvent) => void) => () => void;
   }
 ): Promise<WorkspaceInfo | null> {
-  const workspacesPromise = waitForBackendEvent(
+  const workspacesWait = waitForBackendEvent(
     backend,
     (event): event is Extract<BackendEvent, { type: 'workspaces' }> => event.type === 'workspaces',
     15000,
     'workspace list'
   );
 
-  await backend.listWorkspaces();
-  const response = await workspacesPromise;
+  try {
+    await backend.listWorkspaces();
+  } catch (error) {
+    workspacesWait.cancel();
+    throw error;
+  }
+
+  const response = await workspacesWait.promise;
   const workspaces = response.workspaces;
 
   if (workspaces.length === 0) {
