@@ -9,6 +9,7 @@ import { join } from "path";
 import { WideEventCollector } from "../events/collector.js";
 import { buildProcessEventsConfig } from "./events-config.js";
 import { loadProcessesConfig, getProcessDefinition } from "./config.js";
+import { recordProcessExit } from "./state.js";
 import type { WideEvent } from "../../types/events.js";
 
 interface RunnerOptions {
@@ -94,6 +95,10 @@ async function run(): Promise<void> {
   });
 
   const suppressRaw = shouldSuppressRaw(definition);
+  const prefix = eventsConfig.prefix || "@event";
+
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
 
   const child = spawn({
     cmd: commandArgs,
@@ -106,11 +111,39 @@ async function run(): Promise<void> {
   const handleChunk = (data: Uint8Array, stream: "stdout" | "stderr") => {
     const buffer = Buffer.from(data);
     const rawText = buffer.toString("utf-8");
-    const lines = rawText.split("\n");
-    const prefix = eventsConfig.prefix || "@event";
 
-    const eventLines = lines.filter((line) => line.trim().startsWith(prefix));
-    const nonEventLines = lines.filter((line) => !line.trim().startsWith(prefix));
+    const pending = stream === "stdout" ? stdoutBuffer : stderrBuffer;
+    const combined = pending + rawText;
+    const parts = combined.split("\n");
+
+    let remainder = "";
+    if (combined.endsWith("\n")) {
+      parts.pop();
+    } else {
+      remainder = parts.pop() ?? "";
+    }
+
+    if (stream === "stdout") {
+      stdoutBuffer = remainder;
+    } else {
+      stderrBuffer = remainder;
+    }
+
+    const eventLines: string[] = [];
+    let nonEventPayload = "";
+    let hasNonEventContent = false;
+
+    for (const line of parts) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith(prefix)) {
+        eventLines.push(trimmed);
+      } else {
+        nonEventPayload += `${line}\n`;
+        if (trimmed.length > 0) {
+          hasNonEventContent = true;
+        }
+      }
+    }
 
     if (!suppressRaw) {
       if (stream === "stderr") {
@@ -118,14 +151,11 @@ async function run(): Promise<void> {
       } else {
         process.stdout.write(buffer);
       }
-    } else if (nonEventLines.some((line) => line.trim().length > 0)) {
-      const payload = nonEventLines.join("\n") + (rawText.endsWith("\n") ? "\n" : "");
-      if (payload.trim().length > 0) {
-        if (stream === "stderr") {
-          process.stderr.write(payload);
-        } else {
-          process.stdout.write(payload);
-        }
+    } else if (hasNonEventContent) {
+      if (stream === "stderr") {
+        process.stderr.write(nonEventPayload);
+      } else {
+        process.stdout.write(nonEventPayload);
       }
     }
 
@@ -164,6 +194,9 @@ async function run(): Promise<void> {
 
   const exitCode = await child.exited;
   collector.finalize();
+  try {
+    recordProcessExit(opts.workspacePath, opts.processName, opts.instance, exitCode ?? 0);
+  } catch {}
   process.exit(exitCode ?? 0);
 }
 

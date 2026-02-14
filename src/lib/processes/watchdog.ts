@@ -6,12 +6,23 @@ import type { ProcessInstanceSpec } from '../../types/processes.js';
 import { listSessions } from '../tmux-lite/cli.js';
 import { parseProcessSessionName, startProcessInstance, getRestartConfig } from './manager.js';
 import { isProcessRestartDisabled, disableProcessRestart } from './control.js';
+import { hasProcessStarted, readProcessExit } from './state.js';
 
 export interface ProcessRestartState {
   attempts: number;
   lastStart: number;
   nextDelay: number;
   disabled?: boolean;
+}
+
+export interface ProcessWatchdogDeps {
+  listSessions?: typeof listSessions;
+  startProcessInstance?: typeof startProcessInstance;
+  isProcessRestartDisabled?: typeof isProcessRestartDisabled;
+  disableProcessRestart?: typeof disableProcessRestart;
+  hasProcessStarted?: typeof hasProcessStarted;
+  readProcessExit?: typeof readProcessExit;
+  now?: () => number;
 }
 
 const restartState = new Map<string, ProcessRestartState>();
@@ -22,9 +33,18 @@ function getRestartKey(spec: ProcessInstanceSpec): string {
 
 export async function reconcileProcessRestarts(
   workspacePath: string,
-  specs: ProcessInstanceSpec[]
+  specs: ProcessInstanceSpec[],
+  deps: ProcessWatchdogDeps = {}
 ): Promise<void> {
-  const sessions = await listSessions();
+  const listSessionsFn = deps.listSessions ?? listSessions;
+  const startProcessInstanceFn = deps.startProcessInstance ?? startProcessInstance;
+  const isProcessRestartDisabledFn = deps.isProcessRestartDisabled ?? isProcessRestartDisabled;
+  const disableProcessRestartFn = deps.disableProcessRestart ?? disableProcessRestart;
+  const hasProcessStartedFn = deps.hasProcessStarted ?? hasProcessStarted;
+  const readProcessExitFn = deps.readProcessExit ?? readProcessExit;
+  const nowFn = deps.now ?? Date.now;
+
+  const sessions = await listSessionsFn();
 
   for (const spec of specs) {
     const key = getRestartKey(spec);
@@ -36,11 +56,7 @@ export async function reconcileProcessRestarts(
       return parsed?.processName === spec.name && parsed.instance === spec.instance;
     });
 
-    if (!existing) {
-      continue;
-    }
-
-    if (isProcessRestartDisabled(workspacePath, spec.name, spec.instance)) {
+    if (isProcessRestartDisabledFn(workspacePath, spec.name, spec.instance)) {
       continue;
     }
 
@@ -49,28 +65,35 @@ export async function reconcileProcessRestarts(
       continue;
     }
 
-    if (existing.exitCode === undefined) {
-      restartState.set(key, { ...state, lastStart: Date.now() });
+    if (existing) {
+      restartState.set(key, { ...state, lastStart: nowFn() });
       continue;
     }
 
-    if (restart.policy === 'on-failure' && existing.exitCode === 0) {
-      restartState.delete(key);
+    if (!hasProcessStartedFn(workspacePath, spec.name, spec.instance)) {
       continue;
+    }
+
+    if (restart.policy === 'on-failure') {
+      const exitInfo = readProcessExitFn(workspacePath, spec.name, spec.instance);
+      if (exitInfo?.exitCode === 0) {
+        restartState.delete(key);
+        continue;
+      }
     }
 
     if (state.attempts >= restart.maxAttempts) {
       restartState.set(key, { ...state, disabled: true });
-      disableProcessRestart(workspacePath, spec.name, spec.instance);
+      disableProcessRestartFn(workspacePath, spec.name, spec.instance);
       continue;
     }
 
-    const now = Date.now();
-    if (now - state.lastStart < state.nextDelay) {
+    const now = nowFn();
+    if (state.lastStart > 0 && now - state.lastStart < state.nextDelay) {
       continue;
     }
 
-    await startProcessInstance(workspacePath, spec);
+    await startProcessInstanceFn(workspacePath, spec);
     const nextDelay = Math.min(state.nextDelay * 2, restart.maxBackoffMs);
     restartState.set(key, { attempts: state.attempts + 1, lastStart: now, nextDelay });
   }

@@ -566,6 +566,9 @@ function createPtyDataHandler(
   checkIdle: () => void,
   getProcessTitle: () => string
 ): (term: Bun.Terminal, data: Buffer) => void {
+  const parsedProcess = parseProcessSessionName(sessionName);
+  const processName = parsedProcess?.processName;
+
   return (term, data) => {
     // Track output for idle detection
     idleState.lastOutputTime = Date.now();

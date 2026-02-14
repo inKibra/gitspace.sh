@@ -677,6 +677,7 @@ export class RemoteSessionHandler {
 
       const filtered = snapshots
         .filter((snapshot) => {
+          if (sinceMs !== undefined && snapshot.updatedAt < sinceMs) return false;
           if (!resolvedFilter) return true;
           if (resolvedFilter.processName && snapshot.processName !== resolvedFilter.processName) return false;
           if (resolvedFilter.level && snapshot.level !== resolvedFilter.level) return false;

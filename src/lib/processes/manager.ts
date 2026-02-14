@@ -7,6 +7,8 @@ import { listSessions, createSession, killSession } from '../tmux-lite/cli.js';
 import type { ProcessInstanceSpec, ProcessDefinition, ProcessesConfig } from '../../types/processes.js';
 import { getProcessInstances, loadProcessesConfig } from './config.js';
 import { buildProcessSessionName, parseProcessSessionName } from './names.js';
+import { enableProcessRestart, disableProcessRestart } from './control.js';
+import { markProcessStarted, clearProcessExit } from './state.js';
 
 export interface ProcessSessionInfo {
   sessionId: string;
@@ -58,6 +60,9 @@ export async function startProcessInstance(
   );
 
   if (target) {
+    enableProcessRestart(workspacePath, spec.name, spec.instance);
+    markProcessStarted(workspacePath, spec.name, spec.instance);
+    clearProcessExit(workspacePath, spec.name, spec.instance);
     return { sessionId: target.sessionId, created: false };
   }
 
@@ -91,6 +96,10 @@ export async function startProcessInstance(
     env: spec.definition.env,
   });
 
+  enableProcessRestart(workspacePath, spec.name, spec.instance);
+  markProcessStarted(workspacePath, spec.name, spec.instance);
+  clearProcessExit(workspacePath, spec.name, spec.instance);
+
   return { sessionId: session.id, created: true };
 }
 
@@ -103,6 +112,8 @@ export async function stopProcessInstance(
     (item) => item.processName === spec.name && item.instance === spec.instance
   );
   if (!target) return;
+  disableProcessRestart(workspacePath, spec.name, spec.instance);
+  clearProcessExit(workspacePath, spec.name, spec.instance);
   await killSession(target.sessionId);
 }
 
