@@ -9,6 +9,7 @@ import type { NotificationConfig } from '../notifications/types.js';
 import type {
   AttachSessionParams,
   BackendKey,
+  DeleteWorkspaceParams,
   SessionBackend,
 } from './backend.js';
 import type { ScriptRuntimeState, BackendSessionState } from './types.js';
@@ -62,7 +63,11 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   selectProject: (projectName: string | null) => void;
 
   killSession: (sessionId: string) => void;
-  deleteWorkspace: (projectName: string, workspaceId: string) => void;
+  deleteWorkspace: (
+    projectName: string,
+    workspaceId: string,
+    params?: DeleteWorkspaceParams
+  ) => Promise<void>;
   getBundleRefreshPlan: (projectName: string, workspaceId: string) => Promise<BundleRefreshPlan>;
   applyBundleRefresh: (
     projectName: string,
@@ -125,12 +130,12 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [activeBackendState, mapConnectionStatus]);
 
   const withActiveBackend = useCallback(
-    async (fn: (backendKey: BackendKey) => Promise<void>) => {
+    async <T>(fn: (backendKey: BackendKey) => Promise<T>): Promise<T | null> => {
       const backendKey = activeBackendKeyRef.current;
       if (!backendKey) {
-        return;
+        return null;
       }
-      await fn(backendKey);
+      return fn(backendKey);
     },
     []
   );
@@ -216,10 +221,17 @@ export function useRemoteSessionClient<ConnectParams>(
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
   }, [engine, withActiveBackend]);
 
-  const deleteWorkspace = useCallback((projectName: string, workspaceId: string) => {
-    void withActiveBackend((backendKey) =>
-      engine.deleteWorkspace(backendKey, projectName, workspaceId)
+  const deleteWorkspace = useCallback(async (
+    projectName: string,
+    workspaceId: string,
+    params?: DeleteWorkspaceParams
+  ) => {
+    const result = await withActiveBackend((backendKey) =>
+      engine.deleteWorkspace(backendKey, projectName, workspaceId, params)
     );
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
   }, [engine, withActiveBackend]);
 
   const getBundleRefreshPlan = useCallback(

@@ -114,10 +114,30 @@ export async function removeWorkspace(
 
 	// Delegate to core deletion logic (interactive mode for CLI)
 	logger.info('Removing workspace...')
-	const result = await deleteWorkspaceCore(currentProject, workspaceName, {
-		nonInteractive: false, // CLI is interactive
-		keepBranch: options.keepBranch,
-	})
+	const runDelete = async (scriptPolicy: 'enforce' | 'skip') => {
+		return deleteWorkspaceCore(currentProject, workspaceName, {
+			nonInteractive: false, // CLI is interactive
+			keepBranch: options.keepBranch,
+			removeScriptPolicy: scriptPolicy,
+		})
+	}
+
+	let result = await runDelete('enforce')
+
+	if (!result.success && result.errorCode === 'REMOVE_SCRIPT_FAILED') {
+		logger.warning(result.error || 'Remove scripts failed')
+		const removeAnyway = await promptConfirm(
+			`Remove workspace "${workspaceName}" anyway and skip cleanup scripts?`,
+			false
+		)
+
+		if (!removeAnyway) {
+			logger.info('Cancelled')
+			return
+		}
+
+		result = await runDelete('skip')
+	}
 
 	if (!result.success) {
 		throw new SpacesError(

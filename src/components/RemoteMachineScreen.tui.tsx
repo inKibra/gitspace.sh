@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { PasteEvent } from '@opentui/core';
 import { useKeyboard, useRenderer } from '@opentui/react';
 import type { Identity } from '../types/identity.js';
@@ -23,7 +23,9 @@ import {
   resolveSessionBrowserCommand,
 } from '../app/input/sessionCommands.js';
 import { SessionTerminal } from './SessionTerminal.tui.js';
+import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
+import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -52,6 +54,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const remote = useRemoteTerminal();
   const renderer = useRenderer();
   const [showInbox, setShowInbox] = useState(false);
+  const [showScriptTerminal, setShowScriptTerminal] = useState(false);
+  const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
+  const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
     onError: (error) => {
       remote.disconnect();
@@ -86,6 +91,43 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
   });
 
+  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+    flow,
+    deleteWorkspace: remote.deleteWorkspace,
+    onBeforeDelete: ({ target }) => {
+      setShowInbox(false);
+      setScriptWorkspaceName(target.workspaceName);
+      setShowScriptTerminal(true);
+    },
+    onDeleteSuccess: async () => {
+      setShowScriptTerminal(false);
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    },
+    onDeleteError: async ({ message }) => {
+      setShowScriptTerminal(false);
+      flow.showMessage({
+        title: 'Delete Failed',
+        message,
+        variant: 'error',
+      });
+    },
+  });
+
+  useEffect(() => {
+    if (!showScriptTerminal || remote.mode !== 'browsing') {
+      return;
+    }
+
+    remote.setWriteCallback((data) => {
+      scriptTerminalRef.current?.feed(data);
+    });
+
+    return () => {
+      remote.setWriteCallback(null);
+    };
+  }, [remote.mode, remote.setWriteCallback, showScriptTerminal]);
+
   useEffect(() => {
     void remote.connect({
       relayUrl,
@@ -107,6 +149,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     remote.requestWorkspaces();
     remote.requestNotificationConfig();
   }, [remote.mode, remote.status]);
+
+  useEffect(() => {
+    if (remote.mode === 'attached') {
+      setShowScriptTerminal(false);
+    }
+  }, [remote.mode]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
@@ -228,6 +276,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       return;
     }
 
+    if (showScriptTerminal) {
+      if (
+        !remote.scriptState?.isRunning &&
+        (key.name === 'escape' || key.name === 'n' || key.raw === 'n')
+      ) {
+        setShowScriptTerminal(false);
+      }
+      return;
+    }
+
     if (showInbox) {
       const command = resolveInboxCommand({
         name: key.name,
@@ -323,7 +381,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
               ? `This kills ${selected.workspace.sessionCount} active session(s).`
               : undefined,
           onConfirm: () => {
-            remote.deleteWorkspace(selected.workspace.projectName, selected.workspace.id);
+            void deleteWorkspaceWithPrompt({
+              projectName: selected.workspace.projectName,
+              workspaceId: selected.workspace.id,
+              workspaceName: selected.workspace.name,
+            });
           },
         });
       }
@@ -354,6 +416,24 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           onDetach={remote.detachSession}
           setWriteCallback={remote.setWriteCallback}
         />
+      </Fragment>
+    );
+  }
+
+  if (showScriptTerminal && remote.status === 'established' && remote.mode === 'browsing') {
+    const isRunning = remote.scriptState?.isRunning ?? true;
+    return (
+      <Fragment>
+        <ScriptTerminal
+          ref={scriptTerminalRef}
+          phase={remote.scriptState?.phase ?? 'remove'}
+          workspaceName={scriptWorkspaceName}
+          isRunning={isRunning}
+          error={remote.scriptState?.error}
+          exitCode={remote.scriptState?.exitCode}
+        />
+        <FlowTUI flow={flow} />
+        <StatusBar hint={isRunning ? '[Running scripts...]' : '[Esc/n] Back to workspaces'} />
       </Fragment>
     );
   }

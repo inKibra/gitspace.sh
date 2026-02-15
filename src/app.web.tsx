@@ -18,6 +18,7 @@ import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/devic
 import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 
 // Import shared components and hooks
 import {
@@ -174,6 +175,29 @@ export default function App() {
     },
   });
 
+  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+    flow,
+    deleteWorkspace: terminal.deleteWorkspace,
+    onBeforeDelete: ({ target }) => {
+      setShowInbox(false);
+      setScriptWorkspaceName(target.workspaceName);
+      setShowScriptTerminal(true);
+    },
+    onDeleteSuccess: async () => {
+      setShowScriptTerminal(false);
+      terminal.requestWorkspaces();
+      terminal.requestSessions();
+    },
+    onDeleteError: async ({ message }) => {
+      setShowScriptTerminal(false);
+      flow.showMessage({
+        title: 'Delete Failed',
+        message,
+        variant: 'error',
+      });
+    },
+  });
+
   useEffect(() => {
     let mounted = true;
     void browserPreferencesService.getNotificationConfig().then((config) => {
@@ -263,7 +287,8 @@ export default function App() {
       terminal.commandError.code === 'SCRIPT_FAILED' ||
       terminal.commandError.code === 'PRE_SCRIPT_FAILED' ||
       terminal.commandError.code === 'SETUP_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SELECT_SCRIPT_FAILED';
+      terminal.commandError.code === 'SELECT_SCRIPT_FAILED' ||
+      terminal.commandError.code === 'REMOVE_SCRIPT_FAILED';
 
     if (isScriptFailure) {
       if (!terminal.scriptState) {
@@ -594,8 +619,12 @@ export default function App() {
             message: `Are you sure you want to delete workspace "${selected.workspace.name}"?`,
             confirmText: selected.workspace.name,
             warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
-            onConfirm: () => {
-              terminal.deleteWorkspace(selected.workspace.projectName, selected.workspace.id);
+            onConfirm: async () => {
+              await deleteWorkspaceWithPrompt({
+                projectName: selected.workspace.projectName,
+                workspaceId: selected.workspace.id,
+                workspaceName: selected.workspace.name,
+              });
             },
           });
         }
@@ -607,7 +636,16 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, terminal.status, terminal.mode, showInbox, showScriptTerminal, spacesBrowserProps, flow]);
+  }, [
+    view,
+    terminal.status,
+    terminal.mode,
+    showInbox,
+    showScriptTerminal,
+    spacesBrowserProps,
+    flow,
+    deleteWorkspaceWithPrompt,
+  ]);
 
   // Attached terminal mode keyboard handler (Ctrl+Esc to detach)
   useEffect(() => {

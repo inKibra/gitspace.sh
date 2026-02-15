@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useSessionEngine,
   type AttachSessionParams,
+  type DeleteWorkspaceParams,
   type BundleRefreshPlan,
   type BundleRefreshSubmission,
   type BackendKey,
@@ -253,9 +254,13 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     }, { strict: true });
   }, [backendKey, runWithBackend]);
 
-  const deleteWorkspace = useCallback(async (projectName: string, workspaceId: string) => {
+  const deleteWorkspace = useCallback(async (
+    projectName: string,
+    workspaceId: string,
+    params?: DeleteWorkspaceParams
+  ) => {
     await runWithBackend(async (sessionEngine) => {
-      await sessionEngine.deleteWorkspace(backendKey, projectName, workspaceId);
+      await sessionEngine.deleteWorkspace(backendKey, projectName, workspaceId, params);
       await sessionEngine.listWorkspaces(backendKey);
       await sessionEngine.listSessions(backendKey);
     }, { strict: true });

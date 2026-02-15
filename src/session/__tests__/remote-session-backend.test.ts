@@ -564,4 +564,83 @@ describe('RemoteSessionBackend', () => {
       sessionId: 'existing-session',
     });
   });
+
+  it('waits for workspace_deleted when deleting a workspace', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'ws-1', { scriptPolicy: 'skip' });
+    await Bun.sleep(0);
+    const deleteCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
+    expect(deleteCommand).toEqual({
+      type: 'delete_workspace',
+      projectName: 'alpha',
+      workspaceId: 'ws-1',
+      scriptPolicy: 'skip',
+    });
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'workspace_deleted',
+        workspaceId: 'ws-1',
+      })
+    );
+
+    await expect(deletePromise).resolves.toBeUndefined();
+  });
+
+  it('rejects workspace delete when backend returns an error', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'ws-1');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'REMOVE_SCRIPT_FAILED',
+        message: 'Remove scripts failed: cleanup failed',
+      })
+    );
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'Remove scripts failed: cleanup failed',
+      code: 'REMOVE_SCRIPT_FAILED',
+    });
+  });
 });

@@ -86,6 +86,7 @@ import { useLocalSession } from './hooks/useLocalSession.tui.js';
 import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import {
   resolveInboxCommand,
   resolveMachineListCommand,
@@ -438,6 +439,27 @@ function App({ relayConfig, onQuit }: AppProps) {
     },
   });
 
+  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+    flow,
+    deleteWorkspace: deleteLocalWorkspace,
+    onBeforeDelete: ({ target }) => {
+      setScriptWorkspaceName(target.workspaceName);
+      dispatch({ type: 'SET_VIEW', view: 'scripts' });
+    },
+    onDeleteSuccess: async () => {
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
+      await refreshWorkspaces();
+    },
+    onDeleteError: async ({ message }) => {
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
+      flow.showMessage({
+        title: 'Delete Failed',
+        message,
+        variant: 'error',
+      });
+    },
+  });
+
   // Daemon status hook (tmux-lite and serve)
   const { status: daemonStatus } = useDaemonStatus({ pollInterval: 5000 });
 
@@ -600,26 +622,14 @@ function App({ relayConfig, onQuit }: AppProps) {
       warning: workspace.sessionCount > 0 ? `This will kill ${workspace.sessionCount} active session(s)!` : undefined,
       onConfirm: async () => {
         if (!currentProject) return;
-        flow.showLoading({ title: 'Deleting', message: 'Preparing...' });
-
-        try {
-          await deleteLocalWorkspace(currentProject, workspace.id);
-        } catch (error) {
-          console.error('[tui] Failed to delete workspace:', error);
-          flow.close();
-          flow.showMessage({
-            title: 'Delete Failed',
-            message: error instanceof Error ? error.message : `Failed to delete workspace "${workspace.name}".`,
-            variant: 'error',
-          });
-          return;
-        }
-
-        flow.close();
-        await refreshWorkspaces();
+        await deleteWorkspaceWithPrompt({
+          projectName: currentProject,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+        });
       },
     });
-  }, [currentProject, flow, refreshWorkspaces]);
+  }, [currentProject, flow, deleteWorkspaceWithPrompt]);
 
   // Delete session
   const handleDeleteSession = useCallback((sessionId: string, sessionName: string) => {

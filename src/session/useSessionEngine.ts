@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import type { NotificationConfig } from '../notifications/types.js';
-import type { BackendKey, SessionBackend, AttachSessionParams } from './backend.js';
+import type {
+  BackendKey,
+  SessionBackend,
+  AttachSessionParams,
+  DeleteWorkspaceParams,
+} from './backend.js';
 import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
@@ -205,8 +210,41 @@ export function useSessionEngine() {
     await withBackend(backendKey, (backend) => backend.killSession(sessionId));
   }, [withBackend]);
 
-  const deleteWorkspace = useCallback(async (backendKey: BackendKey, projectName: string, workspaceId: string) => {
-    await withBackend(backendKey, (backend) => backend.deleteWorkspace(projectName, workspaceId));
+  const deleteWorkspace = useCallback(async (
+    backendKey: BackendKey,
+    projectName: string,
+    workspaceId: string,
+    params?: DeleteWorkspaceParams
+  ) => {
+    dispatch({
+      type: 'SET_COMMAND_ERROR',
+      backendKey,
+      commandError: null,
+    });
+    dispatch({
+      type: 'SET_SCRIPT_STATE',
+      backendKey,
+      scriptState: {
+        phase: 'remove',
+        isRunning: true,
+      },
+    });
+    try {
+      await withBackend(backendKey, (backend) => backend.deleteWorkspace(projectName, workspaceId, params));
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (code !== 'REMOVE_SCRIPT_FAILED') {
+        dispatch({
+          type: 'SET_SCRIPT_STATE',
+          backendKey,
+          scriptState: null,
+        });
+      }
+      throw error;
+    }
   }, [withBackend]);
 
   const getBundleRefreshPlan = useCallback(async (

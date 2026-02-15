@@ -193,7 +193,13 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to delete workspaces");
           return;
         }
-        await this.handleDeleteWorkspace(session, msg.projectName, msg.workspaceId, sendResponse);
+        await this.handleDeleteWorkspace(
+          session,
+          msg.projectName,
+          msg.workspaceId,
+          msg.scriptPolicy,
+          sendResponse
+        );
         break;
 
       case "get_inbox":
@@ -566,18 +572,53 @@ export class RemoteSessionHandler {
     session: RemoteClientSession,
     projectName: string,
     workspaceId: string,
+    scriptPolicy: 'auto' | 'skip' | undefined,
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
+    let emittedDone = false;
+    const emitDone = async (error?: string) => {
+      await this.sendMessage(session, sendResponse, {
+        type: 'script_output',
+        phase: 'remove',
+        data: '',
+        done: true,
+        error,
+      });
+      emittedDone = true;
+    };
+
     try {
       const result = await deleteWorkspaceCore(projectName, workspaceId, {
         nonInteractive: true, // Remote context - scripts can't prompt for input
+        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
+        onScriptOutput: (data) => {
+          void this.sendMessage(session, sendResponse, {
+            type: 'script_output',
+            phase: 'remove',
+            data: data.toString('base64'),
+          }).catch((error) => {
+            logger.debug(`[remote-session] Failed to stream remove script output: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        },
       });
 
       if (!result.success) {
-        const errorCode = result.error?.includes("not found") ? "NOT_FOUND" : "DELETE_FAILED";
-        await this.sendError(session, sendResponse, errorCode, result.error || "Failed to delete workspace");
+        const message = result.error || 'Failed to delete workspace';
+        await emitDone(message);
+
+        if (result.errorCode === 'REMOVE_SCRIPT_FAILED') {
+          await this.sendError(session, sendResponse, 'REMOVE_SCRIPT_FAILED', message);
+          return;
+        }
+
+        const errorCode = result.errorCode === 'WORKSPACE_NOT_FOUND' || message.includes('not exist')
+          ? 'NOT_FOUND'
+          : 'DELETE_FAILED';
+        await this.sendError(session, sendResponse, errorCode, message);
         return;
       }
+
+      await emitDone();
 
       await this.sendMessage(session, sendResponse, {
         type: "workspace_deleted",
@@ -585,6 +626,10 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       console.error("[remote-session] Failed to delete workspace:", e);
+      if (!emittedDone) {
+        const message = e instanceof Error ? e.message : String(e);
+        await emitDone(message);
+      }
       await this.sendError(session, sendResponse, "DELETE_FAILED", "Failed to delete workspace");
     }
   }

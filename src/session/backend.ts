@@ -25,6 +25,10 @@ export interface AttachSessionParams {
   scriptPolicy?: 'auto' | 'skip';
 }
 
+export interface DeleteWorkspaceParams {
+  scriptPolicy?: 'auto' | 'skip';
+}
+
 /**
  * Canonical backend contract used by shared session engine.
  */
@@ -42,7 +46,11 @@ export interface SessionBackend {
   detachSession(): Promise<void>;
 
   killSession(sessionId: string): Promise<void>;
-  deleteWorkspace(projectName: string, workspaceId: string): Promise<void>;
+  deleteWorkspace(
+    projectName: string,
+    workspaceId: string,
+    params?: DeleteWorkspaceParams
+  ): Promise<void>;
 
   getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan>;
   applyBundleRefresh(

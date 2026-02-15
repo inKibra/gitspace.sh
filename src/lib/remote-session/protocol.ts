@@ -68,6 +68,7 @@ export interface DeleteWorkspaceRequest {
   type: "delete_workspace";
   workspaceId: string;
   projectName: string;  // Needed to locate workspace
+  scriptPolicy?: 'auto' | 'skip';
 }
 
 /** Request inbox items */

@@ -27,6 +27,7 @@ import type { NotificationConfig } from '../../notifications/types.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  DeleteWorkspaceParams,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
@@ -264,6 +265,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
+  private pendingDeleteWorkspace:
+    | {
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
@@ -378,13 +386,47 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async deleteWorkspace(projectName: string, workspaceId: string): Promise<void> {
+  async deleteWorkspace(
+    projectName: string,
+    workspaceId: string,
+    params: DeleteWorkspaceParams = {}
+  ): Promise<void> {
+    if (this.pendingDeleteWorkspace) {
+      throw new Error('Workspace delete request already in progress');
+    }
+
     const command: DeleteWorkspaceRequest = {
       type: 'delete_workspace',
       projectName,
       workspaceId,
+      scriptPolicy: params.scriptPolicy,
     };
-    await this.sendCommand(command);
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingDeleteWorkspace) {
+          return;
+        }
+        this.pendingDeleteWorkspace = null;
+        reject(new Error('Timed out deleting workspace'));
+      }, 15000);
+
+      this.pendingDeleteWorkspace = {
+        resolve,
+        reject,
+        timeout,
+      };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingDeleteWorkspace;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingDeleteWorkspace = null;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
   }
 
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
@@ -770,6 +812,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         );
         return;
       case 'workspace_deleted':
+        this.resolveWorkspaceDelete(message.workspaceId);
         await this.listWorkspaces();
         return;
       case 'inbox_list':
@@ -800,6 +843,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
+        this.rejectPendingWorkspaceDelete(message.code, message.message);
         this.emit({
           type: 'command_error',
           code: message.code,
@@ -888,6 +932,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
+  private resolveWorkspaceDelete(_workspaceId: string): void {
+    const pending = this.pendingDeleteWorkspace;
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingDeleteWorkspace = null;
+    pending.resolve();
+  }
+
+  private rejectPendingWorkspaceDelete(code: string | undefined, message: string): void {
+    const pending = this.pendingDeleteWorkspace;
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingDeleteWorkspace = null;
+    const error = new Error(message) as Error & { code?: string };
+    error.code = code;
+    pending.reject(error);
+  }
+
   private emitPtyData(data: Uint8Array): void {
     if (!this.ptyOutputHandler) {
       this.pendingPtyChunks.push(data);
@@ -973,6 +1041,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
+    this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected');
     this.connectPromise = null;
     this.connectResolve = null;
     this.connectReject = null;

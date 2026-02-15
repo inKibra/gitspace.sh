@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import { BackendManager } from '../backend-manager';
-import type { AttachSessionParams, BackendDescriptor, SessionBackend } from '../backend';
+import type {
+  AttachSessionParams,
+  BackendDescriptor,
+  DeleteWorkspaceParams,
+  SessionBackend,
+} from '../backend';
 import type { BackendEvent } from '../events';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh';
 
@@ -38,7 +43,11 @@ class FakeBackend implements SessionBackend {
   async attachSession(_params: AttachSessionParams): Promise<void> {}
   async detachSession(): Promise<void> {}
   async killSession(_sessionId: string): Promise<void> {}
-  async deleteWorkspace(_projectName: string, _workspaceId: string): Promise<void> {}
+  async deleteWorkspace(
+    _projectName: string,
+    _workspaceId: string,
+    _params?: DeleteWorkspaceParams
+  ): Promise<void> {}
   async getBundleRefreshPlan(_projectName: string, _workspaceId: string): Promise<BundleRefreshPlan> {
     throw new Error('not implemented');
   }

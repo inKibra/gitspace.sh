@@ -2,7 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
 import type { NotificationConfig } from '../../notifications/types.js'
-import type { AttachSessionParams, BackendDescriptor } from '../backend.js'
+import type {
+  AttachSessionParams,
+  BackendDescriptor,
+  DeleteWorkspaceParams,
+} from '../backend.js'
 import type { BackendEvent } from '../events.js'
 import { buildRemoteBackendKey } from '../backend-key.js'
 import type { RemoteSessionPtyBackend } from '../useRemoteSessionClient.js'
@@ -115,7 +119,11 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     this.killCalls.push(sessionId)
   }
 
-  async deleteWorkspace(projectName: string, workspaceId: string): Promise<void> {
+  async deleteWorkspace(
+    projectName: string,
+    workspaceId: string,
+    _params?: DeleteWorkspaceParams
+  ): Promise<void> {
     this.deleteCalls.push({ projectName, workspaceId })
   }
 

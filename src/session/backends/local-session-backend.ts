@@ -37,6 +37,7 @@ import { findUtf8Boundary } from '../../utils/utf8.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  DeleteWorkspaceParams,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
@@ -550,18 +551,79 @@ export class LocalSessionBackend implements SessionBackend {
     await this.deps.killSession(sessionId);
   }
 
-  async deleteWorkspace(projectName: string, workspaceId: string): Promise<void> {
+  async deleteWorkspace(
+    projectName: string,
+    workspaceId: string,
+    params: DeleteWorkspaceParams = {}
+  ): Promise<void> {
     const resolvedWorkspaceId = resolveWorkspaceName(projectName, workspaceId);
-    const result = await this.deps.deleteWorkspaceCore(projectName, resolvedWorkspaceId, {
-      nonInteractive: true,
-    });
+    const scriptPolicy = params.scriptPolicy ?? 'auto';
+    let emittedDone = false;
 
-    if (!result.success) {
-      throw new SpacesError(
-        result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`,
-        'USER_ERROR',
-        1
-      );
+    try {
+      const result = await this.deps.deleteWorkspaceCore(projectName, resolvedWorkspaceId, {
+        nonInteractive: true,
+        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
+        onScriptOutput: (data) => {
+          this.emitPtyData(data);
+          this.emit({
+            type: 'script_output',
+            phase: 'remove',
+            data,
+          });
+        },
+      });
+
+      if (!result.success) {
+        const errorCode = result.errorCode === 'REMOVE_SCRIPT_FAILED'
+          ? 'REMOVE_SCRIPT_FAILED'
+          : 'DELETE_FAILED';
+        const message = result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`;
+
+        this.emit({
+          type: 'command_error',
+          code: errorCode,
+          message,
+        });
+
+        this.emit({
+          type: 'script_output',
+          phase: 'remove',
+          data: new Uint8Array(0),
+          done: true,
+          error: message,
+        });
+        emittedDone = true;
+
+        const error = new Error(message) as Error & { code?: string };
+        error.code = errorCode;
+        throw error;
+      }
+
+      this.emit({
+        type: 'script_output',
+        phase: 'remove',
+        data: new Uint8Array(0),
+        done: true,
+      });
+      emittedDone = true;
+    } catch (error) {
+      if (!emittedDone) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.emit({
+          type: 'script_output',
+          phase: 'remove',
+          data: new Uint8Array(0),
+          done: true,
+          error: message,
+        });
+        this.emit({
+          type: 'command_error',
+          code: 'DELETE_FAILED',
+          message,
+        });
+      }
+      throw error;
     }
   }
 

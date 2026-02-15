@@ -974,4 +974,93 @@ describe('LocalSessionBackend', () => {
 
     expect(prepareCalls).toBe(1);
   });
+
+  it('streams remove script output and emits completion when deleting workspace', async () => {
+    const events: BackendEvent[] = [];
+
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      deleteWorkspaceCore: async (_projectName, workspaceId, options) => {
+        options?.onScriptOutput?.(Buffer.from(`remove:${workspaceId}`));
+        return {
+          success: true,
+          workspaceName: workspaceId,
+          branchDeleted: false,
+          sessionsKilled: 0,
+        };
+      },
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await backend.deleteWorkspace('alpha', 'alpha:ws-1');
+
+    expect(events).toContainEqual({
+      type: 'script_output',
+      phase: 'remove',
+      data: new TextEncoder().encode('remove:ws-1'),
+    });
+    expect(events).toContainEqual({
+      type: 'script_output',
+      phase: 'remove',
+      data: new Uint8Array(0),
+      done: true,
+    });
+  });
+
+  it('allows retrying delete with scriptPolicy skip after remove script failure', async () => {
+    const events: BackendEvent[] = [];
+    const observedPolicies: Array<'enforce' | 'best-effort' | 'skip' | undefined> = [];
+
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      deleteWorkspaceCore: async (_projectName, workspaceId, options) => {
+        observedPolicies.push(options?.removeScriptPolicy);
+        if (options?.removeScriptPolicy === 'skip') {
+          return {
+            success: true,
+            workspaceName: workspaceId,
+            branchDeleted: false,
+            sessionsKilled: 0,
+          };
+        }
+
+        options?.onScriptOutput?.(Buffer.from('cleanup failed'));
+        return {
+          success: false,
+          workspaceName: workspaceId,
+          branchDeleted: false,
+          sessionsKilled: 0,
+          errorCode: 'REMOVE_SCRIPT_FAILED',
+          error: 'Remove scripts failed: cleanup failed',
+          removeScriptError: 'cleanup failed',
+        };
+      },
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await expect(backend.deleteWorkspace('alpha', 'ws-1')).rejects.toMatchObject({
+      message: 'Remove scripts failed: cleanup failed',
+      code: 'REMOVE_SCRIPT_FAILED',
+    });
+
+    await expect(
+      backend.deleteWorkspace('alpha', 'ws-1', { scriptPolicy: 'skip' })
+    ).resolves.toBeUndefined();
+
+    expect(observedPolicies).toEqual(['enforce', 'skip']);
+    expect(events).toContainEqual({
+      type: 'command_error',
+      code: 'REMOVE_SCRIPT_FAILED',
+      message: 'Remove scripts failed: cleanup failed',
+    });
+    expect(events).toContainEqual({
+      type: 'script_output',
+      phase: 'remove',
+      data: new Uint8Array(0),
+      done: true,
+      error: 'Remove scripts failed: cleanup failed',
+    });
+  });
 });
