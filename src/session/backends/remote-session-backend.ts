@@ -250,15 +250,6 @@ function workspaceIdsMatch(expected: string, actual: string | undefined): boolea
   return false;
 }
 
-function isDeleteErrorCode(code: string | undefined): boolean {
-  return (
-    code === 'REMOVE_SCRIPT_FAILED' ||
-    code === 'DELETE_FAILED' ||
-    code === 'WORKSPACE_NOT_FOUND' ||
-    code === 'NOT_FOUND'
-  );
-}
-
 export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServerAuth>
   implements SessionBackend {
   readonly descriptor: BackendDescriptor;
@@ -864,7 +855,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
-        if (message.workspaceId || isDeleteErrorCode(message.code)) {
+        if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
         this.emit({

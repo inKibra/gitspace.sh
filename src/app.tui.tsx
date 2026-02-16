@@ -2576,11 +2576,9 @@ export async function launchTUI(
   relayConfig?: RelayConfig,
   options: { ignoreKeychainAndSkipSecrets?: boolean } = {}
 ): Promise<void> {
-  if (!relayConfig) {
-    await initializeSecretRuntime({
-      ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
-    });
-  }
+  await initializeSecretRuntime({
+    ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
+  });
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,

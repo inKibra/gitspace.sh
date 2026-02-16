@@ -202,7 +202,16 @@ export class RemoteSessionHandler {
       case "delete_workspace":
         // Security: Requires management permission
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to delete workspaces");
+          const normalizedWorkspaceId = msg.workspaceId.startsWith(`${msg.projectName}:`)
+            ? msg.workspaceId.slice(msg.projectName.length + 1)
+            : msg.workspaceId;
+          await this.sendError(
+            session,
+            sendResponse,
+            "PERMISSION_DENIED",
+            "Requires full access to delete workspaces",
+            { workspaceId: `${msg.projectName}:${normalizedWorkspaceId}` }
+          );
           return;
         }
         await this.handleDeleteWorkspace(
