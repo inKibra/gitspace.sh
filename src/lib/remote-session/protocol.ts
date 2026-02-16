@@ -178,6 +178,7 @@ export interface ErrorResponse {
   type: "error";
   code: string;
   message: string;
+  workspaceId?: string;
 }
 
 /** Project information */

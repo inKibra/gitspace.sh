@@ -588,6 +588,7 @@ export class RemoteSessionHandler {
     const normalizedWorkspaceId = workspaceId.startsWith(`${projectName}:`)
       ? workspaceId.slice(projectName.length + 1)
       : workspaceId;
+    const canonicalWorkspaceId = `${projectName}:${normalizedWorkspaceId}`;
     let emittedDone = false;
     const emitDone = async (error?: string) => {
       await this.sendMessage(session, sendResponse, {
@@ -620,14 +621,18 @@ export class RemoteSessionHandler {
         await emitDone(message);
 
         if (result.errorCode === 'REMOVE_SCRIPT_FAILED') {
-          await this.sendError(session, sendResponse, 'REMOVE_SCRIPT_FAILED', message);
+          await this.sendError(session, sendResponse, 'REMOVE_SCRIPT_FAILED', message, {
+            workspaceId: canonicalWorkspaceId,
+          });
           return;
         }
 
         const errorCode = result.errorCode === 'WORKSPACE_NOT_FOUND' || message.includes('not exist')
           ? 'NOT_FOUND'
           : 'DELETE_FAILED';
-        await this.sendError(session, sendResponse, errorCode, message);
+        await this.sendError(session, sendResponse, errorCode, message, {
+          workspaceId: canonicalWorkspaceId,
+        });
         return;
       }
 
@@ -635,7 +640,7 @@ export class RemoteSessionHandler {
 
       await this.sendMessage(session, sendResponse, {
         type: "workspace_deleted",
-        workspaceId: `${projectName}:${normalizedWorkspaceId}`,
+        workspaceId: canonicalWorkspaceId,
       });
     } catch (e) {
       console.error("[remote-session] Failed to delete workspace:", e);
@@ -643,7 +648,9 @@ export class RemoteSessionHandler {
         const message = e instanceof Error ? e.message : String(e);
         await emitDone(message);
       }
-      await this.sendError(session, sendResponse, "DELETE_FAILED", "Failed to delete workspace");
+      await this.sendError(session, sendResponse, "DELETE_FAILED", "Failed to delete workspace", {
+        workspaceId: canonicalWorkspaceId,
+      });
     }
   }
 
@@ -852,12 +859,14 @@ export class RemoteSessionHandler {
     session: RemoteClientSession,
     sendResponse: (data: Uint8Array) => void,
     code: string,
-    message: string
+    message: string,
+    options?: { workspaceId?: string }
   ): Promise<void> {
     await this.sendMessage(session, sendResponse, {
       type: "error",
       code,
       message,
+      workspaceId: options?.workspaceId,
     });
   }
 

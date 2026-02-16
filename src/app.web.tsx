@@ -50,6 +50,13 @@ type View = "machines" | "terminal";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
+const DELETE_ERROR_CODES = new Set([
+  'REMOVE_SCRIPT_FAILED',
+  'DELETE_FAILED',
+  'WORKSPACE_NOT_FOUND',
+  'RESOURCE_NOT_FOUND',
+  'NOT_FOUND',
+]);
 
 export default function App() {
   const [view, setView] = useState<View>("machines");
@@ -297,8 +304,9 @@ export default function App() {
     lastCommandErrorRef.current = key;
 
     if (
-      terminal.commandError.code === 'REMOVE_SCRIPT_FAILED' &&
-      suppressDeleteScriptFailureModalRef.current
+      suppressDeleteScriptFailureModalRef.current &&
+      terminal.commandError.code &&
+      DELETE_ERROR_CODES.has(terminal.commandError.code)
     ) {
       return;
     }

@@ -674,4 +674,103 @@ describe('RemoteSessionBackend', () => {
       code: 'DELETE_FAILED',
     });
   });
+
+  it('ignores workspace_deleted for a different workspace', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-target');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'workspace_deleted',
+        workspaceId: 'alpha:ws-other',
+      })
+    );
+
+    const statusAfterMismatch = await Promise.race([
+      deletePromise.then(() => 'resolved', () => 'rejected'),
+      Bun.sleep(0).then(() => 'pending'),
+    ]);
+    expect(statusAfterMismatch).toBe('pending');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'workspace_deleted',
+        workspaceId: 'alpha:ws-target',
+      })
+    );
+
+    await expect(deletePromise).resolves.toBeUndefined();
+  });
+
+  it('ignores delete error for a different workspace id', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-target');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'DELETE_FAILED',
+        message: 'wrong workspace error',
+        workspaceId: 'alpha:ws-other',
+      })
+    );
+
+    const statusAfterMismatch = await Promise.race([
+      deletePromise.then(() => 'resolved', () => 'rejected'),
+      Bun.sleep(0).then(() => 'pending'),
+    ]);
+    expect(statusAfterMismatch).toBe('pending');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'DELETE_FAILED',
+        message: 'target workspace error',
+        workspaceId: 'alpha:ws-target',
+      })
+    );
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'target workspace error',
+      code: 'DELETE_FAILED',
+    });
+  });
 });
