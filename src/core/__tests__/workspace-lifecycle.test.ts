@@ -31,6 +31,10 @@ mock.module('../../utils/secrets', () => ({
   preloadProjectSecrets: async () => {},
 }))
 
+mock.module('../secret-runtime', () => ({
+  shouldSkipSecretDependentScripts: () => false,
+}))
+
 mock.module('../../utils/run-workspace-scripts', () => ({
   runWorkspaceScripts: async () => {
     runCalls += 1

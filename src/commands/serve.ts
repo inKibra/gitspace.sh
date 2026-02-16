@@ -61,6 +61,7 @@ import {
   ensureServeDaemonDir,
   type StatusResponse,
 } from '../serve/daemon.js';
+import { initializeSecretRuntime } from '../core/secret-runtime.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -463,6 +464,7 @@ function stopCloudflared(): void {
 export async function serve(options: {
   relay?: string;
   relayPubkey?: string;
+  ignoreKeychainAndSkipSecrets?: boolean;
 } = {}): Promise<void> {
   // Step 1: Load machine identity
   if (!keypairExists()) {
@@ -502,6 +504,10 @@ export async function serve(options: {
   const accessList = new AccessControlList();
   const entries = readAccessList();
   accessList.import(entries);
+
+  await initializeSecretRuntime({
+    ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
+  });
 
   // Step 3: Check for gitspace.sh hosting or explicit relay
   const hostConfig = readHostConfig();
@@ -1156,6 +1162,7 @@ export async function serveStart(options: {
   relayPubkey?: string;
   passwordStdin?: boolean;
   foreground?: boolean;
+  ignoreKeychainAndSkipSecrets?: boolean;
 } = {}): Promise<void> {
   // Check if already running
   if (isServeRunning()) {
@@ -1234,6 +1241,9 @@ export async function serveStart(options: {
     const serveArgs = ['serve', 'start', '--foreground'];
     if (options.relay) serveArgs.push('--relay', options.relay);
     if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
+    if (options.ignoreKeychainAndSkipSecrets) {
+      serveArgs.push('--ignore-keychain-and-skip-secrets');
+    }
     serveArgs.push('--password-stdin');
 
     // Build command: compiled binary runs directly, dev mode uses bun
@@ -1293,6 +1303,10 @@ export async function serveStart(options: {
   const accessList = new AccessControlList();
   const entries = readAccessList();
   accessList.import(entries);
+
+  await initializeSecretRuntime({
+    ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
+  });
 
   // Get config
   const machineIdentity = readMachineIdentity();

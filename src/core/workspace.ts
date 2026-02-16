@@ -21,6 +21,7 @@ import {
 } from './git.js';
 import { runScriptsInTerminal } from '../utils/run-scripts.js';
 import { getProjectSecrets } from '../utils/secrets.js';
+import { shouldSkipSecretDependentScripts } from './secret-runtime.js';
 import { logger } from '../utils/logger.js';
 import {
   listSessions,
@@ -104,6 +105,19 @@ export async function deleteWorkspaceCore(
   }
 
   const removeScriptPolicy = options.removeScriptPolicy ?? 'enforce';
+  let projectConfig: ReturnType<typeof readProjectConfig> | null = null;
+  try {
+    projectConfig = readProjectConfig(projectName);
+  } catch (error) {
+    logger.debug(
+      `Failed to read project config for ${projectName} while preparing delete: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const skipSecretScripts = shouldSkipSecretDependentScripts(
+    projectName,
+    projectConfig?.bundleSecretKeys
+  );
+  const effectiveRemoveScriptPolicy = skipSecretScripts ? 'skip' : removeScriptPolicy;
 
   // Get workspace info before deletion
   const info = await getWorktreeInfo(workspacePath);
@@ -134,12 +148,12 @@ export async function deleteWorkspaceCore(
   }
 
   // Run remove scripts (cleanup before deletion)
-  if (removeScriptPolicy !== 'skip') {
+  if (effectiveRemoveScriptPolicy !== 'skip') {
     try {
-      const projectConfig = readProjectConfig(projectName);
+      const config = projectConfig ?? readProjectConfig(projectName);
       const removeScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'remove');
-      const bundleSecrets = projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0
-        ? await getProjectSecrets(projectName, projectConfig.bundleSecretKeys)
+      const bundleSecrets = config.bundleSecretKeys && config.bundleSecretKeys.length > 0
+        ? await getProjectSecrets(projectName, config.bundleSecretKeys)
         : undefined;
 
       options.onProgress?.('Running cleanup scripts...');
@@ -147,9 +161,9 @@ export async function deleteWorkspaceCore(
         removeScriptsDir,
         workspacePath,
         workspaceName,
-        projectConfig.repository,
+        config.repository,
         {
-          bundleValues: projectConfig.bundleValues,
+          bundleValues: config.bundleValues,
           bundleSecrets,
           nonInteractive: options.nonInteractive,
           onOutput: options.onScriptOutput,
@@ -157,7 +171,7 @@ export async function deleteWorkspaceCore(
       );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (removeScriptPolicy === 'enforce') {
+      if (effectiveRemoveScriptPolicy === 'enforce') {
         result.errorCode = 'REMOVE_SCRIPT_FAILED';
         result.removeScriptError = message;
         result.error = `Remove scripts failed: ${message}`;
@@ -167,7 +181,11 @@ export async function deleteWorkspaceCore(
       logger.debug(`Remove scripts failed for ${workspaceName}: ${e}`);
     }
   } else {
-    options.onProgress?.('Skipping cleanup scripts...');
+    if (skipSecretScripts) {
+      options.onProgress?.('Skipping cleanup scripts (secret loading disabled)...');
+    } else {
+      options.onProgress?.('Skipping cleanup scripts...');
+    }
   }
 
   // Remove worktree

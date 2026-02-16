@@ -12,6 +12,7 @@ import {
 import { readProjectConfig } from './config.js';
 import { logger } from '../utils/logger.js';
 import { preloadProjectSecrets } from '../utils/secrets.js';
+import { shouldSkipSecretDependentScripts } from './secret-runtime.js';
 import {
   runWorkspaceScripts,
   type RunWorkspaceScriptsResult,
@@ -80,6 +81,15 @@ export async function prepareWorkspaceForSession(
     scriptPolicy = 'auto',
   } = options;
 
+  const projectConfig = readProjectConfig(projectName);
+
+  if (shouldSkipSecretDependentScripts(projectName, projectConfig.bundleSecretKeys)) {
+    logger.warning(
+      `Skipping workspace scripts for "${workspaceName}" because --ignore-keychain-and-skip-secrets is enabled.`
+    );
+    return { success: true };
+  }
+
   const bundleReady = await ensureBundleReady({
     projectName,
     workspacePath,
@@ -94,8 +104,6 @@ export async function prepareWorkspaceForSession(
       bundleNeedsRefresh: bundleReady.bundleNeedsRefresh,
     };
   }
-
-  const projectConfig = readProjectConfig(projectName);
 
   if (projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0) {
     await preloadProjectSecrets(projectName, projectConfig.bundleSecretKeys);

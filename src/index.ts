@@ -431,6 +431,7 @@ serveCommand
 	.description('Start the serve daemon')
 	.option('--relay <url>', 'Override default relay URL')
 	.option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
+	.option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
 	.option('--password-stdin', 'Read password from stdin')
 	.option('--foreground', 'Run in foreground (don\'t daemonize)')
 	.action(async (options) => {
@@ -468,6 +469,7 @@ serveCommand
 serveCommand
 	.option('--relay <url>', 'Override default relay URL')
 	.option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
+	.option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
 	.action(async (options) => {
 		await checkFirstTimeSetup()
 		try {
@@ -971,26 +973,42 @@ process.on('unhandledRejection', (reason) => {
 // Parse command line arguments
 // Check for global relay options (TUI mode with relay)
 const args = process.argv.slice(2)
-const hasRelayOption = args.includes('--relay')
-const hasOnlyRelayOptions = args.every(arg =>
-	arg === '--relay' ||
-	(args[args.indexOf('--relay') + 1] === arg)
-)
+let relayUrlFromArgs: string | undefined
+let ignoreKeychainAndSkipSecrets = false
+let hasOnlyTuiOptions = true
+
+for (let i = 0; i < args.length; i += 1) {
+	const arg = args[i]
+	if (arg === '--relay') {
+		const value = args[i + 1]
+		if (!value || value.startsWith('--')) {
+			hasOnlyTuiOptions = false
+			break
+		}
+		relayUrlFromArgs = value
+		i += 1
+		continue
+	}
+
+	if (arg === '--ignore-keychain-and-skip-secrets') {
+		ignoreKeychainAndSkipSecrets = true
+		continue
+	}
+
+	hasOnlyTuiOptions = false
+	break
+}
 
 // If no args provided or only relay options, launch TUI
-if (process.argv.length === 2 || (hasRelayOption && hasOnlyRelayOptions)) {
-	// Extract options manually instead of using commander.parse() which shows help
-	const relayIndex = args.indexOf('--relay')
-	const relayUrl = relayIndex >= 0 ? args[relayIndex + 1] : undefined
-
+if (process.argv.length === 2 || hasOnlyTuiOptions) {
 	// Build relay config if provided (auth now via challenge-response, not token)
-	const relayConfig = relayUrl ? {
-		url: relayUrl,
+	const relayConfig = relayUrlFromArgs ? {
+		url: relayUrlFromArgs,
 	} : undefined
 
 	// Launch TUI
 	checkFirstTimeSetup()
-		.then(() => launchTUI(relayConfig))
+		.then(() => launchTUI(relayConfig, { ignoreKeychainAndSkipSecrets }))
 		.catch((error) => {
 			if (error instanceof SpacesError) {
 				logger.error(error.message)

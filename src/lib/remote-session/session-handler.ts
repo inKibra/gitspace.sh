@@ -39,6 +39,7 @@ import {
   getBundleRefreshPlan,
   applyBundleRefreshSubmission,
 } from '../../core/bundle-refresh.js';
+import { buildSessionName } from '../../session/session-name.js';
 
 import { logger } from "../../utils/logger.js";
 
@@ -85,6 +86,17 @@ function canAttachSession(
     return grantedSessionId === targetSessionId;
   }
   return false;
+}
+
+function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
+  return `${workspace.projectName}:${workspace.id}`;
+}
+
+function matchesWorkspaceId(
+  workspace: { projectName: string; id: string },
+  workspaceId: string
+): boolean {
+  return workspace.id === workspaceId || toCanonicalWorkspaceId(workspace) === workspaceId;
 }
 
 /**
@@ -294,7 +306,10 @@ export class RemoteSessionHandler {
 
     await this.sendMessage(session, sendResponse, {
       type: "workspace_list",
-      workspaces,
+      workspaces: workspaces.map((workspace) => ({
+        ...workspace,
+        id: toCanonicalWorkspaceId(workspace),
+      })),
     });
   }
 
@@ -323,7 +338,7 @@ export class RemoteSessionHandler {
             // Note: Session cwd is set once at creation time and does NOT change
             // as users navigate within the shell.
             const ws = workspacePathMap.get(s.cwd);
-            return ws?.id === workspaceId;
+            return ws ? matchesWorkspaceId(ws, workspaceId) : false;
           })
           .map(s => {
             // Find workspace info by cwd
@@ -331,7 +346,7 @@ export class RemoteSessionHandler {
             return {
               id: s.id,
               name: s.name,
-              workspaceId: ws?.id ?? "unknown",
+              workspaceId: ws ? toCanonicalWorkspaceId(ws) : "unknown",
               attached: s.attached,
               createdAt: s.createdAt,
               processTitle: s.processTitle,
@@ -376,6 +391,7 @@ export class RemoteSessionHandler {
 
       // If no session ID, create new session in workspace
       if (!msg.sessionId && msg.workspaceId) {
+        const requestedWorkspaceId = msg.workspaceId;
         // Security: Creating new sessions requires full/manage access
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to create sessions");
@@ -384,7 +400,7 @@ export class RemoteSessionHandler {
 
         // Find the workspace path
         const workspaces = await scanWorkspaces();
-        const workspace = workspaces.find(w => w.id === msg.workspaceId);
+        const workspace = workspaces.find((w) => matchesWorkspaceId(w, requestedWorkspaceId));
 
         if (!workspace) {
           await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
@@ -452,21 +468,14 @@ export class RemoteSessionHandler {
           done: true,
         });
 
-        // Create session name: use provided name or auto-generate
-        let sessionName: string;
-        if (msg.sessionName) {
-          // Use provided name with project:workspace prefix
-          sessionName = `${workspace.projectName}:${workspace.id}:${msg.sessionName}`;
-          console.log(`[remote-session] Using provided session name: ${sessionName}`);
-        } else {
-          // Auto-generate: project:workspace:N
-          const sessions = await listSessions();
-          const existingCount = sessions.filter(s =>
-            s.name.startsWith(`${workspace.projectName}:${workspace.id}:`)
-          ).length;
-          sessionName = `${workspace.projectName}:${workspace.id}:${existingCount + 1}`;
-          console.log(`[remote-session] Auto-generated session name: ${sessionName}`);
-        }
+        const sessions = await listSessions();
+        const sessionName = buildSessionName({
+          projectName: workspace.projectName,
+          workspaceName: workspace.id,
+          requestedName: msg.sessionName,
+          sessions,
+        });
+        console.log(`[remote-session] Selected session name: ${sessionName}`);
 
         targetSession = await createSession(sessionName, workspace.path);
         console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`)
@@ -501,7 +510,8 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       console.error("[remote-session] Failed to attach session:", e);
-      await this.sendError(session, sendResponse, "ATTACH_FAILED", "Failed to attach to session");
+      const detail = e instanceof Error ? e.message : String(e);
+      await this.sendError(session, sendResponse, "ATTACH_FAILED", `Failed to attach to session: ${detail}`);
     }
   }
 
@@ -549,7 +559,7 @@ export class RemoteSessionHandler {
       const workspacePathMap = new Map(workspaces.map(w => [w.path, w]));
       const targetSession = sessions.find(s => s.id === sessionId);
       const workspace = targetSession ? workspacePathMap.get(targetSession.cwd) : undefined;
-      const workspaceId = workspace?.id ?? "unknown";
+      const workspaceId = workspace ? toCanonicalWorkspaceId(workspace) : "unknown";
 
       await killSession(sessionId);
       // Wait a bit for the server to process the kill
@@ -575,6 +585,9 @@ export class RemoteSessionHandler {
     scriptPolicy: 'auto' | 'skip' | undefined,
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
+    const normalizedWorkspaceId = workspaceId.startsWith(`${projectName}:`)
+      ? workspaceId.slice(projectName.length + 1)
+      : workspaceId;
     let emittedDone = false;
     const emitDone = async (error?: string) => {
       await this.sendMessage(session, sendResponse, {
@@ -588,7 +601,7 @@ export class RemoteSessionHandler {
     };
 
     try {
-      const result = await deleteWorkspaceCore(projectName, workspaceId, {
+      const result = await deleteWorkspaceCore(projectName, normalizedWorkspaceId, {
         nonInteractive: true, // Remote context - scripts can't prompt for input
         removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
         onScriptOutput: (data) => {
@@ -622,7 +635,7 @@ export class RemoteSessionHandler {
 
       await this.sendMessage(session, sendResponse, {
         type: "workspace_deleted",
-        workspaceId,
+        workspaceId: `${projectName}:${normalizedWorkspaceId}`,
       });
     } catch (e) {
       console.error("[remote-session] Failed to delete workspace:", e);

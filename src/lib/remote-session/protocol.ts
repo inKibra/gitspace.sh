@@ -120,7 +120,7 @@ export interface ApplyBundleRefreshRequest {
 
 /** Workspace information */
 export interface WorkspaceInfo {
-  id: string;           // Workspace directory name
+  id: string;           // Canonical workspace id: project:workspace
   name: string;         // Display name
   path: string;         // Full path
   projectName: string;  // Parent project name

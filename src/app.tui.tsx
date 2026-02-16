@@ -87,6 +87,7 @@ import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { initializeSecretRuntime } from './core/secret-runtime.js';
 import {
   resolveInboxCommand,
   resolveMachineListCommand,
@@ -2571,7 +2572,16 @@ function StatusBar({ hint }: { hint: string }) {
 /** @deprecated Use RelayConfig instead */
 export type TUIRelayConfig = RelayConfig;
 
-export async function launchTUI(relayConfig?: RelayConfig): Promise<void> {
+export async function launchTUI(
+  relayConfig?: RelayConfig,
+  options: { ignoreKeychainAndSkipSecrets?: boolean } = {}
+): Promise<void> {
+  if (!relayConfig) {
+    await initializeSecretRuntime({
+      ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
+    });
+  }
+
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 30,

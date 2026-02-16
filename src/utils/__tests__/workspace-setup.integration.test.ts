@@ -32,6 +32,7 @@ function setupModuleMocks(): void {
     getProjectBaseDir: () => baseDir,
     getProjectWorkspacesDir: () => workspacesDir,
     getProjectDir: () => testDir,
+    getAllProjectNames: () => ['test-project'],
     readGlobalConfig: () => ({ currentProject: 'test-project' }),
     updateGlobalConfig: () => {},
   }));

@@ -49,11 +49,11 @@ export type TreeItemWithState = TreeItem & {
 export interface UseSpacesBrowserProps {
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
-  onRequestSessions: (workspaceId: string) => void;
+  onRequestSessions: (workspaceId?: string) => void;
   onAttachSession: (params: { sessionId?: string; workspaceId?: string }) => void | Promise<void>;
   onRefresh: () => void | Promise<void>;
-  /** Called to refresh sessions for specific workspaces (e.g., on manual refresh) */
-  onRefreshSessions?: (workspaceIds: string[]) => void | Promise<void>;
+  /** Called to refresh sessions after workspace refresh (full refresh by default). */
+  onRefreshSessions?: () => void | Promise<void>;
   onBack: () => void;
   /** Called when user wants to create a new workspace */
   onCreateWorkspace?: () => void;
@@ -233,17 +233,14 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   }, [tree.length]);
 
   const toggleWorkspace = useCallback((workspaceId: string) => {
-    console.log('[SpacesBrowser hook] toggleWorkspace called:', workspaceId);
     setExpandedWorkspaces(prev => {
       const next = new Set(prev);
       if (next.has(workspaceId)) {
-        console.log('[SpacesBrowser hook] Collapsing workspace:', workspaceId);
         next.delete(workspaceId);
       } else {
-        console.log('[SpacesBrowser hook] Expanding workspace:', workspaceId);
         next.add(workspaceId);
-        // Request sessions when expanding
-        onRequestSessions(workspaceId);
+        // Request a full sessions refresh when expanding.
+        onRequestSessions();
       }
       return next;
     });
@@ -282,11 +279,11 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   const refresh = useCallback(async () => {
     await onRefresh();
-    // Also refresh sessions for all expanded workspaces
-    if (onRefreshSessions && expandedWorkspaces.size > 0) {
-      await onRefreshSessions(Array.from(expandedWorkspaces));
+    // Also refresh sessions (shared full refresh policy)
+    if (onRefreshSessions) {
+      await onRefreshSessions();
     }
-  }, [onRefresh, onRefreshSessions, expandedWorkspaces]);
+  }, [onRefresh, onRefreshSessions]);
 
   const back = useCallback(() => {
     onBack();

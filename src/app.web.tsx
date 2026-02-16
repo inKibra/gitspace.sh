@@ -395,12 +395,10 @@ export default function App() {
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: terminal.workspaces,
     sessions: terminal.sessions,
-    onRequestSessions: terminal.requestSessions,
+    onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
     onRefresh: terminal.requestWorkspaces,
-    onRefreshSessions: (workspaceIds) => {
-      workspaceIds.forEach(id => terminal.requestSessions(id));
-    },
+    onRefreshSessions: () => terminal.requestSessions(),
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
   });
@@ -471,6 +469,7 @@ export default function App() {
     if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
       terminal.requestProjects();
       terminal.requestWorkspaces();
+      terminal.requestSessions();
       terminal.requestNotificationConfig();
     }
   }, [
@@ -479,6 +478,7 @@ export default function App() {
     terminal.mode,
     terminal.requestProjects,
     terminal.requestWorkspaces,
+    terminal.requestSessions,
     terminal.requestNotificationConfig,
   ]);
 

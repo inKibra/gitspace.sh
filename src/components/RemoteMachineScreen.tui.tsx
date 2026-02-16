@@ -147,6 +147,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
     remote.requestProjects();
     remote.requestWorkspaces();
+    remote.requestSessions();
     remote.requestNotificationConfig();
   }, [remote.mode, remote.status]);
 
@@ -159,14 +160,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
-    onRequestSessions: remote.requestSessions,
+    onRequestSessions: () => remote.requestSessions(),
     onAttachSession: attachController.attachFromSelection,
     onRefresh: remote.requestWorkspaces,
-    onRefreshSessions: (workspaceIds) => {
-      for (const workspaceId of workspaceIds) {
-        remote.requestSessions(workspaceId);
-      }
-    },
+    onRefreshSessions: () => remote.requestSessions(),
     onBack,
     machineName: machine.label || machine.machineId,
   });

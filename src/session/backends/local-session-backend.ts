@@ -34,6 +34,7 @@ import {
 } from '../../core/bundle-refresh.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
+import { buildSessionName } from '../session-name.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -506,10 +507,12 @@ export class LocalSessionBackend implements SessionBackend {
       });
 
       const sessions = await this.deps.listSessions();
-      const sessionPrefix = `${workspace.projectName}:${workspace.id}:`;
-      const count = sessions.filter((session) => session.name.startsWith(sessionPrefix)).length;
-      const suffix = params.sessionName ?? String(count + 1);
-      const fullName = `${sessionPrefix}${suffix}`;
+      const fullName = buildSessionName({
+        projectName: workspace.projectName,
+        workspaceName: workspace.id,
+        requestedName: params.sessionName,
+        sessions,
+      });
       targetSession = await this.deps.createSession(fullName, workspace.path);
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
