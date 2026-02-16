@@ -17,13 +17,19 @@ describe('buildSessionName', () => {
   });
 
   it('throws when requested name already exists in workspace', () => {
-    expect(() =>
+    try {
       buildSessionName({
         projectName: 'alpha',
         workspaceName: 'ws-1',
         requestedName: 'debug',
         sessions: [{ name: 'alpha:ws-1:debug' }],
-      })
-    ).toThrow('already exists');
+      });
+      expect.unreachable('Expected duplicate session name error');
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: 'SessionNameExistsError',
+        code: 'SESSION_ALREADY_EXISTS',
+      });
+    }
   });
 });

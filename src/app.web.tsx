@@ -72,6 +72,7 @@ export default function App() {
   const terminalRef = useRef<SessionTerminalHandle>(null);
   const lastScriptErrorRef = useRef<string | null>(null);
   const lastCommandErrorRef = useRef<string | null>(null);
+  const suppressDeleteScriptFailureModalRef = useRef(false);
 
   // Invite params from URL
   const [inviteParams, setInviteParams] = useState<{
@@ -179,16 +180,23 @@ export default function App() {
     flow,
     deleteWorkspace: terminal.deleteWorkspace,
     onBeforeDelete: ({ target }) => {
+      suppressDeleteScriptFailureModalRef.current = true;
       setShowInbox(false);
       setScriptWorkspaceName(target.workspaceName);
       setShowScriptTerminal(true);
     },
     onDeleteSuccess: async () => {
+      suppressDeleteScriptFailureModalRef.current = false;
       setShowScriptTerminal(false);
       terminal.requestWorkspaces();
       terminal.requestSessions();
     },
+    onDeleteCancelled: async () => {
+      suppressDeleteScriptFailureModalRef.current = false;
+      setShowScriptTerminal(false);
+    },
     onDeleteError: async ({ message }) => {
+      suppressDeleteScriptFailureModalRef.current = false;
       setShowScriptTerminal(false);
       flow.showMessage({
         title: 'Delete Failed',
@@ -259,6 +267,11 @@ export default function App() {
       return;
     }
 
+    if (suppressDeleteScriptFailureModalRef.current) {
+      lastScriptErrorRef.current = scriptError;
+      return;
+    }
+
     if (lastScriptErrorRef.current === scriptError) {
       return;
     }
@@ -282,6 +295,13 @@ export default function App() {
       return;
     }
     lastCommandErrorRef.current = key;
+
+    if (
+      terminal.commandError.code === 'REMOVE_SCRIPT_FAILED' &&
+      suppressDeleteScriptFailureModalRef.current
+    ) {
+      return;
+    }
 
     const isScriptFailure =
       terminal.commandError.code === 'SCRIPT_FAILED' ||

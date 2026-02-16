@@ -269,7 +269,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     | {
         resolve: () => void;
         reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
@@ -403,18 +402,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     };
 
     return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingDeleteWorkspace) {
-          return;
-        }
-        this.pendingDeleteWorkspace = null;
-        reject(new Error('Timed out deleting workspace'));
-      }, 15000);
-
       this.pendingDeleteWorkspace = {
         resolve,
         reject,
-        timeout,
       };
 
       void this.sendCommand(command).catch((error) => {
@@ -422,7 +412,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         if (!pending) {
           return;
         }
-        clearTimeout(pending.timeout);
         this.pendingDeleteWorkspace = null;
         reject(error instanceof Error ? error : new Error(String(error)));
       });
@@ -557,12 +546,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.sendRelayConnectMessage();
       },
       onClose: () => {
-        this.isConnected = false;
-        this.mode = 'browsing';
-        this.attachedSessionId = null;
-        this.sessionKeys = null;
-        this.handshakeState = null;
         this.rejectConnect(new Error('Socket closed before handshake completed'));
+        this.resetState();
         this.emit({ type: 'status', status: 'disconnected' });
       },
       onMessage: (raw) => {
@@ -573,6 +558,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       },
       onError: (error) => {
         this.rejectConnect(error);
+        this.rejectPendingBundleRefreshRequests(error.message);
+        this.rejectPendingWorkspaceDelete('DELETE_FAILED', error.message);
         this.emit({ type: 'status', status: 'error', error: error.message });
       },
     });
@@ -938,7 +925,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
-    clearTimeout(pending.timeout);
     this.pendingDeleteWorkspace = null;
     pending.resolve();
   }
@@ -949,7 +935,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
-    clearTimeout(pending.timeout);
     this.pendingDeleteWorkspace = null;
     const error = new Error(message) as Error & { code?: string };
     error.code = code;

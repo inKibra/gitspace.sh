@@ -44,7 +44,11 @@ import type {
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
-import { SpacesError } from '../../types/errors.js';
+import {
+  SpacesError,
+  WorkspaceDeleteError,
+  type WorkspaceDeleteErrorCode,
+} from '../../types/errors.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -142,6 +146,24 @@ function toError(error: unknown, fallback: string): Error {
     return error;
   }
   return new SpacesError(fallback, 'SYSTEM_ERROR', 2);
+}
+
+function toWorkspaceDeleteErrorCode(error: unknown): WorkspaceDeleteErrorCode | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  if (
+    code === 'REMOVE_SCRIPT_FAILED' ||
+    code === 'WORKSPACE_NOT_FOUND' ||
+    code === 'WORKTREE_REMOVE_FAILED' ||
+    code === 'DELETE_FAILED'
+  ) {
+    return code;
+  }
+
+  return undefined;
 }
 
 function getDefaultTerminalSize(): { cols: number; rows: number } {
@@ -578,9 +600,7 @@ export class LocalSessionBackend implements SessionBackend {
       });
 
       if (!result.success) {
-        const errorCode = result.errorCode === 'REMOVE_SCRIPT_FAILED'
-          ? 'REMOVE_SCRIPT_FAILED'
-          : 'DELETE_FAILED';
+        const errorCode: WorkspaceDeleteErrorCode = result.errorCode ?? 'DELETE_FAILED';
         const message = result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`;
 
         this.emit({
@@ -598,9 +618,7 @@ export class LocalSessionBackend implements SessionBackend {
         });
         emittedDone = true;
 
-        const error = new Error(message) as Error & { code?: string };
-        error.code = errorCode;
-        throw error;
+        throw new WorkspaceDeleteError(message, errorCode);
       }
 
       this.emit({
@@ -613,6 +631,7 @@ export class LocalSessionBackend implements SessionBackend {
     } catch (error) {
       if (!emittedDone) {
         const message = error instanceof Error ? error.message : String(error);
+        const errorCode = toWorkspaceDeleteErrorCode(error) ?? 'DELETE_FAILED';
         this.emit({
           type: 'script_output',
           phase: 'remove',
@@ -622,9 +641,13 @@ export class LocalSessionBackend implements SessionBackend {
         });
         this.emit({
           type: 'command_error',
-          code: 'DELETE_FAILED',
+          code: errorCode,
           message,
         });
+
+        if (!(error instanceof WorkspaceDeleteError)) {
+          throw new WorkspaceDeleteError(message, errorCode);
+        }
       }
       throw error;
     }

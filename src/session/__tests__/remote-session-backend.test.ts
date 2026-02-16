@@ -643,4 +643,35 @@ describe('RemoteSessionBackend', () => {
       code: 'REMOVE_SCRIPT_FAILED',
     });
   });
+
+  it('rejects pending workspace delete immediately when socket closes', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'ws-1');
+    socket.handlers?.onClose();
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'Remote session disconnected',
+      code: 'DELETE_FAILED',
+    });
+  });
 });

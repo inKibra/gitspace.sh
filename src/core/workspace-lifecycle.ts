@@ -84,6 +84,20 @@ export async function prepareWorkspaceForSession(
   const projectConfig = readProjectConfig(projectName);
 
   if (shouldSkipSecretDependentScripts(projectName, projectConfig.bundleSecretKeys)) {
+    const bundleReady = await ensureBundleReady({
+      projectName,
+      workspacePath,
+      mode: 'skip',
+    });
+
+    if (!bundleReady.success) {
+      return {
+        success: false,
+        phase: 'pre',
+        error: bundleReady.error,
+      };
+    }
+
     logger.warning(
       `Skipping workspace scripts for "${workspaceName}" because --ignore-keychain-and-skip-secrets is enabled.`
     );

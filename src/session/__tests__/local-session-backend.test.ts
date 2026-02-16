@@ -1063,4 +1063,34 @@ describe('LocalSessionBackend', () => {
       error: 'Remove scripts failed: cleanup failed',
     });
   });
+
+  it('preserves workspace delete error code and throws typed error', async () => {
+    const events: BackendEvent[] = [];
+
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      deleteWorkspaceCore: async (_projectName, workspaceId) => ({
+        success: false,
+        workspaceName: workspaceId,
+        branchDeleted: false,
+        sessionsKilled: 0,
+        errorCode: 'WORKSPACE_NOT_FOUND',
+        error: 'Workspace "ws-missing" does not exist',
+      }),
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await expect(backend.deleteWorkspace('alpha', 'ws-missing')).rejects.toMatchObject({
+      name: 'WorkspaceDeleteError',
+      code: 'WORKSPACE_NOT_FOUND',
+      message: 'Workspace "ws-missing" does not exist',
+    });
+
+    expect(events).toContainEqual({
+      type: 'command_error',
+      code: 'WORKSPACE_NOT_FOUND',
+      message: 'Workspace "ws-missing" does not exist',
+    });
+  });
 });

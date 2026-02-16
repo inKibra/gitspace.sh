@@ -113,6 +113,10 @@ function setupModuleMocks(): void {
       debug: () => {},
     },
   }));
+
+  mock.module('../../core/secret-runtime', () => ({
+    shouldSkipSecretDependentScripts: () => false,
+  }));
 }
 
 async function loadBundleRefreshModule() {

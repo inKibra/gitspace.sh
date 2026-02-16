@@ -1304,9 +1304,15 @@ export async function serveStart(options: {
   const entries = readAccessList();
   accessList.import(entries);
 
-  await initializeSecretRuntime({
-    ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
-  });
+  try {
+    await initializeSecretRuntime({
+      ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
+    });
+  } catch (error) {
+    stopStatusServer();
+    cleanupServeFiles();
+    throw error;
+  }
 
   // Get config
   const machineIdentity = readMachineIdentity();

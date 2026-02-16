@@ -126,10 +126,12 @@ export async function removeWorkspace(
 
 	if (!result.success && result.errorCode === 'REMOVE_SCRIPT_FAILED') {
 		logger.warning(result.error || 'Remove scripts failed')
-		const removeAnyway = await promptConfirm(
-			`Remove workspace "${workspaceName}" anyway and skip cleanup scripts?`,
-			false
-		)
+		const removeAnyway = options.force
+			? true
+			: await promptConfirm(
+				`Remove workspace "${workspaceName}" anyway and skip cleanup scripts?`,
+				false
+			)
 
 		if (!removeAnyway) {
 			logger.info('Cancelled')

@@ -80,10 +80,6 @@ export async function initializeSecretRuntime(
   }
 }
 
-export function isIgnoringKeychainAndSkippingSecrets(): boolean {
-  return state.ignoreKeychainAndSkipSecrets;
-}
-
 export function shouldSkipSecretDependentScripts(
   projectName: string,
   configuredSecretKeys?: string[]
@@ -104,10 +100,6 @@ export function shouldSkipSecretDependentScripts(
     const config = readProjectConfig(projectName);
     return (config.bundleSecretKeys ?? []).length > 0;
   } catch {
-    return false;
+    return true;
   }
-}
-
-export function isSecretRuntimeInitialized(): boolean {
-  return state.initialized;
 }

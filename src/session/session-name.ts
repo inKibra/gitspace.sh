@@ -1,3 +1,5 @@
+import { SessionNameExistsError } from '../types/errors.js';
+
 export interface ExistingSessionName {
   name: string;
 }
@@ -20,7 +22,7 @@ export function buildSessionName(options: BuildSessionNameOptions): string {
   if (requestedName && requestedName.length > 0) {
     const fullName = `${prefix}${requestedName}`;
     if (sessions.some((session) => session.name === fullName)) {
-      throw new Error(
+      throw new SessionNameExistsError(
         `Session name "${requestedName}" already exists in workspace "${workspaceName}"`
       );
     }
