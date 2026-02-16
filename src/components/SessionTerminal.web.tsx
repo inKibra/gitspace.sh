@@ -4,6 +4,7 @@ import {
   canConsumePageNavigationInViewport,
   type PageDirection,
 } from './session-terminal-page-navigation.js';
+import { isIOSDevice } from '../utils/device.web.js';
 
 interface Props {
   onData: (data: Uint8Array) => void;
@@ -43,6 +44,24 @@ interface TerminalViewportLike {
 const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
 const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before sending scroll
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
+
+function configureMobileHelperTextarea(textarea: HTMLTextAreaElement): void {
+  textarea.setAttribute('autocorrect', 'on');
+  textarea.setAttribute('autocomplete', 'on');
+  textarea.setAttribute('autocapitalize', 'none');
+  textarea.setAttribute('inputmode', 'text');
+  textarea.setAttribute('enterkeyhint', 'enter');
+  textarea.spellcheck = true;
+}
+
+function shouldHandleIosWordInput(event: InputEvent): boolean {
+  const inputType = event.inputType;
+  return (
+    inputType === 'insertText' ||
+    inputType === 'insertReplacementText' ||
+    inputType === 'insertFromComposition'
+  );
+}
 
 export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function SessionTerminal(
   { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true, allowTouchScroll = true },
@@ -227,6 +246,63 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         };
         container.addEventListener('keydown', handleKeyDown, true);
 
+        const isIOS = isIOSDevice();
+        const helperTextarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+        let isComposing = false;
+
+        const handleHelperFocus = () => {
+          if (!isIOS || !helperTextarea) {
+            return;
+          }
+          configureMobileHelperTextarea(helperTextarea);
+        };
+
+        const handleCompositionStart = () => {
+          if (!isIOS) {
+            return;
+          }
+          isComposing = true;
+        };
+
+        const handleCompositionEnd = () => {
+          if (!isIOS) {
+            return;
+          }
+          isComposing = false;
+        };
+
+        const handleInputFallback = (event: Event) => {
+          if (!isIOS || !helperTextarea || isComposing) {
+            return;
+          }
+
+          const inputEvent = event as InputEvent;
+          if (!shouldHandleIosWordInput(inputEvent)) {
+            return;
+          }
+
+          // xterm usually consumes normal key input and clears helper value.
+          // Keep this as an iOS fallback for word-level commits (swipe/predictive text).
+          const value = helperTextarea.value;
+          if (value.length <= 1) {
+            return;
+          }
+
+          onActivityRef.current?.();
+          onDataRef.current(new TextEncoder().encode(value));
+          helperTextarea.value = '';
+        };
+
+        if (helperTextarea) {
+          if (isIOS) {
+            configureMobileHelperTextarea(helperTextarea);
+          }
+          helperTextarea.addEventListener('focus', handleHelperFocus);
+          helperTextarea.addEventListener('compositionstart', handleCompositionStart);
+          helperTextarea.addEventListener('compositionend', handleCompositionEnd);
+          helperTextarea.addEventListener('input', handleInputFallback);
+        }
+
         const handlePreventTouchFocus = (e: Event) => {
           if (!allowTapFocusRef.current) {
             e.stopPropagation();
@@ -337,6 +413,12 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
 
         teardown = () => {
           container.removeEventListener('keydown', handleKeyDown, true);
+          if (helperTextarea) {
+            helperTextarea.removeEventListener('focus', handleHelperFocus);
+            helperTextarea.removeEventListener('compositionstart', handleCompositionStart);
+            helperTextarea.removeEventListener('compositionend', handleCompositionEnd);
+            helperTextarea.removeEventListener('input', handleInputFallback);
+          }
           container.removeEventListener('touchend', handlePreventTouchFocus, true);
           container.removeEventListener('touchstart', handleTouchStart);
           container.removeEventListener('touchmove', handleTouchMove);

@@ -5,6 +5,7 @@ let planResult: any
 let syncParseError: string | undefined
 let syncCalls = 0
 let runCalls = 0
+let skipSecretDependentScripts = false
 
 mock.module('../bundle-refresh', () => ({
   checkAndRefreshBundle: async () => true,
@@ -31,6 +32,10 @@ mock.module('../../utils/secrets', () => ({
   preloadProjectSecrets: async () => {},
 }))
 
+mock.module('../secret-runtime', () => ({
+  shouldSkipSecretDependentScripts: () => skipSecretDependentScripts,
+}))
+
 mock.module('../../utils/run-workspace-scripts', () => ({
   runWorkspaceScripts: async () => {
     runCalls += 1
@@ -41,6 +46,7 @@ mock.module('../../utils/run-workspace-scripts', () => ({
 mock.module('../../utils/logger', () => ({
   logger: {
     info: () => {},
+    warning: () => {},
   },
 }))
 
@@ -51,6 +57,7 @@ describe('prepareWorkspaceForSession bundle checks', () => {
     syncCalls = 0
     runCalls = 0
     syncParseError = undefined
+    skipSecretDependentScripts = false
     detectResult = {
       hasBundle: true,
       hasChanged: false,
@@ -131,6 +138,22 @@ describe('prepareWorkspaceForSession bundle checks', () => {
     expect(result.success).toBe(false)
     expect('bundleNeedsRefresh' in result && result.bundleNeedsRefresh).toBe(true)
     expect(syncCalls).toBe(0)
+    expect(runCalls).toBe(0)
+  })
+
+  it('syncs bundle state and skips scripts when secret loading is disabled', async () => {
+    skipSecretDependentScripts = true
+
+    const result = await prepareWorkspaceForSession({
+      projectName: 'test-project',
+      workspacePath: '/tmp/test-workspace',
+      workspaceName: 'test-workspace',
+      repository: 'owner/repo',
+      bundleMode: 'error-if-changed',
+    })
+
+    expect(result.success).toBe(true)
+    expect(syncCalls).toBe(1)
     expect(runCalls).toBe(0)
   })
 })

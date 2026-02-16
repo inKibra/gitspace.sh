@@ -4,6 +4,7 @@ export type {
   BackendDescriptor,
   SessionBackend,
   AttachSessionParams,
+  DeleteWorkspaceParams,
 } from './backend.js';
 
 export type {

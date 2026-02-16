@@ -24,14 +24,20 @@ import {
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
+import {
+  WorkspaceDeleteError,
+  type WorkspaceDeleteErrorCode,
+} from '../../types/errors.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  DeleteWorkspaceParams,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
+const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 
 interface RelayDataMessage {
   type: 'data';
@@ -226,6 +232,46 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
+function workspaceIdsMatch(expected: string, actual: string | undefined): boolean {
+  if (!actual) {
+    return false;
+  }
+
+  if (expected === actual) {
+    return true;
+  }
+
+  const expectedSeparator = expected.indexOf(':');
+  const actualSeparator = actual.indexOf(':');
+
+  if (expectedSeparator > 0 && actualSeparator <= 0) {
+    return expected.slice(expectedSeparator + 1) === actual;
+  }
+
+  if (expectedSeparator <= 0 && actualSeparator > 0) {
+    return expected === actual.slice(actualSeparator + 1);
+  }
+
+  return false;
+}
+
+function toWorkspaceDeleteErrorCode(code: string | undefined): WorkspaceDeleteErrorCode {
+  if (
+    code === 'REMOVE_SCRIPT_FAILED' ||
+    code === 'WORKSPACE_NOT_FOUND' ||
+    code === 'WORKTREE_REMOVE_FAILED' ||
+    code === 'DELETE_FAILED' ||
+    code === 'NOT_FOUND' ||
+    code === 'RESOURCE_NOT_FOUND' ||
+    code === 'PERMISSION_DENIED' ||
+    code === 'DELETE_TIMEOUT'
+  ) {
+    return code;
+  }
+
+  return 'DELETE_FAILED';
+}
+
 export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServerAuth>
   implements SessionBackend {
   readonly descriptor: BackendDescriptor;
@@ -259,6 +305,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     | null = null;
   private pendingBundleRefreshApply:
     | {
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingDeleteWorkspace:
+    | {
+        workspaceId: string;
         resolve: () => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
@@ -378,13 +432,60 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async deleteWorkspace(projectName: string, workspaceId: string): Promise<void> {
+  async deleteWorkspace(
+    projectName: string,
+    workspaceId: string,
+    params: DeleteWorkspaceParams = {}
+  ): Promise<void> {
+    if (this.pendingDeleteWorkspace) {
+      throw new Error('Workspace delete request already in progress');
+    }
+
     const command: DeleteWorkspaceRequest = {
       type: 'delete_workspace',
       projectName,
       workspaceId,
+      scriptPolicy: params.scriptPolicy,
     };
-    await this.sendCommand(command);
+    const timeoutMs =
+      typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
+        ? params.timeoutMs
+        : DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS;
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingDeleteWorkspace;
+        if (!pending || !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
+          return;
+        }
+
+        this.pendingDeleteWorkspace = null;
+        pending.reject(
+          new WorkspaceDeleteError(
+            `Timed out waiting for workspace deletion response (${workspaceId})`,
+            'DELETE_TIMEOUT'
+          )
+        );
+      }, timeoutMs);
+
+      this.pendingDeleteWorkspace = {
+        workspaceId,
+        resolve,
+        reject,
+        timeout,
+      };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingDeleteWorkspace;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingDeleteWorkspace = null;
+        const message = error instanceof Error ? error.message : String(error);
+        pending.reject(new WorkspaceDeleteError(message, 'DELETE_FAILED'));
+      });
+    });
   }
 
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
@@ -515,12 +616,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.sendRelayConnectMessage();
       },
       onClose: () => {
-        this.isConnected = false;
-        this.mode = 'browsing';
-        this.attachedSessionId = null;
-        this.sessionKeys = null;
-        this.handshakeState = null;
         this.rejectConnect(new Error('Socket closed before handshake completed'));
+        this.resetState();
         this.emit({ type: 'status', status: 'disconnected' });
       },
       onMessage: (raw) => {
@@ -531,6 +628,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       },
       onError: (error) => {
         this.rejectConnect(error);
+        this.rejectPendingBundleRefreshRequests(error.message);
+        this.rejectPendingWorkspaceDelete('DELETE_FAILED', error.message);
         this.emit({ type: 'status', status: 'error', error: error.message });
       },
     });
@@ -770,6 +869,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         );
         return;
       case 'workspace_deleted':
+        this.resolveWorkspaceDelete(message.workspaceId);
         await this.listWorkspaces();
         return;
       case 'inbox_list':
@@ -800,6 +900,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
+        if (message.workspaceId) {
+          this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
+        }
         this.emit({
           type: 'command_error',
           code: message.code,
@@ -888,6 +991,41 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
+  private resolveWorkspaceDelete(workspaceId: string): void {
+    const pending = this.pendingDeleteWorkspace;
+    if (!pending) {
+      return;
+    }
+
+    if (!workspaceIdsMatch(pending.workspaceId, workspaceId)) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingDeleteWorkspace = null;
+    pending.resolve();
+  }
+
+  private rejectPendingWorkspaceDelete(
+    code: string | undefined,
+    message: string,
+    workspaceId?: string,
+    force = false
+  ): void {
+    const pending = this.pendingDeleteWorkspace;
+    if (!pending) {
+      return;
+    }
+
+    if (!force && workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingDeleteWorkspace = null;
+    pending.reject(new WorkspaceDeleteError(message, toWorkspaceDeleteErrorCode(code)));
+  }
+
   private emitPtyData(data: Uint8Array): void {
     if (!this.ptyOutputHandler) {
       this.pendingPtyChunks.push(data);
@@ -973,6 +1111,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
+    this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
     this.connectPromise = null;
     this.connectResolve = null;
     this.connectReject = null;

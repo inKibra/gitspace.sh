@@ -206,3 +206,48 @@ export class InvalidPublicKeyError extends SpacesError {
     this.name = 'InvalidPublicKeyError';
   }
 }
+
+export type WorkspaceDeleteErrorCode =
+  | 'REMOVE_SCRIPT_FAILED'
+  | 'WORKSPACE_NOT_FOUND'
+  | 'WORKTREE_REMOVE_FAILED'
+  | 'DELETE_FAILED'
+  | 'NOT_FOUND'
+  | 'RESOURCE_NOT_FOUND'
+  | 'PERMISSION_DENIED'
+  | 'DELETE_TIMEOUT';
+
+/**
+ * Error thrown when workspace deletion fails in session backends.
+ * Keeps machine-parseable delete codes for retry/UX handling.
+ */
+export class WorkspaceDeleteError extends Error {
+  public readonly code: WorkspaceDeleteErrorCode;
+
+  constructor(message: string, code: WorkspaceDeleteErrorCode) {
+    super(message);
+    this.name = 'WorkspaceDeleteError';
+    this.code = code;
+
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+}
+
+/**
+ * Error thrown when a requested session name already exists.
+ */
+export class SessionNameExistsError extends Error {
+  public readonly code: 'SESSION_ALREADY_EXISTS';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionNameExistsError';
+    this.code = 'SESSION_ALREADY_EXISTS';
+
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+}

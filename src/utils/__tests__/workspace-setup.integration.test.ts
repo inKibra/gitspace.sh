@@ -32,6 +32,7 @@ function setupModuleMocks(): void {
     getProjectBaseDir: () => baseDir,
     getProjectWorkspacesDir: () => workspacesDir,
     getProjectDir: () => testDir,
+    getAllProjectNames: () => ['test-project'],
     readGlobalConfig: () => ({ currentProject: 'test-project' }),
     updateGlobalConfig: () => {},
   }));
@@ -112,6 +113,10 @@ function setupModuleMocks(): void {
       debug: () => {},
     },
   }));
+
+  mock.module('../../core/secret-runtime', () => ({
+    shouldSkipSecretDependentScripts: () => false,
+  }));
 }
 
 async function loadBundleRefreshModule() {
@@ -168,6 +173,15 @@ function setupRemoveScript(workspacePath: string, outputFile: string): void {
   writeExecutable(
     join(removeDir, '01-remove.sh'),
     `#!/bin/bash\necho "remove:${'$'}REGION:${'$'}PULUMI_ACCESS_TOKEN:${'$'}FEATURE_FLAG:${'$'}NPM_TOKEN" >> "${outputFile}"\n`
+  );
+}
+
+function setupFailingRemoveScript(workspacePath: string, outputFile: string): void {
+  const removeDir = join(workspacePath, '.gitspace', 'scripts', 'remove');
+  mkdirSync(removeDir, { recursive: true });
+  writeExecutable(
+    join(removeDir, '01-remove.sh'),
+    `#!/bin/bash\necho "remove-fail" >> "${outputFile}"\nexit 7\n`
   );
 }
 
@@ -559,5 +573,35 @@ describe('workspace setup integration', () => {
 
     expect(mockProjectConfig.bundleWorkspaceState[wsTargetName]).toBeUndefined();
     expect(mockProjectConfig.bundleWorkspaceState[wsOtherName]).toBeDefined();
+  });
+
+  it('fails deletion when remove scripts fail unless skip policy is used', async () => {
+    const { deleteWorkspaceCore } = await loadWorkspaceCoreModule();
+
+    const workspaceName = 'ws-remove-fail';
+    const workspacePath = join(workspacesDir, workspaceName);
+    mkdirSync(workspacePath, { recursive: true });
+
+    const removeOutput = join(testDir, 'remove-fail.log');
+    setupFailingRemoveScript(workspacePath, removeOutput);
+
+    const firstAttempt = await deleteWorkspaceCore('test-project', workspaceName, {
+      nonInteractive: true,
+      keepBranch: true,
+    });
+
+    expect(firstAttempt.success).toBe(false);
+    expect(firstAttempt.errorCode).toBe('REMOVE_SCRIPT_FAILED');
+    expect(existsSync(workspacePath)).toBe(true);
+    expect((await Bun.file(removeOutput).text()).trim()).toBe('remove-fail');
+
+    const secondAttempt = await deleteWorkspaceCore('test-project', workspaceName, {
+      nonInteractive: true,
+      keepBranch: true,
+      removeScriptPolicy: 'skip',
+    });
+
+    expect(secondAttempt.success).toBe(true);
+    expect(existsSync(workspacePath)).toBe(false);
   });
 });

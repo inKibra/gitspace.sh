@@ -34,15 +34,21 @@ import {
 } from '../../core/bundle-refresh.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
+import { buildSessionName } from '../session-name.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  DeleteWorkspaceParams,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
-import { SpacesError } from '../../types/errors.js';
+import {
+  SpacesError,
+  WorkspaceDeleteError,
+  type WorkspaceDeleteErrorCode,
+} from '../../types/errors.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -140,6 +146,24 @@ function toError(error: unknown, fallback: string): Error {
     return error;
   }
   return new SpacesError(fallback, 'SYSTEM_ERROR', 2);
+}
+
+function toWorkspaceDeleteErrorCode(error: unknown): WorkspaceDeleteErrorCode | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  if (
+    code === 'REMOVE_SCRIPT_FAILED' ||
+    code === 'WORKSPACE_NOT_FOUND' ||
+    code === 'WORKTREE_REMOVE_FAILED' ||
+    code === 'DELETE_FAILED'
+  ) {
+    return code;
+  }
+
+  return undefined;
 }
 
 function getDefaultTerminalSize(): { cols: number; rows: number } {
@@ -505,10 +529,12 @@ export class LocalSessionBackend implements SessionBackend {
       });
 
       const sessions = await this.deps.listSessions();
-      const sessionPrefix = `${workspace.projectName}:${workspace.id}:`;
-      const count = sessions.filter((session) => session.name.startsWith(sessionPrefix)).length;
-      const suffix = params.sessionName ?? String(count + 1);
-      const fullName = `${sessionPrefix}${suffix}`;
+      const fullName = buildSessionName({
+        projectName: workspace.projectName,
+        workspaceName: workspace.id,
+        requestedName: params.sessionName,
+        sessions,
+      });
       targetSession = await this.deps.createSession(fullName, workspace.path);
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
@@ -550,18 +576,80 @@ export class LocalSessionBackend implements SessionBackend {
     await this.deps.killSession(sessionId);
   }
 
-  async deleteWorkspace(projectName: string, workspaceId: string): Promise<void> {
+  async deleteWorkspace(
+    projectName: string,
+    workspaceId: string,
+    params: DeleteWorkspaceParams = {}
+  ): Promise<void> {
     const resolvedWorkspaceId = resolveWorkspaceName(projectName, workspaceId);
-    const result = await this.deps.deleteWorkspaceCore(projectName, resolvedWorkspaceId, {
-      nonInteractive: true,
-    });
+    const scriptPolicy = params.scriptPolicy ?? 'auto';
+    let emittedDone = false;
 
-    if (!result.success) {
-      throw new SpacesError(
-        result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`,
-        'USER_ERROR',
-        1
-      );
+    try {
+      const result = await this.deps.deleteWorkspaceCore(projectName, resolvedWorkspaceId, {
+        nonInteractive: true,
+        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
+        onScriptOutput: (data) => {
+          this.emitPtyData(data);
+          this.emit({
+            type: 'script_output',
+            phase: 'remove',
+            data,
+          });
+        },
+      });
+
+      if (!result.success) {
+        const errorCode: WorkspaceDeleteErrorCode = result.errorCode ?? 'DELETE_FAILED';
+        const message = result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`;
+
+        this.emit({
+          type: 'command_error',
+          code: errorCode,
+          message,
+        });
+
+        this.emit({
+          type: 'script_output',
+          phase: 'remove',
+          data: new Uint8Array(0),
+          done: true,
+          error: message,
+        });
+        emittedDone = true;
+
+        throw new WorkspaceDeleteError(message, errorCode);
+      }
+
+      this.emit({
+        type: 'script_output',
+        phase: 'remove',
+        data: new Uint8Array(0),
+        done: true,
+      });
+      emittedDone = true;
+    } catch (error) {
+      if (!emittedDone) {
+        const message = error instanceof Error ? error.message : String(error);
+        const errorCode = toWorkspaceDeleteErrorCode(error) ?? 'DELETE_FAILED';
+        this.emit({
+          type: 'script_output',
+          phase: 'remove',
+          data: new Uint8Array(0),
+          done: true,
+          error: message,
+        });
+        this.emit({
+          type: 'command_error',
+          code: errorCode,
+          message,
+        });
+
+        if (!(error instanceof WorkspaceDeleteError)) {
+          throw new WorkspaceDeleteError(message, errorCode);
+        }
+      }
+      throw error;
     }
   }
 

@@ -21,6 +21,7 @@ import {
 } from './git.js';
 import { runScriptsInTerminal } from '../utils/run-scripts.js';
 import { getProjectSecrets } from '../utils/secrets.js';
+import { shouldSkipSecretDependentScripts } from './secret-runtime.js';
 import { logger } from '../utils/logger.js';
 import {
   listSessions,
@@ -49,6 +50,13 @@ export interface DeleteWorkspaceOptions {
    * Called with a human-readable message for each step.
    */
   onProgress?: (message: string) => void;
+  /**
+   * Controls remove-script behavior:
+   * - enforce: fail deletion when remove scripts fail
+   * - best-effort: log remove script failures and continue deletion
+   * - skip: do not run remove scripts
+   */
+  removeScriptPolicy?: 'enforce' | 'best-effort' | 'skip';
 }
 
 /**
@@ -60,7 +68,9 @@ export interface DeleteWorkspaceResult {
   branch?: string;
   branchDeleted: boolean;
   sessionsKilled: number;
+  errorCode?: 'WORKSPACE_NOT_FOUND' | 'REMOVE_SCRIPT_FAILED' | 'WORKTREE_REMOVE_FAILED';
   error?: string;
+  removeScriptError?: string;
 }
 
 /**
@@ -89,9 +99,25 @@ export async function deleteWorkspaceCore(
 
   // Validate workspace exists before attempting deletion
   if (!existsSync(workspacePath)) {
+    result.errorCode = 'WORKSPACE_NOT_FOUND';
     result.error = `Workspace "${workspaceName}" does not exist`;
     return result;
   }
+
+  const removeScriptPolicy = options.removeScriptPolicy ?? 'enforce';
+  let projectConfig: ReturnType<typeof readProjectConfig> | null = null;
+  try {
+    projectConfig = readProjectConfig(projectName);
+  } catch (error) {
+    logger.debug(
+      `Failed to read project config for ${projectName} while preparing delete: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const skipSecretScripts = shouldSkipSecretDependentScripts(
+    projectName,
+    projectConfig?.bundleSecretKeys
+  );
+  const effectiveRemoveScriptPolicy = skipSecretScripts ? 'skip' : removeScriptPolicy;
 
   // Get workspace info before deletion
   const info = await getWorktreeInfo(workspacePath);
@@ -122,29 +148,44 @@ export async function deleteWorkspaceCore(
   }
 
   // Run remove scripts (cleanup before deletion)
-  try {
-    const projectConfig = readProjectConfig(projectName);
-    const removeScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'remove');
-    const bundleSecrets = projectConfig.bundleSecretKeys && projectConfig.bundleSecretKeys.length > 0
-      ? await getProjectSecrets(projectName, projectConfig.bundleSecretKeys)
-      : undefined;
+  if (effectiveRemoveScriptPolicy !== 'skip') {
+    try {
+      const config = projectConfig ?? readProjectConfig(projectName);
+      const removeScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'remove');
+      const bundleSecrets = config.bundleSecretKeys && config.bundleSecretKeys.length > 0
+        ? await getProjectSecrets(projectName, config.bundleSecretKeys)
+        : undefined;
 
-    options.onProgress?.('Running cleanup scripts...');
-    await runScriptsInTerminal(
-      removeScriptsDir,
-      workspacePath,
-      workspaceName,
-      projectConfig.repository,
-      {
-        bundleValues: projectConfig.bundleValues,
-        bundleSecrets,
-        nonInteractive: options.nonInteractive,
-        onOutput: options.onScriptOutput,
+      options.onProgress?.('Running cleanup scripts...');
+      await runScriptsInTerminal(
+        removeScriptsDir,
+        workspacePath,
+        workspaceName,
+        config.repository,
+        {
+          bundleValues: config.bundleValues,
+          bundleSecrets,
+          nonInteractive: options.nonInteractive,
+          onOutput: options.onScriptOutput,
+        }
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (effectiveRemoveScriptPolicy === 'enforce') {
+        result.errorCode = 'REMOVE_SCRIPT_FAILED';
+        result.removeScriptError = message;
+        result.error = `Remove scripts failed: ${message}`;
+        return result;
       }
-    );
-  } catch (e) {
-    // Scripts are best-effort, log but continue
-    logger.debug(`Remove scripts failed for ${workspaceName}: ${e}`);
+
+      logger.debug(`Remove scripts failed for ${workspaceName}: ${e}`);
+    }
+  } else {
+    if (skipSecretScripts) {
+      options.onProgress?.('Skipping cleanup scripts (secret loading disabled)...');
+    } else {
+      options.onProgress?.('Skipping cleanup scripts...');
+    }
   }
 
   // Remove worktree
@@ -152,6 +193,7 @@ export async function deleteWorkspaceCore(
   try {
     await removeWorktree(baseDir, workspacePath, true);
   } catch (e) {
+    result.errorCode = 'WORKTREE_REMOVE_FAILED';
     result.error = e instanceof Error ? e.message : 'Failed to remove worktree';
     return result;
   }
@@ -264,6 +306,7 @@ export async function deleteProjectCore(
         nonInteractive: options.nonInteractive,
         keepBranch: true, // Don't try to delete branches, we're removing the whole repo
         onProgress: options.onProgress,
+        removeScriptPolicy: 'best-effort',
       });
       if (wsResult.success) {
         result.workspacesDeleted++;

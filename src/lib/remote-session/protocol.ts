@@ -68,6 +68,7 @@ export interface DeleteWorkspaceRequest {
   type: "delete_workspace";
   workspaceId: string;
   projectName: string;  // Needed to locate workspace
+  scriptPolicy?: 'auto' | 'skip';
 }
 
 /** Request inbox items */
@@ -119,7 +120,7 @@ export interface ApplyBundleRefreshRequest {
 
 /** Workspace information */
 export interface WorkspaceInfo {
-  id: string;           // Workspace directory name
+  id: string;           // Canonical workspace id: project:workspace
   name: string;         // Display name
   path: string;         // Full path
   projectName: string;  // Parent project name
@@ -177,6 +178,7 @@ export interface ErrorResponse {
   type: "error";
   code: string;
   message: string;
+  workspaceId?: string;
 }
 
 /** Project information */

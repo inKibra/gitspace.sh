@@ -564,4 +564,328 @@ describe('RemoteSessionBackend', () => {
       sessionId: 'existing-session',
     });
   });
+
+  it('waits for workspace_deleted when deleting a workspace', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'ws-1', { scriptPolicy: 'skip' });
+    await Bun.sleep(0);
+    const deleteCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
+    expect(deleteCommand).toEqual({
+      type: 'delete_workspace',
+      projectName: 'alpha',
+      workspaceId: 'ws-1',
+      scriptPolicy: 'skip',
+    });
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'workspace_deleted',
+        workspaceId: 'ws-1',
+      })
+    );
+
+    await expect(deletePromise).resolves.toBeUndefined();
+  });
+
+  it('rejects workspace delete when backend returns an error', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'ws-1');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'REMOVE_SCRIPT_FAILED',
+        message: 'Remove scripts failed: cleanup failed',
+        workspaceId: 'ws-1',
+      })
+    );
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'Remove scripts failed: cleanup failed',
+      code: 'REMOVE_SCRIPT_FAILED',
+    });
+  });
+
+  it('rejects pending workspace delete immediately when socket closes', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'ws-1');
+    socket.handlers?.onClose();
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'Remote session disconnected',
+      code: 'DELETE_FAILED',
+    });
+  });
+
+  it('times out pending workspace delete when no response arrives', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-timeout', {
+      timeoutMs: 5,
+    });
+
+    await expect(deletePromise).rejects.toMatchObject({
+      name: 'WorkspaceDeleteError',
+      code: 'DELETE_TIMEOUT',
+    });
+  });
+
+  it('ignores workspace_deleted for a different workspace', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-target');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'workspace_deleted',
+        workspaceId: 'alpha:ws-other',
+      })
+    );
+
+    const statusAfterMismatch = await Promise.race([
+      deletePromise.then(() => 'resolved', () => 'rejected'),
+      Bun.sleep(0).then(() => 'pending'),
+    ]);
+    expect(statusAfterMismatch).toBe('pending');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'workspace_deleted',
+        workspaceId: 'alpha:ws-target',
+      })
+    );
+
+    await expect(deletePromise).resolves.toBeUndefined();
+  });
+
+  it('ignores delete error for a different workspace id', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-target');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'DELETE_FAILED',
+        message: 'wrong workspace error',
+        workspaceId: 'alpha:ws-other',
+      })
+    );
+
+    const statusAfterMismatch = await Promise.race([
+      deletePromise.then(() => 'resolved', () => 'rejected'),
+      Bun.sleep(0).then(() => 'pending'),
+    ]);
+    expect(statusAfterMismatch).toBe('pending');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'DELETE_FAILED',
+        message: 'target workspace error',
+        workspaceId: 'alpha:ws-target',
+      })
+    );
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'target workspace error',
+      code: 'DELETE_FAILED',
+    });
+  });
+
+  it('rejects delete on permission error when workspace id is provided', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-target');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'PERMISSION_DENIED',
+        message: 'Requires full access to delete workspaces',
+        workspaceId: 'alpha:ws-target',
+      })
+    );
+
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'Requires full access to delete workspaces',
+      code: 'PERMISSION_DENIED',
+    });
+  });
+
+  it('does not reject delete for unrelated error without workspace id', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-target');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'NOT_FOUND',
+        message: 'Session not found',
+      })
+    );
+
+    const statusAfterUnrelatedError = await Promise.race([
+      deletePromise.then(() => 'resolved', () => 'rejected'),
+      Bun.sleep(0).then(() => 'pending'),
+    ]);
+    expect(statusAfterUnrelatedError).toBe('pending');
+
+    socket.handlers?.onClose();
+    await expect(deletePromise).rejects.toMatchObject({
+      message: 'Remote session disconnected',
+      code: 'DELETE_FAILED',
+    });
+  });
 });

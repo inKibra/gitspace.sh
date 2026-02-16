@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test'
 import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
-import type { AttachSessionParams, BackendEvent, SessionBackend } from '../../session/index.js'
+import type {
+  AttachSessionParams,
+  BackendEvent,
+  DeleteWorkspaceParams,
+  SessionBackend,
+} from '../../session/index.js'
 import type { NotificationConfig } from '../../notifications/types.js'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
 import { SpacesError } from '../../types/errors.js'
@@ -83,7 +88,11 @@ class FakeLocalBackend implements SessionBackend {
 
   async killSession(_sessionId: string): Promise<void> {}
 
-  async deleteWorkspace(_projectName: string, _workspaceId: string): Promise<void> {}
+  async deleteWorkspace(
+    _projectName: string,
+    _workspaceId: string,
+    _params?: DeleteWorkspaceParams
+  ): Promise<void> {}
 
   async getBundleRefreshPlan(
     _projectName: string,

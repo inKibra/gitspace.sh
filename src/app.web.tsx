@@ -18,6 +18,7 @@ import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/devic
 import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 
 // Import shared components and hooks
 import {
@@ -49,6 +50,13 @@ type View = "machines" | "terminal";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
+const DELETE_ERROR_CODES = new Set([
+  'REMOVE_SCRIPT_FAILED',
+  'DELETE_FAILED',
+  'WORKSPACE_NOT_FOUND',
+  'RESOURCE_NOT_FOUND',
+  'NOT_FOUND',
+]);
 
 export default function App() {
   const [view, setView] = useState<View>("machines");
@@ -71,6 +79,7 @@ export default function App() {
   const terminalRef = useRef<SessionTerminalHandle>(null);
   const lastScriptErrorRef = useRef<string | null>(null);
   const lastCommandErrorRef = useRef<string | null>(null);
+  const suppressDeleteScriptFailureModalRef = useRef(false);
 
   // Invite params from URL
   const [inviteParams, setInviteParams] = useState<{
@@ -174,6 +183,36 @@ export default function App() {
     },
   });
 
+  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+    flow,
+    deleteWorkspace: terminal.deleteWorkspace,
+    onBeforeDelete: ({ target }) => {
+      suppressDeleteScriptFailureModalRef.current = true;
+      setShowInbox(false);
+      setScriptWorkspaceName(target.workspaceName);
+      setShowScriptTerminal(true);
+    },
+    onDeleteSuccess: async () => {
+      suppressDeleteScriptFailureModalRef.current = false;
+      setShowScriptTerminal(false);
+      terminal.requestWorkspaces();
+      terminal.requestSessions();
+    },
+    onDeleteCancelled: async () => {
+      suppressDeleteScriptFailureModalRef.current = false;
+      setShowScriptTerminal(false);
+    },
+    onDeleteError: async ({ message }) => {
+      suppressDeleteScriptFailureModalRef.current = false;
+      setShowScriptTerminal(false);
+      flow.showMessage({
+        title: 'Delete Failed',
+        message,
+        variant: 'error',
+      });
+    },
+  });
+
   useEffect(() => {
     let mounted = true;
     void browserPreferencesService.getNotificationConfig().then((config) => {
@@ -235,6 +274,11 @@ export default function App() {
       return;
     }
 
+    if (suppressDeleteScriptFailureModalRef.current) {
+      lastScriptErrorRef.current = scriptError;
+      return;
+    }
+
     if (lastScriptErrorRef.current === scriptError) {
       return;
     }
@@ -259,11 +303,20 @@ export default function App() {
     }
     lastCommandErrorRef.current = key;
 
+    if (
+      suppressDeleteScriptFailureModalRef.current &&
+      terminal.commandError.code &&
+      DELETE_ERROR_CODES.has(terminal.commandError.code)
+    ) {
+      return;
+    }
+
     const isScriptFailure =
       terminal.commandError.code === 'SCRIPT_FAILED' ||
       terminal.commandError.code === 'PRE_SCRIPT_FAILED' ||
       terminal.commandError.code === 'SETUP_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SELECT_SCRIPT_FAILED';
+      terminal.commandError.code === 'SELECT_SCRIPT_FAILED' ||
+      terminal.commandError.code === 'REMOVE_SCRIPT_FAILED';
 
     if (isScriptFailure) {
       if (!terminal.scriptState) {
@@ -370,12 +423,10 @@ export default function App() {
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: terminal.workspaces,
     sessions: terminal.sessions,
-    onRequestSessions: terminal.requestSessions,
+    onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
     onRefresh: terminal.requestWorkspaces,
-    onRefreshSessions: (workspaceIds) => {
-      workspaceIds.forEach(id => terminal.requestSessions(id));
-    },
+    onRefreshSessions: () => terminal.requestSessions(),
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
   });
@@ -446,6 +497,7 @@ export default function App() {
     if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
       terminal.requestProjects();
       terminal.requestWorkspaces();
+      terminal.requestSessions();
       terminal.requestNotificationConfig();
     }
   }, [
@@ -454,6 +506,7 @@ export default function App() {
     terminal.mode,
     terminal.requestProjects,
     terminal.requestWorkspaces,
+    terminal.requestSessions,
     terminal.requestNotificationConfig,
   ]);
 
@@ -594,8 +647,12 @@ export default function App() {
             message: `Are you sure you want to delete workspace "${selected.workspace.name}"?`,
             confirmText: selected.workspace.name,
             warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
-            onConfirm: () => {
-              terminal.deleteWorkspace(selected.workspace.projectName, selected.workspace.id);
+            onConfirm: async () => {
+              await deleteWorkspaceWithPrompt({
+                projectName: selected.workspace.projectName,
+                workspaceId: selected.workspace.id,
+                workspaceName: selected.workspace.name,
+              });
             },
           });
         }
@@ -607,7 +664,16 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, terminal.status, terminal.mode, showInbox, showScriptTerminal, spacesBrowserProps, flow]);
+  }, [
+    view,
+    terminal.status,
+    terminal.mode,
+    showInbox,
+    showScriptTerminal,
+    spacesBrowserProps,
+    flow,
+    deleteWorkspaceWithPrompt,
+  ]);
 
   // Attached terminal mode keyboard handler (Ctrl+Esc to detach)
   useEffect(() => {
