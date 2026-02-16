@@ -211,7 +211,11 @@ export type WorkspaceDeleteErrorCode =
   | 'REMOVE_SCRIPT_FAILED'
   | 'WORKSPACE_NOT_FOUND'
   | 'WORKTREE_REMOVE_FAILED'
-  | 'DELETE_FAILED';
+  | 'DELETE_FAILED'
+  | 'NOT_FOUND'
+  | 'RESOURCE_NOT_FOUND'
+  | 'PERMISSION_DENIED'
+  | 'DELETE_TIMEOUT';
 
 /**
  * Error thrown when workspace deletion fails in session backends.

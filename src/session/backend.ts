@@ -27,6 +27,11 @@ export interface AttachSessionParams {
 
 export interface DeleteWorkspaceParams {
   scriptPolicy?: 'auto' | 'skip';
+  /**
+   * Optional timeout for delete completion when waiting on remote responses.
+   * Ignored by local backend.
+   */
+  timeoutMs?: number;
 }
 
 /**

@@ -24,6 +24,10 @@ import {
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
+import {
+  WorkspaceDeleteError,
+  type WorkspaceDeleteErrorCode,
+} from '../../types/errors.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -33,6 +37,7 @@ import type {
 import type { BackendEvent } from '../events.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
+const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 
 interface RelayDataMessage {
   type: 'data';
@@ -250,6 +255,23 @@ function workspaceIdsMatch(expected: string, actual: string | undefined): boolea
   return false;
 }
 
+function toWorkspaceDeleteErrorCode(code: string | undefined): WorkspaceDeleteErrorCode {
+  if (
+    code === 'REMOVE_SCRIPT_FAILED' ||
+    code === 'WORKSPACE_NOT_FOUND' ||
+    code === 'WORKTREE_REMOVE_FAILED' ||
+    code === 'DELETE_FAILED' ||
+    code === 'NOT_FOUND' ||
+    code === 'RESOURCE_NOT_FOUND' ||
+    code === 'PERMISSION_DENIED' ||
+    code === 'DELETE_TIMEOUT'
+  ) {
+    return code;
+  }
+
+  return 'DELETE_FAILED';
+}
+
 export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServerAuth>
   implements SessionBackend {
   readonly descriptor: BackendDescriptor;
@@ -293,6 +315,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         workspaceId: string;
         resolve: () => void;
         reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
@@ -424,12 +447,32 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       workspaceId,
       scriptPolicy: params.scriptPolicy,
     };
+    const timeoutMs =
+      typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
+        ? params.timeoutMs
+        : DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS;
 
     return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingDeleteWorkspace;
+        if (!pending || !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
+          return;
+        }
+
+        this.pendingDeleteWorkspace = null;
+        pending.reject(
+          new WorkspaceDeleteError(
+            `Timed out waiting for workspace deletion response (${workspaceId})`,
+            'DELETE_TIMEOUT'
+          )
+        );
+      }, timeoutMs);
+
       this.pendingDeleteWorkspace = {
         workspaceId,
         resolve,
         reject,
+        timeout,
       };
 
       void this.sendCommand(command).catch((error) => {
@@ -437,8 +480,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         if (!pending) {
           return;
         }
+        clearTimeout(pending.timeout);
         this.pendingDeleteWorkspace = null;
-        reject(error instanceof Error ? error : new Error(String(error)));
+        const message = error instanceof Error ? error.message : String(error);
+        pending.reject(new WorkspaceDeleteError(message, 'DELETE_FAILED'));
       });
     });
   }
@@ -956,6 +1001,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
+    clearTimeout(pending.timeout);
     this.pendingDeleteWorkspace = null;
     pending.resolve();
   }
@@ -975,10 +1021,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
+    clearTimeout(pending.timeout);
     this.pendingDeleteWorkspace = null;
-    const error = new Error(message) as Error & { code?: string };
-    error.code = code;
-    pending.reject(error);
+    pending.reject(new WorkspaceDeleteError(message, toWorkspaceDeleteErrorCode(code)));
   }
 
   private emitPtyData(data: Uint8Array): void {

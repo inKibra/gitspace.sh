@@ -676,6 +676,38 @@ describe('RemoteSessionBackend', () => {
     });
   });
 
+  it('times out pending workspace delete when no response arrives', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deletePromise = backend.deleteWorkspace('alpha', 'alpha:ws-timeout', {
+      timeoutMs: 5,
+    });
+
+    await expect(deletePromise).rejects.toMatchObject({
+      name: 'WorkspaceDeleteError',
+      code: 'DELETE_TIMEOUT',
+    });
+  });
+
   it('ignores workspace_deleted for a different workspace', async () => {
     const socket = createFakeSocket();
 
