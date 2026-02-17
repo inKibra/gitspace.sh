@@ -1,7 +1,7 @@
 import { getSecretMigrationInputs } from '../core/secret-runtime.js';
 import { logger } from '../utils/logger.js';
 import { promptConfirm } from '../utils/prompts.js';
-import { cleanupLegacySecretEntries } from '../utils/secrets.js';
+import { cleanupLegacySecretEntries, preloadAllSecrets } from '../utils/secrets.js';
 
 export interface CleanupLegacyOptions {
   yes?: boolean;
@@ -23,6 +23,12 @@ export async function migrateCleanupLegacy(
       return;
     }
   }
+
+  // Ensure legacy entries are copied into unified storage before cleanup.
+  await preloadAllSecrets(migrationInputs.projectNames, {
+    projectLegacyKeys: migrationInputs.projectSecretKeys,
+    globalLegacyKeys: migrationInputs.globalSecretKeys,
+  });
 
   const result = await cleanupLegacySecretEntries(migrationInputs.projectNames, {
     projectLegacyKeys: migrationInputs.projectSecretKeys,

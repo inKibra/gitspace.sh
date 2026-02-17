@@ -584,7 +584,7 @@ export async function preloadAllSecrets(
 
       detectedLegacyEntries = true;
       const currentProjectSecrets = blob.projects[projectName] || {};
-      if (currentProjectSecrets[key] !== oldValue) {
+      if (currentProjectSecrets[key] === undefined) {
         blob.projects[projectName] = {
           ...currentProjectSecrets,
           [key]: oldValue,
@@ -616,7 +616,7 @@ export async function preloadAllSecrets(
     }
 
     detectedLegacyEntries = true;
-    if (blob.global[key] !== oldValue) {
+    if (blob.global[key] === undefined) {
       blob.global[key] = oldValue;
       changed = true;
     }
@@ -700,6 +700,15 @@ export async function cleanupLegacySecretEntries(
     } catch (error) {
       result.errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  if (result.errors.length === 0) {
+    const blob = await loadUnifiedSecretsBlob();
+    if (blob.metadata.legacyEntriesRetained) {
+      blob.metadata.legacyEntriesRetained = false;
+      await saveUnifiedSecretsBlob(blob);
+    }
+    legacyEntriesDetected = false;
   }
 
   return result;
