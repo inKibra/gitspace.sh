@@ -183,7 +183,7 @@ A bundle is a directory (typically `.gitspace/`) containing:
 Bundle values are passed to scripts as environment variables using the configured bundle keys:
 
 - `<KEY>` - Regular or secret value using the exact `configKey` from `bundle.json`
-- Legacy aliases `SPACE_VALUE_<KEY>` / `SPACE_SECRET_<KEY>` are also provided for compatibility
+- `<NORMALIZED_KEY>` - Uppercase snake-case alias (for example, `teamName` -> `TEAM_NAME`)
 
 **Example script:**
 
@@ -195,12 +195,12 @@ WORKSPACE_NAME=$1
 REPOSITORY=$2
 
 # Access bundle values
-if [ -n "$TEAMNAME" ]; then
-  echo "Welcome, $TEAMNAME team!"
+if [ -n "$TEAM_NAME" ]; then
+  echo "Welcome, $TEAM_NAME team!"
 fi
 
 # Access secrets (stored securely in OS keychain)
-if [ -n "$APIKEY" ]; then
+if [ -n "$API_KEY" ]; then
   echo "API Key configured"
 fi
 ```
@@ -393,9 +393,8 @@ inside each workspace so they can vary by branch:
 export SPACES_CURRENT_PROJECT="my-app"
 
 # Available in scripts (from bundle onboarding):
-# <KEY>                - Value by bundle config key name
-# SPACE_VALUE_<KEY>    - Legacy alias for regular values
-# SPACE_SECRET_<KEY>   - Legacy alias for secret values
+# <KEY>                - Value by exact bundle config key name
+# <NORMALIZED_KEY>     - Uppercase snake-case alias (e.g. teamName -> TEAM_NAME)
 ```
 
 ## Directory Structure

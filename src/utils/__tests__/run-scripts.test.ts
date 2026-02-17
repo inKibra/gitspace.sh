@@ -333,22 +333,22 @@ echo "$TOKEN" >> "${outputFile}"
       expect(output.trim()).toBe('super-secret-token');
     });
 
-    it('keeps legacy SPACE_* aliases for backwards compatibility', async () => {
+    it('provides uppercase snake-case aliases for camelCase keys', async () => {
       const outputFile = join(testDir, 'aliases.txt');
       const scriptPath = join(scriptsDir, '01-aliases.sh');
       writeFileSync(scriptPath, `#!/bin/bash
-echo "$SPACE_VALUE_TEAM_NAME" >> "${outputFile}"
-echo "$SPACE_SECRET_API_TOKEN" >> "${outputFile}"
+echo "$TEAM_NAME" >> "${outputFile}"
+echo "$API_TOKEN" >> "${outputFile}"
 `);
       chmodSync(scriptPath, 0o755);
 
       await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
         nonInteractive: true,
         bundleValues: {
-          TEAM_NAME: 'platform',
+          teamName: 'platform',
         },
         bundleSecrets: {
-          API_TOKEN: 'shh',
+          apiToken: 'shh',
         },
       });
 

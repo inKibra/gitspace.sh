@@ -113,22 +113,26 @@ export interface RunScriptsOptions {
 }
 
 function normalizeEnvKey(key: string): string {
-  return key.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase();
 }
 
-function setCompatibilityAliases(
+function setNormalizedAlias(
   env: Record<string, string>,
   key: string,
-  value: string,
-  prefix: 'SPACE_VALUE_' | 'SPACE_SECRET_'
+  value: string
 ): void {
   const normalizedKey = normalizeEnvKey(key);
+  if (!normalizedKey) {
+    return;
+  }
 
-  // Legacy namespaced key for backwards compatibility.
-  env[`${prefix}${normalizedKey}`] = value;
-
-  // Uppercase normalized alias for shell-friendly access when key contains
-  // non-shell characters (for example, api-key -> API_KEY).
+  // Uppercase snake-case alias for shell-friendly access when key uses
+  // camelCase or punctuation (for example, apiToken -> API_TOKEN).
   env[normalizedKey] = value;
 }
 
@@ -138,7 +142,7 @@ function setCompatibilityAliases(
  *
  * Bundle values are passed as environment variables:
  * - <KEY> using the exact bundle config key name
- * - Backward-compatible aliases: SPACE_VALUE_<KEY>, SPACE_SECRET_<KEY>, and normalized <KEY>
+ * - <NORMALIZED_KEY> uppercase snake-case alias (for example, apiToken -> API_TOKEN)
  */
 export async function runScriptsInTerminal(
   scriptsDir: string,
@@ -164,7 +168,7 @@ export async function runScriptsInTerminal(
   if (options?.bundleValues) {
     for (const [key, value] of Object.entries(options.bundleValues)) {
       scriptEnv[key] = value;
-      setCompatibilityAliases(scriptEnv, key, value, 'SPACE_VALUE_');
+      setNormalizedAlias(scriptEnv, key, value);
     }
   }
 
@@ -172,7 +176,7 @@ export async function runScriptsInTerminal(
   if (options?.bundleSecrets) {
     for (const [key, value] of Object.entries(options.bundleSecrets)) {
       scriptEnv[key] = value;
-      setCompatibilityAliases(scriptEnv, key, value, 'SPACE_SECRET_');
+      setNormalizedAlias(scriptEnv, key, value);
     }
   }
 

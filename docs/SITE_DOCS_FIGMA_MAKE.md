@@ -377,15 +377,14 @@ Using bundle values in scripts:
 ```bash
 #!/bin/bash
 # Values available as environment variables:
-# <KEY>               - Value by bundle config key name
-# SPACE_VALUE_<KEY>   - Legacy alias for regular values
-# SPACE_SECRET_<KEY>  - Legacy alias for secret values
+# <KEY>               - Value by exact bundle config key name
+# <NORMALIZED_KEY>    - Uppercase snake-case alias (e.g. teamName -> TEAM_NAME)
 
-if [ -n "$TEAMNAME" ]; then
-  echo "Welcome, $TEAMNAME team!"
+if [ -n "$TEAM_NAME" ]; then
+  echo "Welcome, $TEAM_NAME team!"
 fi
 
-if [ -n "$APIKEY" ]; then
+if [ -n "$API_KEY" ]; then
   echo "API Key configured"
 fi
 ```
@@ -960,8 +959,8 @@ Bundles allow teams to share onboarding configurations. Place in `.gitspace/`:
 
 **Using values in scripts:**
 ```bash
-echo "Team: $TEAMNAME"
-echo "Has API key: $APIKEY"
+echo "Team: $TEAM_NAME"
+echo "Has API key: $API_KEY"
 ```
 
 ---
