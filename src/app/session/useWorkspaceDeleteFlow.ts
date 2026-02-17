@@ -30,6 +30,7 @@ export interface UseWorkspaceDeleteFlowOptions {
   onDeleteSuccess?: (context: WorkspaceDeleteContext) => void | Promise<void>;
   onDeleteCancelled?: (context: WorkspaceDeleteContext) => void | Promise<void>;
   onDeleteError?: (context: WorkspaceDeleteErrorContext) => void | Promise<void>;
+  showLoadingDuringDelete?: boolean;
 }
 
 export interface UseWorkspaceDeleteFlowResult {
@@ -86,6 +87,7 @@ export function useWorkspaceDeleteFlow(
     onDeleteSuccess,
     onDeleteCancelled,
     onDeleteError,
+    showLoadingDuringDelete = false,
   } = options;
 
   const executeDelete = useCallback(async (
@@ -100,13 +102,17 @@ export function useWorkspaceDeleteFlow(
     };
 
     await onBeforeDelete?.(context);
-    flow.showLoading({
-      title: 'Deleting Workspace',
-      message:
-        params.scriptPolicy === 'skip'
-          ? 'Removing workspace without cleanup scripts...'
-          : `Running cleanup scripts for "${target.workspaceName}"...`,
-    });
+    if (showLoadingDuringDelete) {
+      flow.showLoading({
+        title: 'Deleting Workspace',
+        message:
+          params.scriptPolicy === 'skip'
+            ? 'Removing workspace without cleanup scripts...'
+            : `Running cleanup scripts for "${target.workspaceName}"...`,
+      });
+    } else {
+      flow.close();
+    }
 
     try {
       await deleteWorkspace(target.projectName, target.workspaceId, params);
@@ -144,7 +150,15 @@ export function useWorkspaceDeleteFlow(
 
       return false;
     }
-  }, [deleteWorkspace, flow, onBeforeDelete, onDeleteCancelled, onDeleteError, onDeleteSuccess]);
+  }, [
+    deleteWorkspace,
+    flow,
+    onBeforeDelete,
+    onDeleteCancelled,
+    onDeleteError,
+    onDeleteSuccess,
+    showLoadingDuringDelete,
+  ]);
 
   const deleteWorkspaceWithPrompt = useCallback(async (target: WorkspaceDeleteTarget): Promise<boolean> => {
     return executeDelete(target, { scriptPolicy: 'auto' }, false);

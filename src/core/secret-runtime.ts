@@ -1,30 +1,71 @@
-import { getAllProjectNames, readProjectConfig } from './config.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { getAllProjectNames, getSpacesDir, readProjectConfig } from './config.js';
 import { logger } from '../utils/logger.js';
-import { preloadProjectSecrets } from '../utils/secrets.js';
+import { preloadAllSecrets } from '../utils/secrets.js';
 import { SpacesError } from '../types/errors.js';
 
 interface SecretRuntimeState {
   ignoreKeychainAndSkipSecrets: boolean;
-  initialized: boolean;
   projectsWithSecrets: Set<string>;
+  legacyEntriesDetected: boolean;
+  legacyReminderConsumed: boolean;
 }
 
-const state: SecretRuntimeState = {
-  ignoreKeychainAndSkipSecrets: false,
-  initialized: false,
-  projectsWithSecrets: new Set<string>(),
-};
+export interface SecretMigrationInputs {
+  projectNames: string[];
+  projectSecretKeys: Record<string, string[]>;
+  globalSecretKeys: string[];
+}
 
-function collectProjectsWithSecrets(): Array<{ projectName: string; keys: string[] }> {
-  const projects = getAllProjectNames();
-  const result: Array<{ projectName: string; keys: string[] }> = [];
+function readHostSubdomains(): string[] {
+  const hostPath = join(getSpacesDir(), 'host.json');
+  if (!existsSync(hostPath)) {
+    return [];
+  }
 
-  for (const projectName of projects) {
+  try {
+    const parsed = JSON.parse(readFileSync(hostPath, 'utf-8')) as {
+      subdomain?: unknown;
+      subdomains?: unknown;
+    };
+
+    const found = new Set<string>();
+    if (typeof parsed.subdomain === 'string' && parsed.subdomain.length > 0) {
+      found.add(parsed.subdomain);
+    }
+
+    if (Array.isArray(parsed.subdomains)) {
+      for (const candidate of parsed.subdomains) {
+        if (typeof candidate === 'string' && candidate.length > 0) {
+          found.add(candidate);
+        }
+      }
+    }
+
+    return [...found];
+  } catch {
+    return [];
+  }
+}
+
+export function getSecretMigrationInputs(): SecretMigrationInputs {
+  const projectNames = getAllProjectNames();
+  const projectSecretKeys: Record<string, string[]> = {};
+  const globalSecretKeys = new Set<string>([
+    'GITSPACE_TOKEN',
+    'linear-api-key',
+    'relay:signingPrivateKey',
+  ]);
+
+  for (const projectName of projectNames) {
+    globalSecretKeys.add(`linear-api-key-${projectName}`);
+
     try {
       const config = readProjectConfig(projectName);
-      const keys = config.bundleSecretKeys ?? [];
+      const keys = [...new Set(config.bundleSecretKeys ?? [])];
       if (keys.length > 0) {
-        result.push({ projectName, keys });
+        projectSecretKeys[projectName] = keys;
       }
     } catch (error) {
       logger.debug(
@@ -33,8 +74,23 @@ function collectProjectsWithSecrets(): Array<{ projectName: string; keys: string
     }
   }
 
-  return result;
+  for (const subdomain of readHostSubdomains()) {
+    globalSecretKeys.add(`TUNNEL_TOKEN_${subdomain}`);
+  }
+
+  return {
+    projectNames,
+    projectSecretKeys,
+    globalSecretKeys: [...globalSecretKeys],
+  };
 }
+
+const state: SecretRuntimeState = {
+  ignoreKeychainAndSkipSecrets: false,
+  projectsWithSecrets: new Set<string>(),
+  legacyEntriesDetected: false,
+  legacyReminderConsumed: false,
+};
 
 export interface InitializeSecretRuntimeOptions {
   ignoreKeychainAndSkipSecrets?: boolean;
@@ -45,13 +101,14 @@ export async function initializeSecretRuntime(
 ): Promise<void> {
   const ignore = options.ignoreKeychainAndSkipSecrets ?? false;
   state.ignoreKeychainAndSkipSecrets = ignore;
+  state.legacyEntriesDetected = false;
+  state.legacyReminderConsumed = false;
 
-  const projectsWithSecrets = collectProjectsWithSecrets();
-  state.projectsWithSecrets = new Set(projectsWithSecrets.map((entry) => entry.projectName));
+  const migrationInputs = getSecretMigrationInputs();
+  state.projectsWithSecrets = new Set(Object.keys(migrationInputs.projectSecretKeys));
 
   if (ignore) {
-    state.initialized = true;
-    if (projectsWithSecrets.length > 0) {
+    if (state.projectsWithSecrets.size > 0) {
       logger.warning(
         'Ignoring keychain and skipping secret-dependent scripts (use with caution).'
       );
@@ -59,16 +116,12 @@ export async function initializeSecretRuntime(
     return;
   }
 
-  if (projectsWithSecrets.length === 0) {
-    state.initialized = true;
-    return;
-  }
-
   try {
-    for (const entry of projectsWithSecrets) {
-      await preloadProjectSecrets(entry.projectName, entry.keys);
-    }
-    state.initialized = true;
+    const preloadResult = await preloadAllSecrets(migrationInputs.projectNames, {
+      projectLegacyKeys: migrationInputs.projectSecretKeys,
+      globalLegacyKeys: migrationInputs.globalSecretKeys,
+    });
+    state.legacyEntriesDetected = preloadResult.legacyEntriesDetected;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new SpacesError(
@@ -78,6 +131,15 @@ export async function initializeSecretRuntime(
       1
     );
   }
+}
+
+export function consumeLegacyCleanupReminderForTui(): string | null {
+  if (!state.legacyEntriesDetected || state.legacyReminderConsumed) {
+    return null;
+  }
+
+  state.legacyReminderConsumed = true;
+  return 'Legacy keychain entries are still present. Run `gssh migrate cleanup-legacy` once you are confident the unified keychain storage is stable.';
 }
 
 export function shouldSkipSecretDependentScripts(

@@ -89,6 +89,32 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       }
       return remote.selectedProjectName;
     },
+    onBeforeAttach: ({ target, params }) => {
+      if (target === 'workspace' && params.workspaceId) {
+        setShowInbox(false);
+        setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
+        setShowScriptTerminal(true);
+      }
+    },
+    onAttachCancelled: ({ target }) => {
+      if (target === 'workspace') {
+        setShowScriptTerminal(false);
+      }
+    },
+    onAttachError: ({ target, message }) => {
+      const isWorkspaceScriptFailure = message.startsWith('Workspace scripts failed during');
+      const hasScriptRuntimeState = Boolean(remote.scriptState);
+
+      if (target === 'workspace' && (!isWorkspaceScriptFailure || !hasScriptRuntimeState)) {
+        setShowScriptTerminal(false);
+      }
+
+      flow.showMessage({
+        title: isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
+        message,
+        variant: 'error',
+      });
+    },
   });
 
   const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
@@ -221,7 +247,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow, renderer]);
 
   useKeyboard(async (key) => {
-    if (flow.isOpen) {
+    const scriptTerminalRunning =
+      showScriptTerminal &&
+      (remote.scriptState?.isRunning ?? true);
+
+    if (flow.isOpen && !scriptTerminalRunning) {
       if (flow.flow.type === 'confirm') {
         if (key.raw === 'y' || key.name === 'return') {
           await flow.handleConfirm();
@@ -429,7 +459,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           error={remote.scriptState?.error}
           exitCode={remote.scriptState?.exitCode}
         />
-        <FlowTUI flow={flow} />
+        {!isRunning && <FlowTUI flow={flow} />}
         <StatusBar hint={isRunning ? '[Running scripts...]' : '[Esc/n] Back to workspaces'} />
       </Fragment>
     );

@@ -19,6 +19,7 @@ let mockProjectConfig: any;
 let secretStore: Record<string, string>;
 let onboardingQueue: Array<any>;
 let capturedOnboardingBatches: OnboardingStep[][];
+let mockRemoveWorktreeError: string | null;
 let oldTmuxSocket: string | undefined;
 let oldTmuxSessionDir: string | undefined;
 let oldTmuxPidFile: string | undefined;
@@ -48,6 +49,9 @@ function setupModuleMocks(): void {
       lastCommit: '',
     }),
     removeWorktree: async (_baseDir: string, workspacePath: string) => {
+      if (mockRemoveWorktreeError) {
+        throw new Error(mockRemoveWorktreeError);
+      }
       if (existsSync(workspacePath)) {
         rmSync(workspacePath, { recursive: true, force: true });
       }
@@ -205,6 +209,7 @@ describe('workspace setup integration', () => {
     secretStore = {};
     onboardingQueue = [];
     capturedOnboardingBatches = [];
+    mockRemoveWorktreeError = null;
 
     // Guard rails: isolate tmux-lite env in case a future code path accidentally
     // reaches tmux-lite helpers.
@@ -602,6 +607,27 @@ describe('workspace setup integration', () => {
     });
 
     expect(secondAttempt.success).toBe(true);
+    expect(existsSync(workspacePath)).toBe(false);
+  });
+
+  it('falls back to removing workspace directory when git reports not a working tree', async () => {
+    const { deleteWorkspaceCore } = await loadWorkspaceCoreModule();
+
+    const workspaceName = 'ws-orphan';
+    const workspacePath = join(workspacesDir, workspaceName);
+    mkdirSync(workspacePath, { recursive: true });
+
+    mockRemoveWorktreeError = `fatal: '${workspacePath}' is not a working tree`;
+
+    const result = await deleteWorkspaceCore('test-project', workspaceName, {
+      nonInteractive: true,
+      keepBranch: true,
+      removeScriptPolicy: 'skip',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.errorCode).toBeUndefined();
     expect(existsSync(workspacePath)).toBe(false);
   });
 });

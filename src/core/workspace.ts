@@ -193,9 +193,29 @@ export async function deleteWorkspaceCore(
   try {
     await removeWorktree(baseDir, workspacePath, true);
   } catch (e) {
-    result.errorCode = 'WORKTREE_REMOVE_FAILED';
-    result.error = e instanceof Error ? e.message : 'Failed to remove worktree';
-    return result;
+    const message = e instanceof Error ? e.message : String(e);
+    const isNotWorkingTreeError = /not a working tree/i.test(message);
+
+    if (isNotWorkingTreeError) {
+      logger.debug(
+        `Worktree metadata missing for ${workspaceName}; removing directory directly.`
+      );
+
+      try {
+        rmSync(workspacePath, { recursive: true, force: true });
+      } catch (rmError) {
+        result.errorCode = 'WORKTREE_REMOVE_FAILED';
+        result.error =
+          rmError instanceof Error
+            ? rmError.message
+            : 'Failed to remove orphaned workspace directory';
+        return result;
+      }
+    } else {
+      result.errorCode = 'WORKTREE_REMOVE_FAILED';
+      result.error = message || 'Failed to remove worktree';
+      return result;
+    }
   }
 
   // Try to delete the local branch
