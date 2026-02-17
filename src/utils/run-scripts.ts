@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { logger } from './logger.js';
+import { normalizeEnvKey } from './normalize-env-key.js';
 
 const FAILURE_OUTPUT_TAIL_MAX_LINES = 25;
 const FAILURE_OUTPUT_TAIL_MAX_CHARS = 4000;
@@ -122,15 +123,6 @@ interface EnvBinding {
   value: string;
 }
 
-function normalizeEnvKey(key: string): string {
-  return key
-    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-    .replace(/[^A-Za-z0-9]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .toUpperCase();
-}
-
 function describeBinding(binding: EnvBinding): string {
   return `${binding.configKey} (${binding.exportKind} ${binding.sourceKind})`;
 }
@@ -200,7 +192,7 @@ function setScriptEnvVars(
   });
 
   const normalizedKey = normalizeEnvKey(key);
-  if (!normalizedKey) {
+  if (!normalizedKey || normalizedKey === key) {
     return;
   }
 

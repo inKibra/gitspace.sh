@@ -17,19 +17,11 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
+import { normalizeEnvKey } from '../utils/normalize-env-key.js';
 import type { SpacesBundle, LoadedBundle } from '../types/bundle.js';
 
 const BUNDLE_FILENAME = 'bundle.json';
 const BUNDLE_SUBDIRS = ['.gitspace'];
-
-function normalizeScriptEnvAlias(key: string): string {
-  return key
-    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-    .replace(/[^A-Za-z0-9]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .toUpperCase();
-}
 
 function assertSafeExtractedPaths(rootDir: string): void {
   const rootResolved = resolve(rootDir);
@@ -266,7 +258,7 @@ export function validateBundle(bundle: SpacesBundle): void {
         }
         configKeys.set(stepWithKey.configKey, step.id);
 
-        const normalizedAlias = normalizeScriptEnvAlias(stepWithKey.configKey);
+        const normalizedAlias = normalizeEnvKey(stepWithKey.configKey);
         if (!normalizedAlias) {
           throw new SpacesError(
             `Step "${step.id}" has invalid configKey "${stepWithKey.configKey}" (no usable env alias)`,
