@@ -1327,7 +1327,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   useKeyboard(async (key) => {
     const localScriptTerminalRunning =
       state.view === 'scripts' &&
-      localScriptState?.isRunning === true;
+      (localScriptState?.isRunning ?? true);
 
     // Handle flow modals FIRST - even in terminal view
     // This ensures y/n work in confirmation modals when terminal is underneath

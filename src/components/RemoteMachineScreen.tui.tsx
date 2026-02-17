@@ -247,7 +247,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow, renderer]);
 
   useKeyboard(async (key) => {
-    const scriptTerminalRunning = showScriptTerminal && remote.scriptState?.isRunning === true;
+    const scriptTerminalRunning =
+      showScriptTerminal &&
+      (remote.scriptState?.isRunning ?? true);
 
     if (flow.isOpen && !scriptTerminalRunning) {
       if (flow.flow.type === 'confirm') {
