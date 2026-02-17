@@ -40,6 +40,10 @@ export async function migrateCleanupLegacy(
     for (const error of result.errors) {
       logger.error(`  ${error}`);
     }
+    logger.info(
+      `Legacy cleanup finished with issues. Deleted ${result.deleted} entries (${result.missing} already absent).`
+    );
+    return;
   }
 
   logger.success(
