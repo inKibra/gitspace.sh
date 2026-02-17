@@ -87,7 +87,10 @@ import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
-import { initializeSecretRuntime } from './core/secret-runtime.js';
+import {
+  consumeLegacyCleanupReminderForTui,
+  initializeSecretRuntime,
+} from './core/secret-runtime.js';
 import {
   resolveInboxCommand,
   resolveMachineListCommand,
@@ -2590,6 +2593,12 @@ export async function launchTUI(
   // Clean exit handler
   const handleQuit = () => {
     renderer.destroy();
+
+    const legacyReminder = consumeLegacyCleanupReminderForTui();
+    if (legacyReminder) {
+      logger.warning(legacyReminder);
+    }
+
     process.exit(0);
   };
 

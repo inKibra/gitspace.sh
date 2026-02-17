@@ -56,6 +56,7 @@ import { hostReserve, hostRelease, hostList, hostSetPrimary, hostStatus } from '
 import { startTmux, stopTmux, statusTmux, listTmux, newTmux, attachTmux, killTmux } from './commands/tmux.js'
 import { showStatus } from './commands/status.js'
 import { configNotifications, linearSetup, linearShow, linearClear } from './commands/config.js'
+import { migrateCleanupLegacy } from './commands/migrate.js'
 import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
 import { bundleRefresh, bundleStatus } from './commands/bundle.js'
 
@@ -718,6 +719,27 @@ configLinearCommand
 		await checkFirstTimeSetup()
 		try {
 			await linearClear(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Migration Commands
+// ============================================================================
+
+const migrateCommand = program
+	.command('migrate')
+	.description('Migration and cleanup utilities')
+
+migrateCommand
+	.command('cleanup-legacy')
+	.description('Delete legacy keychain entries kept for backwards compatibility')
+	.option('-y, --yes', 'Skip confirmation prompt')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await migrateCleanupLegacy(options)
 		} catch (error) {
 			handleError(error)
 		}
