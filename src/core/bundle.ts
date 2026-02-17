@@ -22,6 +22,15 @@ import type { SpacesBundle, LoadedBundle } from '../types/bundle.js';
 const BUNDLE_FILENAME = 'bundle.json';
 const BUNDLE_SUBDIRS = ['.gitspace'];
 
+function normalizeScriptEnvAlias(key: string): string {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase();
+}
+
 function assertSafeExtractedPaths(rootDir: string): void {
   const rootResolved = resolve(rootDir);
   const rootPrefix = rootResolved.endsWith(sep) ? rootResolved : `${rootResolved}${sep}`;
@@ -211,6 +220,9 @@ export function validateBundle(bundle: SpacesBundle): void {
   // Validate onboarding steps if present
   if (bundle.onboarding) {
     const ids = new Set<string>();
+    const configKeys = new Map<string, string>();
+    const normalizedAliases = new Map<string, { stepId: string; configKey: string }>();
+
     for (const step of bundle.onboarding) {
       if (!step.id) {
         throw new SpacesError('Each onboarding step must have an id', 'USER_ERROR', 1);
@@ -235,6 +247,56 @@ export function validateBundle(bundle: SpacesBundle): void {
             1
           );
         }
+
+        const existingConfigKeyStepId = configKeys.get(stepWithKey.configKey);
+        if (existingConfigKeyStepId) {
+          throw new SpacesError(
+            [
+              'Bundle configKey collision',
+              '',
+              `The configKey "${stepWithKey.configKey}" is used by multiple onboarding steps.`,
+              `- step "${existingConfigKeyStepId}"`,
+              `- step "${step.id}"`,
+              '',
+              'Fix: each input/secret step must use a unique configKey.',
+            ].join('\n'),
+            'USER_ERROR',
+            1
+          );
+        }
+        configKeys.set(stepWithKey.configKey, step.id);
+
+        const normalizedAlias = normalizeScriptEnvAlias(stepWithKey.configKey);
+        if (!normalizedAlias) {
+          throw new SpacesError(
+            `Step "${step.id}" has invalid configKey "${stepWithKey.configKey}" (no usable env alias)`,
+            'USER_ERROR',
+            1
+          );
+        }
+
+        const existingAlias = normalizedAliases.get(normalizedAlias);
+        if (existingAlias && existingAlias.configKey !== stepWithKey.configKey) {
+          throw new SpacesError(
+            [
+              'Bundle configKey alias collision',
+              '',
+              `Multiple config keys normalize to the same script env alias: ${normalizedAlias}`,
+              `- step "${existingAlias.stepId}" configKey "${existingAlias.configKey}"`,
+              `- step "${step.id}" configKey "${stepWithKey.configKey}"`,
+              '',
+              `Scripts would read an ambiguous value from $${normalizedAlias}.`,
+              'Fix: rename one of the conflicting configKey values so each exported env var is unique.',
+            ].join('\n'),
+            'USER_ERROR',
+            1
+          );
+        }
+
+        normalizedAliases.set(normalizedAlias, {
+          stepId: step.id,
+          configKey: stepWithKey.configKey,
+        });
       }
     }
   }

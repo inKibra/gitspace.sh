@@ -112,6 +112,16 @@ export interface RunScriptsOptions {
   onOutput?: (data: Buffer) => void;
 }
 
+type BundleValueKind = 'value' | 'secret';
+
+interface EnvBinding {
+  envName: string;
+  configKey: string;
+  sourceKind: BundleValueKind;
+  exportKind: 'exact' | 'normalized';
+  value: string;
+}
+
 function normalizeEnvKey(key: string): string {
   return key
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -121,11 +131,74 @@ function normalizeEnvKey(key: string): string {
     .toUpperCase();
 }
 
-function setNormalizedAlias(
+function describeBinding(binding: EnvBinding): string {
+  return `${binding.configKey} (${binding.exportKind} ${binding.sourceKind})`;
+}
+
+function describeValue(binding: EnvBinding): string {
+  return binding.sourceKind === 'secret' ? '[redacted]' : JSON.stringify(binding.value);
+}
+
+function formatEnvCollisionMessage(existing: EnvBinding, incoming: EnvBinding): string {
+  return [
+    'Bundle script env collision',
+    '',
+    `Multiple config keys resolve to the same environment variable: ${incoming.envName}`,
+    `- ${incoming.envName} <- ${describeBinding(existing)}`,
+    `- ${incoming.envName} <- ${describeBinding(incoming)}`,
+    '',
+    `Scripts would read an ambiguous value from $${incoming.envName}.`,
+    'Fix: rename one of the conflicting configKey values in .gitspace/bundle.json so each exported env var is unique.',
+  ].join('\n');
+}
+
+function formatDuplicateValueMessage(existing: EnvBinding, incoming: EnvBinding): string {
+  return [
+    'Bundle script env conflict',
+    '',
+    `The same configKey is exported with different values: ${incoming.configKey}`,
+    `- ${describeBinding(existing)} => ${describeValue(existing)}`,
+    `- ${describeBinding(incoming)} => ${describeValue(incoming)}`,
+    '',
+    `This would silently overwrite $${incoming.envName}.`,
+    `Fix: ensure configKey "${incoming.configKey}" is defined once with a single value.`,
+  ].join('\n');
+}
+
+function registerEnvBinding(
   env: Record<string, string>,
-  key: string,
-  value: string
+  bindings: Map<string, EnvBinding>,
+  binding: EnvBinding
 ): void {
+  const existing = bindings.get(binding.envName);
+
+  if (existing && existing.configKey !== binding.configKey) {
+    throw new SpacesError(formatEnvCollisionMessage(existing, binding), 'USER_ERROR', 1);
+  }
+
+  if (existing && existing.configKey === binding.configKey && existing.value !== binding.value) {
+    throw new SpacesError(formatDuplicateValueMessage(existing, binding), 'USER_ERROR', 1);
+  }
+
+  bindings.set(binding.envName, binding);
+  env[binding.envName] = binding.value;
+}
+
+function setScriptEnvVars(
+  env: Record<string, string>,
+  bindings: Map<string, EnvBinding>,
+  key: string,
+  value: string,
+  sourceKind: BundleValueKind
+): void {
+  registerEnvBinding(env, bindings, {
+    envName: key,
+    configKey: key,
+    sourceKind,
+    exportKind: 'exact',
+    value,
+  });
+
   const normalizedKey = normalizeEnvKey(key);
   if (!normalizedKey) {
     return;
@@ -133,7 +206,13 @@ function setNormalizedAlias(
 
   // Uppercase snake-case alias for shell-friendly access when key uses
   // camelCase or punctuation (for example, apiToken -> API_TOKEN).
-  env[normalizedKey] = value;
+  registerEnvBinding(env, bindings, {
+    envName: normalizedKey,
+    configKey: key,
+    sourceKind,
+    exportKind: 'normalized',
+    value,
+  });
 }
 
 /**
@@ -143,6 +222,7 @@ function setNormalizedAlias(
  * Bundle values are passed as environment variables:
  * - <KEY> using the exact bundle config key name
  * - <NORMALIZED_KEY> uppercase snake-case alias (for example, apiToken -> API_TOKEN)
+ * - Throws a user-facing error when multiple keys collide on the same env name
  */
 export async function runScriptsInTerminal(
   scriptsDir: string,
@@ -163,20 +243,19 @@ export async function runScriptsInTerminal(
 
   // Build environment variables from bundle values
   const scriptEnv: Record<string, string> = { ...process.env } as Record<string, string>;
+  const envBindings = new Map<string, EnvBinding>();
 
   // Add bundle values using configured key names.
   if (options?.bundleValues) {
     for (const [key, value] of Object.entries(options.bundleValues)) {
-      scriptEnv[key] = value;
-      setNormalizedAlias(scriptEnv, key, value);
+      setScriptEnvVars(scriptEnv, envBindings, key, value, 'value');
     }
   }
 
   // Add bundle secrets using configured key names.
   if (options?.bundleSecrets) {
     for (const [key, value] of Object.entries(options.bundleSecrets)) {
-      scriptEnv[key] = value;
-      setNormalizedAlias(scriptEnv, key, value);
+      setScriptEnvVars(scriptEnv, envBindings, key, value, 'secret');
     }
   }
 

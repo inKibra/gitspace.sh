@@ -357,6 +357,60 @@ echo "$API_TOKEN" >> "${outputFile}"
       expect(lines[0]).toBe('platform');
       expect(lines[1]).toBe('shh');
     });
+
+    it('throws a helpful error when normalized aliases collide', async () => {
+      const scriptPath = join(scriptsDir, '01-noop.sh');
+      writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');
+      chmodSync(scriptPath, 0o755);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            apiToken: 'a',
+            'api-token': 'b',
+          },
+        })
+      ).rejects.toThrow(/Bundle script env collision/);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            apiToken: 'a',
+            'api-token': 'b',
+          },
+        })
+      ).rejects.toThrow(/apiToken/);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            apiToken: 'a',
+            'api-token': 'b',
+          },
+        })
+      ).rejects.toThrow(/API_TOKEN/);
+    });
+
+    it('throws when same key is exported with conflicting values', async () => {
+      const scriptPath = join(scriptsDir, '01-noop.sh');
+      writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');
+      chmodSync(scriptPath, 0o755);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            sharedKey: 'from-value',
+          },
+          bundleSecrets: {
+            sharedKey: 'from-secret',
+          },
+        })
+      ).rejects.toThrow(/Bundle script env conflict/);
+    });
   });
 
   describe('no scripts', () => {
