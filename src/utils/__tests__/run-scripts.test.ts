@@ -358,6 +358,53 @@ echo "$API_TOKEN" >> "${outputFile}"
       expect(lines[1]).toBe('shh');
     });
 
+    it('splits acronym boundaries when normalizing aliases', async () => {
+      const outputFile = join(testDir, 'acronyms.txt');
+      const scriptPath = join(scriptsDir, '01-acronyms.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "$MY_HTTP_CLIENT" >> "${outputFile}"
+echo "$XML_PARSER" >> "${outputFile}"
+`);
+      chmodSync(scriptPath, 0o755);
+
+      await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+        nonInteractive: true,
+        bundleValues: {
+          myHTTPClient: 'client-a',
+          XMLParser: 'parser-b',
+        },
+      });
+
+      const output = await Bun.file(outputFile).text();
+      const lines = output.trim().split('\n');
+      expect(lines[0]).toBe('client-a');
+      expect(lines[1]).toBe('parser-b');
+    });
+
+    it('throws helpful error when normalized alias is not shell-safe', async () => {
+      const scriptPath = join(scriptsDir, '01-noop.sh');
+      writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');
+      chmodSync(scriptPath, 0o755);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            '2faToken': 'secret',
+          },
+        })
+      ).rejects.toThrow(/not shell-safe/);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            '2faToken': 'secret',
+          },
+        })
+      ).rejects.toThrow(/2FA_TOKEN/);
+    });
+
     it('throws a helpful error when normalized aliases collide', async () => {
       const scriptPath = join(scriptsDir, '01-noop.sh');
       writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');

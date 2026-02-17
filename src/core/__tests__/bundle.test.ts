@@ -100,6 +100,88 @@ describe('validateBundle', () => {
     ).toThrow(/API_TOKEN/);
   });
 
+  it('treats acronym boundaries as part of normalized alias collisions', () => {
+    expect(() =>
+      validateBundle({
+        version: '1.0',
+        name: 'Acronym Collision Bundle',
+        onboarding: [
+          {
+            id: 'http-client-acronym',
+            type: 'input',
+            title: 'HTTP client acronym',
+            description: 'acronym',
+            configKey: 'myHTTPClient',
+          },
+          {
+            id: 'http-client-camel',
+            type: 'secret',
+            title: 'HTTP client camel',
+            description: 'camel',
+            configKey: 'myHttpClient',
+          },
+        ],
+      })
+    ).toThrow(/Bundle configKey alias collision/);
+
+    expect(() =>
+      validateBundle({
+        version: '1.0',
+        name: 'Acronym Collision Bundle',
+        onboarding: [
+          {
+            id: 'http-client-acronym',
+            type: 'input',
+            title: 'HTTP client acronym',
+            description: 'acronym',
+            configKey: 'myHTTPClient',
+          },
+          {
+            id: 'http-client-camel',
+            type: 'secret',
+            title: 'HTTP client camel',
+            description: 'camel',
+            configKey: 'myHttpClient',
+          },
+        ],
+      })
+    ).toThrow(/MY_HTTP_CLIENT/);
+  });
+
+  it('throws helpful error when normalized alias is not shell-safe', () => {
+    expect(() =>
+      validateBundle({
+        version: '1.0',
+        name: 'Digit Prefix Bundle',
+        onboarding: [
+          {
+            id: 'two-fa-token',
+            type: 'secret',
+            title: '2FA token',
+            description: '2FA token',
+            configKey: '2faToken',
+          },
+        ],
+      })
+    ).toThrow(/non-shell env alias/);
+
+    expect(() =>
+      validateBundle({
+        version: '1.0',
+        name: 'Digit Prefix Bundle',
+        onboarding: [
+          {
+            id: 'two-fa-token',
+            type: 'secret',
+            title: '2FA token',
+            description: '2FA token',
+            configKey: '2faToken',
+          },
+        ],
+      })
+    ).toThrow(/2FA_TOKEN/);
+  });
+
   it('detects exact key and normalized alias collisions', () => {
     expect(() =>
       validateBundle({

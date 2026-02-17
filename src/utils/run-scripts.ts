@@ -8,7 +8,7 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { logger } from './logger.js';
-import { normalizeEnvKey } from './normalize-env-key.js';
+import { isShellEnvKey, normalizeEnvKey } from './normalize-env-key.js';
 
 const FAILURE_OUTPUT_TAIL_MAX_LINES = 25;
 const FAILURE_OUTPUT_TAIL_MAX_CHARS = 4000;
@@ -157,6 +157,18 @@ function formatDuplicateValueMessage(existing: EnvBinding, incoming: EnvBinding)
   ].join('\n');
 }
 
+function formatInvalidNormalizedAliasMessage(configKey: string, normalizedAlias: string): string {
+  return [
+    'Bundle script env alias is not shell-safe',
+    '',
+    `configKey "${configKey}" normalizes to "${normalizedAlias}".`,
+    `Scripts cannot access this via $${normalizedAlias}.`,
+    '',
+    'Shell variable names must match: [A-Za-z_][A-Za-z0-9_]*',
+    'Fix: rename the configKey so its normalized alias starts with a letter or underscore.',
+  ].join('\n');
+}
+
 function registerEnvBinding(
   env: Record<string, string>,
   bindings: Map<string, EnvBinding>,
@@ -192,7 +204,15 @@ function setScriptEnvVars(
   });
 
   const normalizedKey = normalizeEnvKey(key);
-  if (!normalizedKey || normalizedKey === key) {
+  if (!normalizedKey) {
+    return;
+  }
+
+  if (!isShellEnvKey(normalizedKey)) {
+    throw new SpacesError(formatInvalidNormalizedAliasMessage(key, normalizedKey), 'USER_ERROR', 1);
+  }
+
+  if (normalizedKey === key) {
     return;
   }
 

@@ -17,7 +17,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
-import { normalizeEnvKey } from '../utils/normalize-env-key.js';
+import { isShellEnvKey, normalizeEnvKey } from '../utils/normalize-env-key.js';
 import type { SpacesBundle, LoadedBundle } from '../types/bundle.js';
 
 const BUNDLE_FILENAME = 'bundle.json';
@@ -262,6 +262,22 @@ export function validateBundle(bundle: SpacesBundle): void {
         if (!normalizedAlias) {
           throw new SpacesError(
             `Step "${step.id}" has invalid configKey "${stepWithKey.configKey}" (no usable env alias)`,
+            'USER_ERROR',
+            1
+          );
+        }
+
+        if (!isShellEnvKey(normalizedAlias)) {
+          throw new SpacesError(
+            [
+              'Bundle configKey produces non-shell env alias',
+              '',
+              `Step "${step.id}" configKey "${stepWithKey.configKey}" normalizes to "${normalizedAlias}".`,
+              `Scripts cannot access this via $${normalizedAlias}.`,
+              '',
+              'Shell variable names must match: [A-Za-z_][A-Za-z0-9_]*',
+              'Fix: rename the configKey so its normalized alias starts with a letter or underscore.',
+            ].join('\n'),
             'USER_ERROR',
             1
           );
