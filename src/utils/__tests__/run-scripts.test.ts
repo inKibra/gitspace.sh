@@ -333,22 +333,22 @@ echo "$TOKEN" >> "${outputFile}"
       expect(output.trim()).toBe('super-secret-token');
     });
 
-    it('keeps legacy SPACE_* aliases for backwards compatibility', async () => {
+    it('provides uppercase snake-case aliases for camelCase keys', async () => {
       const outputFile = join(testDir, 'aliases.txt');
       const scriptPath = join(scriptsDir, '01-aliases.sh');
       writeFileSync(scriptPath, `#!/bin/bash
-echo "$SPACE_VALUE_TEAM_NAME" >> "${outputFile}"
-echo "$SPACE_SECRET_API_TOKEN" >> "${outputFile}"
+echo "$TEAM_NAME" >> "${outputFile}"
+echo "$API_TOKEN" >> "${outputFile}"
 `);
       chmodSync(scriptPath, 0o755);
 
       await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
         nonInteractive: true,
         bundleValues: {
-          TEAM_NAME: 'platform',
+          teamName: 'platform',
         },
         bundleSecrets: {
-          API_TOKEN: 'shh',
+          apiToken: 'shh',
         },
       });
 
@@ -356,6 +356,107 @@ echo "$SPACE_SECRET_API_TOKEN" >> "${outputFile}"
       const lines = output.trim().split('\n');
       expect(lines[0]).toBe('platform');
       expect(lines[1]).toBe('shh');
+    });
+
+    it('splits acronym boundaries when normalizing aliases', async () => {
+      const outputFile = join(testDir, 'acronyms.txt');
+      const scriptPath = join(scriptsDir, '01-acronyms.sh');
+      writeFileSync(scriptPath, `#!/bin/bash
+echo "$MY_HTTP_CLIENT" >> "${outputFile}"
+echo "$XML_PARSER" >> "${outputFile}"
+`);
+      chmodSync(scriptPath, 0o755);
+
+      await runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+        nonInteractive: true,
+        bundleValues: {
+          myHTTPClient: 'client-a',
+          XMLParser: 'parser-b',
+        },
+      });
+
+      const output = await Bun.file(outputFile).text();
+      const lines = output.trim().split('\n');
+      expect(lines[0]).toBe('client-a');
+      expect(lines[1]).toBe('parser-b');
+    });
+
+    it('throws helpful error when normalized alias is not shell-safe', async () => {
+      const scriptPath = join(scriptsDir, '01-noop.sh');
+      writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');
+      chmodSync(scriptPath, 0o755);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            '2faToken': 'secret',
+          },
+        })
+      ).rejects.toThrow(/not shell-safe/);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            '2faToken': 'secret',
+          },
+        })
+      ).rejects.toThrow(/2FA_TOKEN/);
+    });
+
+    it('throws a helpful error when normalized aliases collide', async () => {
+      const scriptPath = join(scriptsDir, '01-noop.sh');
+      writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');
+      chmodSync(scriptPath, 0o755);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            apiToken: 'a',
+            'api-token': 'b',
+          },
+        })
+      ).rejects.toThrow(/Bundle script env collision/);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            apiToken: 'a',
+            'api-token': 'b',
+          },
+        })
+      ).rejects.toThrow(/apiToken/);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            apiToken: 'a',
+            'api-token': 'b',
+          },
+        })
+      ).rejects.toThrow(/API_TOKEN/);
+    });
+
+    it('throws when same key is exported with conflicting values', async () => {
+      const scriptPath = join(scriptsDir, '01-noop.sh');
+      writeFileSync(scriptPath, '#!/bin/bash\necho "ok"');
+      chmodSync(scriptPath, 0o755);
+
+      await expect(
+        runScriptsInTerminal(scriptsDir, workspacePath, 'test-workspace', 'test/repo', {
+          nonInteractive: true,
+          bundleValues: {
+            sharedKey: 'from-value',
+          },
+          bundleSecrets: {
+            sharedKey: 'from-secret',
+          },
+        })
+      ).rejects.toThrow(/Bundle script env conflict/);
     });
   });
 
