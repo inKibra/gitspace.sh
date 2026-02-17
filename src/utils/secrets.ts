@@ -20,7 +20,14 @@ const GLOBAL_SECRETS_KEY = 'global';
 interface UnifiedSecretsBlob {
   global: Record<string, string>;
   projects: Record<string, Record<string, string>>;
+  metadata: {
+    schemaVersion: number;
+    legacyMigrationComplete: boolean;
+    legacyEntriesRetained: boolean;
+  };
 }
+
+const UNIFIED_SECRETS_SCHEMA_VERSION = 2;
 
 // In-memory cache for unified secrets blob
 let unifiedSecretsCache: UnifiedSecretsBlob | null = null;
@@ -34,6 +41,11 @@ function createEmptyBlob(): UnifiedSecretsBlob {
   return {
     global: {},
     projects: {},
+    metadata: {
+      schemaVersion: UNIFIED_SECRETS_SCHEMA_VERSION,
+      legacyMigrationComplete: false,
+      legacyEntriesRetained: false,
+    },
   };
 }
 
@@ -60,6 +72,7 @@ function parseUnifiedSecretsBlob(raw: string | null): UnifiedSecretsBlob {
     const parsed = JSON.parse(raw) as {
       global?: unknown;
       projects?: unknown;
+      metadata?: unknown;
     };
 
     const projects: Record<string, Record<string, string>> = {};
@@ -69,27 +82,34 @@ function parseUnifiedSecretsBlob(raw: string | null): UnifiedSecretsBlob {
       }
     }
 
+    const metadata =
+      parsed.metadata && typeof parsed.metadata === 'object'
+        ? (parsed.metadata as {
+            schemaVersion?: unknown;
+            legacyMigrationComplete?: unknown;
+            legacyEntriesRetained?: unknown;
+          })
+        : {};
+
     return {
       global: normalizeRecord(parsed.global),
       projects,
+      metadata: {
+        schemaVersion:
+          typeof metadata.schemaVersion === 'number' && Number.isFinite(metadata.schemaVersion)
+            ? metadata.schemaVersion
+            : UNIFIED_SECRETS_SCHEMA_VERSION,
+        legacyMigrationComplete: metadata.legacyMigrationComplete === true,
+        legacyEntriesRetained: metadata.legacyEntriesRetained === true,
+      },
     };
   } catch {
     return createEmptyBlob();
   }
 }
 
-function hasAnySecrets(blob: UnifiedSecretsBlob): boolean {
-  if (Object.keys(blob.global).length > 0) {
-    return true;
-  }
-
-  for (const secrets of Object.values(blob.projects)) {
-    if (Object.keys(secrets).length > 0) {
-      return true;
-    }
-  }
-
-  return false;
+function isLegacyMigrationComplete(blob: UnifiedSecretsBlob): boolean {
+  return blob.metadata.legacyMigrationComplete === true;
 }
 
 async function loadUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
@@ -103,24 +123,28 @@ async function loadUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
   });
 
   unifiedSecretsCache = parseUnifiedSecretsBlob(raw);
+  if (unifiedSecretsCache.metadata.legacyMigrationComplete) {
+    legacyEntriesDetected = unifiedSecretsCache.metadata.legacyEntriesRetained;
+  }
   return unifiedSecretsCache;
 }
 
 async function saveUnifiedSecretsBlob(blob: UnifiedSecretsBlob): Promise<void> {
-  unifiedSecretsCache = blob;
-
-  if (!hasAnySecrets(blob)) {
-    await Bun.secrets.delete({
-      service: SERVICE_NAME,
-      name: UNIFIED_SECRETS_KEY,
-    });
-    return;
-  }
+  const normalized: UnifiedSecretsBlob = {
+    global: { ...blob.global },
+    projects: { ...blob.projects },
+    metadata: {
+      schemaVersion: UNIFIED_SECRETS_SCHEMA_VERSION,
+      legacyMigrationComplete: blob.metadata.legacyMigrationComplete === true,
+      legacyEntriesRetained: blob.metadata.legacyEntriesRetained === true,
+    },
+  };
+  unifiedSecretsCache = normalized;
 
   await Bun.secrets.set({
     service: SERVICE_NAME,
     name: UNIFIED_SECRETS_KEY,
-    value: JSON.stringify(blob),
+    value: JSON.stringify(normalized),
   });
 }
 
@@ -132,6 +156,7 @@ export function clearSecretsCache(): void {
   unifiedSecretsCache = null;
   legacyProjectBlobChecked.clear();
   legacyGlobalBlobChecked = false;
+  legacyEntriesDetected = false;
 }
 
 // ============================================================================
@@ -252,6 +277,10 @@ export async function getProjectSecret(
     return current[key];
   }
 
+  if (isLegacyMigrationComplete(blob)) {
+    return null;
+  }
+
   // Try legacy project blob format: project:<name>
   if (!legacyProjectBlobChecked.has(projectName)) {
     const legacyBlob = await loadLegacyProjectBlob(projectName);
@@ -313,7 +342,7 @@ export async function getProjectSecrets(
   let secrets = blob.projects[projectName] || {};
   let changed = false;
 
-  if (Object.keys(secrets).length === 0 && !legacyProjectBlobChecked.has(projectName)) {
+  if (!isLegacyMigrationComplete(blob) && !legacyProjectBlobChecked.has(projectName)) {
     const legacyBlob = await loadLegacyProjectBlob(projectName);
     if (legacyBlob.hasLegacyEntry) {
       secrets = mergeSecrets(secrets, legacyBlob.secrets);
@@ -327,6 +356,10 @@ export async function getProjectSecrets(
   for (const key of keys) {
     if (key in secrets) {
       result[key] = secrets[key];
+      continue;
+    }
+
+    if (isLegacyMigrationComplete(blob)) {
       continue;
     }
 
@@ -437,6 +470,10 @@ export async function getSecret(key: string): Promise<string | null> {
     return secrets[key];
   }
 
+  if (isLegacyMigrationComplete(blob)) {
+    return null;
+  }
+
   // Try legacy global blob format: global
   if (!legacyGlobalBlobChecked) {
     const legacyBlob = await loadLegacyGlobalBlob();
@@ -485,34 +522,81 @@ export interface PreloadAllSecretsResult {
   importedLegacyGlobalEntry: boolean;
 }
 
+export interface PreloadAllSecretsOptions {
+  globalLegacyKeys?: string[];
+  projectLegacyKeys?: Record<string, string[]>;
+}
+
 /**
  * Preload all secrets for the process into memory.
  * This is intended to be called once at startup (serve + TUI).
  */
-export async function preloadAllSecrets(projectNames: string[]): Promise<PreloadAllSecretsResult> {
+export async function preloadAllSecrets(
+  projectNames: string[],
+  options: PreloadAllSecretsOptions = {}
+): Promise<PreloadAllSecretsResult> {
   const blob = await loadUnifiedSecretsBlob();
+
+  if (isLegacyMigrationComplete(blob)) {
+    legacyEntriesDetected = blob.metadata.legacyEntriesRetained;
+    return {
+      legacyEntriesDetected,
+      importedLegacyProjectEntries: 0,
+      importedLegacyGlobalEntry: false,
+    };
+  }
+
   let importedLegacyProjectEntries = 0;
   let importedLegacyGlobalEntry = false;
   let changed = false;
+  let detectedLegacyEntries = false;
 
-  const uniqueProjects = [...new Set(projectNames)];
-  for (const projectName of uniqueProjects) {
+  const projectLegacyKeys = options.projectLegacyKeys ?? {};
+  const globalLegacyKeys = [...new Set(options.globalLegacyKeys ?? [])];
+
+  const projectNamesToCheck = [...new Set([...projectNames, ...Object.keys(projectLegacyKeys)])];
+
+  for (const projectName of projectNamesToCheck) {
     const legacyProject = await loadLegacyProjectBlob(projectName);
     if (!legacyProject.hasLegacyEntry) {
-      continue;
+      // continue with per-key migration below
+    } else {
+      detectedLegacyEntries = true;
+      importedLegacyProjectEntries += 1;
+      const current = blob.projects[projectName] || {};
+      const merged = mergeSecrets(current, legacyProject.secrets);
+      if (JSON.stringify(current) !== JSON.stringify(merged)) {
+        blob.projects[projectName] = merged;
+        changed = true;
+      }
     }
 
-    importedLegacyProjectEntries += 1;
-    const current = blob.projects[projectName] || {};
-    const merged = mergeSecrets(current, legacyProject.secrets);
-    if (JSON.stringify(current) !== JSON.stringify(merged)) {
-      blob.projects[projectName] = merged;
-      changed = true;
+    const oldKeys = [...new Set(projectLegacyKeys[projectName] ?? [])];
+    for (const key of oldKeys) {
+      const oldValue = await Bun.secrets.get({
+        service: SERVICE_NAME,
+        name: `${projectName}:${key}`,
+      });
+
+      if (!oldValue) {
+        continue;
+      }
+
+      detectedLegacyEntries = true;
+      const currentProjectSecrets = blob.projects[projectName] || {};
+      if (currentProjectSecrets[key] !== oldValue) {
+        blob.projects[projectName] = {
+          ...currentProjectSecrets,
+          [key]: oldValue,
+        };
+        changed = true;
+      }
     }
   }
 
   const legacyGlobal = await loadLegacyGlobalBlob();
   if (legacyGlobal.hasLegacyEntry) {
+    detectedLegacyEntries = true;
     importedLegacyGlobalEntry = true;
     const merged = mergeSecrets(blob.global, legacyGlobal.secrets);
     if (JSON.stringify(blob.global) !== JSON.stringify(merged)) {
@@ -520,6 +604,29 @@ export async function preloadAllSecrets(projectNames: string[]): Promise<Preload
       changed = true;
     }
   }
+
+  for (const key of globalLegacyKeys) {
+    const oldValue = await Bun.secrets.get({
+      service: SERVICE_NAME,
+      name: key,
+    });
+
+    if (!oldValue) {
+      continue;
+    }
+
+    detectedLegacyEntries = true;
+    if (blob.global[key] !== oldValue) {
+      blob.global[key] = oldValue;
+      changed = true;
+    }
+  }
+
+  blob.metadata.legacyMigrationComplete = true;
+  blob.metadata.legacyEntriesRetained = detectedLegacyEntries;
+  changed = true;
+
+  legacyEntriesDetected = detectedLegacyEntries;
 
   if (changed) {
     await saveUnifiedSecretsBlob(blob);
@@ -542,6 +649,11 @@ export interface CleanupLegacySecretsResult {
   errors: string[];
 }
 
+export interface CleanupLegacySecretsOptions {
+  globalLegacyKeys?: string[];
+  projectLegacyKeys?: Record<string, string[]>;
+}
+
 /**
  * Remove legacy keychain entries now that unified secrets are in use.
  * This only removes legacy blob entries (`project:*`, `global`).
@@ -550,7 +662,8 @@ export interface CleanupLegacySecretsResult {
  * unified secrets storage has been stable for several releases.
  */
 export async function cleanupLegacySecretEntries(
-  projectNames: string[]
+  projectNames: string[],
+  options: CleanupLegacySecretsOptions = {}
 ): Promise<CleanupLegacySecretsResult> {
   const result: CleanupLegacySecretsResult = {
     deleted: 0,
@@ -558,7 +671,21 @@ export async function cleanupLegacySecretEntries(
     errors: [],
   };
 
-  const entries = [GLOBAL_SECRETS_KEY, ...[...new Set(projectNames)].map((name) => getProjectSecretsKey(name))];
+  const projectLegacyKeys = options.projectLegacyKeys ?? {};
+  const globalLegacyKeys = options.globalLegacyKeys ?? [];
+
+  const entries = new Set<string>([
+    GLOBAL_SECRETS_KEY,
+    ...[...new Set(projectNames)].map((name) => getProjectSecretsKey(name)),
+    ...globalLegacyKeys,
+  ]);
+
+  for (const [projectName, keys] of Object.entries(projectLegacyKeys)) {
+    for (const key of keys) {
+      entries.add(`${projectName}:${key}`);
+    }
+  }
+
   for (const name of entries) {
     try {
       const deleted = await Bun.secrets.delete({

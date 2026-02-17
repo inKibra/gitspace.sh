@@ -1,4 +1,6 @@
-import { getAllProjectNames, readProjectConfig } from './config.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { getAllProjectNames, getSpacesDir, readProjectConfig } from './config.js';
 import { logger } from '../utils/logger.js';
 import { preloadAllSecrets } from '../utils/secrets.js';
 import { SpacesError } from '../types/errors.js';
@@ -8,6 +10,79 @@ interface SecretRuntimeState {
   projectsWithSecrets: Set<string>;
   legacyEntriesDetected: boolean;
   legacyReminderConsumed: boolean;
+}
+
+export interface SecretMigrationInputs {
+  projectNames: string[];
+  projectSecretKeys: Record<string, string[]>;
+  globalSecretKeys: string[];
+}
+
+function readHostSubdomains(): string[] {
+  const hostPath = join(getSpacesDir(), 'host.json');
+  if (!existsSync(hostPath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(hostPath, 'utf-8')) as {
+      subdomain?: unknown;
+      subdomains?: unknown;
+    };
+
+    const found = new Set<string>();
+    if (typeof parsed.subdomain === 'string' && parsed.subdomain.length > 0) {
+      found.add(parsed.subdomain);
+    }
+
+    if (Array.isArray(parsed.subdomains)) {
+      for (const candidate of parsed.subdomains) {
+        if (typeof candidate === 'string' && candidate.length > 0) {
+          found.add(candidate);
+        }
+      }
+    }
+
+    return [...found];
+  } catch {
+    return [];
+  }
+}
+
+export function getSecretMigrationInputs(): SecretMigrationInputs {
+  const projectNames = getAllProjectNames();
+  const projectSecretKeys: Record<string, string[]> = {};
+  const globalSecretKeys = new Set<string>([
+    'GITSPACE_TOKEN',
+    'linear-api-key',
+    'relay:signingPrivateKey',
+  ]);
+
+  for (const projectName of projectNames) {
+    globalSecretKeys.add(`linear-api-key-${projectName}`);
+
+    try {
+      const config = readProjectConfig(projectName);
+      const keys = [...new Set(config.bundleSecretKeys ?? [])];
+      if (keys.length > 0) {
+        projectSecretKeys[projectName] = keys;
+      }
+    } catch (error) {
+      logger.debug(
+        `[secrets] Failed reading project config for ${projectName}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  for (const subdomain of readHostSubdomains()) {
+    globalSecretKeys.add(`TUNNEL_TOKEN_${subdomain}`);
+  }
+
+  return {
+    projectNames,
+    projectSecretKeys,
+    globalSecretKeys: [...globalSecretKeys],
+  };
 }
 
 const state: SecretRuntimeState = {
@@ -52,7 +127,7 @@ export async function initializeSecretRuntime(
 
   const projectsWithSecrets = collectProjectsWithSecrets();
   state.projectsWithSecrets = new Set(projectsWithSecrets.map((entry) => entry.projectName));
-  const projectNames = projectsWithSecrets.map((entry) => entry.projectName);
+  const migrationInputs = getSecretMigrationInputs();
 
   if (ignore) {
     if (projectsWithSecrets.length > 0) {
@@ -64,7 +139,10 @@ export async function initializeSecretRuntime(
   }
 
   try {
-    const preloadResult = await preloadAllSecrets(projectNames);
+    const preloadResult = await preloadAllSecrets(migrationInputs.projectNames, {
+      projectLegacyKeys: migrationInputs.projectSecretKeys,
+      globalLegacyKeys: migrationInputs.globalSecretKeys,
+    });
     state.legacyEntriesDetected = preloadResult.legacyEntriesDetected;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
