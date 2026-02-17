@@ -92,27 +92,6 @@ const state: SecretRuntimeState = {
   legacyReminderConsumed: false,
 };
 
-function collectProjectsWithSecrets(): Array<{ projectName: string; keys: string[] }> {
-  const projects = getAllProjectNames();
-  const result: Array<{ projectName: string; keys: string[] }> = [];
-
-  for (const projectName of projects) {
-    try {
-      const config = readProjectConfig(projectName);
-      const keys = config.bundleSecretKeys ?? [];
-      if (keys.length > 0) {
-        result.push({ projectName, keys });
-      }
-    } catch (error) {
-      logger.debug(
-        `[secrets] Failed reading project config for ${projectName}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  return result;
-}
-
 export interface InitializeSecretRuntimeOptions {
   ignoreKeychainAndSkipSecrets?: boolean;
 }
@@ -125,12 +104,11 @@ export async function initializeSecretRuntime(
   state.legacyEntriesDetected = false;
   state.legacyReminderConsumed = false;
 
-  const projectsWithSecrets = collectProjectsWithSecrets();
-  state.projectsWithSecrets = new Set(projectsWithSecrets.map((entry) => entry.projectName));
   const migrationInputs = getSecretMigrationInputs();
+  state.projectsWithSecrets = new Set(Object.keys(migrationInputs.projectSecretKeys));
 
   if (ignore) {
-    if (projectsWithSecrets.length > 0) {
+    if (state.projectsWithSecrets.size > 0) {
       logger.warning(
         'Ignoring keychain and skipping secret-dependent scripts (use with caution).'
       );
