@@ -1325,9 +1325,13 @@ function App({ relayConfig, onQuit }: AppProps) {
   // ========== Keyboard Handlers ==========
 
   useKeyboard(async (key) => {
+    const localScriptTerminalRunning =
+      state.view === 'scripts' &&
+      localScriptState?.isRunning === true;
+
     // Handle flow modals FIRST - even in terminal view
     // This ensures y/n work in confirmation modals when terminal is underneath
-    if (flow.isOpen) {
+    if (flow.isOpen && !localScriptTerminalRunning) {
       // Handle confirm modal with y/n shortcuts
       if (flow.flow.type === 'confirm') {
         if (key.raw === 'y' || key.name === 'return') {
@@ -2062,7 +2066,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           error={localScriptState?.error}
           exitCode={localScriptState?.exitCode}
         />
-        <FlowTUI flow={flow} />
+        {!isRunning && <FlowTUI flow={flow} />}
         <StatusBar hint={isRunning ? '[Running scripts...]' : '[Esc/n] Back to workspaces'} />
       </Fragment>
     );

@@ -747,18 +747,19 @@ export default function App() {
     terminal.mode === 'browsing' &&
     showScriptTerminal
   ) {
+    const isRunning = terminal.scriptState?.isRunning ?? true;
     return (
       <>
         <ScriptTerminal
           phase={terminal.scriptState?.phase ?? 'pre'}
           workspaceName={scriptWorkspaceName}
-          isRunning={terminal.scriptState?.isRunning ?? true}
+          isRunning={isRunning}
           error={terminal.scriptState?.error}
           exitCode={terminal.scriptState?.exitCode}
           setWriteCallback={terminal.setWriteCallback}
           onBack={() => setShowScriptTerminal(false)}
         />
-        <FlowWeb flow={flow} />
+        {!isRunning && <FlowWeb flow={flow} />}
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );

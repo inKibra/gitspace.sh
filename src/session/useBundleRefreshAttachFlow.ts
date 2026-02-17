@@ -394,10 +394,8 @@ export function useBundleRefreshAttachFlow(
             return false;
           }
 
-          currentOptions.flow.showLoading({
-            title: 'Bundle Refresh',
-            message: 'Retrying session attach...',
-          });
+          // Ensure lifecycle script output is visible in ScriptTerminal during retry.
+          currentOptions.flow.close();
           await Promise.resolve(currentOptions.attachSession(pending.params));
           currentOptions.flow.close();
           return true;
@@ -436,10 +434,8 @@ export function useBundleRefreshAttachFlow(
 
         await currentOptions.applyBundleRefresh(projectName, pending.workspaceId, submission);
 
-        currentOptions.flow.showLoading({
-          title: 'Bundle Refresh',
-          message: 'Retrying session attach...',
-        });
+        // Ensure lifecycle script output is visible in ScriptTerminal during retry.
+        currentOptions.flow.close();
 
         await Promise.resolve(currentOptions.attachSession(pending.params));
         currentOptions.flow.close();
@@ -476,10 +472,8 @@ export function useBundleRefreshAttachFlow(
       }
 
       try {
-        currentOptions.flow.showLoading({
-          title: 'Attaching Session',
-          message: 'Retrying without workspace scripts...',
-        });
+        // Do not block ScriptTerminal with loading overlays while attach retries.
+        currentOptions.flow.close();
         await Promise.resolve(currentOptions.attachSession({
           ...pending.params,
           scriptPolicy: 'skip',
