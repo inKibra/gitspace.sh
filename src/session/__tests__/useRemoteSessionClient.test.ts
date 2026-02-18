@@ -170,6 +170,10 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     this.updateNotificationConfigCalls.push(config)
   }
 
+  async sendReviewRequest(): Promise<never> {
+    throw new Error('not implemented')
+  }
+
   async writePtyData(data: Uint8Array): Promise<void> {
     this.ptyWrites.push(new Uint8Array(data))
   }

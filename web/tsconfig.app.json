@@ -13,7 +13,9 @@
     "baseUrl": ".",
     "paths": {
       "ghostty-web": ["./node_modules/ghostty-web"],
-      "sonner": ["./node_modules/sonner"]
+      "sonner": ["./node_modules/sonner"],
+      "@pierre/diffs/react": ["./node_modules/@pierre/diffs/dist/react/index.d.ts"],
+      "@pierre/diffs": ["./node_modules/@pierre/diffs/dist/index.d.ts"]
     },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,

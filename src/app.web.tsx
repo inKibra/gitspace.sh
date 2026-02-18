@@ -19,6 +19,7 @@ import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { ReviewPage } from './pages/ReviewPage.web.js';
 
 // Import shared components and hooks
 import {
@@ -46,7 +47,7 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 
-type View = "machines" | "terminal";
+type View = "machines" | "terminal" | "review";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
@@ -87,6 +88,9 @@ export default function App() {
     inviteId?: string;
     inviteToken?: string;
   } | null>(null);
+
+  // Review workspace/project state
+  const [reviewWorkspace, setReviewWorkspace] = useState<{ projectName: string; workspaceName: string } | null>(null);
 
   // Relay connection (for machine list)
   const relay = useRelayConnection();
@@ -234,7 +238,7 @@ export default function App() {
     setLocalNotificationConfig(terminal.notificationConfig);
   }, [terminal.notificationConfig]);
 
-  // Parse invite from URL hash on load
+  // Parse invite from URL hash on load, and review params from query string
   useEffect(() => {
     const hash = window.location.hash;
     if (hash.startsWith("#invite=")) {
@@ -247,6 +251,16 @@ export default function App() {
           });
         }
       });
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('view') === 'review') {
+      const ws = params.get('workspace');
+      const proj = params.get('project');
+      if (ws && proj) {
+        setReviewWorkspace({ projectName: proj, workspaceName: ws });
+        setView('review');
+      }
     }
   }, []);
 
@@ -418,6 +432,12 @@ export default function App() {
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string }) => {
     await attachController.attachFromSelection(params);
   }, [attachController]);
+
+  // Handle opening review for a workspace
+  const handleOpenReview = useCallback((workspace: { projectName: string; name: string }) => {
+    setReviewWorkspace({ projectName: workspace.projectName, workspaceName: workspace.name });
+    setView('review');
+  }, []);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -740,6 +760,60 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [notifications.activeToast, notifications.attachToActiveToast, flow]);
 
+  // ========== Review View ==========
+  if (view === 'review' && reviewWorkspace) {
+    if (terminal.status === 'established') {
+      return (
+        <>
+          <ReviewPage
+            projectName={reviewWorkspace.projectName}
+            workspaceName={reviewWorkspace.workspaceName}
+            machineName={selectedMachine?.label || selectedMachine?.machineId}
+            sendReviewRequest={terminal.sendReviewRequest}
+            onBack={() => {
+              setView('terminal');
+              setReviewWorkspace(null);
+            }}
+          />
+          <Toaster theme="dark" position="top-right" richColors />
+        </>
+      );
+    }
+
+    // Connection not yet established — show a targeted connecting screen
+    // rather than falling through to the generic machine list.
+    const statusMessage = {
+      disconnected: "Disconnected",
+      connecting: "Connecting to relay...",
+      connected: "Connected, authenticating...",
+      handshaking: "Establishing secure connection...",
+      established: "Connected!",
+      error: "Connection failed",
+    }[terminal.status];
+
+    return (
+      <>
+        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+          <div className="text-center">
+            <div className="text-lg text-[#e6edf3] mb-2">
+              Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceName}</span>
+            </div>
+            <div className="text-sm text-[#8b949e]">{statusMessage}</div>
+            {terminal.status === 'error' && (
+              <button
+                onClick={() => { setView('machines'); setReviewWorkspace(null); }}
+                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+              >
+                Back to Machines
+              </button>
+            )}
+          </div>
+        </div>
+        <Toaster theme="dark" position="top-right" richColors />
+      </>
+    );
+  }
+
   // ========== Spaces Browser View (browsing mode) ==========
   if (
     view === 'terminal' &&
@@ -819,7 +893,7 @@ export default function App() {
             </div>
           </div>
           <div className="flex-1 overflow-hidden">
-            <SpacesBrowserWeb {...spacesBrowserProps} />
+            <SpacesBrowserWeb {...spacesBrowserProps} onReview={handleOpenReview} />
           </div>
         </div>
         <FlowWeb flow={flow} />

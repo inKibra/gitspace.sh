@@ -44,6 +44,8 @@ import type {
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../../types/review.js';
+import { executeLocalReviewOperation } from '../../core/review-executor.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
@@ -665,6 +667,10 @@ export class LocalSessionBackend implements SessionBackend {
   ): Promise<void> {
     const workspace = await this.resolveWorkspace(projectName, workspaceId);
     await this.deps.applyBundleRefreshSubmission(projectName, workspace.path, submission);
+  }
+
+  async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {
+    return executeLocalReviewOperation(operation, this.deps.scanWorkspaces);
   }
 
   async requestInbox(): Promise<void> {

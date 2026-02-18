@@ -309,6 +309,58 @@ export async function deleteLocalBranch(
 }
 
 /**
+ * Get the unified diff between a workspace branch and its base branch.
+ *
+ * Uses three-dot diff (`base...HEAD`) so we only see changes introduced by
+ * the workspace branch, not diverging changes on the base since the fork.
+ *
+ * @param workspacePath  Path to the git worktree
+ * @param baseBranch     The branch to diff against (e.g. 'main')
+ * @returns Unified diff string (empty string if no changes)
+ */
+export async function getWorkspaceDiff(
+  workspacePath: string,
+  baseBranch: string
+): Promise<{ diff: string; baseBranch: string; headBranch: string }> {
+  try {
+    // Get the current HEAD branch name
+    const { stdout: headOutput } = await execAsync('git rev-parse --abbrev-ref HEAD', {
+      cwd: workspacePath,
+    });
+    const headBranch = headOutput.trim();
+
+    // Fetch to ensure we have the latest base branch ref
+    try {
+      await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
+        cwd: workspacePath,
+      });
+    } catch {
+      // Non-fatal — work with local refs
+      logger.debug(`Could not fetch origin/${baseBranch}, using local ref`);
+    }
+
+    // Three-dot diff: changes on HEAD that aren't on origin/baseBranch
+    const mergeBase = `origin/${baseBranch}`;
+    const { stdout: diffOutput } = await execAsync(
+      `git diff ${escapeShellArg(mergeBase)}...HEAD`,
+      { cwd: workspacePath, maxBuffer: 50 * 1024 * 1024 } // 50MB max
+    );
+
+    return {
+      diff: diffOutput,
+      baseBranch,
+      headBranch,
+    };
+  } catch (error) {
+    throw new SpacesError(
+      `Failed to get workspace diff: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
+/**
  * List all worktrees in a repository
  */
 export async function listWorktrees(repoPath: string): Promise<string[]> {

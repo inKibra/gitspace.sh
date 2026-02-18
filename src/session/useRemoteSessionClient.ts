@@ -17,6 +17,7 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import { useSessionEngine } from './useSessionEngine.js';
 
 export type RemoteSessionConnectionStatus =
@@ -87,6 +88,8 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   requestNotificationConfig: () => void;
   updateNotificationConfig: (config: NotificationConfig) => void;
   notificationConfig: NotificationConfig | null;
+
+  sendReviewRequest: (operation: ReviewOperation) => Promise<ReviewResult>;
 
   scriptState: ScriptRuntimeState | null;
   commandError: { code?: string; message: string } | null;
@@ -305,6 +308,17 @@ export function useRemoteSessionClient<ConnectParams>(
     );
   }, [engine, withActiveBackend]);
 
+  const sendReviewRequest = useCallback(
+    async (operation: ReviewOperation): Promise<ReviewResult> => {
+      const backendKey = activeBackendKeyRef.current;
+      if (!backendKey) {
+        throw new Error('No active backend connection');
+      }
+      return engine.sendReviewRequest(backendKey, operation);
+    },
+    [engine]
+  );
+
   useEffect(() => {
     return () => {
       const backendKey = activeBackendKeyRef.current;
@@ -356,6 +370,8 @@ export function useRemoteSessionClient<ConnectParams>(
     requestNotificationConfig,
     updateNotificationConfig,
     notificationConfig: activeBackendState?.notificationConfig ?? null,
+
+    sendReviewRequest,
 
     scriptState: activeBackendState?.scriptState ?? null,
     commandError: activeBackendState?.commandError ?? null,

@@ -34,6 +34,10 @@ import { listProjectSummaries } from "../../core/project-catalog";
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
 import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
+
+// Import review operations
+import { executeLocalReviewOperation } from "../../core/review-executor.js";
+import type { ReviewOperation, ReviewResult } from "../../types/review.js";
 import { getNotificationConfig, updateNotificationConfig } from "../../core/config";
 import {
   getBundleRefreshPlan,
@@ -276,6 +280,15 @@ export class RemoteSessionHandler {
           msg.projectName,
           msg.workspaceId,
           msg.submission,
+          sendResponse
+        );
+        break;
+
+      case 'review_request':
+        await this.handleReviewRequest(
+          session,
+          msg.requestId,
+          msg.operation,
           sendResponse
         );
         break;
@@ -822,6 +835,46 @@ export class RemoteSessionHandler {
       const message = error instanceof Error ? error.message : 'Failed to apply bundle refresh';
       await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_APPLY_FAILED', message);
     }
+  }
+
+  // ============================================================================
+  // Review Request Handling
+  // ============================================================================
+
+  /**
+   * Handle a review_request message by dispatching to the appropriate
+   * review operation and responding with a review_response.
+   */
+  private async handleReviewRequest(
+    session: RemoteClientSession,
+    requestId: string,
+    operation: ReviewOperation,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const result = await this.executeReviewOperation(operation);
+      await this.sendMessage(session, sendResponse, {
+        type: 'review_response',
+        requestId,
+        result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.sendMessage(session, sendResponse, {
+        type: 'review_response',
+        requestId,
+        error: { code: 'REVIEW_ERROR', message },
+      });
+    }
+  }
+
+  /**
+   * Delegate to the shared executeLocalReviewOperation from review-executor.ts.
+   * This is the single authoritative implementation used by both the remote
+   * session handler and the local session backend.
+   */
+  private async executeReviewOperation(operation: ReviewOperation): Promise<ReviewResult> {
+    return executeLocalReviewOperation(operation, scanWorkspaces);
   }
 
   private async resolveWorkspace(

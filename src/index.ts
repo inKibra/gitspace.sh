@@ -59,6 +59,7 @@ import { configNotifications, linearSetup, linearShow, linearClear } from './com
 import { migrateCleanupLegacy } from './commands/migrate.js'
 import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
 import { bundleRefresh, bundleStatus } from './commands/bundle.js'
+import { openReview, showReviewNotes, importReview, pushReview } from './commands/review.js'
 
 const program = new Command()
 
@@ -829,6 +830,70 @@ bundleCommand
 		await checkFirstTimeSetup()
 		try {
 			await bundleStatus(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Review Commands
+// ============================================================================
+
+const reviewCommand = program
+	.command('review')
+	.description('Open or interact with the diff review system')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--port <number>', 'Port of the serve daemon (default: 4480)', (v) => parseInt(v, 10))
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await openReview(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+reviewCommand
+	.command('notes')
+	.description('Print review threads as structured JSON (LLM-friendly)')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--format <format>', 'Output format: json (default) or text')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await showReviewNotes(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+reviewCommand
+	.command('import')
+	.description('Import GitHub PR review comments as local threads')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--pr <number>', 'PR number to import from', (v) => parseInt(v, 10))
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await importReview(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+reviewCommand
+	.command('push')
+	.description('Push local review decisions to GitHub as a formal PR review')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--pr <number>', 'PR number to submit review on', (v) => parseInt(v, 10))
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await pushReview(options)
 		} catch (error) {
 			handleError(error)
 		}

@@ -127,6 +127,10 @@ class FakeLocalBackend implements SessionBackend {
 
   async updateNotificationConfig(_config: NotificationConfig): Promise<void> {}
 
+  async sendReviewRequest(): Promise<never> {
+    throw new Error('not implemented')
+  }
+
   async writePtyData(data: Uint8Array): Promise<void> {
     this.writeCalls.push(new Uint8Array(data))
   }

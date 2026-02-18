@@ -17,6 +17,7 @@
 
 // Re-export InboxItem from tmux-lite protocol
 export type { InboxItem } from "../tmux-lite/protocol.js";
+export type { ReviewOperation, ReviewResult } from "../../types/review.js";
 export type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
@@ -112,6 +113,17 @@ export interface ApplyBundleRefreshRequest {
   projectName: string;
   workspaceId: string;
   submission: import("../../types/bundle-refresh.js").BundleRefreshSubmission;
+}
+
+/**
+ * Review operation request — wraps all review sub-operations in a single
+ * message type, matched to its response by requestId.
+ */
+export interface ReviewRequest {
+  type: "review_request";
+  /** Unique ID for correlating request → response */
+  requestId: string;
+  operation: import("../../types/review.js").ReviewOperation;
 }
 
 // ============================================================================
@@ -267,6 +279,15 @@ export interface BundleRefreshAppliedResponse {
   workspaceId: string;
 }
 
+/** Review operation response — carries either a result or an error */
+export interface ReviewResponse {
+  type: "review_response";
+  /** Matches the requestId from the ReviewRequest */
+  requestId: string;
+  result?: import("../../types/review.js").ReviewResult;
+  error?: { code: string; message: string };
+}
+
 // ============================================================================
 // Union Types
 // ============================================================================
@@ -285,7 +306,8 @@ export type ClientToMachineMessage =
   | GetNotificationConfigRequest
   | UpdateNotificationConfigRequest
   | GetBundleRefreshPlanRequest
-  | ApplyBundleRefreshRequest;
+  | ApplyBundleRefreshRequest
+  | ReviewRequest;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
@@ -305,7 +327,8 @@ export type MachineToClientMessage =
   | NotificationConfigUpdatedResponse
   | ScriptOutputResponse
   | BundleRefreshPlanResponse
-  | BundleRefreshAppliedResponse;
+  | BundleRefreshAppliedResponse
+  | ReviewResponse;
 
 /** All remote session messages */
 export type RemoteSessionMessage =

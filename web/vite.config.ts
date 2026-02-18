@@ -22,6 +22,9 @@ export default defineConfig({
       'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
       'ghostty-web': path.resolve(__dirname, 'node_modules/ghostty-web'),
       'sonner': path.resolve(__dirname, 'node_modules/sonner'),
+      // @pierre/diffs is installed in web/node_modules; alias so src/ imports resolve
+      '@pierre/diffs/react': path.resolve(__dirname, 'node_modules/@pierre/diffs/dist/react/index.js'),
+      '@pierre/diffs': path.resolve(__dirname, 'node_modules/@pierre/diffs/dist/index.js'),
     },
   },
   server: {

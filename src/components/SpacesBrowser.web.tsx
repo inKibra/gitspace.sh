@@ -8,12 +8,17 @@
 
 import type { UseSpacesBrowserReturn } from './SpacesBrowser.js';
 import { formatTime } from './SpacesBrowser.js';
+import type { WorkspaceInfo } from '../lib/remote-session/protocol.js';
 
 // ============================================================================
 // Component
 // ============================================================================
 
-export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
+export interface SpacesBrowserWebProps extends UseSpacesBrowserReturn {
+  onReview?: (workspace: WorkspaceInfo) => void;
+}
+
+export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
   const {
     items,
     machineName,
@@ -23,6 +28,7 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
     attachSession,
     refresh,
     back,
+    onReview,
   } = props;
 
   // Empty state
@@ -91,11 +97,22 @@ export function SpacesBrowserWeb(props: UseSpacesBrowserReturn) {
                     )}
                   </div>
                 </div>
-                <div className="text-right flex-shrink-0 ml-2">
+                <div className="flex items-center gap-2 flex-shrink-0 ml-2">
                   {ws.sessionCount > 0 && (
                     <span className="text-xs px-2 py-1 rounded bg-[#238636] text-[#e6edf3]">
                       {ws.sessionCount}
                     </span>
+                  )}
+                  {onReview && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReview(ws);
+                      }}
+                      className="text-xs px-2 py-1 rounded bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] hover:text-[#58a6ff] border border-[#30363d] hover:border-[#58a6ff] transition-colors"
+                    >
+                      Review
+                    </button>
                   )}
                 </div>
               </div>

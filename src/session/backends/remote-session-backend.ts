@@ -17,11 +17,14 @@ import {
   type ListWorkspacesRequest,
   type MachineToClientMessage,
   type MarkInboxReadRequest,
+  type ReviewRequest,
+  type ReviewResponse,
   type ScriptOutputResponse,
   type SessionCtrl,
   type UpdateNotificationConfigRequest,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
@@ -164,6 +167,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'script_output',
   'bundle_refresh_plan',
   'bundle_refresh_applied',
+  'review_response',
 ]);
 
 function isHandshakeEnvelope(value: unknown): value is HandshakeEnvelope {
@@ -318,6 +322,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
+  private pendingReviewRequests = new Map<string, {
+    resolve: (result: ReviewResult) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
@@ -587,6 +596,38 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
+  async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {
+    const requestId = crypto.randomUUID();
+
+    const command: ReviewRequest = {
+      type: 'review_request',
+      requestId,
+      operation,
+    };
+
+    return new Promise<ReviewResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingReviewRequests.has(requestId)) {
+          return;
+        }
+        this.pendingReviewRequests.delete(requestId);
+        reject(new Error(`Timed out waiting for review response (${operation.op})`));
+      }, 30000);
+
+      this.pendingReviewRequests.set(requestId, { resolve, reject, timeout });
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingReviewRequests.get(requestId);
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingReviewRequests.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
   async writePtyData(data: Uint8Array): Promise<void> {
     this.assertConnected();
 
@@ -630,6 +671,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectConnect(error);
         this.rejectPendingBundleRefreshRequests(error.message);
         this.rejectPendingWorkspaceDelete('DELETE_FAILED', error.message);
+        this.rejectAllPendingReviewRequests(error.message);
         this.emit({ type: 'status', status: 'error', error: error.message });
       },
     });
@@ -898,6 +940,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.resolveBundleRefreshApply(message);
         return;
       }
+      case 'review_response': {
+        this.resolveReviewRequest(message);
+        return;
+      }
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
         if (message.workspaceId) {
@@ -1026,6 +1072,31 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.reject(new WorkspaceDeleteError(message, toWorkspaceDeleteErrorCode(code)));
   }
 
+  private resolveReviewRequest(message: ReviewResponse): void {
+    const pending = this.pendingReviewRequests.get(message.requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingReviewRequests.delete(message.requestId);
+    if (message.error) {
+      pending.reject(new Error(message.error.message));
+    } else if (message.result) {
+      pending.resolve(message.result);
+    } else {
+      pending.reject(new Error('Review response missing result'));
+    }
+  }
+
+  private rejectAllPendingReviewRequests(message: string): void {
+    const error = new Error(message);
+    for (const [requestId, pending] of this.pendingReviewRequests) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.pendingReviewRequests.delete(requestId);
+    }
+  }
+
   private emitPtyData(data: Uint8Array): void {
     if (!this.ptyOutputHandler) {
       this.pendingPtyChunks.push(data);
@@ -1112,6 +1183,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
+    this.rejectAllPendingReviewRequests('Remote session disconnected');
     this.connectPromise = null;
     this.connectResolve = null;
     this.connectReject = null;
