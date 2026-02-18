@@ -21,6 +21,12 @@ if (process.argv.includes('--internal-tmux-server')) {
 	await new Promise(() => {}); // Block forever
 }
 
+// Internal command: run process runner directly
+if (process.argv.includes('--internal-process-runner')) {
+	await import('./lib/processes/runner.js');
+	await new Promise(() => {}); // Runner will exit the process
+}
+
 import { Command } from 'commander'
 import { readFileSync } from 'fs'
 import { join } from 'path'
@@ -70,6 +76,8 @@ import {
 	addLineReview,
 	showSpaceContext,
 } from './commands/review.js'
+import { listEvents, showEvent, tailEvents } from './commands/events.js'
+import { listProcesses, startProcess, stopProcess, attachProcess } from './commands/process.js'
 
 const program = new Command()
 
@@ -730,6 +738,123 @@ configLinearCommand
 		await checkFirstTimeSetup()
 		try {
 			await linearClear(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Events Commands
+// ============================================================================
+
+const eventsCommand = program
+	.command('events')
+	.description('Query wide event logs')
+
+const eventsFilterOption = '--filter <expr>'
+
+eventsCommand
+	.command('list')
+	.description('List events (NDJSON)')
+	.option('--session <id>', 'Session ID or name')
+	.option(eventsFilterOption, 'Filter in key=value format')
+	.option('--limit <n>', 'Limit results', (value: string) => Number(value), 100)
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await listEvents(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+eventsCommand
+	.command('show')
+	.description('Show a single event by eventId')
+	.option('--session <id>', 'Session ID or name')
+	.option(eventsFilterOption, 'Filter in key=value format')
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await showEvent(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+eventsCommand
+	.command('tail')
+	.description('Tail recent events (no follow yet)')
+	.option('--session <id>', 'Session ID or name')
+	.option(eventsFilterOption, 'Filter in key=value format')
+	.option('--limit <n>', 'Limit results', (value: string) => Number(value), 50)
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await tailEvents(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Process Commands
+// ============================================================================
+
+const processCommand = program
+	.command('process')
+	.description('Manage workspace processes')
+
+processCommand
+	.command('list')
+	.description('List configured processes')
+	.option('--workspace <path>', 'Workspace path (defaults to cwd)')
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await listProcesses(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+processCommand
+	.command('start')
+	.description('Start a process by name')
+	.option('--workspace <path>', 'Workspace path (defaults to cwd)')
+	.option('--name <name>', 'Process name')
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await startProcess(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+processCommand
+	.command('stop')
+	.description('Stop a process by name')
+	.option('--workspace <path>', 'Workspace path (defaults to cwd)')
+	.option('--name <name>', 'Process name')
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await stopProcess(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+processCommand
+	.command('attach')
+	.description('Show attach hint for process')
+	.option('--workspace <path>', 'Workspace path (defaults to cwd)')
+	.option('--name <name>', 'Process name')
+	.action(async (options: Record<string, unknown>) => {
+		await checkFirstTimeSetup()
+		try {
+			await attachProcess(options)
 		} catch (error) {
 			handleError(error)
 		}

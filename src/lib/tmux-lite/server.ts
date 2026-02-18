@@ -1071,7 +1071,16 @@ function getShellInitScript(shell: string, hooks?: SessionCreateHooks): string |
 // Main Session Creation
 // ============================================================================
 
-function createSession(name: string | undefined, cwd: string, hooks?: SessionCreateHooks): Session {
+function createSession(
+  name: string | undefined,
+  cwd: string,
+  options?: {
+    hooks?: SessionCreateHooks;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+  }
+): Session {
   const id = genId();
   const sessionName = name || `session-${id}`;
   const socketPath = getSessionSocketPath(id);
@@ -1137,14 +1146,22 @@ function createSession(name: string | undefined, cwd: string, hooks?: SessionCre
     try { ptyTerminal.write(data); } catch {}
   });
 
-  // Spawn shell process
+  // Spawn shell process (or custom command if provided)
   const shell = process.env.SHELL || "/bin/bash";
+  const hooks = options?.hooks;
   const shellEnv = buildShellEnvironment(id, shell, hooks);
 
-  const proc = Bun.spawn([shell], {
+  const spawnCmd = options?.command
+    ? [options.command, ...(options.args ?? [])]
+    : [shell];
+  const spawnEnv = options?.env
+    ? { ...shellEnv, ...options.env }
+    : shellEnv;
+
+  const proc = Bun.spawn(spawnCmd, {
     terminal: ptyTerminal,
     cwd,
-    env: shellEnv,
+    env: spawnEnv,
   });
 
   const shellInitScript = getShellInitScript(shell, hooks);
@@ -1253,7 +1270,12 @@ Bun.listen({
 
           case "new":
             try {
-              const session = createSession(cmd.name, cmd.cwd, cmd.hooks);
+              const session = createSession(cmd.name, cmd.cwd, {
+                hooks: cmd.hooks,
+                command: cmd.command,
+                args: cmd.args,
+                env: cmd.env,
+              });
               res = { type: "session", session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

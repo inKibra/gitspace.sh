@@ -5,6 +5,7 @@ import type {
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
+import type { WideEventFilter } from '../types/events.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -73,6 +74,9 @@ export interface SessionBackend {
   updateNotificationConfig(config: NotificationConfig): Promise<void>;
 
   sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult>;
+  startProcess?(workspaceId: string, processName: string): Promise<void>;
+  stopProcess?(workspaceId: string, processName: string): Promise<void>;
+  requestEvents?(workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number): Promise<void>;
 
   writePtyData?(data: Uint8Array): Promise<void>;
   resizePty?(cols: number, rows: number): Promise<void>;

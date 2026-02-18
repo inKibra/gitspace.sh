@@ -8,6 +8,7 @@ import {
   type ClearInboxRequest,
   type ClientToMachineMessage,
   type DeleteWorkspaceRequest,
+  type GetEventsRequest,
   type GetInboxRequest,
   type GetBundleRefreshPlanRequest,
   type GetNotificationConfigRequest,
@@ -21,10 +22,13 @@ import {
   type ReviewResponse,
   type ScriptOutputResponse,
   type SessionCtrl,
+  type StartProcessRequest,
+  type StopProcessRequest,
   type UpdateNotificationConfigRequest,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
+import type { WideEventFilter } from '../../types/events.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
@@ -169,6 +173,9 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'bundle_refresh_plan',
   'bundle_refresh_applied',
   'review_response',
+  'events_list',
+  'process_started',
+  'process_stopped',
 ]);
 
 function isHandshakeEnvelope(value: unknown): value is HandshakeEnvelope {
@@ -647,6 +654,40 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+  async startProcess(workspaceId: string, processName: string): Promise<void> {
+    const command: StartProcessRequest = {
+      type: 'start_process',
+      workspaceId,
+      processName,
+    };
+    await this.sendCommand(command);
+  }
+
+  async stopProcess(workspaceId: string, processName: string): Promise<void> {
+    const command: StopProcessRequest = {
+      type: 'stop_process',
+      workspaceId,
+      processName,
+    };
+    await this.sendCommand(command);
+  }
+
+  async requestEvents(
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ): Promise<void> {
+    const command: GetEventsRequest = {
+      type: 'get_events',
+      workspacePath,
+      filter,
+      limit,
+      sinceMs,
+    };
+    await this.sendCommand(command);
+  }
+
   async writePtyData(data: Uint8Array): Promise<void> {
     this.assertConnected();
 
@@ -895,7 +936,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.emit({ type: 'projects', projects: message.projects });
         return;
       case 'workspace_list':
-        this.emit({ type: 'workspaces', workspaces: message.workspaces });
+        this.emit({
+          type: 'workspaces',
+          workspaces: message.workspaces,
+          savedEventFilters: message.savedEventFilters,
+        });
         return;
       case 'session_list':
         this.emit({ type: 'sessions', sessions: message.sessions });
@@ -963,6 +1008,28 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.resolveReviewRequest(message);
         return;
       }
+      case 'events_list':
+        this.emit({
+          type: 'events',
+          events: message.events,
+          liveEventIds: message.liveEventIds,
+        });
+        return;
+      case 'process_started':
+        this.emit({
+          type: 'process_started',
+          workspaceId: message.workspaceId,
+          processName: message.processName,
+          sessionId: message.sessionId,
+        });
+        return;
+      case 'process_stopped':
+        this.emit({
+          type: 'process_stopped',
+          workspaceId: message.workspaceId,
+          processName: message.processName,
+        });
+        return;
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
         if (message.workspaceId) {

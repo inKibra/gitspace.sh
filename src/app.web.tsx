@@ -35,6 +35,9 @@ import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
 import { InboxWeb } from "./components/Inbox.web.js";
+import { useEvents, type WideEventItem } from "./components/Events.js";
+import { EventsWeb } from "./components/Events.web.js";
+import type { WideEvent, WideEventFilter } from "./types/events.js";
 import {
   useNotifications,
   type ToastNotification,
@@ -69,6 +72,9 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
+  const [showEvents, setShowEvents] = useState(false);
+  const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
+  const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
     shift: false,
@@ -406,6 +412,7 @@ export default function App() {
     terminal.disconnect();
     setSelectedMachine(null);
     setShowScriptTerminal(false);
+    setShowEvents(false);
     setInputMode(false); // Reset input mode when leaving terminal
     setView("machines");
   };
@@ -416,6 +423,7 @@ export default function App() {
     relay.disconnect();
     setSelectedMachine(null);
     setShowScriptTerminal(false);
+    setShowEvents(false);
     setView("machines");
     // Reconnect automatically
     relay.connect();
@@ -454,6 +462,24 @@ export default function App() {
     sessions: terminal.sessions,
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
+    onStartProcess: (params) => {
+      terminal.startProcess(params.workspaceId, params.processName);
+    },
+    onStartProcessAttach: (params) => {
+      terminal.startProcess(params.workspaceId, params.processName);
+    },
+    onStopProcess: (params) => {
+      terminal.stopProcess(params.workspaceId, params.processName);
+    },
+    onOpenEvents: (workspaceId) => {
+      const workspace = terminal.workspaces.find(w => w.id === workspaceId);
+      if (workspace) {
+        setEventsWorkspacePath(workspace.path);
+        setEventsWorkspaceLabel(workspace.name);
+        setShowEvents(true);
+        terminal.requestEvents(workspace.path, undefined, undefined, undefined);
+      }
+    },
     onRefresh: terminal.requestWorkspaces,
     onRefreshSessions: () => terminal.requestSessions(),
     onBack: handleBackToMachines,
@@ -473,6 +499,57 @@ export default function App() {
     },
     onClose: () => setShowInbox(false),
   });
+
+  // Events hook
+  const eventsItems: WideEventItem[] = terminal.events.map((event: WideEvent) => ({
+    eventId: event.eventId,
+    eventName: event.eventName,
+    level: event.level,
+    timestamp: event.timestamp,
+    timestampMs: event.timestampMs,
+    message: event.message,
+    processName: event.processName,
+    processInstance: event.processInstance,
+    sessionId: event.sessionId,
+    raw: event.raw,
+    kind: event.kind,
+    correlationId: event.correlationId,
+    timeline: event.timeline,
+    timelineMap: event.timelineMap,
+    timelineOrder: event.timelineOrder,
+  }));
+
+  const eventsProps = useEvents({
+    events: eventsItems,
+    liveEventIds: terminal.liveEventIds,
+    savedFilters: terminal.savedEventFilters,
+    onSelectFilter: (filter) => {
+      if (!eventsWorkspacePath) return;
+      if (filter) {
+        terminal.requestEvents(
+          eventsWorkspacePath,
+          filter.filter as WideEventFilter,
+          undefined,
+          filter.sinceMinutes ? filter.sinceMinutes * 60 * 1000 : undefined
+        );
+      } else {
+        terminal.requestEvents(eventsWorkspacePath);
+      }
+    },
+    onClose: () => {
+      setShowEvents(false);
+      setEventsWorkspacePath(null);
+    },
+  });
+
+  // Events polling when events view is active
+  useEffect(() => {
+    if (!showEvents || !eventsWorkspacePath) return;
+    const interval = setInterval(() => {
+      terminal.requestEvents(eventsWorkspacePath);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [showEvents, eventsWorkspacePath, terminal.requestEvents]);
 
   // ========== Activity Tracking for Notifications ==========
 
@@ -623,9 +700,35 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showInbox, inboxProps.moveUp, inboxProps.moveDown, inboxProps.openThread, inboxProps.closeThread, inboxProps.deleteSelected, inboxProps.deleteThread, inboxProps.clearAll, inboxProps.attachToSession, inboxProps.isViewingThread]);
 
+  // Events keyboard navigation
+  useEffect(() => {
+    if (!showEvents) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (e.key === 'Escape' || e.key === 'q') {
+        e.preventDefault();
+        setShowEvents(false);
+        setEventsWorkspacePath(null);
+      } else if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        eventsProps.selectIndex(eventsProps.selectedIndex - 1);
+      } else if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        eventsProps.selectIndex(eventsProps.selectedIndex + 1);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showEvents, eventsProps]);
+
   // Spaces browser keyboard navigation
   useEffect(() => {
-    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox || showScriptTerminal) {
+    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox || showScriptTerminal || showEvents) {
       return;
     }
 
@@ -853,6 +956,17 @@ export default function App() {
       return (
         <>
           <InboxWeb {...inboxProps} />
+          <FlowWeb flow={flow} />
+          <Toaster theme="dark" position="top-right" richColors />
+        </>
+      );
+    }
+
+    // Show events if open
+    if (showEvents) {
+      return (
+        <>
+          <EventsWeb {...eventsProps} workspaceLabel={eventsWorkspaceLabel} />
           <FlowWeb flow={flow} />
           <Toaster theme="dark" position="top-right" richColors />
         </>

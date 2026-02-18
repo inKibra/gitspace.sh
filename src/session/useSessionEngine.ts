@@ -12,6 +12,7 @@ import type {
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { ScriptPhase } from '../types/script-phase.js';
+import type { WideEventFilter } from '../types/events.js';
 import { BackendManager } from './backend-manager.js';
 import {
   createInitialSessionEngineState,
@@ -60,6 +61,9 @@ export function useSessionEngine() {
           break;
         case 'workspaces':
           dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
+          if (event.savedEventFilters) {
+            dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
+          }
           break;
         case 'sessions':
           dispatch({ type: 'SET_SESSIONS', backendKey, sessions: event.sessions });
@@ -133,6 +137,18 @@ export function useSessionEngine() {
           break;
         case 'review_response':
           // Handled directly by RemoteSessionBackend's pending map — no state dispatch needed.
+          break;
+        case 'events':
+          dispatch({
+            type: 'SET_EVENTS',
+            backendKey,
+            events: event.events,
+            liveEventIds: event.liveEventIds,
+          });
+          break;
+        case 'process_started':
+        case 'process_stopped':
+          // Refresh workspaces and sessions to reflect process state changes
           break;
         default:
           break;
@@ -313,6 +329,36 @@ export function useSessionEngine() {
     return result;
   }, [withBackend]);
 
+  const startProcess = useCallback(async (backendKey: BackendKey, workspaceId: string, processName: string) => {
+    await withBackend(backendKey, async (backend) => {
+      if (backend.startProcess) {
+        await backend.startProcess(workspaceId, processName);
+      }
+    });
+  }, [withBackend]);
+
+  const stopProcess = useCallback(async (backendKey: BackendKey, workspaceId: string, processName: string) => {
+    await withBackend(backendKey, async (backend) => {
+      if (backend.stopProcess) {
+        await backend.stopProcess(workspaceId, processName);
+      }
+    });
+  }, [withBackend]);
+
+  const requestEvents = useCallback(async (
+    backendKey: BackendKey,
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ) => {
+    await withBackend(backendKey, async (backend) => {
+      if (backend.requestEvents) {
+        await backend.requestEvents(workspacePath, filter, limit, sinceMs);
+      }
+    });
+  }, [withBackend]);
+
   return useMemo(() => ({
     state,
     activeBackendKey: getActiveBackendKey(state),
@@ -342,6 +388,10 @@ export function useSessionEngine() {
     getNotificationConfig,
     updateNotificationConfig,
     sendReviewRequest,
+
+    startProcess,
+    stopProcess,
+    requestEvents,
   }), [
     state,
     registerBackend,
@@ -364,5 +414,8 @@ export function useSessionEngine() {
     getNotificationConfig,
     updateNotificationConfig,
     sendReviewRequest,
+    startProcess,
+    stopProcess,
+    requestEvents,
   ]);
 }

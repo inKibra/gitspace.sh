@@ -13,10 +13,11 @@ import {
 } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
-import type { GlobalConfig, ProjectConfig, NotificationConfig } from '../types/config.js'
+import type { GlobalConfig, ProjectConfig, NotificationConfig, EventsConfig } from '../types/config.js'
 import {
 	DEFAULT_GLOBAL_CONFIG,
 	DEFAULT_NOTIFICATION_CONFIG,
+	DEFAULT_EVENTS_CONFIG,
 	createDefaultProjectConfig,
 } from '../types/config.js'
 import { SpacesError } from '../types/errors.js'
@@ -389,4 +390,16 @@ export function updateNotificationConfig(
 	}
 	updateGlobalConfig({ notifications: updated })
 	return updated
+}
+
+/**
+ * Get events config for a project, falling back to defaults
+ */
+export function getProjectEventsConfig(projectName: string): EventsConfig {
+	try {
+		const config = readProjectConfig(projectName)
+		return config.events ?? { ...DEFAULT_EVENTS_CONFIG }
+	} catch {
+		return { ...DEFAULT_EVENTS_CONFIG }
+	}
 }

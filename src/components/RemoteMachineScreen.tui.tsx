@@ -188,6 +188,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     sessions: remote.sessions,
     onRequestSessions: () => remote.requestSessions(),
     onAttachSession: attachController.attachFromSelection,
+    onStartProcessAttach: () => {},
+    onOpenEvents: () => {},
     onRefresh: remote.requestWorkspaces,
     onRefreshSessions: () => remote.requestSessions(),
     onBack,

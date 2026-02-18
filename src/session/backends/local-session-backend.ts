@@ -52,11 +52,21 @@ import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
+import type { WideEventFilter } from '../../types/events.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
+import { parseProcessSessionName } from '../../lib/processes/names.js';
+import { loadProcessesConfig } from '../../lib/processes/config.js';
+import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../../lib/processes/manager.js';
+import { startProcessScheduler } from '../../lib/processes/scheduler.js';
+import { readWorkspaceSnapshots } from '../../lib/events/reader.js';
+import { resolveWorkspaceRef } from '../../lib/events/paths.js';
+import { loadSavedEventFilters } from '../../lib/events/filters.js';
+import { readProjectConfig } from '../../core/config.js';
+import { existsSync } from 'fs';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -390,13 +400,24 @@ export class LocalSessionBackend implements SessionBackend {
       counts.set(session.cwd, current + 1);
     }
 
-    this.emit({
-      type: 'workspaces',
-      workspaces: workspaces.map((workspace) => ({
+    const mappedWorkspaces = workspaces.map((workspace) => {
+      const processConfig = loadProcessesConfig(workspace.path);
+      return {
         ...workspace,
         id: toCanonicalWorkspaceId(workspace),
         sessionCount: counts.get(workspace.path) ?? 0,
-      })),
+        processes: processConfig.processes.map((p) => ({
+          name: p.name,
+          instances: p.instances,
+          ports: p.ports,
+        })),
+      };
+    });
+
+    this.emit({
+      type: 'workspaces',
+      workspaces: mappedWorkspaces,
+      savedEventFilters: workspaces.length > 0 ? loadSavedEventFilters(workspaces[0].path) : [],
     });
   }
 
@@ -410,9 +431,21 @@ export class LocalSessionBackend implements SessionBackend {
 
     const filtered = sessions
       .map((session) => {
-        const workspace = workspaceByPath.get(session.cwd);
-        const id = workspace ? toCanonicalWorkspaceId(workspace) : 'unknown';
-        return toSessionInfo(session, id);
+        const parsed = parseProcessSessionName(session.name);
+        let workspace = workspaceByPath.get(session.cwd);
+        if (!workspace && parsed) {
+          workspace = workspaces.find((w) => w.id === parsed.workspaceId);
+        }
+        if (!workspace) {
+          workspace = workspaces.find((w) => session.cwd.startsWith(w.path));
+        }
+        const id = workspace ? toCanonicalWorkspaceId(workspace) : (parsed?.workspaceId ? `unknown:${parsed.workspaceId}` : 'unknown');
+        const info = toSessionInfo(session, id);
+        return {
+          ...info,
+          processName: parsed?.processName,
+          processInstance: parsed?.instance,
+        };
       })
       .filter((session) => {
         if (!workspaceId) {
@@ -702,6 +735,119 @@ export class LocalSessionBackend implements SessionBackend {
     const updated = this.deps.updateNotificationConfig(config) as NotificationConfig;
     this.emit({ type: 'notification_config', config: updated });
   }
+
+  async startProcess(workspaceId: string, processName: string): Promise<void> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find(
+      (w) => w.id === workspaceId || toCanonicalWorkspaceId(w) === workspaceId
+    );
+    if (!workspace) {
+      throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
+    }
+
+    const specs = getProcessSpecs(workspace.path).filter((s) => s.name === processName);
+    if (specs.length === 0) {
+      throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
+    }
+
+    const sessionIds: string[] = [];
+    for (const spec of specs) {
+      const result = await startProcessInstance(workspace.path, spec);
+      sessionIds.push(result.sessionId);
+    }
+
+    if (!this.processSchedulers.has(workspace.path)) {
+      this.processSchedulers.set(workspace.path, startProcessScheduler(workspace.path));
+    }
+
+    this.emit({
+      type: 'process_started',
+      workspaceId,
+      processName,
+      sessionId: sessionIds[0],
+    });
+  }
+
+  async stopProcess(workspaceId: string, processName: string): Promise<void> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find(
+      (w) => w.id === workspaceId || toCanonicalWorkspaceId(w) === workspaceId
+    );
+    if (!workspace) {
+      throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
+    }
+
+    const specs = getProcessSpecs(workspace.path).filter((s) => s.name === processName);
+    if (specs.length === 0) {
+      throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
+    }
+
+    for (const spec of specs) {
+      await stopProcessInstance(workspace.path, spec);
+    }
+
+    this.emit({
+      type: 'process_stopped',
+      workspaceId,
+      processName,
+    });
+  }
+
+  async requestEvents(
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ): Promise<void> {
+    const workspaceRef = resolveWorkspaceRef(workspacePath);
+    if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
+      this.emit({ type: 'events', events: [], liveEventIds: [] });
+      return;
+    }
+
+    const projectConfig = readProjectConfig(workspaceRef.projectName);
+    const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
+      maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
+      maxTimeline: projectConfig.events?.maxTimeline,
+    });
+
+    const filtered = snapshots
+      .filter((snapshot) => {
+        if (sinceMs !== undefined && snapshot.updatedAt < sinceMs) return false;
+        if (!filter) return true;
+        if (filter.processName && snapshot.processName !== filter.processName) return false;
+        if (filter.level && snapshot.level !== filter.level) return false;
+        if (filter.message && !snapshot.message.includes(filter.message)) return false;
+        if (filter.eventName && snapshot.eventName !== filter.eventName) return false;
+        if (filter.correlationId && snapshot.correlationId !== filter.correlationId) return false;
+        return true;
+      })
+      .slice(0, limit ?? 200);
+
+    const events = filtered.map((snapshot) => ({
+      eventId: snapshot.lastEventId,
+      eventName: snapshot.eventName,
+      level: snapshot.level,
+      timestamp: new Date(snapshot.updatedAt).toISOString(),
+      timestampMs: snapshot.updatedAt,
+      message: snapshot.message,
+      sessionId: '',
+      workspaceId: workspaceRef.workspaceId,
+      projectName: workspaceRef.projectName,
+      processName: snapshot.processName,
+      processInstance: snapshot.processInstance,
+      raw: snapshot.raw ?? {},
+      kind: 'wide' as const,
+      correlationId: snapshot.correlationId,
+      timeline: Object.values(snapshot.timelineMap),
+      timelineMap: snapshot.timelineMap,
+      timelineOrder: snapshot.timelineOrder,
+    }));
+
+    this.emit({ type: 'events', events, liveEventIds: [] });
+  }
+
+  private processSchedulers = new Map<string, NodeJS.Timer>();
 
   private async attachToSessionSocket(
     session: TmuxSession,

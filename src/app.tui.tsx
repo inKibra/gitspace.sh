@@ -39,6 +39,9 @@ import { SpacesBrowserTUI } from './components/SpacesBrowser.tui.js';
 import { ProjectListTUI } from './components/ProjectList.tui.js';
 import { InboxTUI } from './components/Inbox.tui.js';
 import { useInbox } from './components/Inbox.js';
+import { EventsTui } from './components/Events.tui.js';
+import { useEvents, type WideEventItem } from './components/Events.js';
+import type { WideEvent, SavedEventFilter, WideEventFilter } from './types/events.js';
 import { toast } from '@opentui-ui/toast';
 import {
   useNotifications,
@@ -297,6 +300,9 @@ function App({ relayConfig, onQuit }: AppProps) {
   const [settingsFlow, setSettingsFlow] = useState<SettingsFlowState>({ type: 'closed' });
   const [notificationConfig, setNotificationConfig] = useState<NotificationConfig>(DEFAULT_NOTIFICATION_CONFIG);
 
+  // Events view state
+  const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
+
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
     relayConfig,
@@ -334,6 +340,12 @@ function App({ relayConfig, onQuit }: AppProps) {
     commandError: localCommandError,
     getBundleRefreshPlan: getLocalBundleRefreshPlan,
     applyBundleRefresh: applyLocalBundleRefresh,
+    startProcess: startLocalProcess,
+    stopProcess: stopLocalProcess,
+    requestEvents: requestLocalEvents,
+    events: localEvents,
+    liveEventIds: localLiveEventIds,
+    savedEventFilters: localSavedEventFilters,
   } = localSession;
 
   const currentProject =
@@ -1140,12 +1152,42 @@ function App({ relayConfig, onQuit }: AppProps) {
     onRefresh: refreshProjects,
   });
 
+  // Process handlers
+  const handleStartProcess = useCallback((params: { workspaceId: string; processName: string }) => {
+    void startLocalProcess(params.workspaceId, params.processName);
+  }, [startLocalProcess]);
+
+  const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
+    void startLocalProcess(params.workspaceId, params.processName).then(() => {
+      // After starting, find and attach to the session
+      void refreshWorkspaces();
+    });
+  }, [startLocalProcess, refreshWorkspaces]);
+
+  const handleStopProcess = useCallback((params: { workspaceId: string; processName: string }) => {
+    void stopLocalProcess(params.workspaceId, params.processName);
+  }, [stopLocalProcess]);
+
+  const handleOpenEvents = useCallback((workspaceId: string) => {
+    setEventsWorkspaceId(workspaceId);
+    // Find workspace path for events request
+    const workspace = localWorkspaces.find(w => w.id === workspaceId);
+    if (workspace) {
+      void requestLocalEvents(workspace.path);
+    }
+    dispatch({ type: 'SET_VIEW', view: 'events' as AppView });
+  }, [localWorkspaces, requestLocalEvents]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
     sessions: sessionInfos,
     onRequestSessions: () => {}, // Sessions already loaded
     onAttachSession: handleAttachSession,
+    onStartProcess: handleStartProcess,
+    onStartProcessAttach: handleStartProcessAttach,
+    onStopProcess: handleStopProcess,
+    onOpenEvents: handleOpenEvents,
     onRefresh: refreshWorkspaces,
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,
@@ -1190,6 +1232,58 @@ function App({ relayConfig, onQuit }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
   });
+
+  // Events hook
+  const eventsItems: WideEventItem[] = localEvents.map((event: WideEvent) => ({
+    eventId: event.eventId,
+    eventName: event.eventName,
+    level: event.level,
+    timestamp: event.timestamp,
+    timestampMs: event.timestampMs,
+    message: event.message,
+    processName: event.processName,
+    processInstance: event.processInstance,
+    sessionId: event.sessionId,
+    raw: event.raw,
+    kind: event.kind,
+    correlationId: event.correlationId,
+    timeline: event.timeline,
+    timelineMap: event.timelineMap,
+    timelineOrder: event.timelineOrder,
+  }));
+
+  const eventsProps = useEvents({
+    events: eventsItems,
+    liveEventIds: localLiveEventIds,
+    savedFilters: localSavedEventFilters,
+    onSelectFilter: (filter) => {
+      if (!eventsWorkspaceId) return;
+      const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
+      if (!workspace) return;
+      if (filter) {
+        void requestLocalEvents(workspace.path, filter.filter as WideEventFilter);
+      } else {
+        void requestLocalEvents(workspace.path);
+      }
+    },
+    onClose: () => {
+      setEventsWorkspaceId(null);
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
+    },
+  });
+
+  // Events polling when events view is active
+  useEffect(() => {
+    if (state.view !== 'events' || !eventsWorkspaceId) return;
+    const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
+    if (!workspace) return;
+
+    const interval = setInterval(() => {
+      void requestLocalEvents(workspace.path);
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [state.view, eventsWorkspaceId, localWorkspaces, requestLocalEvents]);
 
   // ========== Activity Tracking for Notifications ==========
 
@@ -1424,6 +1518,19 @@ function App({ relayConfig, onQuit }: AppProps) {
         )
       ) {
         dispatch({ type: 'SET_VIEW', view: 'projects' });
+      }
+      return;
+    }
+
+    // Events view keyboard handling
+    if (state.view === 'events') {
+      if (key.name === 'escape' || key.raw === 'q') {
+        setEventsWorkspaceId(null);
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      } else if (key.name === 'up' || key.raw === 'k') {
+        eventsProps.selectIndex(eventsProps.selectedIndex - 1);
+      } else if (key.name === 'down' || key.raw === 'j') {
+        eventsProps.selectIndex(eventsProps.selectedIndex + 1);
       }
       return;
     }
@@ -2046,6 +2153,18 @@ function App({ relayConfig, onQuit }: AppProps) {
             dispatch({ type: 'SET_VIEW', view: 'machines' });
           }}
         />
+      </Fragment>
+    );
+  }
+
+  // Events view
+  if (state.view === 'events') {
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <EventsTui {...eventsProps} />
+        <FlowTUI flow={flow} />
+        <StatusBar hint="[Esc/q] Back  [j/k] Navigate" />
       </Fragment>
     );
   }

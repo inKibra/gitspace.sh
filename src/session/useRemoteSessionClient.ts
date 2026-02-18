@@ -19,6 +19,7 @@ import type {
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import { SpacesError } from '../types/errors.js';
+import type { WideEvent, SavedEventFilter, WideEventFilter } from '../types/events.js';
 import { useSessionEngine } from './useSessionEngine.js';
 
 export type RemoteSessionConnectionStatus =
@@ -94,6 +95,13 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
 
   scriptState: ScriptRuntimeState | null;
   commandError: { code?: string; message: string } | null;
+
+  events: WideEvent[];
+  liveEventIds: string[];
+  savedEventFilters: SavedEventFilter[];
+  startProcess: (workspaceId: string, processName: string) => void;
+  stopProcess: (workspaceId: string, processName: string) => void;
+  requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
 }
 
 function defaultStatusMapper(
@@ -320,6 +328,29 @@ export function useRemoteSessionClient<ConnectParams>(
     [engine]
   );
 
+  const startProcess = useCallback((workspaceId: string, processName: string) => {
+    void withActiveBackend((backendKey) =>
+      engine.startProcess(backendKey, workspaceId, processName)
+    );
+  }, [engine, withActiveBackend]);
+
+  const stopProcess = useCallback((workspaceId: string, processName: string) => {
+    void withActiveBackend((backendKey) =>
+      engine.stopProcess(backendKey, workspaceId, processName)
+    );
+  }, [engine, withActiveBackend]);
+
+  const requestEvents = useCallback((
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ) => {
+    void withActiveBackend((backendKey) =>
+      engine.requestEvents(backendKey, workspacePath, filter, limit, sinceMs)
+    );
+  }, [engine, withActiveBackend]);
+
   useEffect(() => {
     return () => {
       const backendKey = activeBackendKeyRef.current;
@@ -376,5 +407,12 @@ export function useRemoteSessionClient<ConnectParams>(
 
     scriptState: activeBackendState?.scriptState ?? null,
     commandError: activeBackendState?.commandError ?? null,
+
+    events: activeBackendState?.events ?? [],
+    liveEventIds: activeBackendState?.liveEventIds ?? [],
+    savedEventFilters: activeBackendState?.savedEventFilters ?? [],
+    startProcess,
+    stopProcess,
+    requestEvents,
   };
 }

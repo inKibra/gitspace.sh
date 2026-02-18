@@ -1,0 +1,117 @@
+/**
+ * Events - Shared Hook
+ */
+
+import { useMemo, useState, useEffect } from 'react';
+
+export interface WideEventItem {
+  eventId: string;
+  eventName: string;
+  level: string;
+  timestamp: string;
+  timestampMs?: number;
+  message: string;
+  processName?: string;
+  processInstance?: number;
+  sessionId?: string;
+  raw?: Record<string, unknown>;
+  kind?: 'source' | 'wide';
+  correlationId?: string;
+  timeline?: import("../types/events.js").WideEventTimelineItem[];
+  timelineMap?: import("../types/events.js").WideSnapshotTimelineMap;
+  timelineOrder?: string[];
+}
+
+function getEventTimestamp(event: WideEventItem): number {
+  if (typeof event.timestampMs === 'number' && !Number.isNaN(event.timestampMs)) {
+    return event.timestampMs;
+  }
+  const parsed = Date.parse(event.timestamp);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function getEventKey(event: WideEventItem): string {
+  const processName = event.processName ?? 'unknown';
+  const instance = event.processInstance ?? 1;
+  const correlation = event.correlationId ?? event.eventId;
+  return `${processName}:${instance}:${correlation}`;
+}
+
+export interface UseEventsProps {
+  events: WideEventItem[];
+  liveEventIds: string[];
+  savedFilters: import("../types/events.js").SavedEventFilter[];
+  onSelectFilter: (filter: import("../types/events.js").SavedEventFilter | null) => void;
+  onClose: () => void;
+}
+
+export interface UseEventsReturn {
+  filtered: WideEventItem[];
+  selectedIndex: number;
+  selected: WideEventItem | null;
+  liveEventIds: string[];
+  savedFilters: import("../types/events.js").SavedEventFilter[];
+  activeFilterName: string | null;
+  selectIndex: (index: number) => void;
+  selectSavedFilter: (filter: import("../types/events.js").SavedEventFilter | null) => void;
+  close: () => void;
+}
+
+export function useEvents(props: UseEventsProps): UseEventsReturn {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [activeFilterName, setActiveFilterName] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
+  const filtered = useMemo(() => {
+    const wideEvents = props.events.filter((event) => event.kind === 'wide');
+    return [...wideEvents].sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
+  }, [props.events]);
+
+  useEffect(() => {
+    if (!selectedKey && filtered.length > 0) {
+      setSelectedIndex(0);
+      setSelectedKey(getEventKey(filtered[0]));
+      return;
+    }
+
+    if (!selectedKey) return;
+    const nextIndex = filtered.findIndex((event) => getEventKey(event) === selectedKey);
+    if (nextIndex !== -1 && nextIndex !== selectedIndex) {
+      setSelectedIndex(nextIndex);
+      return;
+    }
+
+    if (nextIndex === -1 && filtered.length > 0) {
+      setSelectedIndex(0);
+      setSelectedKey(getEventKey(filtered[0]));
+    }
+  }, [filtered, selectedKey, selectedIndex]);
+
+  const selected = filtered[selectedIndex] ?? null;
+
+  const selectSavedFilter = (filter: import("../types/events.js").SavedEventFilter | null) => {
+    setSelectedIndex(0);
+    setSelectedKey(null);
+    setActiveFilterName(filter?.name ?? null);
+    props.onSelectFilter(filter);
+  };
+
+  const selectIndex = (index: number) => {
+    const clamped = Math.max(0, Math.min(index, filtered.length - 1));
+    setSelectedIndex(clamped);
+    const selectedEvent = filtered[clamped];
+    setSelectedKey(selectedEvent ? getEventKey(selectedEvent) : null);
+  };
+
+  return {
+    filtered,
+    selectedIndex,
+    selected,
+    liveEventIds: props.liveEventIds,
+    savedFilters: props.savedFilters,
+    activeFilterName,
+    selectIndex,
+    selectSavedFilter,
+    close: props.onClose,
+  };
+}

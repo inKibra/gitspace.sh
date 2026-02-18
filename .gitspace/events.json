@@ -1,0 +1,11 @@
+{
+  "savedFilters": [
+    {
+      "name": "Sample process events",
+      "filter": {
+        "processName": "sample-events"
+      },
+      "sinceMinutes": 60
+    }
+  ]
+}
