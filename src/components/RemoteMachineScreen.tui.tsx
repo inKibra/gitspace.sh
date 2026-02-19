@@ -239,6 +239,20 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     });
   }, [remote]);
 
+  const handleStartProcess = useCallback((params: { workspaceId: string; processName: string }) => {
+    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName)).finally(() => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    });
+  }, [remote]);
+
+  const handleStopProcess = useCallback((params: { workspaceId: string; processName: string }) => {
+    void Promise.resolve(remote.stopProcess(params.workspaceId, params.processName)).finally(() => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    });
+  }, [remote]);
+
   const handleOpenEvents = useCallback(() => {
     flow.showMessage({
       title: 'Events Unavailable',
@@ -264,7 +278,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onRequestSessions: () => remote.requestSessions(),
     onAttachSession: attachController.attachFromSelection,
     onEditProcesses: handleEditProcesses,
+    onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
+    onStopProcess: handleStopProcess,
     onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,
     onRefreshSessions: () => remote.requestSessions(),
@@ -471,6 +487,19 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           confirmLabel: 'Kill',
           onConfirm: () => {
             remote.killSession(selected.session.id);
+          },
+        });
+      } else if (selected?.type === 'process' && selected.status === 'running') {
+        flow.showConfirm({
+          title: 'Stop Process',
+          message: `Stop process "${selected.processName}"?`,
+          variant: 'warning',
+          confirmLabel: 'Stop',
+          onConfirm: () => {
+            handleStopProcess({
+              workspaceId: selected.workspaceId,
+              processName: selected.processName,
+            });
           },
         });
       }

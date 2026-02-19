@@ -481,6 +481,7 @@ export interface ProcessHostEntry {
 const SERVE_CONFIG_PATH = () => join(getServeDaemonDir(), 'serve-tunnel.yml');
 const SERVE_REFRESH_INTERVAL_MS = 5000;
 const SERVE_READY_TIMEOUT_MS = 5000;
+const MAX_WORKSPACE_PATH_CACHE_SIZE = 256;
 
 export function buildServeIngressConfig(entries: ProcessHostEntry[]): string {
   const lines = ['ingress:'];
@@ -529,6 +530,7 @@ class ServeProcessHostManager {
   private registry: ProcessHostEntry[] = [];
   private refreshPromise: Promise<void> | null = null;
   private restartAttempts = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private workspacePathCache = new Map<string, string>();
 
   constructor(options: { serveDomain: string; tunnelToken: string }) {
@@ -544,6 +546,10 @@ class ServeProcessHostManager {
     return [...this.registry];
   }
 
+  get isActive(): boolean {
+    return this.process !== null;
+  }
+
   async refresh(): Promise<void> {
     if (this.refreshPromise) {
       return this.refreshPromise;
@@ -555,10 +561,15 @@ class ServeProcessHostManager {
   }
 
   stop(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.process) {
       this.process.kill();
       this.process = null;
     }
+    this.workspacePathCache.clear();
   }
 
   private async refreshInternal(): Promise<void> {
@@ -581,7 +592,10 @@ class ServeProcessHostManager {
       this.registry = sorted;
       this.configHash = nextHash;
       logger.dim(`Serve tunnel updated (${sorted.length} routes)`);
+      return;
     }
+
+    this.handleStartupFailure();
   }
 
   private async collectProcessHosts(): Promise<ProcessHostEntry[]> {
@@ -593,6 +607,7 @@ class ServeProcessHostManager {
     }
     const configCache = new Map<string, ReturnType<typeof loadProcessesConfig>>();
     const entries: ProcessHostEntry[] = [];
+    const seenWorkspaceIds = new Set<string>();
 
     for (const session of sessions) {
       const parsed = parseProcessSessionName(session.name);
@@ -605,8 +620,9 @@ class ServeProcessHostManager {
         const cached = this.workspacePathCache.get(parsed.workspaceId);
         const workspacePath = cached ?? findWorkspacePathById(parsed.workspaceId);
         if (workspacePath) {
-          this.workspacePathCache.set(parsed.workspaceId, workspacePath);
+          this.setCachedWorkspacePath(parsed.workspaceId, workspacePath);
           workspaceRef = resolveWorkspaceRef(workspacePath);
+          seenWorkspaceIds.add(parsed.workspaceId);
         }
       }
       if (!workspaceRef) continue;
@@ -649,6 +665,7 @@ class ServeProcessHostManager {
         deduped.set(entry.hostname, entry);
       }
     }
+    this.pruneWorkspacePathCache(seenWorkspaceIds);
     return Array.from(deduped.values());
   }
 
@@ -663,6 +680,10 @@ class ServeProcessHostManager {
     const previous = this.process;
     this.process = nextProcess;
     this.restartAttempts = 0;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (previous) {
       previous.kill();
     }
@@ -690,15 +711,52 @@ class ServeProcessHostManager {
 
   private handleCrash(): void {
     this.process = null;
-    this.restartAttempts += 1;
-    if (this.restartAttempts > MAX_CLOUDFLARED_RESTARTS) {
-      logger.error(`serve tunnel crashed ${MAX_CLOUDFLARED_RESTARTS} times, giving up`);
+    this.scheduleRetry('crashed');
+  }
+
+  private handleStartupFailure(): void {
+    this.scheduleRetry('failed to start');
+  }
+
+  private scheduleRetry(reason: 'crashed' | 'failed to start'): void {
+    if (this.retryTimer) {
       return;
     }
-    logger.info(`Restarting serve tunnel (attempt ${this.restartAttempts}/${MAX_CLOUDFLARED_RESTARTS})...`);
-    setTimeout(() => {
+
+    this.restartAttempts += 1;
+    if (this.restartAttempts > MAX_CLOUDFLARED_RESTARTS) {
+      logger.error(`serve tunnel ${reason} ${MAX_CLOUDFLARED_RESTARTS} times, giving up`);
+      return;
+    }
+
+    logger.info(`Restarting serve tunnel (${reason}) (attempt ${this.restartAttempts}/${MAX_CLOUDFLARED_RESTARTS})...`);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
       void this.refresh();
     }, CLOUDFLARED_RESTART_DELAY);
+  }
+
+  private setCachedWorkspacePath(workspaceId: string, workspacePath: string): void {
+    if (this.workspacePathCache.has(workspaceId)) {
+      this.workspacePathCache.delete(workspaceId);
+    }
+    this.workspacePathCache.set(workspaceId, workspacePath);
+
+    while (this.workspacePathCache.size > MAX_WORKSPACE_PATH_CACHE_SIZE) {
+      const oldest = this.workspacePathCache.keys().next().value;
+      if (!oldest) {
+        break;
+      }
+      this.workspacePathCache.delete(oldest);
+    }
+  }
+
+  private pruneWorkspacePathCache(seenWorkspaceIds: Set<string>): void {
+    for (const key of this.workspacePathCache.keys()) {
+      if (!seenWorkspaceIds.has(key)) {
+        this.workspacePathCache.delete(key);
+      }
+    }
   }
 }
 
@@ -720,8 +778,12 @@ async function startServeProcessHosting(hostConfig: HostConfig): Promise<ServePr
 
   const manager = new ServeProcessHostManager({ serveDomain, tunnelToken });
   await manager.refresh();
-  logger.success(`Serve tunnel active: https://${serveDomain}`);
-  logger.dim(`  Wildcard: https://*.${serveDomain}`);
+  if (manager.isActive) {
+    logger.success(`Serve tunnel active: https://${serveDomain}`);
+    logger.dim(`  Wildcard: https://*.${serveDomain}`);
+  } else {
+    logger.warning(`Serve tunnel failed to start for https://${serveDomain}; retrying in background`);
+  }
   return manager;
 }
 
