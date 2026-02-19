@@ -297,11 +297,13 @@ export async function pushGitHubReview(
       continue;
     }
 
-    const reviewComment = buildGitHubComment(thread, localBodies);
-    if (reviewComment) {
-      reviewComments.push(reviewComment);
-      reviewCommentIdsByThreadId.set(thread.id, pendingLocalComments.map((comment) => comment.id));
+    if (thread.target.kind !== 'line') {
+      continue;
     }
+
+    const reviewComment = buildGitHubLineComment(thread, localBodies);
+    reviewComments.push(reviewComment);
+    reviewCommentIdsByThreadId.set(thread.id, pendingLocalComments.map((comment) => comment.id));
   }
 
   const workspaceNotes = workspaceNoteBodies.join('\n\n');
@@ -425,55 +427,28 @@ function buildTarget(comment: GitHubPRComment): ThreadTarget {
   };
 }
 
-/** Build a GitHub PR review comment from a local thread */
-function buildGitHubComment(
+/** Build a line-anchored GitHub PR review comment from a local line thread */
+function buildGitHubLineComment(
   thread: ReviewThread,
   bodies: string[]
-): GitHubDraftReviewComment | null {
+): GitHubDraftReviewComment {
+  if (thread.target.kind !== 'line') {
+    throw new Error(`Expected line target thread, got: ${thread.target.kind}`);
+  }
+
   const body = bodies.join('\n\n---\n\n');
 
-  if (thread.target.kind === 'line') {
-    const payload: GitHubDraftReviewComment = {
-      path: thread.target.file,
-      line: thread.target.endLine,
-      side: thread.target.side,
-      body,
-    };
-    if (thread.target.startLine !== thread.target.endLine) {
-      payload.start_line = thread.target.startLine;
-      payload.start_side = thread.target.side;
-    }
-    return payload;
+  const payload: GitHubDraftReviewComment = {
+    path: thread.target.file,
+    line: thread.target.endLine,
+    side: thread.target.side,
+    body,
+  };
+  if (thread.target.startLine !== thread.target.endLine) {
+    payload.start_line = thread.target.startLine;
+    payload.start_side = thread.target.side;
   }
-
-  if (thread.target.kind === 'hunk') {
-    // For hunk-level threads, we can only submit as a file comment at line 1
-    // GitHub doesn't have a hunk-level comment concept natively
-    const decisionPrefix =
-      thread.decision === 'approved'
-        ? '✅ **Approved**\n\n'
-        : thread.decision === 'rejected'
-          ? '❌ **Rejected**\n\n'
-          : '';
-    return {
-      path: thread.target.file,
-      line: 1,
-      side: 'RIGHT',
-      body: decisionPrefix + body,
-    };
-  }
-
-  if (thread.target.kind === 'file') {
-    return {
-      path: thread.target.file,
-      line: 1,
-      side: 'RIGHT',
-      body,
-    };
-  }
-
-  // workspace-level threads go in the review body — handled separately
-  return null;
+  return payload;
 }
 
 function isPendingLocalComment(comment: ReviewComment): boolean {
