@@ -42,6 +42,19 @@ export function ReviewPage({
   onBack,
 }: ReviewPageProps) {
   const review = useReview({ sendReviewRequest, projectName, workspaceName });
+  const {
+    threads,
+    loading: reviewLoading,
+    error: reviewError,
+    loadThreads,
+    createThread,
+    updateThread,
+    addReply,
+    updateComment,
+    deleteComment,
+    importGitHub,
+    pushGitHub,
+  } = review;
 
   const [files, setFiles] = useState<ReviewChangedFile[]>([]);
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
@@ -63,7 +76,7 @@ export function ReviewPage({
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
-  const status = computeWorkspaceStatus(review.threads);
+  const status = computeWorkspaceStatus(threads);
   const statusInfo = STATUS_LABELS[status];
 
   const loadChangedFiles = useCallback(async () => {
@@ -92,22 +105,22 @@ export function ReviewPage({
   }, [sendReviewRequest, projectName, workspaceName]);
 
   useEffect(() => {
-    void review.loadThreads();
+    void loadThreads();
     void loadChangedFiles();
-  }, [projectName, workspaceName, loadChangedFiles, review.loadThreads]);
+  }, [projectName, workspaceName, loadChangedFiles, loadThreads]);
 
   const handleRefresh = useCallback(() => {
-    void review.loadThreads();
+    void loadThreads();
     void loadChangedFiles();
-  }, [review, loadChangedFiles]);
+  }, [loadThreads, loadChangedFiles]);
 
   const handleCreateThread = useCallback(async (target: ThreadTarget, body: string, decision?: HunkDecision) => {
-    await review.createThread(target, body, decision);
-  }, [review]);
+    await createThread(target, body, decision);
+  }, [createThread]);
 
   const handleUpdateThread = useCallback(async (threadId: string, updates: { decision?: HunkDecision }) => {
-    await review.updateThread(threadId, updates);
-  }, [review]);
+    await updateThread(threadId, updates);
+  }, [updateThread]);
 
   const handleGetFileDiff = useCallback(async (filePath: string, prevFilePath?: string) => {
     const result = await sendReviewRequest({
@@ -154,7 +167,7 @@ export function ReviewPage({
     setActionError(null);
     setActionSuccess(null);
     try {
-      const { imported } = await review.importGitHub();
+      const { imported } = await importGitHub();
       setActionSuccess(`Imported ${imported} comment(s) from GitHub.`);
       setTimeout(() => setActionSuccess(null), 4000);
     } catch (error) {
@@ -163,14 +176,14 @@ export function ReviewPage({
     } finally {
       setImporting(false);
     }
-  }, [review]);
+  }, [importGitHub]);
 
   const handlePush = useCallback(async () => {
     setPushing(true);
     setActionError(null);
     setActionSuccess(null);
     try {
-      const { url } = await review.pushGitHub();
+      const { url } = await pushGitHub();
       setActionSuccess(`Review submitted: ${url}`);
       setTimeout(() => setActionSuccess(null), 6000);
     } catch (error) {
@@ -179,7 +192,7 @@ export function ReviewPage({
     } finally {
       setPushing(false);
     }
-  }, [review]);
+  }, [pushGitHub]);
 
   const openThread = useCallback((threadId: string) => {
     setSelectedThreadId(threadId);
@@ -315,7 +328,7 @@ export function ReviewPage({
 
         <button
           onClick={handleRefresh}
-          disabled={filesLoading || review.loading}
+          disabled={filesLoading || reviewLoading}
           style={{
             fontSize: '12px',
             padding: '5px 10px',
@@ -326,7 +339,7 @@ export function ReviewPage({
             cursor: 'pointer',
           }}
         >
-          {filesLoading || review.loading ? '...' : '↺ Refresh'}
+          {filesLoading || reviewLoading ? '...' : '↺ Refresh'}
         </button>
 
         <button
@@ -347,7 +360,7 @@ export function ReviewPage({
 
         <button
           onClick={() => void handlePush()}
-          disabled={pushing || review.threads.length === 0}
+          disabled={pushing || threads.length === 0}
           style={{
             fontSize: '12px',
             padding: '5px 10px',
@@ -355,7 +368,7 @@ export function ReviewPage({
             color: pushing ? '#8b949e' : '#0d1117',
             border: '1px solid #30363d',
             borderRadius: '6px',
-            cursor: review.threads.length === 0 ? 'not-allowed' : 'pointer',
+            cursor: threads.length === 0 ? 'not-allowed' : 'pointer',
             fontWeight: 600,
           }}
         >
@@ -375,7 +388,7 @@ export function ReviewPage({
           }}
         >
           {panelCollapsed ? '≡ Threads' : '≡ Hide'}
-          {review.threads.filter((thread) => !thread.resolved).length > 0 && (
+          {threads.filter((thread) => !thread.resolved).length > 0 && (
             <span style={{
               marginLeft: '6px',
               fontSize: '10px',
@@ -385,13 +398,13 @@ export function ReviewPage({
               borderRadius: '8px',
               fontWeight: 700,
             }}>
-              {review.threads.filter((thread) => !thread.resolved).length}
+              {threads.filter((thread) => !thread.resolved).length}
             </span>
           )}
         </button>
       </div>
 
-      {(review.error || filesError) && (
+      {(reviewError || filesError) && (
         <div style={{
           padding: '8px 16px',
           background: '#f8514922',
@@ -399,7 +412,7 @@ export function ReviewPage({
           color: '#f85149',
           fontSize: '12px',
         }}>
-          Error: {filesError?.message ?? review.error}
+          Error: {filesError?.message ?? reviewError}
         </div>
       )}
 
@@ -435,7 +448,7 @@ export function ReviewPage({
           <div style={{ flex: panelCollapsed ? '1 1 100%' : '1 1 auto', overflow: 'hidden' }}>
             <DiffViewer
               files={files}
-              threads={review.threads}
+              threads={threads}
               onCreateThread={handleCreateThread}
               onUpdateThread={handleUpdateThread}
               onRequestFileDiff={handleGetFileDiff}
@@ -467,18 +480,18 @@ export function ReviewPage({
 
               <div style={{ flex: 1, overflow: 'hidden', borderLeft: '1px solid #30363d' }}>
               <ThreadPanel
-                threads={review.threads}
+                threads={threads}
                 currentFilePath={currentFilePath}
                 hunkFocus={currentHunkFocus}
                 filterMode={threadFilter}
                 onFilterModeChange={setThreadFilter}
                 selectedThreadId={selectedThreadId}
                 hoveredThreadId={hoveredThreadId}
-                onResolveThread={(threadId, resolved) => review.updateThread(threadId, { resolved })}
-                onAddReply={review.addReply}
-                onUpdateComment={review.updateComment}
-                onDeleteComment={review.deleteComment}
-                onUpdateDecision={(threadId, decision) => review.updateThread(threadId, { decision })}
+                onResolveThread={(threadId, resolved) => updateThread(threadId, { resolved })}
+                onAddReply={addReply}
+                onUpdateComment={updateComment}
+                onDeleteComment={deleteComment}
+                onUpdateDecision={(threadId, decision) => updateThread(threadId, { decision })}
                 onOpenThreadTarget={openThread}
                 onClose={() => setPanelCollapsed(true)}
               />

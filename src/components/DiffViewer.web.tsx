@@ -1017,13 +1017,13 @@ function fileKey(filePath: string, prevFilePath?: string): string {
 function parseSingleFileDiff(diff: string, file: ReviewChangedFile): LoadedFileDiff {
   const parsed = parsePatchFiles(diff);
   const parsedFile = parsed.flatMap((patch) => patch.files).find((entry) => {
-    if (entry.name === file.filePath) {
-      return true;
-    }
-    if (file.prevFilePath && entry.prevName === file.prevFilePath && entry.name === file.filePath) {
-      return true;
-    }
-    return false;
+    const matchesCurrentOrPreviousName =
+      entry.name === file.filePath ||
+      (file.prevFilePath !== undefined && entry.name === file.prevFilePath);
+    const matchesCurrentOrPreviousPrevName =
+      entry.prevName === file.filePath ||
+      (file.prevFilePath !== undefined && entry.prevName === file.prevFilePath);
+    return matchesCurrentOrPreviousName || matchesCurrentOrPreviousPrevName;
   });
 
   if (!parsedFile) {
