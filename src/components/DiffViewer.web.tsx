@@ -114,6 +114,7 @@ export function DiffViewer({
   const [submitting, setSubmitting] = useState(false);
 
   const diffHostRef = useRef<HTMLDivElement | null>(null);
+  const loadingFileDiffKeysRef = useRef<Set<string>>(new Set());
 
   const fileByKey = useMemo(() => {
     const map = new Map<string, ReviewChangedFile>();
@@ -164,9 +165,20 @@ export function DiffViewer({
   const loadFileDiff = useCallback(async (file: ReviewChangedFile) => {
     const key = fileKey(file.filePath, file.prevFilePath);
 
+    const current = fileDiffStateByKey[key];
+    if (current?.status === 'loading' || current?.status === 'ready') {
+      return;
+    }
+
+    if (loadingFileDiffKeysRef.current.has(key)) {
+      return;
+    }
+
+    loadingFileDiffKeysRef.current.add(key);
+
     setFileDiffStateByKey((prev) => {
-      const current = prev[key];
-      if (current?.status === 'loading' || current?.status === 'ready') {
+      const existing = prev[key];
+      if (existing?.status === 'loading' || existing?.status === 'ready') {
         return prev;
       }
       return { ...prev, [key]: { status: 'loading' } };
@@ -185,8 +197,10 @@ export function DiffViewer({
         ...prev,
         [key]: { status: 'error', message },
       }));
+    } finally {
+      loadingFileDiffKeysRef.current.delete(key);
     }
-  }, [onRequestFileDiff]);
+  }, [fileDiffStateByKey, onRequestFileDiff]);
 
   useEffect(() => {
     if (!selectedFile || !selectedKey) {
@@ -621,8 +635,9 @@ export function DiffViewer({
                   padding: '5px 10px',
                   background: isSelected ? '#161b22' : 'transparent',
                   borderLeft: isSelected ? '2px solid #58a6ff' : '2px solid transparent',
-                  border: 'none',
+                  borderTop: 'none',
                   borderRight: 'none',
+                  borderBottom: 'none',
                   cursor: 'pointer',
                   textAlign: 'left',
                   minWidth: 0,

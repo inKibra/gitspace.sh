@@ -28,7 +28,7 @@
  */
 
 import { spawnSync } from 'child_process';
-import { resolve } from 'path';
+import { isAbsolute, relative, resolve, sep } from 'path';
 import { readProjectConfig, readGlobalConfig, getGitspaceDir } from '../core/config.js';
 import { executeLocalReviewOperation } from '../core/review-executor.js';
 import { logger } from '../utils/logger.js';
@@ -49,22 +49,28 @@ function detectWorkspaceFromCwd(): { projectName: string; workspaceName: string 
   const cwd = resolve(process.cwd());
   const gitspaceDir = resolve(getGitspaceDir());
 
-  if (!(cwd === gitspaceDir || cwd.startsWith(`${gitspaceDir}/`))) {
+  const cwdRelativeToGitspace = relative(gitspaceDir, cwd);
+  if (
+    cwdRelativeToGitspace === '' ||
+    cwdRelativeToGitspace === '.' ||
+    cwdRelativeToGitspace.startsWith('..') ||
+    isAbsolute(cwdRelativeToGitspace)
+  ) {
     return null;
   }
 
-  const relative = cwd.slice(gitspaceDir.length).replace(/^\//, '');
-  if (!relative) {
+  const WORKSPACES_SEGMENT = 'workspaces';
+  const PROJECT_INDEX = 0;
+  const WORKSPACES_INDEX = 1;
+  const WORKSPACE_INDEX = 2;
+
+  const parts = cwdRelativeToGitspace.split(sep).filter(Boolean);
+  if (parts.length < 3 || parts[WORKSPACES_INDEX] !== WORKSPACES_SEGMENT) {
     return null;
   }
 
-  const parts = relative.split('/').filter(Boolean);
-  if (parts.length < 3 || parts[1] !== 'workspaces') {
-    return null;
-  }
-
-  const projectName = parts[0];
-  const workspaceName = parts[2];
+  const projectName = parts[PROJECT_INDEX];
+  const workspaceName = parts[WORKSPACE_INDEX];
   if (!projectName || !workspaceName) {
     return null;
   }
@@ -107,7 +113,8 @@ export function resolveCurrentWorkspace(options: {
   // (reads from <project>/.config.json currentWorkspace if set)
   try {
     const projectConfig = readProjectConfig(projectName);
-    const workspaceName = (projectConfig as unknown as Record<string, unknown>).currentWorkspace as string | undefined;
+    const workspaceValue = (projectConfig as { currentWorkspace?: unknown }).currentWorkspace;
+    const workspaceName = typeof workspaceValue === 'string' ? workspaceValue : undefined;
     if (workspaceName) {
       return { projectName, workspaceName };
     }

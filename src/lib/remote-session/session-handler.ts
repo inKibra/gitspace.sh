@@ -93,6 +93,20 @@ function canAttachSession(
   return false;
 }
 
+const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
+  'create_thread',
+  'add_reply',
+  'update_thread',
+  'update_comment',
+  'delete_comment',
+  'import_github',
+  'push_github',
+]);
+
+function isMutatingReviewOperation(operation: ReviewOperation): boolean {
+  return MUTATING_REVIEW_OPERATIONS.has(operation.op);
+}
+
 function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
   return `${workspace.projectName}:${workspace.id}`;
 }
@@ -854,6 +868,18 @@ export class RemoteSessionHandler {
     operation: ReviewOperation,
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
+    if (isMutatingReviewOperation(operation) && !canManage(session.accessType)) {
+      await this.sendMessage(session, sendResponse, {
+        type: 'review_response',
+        requestId,
+        error: {
+          code: 'PERMISSION_DENIED',
+          message: 'Requires full access to perform this review operation',
+        },
+      });
+      return;
+    }
+
     try {
       const result = await this.executeReviewOperation(operation);
       await this.sendMessage(session, sendResponse, {

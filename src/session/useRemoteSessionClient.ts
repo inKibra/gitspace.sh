@@ -18,6 +18,7 @@ import type {
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
+import { SpacesError } from '../types/errors.js';
 import { useSessionEngine } from './useSessionEngine.js';
 
 export type RemoteSessionConnectionStatus =
@@ -312,7 +313,7 @@ export function useRemoteSessionClient<ConnectParams>(
     async (operation: ReviewOperation): Promise<ReviewResult> => {
       const backendKey = activeBackendKeyRef.current;
       if (!backendKey) {
-        throw new Error('No active backend connection');
+        throw new SpacesError('No active backend connection', 'SYSTEM_ERROR', 2);
       }
       return engine.sendReviewRequest(backendKey, operation);
     },

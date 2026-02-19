@@ -71,11 +71,19 @@ export async function importGitHubReview(
 
   // Build a set of existing github IDs to avoid duplication
   const existingGithubIds = new Set<number>();
+  const threadByRootGithubId = new Map<number, ReviewThread>();
   for (const thread of session.threads) {
+    let rootGithubId: number | null = null;
     for (const comment of thread.comments) {
       if (comment.githubId !== undefined) {
         existingGithubIds.add(comment.githubId);
+        if (rootGithubId === null) {
+          rootGithubId = comment.githubId;
+        }
       }
+    }
+    if (rootGithubId !== null) {
+      threadByRootGithubId.set(rootGithubId, thread);
     }
   }
 
@@ -95,8 +103,35 @@ export async function importGitHubReview(
   let imported = 0;
 
   for (const root of roots) {
-    // Skip if already imported
-    if (existingGithubIds.has(root.id)) continue;
+    const freshReplies: ReviewComment[] = (replyMap.get(root.id) ?? [])
+      .filter(r => !existingGithubIds.has(r.id))
+      .map(r => ({
+        id: generateId(),
+        threadId: '',
+        body: r.body,
+        author: r.user.login,
+        createdAt: r.created_at,
+        githubId: r.id,
+      }));
+
+    const existingThread = threadByRootGithubId.get(root.id);
+    if (existingThread) {
+      if (freshReplies.length > 0) {
+        for (const reply of freshReplies) {
+          existingThread.comments.push({
+            ...reply,
+            threadId: existingThread.id,
+          });
+          if (reply.githubId !== undefined) {
+            existingGithubIds.add(reply.githubId);
+          }
+        }
+
+        const newestReply = freshReplies[freshReplies.length - 1];
+        existingThread.updatedAt = newestReply?.createdAt ?? new Date().toISOString();
+      }
+      continue;
+    }
 
     const now = new Date().toISOString();
     const threadId = generateId();
@@ -110,16 +145,10 @@ export async function importGitHubReview(
       githubId: root.id,
     };
 
-    const replyComments: ReviewComment[] = (replyMap.get(root.id) ?? [])
-      .filter(r => !existingGithubIds.has(r.id))
-      .map(r => ({
-        id: generateId(),
-        threadId,
-        body: r.body,
-        author: r.user.login,
-        createdAt: r.created_at,
-        githubId: r.id,
-      }));
+    const replyComments: ReviewComment[] = freshReplies.map((reply) => ({
+      ...reply,
+      threadId,
+    }));
 
     const target: ThreadTarget = buildTarget(root);
 
@@ -133,6 +162,13 @@ export async function importGitHubReview(
     };
 
     session.threads.push(thread);
+    threadByRootGithubId.set(root.id, thread);
+    existingGithubIds.add(root.id);
+    for (const reply of replyComments) {
+      if (reply.githubId !== undefined) {
+        existingGithubIds.add(reply.githubId);
+      }
+    }
     imported++;
   }
 

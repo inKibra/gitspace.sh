@@ -235,6 +235,35 @@ export class WorkspaceDeleteError extends Error {
   }
 }
 
+export type ReviewRequestErrorCode =
+  | 'REVIEW_TIMEOUT'
+  | 'REVIEW_FAILED'
+  | 'REVIEW_MISSING_RESULT'
+  | (string & {});
+
+/**
+ * Error thrown when remote review requests fail or time out.
+ */
+export class ReviewRequestError extends Error {
+  public readonly code: ReviewRequestErrorCode;
+  public readonly metadata?: { op?: string; requestId?: string };
+
+  constructor(
+    message: string,
+    code: ReviewRequestErrorCode,
+    metadata?: { op?: string; requestId?: string }
+  ) {
+    super(message);
+    this.name = 'ReviewRequestError';
+    this.code = code;
+    this.metadata = metadata;
+
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+}
+
 /**
  * Error thrown when a requested session name already exists.
  */

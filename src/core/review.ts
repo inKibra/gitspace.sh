@@ -409,32 +409,3 @@ function generateId(): string {
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
-
-/**
- * LLM-friendly JSON summary of all threads in a workspace.
- * Used by `gssh review notes` CLI command.
- */
-export function buildNotesSummary(
-  threads: ReviewThread[],
-  workspaceName: string,
-  baseBranch: string
-): object {
-  const unresolved = threads.filter(t => !t.resolved);
-  return {
-    workspace: workspaceName,
-    baseBranch,
-    totalThreads: threads.length,
-    unresolvedThreads: unresolved.length,
-    threads: threads.map(t => ({
-      id: t.id,
-      target: t.target,
-      decision: t.decision,
-      resolved: t.resolved,
-      commentCount: t.comments.length,
-      firstComment: t.comments[0]?.body ?? '',
-      lastReply: t.comments.length > 1 ? t.comments[t.comments.length - 1]?.body : undefined,
-      createdAt: t.createdAt,
-      updatedAt: t.updatedAt,
-    })),
-  };
-}

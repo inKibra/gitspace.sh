@@ -207,7 +207,7 @@ export function useReview({ sendReviewRequest, projectName, workspaceName }: Use
         setThreads(result.threads);
         return { imported: result.imported };
       }
-      return { imported: 0 };
+      throw new Error(`Unexpected response from import_github: ${result.op}`);
     });
   }, [run, sendReviewRequest, projectName, workspaceName]);
 

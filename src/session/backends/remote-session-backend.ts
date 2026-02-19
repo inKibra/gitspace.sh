@@ -28,6 +28,7 @@ import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
+  ReviewRequestError,
   WorkspaceDeleteError,
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
@@ -323,6 +324,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
     | null = null;
   private pendingReviewRequests = new Map<string, {
+    op: ReviewOperation['op'];
     resolve: (result: ReviewResult) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
@@ -611,10 +613,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           return;
         }
         this.pendingReviewRequests.delete(requestId);
-        reject(new Error(`Timed out waiting for review response (${operation.op})`));
+        reject(
+          new ReviewRequestError(
+            `Timed out waiting for review response (${operation.op})`,
+            'REVIEW_TIMEOUT',
+            { op: operation.op, requestId }
+          )
+        );
       }, 30000);
 
-      this.pendingReviewRequests.set(requestId, { resolve, reject, timeout });
+      this.pendingReviewRequests.set(requestId, {
+        op: operation.op,
+        resolve,
+        reject,
+        timeout,
+      });
 
       void this.sendCommand(command).catch((error) => {
         const pending = this.pendingReviewRequests.get(requestId);
@@ -623,7 +636,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         }
         clearTimeout(pending.timeout);
         this.pendingReviewRequests.delete(requestId);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        const message = error instanceof Error ? error.message : String(error);
+        reject(
+          new ReviewRequestError(message, 'REVIEW_FAILED', {
+            op: pending.op,
+            requestId,
+          })
+        );
       });
     });
   }
@@ -1080,19 +1099,34 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     clearTimeout(pending.timeout);
     this.pendingReviewRequests.delete(message.requestId);
     if (message.error) {
-      pending.reject(new Error(message.error.message));
+      pending.reject(
+        new ReviewRequestError(
+          message.error.message,
+          message.error.code || 'REVIEW_FAILED',
+          { op: pending.op, requestId: message.requestId }
+        )
+      );
     } else if (message.result) {
       pending.resolve(message.result);
     } else {
-      pending.reject(new Error('Review response missing result'));
+      pending.reject(
+        new ReviewRequestError('Review response missing result', 'REVIEW_MISSING_RESULT', {
+          op: pending.op,
+          requestId: message.requestId,
+        })
+      );
     }
   }
 
   private rejectAllPendingReviewRequests(message: string): void {
-    const error = new Error(message);
     for (const [requestId, pending] of this.pendingReviewRequests) {
       clearTimeout(pending.timeout);
-      pending.reject(error);
+      pending.reject(
+        new ReviewRequestError(message, 'REVIEW_FAILED', {
+          op: pending.op,
+          requestId,
+        })
+      );
       this.pendingReviewRequests.delete(requestId);
     }
   }
