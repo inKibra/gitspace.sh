@@ -62,6 +62,8 @@ export interface ReviewComment {
   createdAt: string;
   /** Set when synced from/to GitHub */
   githubId?: number;
+  /** Set for local comments once they have been pushed to GitHub */
+  syncedToGitHubAt?: string;
 }
 
 // ============================================================================

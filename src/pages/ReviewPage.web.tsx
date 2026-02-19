@@ -3,8 +3,8 @@
  * ReviewPage — full review dashboard.
  */
 
-import { useCallback, useEffect, useState } from 'react';
-import { DiffViewer } from '../components/DiffViewer.web.js';
+import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { DiffViewer, type HunkFocusTarget } from '../components/DiffViewer.web.js';
 import { ThreadPanel } from '../components/ThreadPanel.web.js';
 import { useReview } from '../hooks/useReview.web.js';
 import { computeWorkspaceStatus } from '../types/review.js';
@@ -48,7 +48,12 @@ export function ReviewPage({
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [hoveredThreadId, setHoveredThreadId] = useState<string | null>(null);
-  const [showPanel, setShowPanel] = useState(true);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(360);
+  const [threadFilter, setThreadFilter] = useState<'all' | 'current-file' | 'current-hunk'>('all');
+  const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
+  const [currentHunkFocus, setCurrentHunkFocus] = useState<HunkFocusTarget | null>(null);
+  const [focusRequest, setFocusRequest] = useState<{ threadId: string; nonce: number } | null>(null);
 
   const [importing, setImporting] = useState(false);
   const [pushing, setPushing] = useState(false);
@@ -175,8 +180,45 @@ export function ReviewPage({
 
   const openThread = useCallback((threadId: string) => {
     setSelectedThreadId(threadId);
-    setShowPanel(true);
+    setPanelCollapsed(false);
+    setFocusRequest({ threadId, nonce: Date.now() });
   }, []);
+
+  const handleSelectedFileChange = useCallback((filePath: string | null) => {
+    setCurrentFilePath(filePath);
+    if (currentHunkFocus && (!filePath || currentHunkFocus.filePath !== filePath)) {
+      setCurrentHunkFocus(null);
+      setThreadFilter((mode) => (mode === 'current-hunk' ? 'current-file' : mode));
+    }
+  }, [currentHunkFocus]);
+
+  const handleHunkFocus = useCallback((target: HunkFocusTarget | null) => {
+    setCurrentHunkFocus(target);
+    if (target) {
+      setPanelCollapsed(false);
+      setThreadFilter('current-hunk');
+    }
+  }, []);
+
+  const startResize = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const initialClientX = event.clientX;
+    const initialWidth = panelWidth;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const delta = initialClientX - moveEvent.clientX;
+      const next = Math.min(640, Math.max(280, initialWidth + delta));
+      setPanelWidth(next);
+    };
+
+    const handleUp = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+  }, [panelWidth]);
 
   return (
     <div style={{
@@ -318,7 +360,7 @@ export function ReviewPage({
         </button>
 
         <button
-          onClick={() => setShowPanel((value) => !value)}
+          onClick={() => setPanelCollapsed((value) => !value)}
           style={{
             fontSize: '12px',
             padding: '5px 10px',
@@ -329,7 +371,7 @@ export function ReviewPage({
             cursor: 'pointer',
           }}
         >
-          {showPanel ? '≡ Hide' : '≡ Threads'}
+          {panelCollapsed ? '≡ Threads' : '≡ Hide'}
           {review.threads.filter((thread) => !thread.resolved).length > 0 && (
             <span style={{
               marginLeft: '6px',
@@ -387,7 +429,7 @@ export function ReviewPage({
         </div>
       ) : (
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          <div style={{ flex: showPanel ? '1 1 70%' : '1 1 100%', overflow: 'hidden' }}>
+          <div style={{ flex: panelCollapsed ? '1 1 100%' : '1 1 auto', overflow: 'hidden' }}>
             <DiffViewer
               files={files}
               threads={review.threads}
@@ -396,19 +438,37 @@ export function ReviewPage({
               onRequestFileDiff={handleGetFileDiff}
               onRequestFileContextRange={handleGetFileContextRange}
               onThreadClick={openThread}
+              onSelectedFileChange={handleSelectedFileChange}
+              onHunkFocus={handleHunkFocus}
+              focusRequest={focusRequest}
               onThreadHover={(threadId) => {
                 setHoveredThreadId(threadId);
                 if (threadId) {
-                  setShowPanel(true);
+                  setPanelCollapsed(false);
                 }
               }}
             />
           </div>
 
-          {showPanel && (
-            <div style={{ flex: '0 0 320px', overflow: 'hidden', borderLeft: '1px solid #30363d' }}>
+          {!panelCollapsed && (
+            <div style={{ display: 'flex', width: `${panelWidth}px`, maxWidth: '60vw', minWidth: '280px' }}>
+              <div
+                onMouseDown={startResize}
+                style={{
+                  width: '6px',
+                  cursor: 'col-resize',
+                  background: 'transparent',
+                  borderLeft: '1px solid #30363d',
+                }}
+              />
+
+              <div style={{ flex: 1, overflow: 'hidden', borderLeft: '1px solid #30363d' }}>
               <ThreadPanel
                 threads={review.threads}
+                currentFilePath={currentFilePath}
+                hunkFocus={currentHunkFocus}
+                filterMode={threadFilter}
+                onFilterModeChange={setThreadFilter}
                 selectedThreadId={selectedThreadId}
                 hoveredThreadId={hoveredThreadId}
                 onResolveThread={(threadId, resolved) => review.updateThread(threadId, { resolved })}
@@ -416,8 +476,10 @@ export function ReviewPage({
                 onUpdateComment={review.updateComment}
                 onDeleteComment={review.deleteComment}
                 onUpdateDecision={(threadId, decision) => review.updateThread(threadId, { decision })}
-                onClose={() => setShowPanel(false)}
+                onOpenThreadTarget={openThread}
+                onClose={() => setPanelCollapsed(true)}
               />
+            </div>
             </div>
           )}
         </div>

@@ -13,6 +13,16 @@ import {
   type SelectedLineRange,
 } from '@pierre/diffs';
 import type { HunkDecision, ReviewChangedFile, ReviewThread, ThreadTarget } from '../types/review.js';
+import { SpacesError } from '../types/errors.js';
+
+export interface HunkFocusTarget {
+  filePath: string;
+  hunkHeader: string;
+  oldStart: number;
+  oldEnd: number;
+  newStart: number;
+  newEnd: number;
+}
 
 export interface DiffViewerProps {
   files: ReviewChangedFile[];
@@ -34,6 +44,9 @@ export interface DiffViewerProps {
   }>;
   onThreadClick?: (threadId: string) => void;
   onThreadHover?: (threadId: string | null) => void;
+  onSelectedFileChange?: (filePath: string | null) => void;
+  onHunkFocus?: (target: HunkFocusTarget | null) => void;
+  focusRequest?: { threadId: string; nonce: number } | null;
 }
 
 interface CommentFormState {
@@ -45,6 +58,10 @@ interface HunkInfo {
   header: string;
   anchorSide: AnnotationSide;
   anchorLine: number;
+  oldStart: number;
+  oldEnd: number;
+  newStart: number;
+  newEnd: number;
 }
 
 interface LoadedFileDiff {
@@ -56,7 +73,7 @@ type FileDiffState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'ready'; data: LoadedFileDiff }
-  | { status: 'error'; message: string };
+  | { status: 'error'; error: SpacesError };
 
 type FileContextState =
   | { status: 'idle' }
@@ -69,7 +86,7 @@ type FileContextState =
       newTotal: number;
       contextHash: string;
     }
-  | { status: 'error'; message: string };
+  | { status: 'error'; error: SpacesError };
 
 type InlineAnnotationMeta =
   | { kind: 'thread'; thread: ReviewThread }
@@ -78,8 +95,15 @@ type InlineAnnotationMeta =
       hunkHeader: string;
       decision: HunkDecision;
       threadId?: string;
+      threadIds: string[];
       commentCount: number;
+      oldStart: number;
+      oldEnd: number;
+      newStart: number;
+      newEnd: number;
     };
+
+type HunkControlMeta = Extract<InlineAnnotationMeta, { kind: 'hunk-control' }>;
 
 const CHANGE_COLOR: Record<ReviewChangedFile['changeType'], string> = {
   new: '#22c55e',
@@ -104,6 +128,9 @@ export function DiffViewer({
   onRequestFileContextRange,
   onThreadClick,
   onThreadHover,
+  onSelectedFileChange,
+  onHunkFocus,
+  focusRequest,
 }: DiffViewerProps) {
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
   const [fileDiffStateByKey, setFileDiffStateByKey] = useState<Record<string, FileDiffState>>({});
@@ -138,6 +165,10 @@ export function DiffViewer({
   const selectedKey = selectedFile ? fileKey(selectedFile.filePath, selectedFile.prevFilePath) : null;
   const selectedDiffState = selectedKey ? fileDiffStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
   const selectedContextState = selectedKey ? contextStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
+
+  useEffect(() => {
+    onSelectedFileChange?.(selectedFile?.filePath ?? null);
+  }, [onSelectedFileChange, selectedFile]);
 
   useEffect(() => {
     fileDiffStateByKeyRef.current = fileDiffStateByKey;
@@ -197,10 +228,10 @@ export function DiffViewer({
         [key]: { status: 'ready', data: parsed },
       }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const typed = toSpacesError(error, 'Failed to load file diff');
       setFileDiffStateByKey((prev) => ({
         ...prev,
-        [key]: { status: 'error', message },
+        [key]: { status: 'error', error: typed },
       }));
     } finally {
       loadingFileDiffKeysRef.current.delete(key);
@@ -216,6 +247,64 @@ export function DiffViewer({
       void loadFileDiff(selectedFile);
     }
   }, [selectedFile, selectedKey, fileDiffStateByKey, loadFileDiff]);
+
+  useEffect(() => {
+    if (!focusRequest) {
+      return;
+    }
+
+    const thread = threads.find((entry) => entry.id === focusRequest.threadId);
+    if (!thread || thread.target.kind === 'workspace') {
+      return;
+    }
+    const target = thread.target;
+
+    const targetFile = files.find((entry) => (
+      entry.filePath === target.file || entry.prevFilePath === target.file
+    ));
+    if (!targetFile) {
+      return;
+    }
+
+    const key = fileKey(targetFile.filePath, targetFile.prevFilePath);
+    setSelectedFileKey(key);
+  }, [files, focusRequest, threads]);
+
+  useEffect(() => {
+    if (!focusRequest || !selectedFile || !selectedKey) {
+      return;
+    }
+
+    const thread = threads.find((entry) => entry.id === focusRequest.threadId);
+    if (!thread || thread.target.kind === 'workspace') {
+      return;
+    }
+
+    if (thread.target.file !== selectedFile.filePath && thread.target.file !== selectedFile.prevFilePath) {
+      return;
+    }
+
+    if (selectedDiffState?.status !== 'ready') {
+      return;
+    }
+
+    const host = diffHostRef.current;
+    if (!host) {
+      return;
+    }
+
+    const marker = host.querySelector<HTMLElement>(`[data-thread-id="${thread.id}"]`);
+    if (marker) {
+      marker.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      marker.focus?.();
+      return;
+    }
+
+    const scrollContainer = host.querySelector<HTMLElement>('[data-diff-scroll-container]');
+    if (scrollContainer) {
+      scrollContainer.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [focusRequest, selectedDiffState?.status, selectedFile, selectedKey, threads]);
 
   const ensureContextLoaded = useCallback(async () => {
     if (!selectedFile || !selectedKey) {
@@ -250,10 +339,10 @@ export function DiffViewer({
         },
       }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const typed = toSpacesError(error, 'Failed to load file context');
       setContextStateByKey((prev) => ({
         ...prev,
-        [selectedKey]: { status: 'error', message },
+        [selectedKey]: { status: 'error', error: typed },
       }));
     }
   }, [selectedFile, selectedKey, contextStateByKey, onRequestFileContextRange]);
@@ -300,7 +389,7 @@ export function DiffViewer({
   const selectedContextReady = selectedContextState?.status === 'ready' ? selectedContextState : null;
 
   const hunkThreadByHeader = useMemo(() => {
-    const map = new Map<string, ReviewThread>();
+    const map = new Map<string, ReviewThread[]>();
     if (!selectedFile) {
       return map;
     }
@@ -312,9 +401,9 @@ export function DiffViewer({
       if (thread.target.file !== selectedFile.filePath) {
         continue;
       }
-      if (!map.has(thread.target.hunkHeader)) {
-        map.set(thread.target.hunkHeader, thread);
-      }
+      const list = map.get(thread.target.hunkHeader) ?? [];
+      list.push(thread);
+      map.set(thread.target.hunkHeader, list);
     }
 
     return map;
@@ -328,16 +417,22 @@ export function DiffViewer({
     const annotations: DiffLineAnnotation<InlineAnnotationMeta>[] = [];
 
     for (const hunk of selectedLoadedDiff.hunks) {
-      const existing = hunkThreadByHeader.get(hunk.header);
+      const existingThreads = hunkThreadByHeader.get(hunk.header) ?? [];
+      const primaryThread = pickPrimaryThread(existingThreads);
       annotations.push({
         side: hunk.anchorSide,
         lineNumber: hunk.anchorLine,
         metadata: {
           kind: 'hunk-control',
           hunkHeader: hunk.header,
-          decision: existing?.decision ?? 'pending',
-          threadId: existing?.id,
-          commentCount: existing?.comments.length ?? 0,
+          decision: aggregateHunkDecision(existingThreads),
+          threadId: primaryThread?.id,
+          threadIds: existingThreads.map((thread) => thread.id),
+          commentCount: existingThreads.reduce((sum, thread) => sum + thread.comments.length, 0),
+          oldStart: hunk.oldStart,
+          oldEnd: hunk.oldEnd,
+          newStart: hunk.newStart,
+          newEnd: hunk.newEnd,
         },
       });
     }
@@ -370,14 +465,24 @@ export function DiffViewer({
     }
   }, [commentForm, commentBody, onCreateThread]);
 
-  const setHunkDecision = useCallback(async (hunkHeader: string, decision: HunkDecision) => {
+  const setHunkDecision = useCallback(async (hunkMeta: HunkControlMeta, decision: HunkDecision) => {
     if (!selectedFile) {
       return;
     }
 
-    const existing = hunkThreadByHeader.get(hunkHeader);
-    if (existing) {
-      await onUpdateThread(existing.id, { decision });
+    onHunkFocus?.({
+      filePath: selectedFile.filePath,
+      hunkHeader: hunkMeta.hunkHeader,
+      oldStart: hunkMeta.oldStart,
+      oldEnd: hunkMeta.oldEnd,
+      newStart: hunkMeta.newStart,
+      newEnd: hunkMeta.newEnd,
+    });
+
+    const existingThreads = hunkThreadByHeader.get(hunkMeta.hunkHeader) ?? [];
+    const primary = pickPrimaryThread(existingThreads);
+    if (primary) {
+      await onUpdateThread(primary.id, { decision });
       return;
     }
 
@@ -386,21 +491,29 @@ export function DiffViewer({
     }
 
     await onCreateThread(
-      { kind: 'hunk', file: selectedFile.filePath, hunkHeader },
+      { kind: 'hunk', file: selectedFile.filePath, hunkHeader: hunkMeta.hunkHeader },
       decision === 'approved'
         ? 'Approved hunk via inline controls.'
         : 'Rejected hunk via inline controls.',
       decision
     );
-  }, [selectedFile, hunkThreadByHeader, onUpdateThread, onCreateThread]);
+  }, [selectedFile, hunkThreadByHeader, onUpdateThread, onCreateThread, onHunkFocus]);
 
-  const openHunkCommentForm = useCallback((hunkHeader: string) => {
+  const openHunkCommentForm = useCallback((hunkMeta: HunkControlMeta) => {
     if (!selectedFile) {
       return;
     }
-    setCommentForm({ target: { kind: 'hunk', file: selectedFile.filePath, hunkHeader } });
+    onHunkFocus?.({
+      filePath: selectedFile.filePath,
+      hunkHeader: hunkMeta.hunkHeader,
+      oldStart: hunkMeta.oldStart,
+      oldEnd: hunkMeta.oldEnd,
+      newStart: hunkMeta.newStart,
+      newEnd: hunkMeta.newEnd,
+    });
+    setCommentForm({ target: { kind: 'hunk', file: selectedFile.filePath, hunkHeader: hunkMeta.hunkHeader } });
     setCommentBody('');
-  }, [selectedFile]);
+  }, [selectedFile, onHunkFocus]);
 
   const handleLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
     if (!range || !selectedFile) {
@@ -424,6 +537,8 @@ export function DiffViewer({
   ) => {
     return (
       <button
+        type="button"
+        aria-label="Add line comment"
         title="Add comment"
         onMouseDown={(event) => {
           event.preventDefault();
@@ -478,6 +593,7 @@ export function DiffViewer({
             onClick={() => onThreadClick?.(thread.id)}
             onMouseEnter={() => onThreadHover?.(thread.id)}
             onMouseLeave={() => onThreadHover?.(null)}
+            data-thread-id={thread.id}
             style={{
               position: 'absolute',
               top: '-9px',
@@ -508,6 +624,7 @@ export function DiffViewer({
     return (
       <div style={{ position: 'relative', zIndex: 10, height: 0, overflow: 'visible', pointerEvents: 'none' }}>
         <div
+          data-thread-id={meta.threadId}
           style={{
             position: 'absolute',
             top: '4px',
@@ -527,22 +644,46 @@ export function DiffViewer({
         >
           <button
             title="Reject hunk"
-            onClick={() => void setHunkDecision(meta.hunkHeader, 'rejected')}
+            onClick={() => void setHunkDecision(meta, 'rejected')}
             style={actionButtonStyle(meta.decision === 'rejected', '#f85149')}
           >
             Reject
           </button>
           <button
             title="Approve hunk"
-            onClick={() => void setHunkDecision(meta.hunkHeader, 'approved')}
+            onClick={() => void setHunkDecision(meta, 'approved')}
             style={actionButtonStyle(meta.decision === 'approved', '#22c55e', true)}
           >
             Approve
           </button>
+          {meta.threadId && (
+            <button
+              title="Open hunk thread"
+              onClick={() => {
+                if (!selectedFile) {
+                  return;
+                }
+                onHunkFocus?.({
+                  filePath: selectedFile.filePath,
+                  hunkHeader: meta.hunkHeader,
+                  oldStart: meta.oldStart,
+                  oldEnd: meta.oldEnd,
+                  newStart: meta.newStart,
+                  newEnd: meta.newEnd,
+                });
+                if (meta.threadId) {
+                  onThreadClick?.(meta.threadId);
+                }
+              }}
+              style={actionButtonStyle(false, '#58a6ff')}
+            >
+              Threads {meta.threadIds.length > 1 ? `(${meta.threadIds.length})` : ''}
+            </button>
+          )}
           {!meta.threadId && (
             <button
               title="Comment on hunk"
-              onClick={() => openHunkCommentForm(meta.hunkHeader)}
+              onClick={() => openHunkCommentForm(meta)}
               style={actionButtonStyle(false, '#58a6ff')}
             >
               Comment
@@ -551,7 +692,7 @@ export function DiffViewer({
         </div>
       </div>
     );
-  }, [onThreadClick, onThreadHover, openHunkCommentForm, setHunkDecision]);
+  }, [onThreadClick, onThreadHover, openHunkCommentForm, onHunkFocus, selectedFile?.filePath, setHunkDecision]);
 
   const fileDiffOptions = useMemo((): FileDiffOptions<InlineAnnotationMeta> => ({
     diffStyle: 'unified',
@@ -588,9 +729,9 @@ export function DiffViewer({
   }
 
   const selectedDiffLoading = selectedDiffState?.status === 'loading' || selectedDiffState?.status === 'idle';
-  const selectedDiffError = selectedDiffState?.status === 'error' ? selectedDiffState.message : null;
+  const selectedDiffError = selectedDiffState?.status === 'error' ? selectedDiffState.error.message : null;
   const contextLoading = selectedContextState?.status === 'loading';
-  const contextError = selectedContextState?.status === 'error' ? selectedContextState.message : null;
+  const contextError = selectedContextState?.status === 'error' ? selectedContextState.error.message : null;
   const contextReady = selectedContextState?.status === 'ready';
 
   return (
@@ -719,7 +860,7 @@ export function DiffViewer({
             Failed to load file diff: {selectedDiffError}
           </div>
         ) : renderedFileDiff ? (
-          <div style={{ flex: 1, overflow: 'auto' }}>
+          <div data-diff-scroll-container style={{ flex: 1, overflow: 'auto' }}>
             <FileDiff
               fileDiff={renderedFileDiff}
               options={fileDiffOptions}
@@ -846,20 +987,28 @@ function parseSingleFileDiff(diff: string, file: ReviewChangedFile): LoadedFileD
       return true;
     }
     return false;
-  }) ?? parsed.flatMap((patch) => patch.files)[0];
+  });
 
   if (!parsedFile) {
-    throw new Error('No parseable file diff returned for selected file');
+    throw new SpacesError('No parseable file diff returned for selected file', 'SYSTEM_ERROR', 2);
   }
 
   const hunks: HunkInfo[] = parsedFile.hunks.map((hunk) => {
     const anchorSide: AnnotationSide = hunk.additionCount > 0 ? 'additions' : 'deletions';
     const anchorLine = Math.max(1, anchorSide === 'additions' ? hunk.additionStart : hunk.deletionStart);
+    const oldStart = Math.max(1, hunk.deletionStart);
+    const newStart = Math.max(1, hunk.additionStart);
+    const oldEnd = oldStart + Math.max(hunk.deletionCount, 1) - 1;
+    const newEnd = newStart + Math.max(hunk.additionCount, 1) - 1;
 
     return {
       header: formatHunkHeader(hunk),
       anchorSide,
       anchorLine,
+      oldStart,
+      oldEnd,
+      newStart,
+      newEnd,
     };
   });
 
@@ -928,4 +1077,37 @@ function actionButtonStyle(active: boolean, color: string, success = false): CSS
     fontWeight: 600,
     cursor: 'pointer',
   };
+}
+
+function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
+  if (error instanceof SpacesError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new SpacesError(error.message, 'SYSTEM_ERROR', 2);
+  }
+  return new SpacesError(fallbackMessage, 'SYSTEM_ERROR', 2);
+}
+
+function pickPrimaryThread(threads: ReviewThread[]): ReviewThread | undefined {
+  if (threads.length === 0) {
+    return undefined;
+  }
+  const unresolved = threads
+    .filter((thread) => !thread.resolved)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  if (unresolved.length > 0) {
+    return unresolved[0];
+  }
+  return [...threads].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
+}
+
+function aggregateHunkDecision(threads: ReviewThread[]): HunkDecision {
+  if (threads.some((thread) => thread.decision === 'rejected')) {
+    return 'rejected';
+  }
+  if (threads.length > 0 && threads.every((thread) => thread.decision === 'approved')) {
+    return 'approved';
+  }
+  return 'pending';
 }

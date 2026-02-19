@@ -205,6 +205,8 @@ export async function pushGitHubReview(
 
   const session = readReviewSession(workspacePath, workspaceName, baseBranch);
   const unresolved = session.threads.filter(t => !t.resolved);
+  const syncedAt = new Date().toISOString();
+  let changed = false;
 
   // Compute overall review action
   const hunkThreads = unresolved.filter(t => t.target.kind === 'hunk');
@@ -219,52 +221,95 @@ export async function pushGitHubReview(
       ? 'APPROVE'
       : 'COMMENT';
 
-  // Build review comments (only threads that can be mapped to a file+line)
-  const reviewComments = unresolved
-    .filter(t => t.target.kind !== 'workspace')
-    .map(t => buildGitHubComment(t))
-    .filter(Boolean);
+  const reviewComments: GitHubDraftReviewComment[] = [];
+  const reviewCommentIdsByThreadId = new Map<string, string[]>();
+  const workspaceNoteBodies: string[] = [];
+  const workspaceNoteIdsByThreadId = new Map<string, string[]>();
 
-  // Collect workspace-level threads as PR body additions
-  const workspaceNotes = unresolved
-    .filter(t => t.target.kind === 'workspace')
-    .map(t => t.comments[0]?.body ?? '')
-    .filter(Boolean)
-    .join('\n\n');
+  for (const thread of unresolved) {
+    const pendingLocalComments = thread.comments.filter(isPendingLocalComment);
+    if (pendingLocalComments.length === 0) {
+      continue;
+    }
+
+    const rootGithubCommentId = getRootGithubCommentId(thread);
+    if (rootGithubCommentId !== null) {
+      for (const comment of pendingLocalComments) {
+        const posted = await postPRReply(
+          owner,
+          repo,
+          prNumber,
+          rootGithubCommentId,
+          comment.body,
+          workspacePath
+        );
+        comment.githubId = posted.id;
+        comment.syncedToGitHubAt = syncedAt;
+        changed = true;
+      }
+      thread.updatedAt = syncedAt;
+      continue;
+    }
+
+    const localBodies = pendingLocalComments.map((comment) => comment.body);
+    if (thread.target.kind === 'workspace') {
+      workspaceNoteBodies.push(localBodies.join('\n\n---\n\n'));
+      workspaceNoteIdsByThreadId.set(thread.id, pendingLocalComments.map((comment) => comment.id));
+      continue;
+    }
+
+    const reviewComment = buildGitHubComment(thread, localBodies);
+    if (reviewComment) {
+      reviewComments.push(reviewComment);
+      reviewCommentIdsByThreadId.set(thread.id, pendingLocalComments.map((comment) => comment.id));
+    }
+  }
+
+  const workspaceNotes = workspaceNoteBodies.join('\n\n');
 
   const bodyParts: string[] = [];
   if (workspaceNotes) {
     bodyParts.push('**General notes:**\n\n' + workspaceNotes);
   }
 
-  const reviewBody = bodyParts.join('\n\n') || 'Review submitted via gssh.';
+  let url = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
+  if (reviewComments.length > 0 || bodyParts.length > 0) {
+    const reviewBody = bodyParts.join('\n\n') || 'Review submitted via gssh.';
 
-  // Submit via `gh api`
-  const payload = {
-    body: reviewBody,
-    event,
-    comments: reviewComments,
-  };
-
-  // Write payload to temp file for `gh api --input`
-  const tmpFile = join(tmpdir(), `gssh-review-${Date.now()}.json`);
-  let rawStdout = '';
-  try {
-    writeFileSync(tmpFile, JSON.stringify(payload), 'utf-8');
-    const reviewsEndpoint = `repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
-    const result = await execAsync(
-      `gh api ${escapeShellArg(reviewsEndpoint)} --method POST --input ${escapeShellArg(tmpFile)}`,
-      { cwd: workspacePath }
+    const reviewData = await submitPullReview(
+      owner,
+      repo,
+      prNumber,
+      {
+        body: reviewBody,
+        event,
+        comments: reviewComments,
+      },
+      workspacePath
     );
-    rawStdout = result.stdout;
-  } finally {
-    try { unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    url =
+      reviewData.html_url ??
+      `https://github.com/${owner}/${repo}/pull/${prNumber}#pullrequestreview-${reviewData.id}`;
+
+    for (const thread of unresolved) {
+      const reviewCommentIds = reviewCommentIdsByThreadId.get(thread.id) ?? [];
+      const workspaceNoteIds = workspaceNoteIdsByThreadId.get(thread.id) ?? [];
+      const syncedIds = new Set([...reviewCommentIds, ...workspaceNoteIds]);
+      if (syncedIds.size === 0) {
+        continue;
+      }
+
+      markThreadCommentsSynced(thread, syncedIds, syncedAt);
+      thread.updatedAt = syncedAt;
+      changed = true;
+    }
   }
 
-  const reviewData = JSON.parse(rawStdout) as { id: number; html_url?: string };
-  const url =
-    reviewData.html_url ??
-    `https://github.com/${owner}/${repo}/pull/${prNumber}#pullrequestreview-${reviewData.id}`;
+  if (changed) {
+    session.prNumber = prNumber;
+    writeReviewSession(workspacePath, workspaceName, session);
+  }
 
   return { prNumber, url };
 }
@@ -280,9 +325,23 @@ async function fetchPRComments(
 ): Promise<GitHubPRComment[]> {
   const commentsEndpoint = `repos/${owner}/${repo}/pulls/${prNumber}/comments`;
   const { stdout } = await execAsync(
-    `gh api ${escapeShellArg(commentsEndpoint)} --paginate`
+    `gh api ${escapeShellArg(commentsEndpoint)} --paginate --slurp`
   );
-  return JSON.parse(stdout) as GitHubPRComment[];
+  const parsed = JSON.parse(stdout) as unknown;
+
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  if (parsed.length === 0) {
+    return [];
+  }
+
+  if (Array.isArray(parsed[0])) {
+    return (parsed as GitHubPRComment[][]).flat();
+  }
+
+  return parsed as GitHubPRComment[];
 }
 
 async function getRepoOwner(cwd: string): Promise<string> {
@@ -327,17 +386,23 @@ function buildTarget(comment: GitHubPRComment): ThreadTarget {
 
 /** Build a GitHub PR review comment from a local thread */
 function buildGitHubComment(
-  thread: ReviewThread
-): { path: string; line: number; side: string; body: string } | null {
-  const body = thread.comments.map(c => c.body).join('\n\n---\n\n');
+  thread: ReviewThread,
+  bodies: string[]
+): GitHubDraftReviewComment | null {
+  const body = bodies.join('\n\n---\n\n');
 
   if (thread.target.kind === 'line') {
-    return {
+    const payload: GitHubDraftReviewComment = {
       path: thread.target.file,
       line: thread.target.endLine,
       side: thread.target.side,
       body,
     };
+    if (thread.target.startLine !== thread.target.endLine) {
+      payload.start_line = thread.target.startLine;
+      payload.start_side = thread.target.side;
+    }
+    return payload;
   }
 
   if (thread.target.kind === 'hunk') {
@@ -368,4 +433,85 @@ function buildGitHubComment(
 
   // workspace-level threads go in the review body — handled separately
   return null;
+}
+
+function isPendingLocalComment(comment: ReviewComment): boolean {
+  return (
+    comment.author === 'local' &&
+    comment.githubId === undefined &&
+    !comment.syncedToGitHubAt
+  );
+}
+
+function getRootGithubCommentId(thread: ReviewThread): number | null {
+  const rootComment = thread.comments[0];
+  return rootComment?.githubId ?? null;
+}
+
+function markThreadCommentsSynced(
+  thread: ReviewThread,
+  commentIds: Set<string>,
+  syncedAt: string
+): void {
+  for (const comment of thread.comments) {
+    if (commentIds.has(comment.id)) {
+      comment.syncedToGitHubAt = syncedAt;
+    }
+  }
+}
+
+async function postPRReply(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  inReplyTo: number,
+  body: string,
+  cwd: string
+): Promise<{ id: number; html_url?: string }> {
+  const endpoint = `repos/${owner}/${repo}/pulls/${prNumber}/comments`;
+  const payload = {
+    body,
+    in_reply_to: inReplyTo,
+  };
+  const response = await postGitHubApi(endpoint, payload, cwd);
+  return JSON.parse(response) as { id: number; html_url?: string };
+}
+
+async function submitPullReview(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  payload: {
+    body: string;
+    event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+    comments: GitHubDraftReviewComment[];
+  },
+  cwd: string
+): Promise<{ id: number; html_url?: string }> {
+  const endpoint = `repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
+  const response = await postGitHubApi(endpoint, payload, cwd);
+  return JSON.parse(response) as { id: number; html_url?: string };
+}
+
+interface GitHubDraftReviewComment {
+  path: string;
+  line: number;
+  side: 'LEFT' | 'RIGHT' | string;
+  body: string;
+  start_line?: number;
+  start_side?: 'LEFT' | 'RIGHT' | string;
+}
+
+async function postGitHubApi(endpoint: string, payload: object, cwd: string): Promise<string> {
+  const tmpFile = join(tmpdir(), `gssh-review-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  try {
+    writeFileSync(tmpFile, JSON.stringify(payload), 'utf-8');
+    const { stdout } = await execAsync(
+      `gh api ${escapeShellArg(endpoint)} --method POST --input ${escapeShellArg(tmpFile)}`,
+      { cwd }
+    );
+    return stdout;
+  } finally {
+    try { unlinkSync(tmpFile); } catch { /* ignore */ }
+  }
 }

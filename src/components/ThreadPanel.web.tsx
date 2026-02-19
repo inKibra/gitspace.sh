@@ -8,11 +8,16 @@
  * - Editing/deleting own comments
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { Fragment, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import type { ReviewThread, HunkDecision } from '../types/review.js';
+import type { HunkFocusTarget } from './DiffViewer.web.js';
 
 export interface ThreadPanelProps {
   threads: ReviewThread[];
+  currentFilePath?: string | null;
+  hunkFocus?: HunkFocusTarget | null;
+  filterMode?: 'all' | 'current-file' | 'current-hunk';
+  onFilterModeChange?: (mode: 'all' | 'current-file' | 'current-hunk') => void;
   selectedThreadId?: string | null;
   hoveredThreadId?: string | null;
   onResolveThread: (threadId: string, resolved: boolean) => Promise<void>;
@@ -20,6 +25,7 @@ export interface ThreadPanelProps {
   onUpdateComment: (threadId: string, commentId: string, body: string) => Promise<void>;
   onDeleteComment: (threadId: string, commentId: string) => Promise<void>;
   onUpdateDecision: (threadId: string, decision: HunkDecision) => Promise<void>;
+  onOpenThreadTarget?: (threadId: string) => void;
   onClose?: () => void;
 }
 
@@ -46,8 +52,158 @@ function targetLabel(thread: ReviewThread): string {
   return 'Overall';
 }
 
+function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
+  const tokenPattern = /(\[[^\]]+\]\([^\)]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  const tokens = text.split(tokenPattern);
+
+  return tokens.map((token, index) => {
+    const key = `${keyPrefix}-inline-${index}`;
+
+    if (token.startsWith('`') && token.endsWith('`')) {
+      return (
+        <code key={key} style={{
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+          fontSize: '11px',
+          background: '#0d1117',
+          border: '1px solid #30363d',
+          borderRadius: '3px',
+          padding: '0 4px',
+          color: '#c9d1d9',
+        }}>
+          {token.slice(1, -1)}
+        </code>
+      );
+    }
+
+    if (token.startsWith('**') && token.endsWith('**')) {
+      return <strong key={key}>{token.slice(2, -2)}</strong>;
+    }
+
+    if (token.startsWith('*') && token.endsWith('*')) {
+      return <em key={key}>{token.slice(1, -1)}</em>;
+    }
+
+    const linkMatch = token.match(/^\[([^\]]+)\]\(([^\)]+)\)$/);
+    if (linkMatch) {
+      const label = linkMatch[1] ?? token;
+      const href = linkMatch[2] ?? '#';
+      return (
+        <a
+          key={key}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: '#58a6ff' }}
+        >
+          {label}
+        </a>
+      );
+    }
+
+    return <Fragment key={key}>{token}</Fragment>;
+  });
+}
+
+function renderMarkdownBody(markdown: string, keyPrefix: string): ReactNode[] {
+  const lines = markdown.replace(/\r/g, '').split('\n');
+  const nodes: ReactNode[] = [];
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    const text = paragraph.join(' ');
+    nodes.push(
+      <p key={`${keyPrefix}-p-${nodes.length}`} style={{ margin: '0 0 6px 0' }}>
+        {renderMarkdownInline(text, `${keyPrefix}-p-${nodes.length}`)}
+      </p>
+    );
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    nodes.push(
+      <ul key={`${keyPrefix}-ul-${nodes.length}`} style={{ margin: '0 0 6px 16px', padding: 0 }}>
+        {listItems.map((item, index) => (
+          <li key={`${keyPrefix}-li-${index}`} style={{ marginBottom: '2px' }}>
+            {renderMarkdownInline(item, `${keyPrefix}-li-${index}`)}
+          </li>
+        ))}
+      </ul>
+    );
+    listItems = [];
+  };
+
+  const flushCodeBlock = () => {
+    if (codeLines.length === 0) return;
+    nodes.push(
+      <pre key={`${keyPrefix}-code-${nodes.length}`} style={{
+        margin: '0 0 6px 0',
+        padding: '8px',
+        borderRadius: '6px',
+        background: '#0d1117',
+        border: '1px solid #30363d',
+        overflowX: 'auto',
+      }}>
+        <code style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: '11px' }}>
+          {codeLines.join('\n')}
+        </code>
+      </pre>
+    );
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    if (line.trim().startsWith('```')) {
+      flushParagraph();
+      flushList();
+      if (inCodeBlock) {
+        flushCodeBlock();
+      }
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    if (line.trimStart().startsWith('- ')) {
+      flushParagraph();
+      listItems.push(line.trimStart().slice(2));
+      continue;
+    }
+
+    paragraph.push(line.trim());
+  }
+
+  flushParagraph();
+  flushList();
+  flushCodeBlock();
+
+  if (nodes.length === 0) {
+    nodes.push(<p key={`${keyPrefix}-empty`} style={{ margin: 0 }} />);
+  }
+
+  return nodes;
+}
+
 export function ThreadPanel({
   threads,
+  currentFilePath,
+  hunkFocus,
+  filterMode = 'all',
+  onFilterModeChange,
   selectedThreadId,
   hoveredThreadId,
   onResolveThread,
@@ -55,6 +211,7 @@ export function ThreadPanel({
   onUpdateComment,
   onDeleteComment,
   onUpdateDecision,
+  onOpenThreadTarget,
   onClose,
 }: ThreadPanelProps) {
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
@@ -62,6 +219,31 @@ export function ThreadPanel({
   const [editingComment, setEditingComment] = useState<{ threadId: string; commentId: string; body: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const threadRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const visibleThreads = useMemo(() => {
+    if (filterMode === 'current-file' && currentFilePath) {
+      return threads.filter((thread) => {
+        if (thread.target.kind === 'workspace') {
+          return true;
+        }
+        return thread.target.file === currentFilePath;
+      });
+    }
+
+    if (filterMode === 'current-hunk' && hunkFocus) {
+      return threads.filter((thread) => {
+        if (thread.target.kind === 'hunk') {
+          return thread.target.file === hunkFocus.filePath && thread.target.hunkHeader === hunkFocus.hunkHeader;
+        }
+        if (thread.target.kind === 'line') {
+          return doesLineThreadOverlapHunk(thread, hunkFocus);
+        }
+        return false;
+      });
+    }
+
+    return threads;
+  }, [currentFilePath, filterMode, hunkFocus, threads]);
 
   useEffect(() => {
     const focusId = hoveredThreadId ?? selectedThreadId;
@@ -96,7 +278,7 @@ export function ThreadPanel({
     }
   }, [editingComment, onUpdateComment]);
 
-  if (threads.length === 0) {
+  if (visibleThreads.length === 0) {
     return (
       <div style={{
         height: '100%',
@@ -118,7 +300,11 @@ export function ThreadPanel({
           )}
         </div>
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8b949e', fontSize: '13px' }}>
-          No threads yet. Click a diff line or hunk to add a comment.
+          {filterMode === 'current-file'
+            ? 'No threads for the current file.'
+            : filterMode === 'current-hunk'
+              ? 'No threads for the selected hunk.'
+              : 'No threads yet. Click a diff line or hunk to add a comment.'}
         </div>
       </div>
     );
@@ -145,22 +331,101 @@ export function ThreadPanel({
         <span style={{ fontSize: '13px', fontWeight: 600, color: '#e6edf3' }}>
           Review Threads
           <span style={{ marginLeft: '8px', fontSize: '11px', color: '#8b949e', fontWeight: 400 }}>
-            ({threads.filter((t) => !t.resolved).length} open)
+            ({visibleThreads.filter((t) => !t.resolved).length} open)
           </span>
         </span>
-        {onClose && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <button
-            onClick={onClose}
-            style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: '16px', padding: '0 4px' }}
+            onClick={() => onFilterModeChange?.('all')}
+            style={{
+              fontSize: '10px',
+              padding: '2px 8px',
+              borderRadius: '999px',
+              border: '1px solid #30363d',
+              background: filterMode === 'all' ? '#1f6feb33' : '#21262d',
+              color: filterMode === 'all' ? '#58a6ff' : '#8b949e',
+              cursor: 'pointer',
+            }}
           >
-            ×
+            All
           </button>
-        )}
+          <button
+            onClick={() => onFilterModeChange?.('current-file')}
+            disabled={!currentFilePath}
+            style={{
+              fontSize: '10px',
+              padding: '2px 8px',
+              borderRadius: '999px',
+              border: '1px solid #30363d',
+              background: filterMode === 'current-file' ? '#1f6feb33' : '#21262d',
+              color: filterMode === 'current-file' ? '#58a6ff' : '#8b949e',
+              cursor: currentFilePath ? 'pointer' : 'not-allowed',
+            }}
+          >
+            Current file
+          </button>
+          <button
+            onClick={() => onFilterModeChange?.('current-hunk')}
+            disabled={!hunkFocus}
+            style={{
+              fontSize: '10px',
+              padding: '2px 8px',
+              borderRadius: '999px',
+              border: '1px solid #30363d',
+              background: filterMode === 'current-hunk' ? '#1f6feb33' : '#21262d',
+              color: filterMode === 'current-hunk' ? '#58a6ff' : '#8b949e',
+              cursor: hunkFocus ? 'pointer' : 'not-allowed',
+            }}
+          >
+            Current hunk
+          </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: '16px', padding: '0 4px' }}
+            >
+              ×
+            </button>
+          )}
+        </div>
       </div>
+
+      {filterMode === 'current-hunk' && hunkFocus && (
+        <div style={{
+          padding: '8px 12px',
+          borderBottom: '1px solid #21262d',
+          fontSize: '11px',
+          color: '#8b949e',
+          background: '#11161d',
+          display: 'flex',
+          gap: '6px',
+          alignItems: 'center',
+        }}>
+          <span style={{ color: '#58a6ff', fontWeight: 600 }}>Hunk filter</span>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {hunkFocus.hunkHeader}
+          </span>
+          <button
+            onClick={() => onFilterModeChange?.('all')}
+            style={{
+              marginLeft: 'auto',
+              fontSize: '10px',
+              padding: '1px 6px',
+              borderRadius: '3px',
+              border: '1px solid #30363d',
+              background: '#21262d',
+              color: '#8b949e',
+              cursor: 'pointer',
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       {/* Thread list */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {threads.map((thread) => {
+        {visibleThreads.map((thread) => {
           const isSelected = thread.id === selectedThreadId;
           const isHovered = thread.id === hoveredThreadId;
           const decision = thread.decision;
@@ -198,6 +463,22 @@ export function ThreadPanel({
                   <span style={{ fontSize: '11px', color: '#6e7681', marginLeft: 'auto' }}>
                     {targetLabel(thread)}
                   </span>
+                  {thread.target.kind !== 'workspace' && (
+                    <button
+                      onClick={() => onOpenThreadTarget?.(thread.id)}
+                      style={{
+                        fontSize: '10px',
+                        padding: '1px 6px',
+                        borderRadius: '3px',
+                        border: '1px solid #30363d',
+                        background: '#21262d',
+                        color: '#58a6ff',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Go to code
+                    </button>
+                  )}
                 </div>
 
                 {/* Hunk decision buttons */}
@@ -295,9 +576,17 @@ export function ThreadPanel({
                       </div>
                     ) : (
                       <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
-                        <p style={{ flex: 1, fontSize: '12px', color: '#e6edf3', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                          {comment.body}
-                        </p>
+                        <div style={{
+                          flex: 1,
+                          fontSize: '12px',
+                          color: '#e6edf3',
+                          margin: 0,
+                          whiteSpace: 'normal',
+                          wordBreak: 'break-word',
+                          lineHeight: 1.45,
+                        }}>
+                          {renderMarkdownBody(comment.body, comment.id)}
+                        </div>
                         {comment.author === 'local' && (
                           <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
                             <button
@@ -431,4 +720,24 @@ export function ThreadPanel({
       </div>
     </div>
   );
+}
+
+function doesLineThreadOverlapHunk(thread: ReviewThread, hunkFocus: HunkFocusTarget): boolean {
+  if (thread.target.kind !== 'line' || thread.target.file !== hunkFocus.filePath) {
+    return false;
+  }
+
+  if (thread.target.side === 'LEFT') {
+    return rangesOverlap(thread.target.startLine, thread.target.endLine, hunkFocus.oldStart, hunkFocus.oldEnd);
+  }
+
+  return rangesOverlap(thread.target.startLine, thread.target.endLine, hunkFocus.newStart, hunkFocus.newEnd);
+}
+
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
+  const minA = Math.min(startA, endA);
+  const maxA = Math.max(startA, endA);
+  const minB = Math.min(startB, endB);
+  const maxB = Math.max(startB, endB);
+  return Math.max(minA, minB) <= Math.min(maxA, maxB);
 }

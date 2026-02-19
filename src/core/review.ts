@@ -253,6 +253,9 @@ export function updateComment(
   }
 
   comment.body = body;
+  if (comment.author === 'local' && comment.githubId === undefined) {
+    delete comment.syncedToGitHubAt;
+  }
   thread.updatedAt = new Date().toISOString();
 
   writeReviewSession(workspacePath, workspaceName, session);
