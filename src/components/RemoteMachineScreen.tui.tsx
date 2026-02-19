@@ -66,6 +66,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
     onError: (error) => {
@@ -239,6 +240,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     setPendingProcessEditWorkspaceId(null);
   }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
 
+  useEffect(() => {
+    pendingProcessAttachRef.current = pendingProcessAttach;
+  }, [pendingProcessAttach]);
+
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
     setPendingProcessAttach({
       workspaceId: params.workspaceId,
@@ -293,23 +298,24 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       return;
     }
 
-    const timeout = setTimeout(() => {
-      setPendingProcessAttach((current) => {
-        if (
-          !current ||
-          current.workspaceId !== pendingProcessAttach.workspaceId ||
-          current.processName !== pendingProcessAttach.processName ||
-          current.instance !== pendingProcessAttach.instance
-        ) {
-          return current;
-        }
+    const target = pendingProcessAttach;
 
-        flow.showMessage({
-          title: 'Attach Timeout',
-          message: `Process started but no active session was found for ${current.processName}#${current.instance}.`,
-          variant: 'warning',
-        });
-        return null;
+    const timeout = setTimeout(() => {
+      const current = pendingProcessAttachRef.current;
+      if (
+        !current ||
+        current.workspaceId !== target.workspaceId ||
+        current.processName !== target.processName ||
+        current.instance !== target.instance
+      ) {
+        return;
+      }
+
+      setPendingProcessAttach(null);
+      flow.showMessage({
+        title: 'Attach Timeout',
+        message: `Process started but no active session was found for ${current.processName}#${current.instance}.`,
+        variant: 'warning',
       });
     }, 8000);
 

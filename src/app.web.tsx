@@ -93,10 +93,15 @@ export default function App() {
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
   const eventsKeyboardStateRef = useRef<{
     selectedIndex: number;
     selectIndex: (index: number) => void;
   } | null>(null);
+
+  useEffect(() => {
+    pendingProcessAttachRef.current = pendingProcessAttach;
+  }, [pendingProcessAttach]);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<SessionTerminalHandle>(null);
@@ -628,20 +633,21 @@ export default function App() {
       return;
     }
 
-    const timeout = window.setTimeout(() => {
-      setPendingProcessAttach((current) => {
-        if (
-          !current ||
-          current.workspaceId !== pendingProcessAttach.workspaceId ||
-          current.processName !== pendingProcessAttach.processName ||
-          current.instance !== pendingProcessAttach.instance
-        ) {
-          return current;
-        }
+    const target = pendingProcessAttach;
 
-        toast.error(`Process started but no active session appeared for ${current.processName}#${current.instance}.`);
-        return null;
-      });
+    const timeout = window.setTimeout(() => {
+      const current = pendingProcessAttachRef.current;
+      if (
+        !current ||
+        current.workspaceId !== target.workspaceId ||
+        current.processName !== target.processName ||
+        current.instance !== target.instance
+      ) {
+        return;
+      }
+
+      setPendingProcessAttach(null);
+      toast.error(`Process started but no active session appeared for ${current.processName}#${current.instance}.`);
     }, 8000);
 
     return () => window.clearTimeout(timeout);

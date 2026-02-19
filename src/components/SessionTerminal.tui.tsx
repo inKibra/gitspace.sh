@@ -267,10 +267,6 @@ export function SessionTerminal({
       return;
     }
 
-    if (readOnly) {
-      return;
-    }
-
     if (key.name === 'pageup') {
       const scrollBox = scrollBoxRef.current;
       if (
@@ -283,6 +279,10 @@ export function SessionTerminal({
         })
       ) {
         scrollBox.scrollBy(-1, 'viewport');
+        return;
+      }
+
+      if (readOnly) {
         return;
       }
     }
@@ -301,6 +301,14 @@ export function SessionTerminal({
         scrollBox.scrollBy(1, 'viewport');
         return;
       }
+
+      if (readOnly) {
+        return;
+      }
+    }
+
+    if (readOnly) {
+      return;
     }
 
     let data: string | undefined;
