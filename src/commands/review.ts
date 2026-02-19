@@ -79,7 +79,7 @@ function detectWorkspaceFromCwd(): { projectName: string; workspaceName: string 
   return { projectName, workspaceName };
 }
 
-export function resolveCurrentWorkspace(options: {
+function resolveCurrentWorkspace(options: {
   workspace?: string;
   project?: string;
 }): { projectName: string; workspaceName: string } | null {

@@ -35,7 +35,7 @@ interface GitHubPRComment {
   diff_hunk: string;
   user: { login: string };
   created_at: string;
-  in_reply_to_id?: number;
+  in_reply_to_id?: number | null;
   pull_request_review_id: number;
 }
 
@@ -82,13 +82,16 @@ export async function importGitHubReview(
   }
 
   // Group comments into threads (root comments + replies)
-  const roots = comments.filter(c => !c.in_reply_to_id);
-  const replies = comments.filter(c => c.in_reply_to_id !== undefined);
+  const roots = comments.filter(c => c.in_reply_to_id == null);
+  const replies = comments.filter(c => c.in_reply_to_id != null);
 
   // Map: root comment id → reply list
   const replyMap = new Map<number, GitHubPRComment[]>();
   for (const reply of replies) {
-    const rootId = reply.in_reply_to_id!;
+    const rootId = reply.in_reply_to_id;
+    if (rootId == null) {
+      continue;
+    }
     const list = replyMap.get(rootId) ?? [];
     list.push(reply);
     replyMap.set(rootId, list);
