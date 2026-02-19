@@ -1142,11 +1142,19 @@ export default function App() {
         return;
       }
 
+      if (isViewOnlySession) {
+        return;
+      }
+
       terminal.send(new TextEncoder().encode(data));
     };
 
     // Handler for keyboard input - applies virtual modifiers then resets them
     const handleKeyboardData = (data: Uint8Array) => {
+      if (isViewOnlySession) {
+        return;
+      }
+
       const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
       if (hasModifiers) {
         // Apply modifiers and reset

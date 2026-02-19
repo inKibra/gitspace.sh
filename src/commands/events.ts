@@ -3,16 +3,16 @@
  */
 
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
-import { getCurrentProject } from '../core/config.js';
-import { listSessions } from '../lib/tmux-lite/cli.js';
+import { getProjectWorkspacesDir } from '../core/config.js';
 import { getProcessEventsDir, listProcessEventsDirs } from '../lib/events/paths.js';
 import { readWideEvents } from '../lib/events/reader.js';
 import type { WideEventFilter } from '../types/events.js';
 
 interface EventsCommandOptions {
-  session?: string;
+  project?: string;
   workspace?: string;
   filter?: string;
   limit?: number;
@@ -51,25 +51,21 @@ function parseFilter(filter?: string): WideEventFilter {
 }
 
 async function resolveEventsDir(options: EventsCommandOptions): Promise<{ eventsDir: string; sessionId: string }> {
-  const project = getCurrentProject();
-  if (!project) {
-    throw new SpacesError('No current project. Run `gssh switch project` first.', 'USER_ERROR');
+  if (!options.project) {
+    throw new SpacesError('Provide project via --project <name>.', 'USER_ERROR');
   }
 
-  const sessions = await listSessions();
-  const target = options.session
-    ? sessions.find((s) => s.id === options.session || s.name === options.session)
-    : sessions[0];
-
-  if (!target) {
-    if (options.session) {
-      throw new SpacesError(`Session not found: ${options.session}`, 'USER_ERROR');
-    }
-    throw new SpacesError('No active sessions found.', 'USER_ERROR');
+  if (!options.workspace) {
+    throw new SpacesError('Provide workspace via --workspace <name>.', 'USER_ERROR');
   }
 
-  const workspacePath = target.cwd;
-  const workspaceId = workspacePath.split('/').pop() || 'workspace';
+  const workspacePath = join(getProjectWorkspacesDir(options.project), options.workspace);
+  if (!existsSync(workspacePath)) {
+    throw new SpacesError(
+      `Workspace not found: ${options.project}/${options.workspace}`,
+      'USER_ERROR'
+    );
+  }
 
   const processName = parseFilter(options.filter).processName;
   const eventsDir = processName
@@ -80,7 +76,7 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<{ events
     throw new SpacesError('No process events directory found for this workspace.', 'USER_ERROR');
   }
 
-  return { eventsDir, sessionId: workspaceId };
+  return { eventsDir, sessionId: options.workspace };
 }
 
 export async function listEvents(options: EventsCommandOptions): Promise<void> {

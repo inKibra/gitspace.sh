@@ -756,7 +756,8 @@ const eventsFilterOption = '--filter <expr>'
 eventsCommand
 	.command('list')
 	.description('List events (NDJSON)')
-	.option('--session <id>', 'Session ID or name')
+	.requiredOption('--project <name>', 'Project name')
+	.requiredOption('--workspace <name>', 'Workspace name')
 	.option(eventsFilterOption, 'Filter in key=value format')
 	.option('--limit <n>', 'Limit results', (value: string) => Number(value), 100)
 	.action(async (options: Record<string, unknown>) => {
@@ -771,7 +772,8 @@ eventsCommand
 eventsCommand
 	.command('show')
 	.description('Show a single event by eventId')
-	.option('--session <id>', 'Session ID or name')
+	.requiredOption('--project <name>', 'Project name')
+	.requiredOption('--workspace <name>', 'Workspace name')
 	.option(eventsFilterOption, 'Filter in key=value format')
 	.action(async (options: Record<string, unknown>) => {
 		await checkFirstTimeSetup()
@@ -785,7 +787,8 @@ eventsCommand
 eventsCommand
 	.command('tail')
 	.description('Tail recent events (no follow yet)')
-	.option('--session <id>', 'Session ID or name')
+	.requiredOption('--project <name>', 'Project name')
+	.requiredOption('--workspace <name>', 'Workspace name')
 	.option(eventsFilterOption, 'Filter in key=value format')
 	.option('--limit <n>', 'Limit results', (value: string) => Number(value), 50)
 	.action(async (options: Record<string, unknown>) => {
