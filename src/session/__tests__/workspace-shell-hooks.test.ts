@@ -16,7 +16,7 @@ describe('buildWorkspaceSessionHooks', () => {
     const hooks = buildWorkspaceSessionHooks("acme's repo", 'feat one');
 
     const expected =
-      `space() { gssh space --project 'acme'\\''s repo' --workspace 'feat one' "$@"; }`;
+      `space() { GSSH_SPACE_PROJECT='acme'\\''s repo' GSSH_SPACE_WORKSPACE='feat one' gssh space "$@"; }`;
 
     expect(hooks.shellInit?.bash).toBe(expected);
     expect(hooks.shellInit?.zsh).toBe(expected);

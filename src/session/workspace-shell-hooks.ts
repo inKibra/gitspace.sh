@@ -14,7 +14,9 @@ export function buildWorkspaceSessionHooks(
   const escapedProject = escapeShellArg(projectName);
   const escapedWorkspace = escapeShellArg(workspaceName);
 
-  const spaceFunction = `space() { gssh space --project ${escapedProject} --workspace ${escapedWorkspace} "$@"; }`;
+  // Keep defaults in env so Commander leaf subcommands can still parse
+  // explicit --project/--workspace flags passed by users.
+  const spaceFunction = `space() { GSSH_SPACE_PROJECT=${escapedProject} GSSH_SPACE_WORKSPACE=${escapedWorkspace} gssh space "$@"; }`;
 
   return {
     env: {

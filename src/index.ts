@@ -969,10 +969,10 @@ registerReviewSubcommands(reviewCommand)
 
 // Hidden workspace-scoped command surface.
 // Intended to be used from `space` shell function injected into workspace sessions.
+// Scope flags intentionally live on leaf subcommands so Commander passes them
+// to each handler's `options` object.
 const spaceCommand = program
 	.command('space', { hidden: true })
-	.option('--workspace <name>', 'Workspace name')
-	.option('--project <name>', 'Project name')
 	.description('Workspace-scoped commands')
 
 spaceCommand

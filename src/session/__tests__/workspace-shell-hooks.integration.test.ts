@@ -170,7 +170,7 @@ describe('workspace shell hooks integration', () => {
     const fakeGsshPath = join(binDir, 'gssh');
     writeFileSync(
       fakeGsshPath,
-      '#!/bin/sh\nfor arg in "$@"; do\n  printf "__GSSH_ARGV__%s\\n" "$arg"\ndone\n'
+      '#!/bin/sh\nprintf "__GSSH_ENV_PROJECT__%s\\n" "$GSSH_SPACE_PROJECT"\nprintf "__GSSH_ENV_WORKSPACE__%s\\n" "$GSSH_SPACE_WORKSPACE"\nfor arg in "$@"; do\n  printf "__GSSH_ARGV__%s\\n" "$arg"\ndone\n'
     );
     chmodSync(fakeGsshPath, 0o755);
 
@@ -256,15 +256,13 @@ describe('workspace shell hooks integration', () => {
 
     expect(argv).toEqual([
       'space',
-      '--project',
-      projectName,
-      '--workspace',
-      workspaceName,
       'review',
       'notes',
       '--format',
       'json',
     ]);
+    expect(normalized).toContain(`__GSSH_ENV_PROJECT__${projectName}`);
+    expect(normalized).toContain(`__GSSH_ENV_WORKSPACE__${workspaceName}`);
     expect(normalized).toContain('__SPACE_EXIT__0');
   });
 });
