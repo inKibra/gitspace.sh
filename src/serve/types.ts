@@ -111,6 +111,8 @@ export interface ClientSession {
   peerIdentityId?: string;
   /** Attached tmux-lite session ID (when state === "attached") */
   attachedSessionId?: string;
+  /** When true, this attached session is server-enforced read-only */
+  viewOnly?: boolean;
   /** True if waiting for initial resize before sending attach-init */
   waitingForResize?: boolean;
   /** Buffer for incomplete frames from tmux-lite socket */

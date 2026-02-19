@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   buildProcessSessionName,
+  encodeProcessNameForPath,
   parseProcessSessionName,
   PROCESS_SESSION_PREFIX,
   PROCESS_SESSION_MAX_NAME,
@@ -109,5 +110,15 @@ describe('buildProcessSessionName / parseProcessSessionName round-trip', () => {
       const parsed = parseProcessSessionName(name);
       expect(parsed?.instance).toBe(i);
     }
+  });
+});
+
+describe('encodeProcessNameForPath', () => {
+  it('encodes path separators and dot segments safely', () => {
+    expect(encodeProcessNameForPath('../api/server')).toBe('..%2Fapi%2Fserver');
+  });
+
+  it('keeps simple names readable', () => {
+    expect(encodeProcessNameForPath('web-server')).toBe('web-server');
   });
 });

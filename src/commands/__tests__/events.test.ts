@@ -99,7 +99,7 @@ describe('events: session not found', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(SpacesError);
       expect((err as SpacesError).exitCode).toBe(1);
-      expect((err as SpacesError).message).toContain('Session not found');
+      expect((err as SpacesError).message).toContain('No active sessions found');
     }
   });
 

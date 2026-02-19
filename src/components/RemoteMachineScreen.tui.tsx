@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PasteEvent } from '@opentui/core';
 import { useKeyboard, useRenderer } from '@opentui/react';
 import type { Identity } from '../types/identity.js';
@@ -90,7 +90,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       return remote.selectedProjectName;
     },
     onBeforeAttach: ({ target, params }) => {
-      if (target === 'workspace' && params.workspaceId) {
+      if (target === 'workspace' && params.workspaceId && !params.command) {
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
@@ -183,13 +183,37 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
   }, [remote.mode]);
 
+  const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
+    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName)).finally(() => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    });
+  }, [remote]);
+
+  const handleOpenEvents = useCallback(() => {
+    flow.showMessage({
+      title: 'Events Unavailable',
+      message: 'Events view is not available in this remote TUI screen yet.',
+      variant: 'info',
+    });
+  }, [flow]);
+
+  const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    void attachController.attach({
+      workspaceId,
+      command: 'sh',
+      args: ['-c', 'mkdir -p .gitspace && exec "${EDITOR:-vi}" .gitspace/processes.json'],
+    });
+  }, [attachController]);
+
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
     onRequestSessions: () => remote.requestSessions(),
     onAttachSession: attachController.attachFromSelection,
-    onStartProcessAttach: () => {},
-    onOpenEvents: () => {},
+    onEditProcesses: handleEditProcesses,
+    onStartProcessAttach: handleStartProcessAttach,
+    onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,
     onRefreshSessions: () => remote.requestSessions(),
     onBack,

@@ -68,6 +68,14 @@ function readSnapshotFile(filePath: string): WideSnapshot[] {
         const parsed = JSON.parse(line) as WideSnapshot;
         if (!parsed || typeof parsed !== 'object') continue;
         if (typeof parsed.correlationId !== 'string') continue;
+        if (typeof parsed.updatedAt !== 'number' || Number.isNaN(parsed.updatedAt)) continue;
+        if (typeof parsed.eventName !== 'string') continue;
+        if (typeof parsed.level !== 'string') continue;
+        if (typeof parsed.message !== 'string') continue;
+        if (typeof parsed.lastEventId !== 'string') continue;
+        if (!parsed.timelineMap || typeof parsed.timelineMap !== 'object') continue;
+        if (!Array.isArray(parsed.timelineOrder)) continue;
+        if (!parsed.timelineOrder.every((entry) => typeof entry === 'string')) continue;
         snapshots.push(parsed);
       } catch {
         // Skip malformed snapshot entries

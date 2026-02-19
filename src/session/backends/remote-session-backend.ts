@@ -20,6 +20,7 @@ import {
   type MarkInboxReadRequest,
   type ReviewRequest,
   type ReviewResponse,
+  type EventsListResponse,
   type ScriptOutputResponse,
   type SessionCtrl,
   type StartProcessRequest,
@@ -28,7 +29,7 @@ import {
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
-import type { WideEventFilter } from '../../types/events.js';
+import type { WideEvent, WideEventFilter } from '../../types/events.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
@@ -84,6 +85,14 @@ interface SessionEventMessage {
   cols?: number;
   rows?: number;
   code?: number;
+}
+
+interface PendingEventsChunk {
+  workspaceId: string;
+  totalChunks: number;
+  chunks: Map<number, WideEvent[]>;
+  liveEventIds: string[];
+  receivedAtMs: number;
 }
 
 export interface RemoteSessionSocketHandlers {
@@ -340,6 +349,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private pendingEventChunks = new Map<string, PendingEventsChunk>();
 
   constructor(options: RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHello, TServerAuth>) {
     this.descriptor = options.descriptor;
@@ -1020,11 +1030,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         return;
       }
       case 'events_list':
-        this.emit({
-          type: 'events',
-          events: message.events,
-          liveEventIds: message.liveEventIds,
-        });
+        this.handleEventsList(message);
         return;
       case 'process_started':
         this.emit({
@@ -1070,6 +1076,67 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       done: message.done,
       error: message.error,
       exitCode: message.exitCode,
+    });
+  }
+
+  private prunePendingEventChunks(nowMs = Date.now()): void {
+    const ttlMs = 30_000;
+    for (const [requestId, pending] of this.pendingEventChunks) {
+      if (nowMs - pending.receivedAtMs > ttlMs) {
+        this.pendingEventChunks.delete(requestId);
+      }
+    }
+  }
+
+  private handleEventsList(message: EventsListResponse): void {
+    const totalChunks = message.totalChunks ?? 1;
+    const chunkIndex = message.chunkIndex ?? 0;
+    const requestId = message.requestId;
+
+    if (!requestId || totalChunks <= 1) {
+      this.emit({
+        type: 'events',
+        events: message.events,
+        liveEventIds: message.liveEventIds,
+      });
+      return;
+    }
+
+    this.prunePendingEventChunks();
+
+    const pending = this.pendingEventChunks.get(requestId) ?? {
+      workspaceId: message.workspaceId,
+      totalChunks,
+      chunks: new Map<number, WideEvent[]>(),
+      liveEventIds: message.liveEventIds,
+      receivedAtMs: Date.now(),
+    };
+
+    pending.workspaceId = message.workspaceId;
+    pending.totalChunks = totalChunks;
+    pending.liveEventIds = message.liveEventIds;
+    pending.receivedAtMs = Date.now();
+    pending.chunks.set(chunkIndex, message.events);
+    this.pendingEventChunks.set(requestId, pending);
+
+    if (pending.chunks.size < pending.totalChunks) {
+      return;
+    }
+
+    const merged: WideEvent[] = [];
+    for (let idx = 0; idx < pending.totalChunks; idx += 1) {
+      const chunk = pending.chunks.get(idx);
+      if (!chunk) {
+        return;
+      }
+      merged.push(...chunk);
+    }
+
+    this.pendingEventChunks.delete(requestId);
+    this.emit({
+      type: 'events',
+      events: merged,
+      liveEventIds: pending.liveEventIds,
     });
   }
 
@@ -1293,6 +1360,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.sessionKeys = null;
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
+    this.pendingEventChunks.clear();
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
     this.rejectAllPendingReviewRequests('Remote session disconnected');

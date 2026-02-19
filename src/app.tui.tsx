@@ -1278,7 +1278,12 @@ function App({ relayConfig, onQuit }: AppProps) {
       const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
       if (!workspace) return;
       if (filter) {
-        void requestLocalEvents(workspace.path, filter.filter as WideEventFilter);
+        void requestLocalEvents(
+          workspace.path,
+          filter.filter as WideEventFilter,
+          undefined,
+          filter.sinceMinutes ? filter.sinceMinutes * 60 * 1000 : undefined
+        );
       } else {
         void requestLocalEvents(workspace.path);
       }
@@ -1295,12 +1300,32 @@ function App({ relayConfig, onQuit }: AppProps) {
     const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
     if (!workspace) return;
 
+    const activeFilter = eventsProps.activeFilterName
+      ? localSavedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+      : null;
+
     const interval = setInterval(() => {
-      void requestLocalEvents(workspace.path);
+      if (activeFilter) {
+        void requestLocalEvents(
+          workspace.path,
+          activeFilter.filter as WideEventFilter,
+          undefined,
+          activeFilter.sinceMinutes ? activeFilter.sinceMinutes * 60 * 1000 : undefined
+        );
+      } else {
+        void requestLocalEvents(workspace.path);
+      }
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [state.view, eventsWorkspaceId, localWorkspaces, requestLocalEvents]);
+  }, [
+    state.view,
+    eventsWorkspaceId,
+    localWorkspaces,
+    eventsProps.activeFilterName,
+    localSavedEventFilters,
+    requestLocalEvents,
+  ]);
 
   // ========== Activity Tracking for Notifications ==========
 

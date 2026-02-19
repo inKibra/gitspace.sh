@@ -1114,36 +1114,49 @@ export class RemoteSessionHandler {
 
       // Chunk responses to stay under payload limit
       const maxPayloadBytes = 900_000;
-      const buildPayload = (chunk: import("../../types/events.js").WideEvent[]) => ({
+      const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      const buildPayload = (
+        chunk: import("../../types/events.js").WideEvent[],
+        chunkIndex: number,
+        totalChunks: number,
+      ) => ({
         type: "events_list" as const,
         workspaceId: workspaceRef.workspaceId,
         events: chunk,
         liveEventIds: [] as string[],
+        requestId,
+        chunkIndex,
+        totalChunks,
       });
 
-      if (events.length === 0) {
-        await this.sendMessage(session, sendResponse, buildPayload([]));
-        return;
-      }
-
+      const chunks: import("../../types/events.js").WideEvent[][] = [];
       let chunk: import("../../types/events.js").WideEvent[] = [];
       for (const event of events) {
         chunk.push(event);
-        const payloadSize = Buffer.byteLength(JSON.stringify(buildPayload(chunk)));
+        const payloadSize = Buffer.byteLength(JSON.stringify(buildPayload(chunk, 0, 1)));
         if (payloadSize > maxPayloadBytes) {
           if (chunk.length === 1) {
-            await this.sendMessage(session, sendResponse, buildPayload(chunk));
+            chunks.push(chunk);
             chunk = [];
             continue;
           }
           const last = chunk.pop();
-          await this.sendMessage(session, sendResponse, buildPayload(chunk));
+          chunks.push(chunk);
           chunk = last ? [last] : [];
         }
       }
 
       if (chunk.length > 0) {
-        await this.sendMessage(session, sendResponse, buildPayload(chunk));
+        chunks.push(chunk);
+      }
+
+      if (chunks.length === 0) {
+        chunks.push([]);
+      }
+
+      const totalChunks = chunks.length;
+      for (let i = 0; i < totalChunks; i += 1) {
+        await this.sendMessage(session, sendResponse, buildPayload(chunks[i], i, totalChunks));
       }
     } catch (e) {
       console.error("[remote-session] Failed to get events:", e);
@@ -1162,7 +1175,7 @@ export class RemoteSessionHandler {
   ): Promise<void> {
     try {
       const workspaces = await scanWorkspaces();
-      const workspace = workspaces.find(w => w.id === workspaceId);
+      const workspace = workspaces.find((w) => matchesWorkspaceId(w, workspaceId));
       if (!workspace) {
         await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
         return;
@@ -1209,7 +1222,7 @@ export class RemoteSessionHandler {
   ): Promise<void> {
     try {
       const workspaces = await scanWorkspaces();
-      const workspace = workspaces.find(w => w.id === workspaceId);
+      const workspace = workspaces.find((w) => matchesWorkspaceId(w, workspaceId));
       if (!workspace) {
         await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
         return;

@@ -24,8 +24,10 @@ interface EventsTailOptions extends EventsCommandOptions {
 
 function parseFilter(filter?: string): WideEventFilter {
   if (!filter) return {};
-  const [key, value] = filter.split('=');
-  if (!key || value === undefined) return {};
+  const separator = filter.indexOf('=');
+  if (separator <= 0) return {};
+  const key = filter.slice(0, separator);
+  const value = filter.slice(separator + 1);
   const trimmed = key.trim();
   const val = value.trim();
   switch (trimmed) {
@@ -39,6 +41,10 @@ function parseFilter(filter?: string): WideEventFilter {
       return { message: val };
     case 'processName':
       return { processName: val };
+    case 'kind':
+      return val === 'source' || val === 'wide' ? { kind: val } : {};
+    case 'correlationId':
+      return { correlationId: val };
     default:
       return {};
   }
@@ -56,15 +62,16 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<{ events
     : sessions[0];
 
   if (!target) {
-    throw new SpacesError('Session not found.', 'USER_ERROR');
+    if (options.session) {
+      throw new SpacesError(`Session not found: ${options.session}`, 'USER_ERROR');
+    }
+    throw new SpacesError('No active sessions found.', 'USER_ERROR');
   }
 
   const workspacePath = target.cwd;
   const workspaceId = workspacePath.split('/').pop() || 'workspace';
 
-  const processName = options.filter?.startsWith('processName=')
-    ? options.filter.split('=')[1]
-    : undefined;
+  const processName = parseFilter(options.filter).processName;
   const eventsDir = processName
     ? getProcessEventsDir(workspacePath, processName)
     : listProcessEventsDirs(workspacePath)[0];

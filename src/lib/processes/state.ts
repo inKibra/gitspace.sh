@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getProcessControlDir } from './control.js';
+import { encodeProcessNameForPath } from './names.js';
 
 export interface ProcessExitInfo {
   exitCode: number;
@@ -20,11 +21,11 @@ function getExitDir(workspacePath: string): string {
 }
 
 function getStartedPath(workspacePath: string, name: string, instance: number): string {
-  return join(getStartedDir(workspacePath), `${name}-${instance}`);
+  return join(getStartedDir(workspacePath), `${encodeProcessNameForPath(name)}-${instance}`);
 }
 
 function getExitPath(workspacePath: string, name: string, instance: number): string {
-  return join(getExitDir(workspacePath), `${name}-${instance}.json`);
+  return join(getExitDir(workspacePath), `${encodeProcessNameForPath(name)}-${instance}.json`);
 }
 
 export function markProcessStarted(workspacePath: string, name: string, instance: number): void {

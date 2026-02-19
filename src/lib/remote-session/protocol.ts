@@ -328,6 +328,9 @@ export interface EventsListResponse {
   workspaceId: string;
   events: import("../../types/events.js").WideEvent[];
   liveEventIds: string[];
+  requestId?: string;
+  chunkIndex?: number;
+  totalChunks?: number;
 }
 
 /** Process started response */

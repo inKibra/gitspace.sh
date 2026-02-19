@@ -4,6 +4,7 @@
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { encodeProcessNameForPath } from './names.js';
 
 export function getProcessControlDir(workspacePath: string): string {
   return join(workspacePath, '.gitspace', '.processes');
@@ -18,7 +19,7 @@ export function getProcessDisablePath(
   name: string,
   instance: number
 ): string {
-  return join(getProcessDisableDir(workspacePath), `${name}-${instance}`);
+  return join(getProcessDisableDir(workspacePath), `${encodeProcessNameForPath(name)}-${instance}`);
 }
 
 export function disableProcessRestart(

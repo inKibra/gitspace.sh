@@ -487,5 +487,8 @@ export function matchFilter(event: WideEvent, filter: WideEventFilter): boolean 
   if (filter.eventId && event.eventId !== filter.eventId) return false;
   if (filter.level && event.level !== filter.level) return false;
   if (filter.message && !event.message.includes(filter.message)) return false;
+  if (filter.processName && event.processName !== filter.processName) return false;
+  if (filter.kind && event.kind !== filter.kind) return false;
+  if (filter.correlationId && event.correlationId !== filter.correlationId) return false;
   return true;
 }

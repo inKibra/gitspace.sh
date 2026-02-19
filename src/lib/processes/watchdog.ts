@@ -27,8 +27,8 @@ export interface ProcessWatchdogDeps {
 
 const restartState = new Map<string, ProcessRestartState>();
 
-function getRestartKey(spec: ProcessInstanceSpec): string {
-  return `${spec.name}:${spec.instance}`;
+function getRestartKey(workspacePath: string, spec: ProcessInstanceSpec): string {
+  return `${workspacePath}:${spec.name}:${spec.instance}`;
 }
 
 export async function reconcileProcessRestarts(
@@ -47,7 +47,7 @@ export async function reconcileProcessRestarts(
   const sessions = await listSessionsFn();
 
   for (const spec of specs) {
-    const key = getRestartKey(spec);
+    const key = getRestartKey(workspacePath, spec);
     const restart = getRestartConfig(spec.definition);
     if (restart.policy === 'never') continue;
 

@@ -169,30 +169,34 @@ async function run(): Promise<void> {
   };
 
   const stdoutStream = child.stdout as ReadableStream<Uint8Array> | null;
+  const streamDrains: Array<Promise<void>> = [];
   if (stdoutStream) {
     const reader = stdoutStream.getReader();
-    (async () => {
+    const drain = (async () => {
       while (true) {
         const { value, done } = await reader.read();
         if (done || !value) break;
         handleChunk(value, "stdout");
       }
     })();
+    streamDrains.push(drain);
   }
 
   const stderrStream = child.stderr as ReadableStream<Uint8Array> | null;
   if (stderrStream) {
     const reader = stderrStream.getReader();
-    (async () => {
+    const drain = (async () => {
       while (true) {
         const { value, done } = await reader.read();
         if (done || !value) break;
         handleChunk(value, "stderr");
       }
     })();
+    streamDrains.push(drain);
   }
 
   const exitCode = await child.exited;
+  await Promise.all(streamDrains);
   collector.finalize();
   try {
     recordProcessExit(opts.workspacePath, opts.processName, opts.instance, exitCode ?? 0);

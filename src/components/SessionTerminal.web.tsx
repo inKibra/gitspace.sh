@@ -236,6 +236,9 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           if (event.key === 'Tab' && event.shiftKey) {
             event.preventDefault();
             event.stopPropagation();
+            if (readOnlyRef.current) {
+              return;
+            }
             onDataRef.current(new TextEncoder().encode('\x1b[Z'));
             return;
           }
@@ -283,7 +286,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         };
 
         const handleInputFallback = (event: Event) => {
-          if (!isIOS || !helperTextarea || isComposing) {
+          if (!isIOS || !helperTextarea || isComposing || readOnlyRef.current) {
             return;
           }
 

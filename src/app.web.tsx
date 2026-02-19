@@ -558,11 +558,25 @@ export default function App() {
   // Events polling when events view is active
   useEffect(() => {
     if (!showEvents || !eventsWorkspacePath) return;
+
+    const activeFilter = eventsProps.activeFilterName
+      ? terminal.savedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+      : null;
+
     const interval = setInterval(() => {
-      terminal.requestEvents(eventsWorkspacePath);
+      if (activeFilter) {
+        terminal.requestEvents(
+          eventsWorkspacePath,
+          activeFilter.filter as WideEventFilter,
+          undefined,
+          activeFilter.sinceMinutes ? activeFilter.sinceMinutes * 60 * 1000 : undefined
+        );
+      } else {
+        terminal.requestEvents(eventsWorkspacePath);
+      }
     }, 2000);
     return () => clearInterval(interval);
-  }, [showEvents, eventsWorkspacePath, terminal.requestEvents]);
+  }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, terminal.savedEventFilters, terminal.requestEvents]);
 
   // ========== Activity Tracking for Notifications ==========
 

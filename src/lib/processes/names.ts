@@ -5,6 +5,13 @@
 export const PROCESS_SESSION_PREFIX = 'proc';
 export const PROCESS_SESSION_MAX_NAME = 64;
 
+/**
+ * Encode a process name for use as a single filesystem path segment.
+ */
+export function encodeProcessNameForPath(processName: string): string {
+  return encodeURIComponent(processName);
+}
+
 export function buildProcessSessionName(
   workspaceId: string,
   processName: string,

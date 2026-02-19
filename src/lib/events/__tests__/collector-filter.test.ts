@@ -63,6 +63,36 @@ describe('matchFilter', () => {
     expect(matchFilter(makeEvent(), { message: '/api/posts' })).toBe(false);
   });
 
+  it('should match on processName', () => {
+    const event = makeEvent({ processName: 'web' });
+    expect(matchFilter(event, { processName: 'web' })).toBe(true);
+  });
+
+  it('should reject on processName mismatch', () => {
+    const event = makeEvent({ processName: 'worker' });
+    expect(matchFilter(event, { processName: 'web' })).toBe(false);
+  });
+
+  it('should match on kind', () => {
+    const event = makeEvent({ kind: 'wide' });
+    expect(matchFilter(event, { kind: 'wide' })).toBe(true);
+  });
+
+  it('should reject on kind mismatch', () => {
+    const event = makeEvent({ kind: 'source' });
+    expect(matchFilter(event, { kind: 'wide' })).toBe(false);
+  });
+
+  it('should match on correlationId', () => {
+    const event = makeEvent({ correlationId: 'corr-1' });
+    expect(matchFilter(event, { correlationId: 'corr-1' })).toBe(true);
+  });
+
+  it('should reject on correlationId mismatch', () => {
+    const event = makeEvent({ correlationId: 'corr-2' });
+    expect(matchFilter(event, { correlationId: 'corr-1' })).toBe(false);
+  });
+
   it('should match with multiple filter fields (AND logic)', () => {
     const event = makeEvent({ eventName: 'http_request', level: 'error' });
     expect(matchFilter(event, { eventName: 'http_request', level: 'error' })).toBe(true);

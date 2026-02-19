@@ -670,7 +670,7 @@ class ServeProcessHostManager {
   }
 
   private spawnProcess(configPath: string): Subprocess {
-    const proc = spawn(['cloudflared', 'tunnel', 'run', '--config', configPath], {
+    const proc = spawn(['cloudflared', 'tunnel', '--config', configPath, 'run'], {
       env: { ...process.env, TUNNEL_TOKEN: this.tunnelToken },
       stdin: 'ignore',
       stdout: 'pipe',

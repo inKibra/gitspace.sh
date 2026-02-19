@@ -5,6 +5,7 @@
 import { existsSync, readdirSync } from 'fs';
 import { join, relative, sep } from 'path';
 import { getGitspaceDir } from '../../core/config.js';
+import { encodeProcessNameForPath } from '../processes/names.js';
 
 const DEFAULT_INSTANCE = 1;
 
@@ -45,7 +46,7 @@ export function getProcessEventsDir(
   processInstance?: number
 ): string {
   const instance = processInstance ?? DEFAULT_INSTANCE;
-  return join(workspacePath, '.events', 'processes', `${processName}-${instance}`);
+  return join(workspacePath, '.events', 'processes', `${encodeProcessNameForPath(processName)}-${instance}`);
 }
 
 export function getProcessSnapshotsPath(

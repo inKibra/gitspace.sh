@@ -1,7 +1,7 @@
 /**
  * Process watchdog tests - restart policy enforcement with injected deps
  *
- * NOTE: The watchdog uses a module-level restartState map keyed by "name:instance".
+ * NOTE: The watchdog uses a module-level restartState map keyed by "workspacePath:name:instance".
  * Each test uses a unique process name to avoid state leaking between tests.
  */
 
@@ -184,5 +184,27 @@ describe('reconcileProcessRestarts', () => {
     currentTime += 20000; // well past doubled backoff
     await reconcileProcessRestarts('/tmp/ws', specs, deps);
     expect(deps.startProcessInstance).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps restart backoff isolated per workspace for same process name', async () => {
+    const name = uniqueName();
+    const spec = makeSpec({ name, backoffMs: 60_000 });
+    const startA = mock(() => Promise.resolve({ sessionId: 'a', created: true }));
+    const startB = mock(() => Promise.resolve({ sessionId: 'b', created: true }));
+
+    const depsA = makeDeps({
+      startProcessInstance: startA,
+      now: mock(() => 1000),
+    });
+    const depsB = makeDeps({
+      startProcessInstance: startB,
+      now: mock(() => 1000),
+    });
+
+    await reconcileProcessRestarts('/tmp/ws-a', [spec], depsA);
+    await reconcileProcessRestarts('/tmp/ws-b', [spec], depsB);
+
+    expect(startA).toHaveBeenCalledTimes(1);
+    expect(startB).toHaveBeenCalledTimes(1);
   });
 });

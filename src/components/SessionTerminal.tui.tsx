@@ -255,7 +255,7 @@ export function SessionTerminal({
     return () => {
       renderer.keyInput.off('paste', handlePaste);
     };
-  }, [modalOpen, onActivity, onData, renderer]);
+  }, [modalOpen, onActivity, onData, readOnly, renderer]);
 
   useKeyboard((key) => {
     if (modalOpen) {
