@@ -56,6 +56,7 @@ import { createShare } from './commands/share.js'
 import { initIdentity, showIdentity } from './commands/identity.js'
 import { connectToRemote } from './commands/connect.js'
 import { serve, serveStart, serveStop, serveStatus } from './commands/serve.js'
+import { cloudDestroy, cloudLaunch, cloudList, cloudResume, cloudSetup, cloudSetupClear, cloudStatus, cloudStop } from './commands/cloud.js'
 import { startRelay, authorizeMachine, revokeMachine, listMachines, listTrustedRelays, untrustRelay } from './commands/relay.js'
 import { authLogin, authLogout, authStatus } from './commands/auth.js'
 import { hostReserve, hostRelease, hostList, hostSetPrimary, hostStatus } from './commands/host.js'
@@ -451,6 +452,9 @@ serveCommand
 	.description('Start the serve daemon')
 	.option('--relay <url>', 'Override default relay URL')
 	.option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
+	.option('--bootstrap-token <token>', 'One-time bootstrap token for cloud machine registration')
+	.option('--unlock-token <token>', 'One-time token to request unlock grant from relay')
+	.option('--workspace-id <id>', 'Cloud workspace id for unlock-token flow')
 	.option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
 	.option('--password-stdin', 'Read password from stdin')
 	.option('--foreground', 'Run in foreground (don\'t daemonize)')
@@ -489,12 +493,114 @@ serveCommand
 serveCommand
 	.option('--relay <url>', 'Override default relay URL')
 	.option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
+	.option('--bootstrap-token <token>', 'One-time bootstrap token for cloud machine registration')
+	.option('--unlock-token <token>', 'One-time token to request unlock grant from relay')
+	.option('--workspace-id <id>', 'Cloud workspace id for unlock-token flow')
 	.option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
 	.action(async (options) => {
 		await checkFirstTimeSetup()
 		try {
 			// Default to interactive (non-daemon) mode for backwards compatibility
 			await serve(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// ============================================================================
+// Cloud Commands
+// ============================================================================
+
+const cloudCommand = program
+	.command('cloud')
+	.description('Cloud control relay operations')
+
+cloudCommand
+	.command('status')
+	.description('Show cloud control status for the running serve daemon')
+	.action(async () => {
+		await checkFirstTimeSetup()
+		try {
+			await cloudStatus()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+cloudCommand
+	.command('list')
+	.description('List cloud workspaces from the control relay store')
+	.action(async () => {
+		await checkFirstTimeSetup()
+		try {
+			await cloudList()
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+cloudCommand
+	.command('setup')
+	.description('Configure cloud provider credentials (Sprites token)')
+	.option('--clear', 'Remove stored provider credentials')
+	.action(async (options: { clear?: boolean }) => {
+		try {
+			if (options.clear) {
+				await cloudSetupClear()
+			} else {
+				await cloudSetup()
+			}
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+cloudCommand
+	.command('launch')
+	.description('Launch a new cloud agent workspace')
+	.requiredOption('--repo <owner/repo>', 'GitHub repository (e.g. myorg/myrepo)')
+	.option('--branch <branch>', 'Branch to check out', 'main')
+	.option('--image <image>', 'Docker image override for the agent VM')
+	.action(async (options: { repo: string; branch?: string; image?: string }) => {
+		try {
+			await cloudLaunch({
+				repo: options.repo,
+				branch: options.branch,
+				image: options.image,
+			})
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+cloudCommand
+	.command('stop <workspaceId>')
+	.description('Hibernate a running cloud workspace')
+	.action(async (workspaceId: string) => {
+		try {
+			await cloudStop(workspaceId)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+cloudCommand
+	.command('resume <workspaceId>')
+	.description('Wake a hibernated cloud workspace')
+	.action(async (workspaceId: string) => {
+		try {
+			await cloudResume(workspaceId)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+cloudCommand
+	.command('destroy <workspaceId>')
+	.description('Permanently destroy a cloud workspace (irreversible)')
+	.action(async (workspaceId: string) => {
+		try {
+			await cloudDestroy(workspaceId)
 		} catch (error) {
 			handleError(error)
 		}

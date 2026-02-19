@@ -102,55 +102,58 @@ All terminal data is encrypted using keys derived from an X3DH (Extended Triple 
 
 ## Quick Start
 
-### Step 1: Start the Relay Server
+### Owner model
 
-The relay is the meeting point for machines and clients. You can run your own or use a hosted relay.
+For hosted setup, the owner is the machine/operator that configures GitSpace and runs `gssh serve start`.
+That host is your control node for identity, access, and relay-connected machines.
+
+### Step 1: Install GitSpace CLI
 
 ```bash
-# Start the relay
-gssh relay start --port 8080
+npm install -g gitspace
+gssh --version
 ```
 
-The relay will listen on `ws://localhost:8080/ws`.
-
-### Step 2: Set Up Your Machine Identity
-
-Before serving, create a persistent identity for your machine:
+### Step 2: Authenticate GitHub CLI (recommended)
 
 ```bash
-# Create a new identity (stored in ~/gitspace/.identity/)
-gssh identity init --label "My MacBook"
+gh auth login
+```
 
-# View your identity
+### Step 3: Set up machine identity
+
+```bash
+gssh identity init --label "My Control Host"
 gssh identity show
 ```
 
-### Step 3: Authorize Your Machine with the Relay
+`gssh serve` requires an existing identity.
 
-Authorize the machine's public identity on the relay host:
-
-```bash
-# On the relay host
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "My MacBook"
-```
-
-You can copy the `gssh-pub:...` value from `gssh identity show`.
-
-### Step 4: Start Serving
-
-Connect your machine to the relay:
+### Step 4: Authenticate with gitspace.sh
 
 ```bash
-# Start the serve daemon
-gssh serve --relay ws://localhost:8080/ws
+gssh auth login
 ```
 
-Your machine is now:
-- Connected to the relay
-- Registered with its identity
-- Ready to accept client connections
+### Step 5: Reserve your subdomain
 
-### Step 5: Create an Invite
+```bash
+gssh host reserve <yourname>
+gssh host status
+```
+
+### Step 6: Start serving
+
+```bash
+gssh serve start
+gssh serve status
+gssh status
+gssh cloud status
+```
+
+Then open `https://<yourname>.gitspace.sh`.
+
+### Step 7: Create an invite
 
 To let someone connect, create a signed invite:
 
@@ -172,7 +175,7 @@ The invite is a self-contained, signed token that includes:
 
 **Note:** When you create an invite, it's automatically registered with the relay server. This allows clients to connect via the invite ID without needing to present the full token to the relay.
 
-### Step 6: Connect from Another Device
+### Step 8: Connect from another device
 
 On the remote device:
 
@@ -191,6 +194,19 @@ The connection flow:
 4. X3DH handshake establishes encryption
 5. PTY session starts
 6. You're in!
+
+### Self-hosted relay alternative
+
+If you are not using gitspace.sh hosting, run your own relay and point serve at it:
+
+```bash
+# Relay host
+gssh relay start --port 4480
+
+# Machine host
+gssh identity init --label "My Machine"
+gssh serve start --relay ws://<relay-host>:4480/ws
+```
 
 ---
 

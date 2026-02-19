@@ -444,17 +444,26 @@ GitSpace provides secure remote terminal access with **end-to-end encryption**. 
 The easiest way to get remote access is through [gitspace.sh](https://gitspace.sh):
 
 ```bash
-# 1. Authenticate with GitHub
+# 1. Initialize machine identity on your control host
+gssh identity init --label "Control Host"
+gssh identity show
+
+# 2. Authenticate with gitspace.sh
 gssh auth login
 
-# 2. Reserve your subdomain (e.g., yourname.gitspace.sh)
+# 3. Reserve your subdomain (e.g., yourname.gitspace.sh)
 gssh host reserve yourname
+gssh host status
 
-# 3. Start serving (creates identity if needed)
-gssh serve
+# 4. Start serving
+gssh serve start
+gssh serve status
+gssh status
 
-# 4. Access from browser at https://yourname.gitspace.sh
+# 5. Access from browser at https://yourname.gitspace.sh
 ```
+
+In hosted mode, this machine is your control node (owner): it runs the relay path, maintains access state, and is the place cloud-control state/secrets are managed.
 
 ### Self-Hosted Setup
 
@@ -466,7 +475,7 @@ gssh relay start --port 4480
 
 # Terminal 2: Initialize identity and start serving
 gssh identity init --label "My MacBook"
-gssh serve --relay ws://localhost:4480/ws
+gssh serve start --relay ws://localhost:4480/ws
 
 # Terminal 3: Create invite for remote access
 gssh share create
@@ -495,10 +504,10 @@ Control who can connect to your machine:
 gssh access list
 
 # Add a client by public key
-gssh access add spcs_pk_abc123... --label "Work Laptop"
+gssh access add gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "Work Laptop"
 
 # Remove client access
-gssh access remove spcs_pk_abc123...
+gssh access remove <client-identity-id-or-label>
 ```
 
 ### Creating Invites
@@ -539,6 +548,8 @@ gssh --relay wss://relay.example.com
 | `gssh serve` | Start machine daemon |
 | `gssh serve start` | Start serve as background daemon |
 | `gssh serve stop` | Stop background serve daemon |
+| `gssh cloud status` | Show cloud control status on current control node |
+| `gssh cloud list` | List cloud workspaces from control store |
 | `gssh share create` | Create invite token |
 | `gssh connect <token>` | Connect to remote machine |
 | `gssh status` | Show all daemon statuses |

@@ -32,8 +32,21 @@ export interface RegisterMachineMessage {
   challengeResponse?: string;
   /** Protocol version (for signature requirement negotiation) */
   protocolVersion?: number;
+  /** One-time bootstrap token for first cloud-machine registration */
+  bootstrapToken?: string;
+  /** One-time register permit minted by unlock_request */
+  registerPermit?: string;
   /** Ed25519 signature of message */
   signature?: SignatureBlock;
+}
+
+/** Machine requests identity unlock material using a one-time token */
+export interface UnlockRequestMessage {
+  type: 'unlock_request';
+  workspaceId: string;
+  unlockToken: string;
+  /** Machine ephemeral X25519 public key (base64) */
+  ephemeralKey: string;
 }
 
 /** Machine registers an invite */
@@ -177,6 +190,23 @@ export interface RegisteredMessage {
   machineId: string;
 }
 
+/** Unlock grant payload from relay to machine */
+export interface UnlockGrantMessage {
+  type: 'unlock_grant';
+  workspaceId: string;
+  tokenId: string;
+  /** One-time permit required for register_machine */
+  registerPermit: string;
+  /** Sealed identity payload (base64) */
+  ciphertext: string;
+  /** Relay ephemeral X25519 public key (base64) */
+  relayEphemeralKey: string;
+  /** HKDF salt (base64) */
+  salt: string;
+  /** Register permit expiry timestamp */
+  expiresAt: string;
+}
+
 /** Access list sync from relay to machine */
 export interface AccessListMessage {
   type: "access_list";
@@ -301,6 +331,7 @@ export interface ErrorMessage {
 /** All messages from machine to relay */
 export type MachineToRelayMessage =
   | RegisterMachineMessage
+  | UnlockRequestMessage
   | RegisterInviteMessage
   | AuthorizeClientMessage
   | RevokeClientMessage
@@ -321,6 +352,7 @@ export type ClientToRelayMessage =
 export type RelayToMachineMessage =
   | RelayIdentityMessage
   | ChallengeMessage
+  | UnlockGrantMessage
   | RegisteredMessage
   | AccessListMessage
   | AccessUpdateMessage
@@ -484,6 +516,9 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       if (!isValidKeyString(msg.keyExchangeKey)) return null;
       if (msg.label !== undefined && !isValidLabel(msg.label)) return null;
       if (msg.challengeResponse !== undefined && !isValidBase64(msg.challengeResponse)) return null;
+      if (msg.protocolVersion !== undefined && typeof msg.protocolVersion !== 'number') return null;
+      if (msg.bootstrapToken !== undefined && !isValidIdentifier(msg.bootstrapToken)) return null;
+      if (msg.registerPermit !== undefined && !isValidIdentifier(msg.registerPermit)) return null;
       return {
         type: "register_machine",
         machineId: msg.machineId,
@@ -491,6 +526,21 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         keyExchangeKey: msg.keyExchangeKey,
         label: msg.label,
         challengeResponse: msg.challengeResponse,
+        protocolVersion: msg.protocolVersion,
+        bootstrapToken: msg.bootstrapToken,
+        registerPermit: msg.registerPermit,
+      };
+    }
+
+    case 'unlock_request': {
+      if (!isValidIdentifier(msg.workspaceId)) return null;
+      if (!isValidIdentifier(msg.unlockToken)) return null;
+      if (!isValidBase64(msg.ephemeralKey)) return null;
+      return {
+        type: 'unlock_request',
+        workspaceId: msg.workspaceId,
+        unlockToken: msg.unlockToken,
+        ephemeralKey: msg.ephemeralKey,
       };
     }
 
@@ -688,6 +738,26 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       return {
         type: "challenge",
         nonce: msg.nonce,
+      };
+    }
+
+    case 'unlock_grant': {
+      if (!isValidIdentifier(msg.workspaceId)) return null;
+      if (!isValidIdentifier(msg.tokenId)) return null;
+      if (!isValidIdentifier(msg.registerPermit)) return null;
+      if (!isValidBase64(msg.ciphertext)) return null;
+      if (!isValidBase64(msg.relayEphemeralKey)) return null;
+      if (!isValidBase64(msg.salt)) return null;
+      if (typeof msg.expiresAt !== 'string') return null;
+      return {
+        type: 'unlock_grant',
+        workspaceId: msg.workspaceId,
+        tokenId: msg.tokenId,
+        registerPermit: msg.registerPermit,
+        ciphertext: msg.ciphertext,
+        relayEphemeralKey: msg.relayEphemeralKey,
+        salt: msg.salt,
+        expiresAt: msg.expiresAt,
       };
     }
 

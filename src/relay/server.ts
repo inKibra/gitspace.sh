@@ -19,8 +19,29 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { signMessage, verifySignedMessage, getSignerPublicKey, type SignedMessage } from "./signing.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import { formatRelayFingerprint, type RelayIdentity } from "./identity.js";
-import { isAuthorized, getAuthorizedMachine } from "./authorization.js";
+import {
+  addAuthorizedMachine,
+  formatSpacesPubKey,
+  getAuthorizedMachine,
+  isAuthorized,
+} from "./authorization.js";
 import { deriveIdentityId } from "../lib/tmux-lite/crypto/identity.js";
+import { x25519 } from "@noble/curves/ed25519.js";
+import { hkdf } from "@noble/hashes/hkdf.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { seal } from "../lib/tmux-lite/crypto/secretbox.js";
+import {
+  validateX25519PublicKey,
+  x25519SharedSecret,
+} from "../lib/tmux-lite/crypto/keyexchange.js";
+import {
+  consumeCloudBootstrapTokenForUnlock,
+  consumeCloudRegisterPermit,
+  getCloudWorkspace,
+  getCloudWorkspaceByMachinePublicKey,
+  markCloudBootstrapReady,
+} from "./control/store.js";
+import { getWorkspaceIdentity } from "./control/workspace-identity.js";
 
 /**
  * Candidate paths to web terminal dist files (built by Vite).
@@ -141,6 +162,7 @@ import {
   isClientHandshakeMessage,
   type ProtocolMessage,
   type RegisterMachineMessage,
+  type UnlockRequestMessage,
   type RegisterInviteMessage,
   type AuthorizeClientMessage,
   type RevokeClientMessage,
@@ -228,6 +250,38 @@ const SIGNED_CLIENT_MESSAGE_TYPES = new Set<SignedClientMessageType>([
   "connect_with_invite",
   "connect_to_machine",
 ]);
+
+const UNLOCK_KDF_INFO = new TextEncoder().encode("gitspace-unlock-v1");
+const UNLOCK_KDF_KEY_LENGTH = 32;
+
+function deriveUnlockKey(sharedSecret: Uint8Array, salt: Uint8Array): Uint8Array {
+  return hkdf(sha256, sharedSecret, salt, UNLOCK_KDF_INFO, UNLOCK_KDF_KEY_LENGTH);
+}
+
+function createSealedUnlockPayload(
+  machineEphemeralPublicKeyBase64: string,
+  payload: string
+): { ciphertext: string; relayEphemeralKey: string; salt: string } {
+  const machineEphemeralPublicKey = new Uint8Array(
+    Buffer.from(machineEphemeralPublicKeyBase64, "base64")
+  );
+  if (!validateX25519PublicKey(machineEphemeralPublicKey)) {
+    throw new Error("Invalid machine ephemeral key");
+  }
+
+  const relayEphemeralPrivateKey = randomBytes(32);
+  const relayEphemeralPublicKey = x25519.getPublicKey(relayEphemeralPrivateKey);
+  const sharedSecret = x25519SharedSecret(relayEphemeralPrivateKey, machineEphemeralPublicKey);
+  const salt = randomBytes(32);
+  const key = deriveUnlockKey(sharedSecret, salt);
+
+  const sealed = seal(Buffer.from(payload, "utf-8"), key);
+  return {
+    ciphertext: sealed.toString("base64"),
+    relayEphemeralKey: Buffer.from(relayEphemeralPublicKey).toString("base64"),
+    salt: Buffer.from(salt).toString("base64"),
+  };
+}
 
 function isSignedClientMessageType(type: unknown): type is SignedClientMessageType {
   return typeof type === "string" && SIGNED_CLIENT_MESSAGE_TYPES.has(type as SignedClientMessageType);
@@ -504,7 +558,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
         // All other message types are protocol messages handled by the relay
         if (parsed && parsed.type !== "data" && parsed.type !== "handshake") {
           // Handle protocol message
-          handleProtocolMessage(state, ws, parsed);
+          void handleProtocolMessage(state, ws, parsed);
           return;
         }
 
@@ -577,15 +631,68 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
 /**
  * Handle protocol messages
  */
-function handleProtocolMessage(
+async function handleProtocolMessage(
   state: RelayServerState,
   ws: ServerWebSocket<WebSocketData>,
   msg: ProtocolMessage
-): void {
+): Promise<void> {
   const { role, connectionId } = ws.data;
 
   switch (msg.type) {
     // ========== Machine Messages ==========
+
+    case 'unlock_request': {
+      if (role !== 'machine') {
+        ws.send(serializeMessage(createErrorMessage('FORBIDDEN', 'Only machines can request unlock grants')));
+        return;
+      }
+
+      const unlockMsg = msg as UnlockRequestMessage;
+      const workspace = getCloudWorkspace(unlockMsg.workspaceId);
+      if (!workspace || workspace.status !== 'bootstrapping') {
+        ws.send(serializeMessage(createErrorMessage('UNAUTHORIZED', 'Workspace is not in bootstrapping state')));
+        ws.close();
+        return;
+      }
+
+      try {
+        const identity = await getWorkspaceIdentity(unlockMsg.workspaceId);
+        if (!identity) {
+          ws.send(serializeMessage(createErrorMessage('NOT_FOUND', 'Workspace identity not found')));
+          ws.close();
+          return;
+        }
+
+        const unlockGrant = consumeCloudBootstrapTokenForUnlock({
+          token: unlockMsg.unlockToken,
+          workspaceId: unlockMsg.workspaceId,
+          machineSigningPublicKey: identity.signingPublicKey,
+        });
+        if (!unlockGrant) {
+          ws.send(serializeMessage(createErrorMessage('UNAUTHORIZED', 'Invalid or expired unlock token')));
+          ws.close();
+          return;
+        }
+
+        const payload = JSON.stringify(identity);
+        const sealed = createSealedUnlockPayload(unlockMsg.ephemeralKey, payload);
+
+        ws.send(serializeMessage({
+          type: 'unlock_grant',
+          workspaceId: unlockMsg.workspaceId,
+          tokenId: unlockGrant.tokenId,
+          registerPermit: unlockGrant.registerPermit,
+          ciphertext: sealed.ciphertext,
+          relayEphemeralKey: sealed.relayEphemeralKey,
+          salt: sealed.salt,
+          expiresAt: unlockGrant.expiresAt,
+        }));
+      } catch (error) {
+        ws.send(serializeMessage(createErrorMessage('ERROR', `Unlock grant failed: ${error instanceof Error ? error.message : String(error)}`)));
+        ws.close();
+      }
+      return;
+    }
 
     case "register_machine": {
       if (role !== "machine") {
@@ -639,9 +746,69 @@ function handleProtocolMessage(
       state.pendingChallenges.delete(connectionId);
 
       // Check if machine is authorized to connect to this relay
-      // Check both on-disk list and pre-authorized set (for ephemeral local relays)
+      // Sources of authorization:
+      // 1) pre-authorized (ephemeral local relay startup)
+      // 2) on-disk authorized machine list
+      // 3) valid one-time register permit (cloud unlock flow)
       const isPreAuthorized = state.preAuthorizedMachines.has(regMsg.signingKey);
-      if (!isPreAuthorized && !isAuthorized(regMsg.signingKey)) {
+      let isAuthorizedMachine = isPreAuthorized || isAuthorized(regMsg.signingKey);
+      let bootstrapWorkspaceId: string | undefined;
+      const cloudWorkspaceForKey = getCloudWorkspaceByMachinePublicKey(regMsg.signingKey);
+
+      // Owner-gated wake flow for cloud workspaces:
+      // if this machine key is tied to a cloud workspace in bootstrapping state,
+      // require a fresh one-time register permit minted by unlock_request.
+      const requiresRegisterPermit = cloudWorkspaceForKey?.status === 'bootstrapping';
+
+      if (requiresRegisterPermit) {
+        if (!regMsg.registerPermit) {
+          ws.send(serializeMessage(createErrorMessage(
+            "UNAUTHORIZED",
+            "Register permit required while cloud workspace is bootstrapping"
+          )));
+          ws.close();
+          return;
+        }
+
+        try {
+          const consumedPermit = consumeCloudRegisterPermit({
+            registerPermit: regMsg.registerPermit,
+            workspaceId: cloudWorkspaceForKey.id,
+            machineId: regMsg.machineId,
+            machineSigningPublicKey: regMsg.signingKey,
+          });
+
+          if (!consumedPermit) {
+            ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invalid or expired register permit")));
+            ws.close();
+            return;
+          }
+
+          if (!isAuthorizedMachine) {
+            const machinePub = formatSpacesPubKey(regMsg.signingKey, regMsg.keyExchangeKey);
+            const authorized = addAuthorizedMachine(machinePub, `cloud:${consumedPermit.workspaceId}`);
+            if (!authorized) {
+              ws.send(serializeMessage(createErrorMessage("ERROR", "Failed to authorize machine from register permit")));
+              ws.close();
+              return;
+            }
+          }
+
+          markCloudBootstrapReady(consumedPermit.workspaceId);
+          bootstrapWorkspaceId = consumedPermit.workspaceId;
+          isAuthorizedMachine = true;
+          console.log(
+            `[relay] Register permit accepted for machine ${regMsg.machineId} (workspace ${consumedPermit.workspaceId})`
+          );
+        } catch (err) {
+          console.warn(`[relay] Register permit validation failed: ${err instanceof Error ? err.message : String(err)}`);
+          ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Register permit validation failed")));
+          ws.close();
+          return;
+        }
+      }
+
+      if (!isAuthorizedMachine) {
         console.warn(`[relay] Machine not authorized: ${regMsg.machineId} (signingKey not in authorized list)`);
         ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Machine not authorized for this relay")));
         ws.close();
@@ -673,7 +840,9 @@ function handleProtocolMessage(
       ws.data.machineId = regMsg.machineId;
       ws.data.accountId = accountId;
 
-      console.log(`[relay] Machine ${regMsg.machineId} registered (authorized: ${authorizedMachine?.label || authorizedMachine?.fingerprint || "unknown"})`);
+      console.log(
+        `[relay] Machine ${regMsg.machineId} registered (authorized: ${authorizedMachine?.label || authorizedMachine?.fingerprint || "unknown"}${bootstrapWorkspaceId ? `, bootstrapWorkspace=${bootstrapWorkspaceId}` : ""})`
+      );
 
       ws.send(serializeMessage({
         type: "registered",
