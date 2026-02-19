@@ -19,6 +19,7 @@ type EnvSnapshot = {
   GH_STUB_PAYLOAD_LOG?: string;
   GH_STUB_REPLY_COUNTER_FILE?: string;
   GH_STUB_REVIEW_COUNTER_FILE?: string;
+  GH_STUB_REVIEW_COMMENTS_FILE?: string;
   GH_STUB_FAIL_REVIEW?: string;
 };
 
@@ -30,6 +31,7 @@ function captureEnv(): EnvSnapshot {
     GH_STUB_PAYLOAD_LOG: process.env.GH_STUB_PAYLOAD_LOG,
     GH_STUB_REPLY_COUNTER_FILE: process.env.GH_STUB_REPLY_COUNTER_FILE,
     GH_STUB_REVIEW_COUNTER_FILE: process.env.GH_STUB_REVIEW_COUNTER_FILE,
+    GH_STUB_REVIEW_COMMENTS_FILE: process.env.GH_STUB_REVIEW_COMMENTS_FILE,
     GH_STUB_FAIL_REVIEW: process.env.GH_STUB_FAIL_REVIEW,
   };
 }
@@ -52,6 +54,9 @@ function restoreEnv(env: EnvSnapshot): void {
 
   if (env.GH_STUB_REVIEW_COUNTER_FILE === undefined) delete process.env.GH_STUB_REVIEW_COUNTER_FILE;
   else process.env.GH_STUB_REVIEW_COUNTER_FILE = env.GH_STUB_REVIEW_COUNTER_FILE;
+
+  if (env.GH_STUB_REVIEW_COMMENTS_FILE === undefined) delete process.env.GH_STUB_REVIEW_COMMENTS_FILE;
+  else process.env.GH_STUB_REVIEW_COMMENTS_FILE = env.GH_STUB_REVIEW_COMMENTS_FILE;
 
   if (env.GH_STUB_FAIL_REVIEW === undefined) delete process.env.GH_STUB_FAIL_REVIEW;
   else process.env.GH_STUB_FAIL_REVIEW = env.GH_STUB_FAIL_REVIEW;
@@ -124,6 +129,20 @@ if (method === 'GET' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/
   process.exit(0);
 }
 
+const reviewCommentsMatch = endpoint.match(/^repos\/${OWNER}\/${REPO}\/pulls\/${PR_NUMBER}\/reviews\/(\d+)\/comments$/);
+if (method === 'GET' && reviewCommentsMatch) {
+  const reviewId = reviewCommentsMatch[1];
+  const reviewCommentsFile = process.env.GH_STUB_REVIEW_COMMENTS_FILE;
+  if (reviewCommentsFile && existsSync(reviewCommentsFile)) {
+    const stored = JSON.parse(readFileSync(reviewCommentsFile, 'utf-8'));
+    const comments = Array.isArray(stored?.[reviewId]) ? stored[reviewId] : [];
+    process.stdout.write(JSON.stringify([comments]));
+  } else {
+    process.stdout.write('[]');
+  }
+  process.exit(0);
+}
+
 if (method === 'POST' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments') {
   const payload = readInputPayload() ?? {};
   if (payloadLog) {
@@ -147,6 +166,34 @@ if (method === 'POST' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}
   }
   const counterFile = process.env.GH_STUB_REVIEW_COUNTER_FILE;
   const id = counterFile ? nextCounter(counterFile, 9000) : 9001;
+
+  const reviewCommentsFile = process.env.GH_STUB_REVIEW_COMMENTS_FILE;
+  if (reviewCommentsFile) {
+    let stored = {};
+    if (existsSync(reviewCommentsFile)) {
+      stored = JSON.parse(readFileSync(reviewCommentsFile, 'utf-8'));
+    }
+    const comments = Array.isArray(payload.comments) ? payload.comments : [];
+    const mapped = comments.map((comment, index) => ({
+      id: 8001 + index,
+      body: comment.body ?? '',
+      path: comment.path,
+      line: comment.line ?? null,
+      original_line: comment.line ?? null,
+      side: comment.side ?? 'RIGHT',
+      start_line: comment.start_line ?? null,
+      original_start_line: comment.start_line ?? null,
+      start_side: comment.start_side ?? null,
+      diff_hunk: '',
+      user: { login: 'reviewer' },
+      created_at: '2026-02-19T00:00:00Z',
+      in_reply_to_id: null,
+      pull_request_review_id: id,
+    }));
+    stored[String(id)] = mapped;
+    writeFileSync(reviewCommentsFile, JSON.stringify(stored), 'utf-8');
+  }
+
   process.stdout.write(JSON.stringify({ id, html_url: 'https://example.invalid/review/' + id }));
   process.exit(0);
 }
@@ -193,6 +240,7 @@ describe('github-review sync behavior', () => {
   let payloadLog: string;
   let replyCounter: string;
   let reviewCounter: string;
+  let reviewCommentsFile: string;
 
   beforeEach(() => {
     envSnapshot = captureEnv();
@@ -208,6 +256,7 @@ describe('github-review sync behavior', () => {
     payloadLog = join(tempRoot, 'gh-payloads.log');
     replyCounter = join(tempRoot, 'reply-counter.txt');
     reviewCounter = join(tempRoot, 'review-counter.txt');
+    reviewCommentsFile = join(tempRoot, 'gh-review-comments.json');
 
     setImportComments(importFile, []);
     writeFileSync(callLog, '', 'utf-8');
@@ -222,6 +271,7 @@ describe('github-review sync behavior', () => {
     process.env.GH_STUB_PAYLOAD_LOG = payloadLog;
     process.env.GH_STUB_REPLY_COUNTER_FILE = replyCounter;
     process.env.GH_STUB_REVIEW_COUNTER_FILE = reviewCounter;
+    process.env.GH_STUB_REVIEW_COMMENTS_FILE = reviewCommentsFile;
   });
 
   afterEach(() => {
@@ -464,7 +514,7 @@ describe('github-review sync behavior', () => {
     const pushedLocalLineRoot = afterFirstPush.threads
       .flatMap((thread) => thread.comments)
       .find((comment) => comment.id === 'local-line-root') as ReviewComment;
-    expect(pushedLocalLineRoot.githubId).toBeUndefined();
+    expect(pushedLocalLineRoot.githubId).toBeDefined();
     expect(pushedLocalLineRoot.syncedToGitHubAt).toBeDefined();
 
     writeFileSync(payloadLog, '', 'utf-8');
@@ -509,7 +559,7 @@ describe('github-review sync behavior', () => {
       .flatMap((thread) => thread.comments)
       .find((comment) => comment.id === 'editable-local-root') as ReviewComment;
     expect(firstComment.syncedToGitHubAt).toBeDefined();
-    expect(firstComment.githubId).toBeUndefined();
+    expect(firstComment.githubId).toBeDefined();
 
     updateComment(
       workspacePath,
@@ -574,7 +624,28 @@ describe('github-review sync behavior', () => {
     const root = afterPush.threads
       .flatMap((thread) => thread.comments)
       .find((comment) => comment.id === 'file-root') as ReviewComment;
+    expect(root.githubId).toBeDefined();
     expect(root.syncedToGitHubAt).toBeDefined();
+
+    setImportComments(importFile, [
+      {
+        id: root.githubId,
+        body: 'File-level note',
+        path: 'src/file-note.ts',
+        line: null,
+        original_line: null,
+        side: 'RIGHT',
+        start_line: null,
+        original_start_line: null,
+        diff_hunk: '',
+        user: { login: 'octocat' },
+        created_at: '2026-02-19T13:31:00Z',
+        pull_request_review_id: 55,
+      },
+    ]);
+
+    const importedAgain = await importGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+    expect(importedAgain.imported).toBe(0);
   });
 
   it('posts hunk-target threads as top-level comments with parsed anchor', async () => {
@@ -619,6 +690,13 @@ describe('github-review sync behavior', () => {
     expect(reviewPayload?.payload.event).toBe('REQUEST_CHANGES');
     expect(Array.isArray(reviewPayload?.payload.comments)).toBe(true);
     expect(reviewPayload?.payload.comments).toHaveLength(0);
+
+    const afterPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    const root = afterPush.threads
+      .flatMap((thread) => thread.comments)
+      .find((comment) => comment.id === 'hunk-root') as ReviewComment;
+    expect(root.githubId).toBeDefined();
+    expect(root.syncedToGitHubAt).toBeDefined();
   });
 
   it('persists posted replies if review submission later fails', async () => {

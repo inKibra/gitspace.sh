@@ -16,6 +16,7 @@ import type { ReviewThread, ReviewComment, ThreadTarget } from '../types/review.
 import { readReviewSession, writeReviewSession } from './review.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 import { generateId } from '../utils/id.js';
+import { logger } from '../utils/logger.js';
 
 const execAsync = promisify(exec);
 
@@ -32,6 +33,7 @@ interface GitHubPRComment {
   side: 'LEFT' | 'RIGHT';
   start_line: number | null;
   original_start_line: number | null;
+  start_side?: 'LEFT' | 'RIGHT' | null;
   diff_hunk: string;
   user: { login: string };
   created_at: string;
@@ -219,6 +221,7 @@ export async function pushGitHubReview(
 
   const reviewComments: GitHubDraftReviewComment[] = [];
   const reviewCommentIdsByThreadId = new Map<string, string[]>();
+  const reviewCommentDraftByThreadId = new Map<string, GitHubDraftReviewComment>();
   const workspaceNoteBodies: string[] = [];
   const workspaceNoteIdsByThreadId = new Map<string, string[]>();
   let pushedPendingHunkTopLevel = false;
@@ -285,7 +288,8 @@ export async function pushGitHubReview(
         markThreadCommentsSynced(
           thread,
           new Set(pendingLocalComments.map((comment) => comment.id)),
-          syncedAt
+          syncedAt,
+          posted.id
         );
         thread.updatedAt = syncedAt;
         session.prNumber = prNumber;
@@ -308,6 +312,7 @@ export async function pushGitHubReview(
     const reviewComment = buildGitHubLineComment(thread, localBodies);
     reviewComments.push(reviewComment);
     reviewCommentIdsByThreadId.set(thread.id, pendingLocalComments.map((comment) => comment.id));
+    reviewCommentDraftByThreadId.set(thread.id, reviewComment);
   }
 
   const workspaceNotes = workspaceNoteBodies.join('\n\n');
@@ -341,6 +346,28 @@ export async function pushGitHubReview(
       reviewData.html_url ??
       `https://github.com/${owner}/${repo}/pull/${prNumber}#pullrequestreview-${reviewData.id}`;
 
+    const reviewCommentGithubIdsByKey = new Map<string, number[]>();
+    if (reviewComments.length > 0) {
+      try {
+        const postedReviewComments = await fetchReviewCommentsForReview(
+          owner,
+          repo,
+          prNumber,
+          reviewData.id,
+          workspacePath
+        );
+        for (const comment of postedReviewComments) {
+          const key = buildReviewCommentMatchKey(comment);
+          const ids = reviewCommentGithubIdsByKey.get(key) ?? [];
+          ids.push(comment.id);
+          reviewCommentGithubIdsByKey.set(key, ids);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warning(`Could not map GitHub review comment IDs: ${message}`);
+      }
+    }
+
     for (const thread of unresolved) {
       const reviewCommentIds = reviewCommentIdsByThreadId.get(thread.id) ?? [];
       const workspaceNoteIds = workspaceNoteIdsByThreadId.get(thread.id) ?? [];
@@ -349,7 +376,22 @@ export async function pushGitHubReview(
         continue;
       }
 
-      markThreadCommentsSynced(thread, syncedIds, syncedAt);
+      let githubId: number | undefined;
+      if (reviewCommentIds.length > 0) {
+        const draft = reviewCommentDraftByThreadId.get(thread.id);
+        if (draft) {
+          const key = buildReviewCommentMatchKey(draft);
+          const ids = reviewCommentGithubIdsByKey.get(key);
+          if (ids && ids.length > 0) {
+            githubId = ids.shift();
+            if (ids.length === 0) {
+              reviewCommentGithubIdsByKey.delete(key);
+            }
+          }
+        }
+      }
+
+      markThreadCommentsSynced(thread, syncedIds, syncedAt, githubId);
       thread.updatedAt = syncedAt;
       changed = true;
     }
@@ -476,11 +518,17 @@ function getRootGithubCommentId(thread: ReviewThread): number | null {
 function markThreadCommentsSynced(
   thread: ReviewThread,
   commentIds: Set<string>,
-  syncedAt: string
+  syncedAt: string,
+  githubId?: number
 ): void {
+  let githubIdAssigned = false;
   for (const comment of thread.comments) {
     if (commentIds.has(comment.id)) {
       comment.syncedToGitHubAt = syncedAt;
+      if (!githubIdAssigned && githubId !== undefined && comment.githubId === undefined) {
+        comment.githubId = githubId;
+        githubIdAssigned = true;
+      }
     }
   }
 }
@@ -516,6 +564,50 @@ async function submitPullReview(
   const endpoint = `repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
   const response = await postGitHubApi(endpoint, payload, cwd);
   return JSON.parse(response) as { id: number; html_url?: string };
+}
+
+async function fetchReviewCommentsForReview(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  reviewId: number,
+  cwd: string
+): Promise<GitHubPRComment[]> {
+  const endpoint = `repos/${owner}/${repo}/pulls/${prNumber}/reviews/${reviewId}/comments`;
+  const { stdout } = await execAsync(
+    `gh api ${escapeShellArg(endpoint)} --paginate --slurp`,
+    { cwd }
+  );
+
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  if (parsed.length === 0) {
+    return [];
+  }
+  if (Array.isArray(parsed[0])) {
+    return (parsed as GitHubPRComment[][]).flat();
+  }
+  return parsed as GitHubPRComment[];
+}
+
+function buildReviewCommentMatchKey(comment: {
+  path: string;
+  line: number | null;
+  side?: string | null;
+  start_line?: number | null;
+  start_side?: string | null;
+  body: string;
+}): string {
+  return [
+    comment.path,
+    String(comment.line ?? ''),
+    String(comment.side ?? ''),
+    String(comment.start_line ?? ''),
+    String(comment.start_side ?? ''),
+    comment.body,
+  ].join('|');
 }
 
 interface GitHubDraftReviewComment {
