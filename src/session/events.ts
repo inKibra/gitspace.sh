@@ -24,7 +24,7 @@ export type BackendEvent =
       exitCode?: number;
     }
   | { type: 'notification_config'; config: NotificationConfig }
-  | { type: 'attached'; sessionId: string; sessionName?: string }
+  | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean }
   | { type: 'detached' }
   | { type: 'session_exited'; sessionId: string; exitCode?: number }
   | { type: 'command_error'; code?: string; message: string }

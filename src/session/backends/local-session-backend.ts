@@ -335,6 +335,7 @@ export class LocalSessionBackend implements SessionBackend {
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private viewOnly = false;
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
@@ -464,6 +465,7 @@ export class LocalSessionBackend implements SessionBackend {
     if (!this.connected) {
       await this.connect();
     }
+    this.viewOnly = params.viewOnly ?? false;
 
     let targetSession: TmuxSession | null = null;
 
@@ -486,72 +488,6 @@ export class LocalSessionBackend implements SessionBackend {
         throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
       }
 
-      let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-
-      const scriptResult = await this.deps.prepareWorkspaceForSession({
-        projectName: workspace.projectName,
-        workspacePath: workspace.path,
-        workspaceName: workspace.id,
-        interactiveScripts: false,
-        bundleMode: 'error-if-changed',
-        scriptPolicy: params.scriptPolicy ?? 'auto',
-        onOutput: (data) => {
-          this.emitPtyData(data);
-          this.emit({
-            type: 'script_output',
-            phase: currentPhase,
-            data,
-          });
-        },
-        onPhaseStart: (phase) => {
-          currentPhase = phase;
-        },
-      });
-
-      if (!scriptResult.success) {
-        const bundleNeedsRefresh =
-          'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh;
-
-        if ('bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh) {
-          this.emit({
-            type: 'command_error',
-            code: 'BUNDLE_REFRESH_REQUIRED',
-            message: scriptResult.error,
-          });
-        } else {
-          this.emit({
-            type: 'command_error',
-            code: scriptFailureCodeForPhase(scriptResult.phase),
-            message: scriptResult.error,
-          });
-        }
-
-        this.emit({
-          type: 'script_output',
-          phase: scriptResult.phase,
-          data: new Uint8Array(0),
-          done: true,
-          error: scriptResult.error,
-        });
-
-        const error = new SpacesError(
-          `Workspace scripts failed during ${scriptResult.phase}: ${scriptResult.error}`
-        ) as Error & { code?: string };
-        if (bundleNeedsRefresh) {
-          error.code = 'BUNDLE_REFRESH_REQUIRED';
-        } else {
-          error.code = scriptFailureCodeForPhase(scriptResult.phase);
-        }
-        throw error;
-      }
-
-      this.emit({
-        type: 'script_output',
-        phase: currentPhase,
-        data: new Uint8Array(0),
-        done: true,
-      });
-
       const sessions = await this.deps.listSessions();
       const fullName = buildSessionName({
         projectName: workspace.projectName,
@@ -559,9 +495,85 @@ export class LocalSessionBackend implements SessionBackend {
         requestedName: params.sessionName,
         sessions,
       });
-      targetSession = await this.deps.createSession(fullName, workspace.path, {
-        hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
-      });
+
+      if (params.command) {
+        // Skip workspace scripts when a custom command is specified
+        targetSession = await this.deps.createSession(fullName, workspace.path, {
+          command: params.command,
+          args: params.args,
+          env: params.env,
+        });
+      } else {
+        let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+
+        const scriptResult = await this.deps.prepareWorkspaceForSession({
+          projectName: workspace.projectName,
+          workspacePath: workspace.path,
+          workspaceName: workspace.id,
+          interactiveScripts: false,
+          bundleMode: 'error-if-changed',
+          scriptPolicy: params.scriptPolicy ?? 'auto',
+          onOutput: (data) => {
+            this.emitPtyData(data);
+            this.emit({
+              type: 'script_output',
+              phase: currentPhase,
+              data,
+            });
+          },
+          onPhaseStart: (phase) => {
+            currentPhase = phase;
+          },
+        });
+
+        if (!scriptResult.success) {
+          const bundleNeedsRefresh =
+            'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh;
+
+          if ('bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh) {
+            this.emit({
+              type: 'command_error',
+              code: 'BUNDLE_REFRESH_REQUIRED',
+              message: scriptResult.error,
+            });
+          } else {
+            this.emit({
+              type: 'command_error',
+              code: scriptFailureCodeForPhase(scriptResult.phase),
+              message: scriptResult.error,
+            });
+          }
+
+          this.emit({
+            type: 'script_output',
+            phase: scriptResult.phase,
+            data: new Uint8Array(0),
+            done: true,
+            error: scriptResult.error,
+          });
+
+          const error = new SpacesError(
+            `Workspace scripts failed during ${scriptResult.phase}: ${scriptResult.error}`
+          ) as Error & { code?: string };
+          if (bundleNeedsRefresh) {
+            error.code = 'BUNDLE_REFRESH_REQUIRED';
+          } else {
+            error.code = scriptFailureCodeForPhase(scriptResult.phase);
+          }
+          throw error;
+        }
+
+        this.emit({
+          type: 'script_output',
+          phase: currentPhase,
+          data: new Uint8Array(0),
+          done: true,
+        });
+
+        targetSession = await this.deps.createSession(fullName, workspace.path, {
+          hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+        });
+      }
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
     }
@@ -577,12 +589,16 @@ export class LocalSessionBackend implements SessionBackend {
     const hadAttached = this.attachedSessionId !== null;
     await this.closeSessionSocket(false);
     this.attachedSessionId = null;
+    this.viewOnly = false;
     if (hadAttached) {
       this.emit({ type: 'detached' });
     }
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
+    if (this.viewOnly) {
+      return;
+    }
     const socket = this.sessionSocket;
     if (!socket || !this.attachedSessionId) {
       throw new SpacesError('No attached local session', 'SYSTEM_ERROR', 2);
@@ -909,6 +925,7 @@ export class LocalSessionBackend implements SessionBackend {
                   type: 'attached',
                   sessionId: session.id,
                   sessionName: session.name,
+                  viewOnly: this.viewOnly,
                 });
                 settleResolve();
                 return;

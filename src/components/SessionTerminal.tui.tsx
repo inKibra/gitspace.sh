@@ -54,6 +54,8 @@ export interface SessionTerminalProps {
   interceptShiftTab?: boolean;
   modalOpen?: boolean;
   onActivity?: () => void;
+  /** When true, keyboard input and paste are disabled (view-only mode) */
+  readOnly?: boolean;
 }
 
 export function SessionTerminal({
@@ -66,6 +68,7 @@ export function SessionTerminal({
   interceptShiftTab,
   modalOpen,
   onActivity,
+  readOnly = false,
 }: SessionTerminalProps) {
   const renderer = useRenderer();
   const [termSize, setTermSize] = useState(getTerminalSize);
@@ -234,7 +237,7 @@ export function SessionTerminal({
 
   useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
-      if (modalOpen) {
+      if (modalOpen || readOnly) {
         return;
       }
       const text = event.text ?? '';
@@ -256,6 +259,15 @@ export function SessionTerminal({
 
   useKeyboard((key) => {
     if (modalOpen) {
+      return;
+    }
+
+    if (key.name === 'escape' && key.ctrl) {
+      onDetach();
+      return;
+    }
+
+    if (readOnly) {
       return;
     }
 
@@ -289,11 +301,6 @@ export function SessionTerminal({
         scrollBox.scrollBy(1, 'viewport');
         return;
       }
-    }
-
-    if (key.name === 'escape' && key.ctrl) {
-      onDetach();
-      return;
     }
 
     let data: string | undefined;
@@ -355,8 +362,9 @@ export function SessionTerminal({
         <box flexGrow={1} flexDirection="row">
           <text fg={COLORS.session}>{sessionName}</text>
           <text fg={COLORS.textDim}> ({endpointLabel})</text>
+          {readOnly && <text fg={COLORS.textDim}> [view only]</text>}
         </box>
-        <text fg={COLORS.detachHint}>[Ctrl+Esc] Detach</text>
+        <text fg={COLORS.detachHint}>[Ctrl+Esc] {readOnly ? 'Back' : 'Detach'}</text>
       </box>
 
       <scrollbox

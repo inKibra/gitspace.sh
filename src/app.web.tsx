@@ -82,6 +82,7 @@ export default function App() {
   });
   const [localNotificationConfig, setLocalNotificationConfig] =
     useState<NotificationConfig | null>(null);
+  const [isViewOnlySession, setIsViewOnlySession] = useState(false);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<SessionTerminalHandle>(null);
@@ -171,7 +172,7 @@ export default function App() {
         return;
       }
 
-      if (params.workspaceId) {
+      if (params.workspaceId && !params.command) {
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
@@ -442,7 +443,8 @@ export default function App() {
   });
 
   // Handle attach session - show modal for new sessions
-  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string }) => {
+  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
+    setIsViewOnlySession(params.viewOnly ?? false);
     await attachController.attachFromSelection(params);
   }, [attachController]);
 
@@ -456,12 +458,23 @@ export default function App() {
     setView('review');
   }, []);
 
+  // Open editor on .gitspace/processes.json in the workspace
+  const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    setIsViewOnlySession(false);
+    void attachController.attach({
+      workspaceId,
+      command: 'sh',
+      args: ['-c', 'mkdir -p .gitspace && exec "${EDITOR:-vi}" .gitspace/processes.json'],
+    });
+  }, [attachController]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: terminal.workspaces,
     sessions: terminal.sessions,
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
+    onEditProcesses: handleEditProcesses,
     onStartProcess: (params) => {
       terminal.startProcess(params.workspaceId, params.processName);
     },
@@ -616,6 +629,13 @@ export default function App() {
     terminal.requestNotificationConfig,
   ]);
 
+  // Reset view-only state when detached
+  useEffect(() => {
+    if (terminal.mode !== 'attached') {
+      setIsViewOnlySession(false);
+    }
+  }, [terminal.mode]);
+
   // ========== Keyboard Handlers ==========
 
   // Machine list keyboard navigation
@@ -767,6 +787,16 @@ export default function App() {
             confirmLabel: 'Kill',
             onConfirm: () => {
               terminal.killSession(selected.session.id);
+            },
+          });
+        } else if (selected?.type === 'process' && selected.status === 'running') {
+          flow.showConfirm({
+            title: 'Stop Process',
+            message: `Stop process "${selected.processName}"?`,
+            variant: 'warning',
+            confirmLabel: 'Stop',
+            onConfirm: () => {
+              terminal.stopProcess(selected.workspaceId, selected.processName);
             },
           });
         }
@@ -1141,6 +1171,7 @@ export default function App() {
               allowTapFocus={inputMode || !showMobileControls}
               allowTouchScroll={!inputMode}
               onActivity={handleTerminalActivity}
+              readOnly={isViewOnlySession}
             />
           </div>
           {/* Mobile controls toolbar - show in input mode */}

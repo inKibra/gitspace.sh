@@ -186,6 +186,7 @@ describe('LocalSessionBackend', () => {
       type: 'attached',
       sessionId: 'sess-new',
       sessionName: 'alpha:ws-1:2',
+      viewOnly: false,
     });
 
     expect(events).toContainEqual({
@@ -284,7 +285,7 @@ describe('LocalSessionBackend', () => {
     expect(sentControls).toContainEqual({ type: 'resize', cols: 100, rows: 30 });
     expect(sentControls).toContainEqual({ type: 'detach' });
     expect(sentPty).toEqual([new Uint8Array([0x41])]);
-    expect(events).toContainEqual({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1' });
+    expect(events).toContainEqual({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1', viewOnly: false });
     expect(events).toContainEqual({ type: 'detached' });
   });
 
@@ -645,6 +646,7 @@ describe('LocalSessionBackend', () => {
         type: 'attached',
         sessionId: 'sess-1',
         sessionName: 'alpha:ws-1:1',
+        viewOnly: false,
       },
     ]);
     expect(detachedEvents).toEqual([{ type: 'detached' }]);
@@ -727,6 +729,7 @@ describe('LocalSessionBackend', () => {
       type: 'attached',
       sessionId: 'sess-1',
       sessionName: 'alpha:ws-1:1',
+      viewOnly: false,
     });
   });
 

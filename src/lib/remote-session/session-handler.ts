@@ -78,6 +78,8 @@ export interface RemoteClientSession {
   attachedSessionId?: string;
   /** Path to tmux-lite session socket (set after attach_session) */
   sessionSocketPath?: string;
+  /** When true, PTY writes from this client are blocked server-side */
+  viewOnly?: boolean;
 }
 
 // ============================================================================
@@ -483,6 +485,10 @@ export class RemoteSessionHandler {
       cols?: number;
       rows?: number;
       scriptPolicy?: 'auto' | 'skip';
+      viewOnly?: boolean;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
     },
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
@@ -514,67 +520,6 @@ export class RemoteSessionHandler {
           return;
         }
 
-        // Run setup/select scripts for the workspace with output streaming.
-        console.log(`[remote-session] Running workspace scripts for: ${workspace.id}`);
-
-        // Track current phase for script_output messages
-        let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-
-        const scriptResult = await prepareWorkspaceForSession({
-          projectName: workspace.projectName,
-          workspacePath: workspace.path,
-          workspaceName: workspace.id,
-          interactiveScripts: false,
-          bundleMode: 'error-if-changed',
-          scriptPolicy: msg.scriptPolicy ?? 'auto',
-          onOutput: (data) => {
-            void this.sendMessage(session, sendResponse, {
-              type: 'script_output',
-              phase: currentPhase,
-              data: data.toString('base64'),
-            }).catch((error) => {
-              logger.debug(`[remote-session] Failed to stream script output: ${error instanceof Error ? error.message : String(error)}`);
-            });
-          },
-          onPhaseStart: (phase) => {
-            currentPhase = phase;
-          },
-        });
-
-        if (!scriptResult.success) {
-          console.error(`[remote-session] ${scriptResult.phase} scripts failed:`, scriptResult.error);
-          await this.sendMessage(session, sendResponse, {
-            type: 'script_output',
-            phase: scriptResult.phase,
-            data: '',
-            done: true,
-            error: scriptResult.error,
-          });
-          const code =
-            'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh
-              ? 'BUNDLE_REFRESH_REQUIRED'
-              : scriptResult.phase === 'setup'
-                ? 'SETUP_SCRIPT_FAILED'
-                : scriptResult.phase === 'select'
-                  ? 'SELECT_SCRIPT_FAILED'
-                  : 'PRE_SCRIPT_FAILED';
-          await this.sendError(
-            session,
-            sendResponse,
-            code,
-            `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`
-          );
-          return;
-        }
-
-        // Send final script_output indicating success
-        await this.sendMessage(session, sendResponse, {
-          type: 'script_output',
-          phase: currentPhase,
-          data: '',
-          done: true,
-        });
-
         const sessions = await listSessions();
         const sessionName = buildSessionName({
           projectName: workspace.projectName,
@@ -584,10 +529,81 @@ export class RemoteSessionHandler {
         });
         console.log(`[remote-session] Selected session name: ${sessionName}`);
 
-        targetSession = await createSession(sessionName, workspace.path, {
-          hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
-        });
-        console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`)
+        if (msg.command) {
+          // Skip workspace scripts when a custom command is specified
+          targetSession = await createSession(sessionName, workspace.path, {
+            command: msg.command,
+            args: msg.args,
+            env: msg.env,
+          });
+          console.log(`[remote-session] Created session (custom cmd): ${targetSession.name} (id: ${targetSession.id})`);
+        } else {
+          // Run setup/select scripts for the workspace with output streaming.
+          console.log(`[remote-session] Running workspace scripts for: ${workspace.id}`);
+
+          // Track current phase for script_output messages
+          let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+
+          const scriptResult = await prepareWorkspaceForSession({
+            projectName: workspace.projectName,
+            workspacePath: workspace.path,
+            workspaceName: workspace.id,
+            interactiveScripts: false,
+            bundleMode: 'error-if-changed',
+            scriptPolicy: msg.scriptPolicy ?? 'auto',
+            onOutput: (data) => {
+              void this.sendMessage(session, sendResponse, {
+                type: 'script_output',
+                phase: currentPhase,
+                data: data.toString('base64'),
+              }).catch((error) => {
+                logger.debug(`[remote-session] Failed to stream script output: ${error instanceof Error ? error.message : String(error)}`);
+              });
+            },
+            onPhaseStart: (phase) => {
+              currentPhase = phase;
+            },
+          });
+
+          if (!scriptResult.success) {
+            console.error(`[remote-session] ${scriptResult.phase} scripts failed:`, scriptResult.error);
+            await this.sendMessage(session, sendResponse, {
+              type: 'script_output',
+              phase: scriptResult.phase,
+              data: '',
+              done: true,
+              error: scriptResult.error,
+            });
+            const code =
+              'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh
+                ? 'BUNDLE_REFRESH_REQUIRED'
+                : scriptResult.phase === 'setup'
+                  ? 'SETUP_SCRIPT_FAILED'
+                  : scriptResult.phase === 'select'
+                    ? 'SELECT_SCRIPT_FAILED'
+                    : 'PRE_SCRIPT_FAILED';
+            await this.sendError(
+              session,
+              sendResponse,
+              code,
+              `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`
+            );
+            return;
+          }
+
+          // Send final script_output indicating success
+          await this.sendMessage(session, sendResponse, {
+            type: 'script_output',
+            phase: currentPhase,
+            data: '',
+            done: true,
+          });
+
+          targetSession = await createSession(sessionName, workspace.path, {
+            hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+          });
+          console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`);
+        }
       } else if (msg.sessionId) {
         // Security: Check if client can attach to this session
         if (!canAttachSession(session.accessType, session.grantedSessionId, msg.sessionId)) {
@@ -608,6 +624,7 @@ export class RemoteSessionHandler {
       session.state = "attached";
       session.attachedSessionId = targetSession.id;
       session.sessionSocketPath = targetSession.socketPath;
+      session.viewOnly = msg.viewOnly ?? false;
 
       // Send confirmation - ClientSessionManager will connect to the socket
       await this.sendMessage(session, sendResponse, {

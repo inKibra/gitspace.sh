@@ -25,6 +25,14 @@ export interface AttachSessionParams {
   cols?: number;
   rows?: number;
   scriptPolicy?: 'auto' | 'skip';
+  /** When true, the client cannot send input to the PTY (view-only mode) */
+  viewOnly?: boolean;
+  /** Custom command to run (skips workspace scripts when set) */
+  command?: string;
+  /** Arguments for the custom command */
+  args?: string[];
+  /** Environment variables for the custom command */
+  env?: Record<string, string>;
 }
 
 export interface DeleteWorkspaceParams {

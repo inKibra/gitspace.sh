@@ -301,6 +301,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private mode: 'browsing' | 'attached' = 'browsing';
   private attachedSessionId: string | null = null;
+  private viewOnly = false;
   private handshakeState: THandshakeState | null = null;
   private sessionKeys: SessionKeys | null = null;
   private isConnected = false;
@@ -428,6 +429,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async attachSession(params: AttachSessionParams): Promise<void> {
+    this.viewOnly = params.viewOnly ?? false;
     const command: AttachSessionRequest = {
       type: 'attach_session',
       sessionId: params.sessionId,
@@ -436,6 +438,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       cols: params.cols,
       rows: params.rows,
       scriptPolicy: params.scriptPolicy,
+      viewOnly: params.viewOnly,
+      command: params.command,
+      args: params.args,
+      env: params.env,
     };
     await this.sendCommand(command);
   }
@@ -689,6 +695,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
+    if (this.viewOnly) {
+      return;
+    }
     this.assertConnected();
 
     const key = this.sessionKeys;
@@ -952,11 +961,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           type: 'attached',
           sessionId: message.sessionId,
           sessionName: message.sessionName,
+          viewOnly: this.viewOnly,
         });
         return;
       case 'detached':
         this.mode = 'browsing';
         this.attachedSessionId = null;
+        this.viewOnly = false;
         this.emit({ type: 'detached' });
         return;
       case 'session_exited':

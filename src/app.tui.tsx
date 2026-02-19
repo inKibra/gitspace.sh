@@ -36,6 +36,7 @@ import {
 import { FlowTUI } from './components/Flow.tui.js';
 import { MachineListTUI } from './components/MachineList.tui.js';
 import { SpacesBrowserTUI } from './components/SpacesBrowser.tui.js';
+import type { TreeItem } from './components/SpacesBrowser.js';
 import { ProjectListTUI } from './components/ProjectList.tui.js';
 import { InboxTUI } from './components/Inbox.tui.js';
 import { useInbox } from './components/Inbox.js';
@@ -303,6 +304,9 @@ function App({ relayConfig, onQuit }: AppProps) {
   // Events view state
   const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
 
+  // View-only session state (true when attached to a running process session)
+  const [isViewOnlySession, setIsViewOnlySession] = useState(false);
+
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
     relayConfig,
@@ -428,7 +432,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     onBeforeAttach: ({ target, params }) => {
       sessionSwitchingRef.current = true;
 
-      if (target === 'workspace' && params.workspaceId) {
+      if (target === 'workspace' && params.workspaceId && !params.command) {
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         dispatch({ type: 'SET_VIEW', view: 'scripts' });
       }
@@ -615,15 +619,27 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [flow, refreshProjects]);
 
   // Attach to session using embedded terminal
-  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string }) => {
+  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
+    setIsViewOnlySession(params.viewOnly ?? false);
     await attachLocalFromSelection(params);
   }, [attachLocalFromSelection]);
+
+  // Open editor on .gitspace/processes.json in the workspace
+  const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    setIsViewOnlySession(false);
+    void attachLocal({
+      workspaceId,
+      command: 'sh',
+      args: ['-c', 'mkdir -p .gitspace && exec "${EDITOR:-vi}" .gitspace/processes.json'],
+    });
+  }, [attachLocal]);
 
   // Handle terminal detach
   const handleTerminalDetach = useCallback(async () => {
     // Don't navigate away if we're in the middle of switching sessions
     if (sessionSwitchingRef.current) return;
 
+    setIsViewOnlySession(false);
     await detachLocalSession();
     dispatch({ type: 'SET_VIEW', view: 'projects' });
     await refreshWorkspaces();
@@ -1184,6 +1200,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     sessions: sessionInfos,
     onRequestSessions: () => {}, // Sessions already loaded
     onAttachSession: handleAttachSession,
+    onEditProcesses: handleEditProcesses,
     onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
@@ -2013,10 +2030,12 @@ function App({ relayConfig, onQuit }: AppProps) {
             }
           }
         } else if (command === 'kill') {
-          // Kill session
+          // Kill session or stop running process
           const selected = spacesBrowserProps.selectedItem;
           if (selected?.type === 'session') {
             handleDeleteSession(selected.session.id, selected.session.name);
+          } else if (selected?.type === 'process' && selected.status === 'running') {
+            void handleStopProcess({ workspaceId: selected.workspaceId, processName: selected.processName });
           }
         } else if (command === 'refresh') {
           try {
@@ -2211,6 +2230,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           interceptShiftTab={!!notifications.activeToast}
           modalOpen={flow.isOpen}
           onActivity={handleTerminalActivity}
+          readOnly={isViewOnlySession}
         />
         <FlowTUI flow={flow} />
       </Fragment>
@@ -2291,7 +2311,7 @@ function App({ relayConfig, onQuit }: AppProps) {
       <StatusBar
         hint={state.panelFocus === 'projects'
           ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
-          : '[Tab] Switch  [Enter] Open/Join  [n] New Workspace  [d] Delete  [x] Kill  [,] Settings  [?] Help  [q] Quit'
+          : getWorkspacesPanelHint(spacesBrowserProps.selectedItem)
         }
       />
 
@@ -2677,6 +2697,35 @@ function SettingsFlowModal({ flow }: { flow: SettingsFlowState }) {
       </box>
     </box>
   );
+}
+
+// ============================================================================
+// Status Bar Helpers
+// ============================================================================
+
+function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): string {
+  if (selectedItem?.type === 'session') {
+    return '[Tab] Switch  [Enter] Attach  [x] Kill  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'process') {
+    if (selectedItem.status === 'running') {
+      return '[Tab] Switch  [Enter] View  [x] Stop  [,] Settings  [?] Help  [q] Quit';
+    }
+    return '[Tab] Switch  [Enter] Start  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'workspace') {
+    return '[Tab] Switch  [Enter] Expand  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'edit-processes') {
+    return '[Tab] Switch  [Enter] Edit Processes Config  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'events') {
+    return '[Tab] Switch  [Enter] Open Events  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'new-session') {
+    return '[Tab] Switch  [Enter] New Session  [,] Settings  [?] Help  [q] Quit';
+  }
+  return '[Tab] Switch  [Enter] Open  [n] New Workspace  [,] Settings  [?] Help  [q] Quit';
 }
 
 // ============================================================================

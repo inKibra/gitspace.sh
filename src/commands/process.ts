@@ -3,6 +3,7 @@
  */
 
 import { logger } from '../utils/logger.js';
+import { SpacesError } from '../types/errors.js';
 import { listSessions } from '../lib/tmux-lite/cli.js';
 import {
   getProcessSpecs,
@@ -42,14 +43,12 @@ export async function listProcesses(options: ProcessCommandOptions): Promise<voi
 export async function startProcess(options: ProcessCommandOptions): Promise<void> {
   const workspacePath = options.workspace || resolveWorkspacePath();
   if (!options.name) {
-    logger.error('Provide process name via --name');
-    return;
+    throw new SpacesError('Provide process name via --name', 'USER_ERROR');
   }
 
   const specs = getProcessSpecs(workspacePath).filter((spec) => spec.name === options.name);
   if (specs.length === 0) {
-    logger.error(`Process not found: ${options.name}`);
-    return;
+    throw new SpacesError(`Process not found: ${options.name}`, 'USER_ERROR');
   }
 
   for (const spec of specs) {
@@ -62,14 +61,12 @@ export async function startProcess(options: ProcessCommandOptions): Promise<void
 export async function stopProcess(options: ProcessCommandOptions): Promise<void> {
   const workspacePath = options.workspace || resolveWorkspacePath();
   if (!options.name) {
-    logger.error('Provide process name via --name');
-    return;
+    throw new SpacesError('Provide process name via --name', 'USER_ERROR');
   }
 
   const specs = getProcessSpecs(workspacePath).filter((spec) => spec.name === options.name);
   if (specs.length === 0) {
-    logger.error(`Process not found: ${options.name}`);
-    return;
+    throw new SpacesError(`Process not found: ${options.name}`, 'USER_ERROR');
   }
 
   for (const spec of specs) {
@@ -81,22 +78,19 @@ export async function stopProcess(options: ProcessCommandOptions): Promise<void>
 export async function attachProcess(options: ProcessCommandOptions): Promise<void> {
   const workspacePath = options.workspace || resolveWorkspacePath();
   if (!options.name) {
-    logger.error('Provide process name via --name');
-    return;
+    throw new SpacesError('Provide process name via --name', 'USER_ERROR');
   }
 
   const sessions = await listProcessSessions(workspacePath);
   const target = sessions.find((session) => session.processName === options.name);
   if (!target) {
-    logger.error(`Process not running: ${options.name}`);
-    return;
+    throw new SpacesError(`Process not running: ${options.name}`, 'USER_ERROR');
   }
 
   const sessionList = await listSessions();
   const session = sessionList.find((item) => item.id === target.sessionId);
   if (!session) {
-    logger.error(`Session not found for process ${options.name}`);
-    return;
+    throw new SpacesError(`Session not found for process ${options.name}`, 'SYSTEM_ERROR');
   }
 
   logger.info(`Attach with: gssh tmux attach ${session.id}`);

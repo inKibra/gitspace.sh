@@ -56,6 +56,7 @@ export type TreeItem =
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
   | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
+  | { type: 'edit-processes'; workspaceId: string }
   | { type: 'events'; workspaceId: string }
   | { type: 'new-session'; workspaceId: string };
 
@@ -70,11 +71,12 @@ export interface UseSpacesBrowserProps {
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
   onRequestSessions: (workspaceId?: string) => void;
-  onAttachSession: (params: { sessionId?: string; workspaceId?: string }) => void | Promise<void>;
+  onAttachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => void | Promise<void>;
   onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
   onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
   onOpenEvents: (workspaceId: string) => void;
+  onEditProcesses?: (params: { workspaceId: string }) => void;
   onRefresh: () => void | Promise<void>;
   /** Called to refresh sessions after workspace refresh (full refresh by default). */
   onRefreshSessions?: () => void | Promise<void>;
@@ -113,6 +115,7 @@ export interface UseSpacesBrowserReturn {
   createWorkspace: () => void;
   refresh: () => Promise<void>;
   openEvents: (workspaceId: string) => void;
+  editProcesses: (params: { workspaceId: string }) => void;
   back: () => void;
 }
 
@@ -240,6 +243,12 @@ function buildTree(
           });
         }
 
+        // Edit processes config action
+        items.push({
+          type: 'edit-processes',
+          workspaceId: ws.id,
+        });
+
         // Events action
         items.push({
           type: 'events',
@@ -280,6 +289,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     onStartProcessAttach,
     onStopProcess,
     onOpenEvents,
+    onEditProcesses,
     onRefresh,
     onRefreshSessions,
     onBack,
@@ -370,7 +380,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
           selectedItem.instance
         );
         if (session) {
-          await onAttachSession({ sessionId: session.id });
+          await onAttachSession({ sessionId: session.id, viewOnly: true });
         }
       } else {
         onStartProcessAttach({
@@ -379,12 +389,14 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
           instance: selectedItem.instance,
         });
       }
+    } else if (selectedItem.type === 'edit-processes') {
+      onEditProcesses?.({ workspaceId: selectedItem.workspaceId });
     } else if (selectedItem.type === 'events') {
       onOpenEvents(selectedItem.workspaceId);
     } else if (selectedItem.type === 'new-session') {
       await onAttachSession({ workspaceId: selectedItem.workspaceId });
     }
-  }, [selectedItem, toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onOpenEvents]);
+  }, [selectedItem, toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onEditProcesses, onOpenEvents]);
 
   const createNewSession = useCallback(async () => {
     if (!selectedItem) return;
@@ -444,6 +456,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     createWorkspace,
     refresh,
     openEvents: (workspaceId) => onOpenEvents(workspaceId),
+    editProcesses: (params) => onEditProcesses?.(params),
     back,
   };
 }

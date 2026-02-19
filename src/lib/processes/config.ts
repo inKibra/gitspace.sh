@@ -17,8 +17,19 @@ export function loadProcessesConfig(workspacePath: string): ProcessesConfig {
     return { processes: [] };
   }
 
-  const raw = readFileSync(path, 'utf-8');
-  const parsed = JSON.parse(raw) as ProcessesConfig;
+  const raw = readFileSync(path, 'utf-8').trim();
+  if (!raw) {
+    return { processes: [] };
+  }
+
+  let parsed: ProcessesConfig;
+  try {
+    parsed = JSON.parse(raw) as ProcessesConfig;
+  } catch {
+    console.warn(`[processes] Failed to parse ${path}`);
+    return { processes: [] };
+  }
+
   const normalized: ProcessesConfig = {
     processes: Array.isArray(parsed.processes) ? parsed.processes : [],
   };

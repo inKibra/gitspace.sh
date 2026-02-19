@@ -4,6 +4,7 @@
 
 import { existsSync } from 'fs';
 import { logger } from '../utils/logger.js';
+import { SpacesError } from '../types/errors.js';
 import { getCurrentProject } from '../core/config.js';
 import { listSessions } from '../lib/tmux-lite/cli.js';
 import { getProcessEventsDir, listProcessEventsDirs } from '../lib/events/paths.js';
@@ -43,11 +44,10 @@ function parseFilter(filter?: string): WideEventFilter {
   }
 }
 
-async function resolveEventsDir(options: EventsCommandOptions): Promise<{ eventsDir: string; sessionId: string } | null> {
+async function resolveEventsDir(options: EventsCommandOptions): Promise<{ eventsDir: string; sessionId: string }> {
   const project = getCurrentProject();
   if (!project) {
-    logger.error('No current project. Run `gssh switch project` first.');
-    return null;
+    throw new SpacesError('No current project. Run `gssh switch project` first.', 'USER_ERROR');
   }
 
   const sessions = await listSessions();
@@ -56,8 +56,7 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<{ events
     : sessions[0];
 
   if (!target) {
-    logger.error('Session not found.');
-    return null;
+    throw new SpacesError('Session not found.', 'USER_ERROR');
   }
 
   const workspacePath = target.cwd;
@@ -71,8 +70,7 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<{ events
     : listProcessEventsDirs(workspacePath)[0];
 
   if (!eventsDir || !existsSync(eventsDir)) {
-    logger.error('No process events directory found for this workspace.');
-    return null;
+    throw new SpacesError('No process events directory found for this workspace.', 'USER_ERROR');
   }
 
   return { eventsDir, sessionId: workspaceId };
@@ -80,7 +78,6 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<{ events
 
 export async function listEvents(options: EventsCommandOptions): Promise<void> {
   const resolved = await resolveEventsDir(options);
-  if (!resolved) return;
 
   const filter = parseFilter(options.filter);
   const events = readWideEvents({
@@ -101,12 +98,10 @@ export async function listEvents(options: EventsCommandOptions): Promise<void> {
 
 export async function showEvent(options: EventsCommandOptions): Promise<void> {
   if (!options.filter || !options.filter.startsWith('eventId=')) {
-    logger.error('Provide eventId filter: --filter "eventId=<id>"');
-    return;
+    throw new SpacesError('Provide eventId filter: --filter "eventId=<id>"', 'USER_ERROR');
   }
 
   const resolved = await resolveEventsDir(options);
-  if (!resolved) return;
 
   const filter = parseFilter(options.filter);
   const events = readWideEvents({
@@ -125,7 +120,6 @@ export async function showEvent(options: EventsCommandOptions): Promise<void> {
 
 export async function tailEvents(options: EventsTailOptions): Promise<void> {
   const resolved = await resolveEventsDir(options);
-  if (!resolved) return;
 
   const filter = parseFilter(options.filter);
   const events = readWideEvents({

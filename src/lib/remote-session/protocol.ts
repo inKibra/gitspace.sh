@@ -54,6 +54,8 @@ export interface AttachSessionRequest {
   command?: string;       // Command to run (process sessions)
   args?: string[];        // Command arguments
   env?: Record<string, string>;  // Environment variables
+  /** When true, the server blocks PTY writes from this client */
+  viewOnly?: boolean;
 }
 
 /** Request wide events for a workspace */
