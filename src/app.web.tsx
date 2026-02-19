@@ -799,14 +799,12 @@ export default function App() {
               Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceName}</span>
             </div>
             <div className="text-sm text-[#8b949e]">{statusMessage}</div>
-            {terminal.status === 'error' && (
-              <button
-                onClick={() => { setView('machines'); setReviewWorkspace(null); }}
-                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
-              >
-                Back to Machines
-              </button>
-            )}
+            <button
+              onClick={() => { setView('machines'); setReviewWorkspace(null); }}
+              className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+            >
+              Back to Machines
+            </button>
           </div>
         </div>
         <Toaster theme="dark" position="top-right" richColors />

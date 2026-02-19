@@ -20,6 +20,7 @@ import type {
 } from '../types/review.js';
 import { generateId } from '../utils/id.js';
 import { SpacesError } from '../types/errors.js';
+import { logger } from '../utils/logger.js';
 
 const execAsync = promisify(exec);
 
@@ -64,8 +65,29 @@ export function readReviewSession(
     const raw = readFileSync(notesPath, 'utf-8');
     const parsed = JSON.parse(raw) as ReviewSession;
     return parsed;
-  } catch {
-    return createEmptySession(workspaceName, baseBranch);
+  } catch (error) {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : undefined;
+
+    if (code === 'ENOENT') {
+      return createEmptySession(workspaceName, baseBranch);
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (error instanceof SyntaxError) {
+      logger.error(`Failed to parse review notes at ${notesPath}: ${message}`);
+      throw new SpacesError(`Corrupted review notes at ${notesPath}: ${message}`, 'USER_ERROR', 1);
+    }
+
+    logger.error(`Failed to read review notes at ${notesPath}: ${message}`);
+    if (error instanceof Error) {
+      throw error;
+    }
+
+    throw new SpacesError(`Failed to read review notes at ${notesPath}: ${message}`, 'SYSTEM_ERROR', 2);
   }
 }
 
