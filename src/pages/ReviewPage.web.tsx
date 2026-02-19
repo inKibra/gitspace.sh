@@ -3,7 +3,7 @@
  * ReviewPage — full review dashboard.
  */
 
-import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { DiffViewer, type HunkFocusTarget } from '../components/DiffViewer.web.js';
 import { ThreadPanel } from '../components/ThreadPanel.web.js';
 import { useReview } from '../hooks/useReview.web.js';
@@ -69,6 +69,7 @@ export function ReviewPage({
   const [threadFilter, setThreadFilter] = useState<'all' | 'current-file' | 'current-hunk'>('all');
   const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
   const [currentHunkFocus, setCurrentHunkFocus] = useState<HunkFocusTarget | null>(null);
+  const currentHunkFocusRef = useRef<HunkFocusTarget | null>(null);
   const [focusRequest, setFocusRequest] = useState<{ threadId: string; nonce: number } | null>(null);
 
   const [importing, setImporting] = useState(false);
@@ -202,10 +203,15 @@ export function ReviewPage({
 
   const handleSelectedFileChange = useCallback((filePath: string | null) => {
     setCurrentFilePath(filePath);
-    if (currentHunkFocus && (!filePath || currentHunkFocus.filePath !== filePath)) {
+    const currentFocus = currentHunkFocusRef.current;
+    if (currentFocus && (!filePath || currentFocus.filePath !== filePath)) {
       setCurrentHunkFocus(null);
       setThreadFilter((mode) => (mode === 'current-hunk' ? 'current-file' : mode));
     }
+  }, []);
+
+  useEffect(() => {
+    currentHunkFocusRef.current = currentHunkFocus;
   }, [currentHunkFocus]);
 
   const handleHunkFocus = useCallback((target: HunkFocusTarget | null) => {

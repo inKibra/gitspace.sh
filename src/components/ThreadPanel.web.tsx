@@ -772,7 +772,14 @@ function doesLineThreadOverlapHunk(thread: ReviewThread, hunkFocus: HunkFocusTar
   }
 
   if (thread.target.side === 'LEFT') {
+    if (hunkFocus.oldEnd < hunkFocus.oldStart) {
+      return false;
+    }
     return rangesOverlap(thread.target.startLine, thread.target.endLine, hunkFocus.oldStart, hunkFocus.oldEnd);
+  }
+
+  if (hunkFocus.newEnd < hunkFocus.newStart) {
+    return false;
   }
 
   return rangesOverlap(thread.target.startLine, thread.target.endLine, hunkFocus.newStart, hunkFocus.newEnd);

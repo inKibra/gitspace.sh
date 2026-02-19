@@ -1077,8 +1077,8 @@ function parseSingleFileDiff(diff: string, file: ReviewChangedFile): LoadedFileD
     const anchorLine = Math.max(1, anchorSide === 'additions' ? hunk.additionStart : hunk.deletionStart);
     const oldStart = Math.max(1, hunk.deletionStart);
     const newStart = Math.max(1, hunk.additionStart);
-    const oldEnd = oldStart + Math.max(hunk.deletionCount, 1) - 1;
-    const newEnd = newStart + Math.max(hunk.additionCount, 1) - 1;
+    const oldEnd = hunk.deletionCount > 0 ? oldStart + hunk.deletionCount - 1 : oldStart - 1;
+    const newEnd = hunk.additionCount > 0 ? newStart + hunk.additionCount - 1 : newStart - 1;
 
     return {
       header: formatHunkHeader(hunk),

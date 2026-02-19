@@ -27,7 +27,7 @@
  *     Add a line-range review thread.
  */
 
-import { spawnSync } from 'child_process';
+import open from 'open';
 import { isAbsolute, relative, resolve, sep } from 'path';
 import { readProjectConfig, readGlobalConfig, getGitspaceDir } from '../core/config.js';
 import { executeLocalReviewOperation } from '../core/review-executor.js';
@@ -288,18 +288,15 @@ function resolveChangedFile(
 }
 
 /**
- * Open a URL in the default browser (macOS / Linux / Windows).
+ * Open a URL in the default browser.
  */
-function openBrowser(url: string): void {
-  const platform = process.platform;
-  if (platform === 'win32') {
-    // `start` is a cmd.exe builtin on Windows, not a standalone executable.
-    spawnSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' });
-    return;
+async function openBrowser(url: string): Promise<void> {
+  try {
+    await open(url, { wait: false });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warning(`Could not open browser automatically: ${message}`);
   }
-
-  const cmd = platform === 'darwin' ? 'open' : 'xdg-open';
-  spawnSync(cmd, [url], { stdio: 'ignore' });
 }
 
 // ============================================================================
@@ -323,7 +320,7 @@ export async function openReview(options: ReviewOptions = {}): Promise<void> {
 
   logger.log(`Opening review UI: ${url}`);
   logger.log('(Requires `gssh serve start` to be running)');
-  openBrowser(url);
+  await openBrowser(url);
 }
 
 // ============================================================================
