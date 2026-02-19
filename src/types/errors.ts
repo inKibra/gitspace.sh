@@ -40,6 +40,16 @@ export class SpacesError extends Error {
   }
 }
 
+export function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
+  if (error instanceof SpacesError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new SpacesError(error.message, 'SYSTEM_ERROR', 2);
+  }
+  return new SpacesError(fallbackMessage, 'SYSTEM_ERROR', 2);
+}
+
 /**
  * Error thrown when a dependency is missing
  */
@@ -228,6 +238,35 @@ export class WorkspaceDeleteError extends Error {
     super(message);
     this.name = 'WorkspaceDeleteError';
     this.code = code;
+
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+}
+
+export type ReviewRequestErrorCode =
+  | 'REVIEW_TIMEOUT'
+  | 'REVIEW_FAILED'
+  | 'REVIEW_MISSING_RESULT'
+  | (string & {});
+
+/**
+ * Error thrown when remote review requests fail or time out.
+ */
+export class ReviewRequestError extends Error {
+  public readonly code: ReviewRequestErrorCode;
+  public readonly metadata?: { op?: string; requestId?: string };
+
+  constructor(
+    message: string,
+    code: ReviewRequestErrorCode,
+    metadata?: { op?: string; requestId?: string }
+  ) {
+    super(message);
+    this.name = 'ReviewRequestError';
+    this.code = code;
+    this.metadata = metadata;
 
     if (typeof Error.captureStackTrace === 'function') {
       Error.captureStackTrace(this, this.constructor);

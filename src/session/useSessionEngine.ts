@@ -10,6 +10,7 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { ScriptPhase } from '../types/script-phase.js';
 import { BackendManager } from './backend-manager.js';
 import {
@@ -129,6 +130,9 @@ export function useSessionEngine() {
             status: 'error',
             error: event.message,
           });
+          break;
+        case 'review_response':
+          // Handled directly by RemoteSessionBackend's pending map — no state dispatch needed.
           break;
         default:
           break;
@@ -295,6 +299,20 @@ export function useSessionEngine() {
     await withBackend(backendKey, (backend) => backend.updateNotificationConfig(config));
   }, [withBackend]);
 
+  const sendReviewRequest = useCallback(async (
+    backendKey: BackendKey,
+    operation: ReviewOperation
+  ): Promise<ReviewResult> => {
+    let result: ReviewResult | null = null;
+    await withBackend(backendKey, async (backend) => {
+      result = await backend.sendReviewRequest(operation);
+    });
+    if (!result) {
+      throw new SpacesError('Review request was not handled by backend', 'SYSTEM_ERROR', 2);
+    }
+    return result;
+  }, [withBackend]);
+
   return useMemo(() => ({
     state,
     activeBackendKey: getActiveBackendKey(state),
@@ -323,6 +341,7 @@ export function useSessionEngine() {
     markInboxRead,
     getNotificationConfig,
     updateNotificationConfig,
+    sendReviewRequest,
   }), [
     state,
     registerBackend,
@@ -344,5 +363,6 @@ export function useSessionEngine() {
     markInboxRead,
     getNotificationConfig,
     updateNotificationConfig,
+    sendReviewRequest,
   ]);
 }

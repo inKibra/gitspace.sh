@@ -6,6 +6,7 @@ import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
+import type { ReviewOperation, ReviewResult } from '../types/review.js';
 
 export type BackendEvent =
   | { type: 'status'; status: 'disconnected' | 'connecting' | 'connected' | 'error'; error?: string }
@@ -26,4 +27,8 @@ export type BackendEvent =
   | { type: 'detached' }
   | { type: 'session_exited'; sessionId: string; exitCode?: number }
   | { type: 'command_error'; code?: string; message: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'review_response'; requestId: string; result?: ReviewResult; error?: { code: string; message: string } };
+
+// Re-export for convenience
+export type { ReviewOperation, ReviewResult };

@@ -61,6 +61,9 @@ class FakeBackend implements SessionBackend {
   async markInboxRead(_id: string): Promise<void> {}
   async getNotificationConfig(): Promise<void> {}
   async updateNotificationConfig(): Promise<void> {}
+  async sendReviewRequest(): Promise<never> {
+    throw new Error('not implemented');
+  }
 }
 
 describe('BackendManager', () => {

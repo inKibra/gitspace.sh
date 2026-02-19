@@ -34,12 +34,18 @@ import { listProjectSummaries } from "../../core/project-catalog";
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
 import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
+
+// Import review operations
+import { executeLocalReviewOperation } from "../../core/review-executor.js";
+import type { ReviewOperation, ReviewResult } from "../../types/review.js";
 import { getNotificationConfig, updateNotificationConfig } from "../../core/config";
 import {
   getBundleRefreshPlan,
   applyBundleRefreshSubmission,
 } from '../../core/bundle-refresh.js';
 import { buildSessionName } from '../../session/session-name.js';
+import { buildWorkspaceSessionHooks } from '../../session/workspace-shell-hooks.js';
+import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 
 import { logger } from "../../utils/logger.js";
 
@@ -88,15 +94,18 @@ function canAttachSession(
   return false;
 }
 
-function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
-  return `${workspace.projectName}:${workspace.id}`;
-}
+const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
+  'create_thread',
+  'add_reply',
+  'update_thread',
+  'update_comment',
+  'delete_comment',
+  'import_github',
+  'push_github',
+]);
 
-function matchesWorkspaceId(
-  workspace: { projectName: string; id: string },
-  workspaceId: string
-): boolean {
-  return workspace.id === workspaceId || toCanonicalWorkspaceId(workspace) === workspaceId;
+function isMutatingReviewOperation(operation: ReviewOperation): boolean {
+  return MUTATING_REVIEW_OPERATIONS.has(operation.op);
 }
 
 /**
@@ -276,6 +285,15 @@ export class RemoteSessionHandler {
           msg.projectName,
           msg.workspaceId,
           msg.submission,
+          sendResponse
+        );
+        break;
+
+      case 'review_request':
+        await this.handleReviewRequest(
+          session,
+          msg.requestId,
+          msg.operation,
           sendResponse
         );
         break;
@@ -486,7 +504,9 @@ export class RemoteSessionHandler {
         });
         console.log(`[remote-session] Selected session name: ${sessionName}`);
 
-        targetSession = await createSession(sessionName, workspace.path);
+        targetSession = await createSession(sessionName, workspace.path, {
+          hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+        });
         console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`)
       } else if (msg.sessionId) {
         // Security: Check if client can attach to this session
@@ -822,6 +842,58 @@ export class RemoteSessionHandler {
       const message = error instanceof Error ? error.message : 'Failed to apply bundle refresh';
       await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_APPLY_FAILED', message);
     }
+  }
+
+  // ============================================================================
+  // Review Request Handling
+  // ============================================================================
+
+  /**
+   * Handle a review_request message by dispatching to the appropriate
+   * review operation and responding with a review_response.
+   */
+  private async handleReviewRequest(
+    session: RemoteClientSession,
+    requestId: string,
+    operation: ReviewOperation,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    if (isMutatingReviewOperation(operation) && !canManage(session.accessType)) {
+      await this.sendMessage(session, sendResponse, {
+        type: 'review_response',
+        requestId,
+        error: {
+          code: 'PERMISSION_DENIED',
+          message: 'Requires full access to perform this review operation',
+        },
+      });
+      return;
+    }
+
+    try {
+      const result = await this.executeReviewOperation(operation);
+      await this.sendMessage(session, sendResponse, {
+        type: 'review_response',
+        requestId,
+        result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.sendMessage(session, sendResponse, {
+        type: 'review_response',
+        requestId,
+        error: { code: 'REVIEW_ERROR', message },
+      });
+    }
+  }
+
+  /**
+   * Delegate to the shared executeLocalReviewOperation from review-executor.ts.
+   * This is the single authoritative implementation used by both the remote
+   * session handler and the local session backend.
+   */
+  private async executeReviewOperation(operation: ReviewOperation): Promise<ReviewResult> {
+    return executeLocalReviewOperation(operation, scanWorkspaces);
   }
 
   private async resolveWorkspace(

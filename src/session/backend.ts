@@ -4,6 +4,7 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../types/review.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -70,6 +71,8 @@ export interface SessionBackend {
 
   getNotificationConfig(): Promise<void>;
   updateNotificationConfig(config: NotificationConfig): Promise<void>;
+
+  sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult>;
 
   writePtyData?(data: Uint8Array): Promise<void>;
   resizePty?(cols: number, rows: number): Promise<void>;

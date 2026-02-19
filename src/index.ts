@@ -59,6 +59,17 @@ import { configNotifications, linearSetup, linearShow, linearClear } from './com
 import { migrateCleanupLegacy } from './commands/migrate.js'
 import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
 import { bundleRefresh, bundleStatus } from './commands/bundle.js'
+import {
+	openReview,
+	showReviewNotes,
+	importReview,
+	pushReview,
+	listReviewHunks,
+	addHunkReview,
+	addFileReview,
+	addLineReview,
+	showSpaceContext,
+} from './commands/review.js'
 
 const program = new Command()
 
@@ -835,6 +846,157 @@ bundleCommand
 	})
 
 // ============================================================================
+// Review Commands
+// ============================================================================
+
+function withReviewSetup<T extends unknown[]>(
+	handler: (...args: T) => Promise<void>
+): (...args: T) => Promise<void> {
+	return async (...args: T): Promise<void> => {
+		await checkFirstTimeSetup()
+		try {
+			await handler(...args)
+		} catch (error) {
+			handleError(error)
+		}
+	}
+}
+
+function addReviewScopeOptions(command: Command): Command {
+	return command
+		.option('--workspace <name>', 'Workspace name')
+		.option('--project <name>', 'Project name')
+}
+
+function registerReviewSubcommands(command: Command): void {
+	addReviewScopeOptions(
+		command
+			.command('notes')
+			.description('Print review threads as structured JSON (LLM-friendly)')
+	)
+		.option('--format <format>', 'Output format: json (default) or text')
+		.action(withReviewSetup(async (options) => {
+			await showReviewNotes(options)
+		}))
+
+	addReviewScopeOptions(
+		command
+			.command('import')
+			.description('Import GitHub PR review comments as local threads')
+	)
+		.option('--pr <number>', 'PR number to import from', (v) => parseInt(v, 10))
+		.action(withReviewSetup(async (options) => {
+			await importReview(options)
+		}))
+
+	addReviewScopeOptions(
+		command
+			.command('push')
+			.description('Push local review decisions to GitHub as a formal PR review')
+	)
+		.option('--pr <number>', 'PR number to submit review on', (v) => parseInt(v, 10))
+		.action(withReviewSetup(async (options) => {
+			await pushReview(options)
+		}))
+
+	addReviewScopeOptions(
+		command
+			.command('hunks <file>')
+			.description('List hunks in a changed file (AI-friendly target IDs)')
+	)
+		.option('--format <format>', 'Output format: json (default) or text')
+		.action(withReviewSetup(async (file, options) => {
+			await listReviewHunks(file, options)
+		}))
+
+	addReviewScopeOptions(
+		command
+			.command('add-hunk <file>')
+			.description('Add or update hunk review by hunk index')
+	)
+		.requiredOption('--index <number>', '1-based hunk index', (v) => parseInt(v, 10))
+		.option('--body <text>', 'Optional comment body')
+		.option('--approve', 'Set hunk decision to approved')
+		.option('--reject', 'Set hunk decision to rejected')
+		.option('--pending', 'Set hunk decision to pending')
+		.option('--json', 'Output structured JSON')
+		.action(withReviewSetup(async (file, options) => {
+			await addHunkReview(file, options)
+		}))
+
+	addReviewScopeOptions(
+		command
+			.command('add-file <file>')
+			.description('Add a file-level review thread')
+	)
+		.requiredOption('--body <text>', 'Comment body')
+		.option('--json', 'Output structured JSON')
+		.action(withReviewSetup(async (file, options) => {
+			await addFileReview(file, options)
+		}))
+
+	addReviewScopeOptions(
+		command
+			.command('add-line <file>')
+			.description('Add a line-range review thread')
+	)
+		.requiredOption('--start <number>', '1-based start line', (v) => parseInt(v, 10))
+		.option('--end <number>', '1-based end line (defaults to start)', (v) => parseInt(v, 10))
+		.option('--side <side>', 'LEFT or RIGHT side of diff (default: RIGHT)')
+		.requiredOption('--body <text>', 'Comment body')
+		.option('--json', 'Output structured JSON')
+		.action(withReviewSetup(async (file, options) => {
+			await addLineReview(file, options)
+		}))
+}
+
+const reviewCommand = program
+	.command('review')
+	.description('Open or interact with the diff review system')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--port <number>', 'Port of the serve daemon (default: 4480)', (v) => parseInt(v, 10))
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await openReview(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+registerReviewSubcommands(reviewCommand)
+
+// Hidden workspace-scoped command surface.
+// Intended to be used from `space` shell function injected into workspace sessions.
+// Scope flags intentionally live on leaf subcommands so Commander passes them
+// to each handler's `options` object.
+const spaceCommand = program
+	.command('space', { hidden: true })
+	.description('Workspace-scoped commands')
+
+spaceCommand
+	.command('context')
+	.description('Show resolved workspace context')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--json', 'Output structured JSON')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await showSpaceContext(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+const spaceReviewCommand = spaceCommand
+	.command('review')
+	.description('Workspace review commands')
+
+registerReviewSubcommands(spaceReviewCommand)
+
+// ============================================================================
 // Auth Commands (gitspace.sh)
 // ============================================================================
 
@@ -992,9 +1154,51 @@ process.on('unhandledRejection', (reason) => {
 	process.exit(1)
 })
 
+function isWorkspaceScopedSession(): boolean {
+	return process.env.GSSH_SESSION_MODE === 'workspace'
+}
+
+function isAllowedWorkspaceSessionCommand(args: string[]): boolean {
+	if (args.length === 0) {
+		return false
+	}
+
+	const first = args[0]
+	if (!first) {
+		return false
+	}
+
+	if (first === 'space') {
+		return true
+	}
+
+	if (first === '--help' || first === '-h' || first === '--version' || first === '-V') {
+		return true
+	}
+
+	if (first === 'help') {
+		return true
+	}
+
+	return false
+}
+
 // Parse command line arguments
 // Check for global relay options (TUI mode with relay)
 const args = process.argv.slice(2)
+
+if (isWorkspaceScopedSession() && !isAllowedWorkspaceSessionCommand(args)) {
+	if (args.length === 0) {
+		logger.error('Bare `gssh` is disabled inside a workspace session.')
+	} else if (args[0] === 'tmux') {
+		logger.error('tmux commands are disabled inside workspace sessions.')
+	} else {
+		logger.error('This command is disabled inside a workspace session.')
+	}
+	logger.log('Use `space ...` for workspace-scoped operations.')
+	process.exit(1)
+}
+
 let relayUrlFromArgs: string | undefined
 let ignoreKeychainAndSkipSecrets = false
 let hasOnlyTuiOptions = true

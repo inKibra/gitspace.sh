@@ -106,6 +106,22 @@ gssh switch
 gssh switch my-feature
 ```
 
+### Workspace Session Mode (`space`)
+
+When GitSpace opens a workspace-scoped terminal session, it injects a `space` shell function (bash/zsh).
+
+- Use `space ...` for workspace operations without repeating `--project` and `--workspace`
+- `gssh` commands are restricted in this mode to avoid cross-workspace mistakes
+- `gssh tmux ...` is blocked inside workspace sessions
+
+Examples:
+
+```bash
+space context --json
+space review hunks src/app.ts --format json
+space review add-hunk src/app.ts --index 1 --approve --body "Looks good"
+```
+
 ## Repo Config Bundles
 
 Repo config bundles allow repository owners to share onboarding configurations with their team. When someone clones a project that contains a bundle, they'll be guided through setup steps and have scripts automatically installed.

@@ -8,15 +8,16 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
-import { getCurrentProject, getProjectBaseDir, getProjectWorkspacesDir } from '../core/config.js';
+import { getCurrentProject, getGitspaceDir, getProjectBaseDir, getProjectWorkspacesDir } from '../core/config.js';
 import {
   detectBundleChanges,
   formatBundleChangeDetails,
   refreshBundle,
   type BundleRefreshOptions,
 } from '../core/bundle-refresh.js';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { existsSync } from 'fs';
+import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
 
 const execAsync = promisify(exec);
 
@@ -43,24 +44,16 @@ export interface BundleStatusOptions {
  * Returns the workspace path if found, undefined otherwise
  */
 function detectWorkspaceFromCwd(projectName: string): string | undefined {
-  const cwd = process.cwd();
   const workspacesDir = getProjectWorkspacesDir(projectName);
 
-  // Check if cwd is inside the workspaces directory
-  const resolvedCwd = resolve(cwd);
-  const resolvedWorkspacesDir = resolve(workspacesDir);
+  const context = detectWorkspaceContextFromCwd(process.cwd(), getGitspaceDir());
+  if (!context || context.projectName !== projectName) {
+    return undefined;
+  }
 
-  if (resolvedCwd.startsWith(resolvedWorkspacesDir + '/') || resolvedCwd === resolvedWorkspacesDir) {
-    // Extract the workspace name (first path segment after workspaces/)
-    const relativePath = resolvedCwd.slice(resolvedWorkspacesDir.length + 1);
-    const workspaceName = relativePath.split('/')[0];
-
-    if (workspaceName) {
-      const workspacePath = join(workspacesDir, workspaceName);
-      if (existsSync(workspacePath)) {
-        return workspacePath;
-      }
-    }
+  const workspacePath = join(workspacesDir, context.workspaceName);
+  if (existsSync(workspacePath)) {
+    return workspacePath;
   }
 
   return undefined;

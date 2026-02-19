@@ -34,7 +34,13 @@ import {
 } from '../../core/bundle-refresh.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
+import {
+  matchesWorkspaceId,
+  resolveWorkspaceName,
+  toCanonicalWorkspaceId,
+} from '../../utils/workspace-id.js';
 import { buildSessionName } from '../session-name.js';
+import { buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -44,6 +50,8 @@ import type {
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../../types/review.js';
+import { executeLocalReviewOperation } from '../../core/review-executor.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
@@ -95,22 +103,6 @@ const DEFAULT_DESCRIPTOR: BackendDescriptor = {
   kind: 'local',
   label: 'Local',
 };
-
-function toWorkspaceId(projectName: string, workspaceName: string): string {
-  return `${projectName}:${workspaceName}`;
-}
-
-function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
-  return toWorkspaceId(workspace.projectName, workspace.id);
-}
-
-function resolveWorkspaceName(projectName: string, workspaceId: string): string {
-  const prefix = `${projectName}:`;
-  if (workspaceId.startsWith(prefix)) {
-    return workspaceId.slice(prefix.length);
-  }
-  return workspaceId;
-}
 
 function toSessionInfo(
   session: TmuxSession,
@@ -452,14 +444,13 @@ export class LocalSessionBackend implements SessionBackend {
         throw toExitedSessionError(targetSession);
       }
     } else if (params.workspaceId) {
+      const workspaceId = params.workspaceId;
       const workspaces = await this.deps.scanWorkspaces();
       const workspace = workspaces.find(
-        (item) =>
-          item.id === params.workspaceId ||
-          toCanonicalWorkspaceId(item) === params.workspaceId
+        (item) => matchesWorkspaceId(item, workspaceId)
       );
       if (!workspace) {
-        throw new SpacesError(`Workspace not found: ${params.workspaceId}`, 'USER_ERROR', 1);
+        throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
       }
 
       let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
@@ -535,7 +526,9 @@ export class LocalSessionBackend implements SessionBackend {
         requestedName: params.sessionName,
         sessions,
       });
-      targetSession = await this.deps.createSession(fullName, workspace.path);
+      targetSession = await this.deps.createSession(fullName, workspace.path, {
+        hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+      });
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
     }
@@ -665,6 +658,10 @@ export class LocalSessionBackend implements SessionBackend {
   ): Promise<void> {
     const workspace = await this.resolveWorkspace(projectName, workspaceId);
     await this.deps.applyBundleRefreshSubmission(projectName, workspace.path, submission);
+  }
+
+  async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {
+    return executeLocalReviewOperation(operation, this.deps.scanWorkspaces);
   }
 
   async requestInbox(): Promise<void> {
@@ -883,7 +880,7 @@ export class LocalSessionBackend implements SessionBackend {
     const workspace = workspaces.find(
       (item) =>
         item.projectName === projectName &&
-        (item.id === resolvedWorkspaceId || toCanonicalWorkspaceId(item) === workspaceId)
+        (item.id === resolvedWorkspaceId || matchesWorkspaceId(item, workspaceId))
     );
 
     if (!workspace) {
