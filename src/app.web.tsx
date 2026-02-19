@@ -530,6 +530,12 @@ export default function App() {
     terminal.requestSessions();
   }, [terminal]);
 
+  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
+    const workspace = terminal.workspaces.find((item) => item.id === params.workspaceId);
+    const workspaceLabel = workspace?.name ?? params.workspaceId;
+    toast.error(`Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`);
+  }, [terminal.workspaces]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: terminal.workspaces,
@@ -544,6 +550,7 @@ export default function App() {
       terminal.requestWorkspaces();
       terminal.requestSessions();
     },
+    onProcessDisabled: handleProcessDisabled,
     onOpenEvents: (workspaceId) => {
       const workspace = terminal.workspaces.find(w => w.id === workspaceId);
       if (workspace) {

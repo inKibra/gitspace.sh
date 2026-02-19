@@ -11,6 +11,8 @@ import {
   stopProcessInstance,
   listProcessSessions,
 } from '../lib/processes/manager.js';
+import { loadProcessesConfig, getProcessDefinition } from '../lib/processes/config.js';
+import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
 
 interface ProcessCommandOptions {
   workspace?: string;
@@ -48,6 +50,11 @@ export async function startProcess(options: ProcessCommandOptions): Promise<void
 
   const specs = getProcessSpecs(workspacePath).filter((spec) => spec.name === options.name);
   if (specs.length === 0) {
+    const processConfig = loadProcessesConfig(workspacePath);
+    const definition = getProcessDefinition(processConfig, options.name);
+    if (definition && normalizeProcessInstanceCount(definition.instances) === 0) {
+      throw new SpacesError(`Process is disabled (instances: 0): ${options.name}`, 'USER_ERROR');
+    }
     throw new SpacesError(`Process not found: ${options.name}`, 'USER_ERROR');
   }
 

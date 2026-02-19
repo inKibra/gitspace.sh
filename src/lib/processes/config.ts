@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { ProcessesConfig, ProcessDefinition, ProcessInstanceSpec } from '../../types/processes.js';
 import { validateProcessesConfig } from './schema.js';
+import { normalizeProcessInstanceCount } from './instances.js';
 
 export interface ProcessesConfigLoadResult {
   config: ProcessesConfig;
@@ -170,7 +171,7 @@ export function loadProcessesConfig(workspacePath: string): ProcessesConfig {
 export function getProcessInstances(config: ProcessesConfig): ProcessInstanceSpec[] {
   const instances: ProcessInstanceSpec[] = [];
   for (const process of config.processes) {
-    const count = Math.max(1, process.instances ?? 1);
+    const count = normalizeProcessInstanceCount(process.instances);
     for (let idx = 1; idx <= count; idx++) {
       instances.push({ name: process.name, instance: idx, definition: process });
     }

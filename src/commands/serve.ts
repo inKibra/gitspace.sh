@@ -626,6 +626,10 @@ class ServeProcessHostManager {
         }
       }
       if (!workspaceRef) continue;
+      seenWorkspaceIds.add(workspaceRef.workspaceId);
+      if (parsed?.workspaceId) {
+        seenWorkspaceIds.add(parsed.workspaceId);
+      }
 
       const config = configCache.get(workspaceRef.workspacePath) ?? loadProcessesConfig(workspaceRef.workspacePath);
       configCache.set(workspaceRef.workspacePath, config);
@@ -636,7 +640,8 @@ class ServeProcessHostManager {
         if (!Number.isInteger(port.port) || port.port <= 0) {
           continue;
         }
-        const portLabel = port.name?.trim().length ? port.name : String(port.port);
+        const trimmedPortName = port.name?.trim();
+        const portLabel = trimmedPortName && trimmedPortName.length > 0 ? trimmedPortName : String(port.port);
         const hostname = buildProcessHostname(
           this.serveDomain,
           workspaceRef.workspaceId,

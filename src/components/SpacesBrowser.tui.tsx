@@ -50,6 +50,9 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
       ? '[↑↓] Navigate  [Enter] View  [x] Stop  [r] Refresh  [q] Back'
       : '[↑↓] Navigate  [Enter] Start  [r] Refresh  [q] Back';
   }
+  if (selectedItem?.type === 'process-disabled') {
+    return '[↑↓] Navigate  [Enter] Disabled  [r] Refresh  [q] Back';
+  }
   if (selectedItem?.type === 'process-config-error') {
     return '[↑↓] Navigate  [Enter] Fix Config  [r] Refresh  [q] Back';
   }
@@ -187,6 +190,18 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
                 <text fg={textColor}> {item.processName}#{item.instance}</text>
                 {portInfo && <text fg={COLORS.textDim}>{portInfo}</text>}
                 <text fg={statusColor}> ({item.status})</text>
+              </box>
+            );
+          }
+
+          if (item.type === 'process-disabled') {
+            const textColor = isSelected ? COLORS.selected : '#D29922';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <box key={`process-disabled-${item.workspaceId}-${item.processName}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}   </text>
+                <text fg="#D29922">⏸</text>
+                <text fg={textColor}> {item.processName} (disabled)</text>
               </box>
             );
           }

@@ -253,6 +253,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     });
   }, [remote]);
 
+  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
+    const workspace = remote.workspaces.find((item) => item.id === params.workspaceId);
+    const workspaceLabel = workspace?.name ?? params.workspaceId;
+    flow.showMessage({
+      title: 'Process Disabled',
+      message: `Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`,
+      variant: 'error',
+    });
+  }, [flow, remote.workspaces]);
+
   const handleOpenEvents = useCallback(() => {
     flow.showMessage({
       title: 'Events Unavailable',
@@ -281,6 +291,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
+    onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,
     onRefreshSessions: () => remote.requestSessions(),

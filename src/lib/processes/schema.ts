@@ -32,6 +32,12 @@ export function validateProcessesConfig(config: ProcessesConfig): ProcessValidat
       errors.push(`process ${process.name} missing command`);
     }
 
+    if (process.instances !== undefined) {
+      if (!Number.isInteger(process.instances) || process.instances < 0) {
+        errors.push(`process ${process.name} instances must be a non-negative integer`);
+      }
+    }
+
     if (process.events?.keepRawOutput !== undefined && typeof process.events.keepRawOutput !== 'boolean') {
       errors.push(`process ${process.name} keepRawOutput must be a boolean`);
     }

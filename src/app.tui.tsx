@@ -1250,6 +1250,12 @@ function App({ relayConfig, onQuit }: AppProps) {
     void stopLocalProcess(params.workspaceId, params.processName);
   }, [stopLocalProcess]);
 
+  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
+    const workspace = localWorkspaces.find((item) => item.id === params.workspaceId);
+    const workspaceLabel = workspace?.name ?? params.workspaceId;
+    toast.error(`Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`);
+  }, [localWorkspaces]);
+
   const handleOpenEvents = useCallback((workspaceId: string) => {
     setEventsWorkspaceId(workspaceId);
     // Find workspace path for events request
@@ -1270,6 +1276,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
+    onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onRefresh: refreshWorkspaces,
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
@@ -2807,6 +2814,9 @@ function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): stri
   }
   if (selectedItem?.type === 'workspace') {
     return '[Tab] Switch  [Enter] Expand  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'process-disabled') {
+    return '[Tab] Switch  [Enter] Disabled  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'process-config-error') {
     return '[Tab] Switch  [Enter] Fix Process Config  [,] Settings  [?] Help  [q] Quit';

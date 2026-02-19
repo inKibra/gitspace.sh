@@ -74,6 +74,32 @@ describe('validateProcessesConfig', () => {
     expect(result.errors).toContain('process web missing command');
   });
 
+  it('should allow instances set to 0 (disabled process)', () => {
+    const config: ProcessesConfig = {
+      processes: [{ name: 'worker', command: 'npm run worker', instances: 0 }],
+    };
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail when instances is negative', () => {
+    const config = {
+      processes: [{ name: 'worker', command: 'npm run worker', instances: -1 }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain('process worker instances must be a non-negative integer');
+  });
+
+  it('should fail when instances is not an integer', () => {
+    const config = {
+      processes: [{ name: 'worker', command: 'npm run worker', instances: 1.5 }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain('process worker instances must be a non-negative integer');
+  });
+
   it('should fail when keepRawOutput is not boolean', () => {
     const config = {
       processes: [

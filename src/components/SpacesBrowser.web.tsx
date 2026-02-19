@@ -174,6 +174,24 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'process-disabled') {
+            return (
+              <div
+                key={`process-disabled-${item.workspaceId}-${item.processName}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[52px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#d29922]">⏸ {item.processName} (disabled)</span>
+              </div>
+            );
+          }
+
           if (item.type === 'process-config-error') {
             return (
               <div

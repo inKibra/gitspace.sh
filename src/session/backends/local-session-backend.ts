@@ -59,9 +59,14 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import { parseProcessSessionName } from '../../lib/processes/names.js';
-import { loadProcessesConfigWithDiagnostics } from '../../lib/processes/config.js';
+import {
+  loadProcessesConfig,
+  loadProcessesConfigWithDiagnostics,
+  getProcessDefinition,
+} from '../../lib/processes/config.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../../lib/processes/manager.js';
 import { startProcessScheduler } from '../../lib/processes/scheduler.js';
+import { normalizeProcessInstanceCount } from '../../lib/processes/instances.js';
 import { readWorkspaceSnapshots } from '../../lib/events/reader.js';
 import { resolveWorkspaceRef } from '../../lib/events/paths.js';
 import { loadSavedEventFilters } from '../../lib/events/filters.js';
@@ -760,6 +765,15 @@ export class LocalSessionBackend implements SessionBackend {
     );
     if (!workspace) {
       throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
+    }
+
+    const processConfig = loadProcessesConfig(workspace.path);
+    const processDefinition = getProcessDefinition(processConfig, processName);
+    if (!processDefinition) {
+      throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
+    }
+    if (normalizeProcessInstanceCount(processDefinition.instances) === 0) {
+      throw new SpacesError(`Process is disabled (instances: 0): ${processName}`, 'USER_ERROR', 1);
     }
 
     const specs = getProcessSpecs(workspace.path).filter((s) =>

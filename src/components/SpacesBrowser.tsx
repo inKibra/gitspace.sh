@@ -6,6 +6,7 @@
  */
 
 import { useState, useCallback, useMemo, useEffect } from 'react';
+import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
 
 // ============================================================================
 // Types
@@ -57,6 +58,7 @@ export type TreeItem =
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
   | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
+  | { type: 'process-disabled'; processName: string; workspaceId: string; ports?: WorkspaceProcessPort[] }
   | { type: 'process-config-error'; workspaceId: string; error: string }
   | { type: 'edit-processes'; workspaceId: string }
   | { type: 'events'; workspaceId: string }
@@ -77,6 +79,7 @@ export interface UseSpacesBrowserProps {
   onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
   onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
+  onProcessDisabled?: (params: { workspaceId: string; processName: string }) => void;
   onOpenEvents: (workspaceId: string) => void;
   onEditProcesses?: (params: { workspaceId: string }) => void;
   onRefresh: () => void | Promise<void>;
@@ -206,10 +209,19 @@ function buildTree(
         };
 
         for (const process of processEntries) {
-          const configuredCount = process.instances ?? 1;
+          const configuredCount = normalizeProcessInstanceCount(process.instances);
+          if (configuredCount === 0) {
+            items.push({
+              type: 'process-disabled',
+              processName: process.name,
+              workspaceId: ws.id,
+              ports: process.ports,
+            });
+            continue;
+          }
+
           const configuredInstances = Array.from({ length: configuredCount }, (_, idx) => idx + 1);
-          const instanceList = configuredInstances.length > 0 ? configuredInstances : [1];
-          for (const instance of instanceList) {
+          for (const instance of configuredInstances) {
             const sessionKey = `${process.name}:${instance}`;
             const matchingSessions = processSessionGroups.get(sessionKey) ?? [];
             const runningSession = getLatestSession(matchingSessions.filter((session) => session.exitCode === undefined));
@@ -310,6 +322,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     onStartProcess,
     onStartProcessAttach,
     onStopProcess,
+    onProcessDisabled,
     onOpenEvents,
     onEditProcesses,
     onRefresh,
@@ -414,6 +427,11 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
           instance: item.instance,
         });
       }
+    } else if (item.type === 'process-disabled') {
+      onProcessDisabled?.({
+        workspaceId: item.workspaceId,
+        processName: item.processName,
+      });
     } else if (item.type === 'process-config-error') {
       onEditProcesses?.({ workspaceId: item.workspaceId });
     } else if (item.type === 'edit-processes') {
@@ -423,7 +441,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     } else if (item.type === 'new-session') {
       await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onEditProcesses, onOpenEvents]);
+  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onOpenEvents]);
 
   const activateSelected = useCallback(async () => {
     await activateItem(selectedItem);

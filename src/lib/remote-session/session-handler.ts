@@ -55,7 +55,12 @@ import { loadSavedEventFilters } from "../events/filters.js";
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from "../processes/manager.js";
 import { autostartProcesses } from "../processes/autostart.js";
 import { startProcessScheduler } from "../processes/scheduler.js";
-import { loadProcessesConfigWithDiagnostics } from "../processes/config.js";
+import {
+  loadProcessesConfigWithDiagnostics,
+  loadProcessesConfig,
+  getProcessDefinition,
+} from "../processes/config.js";
+import { normalizeProcessInstanceCount } from "../processes/instances.js";
 import { readProjectConfig } from "../../core/config.js";
 import { existsSync } from "fs";
 
@@ -1188,6 +1193,17 @@ export class RemoteSessionHandler {
       const workspace = workspaces.find((w) => matchesWorkspaceId(w, workspaceId));
       if (!workspace) {
         await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
+        return;
+      }
+
+      const processConfig = loadProcessesConfig(workspace.path);
+      const processDefinition = getProcessDefinition(processConfig, processName);
+      if (!processDefinition) {
+        await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
+        return;
+      }
+      if (normalizeProcessInstanceCount(processDefinition.instances) === 0) {
+        await this.sendError(session, sendResponse, "PROCESS_DISABLED", `Process is disabled (instances: 0): ${processName}`);
         return;
       }
 

@@ -5,6 +5,9 @@
 import { describe, expect, it, mock, beforeEach } from 'bun:test';
 import { SpacesError } from '../../types/errors.js';
 import type { ProcessInstanceSpec } from '../../types/processes.js';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // ============================================================================
 // Mocks
@@ -86,6 +89,29 @@ describe('startProcess', () => {
     await startProcess({ name: 'web' });
 
     expect(mockStartProcessInstance).toHaveBeenCalledTimes(1);
+  });
+
+  it('should throw disabled error when process exists with instances: 0', async () => {
+    mockGetProcessSpecs.mockImplementation(() => []);
+    const workspacePath = mkdtempSync(join(tmpdir(), 'gssh-process-test-'));
+    const gitspaceDir = join(workspacePath, '.gitspace');
+    mkdirSync(gitspaceDir, { recursive: true });
+    writeFileSync(
+      join(gitspaceDir, 'processes.json'),
+      JSON.stringify({ processes: [{ name: 'web', command: 'npm start', instances: 0 }] }),
+      'utf-8'
+    );
+
+    try {
+      await startProcess({ name: 'web', workspace: workspacePath });
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SpacesError);
+      expect((err as SpacesError).exitCode).toBe(1);
+      expect((err as SpacesError).message).toContain('Process is disabled');
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true });
+    }
   });
 });
 

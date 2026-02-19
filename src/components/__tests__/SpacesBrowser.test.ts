@@ -143,6 +143,23 @@ describe('useSpacesBrowser tree building', () => {
     expect(names).toContain('worker#2');
   });
 
+  it('shows disabled process rows when instances is 0', () => {
+    const ws = makeWorkspace({
+      sessionCount: 0,
+      processes: [
+        { name: 'web', instances: 0 },
+      ],
+    });
+    const props = makeProps({ workspaces: [ws] });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const disabledRows = result.current.items.filter((item) => item.type === 'process-disabled');
+    expect(disabledRows).toHaveLength(1);
+    expect(disabledRows[0]?.type === 'process-disabled' && disabledRows[0].processName).toBe('web');
+  });
+
   it('derives process status from sessions', () => {
     const ws = makeWorkspace({
       sessionCount: 1,
@@ -392,6 +409,28 @@ describe('useSpacesBrowser activateSelected', () => {
     await act(async () => { await result.current.activateSelected(); });
 
     expect(onAttachSession).toHaveBeenCalledWith({ sessionId: 'proc-sess-1', viewOnly: true });
+  });
+
+  it('calls onProcessDisabled when disabled process row is activated', async () => {
+    const ws = makeWorkspace({
+      processes: [{ name: 'worker', instances: 0 }],
+    });
+    const onProcessDisabled = mock(() => {});
+    const props = makeProps({ workspaces: [ws], onProcessDisabled });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const disabledIndex = result.current.items.findIndex((item) => item.type === 'process-disabled');
+    expect(disabledIndex).toBeGreaterThanOrEqual(0);
+    act(() => { result.current.selectIndex(disabledIndex); });
+
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onProcessDisabled).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      processName: 'worker',
+    });
   });
 });
 
