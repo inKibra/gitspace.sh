@@ -343,7 +343,7 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to start processes");
           return;
         }
-        await this.handleStartProcess(session, msg.workspaceId, msg.processName, sendResponse);
+        await this.handleStartProcess(session, msg.workspaceId, msg.processName, msg.instance, sendResponse);
         break;
 
       case "stop_process":
@@ -1172,6 +1172,7 @@ export class RemoteSessionHandler {
     session: RemoteClientSession,
     workspaceId: string,
     processName: string,
+    instance: number | undefined,
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     try {
@@ -1182,7 +1183,9 @@ export class RemoteSessionHandler {
         return;
       }
 
-      const specs = getProcessSpecs(workspace.path).filter(spec => spec.name === processName);
+      const specs = getProcessSpecs(workspace.path).filter(
+        (spec) => spec.name === processName && (instance === undefined || spec.instance === instance)
+      );
       if (specs.length === 0) {
         await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
         return;

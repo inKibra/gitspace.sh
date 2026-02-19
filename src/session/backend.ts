@@ -82,7 +82,7 @@ export interface SessionBackend {
   updateNotificationConfig(config: NotificationConfig): Promise<void>;
 
   sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult>;
-  startProcess?(workspaceId: string, processName: string): Promise<void>;
+  startProcess?(workspaceId: string, processName: string, instance?: number): Promise<void>;
   stopProcess?(workspaceId: string, processName: string): Promise<void>;
   requestEvents?(workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number): Promise<void>;
 

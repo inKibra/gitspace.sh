@@ -670,11 +670,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
-  async startProcess(workspaceId: string, processName: string): Promise<void> {
+  async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
     const command: StartProcessRequest = {
       type: 'start_process',
       workspaceId,
       processName,
+      instance,
     };
     await this.sendCommand(command);
   }

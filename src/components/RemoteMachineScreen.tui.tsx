@@ -58,6 +58,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
     onError: (error) => {
@@ -197,6 +198,14 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       return;
     }
 
+    if (
+      pendingProcessEditWorkspacesRef.current &&
+      pendingProcessEditWorkspacesRef.current === remote.workspaces
+    ) {
+      return;
+    }
+    pendingProcessEditWorkspacesRef.current = null;
+
     const workspace = remote.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
       setPendingProcessEditWorkspaceId(null);
@@ -224,7 +233,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
 
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
-    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName)).finally(() => {
+    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName, params.instance)).finally(() => {
       remote.requestWorkspaces();
       remote.requestSessions();
     });
@@ -239,6 +248,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow]);
 
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    pendingProcessEditWorkspacesRef.current = remote.workspaces;
     setPendingProcessEditWorkspaceId(workspaceId);
     const commandSpec = buildEditProcessesCommand();
     void attachController.attach({
@@ -246,7 +256,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       command: commandSpec.command,
       args: commandSpec.args,
     });
-  }, [attachController]);
+  }, [attachController, remote.workspaces]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,

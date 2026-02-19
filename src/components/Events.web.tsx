@@ -95,6 +95,7 @@ export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | n
     const query = search.trim().toLowerCase();
     if (!query) return filtered;
     return filtered.filter((event) =>
+      event.eventName.toLowerCase().includes(query) ||
       event.message.toLowerCase().includes(query) ||
       event.correlationId?.toLowerCase().includes(query)
     );
@@ -372,7 +373,7 @@ function Header({
             <div className="text-xs text-[#6e7681]">Workspace: {workspaceLabel}</div>
           )}
           {processLabel && (
-            <div className="text-xs text-[#6e7681]">Last update: {processLabel}</div>
+            <div className="text-xs text-[#6e7681]">Process: {processLabel}</div>
           )}
         </div>
       </div>

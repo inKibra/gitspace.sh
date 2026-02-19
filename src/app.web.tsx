@@ -85,6 +85,7 @@ export default function App() {
   const [localNotificationConfig, setLocalNotificationConfig] =
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
+  const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<SessionTerminalHandle>(null);
@@ -307,6 +308,14 @@ export default function App() {
       return;
     }
 
+    if (
+      pendingProcessEditWorkspacesRef.current &&
+      pendingProcessEditWorkspacesRef.current === terminal.workspaces
+    ) {
+      return;
+    }
+    pendingProcessEditWorkspacesRef.current = null;
+
     const workspace = terminal.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
       setPendingProcessEditWorkspaceId(null);
@@ -501,6 +510,7 @@ export default function App() {
   // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     setIsViewOnlySession(false);
+    pendingProcessEditWorkspacesRef.current = terminal.workspaces;
     setPendingProcessEditWorkspaceId(workspaceId);
     const commandSpec = buildEditProcessesCommand();
     void attachController.attach({
@@ -508,7 +518,11 @@ export default function App() {
       command: commandSpec.command,
       args: commandSpec.args,
     });
-  }, [attachController]);
+  }, [attachController, terminal.workspaces]);
+
+  const handleStartProcessSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
+    terminal.startProcess(params.workspaceId, params.processName, params.instance);
+  }, [terminal]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -517,12 +531,8 @@ export default function App() {
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
-    onStartProcess: (params) => {
-      terminal.startProcess(params.workspaceId, params.processName);
-    },
-    onStartProcessAttach: (params) => {
-      terminal.startProcess(params.workspaceId, params.processName);
-    },
+    onStartProcess: (params) => handleStartProcessSelection(params),
+    onStartProcessAttach: (params) => handleStartProcessSelection(params),
     onStopProcess: (params) => {
       terminal.stopProcess(params.workspaceId, params.processName);
     },

@@ -323,9 +323,9 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     });
   }, [enabled]);
 
-  const startProcess = useCallback(async (workspaceId: string, processName: string) => {
+  const startProcess = useCallback(async (workspaceId: string, processName: string, instance?: number) => {
     await runWithBackend(async (sessionEngine) => {
-      await sessionEngine.startProcess(backendKey, workspaceId, processName);
+      await sessionEngine.startProcess(backendKey, workspaceId, processName, instance);
       await sessionEngine.listWorkspaces(backendKey);
       await sessionEngine.listSessions(backendKey);
     });

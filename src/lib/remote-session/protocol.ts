@@ -73,6 +73,7 @@ export interface StartProcessRequest {
   type: "start_process";
   workspaceId: string;
   processName: string;
+  instance?: number;
 }
 
 /** Stop a process in a workspace */
@@ -434,6 +435,7 @@ export function serializeRemoteMessage(msg: RemoteSessionMessage): string {
 export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListWorkspacesRequest
   | ListSessionsRequest
-  | AttachSessionRequest {
+  | AttachSessionRequest
+  | GetEventsRequest {
   return ["list_workspaces", "list_sessions", "attach_session", "get_events"].includes(msg.type);
 }

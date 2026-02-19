@@ -1225,7 +1225,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [startLocalProcess]);
 
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
-    void startLocalProcess(params.workspaceId, params.processName).then(() => {
+    void startLocalProcess(params.workspaceId, params.processName, params.instance).then(() => {
       // After starting, find and attach to the session
       void refreshWorkspaces();
     });

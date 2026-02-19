@@ -190,6 +190,7 @@ function buildTree(
 
         // Build process entries from workspace config
         const processEntries = ws.processes ?? [];
+        const renderedProcessKeys = new Set<string>();
         const processInstances = new Map<string, Set<number>>();
         for (const session of processSessions) {
           const instance = session.processInstance ?? 1;
@@ -224,11 +225,16 @@ function buildTree(
               ports: process.ports,
               serveDomain: ws.serveDomain,
             });
+            renderedProcessKeys.add(`${process.name}:${instance}`);
           }
         }
 
-        // Process sessions
+        // Process sessions not represented by process rows (orphaned/unconfigured)
         for (const session of processSessions) {
+          const processKey = `${session.processName}:${session.processInstance ?? 1}`;
+          if (renderedProcessKeys.has(processKey)) {
+            continue;
+          }
           items.push({
             type: 'session',
             session,

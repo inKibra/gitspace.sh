@@ -99,7 +99,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   events: WideEvent[];
   liveEventIds: string[];
   savedEventFilters: SavedEventFilter[];
-  startProcess: (workspaceId: string, processName: string) => void;
+  startProcess: (workspaceId: string, processName: string, instance?: number) => void;
   stopProcess: (workspaceId: string, processName: string) => void;
   requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
 }
@@ -328,9 +328,9 @@ export function useRemoteSessionClient<ConnectParams>(
     [engine]
   );
 
-  const startProcess = useCallback((workspaceId: string, processName: string) => {
+  const startProcess = useCallback((workspaceId: string, processName: string, instance?: number) => {
     void withActiveBackend((backendKey) =>
-      engine.startProcess(backendKey, workspaceId, processName)
+      engine.startProcess(backendKey, workspaceId, processName, instance)
     );
   }, [engine, withActiveBackend]);
 

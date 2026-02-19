@@ -329,10 +329,10 @@ export function useSessionEngine() {
     return result;
   }, [withBackend]);
 
-  const startProcess = useCallback(async (backendKey: BackendKey, workspaceId: string, processName: string) => {
+  const startProcess = useCallback(async (backendKey: BackendKey, workspaceId: string, processName: string, instance?: number) => {
     await withBackend(backendKey, async (backend) => {
       if (backend.startProcess) {
-        await backend.startProcess(workspaceId, processName);
+        await backend.startProcess(workspaceId, processName, instance);
       }
     });
   }, [withBackend]);

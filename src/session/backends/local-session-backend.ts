@@ -753,7 +753,7 @@ export class LocalSessionBackend implements SessionBackend {
     this.emit({ type: 'notification_config', config: updated });
   }
 
-  async startProcess(workspaceId: string, processName: string): Promise<void> {
+  async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
     const workspaces = await this.deps.scanWorkspaces();
     const workspace = workspaces.find(
       (w) => w.id === workspaceId || toCanonicalWorkspaceId(w) === workspaceId
@@ -762,7 +762,9 @@ export class LocalSessionBackend implements SessionBackend {
       throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
     }
 
-    const specs = getProcessSpecs(workspace.path).filter((s) => s.name === processName);
+    const specs = getProcessSpecs(workspace.path).filter((s) =>
+      s.name === processName && (instance === undefined || s.instance === instance)
+    );
     if (specs.length === 0) {
       throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
     }
