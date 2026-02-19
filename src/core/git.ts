@@ -13,6 +13,14 @@ import type { ReviewChangedFile } from '../types/review.js';
 
 const execAsync = promisify(exec);
 
+const BASE_REF_CACHE_TTL_MS = 60_000;
+const comparableBaseRefCache = new Map<string, { baseRef: string; cachedAt: number }>();
+const comparableBaseRefInflight = new Map<string, Promise<string>>();
+
+function comparableBaseRefKey(workspacePath: string, baseBranch: string): string {
+  return `${workspacePath}::${baseBranch}`;
+}
+
 /**
  * Get the default branch of a repository
  */
@@ -522,32 +530,57 @@ async function resolveComparableBaseRef(
   workspacePath: string,
   baseBranch: string
 ): Promise<string> {
-  // Best effort fetch. Keep short timeout to avoid hanging review requests.
-  try {
-    await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
-      cwd: workspacePath,
-      timeout: 8000,
-    });
-  } catch {
-    logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
+  const cacheKey = comparableBaseRefKey(workspacePath, baseBranch);
+  const cached = comparableBaseRefCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < BASE_REF_CACHE_TTL_MS) {
+    return cached.baseRef;
   }
 
-  const candidates = [`origin/${baseBranch}`, baseBranch];
-  for (const candidate of candidates) {
+  const inFlight = comparableBaseRefInflight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const resolvePromise = (async () => {
+    // Best effort fetch. Keep short timeout to avoid hanging review requests.
     try {
-      await execAsync(`git rev-parse --verify ${escapeShellArg(candidate)}`, {
+      await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
         cwd: workspacePath,
-        timeout: 5000,
+        timeout: 8000,
       });
-      return candidate;
     } catch {
-      // Try next candidate
+      logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
     }
-  }
 
-  throw new Error(
-    `Cannot resolve base ref for "${baseBranch}". Fetch the branch or update project base branch config.`
-  );
+    const candidates = [`origin/${baseBranch}`, baseBranch];
+    for (const candidate of candidates) {
+      try {
+        await execAsync(`git rev-parse --verify ${escapeShellArg(candidate)}`, {
+          cwd: workspacePath,
+          timeout: 5000,
+        });
+
+        comparableBaseRefCache.set(cacheKey, {
+          baseRef: candidate,
+          cachedAt: Date.now(),
+        });
+        return candidate;
+      } catch {
+        // Try next candidate
+      }
+    }
+
+    throw new Error(
+      `Cannot resolve base ref for "${baseBranch}". Fetch the branch or update project base branch config.`
+    );
+  })();
+
+  comparableBaseRefInflight.set(cacheKey, resolvePromise);
+  try {
+    return await resolvePromise;
+  } finally {
+    comparableBaseRefInflight.delete(cacheKey);
+  }
 }
 
 async function resolveMergeBaseCommit(

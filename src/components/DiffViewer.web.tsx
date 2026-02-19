@@ -142,7 +142,9 @@ export function DiffViewer({
 
   const diffHostRef = useRef<HTMLDivElement | null>(null);
   const loadingFileDiffKeysRef = useRef<Set<string>>(new Set());
+  const loadingContextKeysRef = useRef<Set<string>>(new Set());
   const fileDiffStateByKeyRef = useRef<Record<string, FileDiffState>>({});
+  const contextStateByKeyRef = useRef<Record<string, FileContextState>>({});
 
   const fileByKey = useMemo(() => {
     const map = new Map<string, ReviewChangedFile>();
@@ -175,7 +177,22 @@ export function DiffViewer({
   }, [fileDiffStateByKey]);
 
   useEffect(() => {
+    contextStateByKeyRef.current = contextStateByKey;
+  }, [contextStateByKey]);
+
+  useEffect(() => {
     const valid = new Set(files.map((file) => fileKey(file.filePath, file.prevFilePath)));
+
+    for (const key of [...loadingFileDiffKeysRef.current]) {
+      if (!valid.has(key)) {
+        loadingFileDiffKeysRef.current.delete(key);
+      }
+    }
+    for (const key of [...loadingContextKeysRef.current]) {
+      if (!valid.has(key)) {
+        loadingContextKeysRef.current.delete(key);
+      }
+    }
 
     setFileDiffStateByKey((prev) => {
       const next: Record<string, FileDiffState> = {};
@@ -311,10 +328,16 @@ export function DiffViewer({
       return;
     }
 
-    const current = contextStateByKey[selectedKey] ?? { status: 'idle' as const };
+    const current = contextStateByKeyRef.current[selectedKey] ?? { status: 'idle' as const };
     if (current.status === 'loading' || current.status === 'ready') {
       return;
     }
+
+    if (loadingContextKeysRef.current.has(selectedKey)) {
+      return;
+    }
+
+    loadingContextKeysRef.current.add(selectedKey);
 
     setContextStateByKey((prev) => ({
       ...prev,
@@ -344,8 +367,10 @@ export function DiffViewer({
         ...prev,
         [selectedKey]: { status: 'error', error: typed },
       }));
+    } finally {
+      loadingContextKeysRef.current.delete(selectedKey);
     }
-  }, [selectedFile, selectedKey, contextStateByKey, onRequestFileContextRange]);
+  }, [selectedFile, selectedKey, onRequestFileContextRange]);
 
   // On-demand expansion trigger: clicking line-info separators when context is
   // not loaded will load context first, then user can click again to expand.
@@ -356,7 +381,7 @@ export function DiffViewer({
     }
 
     const onCaptureClick = (event: MouseEvent) => {
-      const current = contextStateByKey[selectedKey] ?? { status: 'idle' as const };
+      const current = contextStateByKeyRef.current[selectedKey] ?? { status: 'idle' as const };
       if (current.status === 'loading' || current.status === 'ready') {
         return;
       }
@@ -383,7 +408,7 @@ export function DiffViewer({
     return () => {
       host.removeEventListener('click', onCaptureClick, true);
     };
-  }, [selectedKey, contextStateByKey, ensureContextLoaded]);
+  }, [selectedKey, ensureContextLoaded]);
 
   const selectedLoadedDiff = selectedDiffState?.status === 'ready' ? selectedDiffState.data : null;
   const selectedContextReady = selectedContextState?.status === 'ready' ? selectedContextState : null;
