@@ -199,6 +199,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
     const workspace = remote.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
+      setPendingProcessEditWorkspaceId(null);
       return;
     }
 

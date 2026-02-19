@@ -309,6 +309,7 @@ export default function App() {
 
     const workspace = terminal.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
+      setPendingProcessEditWorkspaceId(null);
       return;
     }
 

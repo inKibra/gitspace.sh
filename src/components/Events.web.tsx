@@ -88,14 +88,13 @@ function formatLevel(level: string): string {
 }
 
 export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | null }) {
-  const { filtered, selectedIndex, selected, liveEventIds, savedFilters, activeFilterName, selectIndex, selectSavedFilter, close } = props;
+  const { filtered, selected, liveEventIds, savedFilters, activeFilterName, selectIndex, selectSavedFilter, close } = props;
   const [search, setSearch] = useState('');
 
   const filteredLogs = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const wideEvents = filtered.filter((event) => event.kind === 'wide');
-    if (!query) return wideEvents;
-    return wideEvents.filter((event) =>
+    if (!query) return filtered;
+    return filtered.filter((event) =>
       event.message.toLowerCase().includes(query) ||
       event.correlationId?.toLowerCase().includes(query)
     );
@@ -118,7 +117,7 @@ export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | n
       }));
     }
     return [] as Array<import('../types/events.js').WideSnapshotTimelineEntry>;
-  }, [filtered, selected]);
+  }, [selected]);
 
   const timelineBuckets = useMemo(() => buildTimelineBuckets(timelineEvents), [timelineEvents]);
   const timelineMax = Math.max(1, ...timelineBuckets.map((bucket) => bucket.count));
