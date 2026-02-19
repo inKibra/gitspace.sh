@@ -41,8 +41,8 @@ import { ProjectListTUI } from './components/ProjectList.tui.js';
 import { InboxTUI } from './components/Inbox.tui.js';
 import { useInbox } from './components/Inbox.js';
 import { EventsTui } from './components/Events.tui.js';
-import { useEvents, type WideEventItem } from './components/Events.js';
-import type { WideEvent, SavedEventFilter, WideEventFilter } from './types/events.js';
+import { useEvents, toWideEventItem, type WideEventItem } from './components/Events.js';
+import type { SavedEventFilter, WideEventFilter } from './types/events.js';
 import { toast } from '@opentui-ui/toast';
 import {
   useNotifications,
@@ -1302,23 +1302,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   });
 
   // Events hook
-  const eventsItems: WideEventItem[] = localEvents.map((event: WideEvent) => ({
-    eventId: event.eventId,
-    eventName: event.eventName,
-    level: event.level,
-    timestamp: event.timestamp,
-    timestampMs: event.timestampMs,
-    message: event.message,
-    processName: event.processName,
-    processInstance: event.processInstance,
-    sessionId: event.sessionId,
-    raw: event.raw,
-    kind: event.kind,
-    correlationId: event.correlationId,
-    timeline: event.timeline,
-    timelineMap: event.timelineMap,
-    timelineOrder: event.timelineOrder,
-  }));
+  const eventsItems: WideEventItem[] = localEvents.map(toWideEventItem);
 
   const eventsProps = useEvents({
     events: eventsItems,

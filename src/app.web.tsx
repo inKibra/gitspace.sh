@@ -36,9 +36,9 @@ import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
 import { InboxWeb } from "./components/Inbox.web.js";
-import { useEvents, type WideEventItem } from "./components/Events.js";
+import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
-import type { WideEvent, WideEventFilter } from "./types/events.js";
+import type { WideEventFilter } from "./types/events.js";
 import {
   useNotifications,
   type ToastNotification,
@@ -541,6 +541,8 @@ export default function App() {
     onStartProcessAttach: (params) => handleStartProcessSelection(params),
     onStopProcess: (params) => {
       terminal.stopProcess(params.workspaceId, params.processName);
+      terminal.requestWorkspaces();
+      terminal.requestSessions();
     },
     onOpenEvents: (workspaceId) => {
       const workspace = terminal.workspaces.find(w => w.id === workspaceId);
@@ -572,23 +574,7 @@ export default function App() {
   });
 
   // Events hook
-  const eventsItems: WideEventItem[] = terminal.events.map((event: WideEvent) => ({
-    eventId: event.eventId,
-    eventName: event.eventName,
-    level: event.level,
-    timestamp: event.timestamp,
-    timestampMs: event.timestampMs,
-    message: event.message,
-    processName: event.processName,
-    processInstance: event.processInstance,
-    sessionId: event.sessionId,
-    raw: event.raw,
-    kind: event.kind,
-    correlationId: event.correlationId,
-    timeline: event.timeline,
-    timelineMap: event.timelineMap,
-    timelineOrder: event.timelineOrder,
-  }));
+  const eventsItems: WideEventItem[] = terminal.events.map(toWideEventItem);
 
   const eventsProps = useEvents({
     events: eventsItems,

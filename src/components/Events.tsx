@@ -22,6 +22,26 @@ export interface WideEventItem {
   timelineOrder?: string[];
 }
 
+export function toWideEventItem(event: import('../types/events.js').WideEvent): WideEventItem {
+  return {
+    eventId: event.eventId,
+    eventName: event.eventName,
+    level: event.level,
+    timestamp: event.timestamp,
+    timestampMs: event.timestampMs,
+    message: event.message,
+    processName: event.processName,
+    processInstance: event.processInstance,
+    sessionId: event.sessionId,
+    raw: event.raw,
+    kind: event.kind,
+    correlationId: event.correlationId,
+    timeline: event.timeline,
+    timelineMap: event.timelineMap,
+    timelineOrder: event.timelineOrder,
+  };
+}
+
 function getEventTimestamp(event: WideEventItem): number {
   if (typeof event.timestampMs === 'number' && !Number.isNaN(event.timestampMs)) {
     return event.timestampMs;
