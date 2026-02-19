@@ -15,6 +15,7 @@ import type {
   ReviewResult,
   ThreadTarget,
 } from '../types/review.js';
+import { SpacesError } from '../types/errors.js';
 
 export interface ReviewPageProps {
   projectName: string;
@@ -31,6 +32,16 @@ const STATUS_LABELS = {
   changes_required: { label: 'Changes required', color: '#f85149' },
 };
 
+function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
+  if (error instanceof SpacesError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new SpacesError(error.message, 'SYSTEM_ERROR', 2);
+  }
+  return new SpacesError(fallbackMessage, 'SYSTEM_ERROR', 2);
+}
+
 export function ReviewPage({
   projectName,
   workspaceName,
@@ -44,7 +55,7 @@ export function ReviewPage({
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
   const [headBranch, setHeadBranch] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
-  const [filesError, setFilesError] = useState<string | null>(null);
+  const [filesError, setFilesError] = useState<SpacesError | null>(null);
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [hoveredThreadId, setHoveredThreadId] = useState<string | null>(null);
@@ -74,7 +85,7 @@ export function ReviewPage({
       });
 
       if (result.op !== 'changed_files') {
-        throw new Error(`Unexpected response for get_changed_files: ${result.op}`);
+        throw new SpacesError(`Unexpected response for get_changed_files: ${result.op}`, 'SYSTEM_ERROR', 2);
       }
 
       setFiles(result.files);
@@ -82,7 +93,7 @@ export function ReviewPage({
       setHeadBranch(result.headBranch);
     } catch (error) {
       setFiles([]);
-      setFilesError(error instanceof Error ? error.message : String(error));
+      setFilesError(toSpacesError(error, 'Failed to load changed files'));
     } finally {
       setFilesLoading(false);
     }
@@ -116,7 +127,7 @@ export function ReviewPage({
     });
 
     if (result.op !== 'file_diff') {
-      throw new Error(`Unexpected response for get_file_diff: ${result.op}`);
+      throw new SpacesError(`Unexpected response for get_file_diff: ${result.op}`, 'SYSTEM_ERROR', 2);
     }
 
     return result.diff;
@@ -140,7 +151,7 @@ export function ReviewPage({
     });
 
     if (result.op !== 'file_context_range') {
-      throw new Error(`Unexpected response for get_file_context_range: ${result.op}`);
+      throw new SpacesError(`Unexpected response for get_file_context_range: ${result.op}`, 'SYSTEM_ERROR', 2);
     }
 
     return result;
@@ -396,7 +407,7 @@ export function ReviewPage({
           color: '#f85149',
           fontSize: '12px',
         }}>
-          Error: {filesError ?? review.error}
+          Error: {filesError?.message ?? review.error}
         </div>
       )}
 

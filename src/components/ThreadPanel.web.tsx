@@ -35,6 +35,17 @@ const DECISION_COLORS: Record<string, string> = {
   pending: '#d29922',
 };
 
+const SAFE_LINK_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
+
+function isSafeMarkdownHref(href: string): boolean {
+  const trimmed = href.trim();
+  const scheme = trimmed.match(/^([a-zA-Z][a-zA-Z\d+.-]*):/);
+  if (!scheme?.[1]) {
+    return false;
+  }
+  return SAFE_LINK_SCHEMES.has(scheme[1].toLowerCase());
+}
+
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso);
@@ -87,6 +98,9 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
     if (linkMatch) {
       const label = linkMatch[1] ?? token;
       const href = linkMatch[2] ?? '#';
+      if (!isSafeMarkdownHref(href)) {
+        return <Fragment key={key}>{label}</Fragment>;
+      }
       return (
         <a
           key={key}

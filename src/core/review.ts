@@ -19,6 +19,7 @@ import type {
   HunkDecision,
 } from '../types/review.js';
 import { generateId } from '../utils/id.js';
+import { SpacesError } from '../types/errors.js';
 
 const execAsync = promisify(exec);
 
@@ -179,7 +180,7 @@ export function addReply(
   const thread = session.threads.find(t => t.id === threadId);
 
   if (!thread) {
-    throw new Error(`Thread not found: ${threadId}`);
+    throw new SpacesError(`Thread not found: ${threadId}`, 'USER_ERROR', 1);
   }
 
   const now = new Date().toISOString();
@@ -212,7 +213,7 @@ export function updateThread(
   const thread = session.threads.find(t => t.id === threadId);
 
   if (!thread) {
-    throw new Error(`Thread not found: ${threadId}`);
+    throw new SpacesError(`Thread not found: ${threadId}`, 'USER_ERROR', 1);
   }
 
   if (updates.resolved !== undefined) {
@@ -244,12 +245,12 @@ export function updateComment(
   const thread = session.threads.find(t => t.id === threadId);
 
   if (!thread) {
-    throw new Error(`Thread not found: ${threadId}`);
+    throw new SpacesError(`Thread not found: ${threadId}`, 'USER_ERROR', 1);
   }
 
   const comment = thread.comments.find(c => c.id === commentId);
   if (!comment) {
-    throw new Error(`Comment not found: ${commentId}`);
+    throw new SpacesError(`Comment not found: ${commentId}`, 'USER_ERROR', 1);
   }
 
   comment.body = body;
@@ -278,14 +279,14 @@ export function deleteComment(
   const threadIndex = session.threads.findIndex(t => t.id === threadId);
 
   if (threadIndex === -1) {
-    throw new Error(`Thread not found: ${threadId}`);
+    throw new SpacesError(`Thread not found: ${threadId}`, 'USER_ERROR', 1);
   }
 
   const thread = session.threads[threadIndex];
   const commentIndex = thread.comments.findIndex(c => c.id === commentId);
 
   if (commentIndex === -1) {
-    throw new Error(`Comment not found: ${commentId}`);
+    throw new SpacesError(`Comment not found: ${commentId}`, 'USER_ERROR', 1);
   }
 
   thread.comments.splice(commentIndex, 1);
