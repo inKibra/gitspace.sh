@@ -265,7 +265,6 @@ function resolveChangedFile(
   const suffixMatches = changedFiles.filter(
     (file) =>
       file.filePath.endsWith(`/${inputFile}`) ||
-      file.filePath === inputFile ||
       (file.prevFilePath ? file.prevFilePath.endsWith(`/${inputFile}`) : false)
   );
 

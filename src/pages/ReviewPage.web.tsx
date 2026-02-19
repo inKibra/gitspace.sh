@@ -20,6 +20,7 @@ import { SpacesError } from '../types/errors.js';
 export interface ReviewPageProps {
   projectName: string;
   workspaceName: string;
+  workspaceLabel?: string;
   machineName?: string;
   sendReviewRequest: (operation: ReviewOperation) => Promise<ReviewResult>;
   onBack: () => void;
@@ -45,6 +46,7 @@ function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
 export function ReviewPage({
   projectName,
   workspaceName,
+  workspaceLabel,
   machineName,
   sendReviewRequest,
   onBack,
@@ -282,7 +284,7 @@ export function ReviewPage({
           )}
           <span style={{ fontSize: '13px', color: '#8b949e' }}>{projectName}</span>
           <span style={{ color: '#30363d' }}>/</span>
-          <span style={{ fontSize: '13px', color: '#e6edf3', fontWeight: 600 }}>{workspaceName}</span>
+          <span style={{ fontSize: '13px', color: '#e6edf3', fontWeight: 600 }}>{workspaceLabel ?? workspaceName}</span>
           {headBranch && (
             <span style={{ fontSize: '11px', color: '#6e7681', background: '#21262d', padding: '1px 6px', borderRadius: '4px', border: '1px solid #30363d' }}>
               {headBranch}

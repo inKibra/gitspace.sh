@@ -28,6 +28,7 @@ import {
   useFlow,
   getDefaultShortcuts,
   type MachineInfo,
+  type WorkspaceInfo,
 } from "./components/index.js";
 import { MachineListWeb } from "./components/MachineList.web.js";
 import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
@@ -90,7 +91,11 @@ export default function App() {
   } | null>(null);
 
   // Review workspace/project state
-  const [reviewWorkspace, setReviewWorkspace] = useState<{ projectName: string; workspaceName: string } | null>(null);
+  const [reviewWorkspace, setReviewWorkspace] = useState<{
+    projectName: string;
+    workspaceId: string;
+    workspaceLabel?: string;
+  } | null>(null);
 
   // Relay connection (for machine list)
   const relay = useRelayConnection();
@@ -258,7 +263,7 @@ export default function App() {
       const ws = params.get('workspace');
       const proj = params.get('project');
       if (ws && proj) {
-        setReviewWorkspace({ projectName: proj, workspaceName: ws });
+        setReviewWorkspace({ projectName: proj, workspaceId: ws, workspaceLabel: ws });
         setView('review');
       }
     }
@@ -434,8 +439,12 @@ export default function App() {
   }, [attachController]);
 
   // Handle opening review for a workspace
-  const handleOpenReview = useCallback((workspace: { projectName: string; name: string }) => {
-    setReviewWorkspace({ projectName: workspace.projectName, workspaceName: workspace.name });
+  const handleOpenReview = useCallback((workspace: WorkspaceInfo) => {
+    setReviewWorkspace({
+      projectName: workspace.projectName,
+      workspaceId: workspace.id,
+      workspaceLabel: workspace.name,
+    });
     setView('review');
   }, []);
 
@@ -767,7 +776,8 @@ export default function App() {
         <>
           <ReviewPage
             projectName={reviewWorkspace.projectName}
-            workspaceName={reviewWorkspace.workspaceName}
+            workspaceName={reviewWorkspace.workspaceId}
+            workspaceLabel={reviewWorkspace.workspaceLabel}
             machineName={selectedMachine?.label || selectedMachine?.machineId}
             sendReviewRequest={terminal.sendReviewRequest}
             onBack={() => {
@@ -796,7 +806,7 @@ export default function App() {
         <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
           <div className="text-center">
             <div className="text-lg text-[#e6edf3] mb-2">
-              Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceName}</span>
+              Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
             </div>
             <div className="text-sm text-[#8b949e]">{statusMessage}</div>
             <button
