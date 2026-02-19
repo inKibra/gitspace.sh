@@ -192,31 +192,36 @@ function buildTree(
         // Build process entries from workspace config
         const processEntries = ws.processes ?? [];
         const renderedProcessKeys = new Set<string>();
-        const processInstances = new Map<string, Set<number>>();
+        const processSessionGroups = new Map<string, SessionInfo[]>();
         for (const session of processSessions) {
-          const instance = session.processInstance ?? 1;
-          const set = processInstances.get(session.processName ?? '') || new Set<number>();
-          set.add(instance);
-          processInstances.set(session.processName ?? '', set);
+          const key = `${session.processName ?? ''}:${session.processInstance ?? 1}`;
+          const existing = processSessionGroups.get(key) ?? [];
+          existing.push(session);
+          processSessionGroups.set(key, existing);
         }
 
+        const getLatestSession = (items: SessionInfo[]): SessionInfo | null => {
+          if (items.length === 0) return null;
+          return [...items].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+        };
+
         for (const process of processEntries) {
-          const knownInstances = processInstances.get(process.name) ?? new Set<number>();
           const configuredCount = process.instances ?? 1;
           const configuredInstances = Array.from({ length: configuredCount }, (_, idx) => idx + 1);
           const instanceList = configuredInstances.length > 0 ? configuredInstances : [1];
           for (const instance of instanceList) {
-            const sessionMatch = processSessions.find(
-              (session) => session.processName === process.name && (session.processInstance ?? 1) === instance
-            );
-            const exitCode = sessionMatch?.exitCode;
-            const status = exitCode !== undefined
-              ? exitCode === 0
-                ? 'stopped'
-                : 'failed'
-              : knownInstances.has(instance)
-                ? 'running'
-                : 'stopped';
+            const sessionKey = `${process.name}:${instance}`;
+            const matchingSessions = processSessionGroups.get(sessionKey) ?? [];
+            const runningSession = getLatestSession(matchingSessions.filter((session) => session.exitCode === undefined));
+            const latestSession = getLatestSession(matchingSessions);
+
+            let status: 'running' | 'stopped' | 'failed' = 'stopped';
+            if (runningSession) {
+              status = 'running';
+            } else if (latestSession?.exitCode !== undefined) {
+              status = latestSession.exitCode === 0 ? 'stopped' : 'failed';
+            }
+
             items.push({
               type: 'process',
               processName: process.name,

@@ -526,6 +526,8 @@ export default function App() {
 
   const handleStartProcessSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
     terminal.startProcess(params.workspaceId, params.processName, params.instance);
+    terminal.requestWorkspaces();
+    terminal.requestSessions();
   }, [terminal]);
 
   // Spaces browser hook

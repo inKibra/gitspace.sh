@@ -190,6 +190,38 @@ describe('useSpacesBrowser tree building', () => {
     expect(processItem!.type === 'process' && processItem!.status).toBe('failed');
   });
 
+  it('prefers running session status over older exited sessions for same process instance', () => {
+    const ws = makeWorkspace({
+      sessionCount: 2,
+      processes: [{ name: 'web-server', instances: 1 }],
+    });
+    const olderExited = makeSession({
+      id: 'proc-old',
+      name: 'a-old-exited',
+      processName: 'web-server',
+      processInstance: 1,
+      exitCode: 1,
+      createdAt: Date.now() - 120_000,
+    });
+    const newerRunning = makeSession({
+      id: 'proc-new',
+      name: 'z-new-running',
+      processName: 'web-server',
+      processInstance: 1,
+      createdAt: Date.now() - 5_000,
+    });
+    const props = makeProps({ workspaces: [ws], sessions: [olderExited, newerRunning] });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const processItem = result.current.items.find(
+      (item) => item.type === 'process' && item.processName === 'web-server'
+    );
+    expect(processItem).toBeDefined();
+    expect(processItem!.type === 'process' && processItem!.status).toBe('running');
+  });
+
   it('always includes events item under expanded workspace', () => {
     const ws = makeWorkspace();
     const props = makeProps({ workspaces: [ws] });
