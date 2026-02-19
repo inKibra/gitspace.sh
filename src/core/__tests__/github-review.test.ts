@@ -59,7 +59,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 const args = process.argv.slice(2);
 const callLog = process.env.GH_STUB_CALL_LOG;
 if (callLog) {
-  appendFileSync(callLog, JSON.stringify({ args }) + '\n', 'utf-8');
+  appendFileSync(callLog, JSON.stringify({ args, cwd: process.cwd() }) + '\n', 'utf-8');
 }
 
 function readFlag(name) {
@@ -157,6 +157,16 @@ function readPayloadLog(payloadLog: string): Array<{ kind: string; endpoint: str
   const raw = readFileSync(payloadLog, 'utf-8').trim();
   if (!raw) return [];
   return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function readCallLog(callLog: string): Array<{ args: string[]; cwd?: string }> {
+  if (!existsSync(callLog)) return [];
+  const raw = readFileSync(callLog, 'utf-8').trim();
+  if (!raw) return [];
+  return raw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { args: string[]; cwd?: string });
 }
 
 describe('github-review sync behavior', () => {
@@ -308,6 +318,23 @@ describe('github-review sync behavior', () => {
     const result = await importGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
     expect(result.imported).toBe(2);
     expect(result.threads).toHaveLength(2);
+  });
+
+  it('fetches PR comments with workspace cwd context', async () => {
+    setImportComments(importFile, []);
+
+    await importGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+
+    const calls = readCallLog(callLog);
+    const commentsApiCall = calls.find(
+      (entry) =>
+        entry.args[0] === 'api' &&
+        entry.args[1] === `repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments` &&
+        !entry.args.includes('--method')
+    );
+
+    expect(commentsApiCall).toBeDefined();
+    expect(commentsApiCall?.cwd?.endsWith(workspacePath)).toBe(true);
   });
 
   it('imports outdated comments without line metadata as file-level targets', async () => {

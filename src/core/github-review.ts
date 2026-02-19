@@ -59,7 +59,7 @@ export async function importGitHubReview(
   const repo = await getRepoName(workspacePath);
 
   // Fetch all review comments from the PR
-  const comments = await fetchPRComments(owner, repo, prNumber);
+  const comments = await fetchPRComments(owner, repo, prNumber, workspacePath);
 
   const session = readReviewSession(workspacePath, workspaceName, baseBranch);
 
@@ -316,11 +316,13 @@ export async function pushGitHubReview(
 async function fetchPRComments(
   owner: string,
   repo: string,
-  prNumber: number
+  prNumber: number,
+  cwd: string
 ): Promise<GitHubPRComment[]> {
   const commentsEndpoint = `repos/${owner}/${repo}/pulls/${prNumber}/comments`;
   const { stdout } = await execAsync(
-    `gh api ${escapeShellArg(commentsEndpoint)} --paginate --slurp`
+    `gh api ${escapeShellArg(commentsEndpoint)} --paginate --slurp`,
+    { cwd }
   );
   const parsed = JSON.parse(stdout) as unknown;
 
