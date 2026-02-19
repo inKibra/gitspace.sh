@@ -2,7 +2,14 @@
  * Events command tests - validates error paths throw SpacesError with exit code 1
  */
 
-import { describe, expect, it, mock, beforeEach } from 'bun:test';
+import { describe, expect, it, mock, beforeEach, afterAll } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import * as realConfig from '../../core/config.js';
+import * as realCli from '../../lib/tmux-lite/cli.js';
+import * as realEventPaths from '../../lib/events/paths.js';
+import * as realEventReader from '../../lib/events/reader.js';
 import { SpacesError } from '../../types/errors.js';
 
 // ============================================================================
@@ -10,46 +17,75 @@ import { SpacesError } from '../../types/errors.js';
 // ============================================================================
 
 // Mock config
-const mockGetCurrentProject = mock<() => string | null>(() => null);
+const mockGetCurrentProject = mock<() => string | null>(() => realConfig.getCurrentProject());
 mock.module('../../core/config.js', () => ({
+  ...realConfig,
   getCurrentProject: mockGetCurrentProject,
   getGitspaceDir: mock(() => '/tmp/gitspace'),
 }));
 
 // Mock tmux-lite CLI
 const mockListSessions = mock<() => Promise<Array<{ id: string; name: string; cwd: string }>>>(
-  () => Promise.resolve([])
+  () => realCli.listSessions()
 );
 mock.module('../../lib/tmux-lite/cli.js', () => ({
+  ...realCli,
   listSessions: mockListSessions,
 }));
 
 // Mock events paths
 const mockGetProcessEventsDir = mock<(workspacePath: string, processName: string) => string>(
-  () => '/tmp/events/processes/web-1'
+  (workspacePath: string, processName: string) =>
+    realEventPaths.getProcessEventsDir(workspacePath, processName)
 );
-const mockListProcessEventsDirs = mock<(workspacePath: string) => string[]>(() => []);
+const mockListProcessEventsDirs = mock<(workspacePath: string) => string[]>(
+  (workspacePath: string) => realEventPaths.listProcessEventsDirs(workspacePath)
+);
 mock.module('../../lib/events/paths.js', () => ({
+  ...realEventPaths,
   getProcessEventsDir: mockGetProcessEventsDir,
   listProcessEventsDirs: mockListProcessEventsDirs,
 }));
 
 // Mock events reader
-const mockReadWideEvents = mock<(...args: unknown[]) => unknown[]>(() => []);
+const mockReadWideEvents = mock<(...args: unknown[]) => unknown[]>((...args: unknown[]) =>
+  realEventReader.readWideEvents(...args as Parameters<typeof realEventReader.readWideEvents>)
+);
 mock.module('../../lib/events/reader.js', () => ({
+  ...realEventReader,
   readWideEvents: mockReadWideEvents,
 }));
 
-// Mock fs.existsSync
-const mockExistsSync = mock<(path: string) => boolean>(() => false);
-mock.module('fs', () => ({
-  existsSync: mockExistsSync,
-  // Re-export defaults that other modules may need
-  readFileSync: mock(() => ''),
-  writeFileSync: mock(() => {}),
-  mkdirSync: mock(() => {}),
-  readdirSync: mock(() => []),
-}));
+const tempDirs: string[] = [];
+
+function makeTempEventsDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'gssh-events-cmd-'));
+  tempDirs.push(dir);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+afterAll(() => {
+  mock.module('../../core/config.js', () => ({
+    ...realConfig,
+  }));
+  mock.module('../../lib/tmux-lite/cli.js', () => ({
+    ...realCli,
+  }));
+  mock.module('../../lib/events/paths.js', () => ({
+    ...realEventPaths,
+  }));
+  mock.module('../../lib/events/reader.js', () => ({
+    ...realEventReader,
+  }));
+
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop();
+    if (dir) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
 
 // Import after mocking
 const { listEvents, showEvent, tailEvents } = await import('../events.js');
@@ -126,7 +162,6 @@ describe('events: no events directory', () => {
       Promise.resolve([{ id: 'sess-1', name: 'my-session', cwd: '/tmp/workspace' }])
     );
     mockListProcessEventsDirs.mockImplementation(() => []);
-    mockExistsSync.mockImplementation(() => false);
   });
 
   it('listEvents should throw SpacesError when no events dir found', async () => {
@@ -174,13 +209,15 @@ describe('showEvent', () => {
 // ============================================================================
 
 describe('events: happy path', () => {
+  let eventsDir = '';
+
   beforeEach(() => {
+    eventsDir = makeTempEventsDir();
     mockGetCurrentProject.mockImplementation(() => 'my-project');
     mockListSessions.mockImplementation(() =>
       Promise.resolve([{ id: 'sess-1', name: 'my-session', cwd: '/tmp/workspace' }])
     );
-    mockListProcessEventsDirs.mockImplementation(() => ['/tmp/workspace/.events/processes/web-1']);
-    mockExistsSync.mockImplementation(() => true);
+    mockListProcessEventsDirs.mockImplementation(() => [eventsDir]);
     mockReadWideEvents.mockReset();
   });
 

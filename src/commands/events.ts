@@ -2,7 +2,7 @@
  * Events command - query wide event logs
  */
 
-import { existsSync } from 'fs';
+import { existsSync } from 'node:fs';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { getCurrentProject } from '../core/config.js';
