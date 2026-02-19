@@ -170,6 +170,22 @@ export function DiffViewer({
     return files[0] ?? null;
   }, [selectedFileKey, fileByKey, files]);
 
+  useEffect(() => {
+    if (!commentForm) {
+      return;
+    }
+
+    if (commentForm.target.kind === 'workspace') {
+      return;
+    }
+
+    const selectedFilePath = selectedFile?.filePath;
+    if (!selectedFilePath || commentForm.target.file !== selectedFilePath) {
+      setCommentForm(null);
+      setCommentBody('');
+    }
+  }, [commentForm, selectedFile?.filePath]);
+
   const selectedKey = selectedFile ? fileKey(selectedFile.filePath, selectedFile.prevFilePath) : null;
   const selectedDiffState = selectedKey ? fileDiffStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
   const selectedContextState = selectedKey ? contextStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;

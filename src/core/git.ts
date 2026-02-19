@@ -14,11 +14,36 @@ import type { ReviewChangedFile } from '../types/review.js';
 const execAsync = promisify(exec);
 
 const BASE_REF_CACHE_TTL_MS = 60_000;
+const BASE_REF_CACHE_MAX_ENTRIES = 256;
 const comparableBaseRefCache = new Map<string, { baseRef: string; cachedAt: number }>();
 const comparableBaseRefInflight = new Map<string, Promise<string>>();
 
 function comparableBaseRefKey(workspacePath: string, baseBranch: string): string {
   return `${workspacePath}::${baseBranch}`;
+}
+
+function pruneComparableBaseRefCache(now: number): void {
+  for (const [key, value] of comparableBaseRefCache.entries()) {
+    if (now - value.cachedAt >= BASE_REF_CACHE_TTL_MS) {
+      comparableBaseRefCache.delete(key);
+    }
+  }
+
+  const overflow = comparableBaseRefCache.size - BASE_REF_CACHE_MAX_ENTRIES;
+  if (overflow <= 0) {
+    return;
+  }
+
+  const sortedByAge = [...comparableBaseRefCache.entries()].sort(
+    (a, b) => a[1].cachedAt - b[1].cachedAt
+  );
+  for (let index = 0; index < overflow; index++) {
+    const entry = sortedByAge[index];
+    if (!entry) {
+      break;
+    }
+    comparableBaseRefCache.delete(entry[0]);
+  }
 }
 
 /**
@@ -530,9 +555,12 @@ async function resolveComparableBaseRef(
   workspacePath: string,
   baseBranch: string
 ): Promise<string> {
+  const now = Date.now();
+  pruneComparableBaseRefCache(now);
+
   const cacheKey = comparableBaseRefKey(workspacePath, baseBranch);
   const cached = comparableBaseRefCache.get(cacheKey);
-  if (cached && Date.now() - cached.cachedAt < BASE_REF_CACHE_TTL_MS) {
+  if (cached && now - cached.cachedAt < BASE_REF_CACHE_TTL_MS) {
     return cached.baseRef;
   }
 
@@ -564,6 +592,7 @@ async function resolveComparableBaseRef(
           baseRef: candidate,
           cachedAt: Date.now(),
         });
+        pruneComparableBaseRefCache(Date.now());
         return candidate;
       } catch {
         // Try next candidate
