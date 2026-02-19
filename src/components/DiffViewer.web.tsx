@@ -147,8 +147,10 @@ export function DiffViewer({
   const diffHostRef = useRef<HTMLDivElement | null>(null);
   const loadingFileDiffKeysRef = useRef<Set<string>>(new Set());
   const loadingContextKeysRef = useRef<Set<string>>(new Set());
+  const decidingHunkKeysRef = useRef<Set<string>>(new Set());
   const fileDiffStateByKeyRef = useRef<Record<string, FileDiffState>>({});
   const contextStateByKeyRef = useRef<Record<string, FileContextState>>({});
+  const hunkThreadByHeaderRef = useRef<Map<string, ReviewThread[]>>(new Map());
 
   const fileByKey = useMemo(() => {
     const map = new Map<string, ReviewChangedFile>();
@@ -186,6 +188,7 @@ export function DiffViewer({
 
   useEffect(() => {
     const valid = new Set(files.map((file) => fileKey(file.filePath, file.prevFilePath)));
+    const validFilePaths = new Set(files.map((file) => file.filePath));
 
     for (const key of [...loadingFileDiffKeysRef.current]) {
       if (!valid.has(key)) {
@@ -195,6 +198,13 @@ export function DiffViewer({
     for (const key of [...loadingContextKeysRef.current]) {
       if (!valid.has(key)) {
         loadingContextKeysRef.current.delete(key);
+      }
+    }
+    for (const key of [...decidingHunkKeysRef.current]) {
+      const separator = key.indexOf('::');
+      const filePath = separator >= 0 ? key.slice(0, separator) : key;
+      if (!validFilePaths.has(filePath)) {
+        decidingHunkKeysRef.current.delete(key);
       }
     }
 
@@ -439,6 +449,10 @@ export function DiffViewer({
     return map;
   }, [threads, selectedFile]);
 
+  useEffect(() => {
+    hunkThreadByHeaderRef.current = hunkThreadByHeader;
+  }, [hunkThreadByHeader]);
+
   const lineAnnotations = useMemo((): DiffLineAnnotation<InlineAnnotationMeta>[] => {
     if (!selectedLoadedDiff || !selectedFile) {
       return [];
@@ -503,43 +517,54 @@ export function DiffViewer({
       return;
     }
 
-    onHunkFocus?.({
-      filePath: selectedFile.filePath,
-      hunkHeader: hunkMeta.hunkHeader,
-      oldStart: hunkMeta.oldStart,
-      oldEnd: hunkMeta.oldEnd,
-      newStart: hunkMeta.newStart,
-      newEnd: hunkMeta.newEnd,
-    });
-
     const normalizedHeader = normalizeHunkHeader(hunkMeta.hunkHeader);
-    const existingThreads = hunkThreadByHeader.get(normalizedHeader) ?? [];
-    const primary = pickPrimaryThread(existingThreads);
-    if (primary) {
+    const hunkKey = `${selectedFile.filePath}::${normalizedHeader}`;
+    if (decidingHunkKeysRef.current.has(hunkKey)) {
+      return;
+    }
+
+    decidingHunkKeysRef.current.add(hunkKey);
+
+    try {
+      onHunkFocus?.({
+        filePath: selectedFile.filePath,
+        hunkHeader: hunkMeta.hunkHeader,
+        oldStart: hunkMeta.oldStart,
+        oldEnd: hunkMeta.oldEnd,
+        newStart: hunkMeta.newStart,
+        newEnd: hunkMeta.newEnd,
+      });
+
+      const existingThreads = hunkThreadByHeaderRef.current.get(normalizedHeader) ?? [];
+      const primary = pickPrimaryThread(existingThreads);
+      if (primary) {
+        try {
+          await onUpdateThread(primary.id, { decision });
+        } catch {
+          // Error is surfaced via review hook state; avoid unhandled promise rejections.
+        }
+        return;
+      }
+
+      if (decision === 'pending') {
+        return;
+      }
+
       try {
-        await onUpdateThread(primary.id, { decision });
+        await onCreateThread(
+          { kind: 'hunk', file: selectedFile.filePath, hunkHeader: normalizedHeader },
+          decision === 'approved'
+            ? 'Approved hunk via inline controls.'
+            : 'Rejected hunk via inline controls.',
+          decision
+        );
       } catch {
         // Error is surfaced via review hook state; avoid unhandled promise rejections.
       }
-      return;
+    } finally {
+      decidingHunkKeysRef.current.delete(hunkKey);
     }
-
-    if (decision === 'pending') {
-      return;
-    }
-
-    try {
-      await onCreateThread(
-        { kind: 'hunk', file: selectedFile.filePath, hunkHeader: normalizedHeader },
-        decision === 'approved'
-          ? 'Approved hunk via inline controls.'
-          : 'Rejected hunk via inline controls.',
-        decision
-      );
-    } catch {
-      // Error is surfaced via review hook state; avoid unhandled promise rejections.
-    }
-  }, [selectedFile, hunkThreadByHeader, onUpdateThread, onCreateThread, onHunkFocus]);
+  }, [selectedFile, onUpdateThread, onCreateThread, onHunkFocus]);
 
   const openHunkCommentForm = useCallback((hunkMeta: HunkControlMeta) => {
     if (!selectedFile) {

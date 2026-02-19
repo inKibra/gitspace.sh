@@ -37,12 +37,12 @@ export async function openWorkspaceShell(
 	noSetup: boolean = false,
 	sessionName?: string
 ): Promise<void> {
-	const workspaceName = workspacePath.split('/').pop() || 'workspace'
+	const workspaceId = workspacePath.split('/').pop() || 'workspace'
 
 	const prepareResult = await prepareWorkspaceForSession({
 		projectName,
 		workspacePath,
-		workspaceName,
+		workspaceName: workspaceId,
 		repository,
 		noSetup,
 		interactiveScripts: true,
@@ -58,14 +58,14 @@ export async function openWorkspaceShell(
 	printToTerminal('')
 
 	// Create or attach to tmux-lite session
-	await openTmuxLiteSession(workspacePath, projectName, workspaceName, sessionName)
+	await openTmuxLiteSession(workspacePath, projectName, workspaceId, sessionName)
 }
 
 /**
  * Build a full session name from components
  */
-function buildSessionName(projectName: string, workspaceName: string, sessionName: string): string {
-	return `${projectName}:${workspaceName}:${sessionName}`
+function buildSessionName(projectName: string, workspaceId: string, sessionName: string): string {
+	return `${projectName}:${workspaceId}:${sessionName}`
 }
 
 /**
@@ -76,7 +76,7 @@ function buildSessionName(projectName: string, workspaceName: string, sessionNam
 async function openTmuxLiteSession(
 	workspacePath: string,
 	projectName: string,
-	workspaceName: string,
+	workspaceId: string,
 	sessionName?: string
 ): Promise<void> {
 	// Check if we're already in a tmux-lite session
@@ -89,13 +89,13 @@ async function openTmuxLiteSession(
 		const suffix = sessionName && sessionName.trim().length > 0
 			? sessionName
 			: `${Date.now()}`
-		const fullSessionName = buildSessionName(projectName, workspaceName, suffix)
+		const fullSessionName = buildSessionName(projectName, workspaceId, suffix)
 
 		logger.debug(`Creating tmux-lite session: ${fullSessionName}`)
 
 		// Create new session
 		const session = await createSession(fullSessionName, workspacePath, {
-			hooks: buildWorkspaceSessionHooks(projectName, workspaceName),
+			hooks: buildWorkspaceSessionHooks(projectName, workspaceId),
 		})
 
 		// Spawn the CLI attach command as a subprocess with inherited stdio
