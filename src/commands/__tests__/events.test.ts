@@ -141,6 +141,19 @@ describe('events command directory resolution', () => {
 
     expect(mockGetProcessEventsDir).toHaveBeenCalledWith(workspacePath, 'web');
   });
+
+  it('aggregates events across all process dirs when processName is not provided', async () => {
+    makeWorkspace('my-project', 'ws-1');
+    const eventsDirA = makeTempDir('gssh-events-dir-a-');
+    const eventsDirB = makeTempDir('gssh-events-dir-b-');
+    mockListProcessEventsDirs.mockImplementation(() => [eventsDirA, eventsDirB]);
+
+    await listEvents({ project: 'my-project', workspace: 'ws-1' });
+
+    expect(mockReadWideEvents).toHaveBeenCalledTimes(2);
+    expect(mockReadWideEvents).toHaveBeenCalledWith({ eventsDir: eventsDirA, filter: {} });
+    expect(mockReadWideEvents).toHaveBeenCalledWith({ eventsDir: eventsDirB, filter: {} });
+  });
 });
 
 describe('showEvent validations', () => {

@@ -411,6 +411,31 @@ describe('useSpacesBrowser activateSelected', () => {
     expect(onAttachSession).toHaveBeenCalledWith({ sessionId: 'proc-sess-1', viewOnly: true });
   });
 
+  it('falls back to start-and-attach when running process has no active session', async () => {
+    const ws = makeWorkspace({
+      sessionCount: 1,
+      processes: [{ name: 'web-server' }],
+    });
+    const onStartProcessAttach = mock(() => {});
+    const onAttachSession = mock(async () => {});
+    const props = makeProps({ workspaces: [ws], sessions: [], onStartProcessAttach, onAttachSession });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const processIndex = result.current.items.findIndex((item) => item.type === 'process');
+    act(() => { result.current.selectIndex(processIndex); });
+
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onAttachSession).not.toHaveBeenCalled();
+    expect(onStartProcessAttach).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      processName: 'web-server',
+      instance: 1,
+    });
+  });
+
   it('ignores exited process sessions when attaching from running process item', async () => {
     const ws = makeWorkspace({
       sessionCount: 2,

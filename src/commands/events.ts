@@ -9,7 +9,7 @@ import { SpacesError } from '../types/errors.js';
 import { getProjectWorkspacesDir } from '../core/config.js';
 import { getProcessEventsDir, listProcessEventsDirs } from '../lib/events/paths.js';
 import { readWideEvents } from '../lib/events/reader.js';
-import type { WideEventFilter } from '../types/events.js';
+import type { WideEvent, WideEventFilter } from '../types/events.js';
 
 interface EventsCommandOptions {
   project?: string;
@@ -50,7 +50,7 @@ function parseFilter(filter?: string): WideEventFilter {
   }
 }
 
-async function resolveEventsDir(options: EventsCommandOptions): Promise<string> {
+async function resolveEventsDirs(options: EventsCommandOptions, filter: WideEventFilter): Promise<string[]> {
   if (!options.project) {
     throw new SpacesError('Provide project via --project <name>.', 'USER_ERROR');
   }
@@ -67,27 +67,53 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<string> 
     );
   }
 
-  const processName = parseFilter(options.filter).processName;
-  const eventsDir = processName
-    ? getProcessEventsDir(workspacePath, processName)
-    : listProcessEventsDirs(workspacePath)[0];
+  const processName = filter.processName;
+  const eventsDirs = processName
+    ? [getProcessEventsDir(workspacePath, processName)]
+    : listProcessEventsDirs(workspacePath);
 
-  if (!eventsDir || !existsSync(eventsDir)) {
+  const existingDirs = eventsDirs.filter((eventsDir) => existsSync(eventsDir));
+
+  if (existingDirs.length === 0) {
     throw new SpacesError('No process events directory found for this workspace.', 'USER_ERROR');
   }
 
-  return eventsDir;
+  return existingDirs;
+}
+
+function getEventTimestamp(event: WideEvent): number {
+  if (typeof event.timestampMs === 'number' && !Number.isNaN(event.timestampMs)) {
+    return event.timestampMs;
+  }
+  const parsed = Date.parse(event.timestamp);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function readWideEventsFromDirs(eventsDirs: string[], filter: WideEventFilter, limit?: number): WideEvent[] {
+  if (eventsDirs.length === 1) {
+    return readWideEvents({
+      eventsDir: eventsDirs[0],
+      filter,
+      limit,
+    });
+  }
+
+  const merged = eventsDirs.flatMap((eventsDir) =>
+    readWideEvents({
+      eventsDir,
+      filter,
+    })
+  );
+
+  const sortedNewestFirst = [...merged].sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
+  const limited = typeof limit === 'number' ? sortedNewestFirst.slice(0, limit) : sortedNewestFirst;
+  return limited.reverse();
 }
 
 export async function listEvents(options: EventsCommandOptions): Promise<void> {
-  const eventsDir = await resolveEventsDir(options);
-
   const filter = parseFilter(options.filter);
-  const events = readWideEvents({
-    eventsDir,
-    filter,
-    limit: options.limit,
-  });
+  const eventsDirs = await resolveEventsDirs(options, filter);
+  const events = readWideEventsFromDirs(eventsDirs, filter, options.limit);
 
   if (events.length === 0) {
     logger.info('No events found.');
@@ -104,14 +130,9 @@ export async function showEvent(options: EventsCommandOptions): Promise<void> {
     throw new SpacesError('Provide eventId filter: --filter "eventId=<id>"', 'USER_ERROR');
   }
 
-  const eventsDir = await resolveEventsDir(options);
-
   const filter = parseFilter(options.filter);
-  const events = readWideEvents({
-    eventsDir,
-    filter,
-    limit: 1,
-  });
+  const eventsDirs = await resolveEventsDirs(options, filter);
+  const events = readWideEventsFromDirs(eventsDirs, filter, 1);
 
   if (events.length === 0) {
     logger.info('No event found.');
@@ -122,14 +143,9 @@ export async function showEvent(options: EventsCommandOptions): Promise<void> {
 }
 
 export async function tailEvents(options: EventsTailOptions): Promise<void> {
-  const eventsDir = await resolveEventsDir(options);
-
   const filter = parseFilter(options.filter);
-  const events = readWideEvents({
-    eventsDir,
-    filter,
-    limit: options.limit ?? 50,
-  });
+  const eventsDirs = await resolveEventsDirs(options, filter);
+  const events = readWideEventsFromDirs(eventsDirs, filter, options.limit ?? 50);
 
   for (const event of events) {
     logger.log(JSON.stringify(event));

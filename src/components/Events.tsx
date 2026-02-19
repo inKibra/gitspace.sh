@@ -89,23 +89,23 @@ export function useEvents(props: UseEventsProps): UseEventsReturn {
 
   useEffect(() => {
     if (!selectedKey && filtered.length > 0) {
-      setSelectedIndex(0);
+      setSelectedIndex((current) => (current === 0 ? current : 0));
       setSelectedKey(getEventKey(filtered[0]));
       return;
     }
 
     if (!selectedKey) return;
     const nextIndex = filtered.findIndex((event) => getEventKey(event) === selectedKey);
-    if (nextIndex !== -1 && nextIndex !== selectedIndex) {
-      setSelectedIndex(nextIndex);
+    if (nextIndex !== -1) {
+      setSelectedIndex((current) => (current === nextIndex ? current : nextIndex));
       return;
     }
 
     if (nextIndex === -1 && filtered.length > 0) {
-      setSelectedIndex(0);
+      setSelectedIndex((current) => (current === 0 ? current : 0));
       setSelectedKey(getEventKey(filtered[0]));
     }
-  }, [filtered, selectedKey, selectedIndex]);
+  }, [filtered, selectedKey]);
 
   const selected = filtered[selectedIndex] ?? null;
 

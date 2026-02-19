@@ -1459,11 +1459,11 @@ function App({ relayConfig, onQuit }: AppProps) {
     const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
     if (!workspace) return;
 
-    const activeFilter = eventsProps.activeFilterName
-      ? localSavedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
-      : null;
-
     const interval = setInterval(() => {
+      const activeFilter = eventsProps.activeFilterName
+        ? localSavedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+        : null;
+
       if (activeFilter) {
         const sinceMs = activeFilter.sinceMinutes
           ? Date.now() - activeFilter.sinceMinutes * 60 * 1000

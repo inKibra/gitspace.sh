@@ -558,17 +558,30 @@ export default function App() {
   }, [attachController, terminal.workspaces]);
 
   const handleStartProcessSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
-    terminal.startProcess(params.workspaceId, params.processName, params.instance);
+    void terminal.startProcess(params.workspaceId, params.processName, params.instance).catch((error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    });
   }, [terminal]);
 
   const handleStartProcessAttachSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
     const instance = params.instance ?? 1;
-    setPendingProcessAttach({
+    const target: PendingProcessAttachTarget = {
       workspaceId: params.workspaceId,
       processName: params.processName,
       instance,
+    };
+    setPendingProcessAttach(target);
+    void terminal.startProcess(params.workspaceId, params.processName, instance).catch((error) => {
+      setPendingProcessAttach((current) =>
+        current &&
+        current.workspaceId === target.workspaceId &&
+        current.processName === target.processName &&
+        current.instance === target.instance
+          ? null
+          : current
+      );
+      toast.error(error instanceof Error ? error.message : String(error));
     });
-    terminal.startProcess(params.workspaceId, params.processName, instance);
   }, [terminal]);
 
   const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
@@ -587,7 +600,9 @@ export default function App() {
     onStartProcess: (params) => handleStartProcessSelection(params),
     onStartProcessAttach: (params) => handleStartProcessAttachSelection(params),
     onStopProcess: (params) => {
-      terminal.stopProcess(params.workspaceId, params.processName);
+      void terminal.stopProcess(params.workspaceId, params.processName).catch((error) => {
+        toast.error(error instanceof Error ? error.message : String(error));
+      });
     },
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: (workspaceId) => {
@@ -724,11 +739,11 @@ export default function App() {
   useEffect(() => {
     if (!showEvents || !eventsWorkspacePath) return;
 
-    const activeFilter = eventsProps.activeFilterName
-      ? terminal.savedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
-      : null;
-
     const interval = setInterval(() => {
+      const activeFilter = eventsProps.activeFilterName
+        ? terminal.savedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+        : null;
+
       if (activeFilter) {
         const sinceMs = activeFilter.sinceMinutes
           ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
@@ -982,7 +997,9 @@ export default function App() {
             variant: 'warning',
             confirmLabel: 'Stop',
             onConfirm: () => {
-              terminal.stopProcess(selected.workspaceId, selected.processName);
+              void terminal.stopProcess(selected.workspaceId, selected.processName).catch((error) => {
+                toast.error(error instanceof Error ? error.message : String(error));
+              });
             },
           });
         }

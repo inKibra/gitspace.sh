@@ -99,8 +99,8 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   events: WideEvent[];
   liveEventIds: string[];
   savedEventFilters: SavedEventFilter[];
-  startProcess: (workspaceId: string, processName: string, instance?: number) => void;
-  stopProcess: (workspaceId: string, processName: string) => void;
+  startProcess: (workspaceId: string, processName: string, instance?: number) => Promise<void>;
+  stopProcess: (workspaceId: string, processName: string) => Promise<void>;
   requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
 }
 
@@ -328,16 +328,22 @@ export function useRemoteSessionClient<ConnectParams>(
     [engine]
   );
 
-  const startProcess = useCallback((workspaceId: string, processName: string, instance?: number) => {
-    void withActiveBackend((backendKey) =>
+  const startProcess = useCallback(async (workspaceId: string, processName: string, instance?: number) => {
+    const result = await withActiveBackend((backendKey) =>
       engine.startProcess(backendKey, workspaceId, processName, instance)
     );
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
   }, [engine, withActiveBackend]);
 
-  const stopProcess = useCallback((workspaceId: string, processName: string) => {
-    void withActiveBackend((backendKey) =>
+  const stopProcess = useCallback(async (workspaceId: string, processName: string) => {
+    const result = await withActiveBackend((backendKey) =>
       engine.stopProcess(backendKey, workspaceId, processName)
     );
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
   }, [engine, withActiveBackend]);
 
   const requestEvents = useCallback((
