@@ -363,6 +363,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       workspaceId,
       command: commandSpec.command,
       args: commandSpec.args,
+    }).then((attached) => {
+      if (!attached) {
+        pendingProcessEditWorkspacesRef.current = null;
+        setPendingProcessEditWorkspaceId(null);
+      }
     });
   }, [attachController, remote.workspaces]);
 

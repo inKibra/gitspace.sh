@@ -411,6 +411,42 @@ describe('useSpacesBrowser activateSelected', () => {
     expect(onAttachSession).toHaveBeenCalledWith({ sessionId: 'proc-sess-1', viewOnly: true });
   });
 
+  it('ignores exited process sessions when attaching from running process item', async () => {
+    const ws = makeWorkspace({
+      sessionCount: 2,
+      processes: [{ name: 'web-server' }],
+    });
+    const exitedSession = makeSession({
+      id: 'proc-sess-exited',
+      processName: 'web-server',
+      processInstance: 1,
+      createdAt: Date.now(),
+      exitCode: 1,
+    });
+    const runningSession = makeSession({
+      id: 'proc-sess-running',
+      processName: 'web-server',
+      processInstance: 1,
+      createdAt: Date.now() - 30_000,
+    });
+    const onAttachSession = mock(async () => {});
+    const props = makeProps({
+      workspaces: [ws],
+      sessions: [exitedSession, runningSession],
+      onAttachSession,
+    });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const processIndex = result.current.items.findIndex((item) => item.type === 'process');
+    act(() => { result.current.selectIndex(processIndex); });
+
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onAttachSession).toHaveBeenCalledWith({ sessionId: 'proc-sess-running', viewOnly: true });
+  });
+
   it('calls onProcessDisabled when disabled process row is activated', async () => {
     const ws = makeWorkspace({
       processes: [{ name: 'worker', instances: 0 }],

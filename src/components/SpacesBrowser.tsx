@@ -354,12 +354,15 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   const findSessionForProcess = useCallback(
     (workspaceId: string, processName: string, instance: number) =>
-      sessions.find(
-        (session) =>
-          session.workspaceId === workspaceId &&
-          session.processName === processName &&
-          (session.processInstance ?? 1) === instance
-      ),
+      sessions
+        .filter(
+          (session) =>
+            session.workspaceId === workspaceId &&
+            session.processName === processName &&
+            (session.processInstance ?? 1) === instance &&
+            session.exitCode === undefined
+        )
+        .sort((a, b) => b.createdAt - a.createdAt)[0],
     [sessions]
   );
 

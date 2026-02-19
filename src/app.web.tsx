@@ -528,6 +528,11 @@ export default function App() {
       workspaceId,
       command: commandSpec.command,
       args: commandSpec.args,
+    }).then((attached) => {
+      if (!attached) {
+        pendingProcessEditWorkspacesRef.current = null;
+        setPendingProcessEditWorkspaceId(null);
+      }
     });
   }, [attachController, terminal.workspaces]);
 
