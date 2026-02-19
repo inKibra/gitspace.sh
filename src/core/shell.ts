@@ -10,6 +10,7 @@ import {
 	createSession,
 	isNested,
 } from '../lib/tmux-lite/cli.js'
+import { buildWorkspaceSessionHooks } from '../session/workspace-shell-hooks.js'
 
 /**
  * Print a message to terminal using echo (same mechanism as scripts)
@@ -93,7 +94,9 @@ async function openTmuxLiteSession(
 		logger.debug(`Creating tmux-lite session: ${fullSessionName}`)
 
 		// Create new session
-		const session = await createSession(fullSessionName, workspacePath)
+		const session = await createSession(fullSessionName, workspacePath, {
+			hooks: buildWorkspaceSessionHooks(projectName, workspaceName),
+		})
 
 		// Spawn the CLI attach command as a subprocess with inherited stdio
 		// This works better with TUI suspension than direct attach() call

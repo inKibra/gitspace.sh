@@ -24,6 +24,7 @@ import {
   type Session,
   type SessionCtrl,
   type InboxItem,
+  type SessionCreateHooks,
   encodeRouterMessage,
   decodeRouterMessages,
   encodePTY,
@@ -1010,7 +1011,11 @@ function createSessionSocketHandlers(
 /**
  * Builds the shell environment with integration hooks.
  */
-function buildShellEnvironment(id: string, shell: string): Record<string, string> {
+function buildShellEnvironment(
+  id: string,
+  shell: string,
+  hooks?: SessionCreateHooks
+): Record<string, string> {
   // Shell integration: report non-zero exit codes via OSC 777
   // This creates inbox notifications for failed commands
   const exitReporter = '__tl_report() { local e=$?; [[ $e -ne 0 ]] && printf "\\033]777;exit:%d\\007" "$e"; return $e; }';
@@ -1018,6 +1023,7 @@ function buildShellEnvironment(id: string, shell: string): Record<string, string
   const shellEnv: Record<string, string> = {
     ...process.env as Record<string, string>,
     TMUX_LITE: id,
+    ...(hooks?.env ?? {}),
   };
 
   // Add PROMPT_COMMAND for bash
@@ -1029,11 +1035,37 @@ function buildShellEnvironment(id: string, shell: string): Record<string, string
   return shellEnv;
 }
 
+function getShellInitScript(shell: string, hooks?: SessionCreateHooks): string | null {
+  const shellInit = hooks?.shellInit;
+  if (!shellInit) return null;
+
+  const shellName = shell.split('/').pop() ?? '';
+  const scriptParts: string[] = [];
+
+  if (shellInit.all) {
+    scriptParts.push(shellInit.all);
+  }
+
+  if (shellName.endsWith('bash') && shellInit.bash) {
+    scriptParts.push(shellInit.bash);
+  } else if (shellName.endsWith('zsh') && shellInit.zsh) {
+    scriptParts.push(shellInit.zsh);
+  } else if ((shellName.endsWith('sh') || shellName === 'sh') && shellInit.sh) {
+    scriptParts.push(shellInit.sh);
+  }
+
+  if (scriptParts.length === 0) {
+    return null;
+  }
+
+  return `${scriptParts.join('\n')}\n`;
+}
+
 // ============================================================================
 // Main Session Creation
 // ============================================================================
 
-function createSession(name: string | undefined, cwd: string): Session {
+function createSession(name: string | undefined, cwd: string, hooks?: SessionCreateHooks): Session {
   const id = genId();
   const sessionName = name || `session-${id}`;
   const socketPath = getSessionSocketPath(id);
@@ -1101,13 +1133,23 @@ function createSession(name: string | undefined, cwd: string): Session {
 
   // Spawn shell process
   const shell = process.env.SHELL || "/bin/bash";
-  const shellEnv = buildShellEnvironment(id, shell);
+  const shellEnv = buildShellEnvironment(id, shell, hooks);
 
   const proc = Bun.spawn([shell], {
     terminal: ptyTerminal,
     cwd,
     env: shellEnv,
   });
+
+  const shellInitScript = getShellInitScript(shell, hooks);
+  if (shellInitScript) {
+    try {
+      ptyTerminal.write(shellInitScript);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[${sessionName}] failed to apply shell init hook: ${message}`);
+    }
+  }
 
   // Handle process exit
   proc.exited.then(handleProcessExit(id, sessionName, xterm, socketPath, disposeDsr, getProcessTitle));
@@ -1205,7 +1247,7 @@ Bun.listen({
 
           case "new":
             try {
-              const session = createSession(cmd.name, cmd.cwd);
+              const session = createSession(cmd.name, cmd.cwd, cmd.hooks);
               res = { type: "session", session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

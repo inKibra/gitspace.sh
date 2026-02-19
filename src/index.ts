@@ -59,7 +59,17 @@ import { configNotifications, linearSetup, linearShow, linearClear } from './com
 import { migrateCleanupLegacy } from './commands/migrate.js'
 import { notificationsInstall, notificationsUninstall, notificationsHook, notificationsStatus } from './commands/notifications.js'
 import { bundleRefresh, bundleStatus } from './commands/bundle.js'
-import { openReview, showReviewNotes, importReview, pushReview } from './commands/review.js'
+import {
+	openReview,
+	showReviewNotes,
+	importReview,
+	pushReview,
+	listReviewHunks,
+	addHunkReview,
+	addFileReview,
+	addLineReview,
+	showSpaceContext,
+} from './commands/review.js'
 
 const program = new Command()
 
@@ -899,6 +909,216 @@ reviewCommand
 		}
 	})
 
+reviewCommand
+	.command('hunks <file>')
+	.description('List hunks in a changed file (AI-friendly target IDs)')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--format <format>', 'Output format: json (default) or text')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await listReviewHunks(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+reviewCommand
+	.command('add-hunk <file>')
+	.description('Add or update hunk review by hunk index')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.requiredOption('--index <number>', '1-based hunk index', (v) => parseInt(v, 10))
+	.option('--body <text>', 'Optional comment body')
+	.option('--approve', 'Set hunk decision to approved')
+	.option('--reject', 'Set hunk decision to rejected')
+	.option('--pending', 'Set hunk decision to pending')
+	.option('--json', 'Output structured JSON')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addHunkReview(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+reviewCommand
+	.command('add-file <file>')
+	.description('Add a file-level review thread')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.requiredOption('--body <text>', 'Comment body')
+	.option('--json', 'Output structured JSON')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addFileReview(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+reviewCommand
+	.command('add-line <file>')
+	.description('Add a line-range review thread')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.requiredOption('--start <number>', '1-based start line', (v) => parseInt(v, 10))
+	.option('--end <number>', '1-based end line (defaults to start)', (v) => parseInt(v, 10))
+	.option('--side <side>', 'LEFT or RIGHT side of diff (default: RIGHT)')
+	.requiredOption('--body <text>', 'Comment body')
+	.option('--json', 'Output structured JSON')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addLineReview(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+// Hidden workspace-scoped command surface.
+// Intended to be used from `space` shell function injected into workspace sessions.
+const spaceCommand = program
+	.command('space', { hidden: true })
+	.description('Workspace-scoped commands')
+
+spaceCommand
+	.command('context')
+	.description('Show resolved workspace context')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--json', 'Output structured JSON')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await showSpaceContext(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+const spaceReviewCommand = spaceCommand
+	.command('review')
+	.description('Workspace review commands')
+
+spaceReviewCommand
+	.command('notes')
+	.description('Print review threads as structured JSON (LLM-friendly)')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--format <format>', 'Output format: json (default) or text')
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await showReviewNotes(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+spaceReviewCommand
+	.command('import')
+	.description('Import GitHub PR review comments as local threads')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--pr <number>', 'PR number to import from', (v) => parseInt(v, 10))
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await importReview(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+spaceReviewCommand
+	.command('push')
+	.description('Push local review decisions to GitHub as a formal PR review')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--pr <number>', 'PR number to submit review on', (v) => parseInt(v, 10))
+	.action(async (options) => {
+		await checkFirstTimeSetup()
+		try {
+			await pushReview(options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+spaceReviewCommand
+	.command('hunks <file>')
+	.description('List hunks in a changed file (AI-friendly target IDs)')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.option('--format <format>', 'Output format: json (default) or text')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await listReviewHunks(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+spaceReviewCommand
+	.command('add-hunk <file>')
+	.description('Add or update hunk review by hunk index')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.requiredOption('--index <number>', '1-based hunk index', (v) => parseInt(v, 10))
+	.option('--body <text>', 'Optional comment body')
+	.option('--approve', 'Set hunk decision to approved')
+	.option('--reject', 'Set hunk decision to rejected')
+	.option('--pending', 'Set hunk decision to pending')
+	.option('--json', 'Output structured JSON')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addHunkReview(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+spaceReviewCommand
+	.command('add-file <file>')
+	.description('Add a file-level review thread')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.requiredOption('--body <text>', 'Comment body')
+	.option('--json', 'Output structured JSON')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addFileReview(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
+spaceReviewCommand
+	.command('add-line <file>')
+	.description('Add a line-range review thread')
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
+	.requiredOption('--start <number>', '1-based start line', (v) => parseInt(v, 10))
+	.option('--end <number>', '1-based end line (defaults to start)', (v) => parseInt(v, 10))
+	.option('--side <side>', 'LEFT or RIGHT side of diff (default: RIGHT)')
+	.requiredOption('--body <text>', 'Comment body')
+	.option('--json', 'Output structured JSON')
+	.action(async (file, options) => {
+		await checkFirstTimeSetup()
+		try {
+			await addLineReview(file, options)
+		} catch (error) {
+			handleError(error)
+		}
+	})
+
 // ============================================================================
 // Auth Commands (gitspace.sh)
 // ============================================================================
@@ -1057,9 +1277,49 @@ process.on('unhandledRejection', (reason) => {
 	process.exit(1)
 })
 
+function isWorkspaceScopedSession(): boolean {
+	return process.env.GSSH_SESSION_MODE === 'workspace'
+}
+
+function isAllowedWorkspaceSessionCommand(args: string[]): boolean {
+	if (args.length === 0) {
+		return false
+	}
+
+	const first = args[0]
+	if (!first) {
+		return false
+	}
+
+	if (first === 'space') {
+		return true
+	}
+
+	if (first === '--help' || first === '-h' || first === '--version' || first === '-V') {
+		return true
+	}
+
+	if (first === 'help') {
+		return true
+	}
+
+	return false
+}
+
 // Parse command line arguments
 // Check for global relay options (TUI mode with relay)
 const args = process.argv.slice(2)
+
+if (isWorkspaceScopedSession() && !isAllowedWorkspaceSessionCommand(args)) {
+	if (args[0] === 'tmux') {
+		logger.error('tmux commands are disabled inside workspace sessions.')
+	} else {
+		logger.error('This command is disabled inside a workspace session.')
+	}
+	logger.log('Use `space ...` for workspace-scoped operations.')
+	process.exit(1)
+}
+
 let relayUrlFromArgs: string | undefined
 let ignoreKeychainAndSkipSecrets = false
 let hasOnlyTuiOptions = true

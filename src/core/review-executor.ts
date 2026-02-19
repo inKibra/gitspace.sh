@@ -15,7 +15,13 @@ import {
   deleteComment,
   detectPRNumber,
 } from './review.js';
-import { getWorkspaceDiff } from './git.js';
+import {
+  getWorkspaceChangedFiles,
+  getWorkspaceDiff,
+  getWorkspaceFileContextRange,
+  getWorkspaceFileDiff,
+  getWorkspaceFileVersions,
+} from './git.js';
 import { importGitHubReview, pushGitHubReview } from './github-review.js';
 import { readProjectConfig } from './config.js';
 import { scanWorkspaces } from '../lib/remote-session/workspace-scanner.js';
@@ -174,6 +180,94 @@ export async function executeLocalReviewOperation(
         diff: diffResult.diff,
         baseBranch: diffResult.baseBranch,
         headBranch: diffResult.headBranch,
+      };
+    }
+
+    case 'get_changed_files': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const changed = await getWorkspaceChangedFiles(workspace.path, workspace.baseBranch);
+      return {
+        op: 'changed_files',
+        files: changed.files,
+        baseBranch: changed.baseBranch,
+        headBranch: changed.headBranch,
+      };
+    }
+
+    case 'get_file_diff': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const result = await getWorkspaceFileDiff(
+        workspace.path,
+        workspace.baseBranch,
+        operation.filePath,
+        operation.prevFilePath
+      );
+      return {
+        op: 'file_diff',
+        filePath: operation.filePath,
+        prevFilePath: operation.prevFilePath,
+        diff: result.diff,
+      };
+    }
+
+    case 'get_file_versions': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const { oldContents, newContents } = await getWorkspaceFileVersions(
+        workspace.path,
+        workspace.baseBranch,
+        operation.filePath,
+        operation.prevFilePath
+      );
+      return {
+        op: 'file_versions',
+        filePath: operation.filePath,
+        prevFilePath: operation.prevFilePath,
+        oldContents,
+        newContents,
+      };
+    }
+
+    case 'get_file_context_range': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const result = await getWorkspaceFileContextRange(
+        workspace.path,
+        workspace.baseBranch,
+        operation.filePath,
+        operation.prevFilePath,
+        {
+          oldStart: operation.oldStart,
+          oldEnd: operation.oldEnd,
+          newStart: operation.newStart,
+          newEnd: operation.newEnd,
+        }
+      );
+
+      return {
+        op: 'file_context_range',
+        filePath: operation.filePath,
+        prevFilePath: operation.prevFilePath,
+        oldStart: result.oldStart,
+        oldLines: result.oldLines,
+        oldTotal: result.oldTotal,
+        newStart: result.newStart,
+        newLines: result.newLines,
+        newTotal: result.newTotal,
       };
     }
 

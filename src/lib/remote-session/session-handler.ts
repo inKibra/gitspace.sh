@@ -44,6 +44,7 @@ import {
   applyBundleRefreshSubmission,
 } from '../../core/bundle-refresh.js';
 import { buildSessionName } from '../../session/session-name.js';
+import { buildWorkspaceSessionHooks } from '../../session/workspace-shell-hooks.js';
 
 import { logger } from "../../utils/logger.js";
 
@@ -499,7 +500,9 @@ export class RemoteSessionHandler {
         });
         console.log(`[remote-session] Selected session name: ${sessionName}`);
 
-        targetSession = await createSession(sessionName, workspace.path);
+        targetSession = await createSession(sessionName, workspace.path, {
+          hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+        });
         console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`)
       } else if (msg.sessionId) {
         // Security: Check if client can attach to this session

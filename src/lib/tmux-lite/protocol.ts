@@ -82,9 +82,25 @@ export function decodeRouterMessages(buffer: Buffer): {
 }
 
 // Router commands
+export interface SessionCreateHooks {
+  /** Environment variables injected into spawned shell process */
+  env?: Record<string, string>;
+  /** Optional shell init snippets (run once after shell starts) */
+  shellInit?: {
+    /** Runs for all shells */
+    all?: string;
+    /** Runs for bash shells */
+    bash?: string;
+    /** Runs for zsh shells */
+    zsh?: string;
+    /** Runs for sh shells */
+    sh?: string;
+  };
+}
+
 export type Command =
   | { type: "list" }
-  | { type: "new"; name?: string; cwd: string }
+  | { type: "new"; name?: string; cwd: string; hooks?: SessionCreateHooks }
   | { type: "attach"; id: string; force?: boolean }
   | { type: "kill"; id: string }
   | { type: "kill-server" }

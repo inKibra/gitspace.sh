@@ -8,12 +8,13 @@
  * - Editing/deleting own comments
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { ReviewThread, HunkDecision } from '../types/review.js';
 
 export interface ThreadPanelProps {
   threads: ReviewThread[];
   selectedThreadId?: string | null;
+  hoveredThreadId?: string | null;
   onResolveThread: (threadId: string, resolved: boolean) => Promise<void>;
   onAddReply: (threadId: string, body: string) => Promise<void>;
   onUpdateComment: (threadId: string, commentId: string, body: string) => Promise<void>;
@@ -48,6 +49,7 @@ function targetLabel(thread: ReviewThread): string {
 export function ThreadPanel({
   threads,
   selectedThreadId,
+  hoveredThreadId,
   onResolveThread,
   onAddReply,
   onUpdateComment,
@@ -59,6 +61,17 @@ export function ThreadPanel({
   const [replyBody, setReplyBody] = useState('');
   const [editingComment, setEditingComment] = useState<{ threadId: string; commentId: string; body: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const threadRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  useEffect(() => {
+    const focusId = hoveredThreadId ?? selectedThreadId;
+    if (!focusId) return;
+
+    const el = threadRefs.current[focusId];
+    if (!el) return;
+
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [hoveredThreadId, selectedThreadId]);
 
   const handleAddReply = useCallback(async (threadId: string) => {
     if (!replyBody.trim()) return;
@@ -149,14 +162,17 @@ export function ThreadPanel({
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {threads.map((thread) => {
           const isSelected = thread.id === selectedThreadId;
+          const isHovered = thread.id === hoveredThreadId;
           const decision = thread.decision;
 
           return (
             <div
               key={thread.id}
+              ref={(el) => { threadRefs.current[thread.id] = el; }}
               style={{
                 borderBottom: '1px solid #21262d',
-                background: isSelected ? '#161b22' : 'transparent',
+                background: isSelected ? '#161b22' : isHovered ? '#1b2230' : 'transparent',
+                boxShadow: isHovered ? 'inset 2px 0 0 #58a6ff' : undefined,
               }}
             >
               {/* Thread header */}

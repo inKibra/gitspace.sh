@@ -35,6 +35,7 @@ import {
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import { buildSessionName } from '../session-name.js';
+import { buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -537,7 +538,9 @@ export class LocalSessionBackend implements SessionBackend {
         requestedName: params.sessionName,
         sessions,
       });
-      targetSession = await this.deps.createSession(fullName, workspace.path);
+      targetSession = await this.deps.createSession(fullName, workspace.path, {
+        hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+      });
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
     }

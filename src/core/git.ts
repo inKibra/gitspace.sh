@@ -9,6 +9,7 @@ import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 import type { WorktreeInfo } from '../types/workspace.js';
+import type { ReviewChangedFile } from '../types/review.js';
 
 const execAsync = promisify(exec);
 
@@ -329,18 +330,9 @@ export async function getWorkspaceDiff(
     });
     const headBranch = headOutput.trim();
 
-    // Fetch to ensure we have the latest base branch ref
-    try {
-      await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
-        cwd: workspacePath,
-      });
-    } catch {
-      // Non-fatal — work with local refs
-      logger.debug(`Could not fetch origin/${baseBranch}, using local ref`);
-    }
+    const mergeBase = await resolveComparableBaseRef(workspacePath, baseBranch);
 
-    // Three-dot diff: changes on HEAD that aren't on origin/baseBranch
-    const mergeBase = `origin/${baseBranch}`;
+    // Three-dot diff: changes on HEAD that are not in the selected base ref
     const { stdout: diffOutput } = await execAsync(
       `git diff ${escapeShellArg(mergeBase)}...HEAD`,
       { cwd: workspacePath, maxBuffer: 50 * 1024 * 1024 } // 50MB max
@@ -358,6 +350,330 @@ export async function getWorkspaceDiff(
       2
     );
   }
+}
+
+/**
+ * List changed files in a workspace branch vs base branch.
+ */
+export async function getWorkspaceChangedFiles(
+  workspacePath: string,
+  baseBranch: string
+): Promise<{ files: ReviewChangedFile[]; baseBranch: string; headBranch: string }> {
+  try {
+    const { stdout: headOutput } = await execAsync('git rev-parse --abbrev-ref HEAD', {
+      cwd: workspacePath,
+    });
+    const headBranch = headOutput.trim();
+
+    const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
+    const { stdout } = await execAsync(
+      `git diff --name-status -z --find-renames -M ${escapeShellArg(baseRef)}...HEAD`,
+      { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
+    );
+
+    return {
+      files: parseChangedFilesFromNameStatusZ(stdout),
+      baseBranch,
+      headBranch,
+    };
+  } catch (error) {
+    throw new SpacesError(
+      `Failed to list changed files: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
+/**
+ * Get diff for a single file path in workspace vs base branch.
+ */
+export async function getWorkspaceFileDiff(
+  workspacePath: string,
+  baseBranch: string,
+  filePath: string,
+  prevFilePath?: string
+): Promise<{ diff: string; baseBranch: string; headBranch: string }> {
+  try {
+    const { stdout: headOutput } = await execAsync('git rev-parse --abbrev-ref HEAD', {
+      cwd: workspacePath,
+    });
+    const headBranch = headOutput.trim();
+
+    const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
+    const pathSpec = prevFilePath
+      ? `${escapeShellArg(prevFilePath)} ${escapeShellArg(filePath)}`
+      : escapeShellArg(filePath);
+
+    const { stdout } = await execAsync(
+      `git diff --patch --no-color --find-renames -M ${escapeShellArg(baseRef)}...HEAD -- ${pathSpec}`,
+      { cwd: workspacePath, maxBuffer: 20 * 1024 * 1024 }
+    );
+
+    return {
+      diff: stdout,
+      baseBranch,
+      headBranch,
+    };
+  } catch (error) {
+    throw new SpacesError(
+      `Failed to get file diff: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
+/**
+ * Read a file's old/new versions for the workspace diff base.
+ *
+ * Uses merge-base(<base-ref>, HEAD) for the old side so content aligns with
+ * three-dot diff semantics. For renames, pass prevFilePath for the old side.
+ */
+export async function getWorkspaceFileVersions(
+  workspacePath: string,
+  baseBranch: string,
+  filePath: string,
+  prevFilePath?: string
+): Promise<{ oldContents: string | null; newContents: string | null }> {
+  try {
+    const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
+    const mergeBaseCommit = await resolveMergeBaseCommit(workspacePath, baseRef);
+
+    const oldPath = prevFilePath ?? filePath;
+    const [oldContents, newContents] = await Promise.all([
+      readFileAtRevision(workspacePath, mergeBaseCommit, oldPath),
+      readFileAtRevision(workspacePath, 'HEAD', filePath),
+    ]);
+
+    return { oldContents, newContents };
+  } catch (error) {
+    throw new SpacesError(
+      `Failed to read workspace file versions: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
+/**
+ * Read a file context range (or the full file when range omitted) on both
+ * old/base and new/head sides for on-demand diff expansion.
+ */
+export async function getWorkspaceFileContextRange(
+  workspacePath: string,
+  baseBranch: string,
+  filePath: string,
+  prevFilePath?: string,
+  range?: {
+    oldStart?: number;
+    oldEnd?: number;
+    newStart?: number;
+    newEnd?: number;
+  }
+): Promise<{
+  oldStart: number;
+  oldLines: string[];
+  oldTotal: number;
+  newStart: number;
+  newLines: string[];
+  newTotal: number;
+}> {
+  try {
+    const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
+    const mergeBaseCommit = await resolveMergeBaseCommit(workspacePath, baseRef);
+
+    const oldPath = prevFilePath ?? filePath;
+    const [oldContents, newContents] = await Promise.all([
+      readFileAtRevision(workspacePath, mergeBaseCommit, oldPath),
+      readFileAtRevision(workspacePath, 'HEAD', filePath),
+    ]);
+
+    const oldAllLines = splitFileIntoLines(oldContents ?? '');
+    const newAllLines = splitFileIntoLines(newContents ?? '');
+
+    const oldTotal = oldAllLines.length;
+    const newTotal = newAllLines.length;
+
+    const [oldStart, oldEnd] = normalizeRange(oldTotal, range?.oldStart, range?.oldEnd);
+    const [newStart, newEnd] = normalizeRange(newTotal, range?.newStart, range?.newEnd);
+
+    const oldLines = oldTotal === 0 ? [] : oldAllLines.slice(oldStart - 1, oldEnd);
+    const newLines = newTotal === 0 ? [] : newAllLines.slice(newStart - 1, newEnd);
+
+    return {
+      oldStart,
+      oldLines,
+      oldTotal,
+      newStart,
+      newLines,
+      newTotal,
+    };
+  } catch (error) {
+    throw new SpacesError(
+      `Failed to read file context range: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
+async function resolveComparableBaseRef(
+  workspacePath: string,
+  baseBranch: string
+): Promise<string> {
+  // Best effort fetch. Keep short timeout to avoid hanging review requests.
+  try {
+    await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
+      cwd: workspacePath,
+      timeout: 8000,
+    });
+  } catch {
+    logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
+  }
+
+  const candidates = [`origin/${baseBranch}`, baseBranch];
+  for (const candidate of candidates) {
+    try {
+      await execAsync(`git rev-parse --verify ${escapeShellArg(candidate)}`, {
+        cwd: workspacePath,
+        timeout: 5000,
+      });
+      return candidate;
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  throw new Error(
+    `Cannot resolve base ref for "${baseBranch}". Fetch the branch or update project base branch config.`
+  );
+}
+
+async function resolveMergeBaseCommit(
+  workspacePath: string,
+  baseRef: string
+): Promise<string> {
+  const { stdout } = await execAsync(
+    `git merge-base ${escapeShellArg(baseRef)} HEAD`,
+    { cwd: workspacePath, timeout: 5000 }
+  );
+
+  const mergeBaseCommit = stdout.trim();
+  if (!mergeBaseCommit) {
+    throw new Error(`Could not determine merge base for ${baseRef} and HEAD`);
+  }
+
+  return mergeBaseCommit;
+}
+
+async function readFileAtRevision(
+  workspacePath: string,
+  revision: string,
+  filePath: string
+): Promise<string | null> {
+  const spec = `${revision}:${filePath}`;
+
+  try {
+    const { stdout } = await execAsync(`git show ${escapeShellArg(spec)}`, {
+      cwd: workspacePath,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    return stdout;
+  } catch (error) {
+    const err = error as { message?: string; stderr?: string };
+    const message = `${err.message ?? ''}\n${err.stderr ?? ''}`;
+
+    // Missing file at ref is expected for new/deleted/renamed files.
+    if (
+      /exists on disk, but not in/i.test(message) ||
+      /path .* does not exist in/i.test(message) ||
+      /path .* not in/i.test(message) ||
+      /invalid object name/i.test(message)
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function normalizeRange(total: number, start?: number, end?: number): [number, number] {
+  if (total <= 0) {
+    return [1, 0];
+  }
+
+  const normalizedStart =
+    typeof start === 'number' && Number.isFinite(start) ? clamp(Math.floor(start), 1, total) : 1;
+  const normalizedEnd =
+    typeof end === 'number' && Number.isFinite(end)
+      ? clamp(Math.floor(end), normalizedStart, total)
+      : total;
+
+  return [normalizedStart, normalizedEnd];
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function splitFileIntoLines(contents: string): string[] {
+  if (contents.length === 0) {
+    return [];
+  }
+
+  const lines = contents.match(/[^\n]*\n|[^\n]+$/g);
+  return lines ?? [];
+}
+
+function parseChangedFilesFromNameStatusZ(stdout: string): ReviewChangedFile[] {
+  if (!stdout) {
+    return [];
+  }
+
+  const tokens = stdout.split('\0').filter((token) => token.length > 0);
+  const files: ReviewChangedFile[] = [];
+
+  let index = 0;
+  while (index < tokens.length) {
+    const statusToken = tokens[index++];
+    if (!statusToken) {
+      continue;
+    }
+
+    const statusCode = statusToken[0];
+    if (statusCode === 'R') {
+      const prev = tokens[index++];
+      const next = tokens[index++];
+      if (!prev || !next) {
+        continue;
+      }
+      files.push({
+        filePath: next,
+        prevFilePath: prev,
+        changeType: 'renamed',
+      });
+      continue;
+    }
+
+    const path = tokens[index++];
+    if (!path) {
+      continue;
+    }
+
+    const changeType: ReviewChangedFile['changeType'] =
+      statusCode === 'A'
+        ? 'new'
+        : statusCode === 'D'
+          ? 'deleted'
+          : 'modified';
+
+    files.push({ filePath: path, changeType });
+  }
+
+  return files;
 }
 
 /**

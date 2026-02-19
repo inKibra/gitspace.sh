@@ -174,9 +174,47 @@ export type ReviewOperation =
       threadId: string;
       commentId: string;
     }
+  | { op: 'get_changed_files'; projectName: string; workspaceName: string }
   | { op: 'get_diff'; projectName: string; workspaceName: string }
+  | {
+      op: 'get_file_diff';
+      projectName: string;
+      workspaceName: string;
+      filePath: string;
+      prevFilePath?: string;
+    }
+  | {
+      op: 'get_file_versions';
+      projectName: string;
+      workspaceName: string;
+      filePath: string;
+      /** Optional old path for renames (rename from) */
+      prevFilePath?: string;
+    }
+  | {
+      op: 'get_file_context_range';
+      projectName: string;
+      workspaceName: string;
+      filePath: string;
+      /** Optional old path for renames (rename from) */
+      prevFilePath?: string;
+      /** 1-based inclusive range on old/base side. Omit for full file */
+      oldStart?: number;
+      /** 1-based inclusive range on old/base side. Omit for full file */
+      oldEnd?: number;
+      /** 1-based inclusive range on new/head side. Omit for full file */
+      newStart?: number;
+      /** 1-based inclusive range on new/head side. Omit for full file */
+      newEnd?: number;
+    }
   | { op: 'import_github'; projectName: string; workspaceName: string; prNumber?: number }
   | { op: 'push_github'; projectName: string; workspaceName: string; prNumber?: number };
+
+export interface ReviewChangedFile {
+  filePath: string;
+  prevFilePath?: string;
+  changeType: 'new' | 'deleted' | 'renamed' | 'modified';
+}
 
 /** Results returned from machine to client */
 export type ReviewResult =
@@ -186,7 +224,37 @@ export type ReviewResult =
   | { op: 'comment_added'; thread: ReviewThread }
   | { op: 'comment_updated'; thread: ReviewThread }
   | { op: 'comment_deleted'; thread: ReviewThread }
+  | {
+      op: 'changed_files';
+      files: ReviewChangedFile[];
+      baseBranch: string;
+      headBranch: string;
+    }
   | { op: 'diff'; diff: string; baseBranch: string; headBranch: string }
+  | {
+      op: 'file_diff';
+      filePath: string;
+      prevFilePath?: string;
+      diff: string;
+    }
+  | {
+      op: 'file_versions';
+      filePath: string;
+      prevFilePath?: string;
+      oldContents: string | null;
+      newContents: string | null;
+    }
+  | {
+      op: 'file_context_range';
+      filePath: string;
+      prevFilePath?: string;
+      oldStart: number;
+      oldLines: string[];
+      oldTotal: number;
+      newStart: number;
+      newLines: string[];
+      newTotal: number;
+    }
   | { op: 'github_imported'; imported: number; threads: ReviewThread[] }
   | { op: 'github_pushed'; prNumber: number; url: string };
 

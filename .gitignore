@@ -46,3 +46,6 @@ temp/
 
 # GitSpace marker files
 gitspace.lock
+
+# gssh review — workspace review notes
+.gitspace/review/
