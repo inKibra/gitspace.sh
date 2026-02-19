@@ -309,6 +309,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
 
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
@@ -630,14 +631,20 @@ function App({ relayConfig, onQuit }: AppProps) {
   // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     setIsViewOnlySession(false);
+    pendingProcessEditWorkspacesRef.current = localWorkspaces;
     setPendingProcessEditWorkspaceId(workspaceId);
     const commandSpec = buildEditProcessesCommand();
     void attachLocal({
       workspaceId,
       command: commandSpec.command,
       args: commandSpec.args,
+    }).then((attached) => {
+      if (!attached) {
+        pendingProcessEditWorkspacesRef.current = null;
+        setPendingProcessEditWorkspaceId(null);
+      }
     });
-  }, [attachLocal]);
+  }, [attachLocal, localWorkspaces]);
 
   useEffect(() => {
     if (!pendingProcessEditWorkspaceId) {
@@ -646,6 +653,14 @@ function App({ relayConfig, onQuit }: AppProps) {
     if (state.view !== 'projects' || localSessionMode !== 'browsing') {
       return;
     }
+
+    if (
+      pendingProcessEditWorkspacesRef.current &&
+      pendingProcessEditWorkspacesRef.current === localWorkspaces
+    ) {
+      return;
+    }
+    pendingProcessEditWorkspacesRef.current = null;
 
     const workspace = localWorkspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {

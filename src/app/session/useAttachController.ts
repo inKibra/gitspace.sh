@@ -8,6 +8,7 @@ import type {
 export interface AttachSelectionParams {
   sessionId?: string
   workspaceId?: string
+  viewOnly?: boolean
 }
 
 export type AttachTarget = 'session' | 'workspace'
@@ -182,7 +183,14 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         return
       }
 
-      await attach({ sessionId: selection.sessionId })
+      const attachParams: BundleRefreshAttachParams = {
+        sessionId: selection.sessionId,
+      }
+      if (selection.viewOnly !== undefined) {
+        attachParams.viewOnly = selection.viewOnly
+      }
+
+      await attach(attachParams)
       return
     }
 

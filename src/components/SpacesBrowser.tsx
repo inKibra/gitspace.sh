@@ -110,7 +110,7 @@ export interface UseSpacesBrowserReturn {
   activateSelected: () => Promise<void>;
   activateIndex: (index: number) => Promise<void>;
   /** Direct attach - bypasses state timing issues on mobile */
-  attachSession: (params: { sessionId?: string; workspaceId?: string }) => Promise<void>;
+  attachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => Promise<void>;
   startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   startProcess: (params: { workspaceId: string; processName: string }) => void;
   stopProcess: (params: { workspaceId: string; processName: string }) => void;
