@@ -35,16 +35,22 @@ import { AccessControlList } from '../lib/tmux-lite/crypto/access-control.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
 import type { ServeEventHandler } from '../serve/types.js';
 import type { AccessEntry } from '../types/identity.js';
+import type { Identity, StoredIdentity } from '../types/identity.js';
 import {
   NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
 import { readHostConfig } from './host.js';
 import { createRelayServer } from '../relay/server.js';
-import { generateRelayIdentity } from '../relay/identity.js';
+import { formatRelayFingerprint, loadOrCreateRelayIdentity } from '../relay/identity.js';
 import { signMessage } from '../relay/signing.js';
 import { PROTOCOL_VERSION } from '../relay/protocol.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
+import { generateEphemeralKeypair, validateX25519PublicKey, x25519SharedSecret } from '../lib/tmux-lite/crypto/keyexchange.js';
+import { open } from '../lib/tmux-lite/crypto/secretbox.js';
+import { hkdf } from '@noble/hashes/hkdf.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 import {
   isServeRunning,
   getServePid,
@@ -62,6 +68,7 @@ import {
   type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
+import { bindControlOwner, bindControlRelayIdentity, ensureControlStore } from '../relay/control/store.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -236,6 +243,152 @@ async function verifyRelayTrust(
   return { trusted: true };
 }
 
+const UNLOCK_KDF_INFO = new TextEncoder().encode('gitspace-unlock-v1');
+const UNLOCK_KDF_KEY_LENGTH = 32;
+
+function deriveUnlockKey(sharedSecret: Uint8Array, salt: Uint8Array): Uint8Array {
+  return hkdf(sha256, sharedSecret, salt, UNLOCK_KDF_INFO, UNLOCK_KDF_KEY_LENGTH);
+}
+
+function decryptUnlockGrant(
+  relayEphemeralKeyBase64: string,
+  saltBase64: string,
+  ciphertextBase64: string,
+  machineEphemeralPrivateKey: Uint8Array
+): StoredIdentity {
+  const relayEphemeralPublicKey = new Uint8Array(Buffer.from(relayEphemeralKeyBase64, 'base64'));
+  if (!validateX25519PublicKey(relayEphemeralPublicKey)) {
+    throw new Error('Relay unlock key is invalid');
+  }
+
+  const salt = new Uint8Array(Buffer.from(saltBase64, 'base64'));
+  const ciphertext = Buffer.from(ciphertextBase64, 'base64');
+  const sharedSecret = x25519SharedSecret(machineEphemeralPrivateKey, relayEphemeralPublicKey);
+  const key = deriveUnlockKey(sharedSecret, salt);
+  const plaintext = open(ciphertext, key);
+  if (!plaintext) {
+    throw new Error('Failed to decrypt unlock grant');
+  }
+
+  return JSON.parse(plaintext.toString('utf-8')) as StoredIdentity;
+}
+
+interface UnlockIdentityResult {
+  identity: Identity;
+  registerPermit: string;
+}
+
+async function fetchIdentityViaUnlockToken(
+  relayUrl: string,
+  relayPubkey: string | undefined,
+  workspaceId: string,
+  unlockToken: string
+): Promise<UnlockIdentityResult> {
+  const ephemeral = generateEphemeralKeypair();
+  const url = new URL(relayUrl);
+  url.searchParams.set('role', 'machine');
+  url.searchParams.set('m', `unlock-${Date.now().toString(36)}`);
+
+  return await new Promise<UnlockIdentityResult>((resolve, reject) => {
+    let completed = false;
+    const ws = new WebSocket(url.toString());
+
+    const fail = (message: string) => {
+      if (completed) return;
+      completed = true;
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      reject(new SpacesError(message, 'USER_ERROR', 1));
+    };
+
+    ws.onerror = () => {
+      fail('Failed to connect to relay for unlock request');
+    };
+
+    ws.onclose = () => {
+      if (!completed) {
+        fail('Relay closed unlock connection before unlock grant was received');
+      }
+    };
+
+    ws.onmessage = async (event) => {
+      let msg: Record<string, unknown>;
+      try {
+        const raw = typeof event.data === 'string'
+          ? event.data
+          : new TextDecoder().decode(event.data as ArrayBuffer);
+        msg = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        fail('Invalid unlock response from relay');
+        return;
+      }
+
+      if (msg.type === 'relay_identity') {
+        const trust = await verifyRelayTrust(
+          relayUrl,
+          String(msg.publicKey ?? ''),
+          String(msg.fingerprint ?? ''),
+          typeof msg.label === 'string' ? msg.label : undefined,
+          relayPubkey
+        );
+
+        if (!trust.trusted) {
+          fail(trust.reason);
+          return;
+        }
+
+        ws.send(JSON.stringify({
+          type: 'unlock_request',
+          workspaceId,
+          unlockToken,
+          ephemeralKey: Buffer.from(ephemeral.publicKey).toString('base64'),
+        }));
+        return;
+      }
+
+      if (msg.type === 'unlock_grant') {
+        const ciphertext = typeof msg.ciphertext === 'string' ? msg.ciphertext : '';
+        const relayEphemeralKey = typeof msg.relayEphemeralKey === 'string' ? msg.relayEphemeralKey : '';
+        const salt = typeof msg.salt === 'string' ? msg.salt : '';
+        const registerPermit = typeof msg.registerPermit === 'string' ? msg.registerPermit : '';
+        if (!ciphertext || !relayEphemeralKey || !salt || !registerPermit) {
+          fail('Unlock grant did not include identity material');
+          return;
+        }
+
+        try {
+          const parsed = decryptUnlockGrant(
+            relayEphemeralKey,
+            salt,
+            ciphertext,
+            ephemeral.privateKey
+          );
+          const identity = deserializeIdentity(parsed);
+          if (completed) return;
+          completed = true;
+          ws.close();
+          resolve({
+            identity,
+            registerPermit,
+          });
+        } catch (error) {
+          fail(`Failed to parse unlock identity payload: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return;
+      }
+
+      if (msg.type === 'error') {
+        const code = typeof msg.code === 'string' ? msg.code : 'ERROR';
+        const message = typeof msg.message === 'string' ? msg.message : 'Unlock request failed';
+        fail(`[${code}] ${message}`);
+      }
+    };
+  });
+}
+
 /**
  * Sign a challenge and create registration message
  *
@@ -249,7 +402,9 @@ function signChallengeAndCreateRegistration(
   challenge: string,
   signingPrivateKey: Uint8Array,
   machineId: string,
-  publicIdentity: PublicIdentity
+  publicIdentity: PublicIdentity,
+  bootstrapToken?: string,
+  registerPermit?: string
 ): { challengeResponse: string; message: object } | null {
   try {
     const nonceBytes = new Uint8Array(Buffer.from(challenge, 'base64'));
@@ -266,6 +421,8 @@ function signChallengeAndCreateRegistration(
         label: publicIdentity.label,
         protocolVersion: PROTOCOL_VERSION,
         challengeResponse,
+        bootstrapToken,
+        registerPermit,
       },
     };
   } catch (err) {
@@ -464,6 +621,9 @@ function stopCloudflared(): void {
 export async function serve(options: {
   relay?: string;
   relayPubkey?: string;
+  bootstrapToken?: string;
+  unlockToken?: string;
+  workspaceId?: string;
   ignoreKeychainAndSkipSecrets?: boolean;
 } = {}): Promise<void> {
   // Step 1: Load machine identity
@@ -540,13 +700,28 @@ export async function serve(options: {
   logger.dim(`Access list: ${entries.length} authorized ${entries.length === 1 ? 'client' : 'clients'}`);
   logger.log('');
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
-  let localRelayIdentity: ReturnType<typeof generateRelayIdentity> | null = null;
+  let localRelayIdentity: Awaited<ReturnType<typeof loadOrCreateRelayIdentity>> | null = null;
 
   if (hostConfig?.subdomain) {
-    logger.bold('gitspace.sh Hosting:');
+    ensureControlStore();
+    const ownerBinding = bindControlOwner(identity.id);
 
-    // Generate an ephemeral identity for local relay
-    localRelayIdentity = generateRelayIdentity('local-relay');
+    logger.bold('gitspace.sh Hosting:');
+    if (ownerBinding.bound) {
+      logger.dim(`Control relay owner initialized: ${ownerBinding.ownerIdentityId}`);
+    }
+
+    // Load or create persistent relay identity for control mode
+    localRelayIdentity = await loadOrCreateRelayIdentity('control-relay');
+    const relayFingerprint = formatRelayFingerprint(localRelayIdentity.signingPublicKey);
+    const relayBinding = bindControlRelayIdentity({
+      relayIdentityId: localRelayIdentity.id,
+      relaySigningPublicKey: localRelayIdentity.signingPublicKey,
+      relayFingerprint,
+    });
+    if (relayBinding.bound) {
+      logger.dim(`Control relay identity initialized: ${relayFingerprint}`);
+    }
 
     // Start local relay server with this machine pre-authorized
     try {
@@ -600,7 +775,7 @@ export async function serve(options: {
     // Connect to local relay (no token needed - uses challenge-response auth)
     logger.info('Registering with local relay...');
     try {
-      await connectToRelay(localRelayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey);
+      await connectToRelay(localRelayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey, undefined, options.bootstrapToken);
     } catch (error) {
       logger.error(`Failed to register with local relay: ${error instanceof Error ? error.message : String(error)}`);
       localRelayServer.stop();
@@ -652,7 +827,7 @@ export async function serve(options: {
   logger.info('Connecting to relay...');
 
   try {
-    await connectToRelay(relayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey, options.relayPubkey);
+    await connectToRelay(relayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey, options.relayPubkey, options.bootstrapToken);
 
     // Save relay config for share command
     writeRelayConfig({
@@ -703,7 +878,9 @@ async function connectToRelay(
   eventHandler: ServeEventHandler,
   accessList: AccessControlList,
   signingPrivateKey?: Uint8Array,
-  relayPubkey?: string
+  relayPubkey?: string,
+  bootstrapToken?: string,
+  registerPermit?: string
 ): Promise<void> {
   // Build WebSocket URL with machine role (no token in URL - auth via challenge-response)
   const url = new URL(relayUrl);
@@ -921,7 +1098,9 @@ async function connectToRelay(
                 challenge,
                 signingPrivateKey,
                 machineId,
-                publicIdentity
+                publicIdentity,
+                bootstrapToken,
+                registerPermit
               );
 
               if (!registration) {
@@ -1160,6 +1339,9 @@ function formatUptime(seconds: number): string {
 export async function serveStart(options: {
   relay?: string;
   relayPubkey?: string;
+  bootstrapToken?: string;
+  unlockToken?: string;
+  workspaceId?: string;
   passwordStdin?: boolean;
   foreground?: boolean;
   ignoreKeychainAndSkipSecrets?: boolean;
@@ -1171,15 +1353,15 @@ export async function serveStart(options: {
     return;
   }
 
-  // Load identity (need password)
-  if (!keypairExists()) {
-    throw new NoIdentityError();
-  }
+  const usingUnlockMode = Boolean(options.unlockToken);
 
   let password: string | null = null;
+  let identity: Identity | null = null;
+  let signingPrivateKey: Uint8Array | null = null;
+  let publicIdentity: PublicIdentity | null = null;
+  let registerPermit: string | undefined;
 
-  if (options.passwordStdin) {
-    // Read password from stdin
+  const loadPasswordFromStdin = async (): Promise<string> => {
     const reader = process.stdin;
     const chunks: Buffer[] = [];
 
@@ -1200,38 +1382,51 @@ export async function serveStart(options: {
       reader.once('error', onError);
     });
 
-    // Clean up stdin to allow process to exit
     reader.removeListener('data', onData);
     reader.pause();
 
-    password = Buffer.concat(chunks).toString().trim();
-    if (!password) {
+    const result = Buffer.concat(chunks).toString().trim();
+    if (!result) {
       throw new SpacesError('No password provided via stdin', 'USER_ERROR', 1);
     }
-  } else {
-    // Interactive prompt
-    password = await promptPassword('Enter password to unlock identity:');
-    if (!password) {
-      logger.info('Cancelled');
-      return;
-    }
-  }
-
-  // Validate password by loading keypair
-  const identity = await loadKeypair(password);
-  if (!identity) {
-    throw new SpacesError(
-      'Failed to unlock identity. Check your password.',
-      'USER_ERROR',
-      1
-    );
-  }
-
-  // Extract signing private key for challenge-response
-  const signingPrivateKey = identity.signing.secretKey.slice(0, 32);
+    return result;
+  };
 
   // If not foreground mode, fork to background
   if (!options.foreground) {
+    if (usingUnlockMode) {
+      if (!options.relay) {
+        throw new SpacesError('Unlock mode requires --relay', 'USER_ERROR', 1);
+      }
+      if (!options.workspaceId) {
+        throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
+      }
+    } else {
+      if (!keypairExists()) {
+        throw new NoIdentityError();
+      }
+
+      if (options.passwordStdin) {
+        password = await loadPasswordFromStdin();
+      } else {
+        password = await promptPassword('Enter password to unlock identity:');
+        if (!password) {
+          logger.info('Cancelled');
+          return;
+        }
+      }
+
+      // Validate password before daemonizing
+      const loadedIdentity = await loadKeypair(password);
+      if (!loadedIdentity) {
+        throw new SpacesError(
+          'Failed to unlock identity. Check your password.',
+          'USER_ERROR',
+          1
+        );
+      }
+    }
+
     logger.log('Starting serve daemon...');
 
     // Build args for background process
@@ -1241,10 +1436,15 @@ export async function serveStart(options: {
     const serveArgs = ['serve', 'start', '--foreground'];
     if (options.relay) serveArgs.push('--relay', options.relay);
     if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
+    if (options.bootstrapToken) serveArgs.push('--bootstrap-token', options.bootstrapToken);
+    if (options.unlockToken) serveArgs.push('--unlock-token', options.unlockToken);
+    if (options.workspaceId) serveArgs.push('--workspace-id', options.workspaceId);
     if (options.ignoreKeychainAndSkipSecrets) {
       serveArgs.push('--ignore-keychain-and-skip-secrets');
     }
-    serveArgs.push('--password-stdin');
+    if (!usingUnlockMode) {
+      serveArgs.push('--password-stdin');
+    }
 
     // Build command: compiled binary runs directly, dev mode uses bun
     const cmd = isCompiled
@@ -1266,9 +1466,13 @@ export async function serveStart(options: {
       env: process.env,
     });
 
-    // Send password via stdin
-    child.stdin.write(password);
-    child.stdin.end();
+    // Send password via stdin (non-unlock mode)
+    if (!usingUnlockMode) {
+      child.stdin.write(password ?? '');
+      child.stdin.end();
+    } else {
+      child.stdin.end();
+    }
 
     // Wait a bit for process to start
     await Bun.sleep(1000);
@@ -1288,16 +1492,64 @@ export async function serveStart(options: {
     }
   }
 
+  // Foreground mode identity resolution
+  if (usingUnlockMode) {
+    if (!options.relay) {
+      cleanupServeFiles();
+      throw new SpacesError('Unlock mode requires --relay', 'USER_ERROR', 1);
+    }
+    if (!options.workspaceId) {
+      cleanupServeFiles();
+      throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
+    }
+
+    const unlocked = await fetchIdentityViaUnlockToken(
+      options.relay,
+      options.relayPubkey,
+      options.workspaceId,
+      options.unlockToken ?? ''
+    );
+    identity = unlocked.identity;
+    registerPermit = unlocked.registerPermit;
+  } else {
+    if (!keypairExists()) {
+      cleanupServeFiles();
+      throw new NoIdentityError();
+    }
+
+    if (options.passwordStdin) {
+      password = await loadPasswordFromStdin();
+    } else {
+      password = await promptPassword('Enter password to unlock identity:');
+      if (!password) {
+        logger.info('Cancelled');
+        cleanupServeFiles();
+        return;
+      }
+    }
+
+    identity = await loadKeypair(password);
+    if (!identity) {
+      cleanupServeFiles();
+      throw new SpacesError(
+        'Failed to unlock identity. Check your password.',
+        'USER_ERROR',
+        1
+      );
+    }
+  }
+
+  if (!identity) {
+    cleanupServeFiles();
+    throw new SpacesError('Failed to initialize identity for serve daemon', 'SYSTEM_ERROR', 2);
+  }
+
+  signingPrivateKey = identity.signing.secretKey.slice(0, 32);
+  publicIdentity = getPublicIdentityFromPrivate(identity);
+
   // Foreground/daemon mode - write PID and start status server
   writeServePid(process.pid);
   startStatusServer();
-
-  // Get public identity for registration
-  const publicIdentity = getPublicKeyWithoutPassword();
-  if (!publicIdentity) {
-    cleanupServeFiles();
-    throw new SpacesError('Failed to read public identity', 'SYSTEM_ERROR', 2);
-  }
 
   // Load access control list
   const accessList = new AccessControlList();
@@ -1312,6 +1564,12 @@ export async function serveStart(options: {
     stopStatusServer();
     cleanupServeFiles();
     throw error;
+  }
+
+  if (!signingPrivateKey || !publicIdentity) {
+    stopStatusServer();
+    cleanupServeFiles();
+    throw new SpacesError('Failed to initialize identity for serve daemon', 'SYSTEM_ERROR', 2);
   }
 
   // Get config
@@ -1337,7 +1595,7 @@ export async function serveStart(options: {
   }
 
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
-  let localRelayIdentity: ReturnType<typeof generateRelayIdentity> | null = null;
+  let localRelayIdentity: Awaited<ReturnType<typeof loadOrCreateRelayIdentity>> | null = null;
   let effectiveRelayUrl = relayUrl || '';
 
   // Initialize daemon state
@@ -1356,8 +1614,16 @@ export async function serveStart(options: {
   });
 
   if (hostConfig?.subdomain) {
-    // Generate an ephemeral identity for local relay
-    localRelayIdentity = generateRelayIdentity('local-relay');
+    ensureControlStore();
+    bindControlOwner(identity.id);
+
+    // Load or create persistent relay identity for control mode
+    localRelayIdentity = await loadOrCreateRelayIdentity('control-relay');
+    bindControlRelayIdentity({
+      relayIdentityId: localRelayIdentity.id,
+      relaySigningPublicKey: localRelayIdentity.signingPublicKey,
+      relayFingerprint: formatRelayFingerprint(localRelayIdentity.signingPublicKey),
+    });
 
     // Start local relay server with this machine pre-authorized
     try {
@@ -1421,7 +1687,18 @@ export async function serveStart(options: {
 
   // Connect to relay
   try {
-    await connectToRelay(effectiveRelayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey, options.relayPubkey);
+    await connectToRelay(
+      effectiveRelayUrl,
+      machineId,
+      publicIdentity,
+      sessionManager,
+      eventHandler,
+      accessList,
+      signingPrivateKey,
+      options.relayPubkey,
+      options.bootstrapToken,
+      registerPermit
+    );
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
     localRelayServer?.stop();

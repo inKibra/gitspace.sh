@@ -138,6 +138,74 @@ describe("parseMessage", () => {
     });
   });
 
+  describe('unlock_request validation', () => {
+    const validUnlock = {
+      type: 'unlock_request',
+      workspaceId: 'ws-abc123',
+      unlockToken: 'tok_abc123',
+      ephemeralKey: '3QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+    };
+
+    test('parses valid unlock_request message', () => {
+      const result = parseMessage(JSON.stringify(validUnlock));
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe('unlock_request');
+    });
+
+    test('rejects unlock_request with missing workspaceId', () => {
+      const msg = { ...validUnlock } as any;
+      delete msg.workspaceId;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+
+    test('rejects unlock_request with empty token', () => {
+      const msg = { ...validUnlock, unlockToken: '' };
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+
+    test('rejects unlock_request with missing ephemeralKey', () => {
+      const msg = { ...validUnlock } as any;
+      delete msg.ephemeralKey;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('unlock_grant validation', () => {
+    const validGrant = {
+      type: 'unlock_grant',
+      workspaceId: 'ws-abc123',
+      tokenId: 'tok-id-123',
+      registerPermit: 'permit-123',
+      ciphertext: '3QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+      relayEphemeralKey: '4QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+      salt: '5QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+
+    test('parses valid unlock_grant message', () => {
+      const result = parseMessage(JSON.stringify(validGrant));
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe('unlock_grant');
+    });
+
+    test('rejects unlock_grant missing ciphertext', () => {
+      const msg = { ...validGrant } as any;
+      delete msg.ciphertext;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+
+    test('rejects unlock_grant missing registerPermit', () => {
+      const msg = { ...validGrant } as any;
+      delete msg.registerPermit;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+  });
+
   describe("data message validation", () => {
     test("parses machine data message with connectionId", () => {
       const msg = {

@@ -1,4 +1,7 @@
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRelayServer } from "./server";
 import { generateRelayIdentity } from "./identity";
 import { clearAllRegistries } from "./registries";
@@ -18,6 +21,8 @@ import {
 import { startRelayServer } from "./__tests__/helpers/ports";
 import type { Server } from "bun";
 import type { Identity } from "../types/identity";
+import { generateEphemeralKeypair } from "../lib/tmux-lite/crypto/keyexchange";
+import { createCloudBootstrapToken, ensureControlStore, upsertCloudWorkspace } from "./control/store";
 
 const TEST_HOST = "127.0.0.1";
 let relayUrl = "";
@@ -632,6 +637,107 @@ describe("Protocol messages", () => {
 
     machineWs.close();
     clientWs.close();
+  });
+});
+
+describe("Unlock request gating", () => {
+  test("rejects unlock_request with invalid token", async () => {
+    const ws = new WebSocket(`${relayUrl}?role=machine`);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error("Connection failed"));
+      setTimeout(() => reject(new Error("Timeout")), 2000);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type === "relay_identity") {
+          const ephemeral = generateEphemeralKeypair();
+          ws.send(JSON.stringify({
+            type: "unlock_request",
+            workspaceId: "ws-missing",
+            unlockToken: "tok-invalid",
+            ephemeralKey: Buffer.from(ephemeral.publicKey).toString("base64"),
+          }));
+          return;
+        }
+
+        if (msg.type === "error") {
+          expect(msg.code).toBe("UNAUTHORIZED");
+          const message = String(msg.message).toLowerCase();
+          expect(message.includes("token") || message.includes("bootstrapping")).toBe(true);
+          resolve();
+          return;
+        }
+      };
+      setTimeout(() => reject(new Error("Timeout waiting for unlock error")), 3000);
+    });
+
+    ws.close();
+  });
+
+  test("rejects unlock_request when workspace is not bootstrapping", async () => {
+    const prevControlDir = process.env.GITSPACE_CONTROL_DIR;
+    const tempControlDir = mkdtempSync(join(tmpdir(), "gssh-relay-unlock-test-"));
+    process.env.GITSPACE_CONTROL_DIR = tempControlDir;
+
+    try {
+      ensureControlStore();
+      upsertCloudWorkspace({
+        id: "ws-not-bootstrapping",
+        provider: "sprites",
+        providerWorkspaceId: "sprite-1",
+        machineId: "machine-1",
+        machinePublicKey: "machine-signing-pub-1",
+        status: "ready",
+      });
+
+      const token = createCloudBootstrapToken({
+        workspaceId: "ws-not-bootstrapping",
+        ownerIdentityId: "owner-1",
+      });
+
+      const ws = new WebSocket(`${relayUrl}?role=machine`);
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error("Connection failed"));
+        setTimeout(() => reject(new Error("Timeout")), 2000);
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string);
+          if (msg.type === "relay_identity") {
+            const ephemeral = generateEphemeralKeypair();
+            ws.send(JSON.stringify({
+              type: "unlock_request",
+              workspaceId: "ws-not-bootstrapping",
+              unlockToken: token.token,
+              ephemeralKey: Buffer.from(ephemeral.publicKey).toString("base64"),
+            }));
+            return;
+          }
+
+          if (msg.type === "error") {
+            expect(msg.code).toBe("UNAUTHORIZED");
+            expect(String(msg.message).toLowerCase()).toContain("bootstrapping");
+            resolve();
+            return;
+          }
+        };
+        setTimeout(() => reject(new Error("Timeout waiting for unlock state error")), 3000);
+      });
+
+      ws.close();
+    } finally {
+      if (prevControlDir === undefined) {
+        delete process.env.GITSPACE_CONTROL_DIR;
+      } else {
+        process.env.GITSPACE_CONTROL_DIR = prevControlDir;
+      }
+      rmSync(tempControlDir, { recursive: true, force: true });
+    }
   });
 });
 
