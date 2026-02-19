@@ -292,7 +292,13 @@ function resolveChangedFile(
  */
 function openBrowser(url: string): void {
   const platform = process.platform;
-  const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
+  if (platform === 'win32') {
+    // `start` is a cmd.exe builtin on Windows, not a standalone executable.
+    spawnSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' });
+    return;
+  }
+
+  const cmd = platform === 'darwin' ? 'open' : 'xdg-open';
   spawnSync(cmd, [url], { stdio: 'ignore' });
 }
 
@@ -776,7 +782,7 @@ export async function importReview(options: ReviewImportOptions = {}): Promise<v
     process.exit(1);
   }
 
-  logger.success(`Imported ${result.imported} comment(s) as ${result.threads.length} thread(s).`);
+  logger.success(`Imported ${result.imported} new thread(s) from GitHub (${result.threads.length} total).`);
 }
 
 // ============================================================================

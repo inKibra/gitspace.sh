@@ -32,14 +32,14 @@ const execAsync = promisify(exec);
  * Returns the directory where review notes are stored for this workspace.
  * Path: <workspacePath>/.gitspace/review/<workspaceName>/
  */
-export function getReviewDir(workspacePath: string, workspaceName: string): string {
+function getReviewDir(workspacePath: string, workspaceName: string): string {
   return join(workspacePath, '.gitspace', 'review', workspaceName);
 }
 
 /**
  * Returns the path to the notes.json file for this workspace.
  */
-export function getNotesPath(workspacePath: string, workspaceName: string): string {
+function getNotesPath(workspacePath: string, workspaceName: string): string {
   return join(getReviewDir(workspacePath, workspaceName), 'notes.json');
 }
 

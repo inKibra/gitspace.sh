@@ -168,7 +168,7 @@ export function ReviewPage({
     setActionSuccess(null);
     try {
       const { imported } = await importGitHub();
-      setActionSuccess(`Imported ${imported} comment(s) from GitHub.`);
+      setActionSuccess(`Imported ${imported} new thread(s) from GitHub.`);
       setTimeout(() => setActionSuccess(null), 4000);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Import failed');
