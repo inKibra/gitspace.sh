@@ -310,6 +310,33 @@ describe('github-review sync behavior', () => {
     expect(result.threads).toHaveLength(2);
   });
 
+  it('imports outdated comments without line metadata as file-level targets', async () => {
+    setImportComments(importFile, [
+      {
+        id: 450,
+        body: 'Outdated comment',
+        path: 'src/outdated.ts',
+        line: null,
+        original_line: null,
+        side: 'RIGHT',
+        start_line: null,
+        original_start_line: null,
+        diff_hunk: '@@ -20,5 +20,0 @@ removed block',
+        user: { login: 'octocat' },
+        created_at: '2026-02-19T15:10:00Z',
+        pull_request_review_id: 31,
+      },
+    ]);
+
+    const result = await importGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+    expect(result.imported).toBe(1);
+    expect(result.threads).toHaveLength(1);
+    expect(result.threads[0]?.target).toEqual({
+      kind: 'file',
+      file: 'src/outdated.ts',
+    });
+  });
+
   it('pushes only unsynced local comments and avoids replay on repeat push', async () => {
     setImportComments(importFile, [
       {

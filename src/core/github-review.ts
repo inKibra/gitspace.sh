@@ -354,12 +354,13 @@ async function getRepoName(cwd: string): Promise<string> {
 
 /** Build a ThreadTarget from a GitHub PR comment */
 function buildTarget(comment: GitHubPRComment): ThreadTarget {
-  const line = comment.line ?? comment.original_line ?? 1;
-  const startLine = comment.start_line ?? comment.original_start_line ?? line;
+  const line = comment.line ?? comment.original_line;
 
   // Extract hunk header from diff_hunk
   const hunkHeaderMatch = comment.diff_hunk.match(/^(@@ [^@]+ @@[^\n]*)/m);
-  if (hunkHeaderMatch) {
+  if (hunkHeaderMatch && line !== null) {
+    const startLine = comment.start_line ?? comment.original_start_line ?? line;
+
     // We prefer line-level targeting so the annotation is precise
     return {
       kind: 'line',
