@@ -422,6 +422,12 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
         );
         if (session) {
           await onAttachSession({ sessionId: session.id, viewOnly: true });
+        } else {
+          onStartProcessAttach({
+            workspaceId: item.workspaceId,
+            processName: item.processName,
+            instance: item.instance,
+          });
         }
       } else {
         onStartProcessAttach({

@@ -93,6 +93,7 @@ export default function App() {
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const pendingProcessEditValidationArmedRef = useRef(false);
   const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
   const eventsKeyboardStateRef = useRef<{
     selectedIndex: number;
@@ -313,14 +314,22 @@ export default function App() {
   }, [terminal.mode, terminal.scriptState?.isRunning, terminal.status]);
 
   useEffect(() => {
-    if (!pendingProcessEditWorkspaceId || terminal.mode !== 'browsing') {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      terminal.mode !== 'browsing'
+    ) {
       return;
     }
     terminal.requestWorkspaces();
   }, [pendingProcessEditWorkspaceId, terminal.mode, terminal.requestWorkspaces]);
 
   useEffect(() => {
-    if (!pendingProcessEditWorkspaceId || terminal.mode !== 'browsing') {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      terminal.mode !== 'browsing'
+    ) {
       return;
     }
 
@@ -334,6 +343,7 @@ export default function App() {
 
     const workspace = terminal.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
+      pendingProcessEditValidationArmedRef.current = false;
       setPendingProcessEditWorkspaceId(null);
       return;
     }
@@ -355,6 +365,7 @@ export default function App() {
       });
     }
 
+    pendingProcessEditValidationArmedRef.current = false;
     setPendingProcessEditWorkspaceId(null);
   }, [flow, pendingProcessEditWorkspaceId, terminal.mode, terminal.workspaces]);
 
@@ -526,6 +537,7 @@ export default function App() {
   // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     setIsViewOnlySession(false);
+    pendingProcessEditValidationArmedRef.current = false;
     pendingProcessEditWorkspacesRef.current = terminal.workspaces;
     setPendingProcessEditWorkspaceId(workspaceId);
     const commandSpec = buildEditProcessesCommand();
@@ -535,16 +547,18 @@ export default function App() {
       args: commandSpec.args,
     }).then((attached) => {
       if (!attached) {
+        pendingProcessEditValidationArmedRef.current = false;
         pendingProcessEditWorkspacesRef.current = null;
         setPendingProcessEditWorkspaceId(null);
+        return;
       }
+
+      pendingProcessEditValidationArmedRef.current = true;
     });
   }, [attachController, terminal.workspaces]);
 
   const handleStartProcessSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
     terminal.startProcess(params.workspaceId, params.processName, params.instance);
-    terminal.requestWorkspaces();
-    terminal.requestSessions();
   }, [terminal]);
 
   const handleStartProcessAttachSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
@@ -555,8 +569,6 @@ export default function App() {
       instance,
     });
     terminal.startProcess(params.workspaceId, params.processName, instance);
-    terminal.requestWorkspaces();
-    terminal.requestSessions();
   }, [terminal]);
 
   const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
@@ -576,8 +588,6 @@ export default function App() {
     onStartProcessAttach: (params) => handleStartProcessAttachSelection(params),
     onStopProcess: (params) => {
       terminal.stopProcess(params.workspaceId, params.processName);
-      terminal.requestWorkspaces();
-      terminal.requestSessions();
     },
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: (workspaceId) => {

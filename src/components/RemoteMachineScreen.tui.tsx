@@ -66,6 +66,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const pendingProcessEditValidationArmedRef = useRef(false);
   const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
@@ -195,14 +196,22 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [remote.mode]);
 
   useEffect(() => {
-    if (!pendingProcessEditWorkspaceId || remote.mode !== 'browsing') {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      remote.mode !== 'browsing'
+    ) {
       return;
     }
     remote.requestWorkspaces();
   }, [pendingProcessEditWorkspaceId, remote.mode, remote.requestWorkspaces]);
 
   useEffect(() => {
-    if (!pendingProcessEditWorkspaceId || remote.mode !== 'browsing') {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      remote.mode !== 'browsing'
+    ) {
       return;
     }
 
@@ -216,6 +225,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
     const workspace = remote.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
+      pendingProcessEditValidationArmedRef.current = false;
       setPendingProcessEditWorkspaceId(null);
       return;
     }
@@ -237,6 +247,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       });
     }
 
+    pendingProcessEditValidationArmedRef.current = false;
     setPendingProcessEditWorkspaceId(null);
   }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
 
@@ -362,6 +373,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow]);
 
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    pendingProcessEditValidationArmedRef.current = false;
     pendingProcessEditWorkspacesRef.current = remote.workspaces;
     setPendingProcessEditWorkspaceId(workspaceId);
     const commandSpec = buildEditProcessesCommand();
@@ -371,9 +383,13 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       args: commandSpec.args,
     }).then((attached) => {
       if (!attached) {
+        pendingProcessEditValidationArmedRef.current = false;
         pendingProcessEditWorkspacesRef.current = null;
         setPendingProcessEditWorkspaceId(null);
+        return;
       }
+
+      pendingProcessEditValidationArmedRef.current = true;
     });
   }, [attachController, remote.workspaces]);
 
