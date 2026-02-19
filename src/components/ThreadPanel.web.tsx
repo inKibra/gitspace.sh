@@ -35,10 +35,25 @@ const SAFE_LINK_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 
 function isSafeMarkdownHref(href: string): boolean {
   const trimmed = href.trim();
-  const scheme = trimmed.match(/^([a-zA-Z][a-zA-Z\d+.-]*):/);
-  if (!scheme?.[1]) {
+  if (!trimmed) {
     return false;
   }
+
+  if (
+    trimmed.startsWith('#') ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('../')
+  ) {
+    return true;
+  }
+
+  const scheme = trimmed.match(/^([a-zA-Z][a-zA-Z\d+.-]*):/);
+  if (!scheme?.[1]) {
+    // Relative paths without a URI scheme are safe.
+    return true;
+  }
+
   return SAFE_LINK_SCHEMES.has(scheme[1].toLowerCase());
 }
 

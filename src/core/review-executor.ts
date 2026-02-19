@@ -155,18 +155,9 @@ export async function executeLocalReviewOperation(
         operation.threadId,
         operation.commentId
       );
-      // deleteComment may return null if the thread was itself removed
-      const now = new Date().toISOString();
       return {
         op: 'comment_deleted',
-        thread: thread ?? {
-          id: operation.threadId,
-          target: { kind: 'workspace' as const },
-          resolved: true,
-          comments: [],
-          createdAt: now,
-          updatedAt: now,
-        },
+        thread,
       };
     }
 

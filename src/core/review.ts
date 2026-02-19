@@ -154,6 +154,10 @@ export async function createThread(
   decision?: HunkDecision,
   author = 'local'
 ): Promise<ReviewThread> {
+  // Ensure .gitignore decision is handled before reading/writing session state so
+  // concurrent CRUD writes cannot be overwritten after an async gap.
+  await ensureGitignore(workspacePath, workspaceName);
+
   const session = readReviewSession(workspacePath, workspaceName, baseBranch);
   const now = new Date().toISOString();
 
@@ -179,9 +183,6 @@ export async function createThread(
   };
 
   session.threads.push(thread);
-
-  // First-time .gitignore prompt
-  await ensureGitignore(workspacePath, workspaceName);
 
   writeReviewSession(workspacePath, workspaceName, session);
   return thread;
@@ -285,7 +286,8 @@ export function updateComment(
 /**
  * Delete a specific comment from a thread.
  * If it's the only comment in the thread, the thread itself is deleted.
- * Returns the updated thread, or null if the thread was deleted.
+ * Returns the updated thread snapshot. If the last comment is deleted,
+ * the returned thread keeps its original target metadata and has comments: [].
  */
 export function deleteComment(
   workspacePath: string,
@@ -293,7 +295,7 @@ export function deleteComment(
   baseBranch: string,
   threadId: string,
   commentId: string
-): ReviewThread | null {
+): ReviewThread {
   const session = readReviewSession(workspacePath, workspaceName, baseBranch);
   const threadIndex = session.threads.findIndex(t => t.id === threadId);
 
@@ -309,15 +311,15 @@ export function deleteComment(
   }
 
   thread.comments.splice(commentIndex, 1);
+  thread.updatedAt = new Date().toISOString();
 
   // If no comments remain, delete the whole thread
   if (thread.comments.length === 0) {
     session.threads.splice(threadIndex, 1);
     writeReviewSession(workspacePath, workspaceName, session);
-    return null;
+    return thread;
   }
 
-  thread.updatedAt = new Date().toISOString();
   writeReviewSession(workspacePath, workspaceName, session);
   return thread;
 }
