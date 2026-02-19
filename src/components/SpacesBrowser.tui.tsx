@@ -50,6 +50,9 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
       ? '[↑↓] Navigate  [Enter] View  [x] Stop  [r] Refresh  [q] Back'
       : '[↑↓] Navigate  [Enter] Start  [r] Refresh  [q] Back';
   }
+  if (selectedItem?.type === 'process-config-error') {
+    return '[↑↓] Navigate  [Enter] Fix Config  [r] Refresh  [q] Back';
+  }
   if (selectedItem?.type === 'workspace') {
     return '[↑↓] Navigate  [Enter] Expand  [n] New  [d] Delete  [r] Refresh  [q] Back';
   }
@@ -194,6 +197,16 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             return (
               <text key={`edit-processes-${item.workspaceId}`} fg={textColor} height={1}>
                 {prefix}   ⚙ Edit Processes Config
+              </text>
+            );
+          }
+
+          if (item.type === 'process-config-error') {
+            const textColor = isSelected ? COLORS.selected : '#FF6666';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <text key={`process-config-error-${item.workspaceId}`} fg={textColor} height={1}>
+                {prefix}   ⚠ Invalid processes config
               </text>
             );
           }

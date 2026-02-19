@@ -689,6 +689,7 @@ class ServeProcessHostManager {
   }
 
   private handleCrash(): void {
+    this.process = null;
     this.restartAttempts += 1;
     if (this.restartAttempts > MAX_CLOUDFLARED_RESTARTS) {
       logger.error(`serve tunnel crashed ${MAX_CLOUDFLARED_RESTARTS} times, giving up`);

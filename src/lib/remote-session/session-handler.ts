@@ -55,7 +55,7 @@ import { loadSavedEventFilters } from "../events/filters.js";
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from "../processes/manager.js";
 import { autostartProcesses } from "../processes/autostart.js";
 import { startProcessScheduler } from "../processes/scheduler.js";
-import { loadProcessesConfig } from "../processes/config.js";
+import { loadProcessesConfigWithDiagnostics } from "../processes/config.js";
 import { readProjectConfig } from "../../core/config.js";
 import { existsSync } from "fs";
 
@@ -384,12 +384,13 @@ export class RemoteSessionHandler {
           workspace.sessionCount = workspaceSessions.length;
 
           // Load process config for the workspace
-          const processConfig = loadProcessesConfig(workspace.path);
-          workspace.processes = processConfig.processes.map((process) => ({
+          const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
+          workspace.processes = processConfig.config.processes.map((process) => ({
             name: process.name,
             instances: process.instances,
             ports: process.ports,
           }));
+          workspace.processConfigError = processConfig.error ?? undefined;
         }
       } catch {
         // Ignore errors - just use 0 session counts

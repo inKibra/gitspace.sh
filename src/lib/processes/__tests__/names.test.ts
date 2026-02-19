@@ -30,6 +30,7 @@ describe('buildProcessSessionName', () => {
     const longWorkspace = 'a'.repeat(80);
     const name = buildProcessSessionName(longWorkspace, 'web', 1);
     expect(name.length).toBeLessThanOrEqual(PROCESS_SESSION_MAX_NAME);
+    expect(parseProcessSessionName(name)).not.toBeNull();
   });
 
   it('should not truncate short names', () => {

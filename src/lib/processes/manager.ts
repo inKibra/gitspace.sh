@@ -25,7 +25,7 @@ export interface ProcessRunResult {
 
 export async function listProcessSessions(workspacePath: string): Promise<ProcessSessionInfo[]> {
   const sessions = await listSessions();
-  const workspaceId = workspacePath.split('/').pop() ?? workspacePath;
+  const isWorkspaceMatch = (cwd: string) => cwd === workspacePath || cwd.startsWith(`${workspacePath}/`);
   return sessions
     .filter((session) => session.name.startsWith('proc:'))
     .map((session) => {
@@ -40,10 +40,7 @@ export async function listProcessSessions(workspacePath: string): Promise<Proces
       };
     })
     .filter((item): item is ProcessSessionInfo => Boolean(item))
-    .filter((item) =>
-      item.name.includes(`:${workspaceId}:`) &&
-      (item.workspacePath === workspacePath || item.workspacePath.startsWith(workspacePath))
-    );
+    .filter((item) => isWorkspaceMatch(item.workspacePath));
 }
 
 export function loadWorkspaceProcesses(workspacePath: string): ProcessesConfig {

@@ -17,13 +17,45 @@ export function buildProcessSessionName(
   processName: string,
   instance: number
 ): string {
-  const base = `${PROCESS_SESSION_PREFIX}:${workspaceId}:${processName}:${instance}`;
-  if (base.length <= PROCESS_SESSION_MAX_NAME) {
-    return base;
+  const instancePart = String(instance);
+  const prefix = `${PROCESS_SESSION_PREFIX}:`;
+  let workspacePart = workspaceId;
+  let processPart = processName;
+
+  const build = () => `${prefix}${workspacePart}:${processPart}:${instancePart}`;
+
+  let candidate = build();
+  if (candidate.length <= PROCESS_SESSION_MAX_NAME) {
+    return candidate;
   }
-  return base.slice(0, PROCESS_SESSION_MAX_NAME);
+
+  const maxWorkspaceLength = Math.max(
+    1,
+    PROCESS_SESSION_MAX_NAME - (prefix.length + 2 + instancePart.length + processPart.length)
+  );
+  if (workspacePart.length > maxWorkspaceLength) {
+    workspacePart = workspacePart.slice(0, maxWorkspaceLength);
+    candidate = build();
+  }
+
+  if (candidate.length > PROCESS_SESSION_MAX_NAME) {
+    const maxProcessLength = Math.max(
+      1,
+      PROCESS_SESSION_MAX_NAME - (prefix.length + 2 + instancePart.length + workspacePart.length)
+    );
+    processPart = processPart.slice(0, maxProcessLength);
+    candidate = build();
+  }
+
+  return candidate;
 }
 
+/**
+ * Parse a process session name in the format:
+ * `proc:<workspaceId>:<processName>:<instance>`
+ *
+ * Note: `<workspaceId>` and `<processName>` must not contain `:`.
+ */
 export function parseProcessSessionName(name: string): {
   workspaceId: string;
   processName: string;

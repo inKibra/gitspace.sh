@@ -20,6 +20,7 @@ import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow
 import { useAttachController } from './app/session/useAttachController.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
+import { buildEditProcessesCommand } from './lib/processes/editor.js';
 
 // Import shared components and hooks
 import {
@@ -75,6 +76,7 @@ export default function App() {
   const [showEvents, setShowEvents] = useState(false);
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
+  const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
     shift: false,
@@ -294,6 +296,43 @@ export default function App() {
   }, [terminal.mode, terminal.scriptState?.isRunning, terminal.status]);
 
   useEffect(() => {
+    if (!pendingProcessEditWorkspaceId || terminal.mode !== 'browsing') {
+      return;
+    }
+    terminal.requestWorkspaces();
+  }, [pendingProcessEditWorkspaceId, terminal.mode, terminal.requestWorkspaces]);
+
+  useEffect(() => {
+    if (!pendingProcessEditWorkspaceId || terminal.mode !== 'browsing') {
+      return;
+    }
+
+    const workspace = terminal.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    if (!workspace) {
+      return;
+    }
+
+    if (workspace.processConfigError) {
+      flow.showMessage({
+        title: 'Invalid Processes Config',
+        message: workspace.processConfigError,
+        variant: 'error',
+      });
+    } else {
+      const processCount = workspace.processes?.length ?? 0;
+      flow.showMessage({
+        title: 'Processes Config Updated',
+        message: processCount === 0
+          ? 'Config is valid. No processes are defined yet.'
+          : `Config is valid. ${processCount} process${processCount === 1 ? '' : 'es'} defined.`,
+        variant: 'success',
+      });
+    }
+
+    setPendingProcessEditWorkspaceId(null);
+  }, [flow, pendingProcessEditWorkspaceId, terminal.mode, terminal.workspaces]);
+
+  useEffect(() => {
     const scriptError = terminal.scriptState?.error;
     if (!scriptError) {
       lastScriptErrorRef.current = null;
@@ -461,10 +500,12 @@ export default function App() {
   // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     setIsViewOnlySession(false);
+    setPendingProcessEditWorkspaceId(workspaceId);
+    const commandSpec = buildEditProcessesCommand();
     void attachController.attach({
       workspaceId,
-      command: 'sh',
-      args: ['-c', 'mkdir -p .gitspace && exec "${EDITOR:-vi}" .gitspace/processes.json'],
+      command: commandSpec.command,
+      args: commandSpec.args,
     });
   }, [attachController]);
 
@@ -539,11 +580,14 @@ export default function App() {
     onSelectFilter: (filter) => {
       if (!eventsWorkspacePath) return;
       if (filter) {
+        const sinceMs = filter.sinceMinutes
+          ? Date.now() - filter.sinceMinutes * 60 * 1000
+          : undefined;
         terminal.requestEvents(
           eventsWorkspacePath,
           filter.filter as WideEventFilter,
           undefined,
-          filter.sinceMinutes ? filter.sinceMinutes * 60 * 1000 : undefined
+          sinceMs
         );
       } else {
         terminal.requestEvents(eventsWorkspacePath);
@@ -565,11 +609,14 @@ export default function App() {
 
     const interval = setInterval(() => {
       if (activeFilter) {
+        const sinceMs = activeFilter.sinceMinutes
+          ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
+          : undefined;
         terminal.requestEvents(
           eventsWorkspacePath,
           activeFilter.filter as WideEventFilter,
           undefined,
-          activeFilter.sinceMinutes ? activeFilter.sinceMinutes * 60 * 1000 : undefined
+          sinceMs
         );
       } else {
         terminal.requestEvents(eventsWorkspacePath);
@@ -846,6 +893,7 @@ export default function App() {
     terminal.mode,
     showInbox,
     showScriptTerminal,
+    showEvents,
     spacesBrowserProps,
     flow,
     deleteWorkspaceWithPrompt,

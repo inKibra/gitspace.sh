@@ -513,7 +513,6 @@ export class ClientSessionManager {
                   const eventData = new TextEncoder().encode(eventMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, eventData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
-                  return;
                 }
                 // Ignore attach-ready and attached - handled by client
               } else if (frame.type === FrameType.PTY) {

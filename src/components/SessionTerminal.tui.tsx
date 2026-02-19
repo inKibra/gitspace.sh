@@ -371,7 +371,6 @@ export function SessionTerminal({
         ref={(el: ScrollBoxRenderable | null) => {
           scrollBoxRef.current = el;
         }}
-        {...{ focusable: false } as any}
         flexGrow={1}
         viewportCulling={true}
         stickyScroll={true}

@@ -199,14 +199,18 @@ export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | n
                 <div className="text-[#8b949e] text-center py-8">No wide events</div>
               ) : (
                 filteredLogs.map((event, index) => {
-                  const selectedEvent = filteredLogs[selectedIndex];
-                  const isSelected = selectedEvent?.eventId === event.eventId;
+                  const isSelected = selected?.eventId === event.eventId;
                   const level = formatLevel(event.level);
                   const levelColor = LEVEL_COLORS[level] ?? '#8b949e';
                   return (
                     <div
                       key={`${event.eventId}-${index}`}
-                      onClick={() => selectIndex(index)}
+                      onClick={() => {
+                        const baseIndex = filtered.findIndex((item) => item.eventId === event.eventId);
+                        if (baseIndex >= 0) {
+                          selectIndex(baseIndex);
+                        }
+                      }}
                       className={`px-4 py-3 border-b border-[#30363d] cursor-pointer ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22]'}`}
                     >
                       <div className="flex items-center gap-2 text-xs text-[#6e7681]">
@@ -380,4 +384,3 @@ function Header({
     </div>
   );
 }
-

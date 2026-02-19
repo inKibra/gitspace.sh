@@ -53,7 +53,13 @@ export async function reconcileProcessRestarts(
 
     const existing = sessions.find((session) => {
       const parsed = parseProcessSessionName(session.name);
-      return parsed?.processName === spec.name && parsed.instance === spec.instance;
+      const inWorkspace =
+        session.cwd === workspacePath || session.cwd.startsWith(`${workspacePath}/`);
+      return (
+        inWorkspace &&
+        parsed?.processName === spec.name &&
+        parsed.instance === spec.instance
+      );
     });
 
     if (isProcessRestartDisabledFn(workspacePath, spec.name, spec.instance)) {

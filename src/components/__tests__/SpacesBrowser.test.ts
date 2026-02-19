@@ -295,6 +295,23 @@ describe('useSpacesBrowser activateSelected', () => {
     expect(editIdx).toBeLessThan(eventsIdx);
   });
 
+  it('shows process-config-error item and routes activation to edit config', async () => {
+    const ws = makeWorkspace({ processConfigError: 'Invalid config' });
+    const onEditProcesses = mock(() => {});
+    const props = makeProps({ workspaces: [ws], onEditProcesses });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const errorIndex = result.current.items.findIndex((item) => item.type === 'process-config-error');
+    expect(errorIndex).toBeGreaterThanOrEqual(0);
+
+    act(() => { result.current.selectIndex(errorIndex); });
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onEditProcesses).toHaveBeenCalledWith({ workspaceId: 'ws-1' });
+  });
+
   it('calls onStartProcessAttach when stopped process is activated', async () => {
     const ws = makeWorkspace({
       processes: [{ name: 'web-server' }],

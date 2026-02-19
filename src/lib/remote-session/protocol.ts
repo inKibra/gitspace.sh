@@ -170,6 +170,7 @@ export interface WorkspaceInfo {
   isStale?: boolean;    // No activity for 30+ days
   serveDomain?: string; // Hosting domain for process ports
   processes?: { name: string; instances?: number; ports?: import("../../types/processes.js").ProcessPortConfig[] }[];
+  processConfigError?: string;
 }
 
 /** Session information */

@@ -35,6 +35,7 @@ export interface WorkspaceInfo {
   isStale?: boolean;
   processes?: WorkspaceProcessInfo[];
   serveDomain?: string;
+  processConfigError?: string;
 }
 
 /** Session info from machine */
@@ -56,6 +57,7 @@ export type TreeItem =
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
   | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
+  | { type: 'process-config-error'; workspaceId: string; error: string }
   | { type: 'edit-processes'; workspaceId: string }
   | { type: 'events'; workspaceId: string }
   | { type: 'new-session'; workspaceId: string };
@@ -243,6 +245,14 @@ function buildTree(
           });
         }
 
+        if (ws.processConfigError) {
+          items.push({
+            type: 'process-config-error',
+            workspaceId: ws.id,
+            error: ws.processConfigError,
+          });
+        }
+
         // Edit processes config action
         items.push({
           type: 'edit-processes',
@@ -389,6 +399,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
           instance: selectedItem.instance,
         });
       }
+    } else if (selectedItem.type === 'process-config-error') {
+      onEditProcesses?.({ workspaceId: selectedItem.workspaceId });
     } else if (selectedItem.type === 'edit-processes') {
       onEditProcesses?.({ workspaceId: selectedItem.workspaceId });
     } else if (selectedItem.type === 'events') {
@@ -404,7 +416,11 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     let workspaceId: string | null = null;
     if (selectedItem.type === 'workspace') {
       workspaceId = selectedItem.workspace.id;
-    } else if (selectedItem.type === 'session' || selectedItem.type === 'new-session') {
+    } else if (
+      selectedItem.type === 'session' ||
+      selectedItem.type === 'new-session' ||
+      selectedItem.type === 'process-config-error'
+    ) {
       workspaceId = selectedItem.workspaceId;
     }
 

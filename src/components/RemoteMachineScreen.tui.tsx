@@ -26,6 +26,7 @@ import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
+import { buildEditProcessesCommand } from '../lib/processes/editor.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -56,6 +57,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
+  const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
     onError: (error) => {
@@ -183,6 +185,43 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
   }, [remote.mode]);
 
+  useEffect(() => {
+    if (!pendingProcessEditWorkspaceId || remote.mode !== 'browsing') {
+      return;
+    }
+    remote.requestWorkspaces();
+  }, [pendingProcessEditWorkspaceId, remote.mode, remote.requestWorkspaces]);
+
+  useEffect(() => {
+    if (!pendingProcessEditWorkspaceId || remote.mode !== 'browsing') {
+      return;
+    }
+
+    const workspace = remote.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    if (!workspace) {
+      return;
+    }
+
+    if (workspace.processConfigError) {
+      flow.showMessage({
+        title: 'Invalid Processes Config',
+        message: workspace.processConfigError,
+        variant: 'error',
+      });
+    } else {
+      const processCount = workspace.processes?.length ?? 0;
+      flow.showMessage({
+        title: 'Processes Config Updated',
+        message: processCount === 0
+          ? 'Config is valid. No processes are defined yet.'
+          : `Config is valid. ${processCount} process${processCount === 1 ? '' : 'es'} defined.`,
+        variant: 'success',
+      });
+    }
+
+    setPendingProcessEditWorkspaceId(null);
+  }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
+
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
     void Promise.resolve(remote.startProcess(params.workspaceId, params.processName)).finally(() => {
       remote.requestWorkspaces();
@@ -199,10 +238,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow]);
 
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    setPendingProcessEditWorkspaceId(workspaceId);
+    const commandSpec = buildEditProcessesCommand();
     void attachController.attach({
       workspaceId,
-      command: 'sh',
-      args: ['-c', 'mkdir -p .gitspace && exec "${EDITOR:-vi}" .gitspace/processes.json'],
+      command: commandSpec.command,
+      args: commandSpec.args,
     });
   }, [attachController]);
 

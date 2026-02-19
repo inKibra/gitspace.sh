@@ -91,6 +91,8 @@ import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { buildEditProcessesCommand } from './lib/processes/editor.js';
+import { loadProcessesConfigWithDiagnostics } from './lib/processes/config.js';
 import {
   consumeLegacyCleanupReminderForTui,
   initializeSecretRuntime,
@@ -306,6 +308,7 @@ function App({ relayConfig, onQuit }: AppProps) {
 
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
+  const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
 
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
@@ -627,12 +630,57 @@ function App({ relayConfig, onQuit }: AppProps) {
   // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     setIsViewOnlySession(false);
+    setPendingProcessEditWorkspaceId(workspaceId);
+    const commandSpec = buildEditProcessesCommand();
     void attachLocal({
       workspaceId,
-      command: 'sh',
-      args: ['-c', 'mkdir -p .gitspace && exec "${EDITOR:-vi}" .gitspace/processes.json'],
+      command: commandSpec.command,
+      args: commandSpec.args,
     });
   }, [attachLocal]);
+
+  useEffect(() => {
+    if (!pendingProcessEditWorkspaceId) {
+      return;
+    }
+    if (state.view !== 'projects' || localSessionMode !== 'browsing') {
+      return;
+    }
+
+    const workspace = localWorkspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    if (!workspace) {
+      setPendingProcessEditWorkspaceId(null);
+      return;
+    }
+
+    const diagnostics = loadProcessesConfigWithDiagnostics(workspace.path);
+    if (diagnostics.error) {
+      flow.showMessage({
+        title: 'Invalid Processes Config',
+        message: diagnostics.error,
+        variant: 'error',
+      });
+    } else {
+      const processCount = diagnostics.config.processes.length;
+      flow.showMessage({
+        title: 'Processes Config Updated',
+        message: processCount === 0
+          ? 'Config is valid. No processes are defined yet.'
+          : `Config is valid. ${processCount} process${processCount === 1 ? '' : 'es'} defined.`,
+        variant: 'success',
+      });
+    }
+
+    setPendingProcessEditWorkspaceId(null);
+    void refreshWorkspaces();
+  }, [
+    flow,
+    localSessionMode,
+    localWorkspaces,
+    pendingProcessEditWorkspaceId,
+    refreshWorkspaces,
+    state.view,
+  ]);
 
   // Handle terminal detach
   const handleTerminalDetach = useCallback(async () => {
@@ -1146,6 +1194,9 @@ function App({ relayConfig, onQuit }: AppProps) {
       branch: workspace.branch,
       sessionCount: localSessions.filter((session) => session.workspaceId === workspace.id).length,
       isStale: workspace.isStale,
+      processes: workspace.processes,
+      processConfigError: workspace.processConfigError,
+      serveDomain: workspace.serveDomain,
     }));
 
   const sessionInfos = currentProject
@@ -1278,11 +1329,14 @@ function App({ relayConfig, onQuit }: AppProps) {
       const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
       if (!workspace) return;
       if (filter) {
+        const sinceMs = filter.sinceMinutes
+          ? Date.now() - filter.sinceMinutes * 60 * 1000
+          : undefined;
         void requestLocalEvents(
           workspace.path,
           filter.filter as WideEventFilter,
           undefined,
-          filter.sinceMinutes ? filter.sinceMinutes * 60 * 1000 : undefined
+          sinceMs
         );
       } else {
         void requestLocalEvents(workspace.path);
@@ -1306,11 +1360,14 @@ function App({ relayConfig, onQuit }: AppProps) {
 
     const interval = setInterval(() => {
       if (activeFilter) {
+        const sinceMs = activeFilter.sinceMinutes
+          ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
+          : undefined;
         void requestLocalEvents(
           workspace.path,
           activeFilter.filter as WideEventFilter,
           undefined,
-          activeFilter.sinceMinutes ? activeFilter.sinceMinutes * 60 * 1000 : undefined
+          sinceMs
         );
       } else {
         void requestLocalEvents(workspace.path);
@@ -2740,6 +2797,9 @@ function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): stri
   }
   if (selectedItem?.type === 'workspace') {
     return '[Tab] Switch  [Enter] Expand  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'process-config-error') {
+    return '[Tab] Switch  [Enter] Fix Process Config  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'edit-processes') {
     return '[Tab] Switch  [Enter] Edit Processes Config  [,] Settings  [?] Help  [q] Quit';

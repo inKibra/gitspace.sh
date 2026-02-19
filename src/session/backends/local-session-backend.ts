@@ -59,7 +59,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import { parseProcessSessionName } from '../../lib/processes/names.js';
-import { loadProcessesConfig } from '../../lib/processes/config.js';
+import { loadProcessesConfigWithDiagnostics } from '../../lib/processes/config.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../../lib/processes/manager.js';
 import { startProcessScheduler } from '../../lib/processes/scheduler.js';
 import { readWorkspaceSnapshots } from '../../lib/events/reader.js';
@@ -402,16 +402,17 @@ export class LocalSessionBackend implements SessionBackend {
     }
 
     const mappedWorkspaces = workspaces.map((workspace) => {
-      const processConfig = loadProcessesConfig(workspace.path);
+      const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
       return {
         ...workspace,
         id: toCanonicalWorkspaceId(workspace),
         sessionCount: counts.get(workspace.path) ?? 0,
-        processes: processConfig.processes.map((p) => ({
+        processes: processConfig.config.processes.map((p) => ({
           name: p.name,
           instances: p.instances,
           ports: p.ports,
         })),
+        processConfigError: processConfig.error ?? undefined,
       };
     });
 
