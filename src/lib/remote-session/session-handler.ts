@@ -122,6 +122,14 @@ function isMutatingReviewOperation(operation: ReviewOperation): boolean {
   return MUTATING_REVIEW_OPERATIONS.has(operation.op);
 }
 
+function normalizeWorkspaceIdToken(workspaceId: string): string {
+  return workspaceId.includes(':') ? workspaceId.split(':').pop() ?? workspaceId : workspaceId;
+}
+
+function matchesWorkspaceIdToken(parsedWorkspaceId: string, workspaceId: string): boolean {
+  return normalizeWorkspaceIdToken(parsedWorkspaceId) === normalizeWorkspaceIdToken(workspaceId);
+}
+
 export interface RemoteSessionHandlerOptions {
   processHostDomain?: string;
   onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
@@ -437,7 +445,7 @@ export class RemoteSessionHandler {
             if (!workspaceId) return true;
             // Try process session name first
             const parsed = parseProcessSessionName(s.name);
-            if (parsed) return parsed.workspaceId === workspaceId;
+            if (parsed) return matchesWorkspaceIdToken(parsed.workspaceId, workspaceId);
             // Fall back to cwd matching
             const ws = workspacePathMap.get(s.cwd);
             return ws ? matchesWorkspaceId(ws, workspaceId) : false;
@@ -446,7 +454,7 @@ export class RemoteSessionHandler {
             const parsed = parseProcessSessionName(s.name);
             let ws = workspacePathMap.get(s.cwd);
             if (!ws && parsed) {
-              ws = workspaces.find(workspace => workspace.id === parsed.workspaceId);
+              ws = workspaces.find(workspace => matchesWorkspaceId(workspace, parsed.workspaceId));
             }
             if (!ws) {
               ws = workspaces.find(workspace => s.cwd.startsWith(workspace.path));
@@ -1208,6 +1216,7 @@ export class RemoteSessionHandler {
         workspaceId,
         processName,
         sessionId: sessions[0],
+        sessionIds: sessions,
       });
     } catch (e) {
       console.error("[remote-session] Failed to start process:", e);

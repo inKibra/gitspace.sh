@@ -148,7 +148,15 @@ export function useSessionEngine() {
           break;
         case 'process_started':
         case 'process_stopped':
-          // Refresh workspaces and sessions to reflect process state changes
+          // Refresh workspaces and sessions to reflect process state changes.
+          // Important for remote/web clients that don't immediately call refresh.
+          {
+            const backend = managerRef.current?.get(backendKey);
+            if (backend) {
+              void backend.listWorkspaces().catch(() => undefined);
+              void backend.listSessions().catch(() => undefined);
+            }
+          }
           break;
         default:
           break;

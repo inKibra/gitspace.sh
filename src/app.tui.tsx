@@ -2117,7 +2117,18 @@ function App({ relayConfig, onQuit }: AppProps) {
           if (selected?.type === 'session') {
             handleDeleteSession(selected.session.id, selected.session.name);
           } else if (selected?.type === 'process' && selected.status === 'running') {
-            void handleStopProcess({ workspaceId: selected.workspaceId, processName: selected.processName });
+            flow.showConfirm({
+              title: 'Stop Process',
+              message: `Stop process "${selected.processName}"?`,
+              variant: 'warning',
+              confirmLabel: 'Stop',
+              onConfirm: () => {
+                void handleStopProcess({
+                  workspaceId: selected.workspaceId,
+                  processName: selected.processName,
+                });
+              },
+            });
           }
         } else if (command === 'refresh') {
           try {

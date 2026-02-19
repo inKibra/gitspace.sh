@@ -1039,6 +1039,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           workspaceId: message.workspaceId,
           processName: message.processName,
           sessionId: message.sessionId,
+          sessionIds: message.sessionIds,
         });
         return;
       case 'process_stopped':

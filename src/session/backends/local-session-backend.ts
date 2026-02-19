@@ -770,9 +770,22 @@ export class LocalSessionBackend implements SessionBackend {
     }
 
     const sessionIds: string[] = [];
-    for (const spec of specs) {
-      const result = await startProcessInstance(workspace.path, spec);
-      sessionIds.push(result.sessionId);
+    const startedSpecs: typeof specs = [];
+    try {
+      for (const spec of specs) {
+        const result = await startProcessInstance(workspace.path, spec);
+        sessionIds.push(result.sessionId);
+        startedSpecs.push(spec);
+      }
+    } catch (error) {
+      for (const startedSpec of startedSpecs) {
+        try {
+          await stopProcessInstance(workspace.path, startedSpec);
+        } catch {
+          // Best-effort rollback; preserve original start error
+        }
+      }
+      throw error;
     }
 
     if (!this.processSchedulers.has(workspace.path)) {
@@ -784,6 +797,7 @@ export class LocalSessionBackend implements SessionBackend {
       workspaceId,
       processName,
       sessionId: sessionIds[0],
+      sessionIds,
     });
   }
 

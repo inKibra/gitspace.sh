@@ -86,6 +86,10 @@ export default function App() {
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const eventsKeyboardStateRef = useRef<{
+    selectedIndex: number;
+    selectIndex: (index: number) => void;
+  } | null>(null);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<SessionTerminalHandle>(null);
@@ -610,6 +614,13 @@ export default function App() {
     },
   });
 
+  useEffect(() => {
+    eventsKeyboardStateRef.current = {
+      selectedIndex: eventsProps.selectedIndex,
+      selectIndex: eventsProps.selectIndex,
+    };
+  }, [eventsProps.selectedIndex, eventsProps.selectIndex]);
+
   // Events polling when events view is active
   useEffect(() => {
     if (!showEvents || !eventsWorkspacePath) return;
@@ -807,16 +818,20 @@ export default function App() {
         setEventsWorkspacePath(null);
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
-        eventsProps.selectIndex(eventsProps.selectedIndex - 1);
+        const state = eventsKeyboardStateRef.current;
+        if (!state) return;
+        state.selectIndex(state.selectedIndex - 1);
       } else if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        eventsProps.selectIndex(eventsProps.selectedIndex + 1);
+        const state = eventsKeyboardStateRef.current;
+        if (!state) return;
+        state.selectIndex(state.selectedIndex + 1);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showEvents, eventsProps]);
+  }, [showEvents]);
 
   // Spaces browser keyboard navigation
   useEffect(() => {

@@ -341,6 +341,7 @@ export interface ProcessStartedResponse {
   workspaceId: string;
   processName: string;
   sessionId?: string;
+  sessionIds?: string[];
 }
 
 /** Process stopped response */

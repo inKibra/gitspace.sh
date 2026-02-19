@@ -388,7 +388,10 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     if (item.type === 'workspace') {
       toggleWorkspace(item.workspace.id);
     } else if (item.type === 'session') {
-      await onAttachSession({ sessionId: item.session.id });
+      await onAttachSession({
+        sessionId: item.session.id,
+        viewOnly: item.session.processName ? true : undefined,
+      });
     } else if (item.type === 'process') {
       if (item.status === 'running') {
         const session = findSessionForProcess(
@@ -433,11 +436,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     let workspaceId: string | null = null;
     if (selectedItem.type === 'workspace') {
       workspaceId = selectedItem.workspace.id;
-    } else if (
-      selectedItem.type === 'session' ||
-      selectedItem.type === 'new-session' ||
-      selectedItem.type === 'process-config-error'
-    ) {
+    } else if ('workspaceId' in selectedItem) {
       workspaceId = selectedItem.workspaceId;
     }
 
