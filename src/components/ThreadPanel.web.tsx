@@ -39,6 +39,10 @@ function isSafeMarkdownHref(href: string): boolean {
     return false;
   }
 
+  if (trimmed.startsWith('//')) {
+    return false;
+  }
+
   if (
     trimmed.startsWith('#') ||
     trimmed.startsWith('/') ||

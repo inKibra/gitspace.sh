@@ -406,8 +406,7 @@ export async function listReviewHunks(file: string, options: ReviewHunksOptions 
     }
     logger.log(`Hunks in ${resolvedFile.filePath}:`);
     for (const hunk of hunks) {
-      const context = hunk.context ? `  ${hunk.context}` : '';
-      logger.log(`  [${hunk.index}] ${hunk.header}${context}`);
+      logger.log(`  [${hunk.index}] ${hunk.header}`);
     }
     return;
   }
