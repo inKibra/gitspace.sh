@@ -10,7 +10,6 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } fr
 import { join, dirname } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { confirm } from '@inquirer/prompts';
 import type {
   ReviewSession,
   ReviewThread,
@@ -363,6 +362,7 @@ async function ensureGitignore(workspacePath: string, workspaceName: string): Pr
   const isTTY = Boolean(process.stdin.isTTY);
   if (isTTY) {
     try {
+      const { confirm } = await import('@inquirer/prompts');
       keepPrivate = await confirm({
         message:
           'Review notes found. Keep them private (add to .gitignore) or share with the team (commit alongside branch)?',

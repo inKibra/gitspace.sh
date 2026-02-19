@@ -785,7 +785,7 @@ export function DiffViewer({
         </div>
       </div>
     );
-  }, [onThreadClick, onThreadHover, openHunkCommentForm, onHunkFocus, selectedFile?.filePath, setHunkDecision]);
+  }, [onThreadClick, onThreadHover, openHunkCommentForm, onHunkFocus, selectedFile, setHunkDecision]);
 
   const fileDiffOptions = useMemo((): FileDiffOptions<InlineAnnotationMeta> => ({
     diffStyle: 'unified',

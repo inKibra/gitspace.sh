@@ -611,7 +611,7 @@ describe('github-review sync behavior', () => {
 
     expect(topCommentPayload).toBeDefined();
     expect(topCommentPayload?.payload.path).toBe('src/hunk-note.ts');
-    expect(topCommentPayload?.payload.line).toBe(8);
+    expect(topCommentPayload?.payload.line).toBe(10);
     expect(topCommentPayload?.payload.side).toBe('RIGHT');
     expect(topCommentPayload?.payload.subject_type).toBeUndefined();
     expect(topCommentPayload?.payload.body).toContain('❌ **Rejected**');

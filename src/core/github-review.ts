@@ -557,11 +557,11 @@ function parseHunkAnchor(hunkHeader: string): HunkAnchor | null {
   }
 
   if (newCount > 0) {
-    return { line: newStart, side: 'RIGHT' };
+    return { line: newStart + newCount - 1, side: 'RIGHT' };
   }
 
   if (oldCount > 0) {
-    return { line: oldStart, side: 'LEFT' };
+    return { line: oldStart + oldCount - 1, side: 'LEFT' };
   }
 
   return null;
