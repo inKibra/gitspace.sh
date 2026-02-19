@@ -19,6 +19,7 @@ type EnvSnapshot = {
   GH_STUB_PAYLOAD_LOG?: string;
   GH_STUB_REPLY_COUNTER_FILE?: string;
   GH_STUB_REVIEW_COUNTER_FILE?: string;
+  GH_STUB_FAIL_REVIEW?: string;
 };
 
 function captureEnv(): EnvSnapshot {
@@ -29,6 +30,7 @@ function captureEnv(): EnvSnapshot {
     GH_STUB_PAYLOAD_LOG: process.env.GH_STUB_PAYLOAD_LOG,
     GH_STUB_REPLY_COUNTER_FILE: process.env.GH_STUB_REPLY_COUNTER_FILE,
     GH_STUB_REVIEW_COUNTER_FILE: process.env.GH_STUB_REVIEW_COUNTER_FILE,
+    GH_STUB_FAIL_REVIEW: process.env.GH_STUB_FAIL_REVIEW,
   };
 }
 
@@ -50,6 +52,9 @@ function restoreEnv(env: EnvSnapshot): void {
 
   if (env.GH_STUB_REVIEW_COUNTER_FILE === undefined) delete process.env.GH_STUB_REVIEW_COUNTER_FILE;
   else process.env.GH_STUB_REVIEW_COUNTER_FILE = env.GH_STUB_REVIEW_COUNTER_FILE;
+
+  if (env.GH_STUB_FAIL_REVIEW === undefined) delete process.env.GH_STUB_FAIL_REVIEW;
+  else process.env.GH_STUB_FAIL_REVIEW = env.GH_STUB_FAIL_REVIEW;
 }
 
 function writeGhStub(binPath: string): void {
@@ -126,6 +131,10 @@ if (method === 'POST' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}
 }
 
 if (method === 'POST' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews') {
+  if (process.env.GH_STUB_FAIL_REVIEW === '1') {
+    process.stderr.write('Simulated review submission failure\n');
+    process.exit(1);
+  }
   const payload = readInputPayload() ?? {};
   if (payloadLog) {
     appendFileSync(payloadLog, JSON.stringify({ kind: 'review', endpoint, payload }) + '\n', 'utf-8');
@@ -516,5 +525,85 @@ describe('github-review sync behavior', () => {
     await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
     const payloadsAfterSecondPush = readPayloadLog(payloadLog);
     expect(payloadsAfterSecondPush).toHaveLength(0);
+  });
+
+  it('persists posted replies if review submission later fails', async () => {
+    setImportComments(importFile, [
+      {
+        id: 301,
+        body: 'Imported root comment',
+        path: 'src/main.ts',
+        line: 8,
+        original_line: 8,
+        side: 'RIGHT',
+        start_line: 8,
+        original_start_line: 8,
+        diff_hunk: '@@ -6,2 +6,3 @@ context',
+        user: { login: 'octocat' },
+        created_at: '2026-02-19T12:00:00Z',
+        pull_request_review_id: 20,
+      },
+    ]);
+
+    await importGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+
+    const session = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    const importedThread = session.threads[0] as ReviewThread;
+    importedThread.comments.push({
+      id: 'local-reply-failure',
+      threadId: importedThread.id,
+      body: 'Persist this reply even if review submit fails',
+      author: 'local',
+      createdAt: '2026-02-19T12:30:00Z',
+    });
+
+    session.threads.push({
+      id: 'local-line-thread-failure',
+      target: {
+        kind: 'line',
+        file: 'src/failure.ts',
+        startLine: 10,
+        endLine: 10,
+        side: 'RIGHT',
+      },
+      resolved: false,
+      comments: [
+        {
+          id: 'local-line-root-failure',
+          threadId: 'local-line-thread-failure',
+          body: 'Force review submission path',
+          author: 'local',
+          createdAt: '2026-02-19T12:31:00Z',
+        },
+      ],
+      createdAt: '2026-02-19T12:31:00Z',
+      updatedAt: '2026-02-19T12:31:00Z',
+    });
+
+    writeReviewSession(workspacePath, WORKSPACE_NAME, session);
+
+    process.env.GH_STUB_FAIL_REVIEW = '1';
+    let failed = false;
+    try {
+      await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+    } catch {
+      failed = true;
+    }
+    expect(failed).toBe(true);
+
+    const persistedSession = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    const persistedReply = persistedSession.threads
+      .flatMap((thread) => thread.comments)
+      .find((comment) => comment.id === 'local-reply-failure') as ReviewComment;
+    expect(persistedReply.githubId).toBeDefined();
+    expect(persistedReply.syncedToGitHubAt).toBeDefined();
+
+    delete process.env.GH_STUB_FAIL_REVIEW;
+    writeFileSync(payloadLog, '', 'utf-8');
+
+    await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+    const payloads = readPayloadLog(payloadLog);
+    const replyPayloads = payloads.filter((entry) => entry.kind === 'reply');
+    expect(replyPayloads).toHaveLength(0);
   });
 });

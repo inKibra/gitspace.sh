@@ -240,9 +240,11 @@ export async function pushGitHubReview(
         );
         comment.githubId = posted.id;
         comment.syncedToGitHubAt = syncedAt;
+        thread.updatedAt = syncedAt;
+        session.prNumber = prNumber;
+        writeReviewSession(workspacePath, workspaceName, session);
         changed = true;
       }
-      thread.updatedAt = syncedAt;
       continue;
     }
 
