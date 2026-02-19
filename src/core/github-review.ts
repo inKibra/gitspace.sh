@@ -202,6 +202,7 @@ export async function pushGitHubReview(
   const unresolved = session.threads.filter(t => !t.resolved);
   const syncedAt = new Date().toISOString();
   let changed = false;
+  let url = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
 
   // Compute overall review action
   const hunkThreads = unresolved.filter(t => t.target.kind === 'hunk');
@@ -220,6 +221,15 @@ export async function pushGitHubReview(
   const reviewCommentIdsByThreadId = new Map<string, string[]>();
   const workspaceNoteBodies: string[] = [];
   const workspaceNoteIdsByThreadId = new Map<string, string[]>();
+  let pullHeadSha: string | null = null;
+
+  const resolvePullHeadSha = async (): Promise<string> => {
+    if (pullHeadSha !== null) {
+      return pullHeadSha;
+    }
+    pullHeadSha = await getPullHeadSha(owner, repo, prNumber, workspacePath);
+    return pullHeadSha;
+  };
 
   for (const thread of unresolved) {
     const pendingLocalComments = thread.comments.filter(isPendingLocalComment);
@@ -255,6 +265,38 @@ export async function pushGitHubReview(
       continue;
     }
 
+    if (thread.target.kind === 'file' || thread.target.kind === 'hunk') {
+      const topLevelComment = buildGitHubTopLevelComment(
+        thread,
+        localBodies,
+        await resolvePullHeadSha()
+      );
+
+      if (topLevelComment) {
+        const posted = await postPRTopLevelComment(
+          owner,
+          repo,
+          prNumber,
+          topLevelComment,
+          workspacePath
+        );
+
+        markThreadCommentsSynced(
+          thread,
+          new Set(pendingLocalComments.map((comment) => comment.id)),
+          syncedAt
+        );
+        thread.updatedAt = syncedAt;
+        session.prNumber = prNumber;
+        writeReviewSession(workspacePath, workspaceName, session);
+        if (posted.html_url) {
+          url = posted.html_url;
+        }
+        changed = true;
+      }
+      continue;
+    }
+
     const reviewComment = buildGitHubComment(thread, localBodies);
     if (reviewComment) {
       reviewComments.push(reviewComment);
@@ -269,7 +311,6 @@ export async function pushGitHubReview(
     bodyParts.push('**General notes:**\n\n' + workspaceNotes);
   }
 
-  let url = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
   if (reviewComments.length > 0 || bodyParts.length > 0) {
     const reviewBody = bodyParts.join('\n\n') || 'Review submitted via gssh.';
 
@@ -500,6 +541,133 @@ interface GitHubDraftReviewComment {
   body: string;
   start_line?: number;
   start_side?: 'LEFT' | 'RIGHT' | string;
+}
+
+interface GitHubTopLevelPRComment {
+  body: string;
+  commit_id: string;
+  path: string;
+  subject_type?: 'file';
+  line?: number;
+  side?: 'LEFT' | 'RIGHT';
+}
+
+interface HunkAnchor {
+  line: number;
+  side: 'LEFT' | 'RIGHT';
+}
+
+function parseHunkAnchor(hunkHeader: string): HunkAnchor | null {
+  const match = hunkHeader.match(/^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@/);
+  if (!match) {
+    return null;
+  }
+
+  const oldStart = parseInt(match[1] ?? '', 10);
+  const oldCount = parseInt(match[2] ?? '1', 10);
+  const newStart = parseInt(match[3] ?? '', 10);
+  const newCount = parseInt(match[4] ?? '1', 10);
+
+  if (Number.isNaN(oldStart) || Number.isNaN(oldCount) || Number.isNaN(newStart) || Number.isNaN(newCount)) {
+    return null;
+  }
+
+  if (newCount > 0) {
+    return { line: newStart, side: 'RIGHT' };
+  }
+
+  if (oldCount > 0) {
+    return { line: oldStart, side: 'LEFT' };
+  }
+
+  return null;
+}
+
+function buildGitHubTopLevelComment(
+  thread: ReviewThread,
+  bodies: string[],
+  commitSha: string
+): GitHubTopLevelPRComment | null {
+  const body = bodies.join('\n\n---\n\n');
+
+  if (thread.target.kind === 'file') {
+    return {
+      path: thread.target.file,
+      commit_id: commitSha,
+      subject_type: 'file',
+      body,
+    };
+  }
+
+  if (thread.target.kind === 'hunk') {
+    const decisionPrefix =
+      thread.decision === 'approved'
+        ? '✅ **Approved**\n\n'
+        : thread.decision === 'rejected'
+          ? '❌ **Rejected**\n\n'
+          : '';
+    const finalBody = decisionPrefix + body;
+    const anchor = parseHunkAnchor(thread.target.hunkHeader);
+
+    if (!anchor) {
+      return {
+        path: thread.target.file,
+        commit_id: commitSha,
+        subject_type: 'file',
+        body: finalBody,
+      };
+    }
+
+    return {
+      path: thread.target.file,
+      commit_id: commitSha,
+      line: anchor.line,
+      side: anchor.side,
+      body: finalBody,
+    };
+  }
+
+  return null;
+}
+
+async function getPullHeadSha(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  cwd: string
+): Promise<string> {
+  const endpoint = `repos/${owner}/${repo}/pulls/${prNumber}`;
+  const { stdout } = await execAsync(
+    `gh api ${escapeShellArg(endpoint)} --jq '.head.sha'`,
+    { cwd }
+  );
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    throw new Error(`Could not resolve head SHA for PR #${prNumber}`);
+  }
+
+  if (trimmed.startsWith('{')) {
+    const parsed = JSON.parse(trimmed) as { head?: { sha?: string } };
+    const sha = parsed.head?.sha?.trim();
+    if (sha) {
+      return sha;
+    }
+    throw new Error(`Could not resolve head SHA for PR #${prNumber}`);
+  }
+
+  return trimmed;
+}
+
+async function postPRTopLevelComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  payload: GitHubTopLevelPRComment,
+  cwd: string
+): Promise<{ id: number; html_url?: string }> {
+  const endpoint = `repos/${owner}/${repo}/pulls/${prNumber}/comments`;
+  const response = await postGitHubApi(endpoint, payload, cwd);
+  return JSON.parse(response) as { id: number; html_url?: string };
 }
 
 async function postGitHubApi(endpoint: string, payload: object, cwd: string): Promise<string> {

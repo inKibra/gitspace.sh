@@ -109,6 +109,11 @@ if (args[0] !== 'api') {
 const endpoint = args[1] ?? '';
 const method = readFlag('--method') ?? 'GET';
 
+if (method === 'GET' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}') {
+  process.stdout.write(JSON.stringify({ head: { sha: '1111111111111111111111111111111111111111' } }));
+  process.exit(0);
+}
+
 if (method === 'GET' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments') {
   const importFile = process.env.GH_STUB_IMPORT_FILE;
   if (importFile && existsSync(importFile)) {
@@ -122,7 +127,8 @@ if (method === 'GET' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/
 if (method === 'POST' && endpoint === 'repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments') {
   const payload = readInputPayload() ?? {};
   if (payloadLog) {
-    appendFileSync(payloadLog, JSON.stringify({ kind: 'reply', endpoint, payload }) + '\n', 'utf-8');
+    const kind = payload.in_reply_to != null ? 'reply' : 'top_comment';
+    appendFileSync(payloadLog, JSON.stringify({ kind, endpoint, payload }) + '\n', 'utf-8');
   }
   const counterFile = process.env.GH_STUB_REPLY_COUNTER_FILE;
   const id = counterFile ? nextCounter(counterFile, 5000) : 5001;
@@ -525,6 +531,88 @@ describe('github-review sync behavior', () => {
     await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
     const payloadsAfterSecondPush = readPayloadLog(payloadLog);
     expect(payloadsAfterSecondPush).toHaveLength(0);
+  });
+
+  it('posts file-target threads as top-level file comments', async () => {
+    const now = '2026-02-19T13:30:00Z';
+    const session = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    session.threads.push({
+      id: 'file-thread',
+      target: {
+        kind: 'file',
+        file: 'src/file-note.ts',
+      },
+      resolved: false,
+      comments: [
+        {
+          id: 'file-root',
+          threadId: 'file-thread',
+          body: 'File-level note',
+          author: 'local',
+          createdAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    });
+    writeReviewSession(workspacePath, WORKSPACE_NAME, session);
+
+    await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+
+    const payloads = readPayloadLog(payloadLog);
+    const topCommentPayload = payloads.find((entry) => entry.kind === 'top_comment');
+    const reviewPayload = payloads.find((entry) => entry.kind === 'review');
+
+    expect(topCommentPayload).toBeDefined();
+    expect(topCommentPayload?.payload.path).toBe('src/file-note.ts');
+    expect(topCommentPayload?.payload.subject_type).toBe('file');
+    expect(topCommentPayload?.payload.commit_id).toBe('1111111111111111111111111111111111111111');
+    expect(reviewPayload).toBeUndefined();
+
+    const afterPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    const root = afterPush.threads
+      .flatMap((thread) => thread.comments)
+      .find((comment) => comment.id === 'file-root') as ReviewComment;
+    expect(root.syncedToGitHubAt).toBeDefined();
+  });
+
+  it('posts hunk-target threads as top-level comments with parsed anchor', async () => {
+    const now = '2026-02-19T13:40:00Z';
+    const session = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    session.threads.push({
+      id: 'hunk-thread',
+      target: {
+        kind: 'hunk',
+        file: 'src/hunk-note.ts',
+        hunkHeader: '@@ -5,2 +8,3 @@ function block',
+      },
+      decision: 'rejected',
+      resolved: false,
+      comments: [
+        {
+          id: 'hunk-root',
+          threadId: 'hunk-thread',
+          body: 'Hunk-level note',
+          author: 'local',
+          createdAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    });
+    writeReviewSession(workspacePath, WORKSPACE_NAME, session);
+
+    await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+
+    const payloads = readPayloadLog(payloadLog);
+    const topCommentPayload = payloads.find((entry) => entry.kind === 'top_comment');
+
+    expect(topCommentPayload).toBeDefined();
+    expect(topCommentPayload?.payload.path).toBe('src/hunk-note.ts');
+    expect(topCommentPayload?.payload.line).toBe(8);
+    expect(topCommentPayload?.payload.side).toBe('RIGHT');
+    expect(topCommentPayload?.payload.subject_type).toBeUndefined();
+    expect(topCommentPayload?.payload.body).toContain('❌ **Rejected**');
   });
 
   it('persists posted replies if review submission later fails', async () => {
