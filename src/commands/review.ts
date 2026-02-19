@@ -28,11 +28,11 @@
  */
 
 import open from 'open';
-import { isAbsolute, relative, resolve, sep } from 'path';
 import { readProjectConfig, readGlobalConfig, getGitspaceDir } from '../core/config.js';
 import { executeLocalReviewOperation } from '../core/review-executor.js';
 import { logger } from '../utils/logger.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
+import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
 import type { HunkDecision, ReviewChangedFile, ReviewThread } from '../types/review.js';
 
 // Match the port used by `gssh serve` local relay (overridable via RELAY_PORT env)
@@ -47,36 +47,7 @@ const DEFAULT_PORT = parseInt(process.env.RELAY_PORT ?? '4480', 10);
  * Returns null if no workspace context is available.
  */
 function detectWorkspaceFromCwd(): { projectName: string; workspaceName: string } | null {
-  const cwd = resolve(process.cwd());
-  const gitspaceDir = resolve(getGitspaceDir());
-
-  const cwdRelativeToGitspace = relative(gitspaceDir, cwd);
-  if (
-    cwdRelativeToGitspace === '' ||
-    cwdRelativeToGitspace === '.' ||
-    cwdRelativeToGitspace.startsWith('..') ||
-    isAbsolute(cwdRelativeToGitspace)
-  ) {
-    return null;
-  }
-
-  const WORKSPACES_SEGMENT = 'workspaces';
-  const PROJECT_INDEX = 0;
-  const WORKSPACES_INDEX = 1;
-  const WORKSPACE_INDEX = 2;
-
-  const parts = cwdRelativeToGitspace.split(sep).filter(Boolean);
-  if (parts.length < 3 || parts[WORKSPACES_INDEX] !== WORKSPACES_SEGMENT) {
-    return null;
-  }
-
-  const projectName = parts[PROJECT_INDEX];
-  const workspaceName = parts[WORKSPACE_INDEX];
-  if (!projectName || !workspaceName) {
-    return null;
-  }
-
-  return { projectName, workspaceName };
+  return detectWorkspaceContextFromCwd(process.cwd(), getGitspaceDir());
 }
 
 function resolveCurrentWorkspace(options: {

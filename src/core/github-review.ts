@@ -221,6 +221,7 @@ export async function pushGitHubReview(
   const reviewCommentIdsByThreadId = new Map<string, string[]>();
   const workspaceNoteBodies: string[] = [];
   const workspaceNoteIdsByThreadId = new Map<string, string[]>();
+  let pushedPendingHunkTopLevel = false;
   let pullHeadSha: string | null = null;
 
   const resolvePullHeadSha = async (): Promise<string> => {
@@ -292,6 +293,9 @@ export async function pushGitHubReview(
         if (posted.html_url) {
           url = posted.html_url;
         }
+        if (thread.target.kind === 'hunk') {
+          pushedPendingHunkTopLevel = true;
+        }
         changed = true;
       }
       continue;
@@ -313,7 +317,12 @@ export async function pushGitHubReview(
     bodyParts.push('**General notes:**\n\n' + workspaceNotes);
   }
 
-  if (reviewComments.length > 0 || bodyParts.length > 0) {
+  const shouldSubmitFormalReview =
+    reviewComments.length > 0 ||
+    bodyParts.length > 0 ||
+    (event !== 'COMMENT' && pushedPendingHunkTopLevel);
+
+  if (shouldSubmitFormalReview) {
     const reviewBody = bodyParts.join('\n\n') || 'Review submitted via gssh.';
 
     const reviewData = await submitPullReview(

@@ -567,6 +567,7 @@ describe('github-review sync behavior', () => {
     expect(topCommentPayload?.payload.path).toBe('src/file-note.ts');
     expect(topCommentPayload?.payload.subject_type).toBe('file');
     expect(topCommentPayload?.payload.commit_id).toBe('1111111111111111111111111111111111111111');
+    expect(topCommentPayload?.payload.body).toContain('File-level note');
     expect(reviewPayload).toBeUndefined();
 
     const afterPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
@@ -606,6 +607,7 @@ describe('github-review sync behavior', () => {
 
     const payloads = readPayloadLog(payloadLog);
     const topCommentPayload = payloads.find((entry) => entry.kind === 'top_comment');
+    const reviewPayload = payloads.find((entry) => entry.kind === 'review');
 
     expect(topCommentPayload).toBeDefined();
     expect(topCommentPayload?.payload.path).toBe('src/hunk-note.ts');
@@ -613,6 +615,10 @@ describe('github-review sync behavior', () => {
     expect(topCommentPayload?.payload.side).toBe('RIGHT');
     expect(topCommentPayload?.payload.subject_type).toBeUndefined();
     expect(topCommentPayload?.payload.body).toContain('❌ **Rejected**');
+    expect(reviewPayload).toBeDefined();
+    expect(reviewPayload?.payload.event).toBe('REQUEST_CHANGES');
+    expect(Array.isArray(reviewPayload?.payload.comments)).toBe(true);
+    expect(reviewPayload?.payload.comments).toHaveLength(0);
   });
 
   it('persists posted replies if review submission later fails', async () => {
