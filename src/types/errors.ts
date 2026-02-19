@@ -40,6 +40,16 @@ export class SpacesError extends Error {
   }
 }
 
+export function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
+  if (error instanceof SpacesError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new SpacesError(error.message, 'SYSTEM_ERROR', 2);
+  }
+  return new SpacesError(fallbackMessage, 'SYSTEM_ERROR', 2);
+}
+
 /**
  * Error thrown when a dependency is missing
  */

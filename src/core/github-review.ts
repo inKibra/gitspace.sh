@@ -39,14 +39,6 @@ interface GitHubPRComment {
   pull_request_review_id: number;
 }
 
-interface GitHubReview {
-  id: number;
-  body: string;
-  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
-  user: { login: string };
-  submitted_at: string;
-}
-
 // ============================================================================
 // Import from GitHub
 // ============================================================================

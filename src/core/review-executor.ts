@@ -29,6 +29,17 @@ import type { ReviewOperation, ReviewResult } from '../types/review.js';
 
 type ScanWorkspacesFn = typeof scanWorkspaces;
 
+function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
+  return `${workspace.projectName}:${workspace.id}`;
+}
+
+function matchesWorkspaceId(
+  workspace: { projectName: string; id: string },
+  workspaceId: string
+): boolean {
+  return workspace.id === workspaceId || toCanonicalWorkspaceId(workspace) === workspaceId;
+}
+
 async function resolveWorkspaceByName(
   projectName: string,
   workspaceName: string,
@@ -36,7 +47,7 @@ async function resolveWorkspaceByName(
 ): Promise<{ id: string; path: string; baseBranch: string }> {
   const workspaces = await scan();
   const workspace = workspaces.find(
-    (w) => w.projectName === projectName && w.id === workspaceName
+    (w) => w.projectName === projectName && matchesWorkspaceId(w, workspaceName)
   );
 
   if (!workspace) {
@@ -71,7 +82,7 @@ export async function executeLocalReviewOperation(
         operation.workspaceName,
         scan
       );
-      const threads = getThreads(workspace.path, operation.workspaceName, workspace.baseBranch);
+      const threads = getThreads(workspace.path, workspace.id, workspace.baseBranch);
       return { op: 'threads', threads };
     }
 
@@ -83,7 +94,7 @@ export async function executeLocalReviewOperation(
       );
       const thread = await createThread(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         operation.target,
         operation.body,
@@ -100,7 +111,7 @@ export async function executeLocalReviewOperation(
       );
       const thread = addReply(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         operation.threadId,
         operation.body
@@ -116,7 +127,7 @@ export async function executeLocalReviewOperation(
       );
       const thread = updateThread(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         operation.threadId,
         { resolved: operation.resolved, decision: operation.decision }
@@ -132,7 +143,7 @@ export async function executeLocalReviewOperation(
       );
       const thread = updateComment(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         operation.threadId,
         operation.commentId,
@@ -149,7 +160,7 @@ export async function executeLocalReviewOperation(
       );
       const thread = deleteComment(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         operation.threadId,
         operation.commentId
@@ -287,7 +298,7 @@ export async function executeLocalReviewOperation(
       }
       const { imported, threads } = await importGitHubReview(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         prNumber
       );
@@ -309,7 +320,7 @@ export async function executeLocalReviewOperation(
       }
       const { url } = await pushGitHubReview(
         workspace.path,
-        operation.workspaceName,
+        workspace.id,
         workspace.baseBranch,
         prNumber
       );

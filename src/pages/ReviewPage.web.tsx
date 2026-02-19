@@ -15,7 +15,7 @@ import type {
   ReviewResult,
   ThreadTarget,
 } from '../types/review.js';
-import { SpacesError } from '../types/errors.js';
+import { SpacesError, toSpacesError } from '../types/errors.js';
 
 export interface ReviewPageProps {
   projectName: string;
@@ -32,16 +32,6 @@ const STATUS_LABELS = {
   approved: { label: 'Approved', color: '#22c55e' },
   changes_required: { label: 'Changes required', color: '#f85149' },
 };
-
-function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
-  if (error instanceof SpacesError) {
-    return error;
-  }
-  if (error instanceof Error) {
-    return new SpacesError(error.message, 'SYSTEM_ERROR', 2);
-  }
-  return new SpacesError(fallbackMessage, 'SYSTEM_ERROR', 2);
-}
 
 export function ReviewPage({
   projectName,

@@ -13,7 +13,7 @@ import {
   type SelectedLineRange,
 } from '@pierre/diffs';
 import type { HunkDecision, ReviewChangedFile, ReviewThread, ThreadTarget } from '../types/review.js';
-import { SpacesError } from '../types/errors.js';
+import { SpacesError, toSpacesError } from '../types/errors.js';
 
 export interface HunkFocusTarget {
   filePath: string;
@@ -1077,16 +1077,6 @@ function actionButtonStyle(active: boolean, color: string, success = false): CSS
     fontWeight: 600,
     cursor: 'pointer',
   };
-}
-
-function toSpacesError(error: unknown, fallbackMessage: string): SpacesError {
-  if (error instanceof SpacesError) {
-    return error;
-  }
-  if (error instanceof Error) {
-    return new SpacesError(error.message, 'SYSTEM_ERROR', 2);
-  }
-  return new SpacesError(fallbackMessage, 'SYSTEM_ERROR', 2);
 }
 
 function pickPrimaryThread(threads: ReviewThread[]): ReviewThread | undefined {
