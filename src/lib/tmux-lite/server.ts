@@ -1026,8 +1026,10 @@ function buildShellEnvironment(
     ...(hooks?.env ?? {}),
   };
 
-  // Add PROMPT_COMMAND for bash
-  if (shell.endsWith('/bash') || shell.endsWith('/sh')) {
+  const shellName = shell.split('/').pop() ?? '';
+
+  // Add PROMPT_COMMAND only for bash-compatible shells.
+  if (shellName === 'bash' || shellName === 'rbash') {
     const existingPrompt = process.env.PROMPT_COMMAND || '';
     shellEnv.PROMPT_COMMAND = `${exitReporter}; __tl_report${existingPrompt ? '; ' + existingPrompt : ''}`;
   }
@@ -1046,11 +1048,15 @@ function getShellInitScript(shell: string, hooks?: SessionCreateHooks): string |
     scriptParts.push(shellInit.all);
   }
 
-  if (shellName.endsWith('bash') && shellInit.bash) {
+  const isBashShell = shellName === 'bash' || shellName === 'rbash';
+  const isZshShell = shellName === 'zsh';
+  const isShShell = shellName === 'sh' || shellName === 'dash';
+
+  if (isBashShell && shellInit.bash) {
     scriptParts.push(shellInit.bash);
-  } else if (shellName.endsWith('zsh') && shellInit.zsh) {
+  } else if (isZshShell && shellInit.zsh) {
     scriptParts.push(shellInit.zsh);
-  } else if ((shellName.endsWith('sh') || shellName === 'sh') && shellInit.sh) {
+  } else if (isShShell && shellInit.sh) {
     scriptParts.push(shellInit.sh);
   }
 

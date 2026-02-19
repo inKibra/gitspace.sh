@@ -14,6 +14,8 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ReviewThread, ReviewComment, ThreadTarget } from '../types/review.js';
 import { readReviewSession, writeReviewSession } from './review.js';
+import { escapeShellArg } from '../utils/shell-escape.js';
+import { generateId } from '../utils/id.js';
 
 const execAsync = promisify(exec);
 
@@ -249,8 +251,9 @@ export async function pushGitHubReview(
   let rawStdout = '';
   try {
     writeFileSync(tmpFile, JSON.stringify(payload), 'utf-8');
+    const reviewsEndpoint = `repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
     const result = await execAsync(
-      `gh api repos/${owner}/${repo}/pulls/${prNumber}/reviews --method POST --input ${JSON.stringify(tmpFile)}`,
+      `gh api ${escapeShellArg(reviewsEndpoint)} --method POST --input ${escapeShellArg(tmpFile)}`,
       { cwd: workspacePath }
     );
     rawStdout = result.stdout;
@@ -275,8 +278,9 @@ async function fetchPRComments(
   repo: string,
   prNumber: number
 ): Promise<GitHubPRComment[]> {
+  const commentsEndpoint = `repos/${owner}/${repo}/pulls/${prNumber}/comments`;
   const { stdout } = await execAsync(
-    `gh api repos/${owner}/${repo}/pulls/${prNumber}/comments --paginate`
+    `gh api ${escapeShellArg(commentsEndpoint)} --paginate`
   );
   return JSON.parse(stdout) as GitHubPRComment[];
 }
@@ -364,11 +368,4 @@ function buildGitHubComment(
 
   // workspace-level threads go in the review body — handled separately
   return null;
-}
-
-function generateId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

@@ -18,6 +18,7 @@ import type {
   ThreadTarget,
   HunkDecision,
 } from '../types/review.js';
+import { generateId } from '../utils/id.js';
 
 const execAsync = promisify(exec);
 
@@ -299,24 +300,6 @@ export function deleteComment(
 }
 
 // ============================================================================
-// PR Number Association
-// ============================================================================
-
-/**
- * Associate a GitHub PR number with the workspace's review session.
- */
-export function setPRNumber(
-  workspacePath: string,
-  workspaceName: string,
-  baseBranch: string,
-  prNumber: number | null
-): void {
-  const session = readReviewSession(workspacePath, workspaceName, baseBranch);
-  session.prNumber = prNumber;
-  writeReviewSession(workspacePath, workspaceName, session);
-}
-
-// ============================================================================
 // .gitignore Management
 // ============================================================================
 
@@ -396,16 +379,4 @@ export async function detectPRNumber(workspacePath: string): Promise<number | nu
   } catch {
     return null;
   }
-}
-
-// ============================================================================
-// Utility
-// ============================================================================
-
-function generateId(): string {
-  // Use crypto.randomUUID if available (Bun/modern Node), fallback to timestamp+random
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

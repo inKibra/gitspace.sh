@@ -115,6 +115,7 @@ export function DiffViewer({
 
   const diffHostRef = useRef<HTMLDivElement | null>(null);
   const loadingFileDiffKeysRef = useRef<Set<string>>(new Set());
+  const fileDiffStateByKeyRef = useRef<Record<string, FileDiffState>>({});
 
   const fileByKey = useMemo(() => {
     const map = new Map<string, ReviewChangedFile>();
@@ -137,6 +138,10 @@ export function DiffViewer({
   const selectedKey = selectedFile ? fileKey(selectedFile.filePath, selectedFile.prevFilePath) : null;
   const selectedDiffState = selectedKey ? fileDiffStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
   const selectedContextState = selectedKey ? contextStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
+
+  useEffect(() => {
+    fileDiffStateByKeyRef.current = fileDiffStateByKey;
+  }, [fileDiffStateByKey]);
 
   useEffect(() => {
     const valid = new Set(files.map((file) => fileKey(file.filePath, file.prevFilePath)));
@@ -165,7 +170,7 @@ export function DiffViewer({
   const loadFileDiff = useCallback(async (file: ReviewChangedFile) => {
     const key = fileKey(file.filePath, file.prevFilePath);
 
-    const current = fileDiffStateByKey[key];
+    const current = fileDiffStateByKeyRef.current[key];
     if (current?.status === 'loading' || current?.status === 'ready') {
       return;
     }
@@ -200,7 +205,7 @@ export function DiffViewer({
     } finally {
       loadingFileDiffKeysRef.current.delete(key);
     }
-  }, [fileDiffStateByKey, onRequestFileDiff]);
+  }, [onRequestFileDiff]);
 
   useEffect(() => {
     if (!selectedFile || !selectedKey) {
