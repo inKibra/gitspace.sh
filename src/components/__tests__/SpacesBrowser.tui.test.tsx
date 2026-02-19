@@ -28,6 +28,7 @@ function makeTuiProps(overrides: Partial<UseSpacesBrowserReturn> = {}): UseSpace
     selectIndex: mock(() => {}),
     toggleWorkspace: mock(() => {}),
     activateSelected: mock(async () => {}),
+    activateIndex: mock(async () => {}),
     attachSession: mock(async () => {}),
     startProcessAttach: mock(() => {}),
     startProcess: mock(() => {}),

@@ -23,9 +23,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
     items,
     machineName,
     isEmpty,
-    selectIndex,
-    toggleWorkspace,
-    attachSession,
+    activateIndex,
     refresh,
     back,
     onReview,
@@ -74,9 +72,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`ws-${ws.id}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log('[SpacesBrowser] Workspace clicked:', ws.id, ws.name);
-                  selectIndex(index);
-                  toggleWorkspace(ws.id);
+                  void activateIndex(index);
                 }}
                 className={`
                   px-4 py-4 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[56px]
@@ -126,9 +122,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`session-${session.id}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log('[SpacesBrowser] Session clicked:', session.id, session.name);
-                  selectIndex(index);
-                  attachSession({ sessionId: session.id });
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px]
@@ -161,7 +155,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`process-${item.workspaceId}-${item.processName}-${item.instance}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  selectIndex(index);
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px]
@@ -186,8 +180,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`process-config-error-${item.workspaceId}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  selectIndex(index);
-                  props.editProcesses({ workspaceId: item.workspaceId });
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
@@ -206,8 +199,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`edit-processes-${item.workspaceId}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  selectIndex(index);
-                  props.editProcesses({ workspaceId: item.workspaceId });
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
@@ -225,8 +217,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`events-${item.workspaceId}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  selectIndex(index);
-                  props.openEvents(item.workspaceId);
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
@@ -244,9 +235,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`new-${item.workspaceId}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log('[SpacesBrowser] New session clicked for workspace:', item.workspaceId);
-                  selectIndex(index);
-                  attachSession({ workspaceId: item.workspaceId });
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center

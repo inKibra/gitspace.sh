@@ -108,6 +108,7 @@ export interface UseSpacesBrowserReturn {
   selectIndex: (index: number) => void;
   toggleWorkspace: (workspaceId: string) => void;
   activateSelected: () => Promise<void>;
+  activateIndex: (index: number) => Promise<void>;
   /** Direct attach - bypasses state timing issues on mobile */
   attachSession: (params: { sessionId?: string; workspaceId?: string }) => Promise<void>;
   startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
@@ -381,40 +382,50 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     });
   }, [onRequestSessions]);
 
-  const activateSelected = useCallback(async () => {
-    if (!selectedItem) return;
+  const activateItem = useCallback(async (item: TreeItem | null) => {
+    if (!item) return;
 
-    if (selectedItem.type === 'workspace') {
-      toggleWorkspace(selectedItem.workspace.id);
-    } else if (selectedItem.type === 'session') {
-      await onAttachSession({ sessionId: selectedItem.session.id });
-    } else if (selectedItem.type === 'process') {
-      if (selectedItem.status === 'running') {
+    if (item.type === 'workspace') {
+      toggleWorkspace(item.workspace.id);
+    } else if (item.type === 'session') {
+      await onAttachSession({ sessionId: item.session.id });
+    } else if (item.type === 'process') {
+      if (item.status === 'running') {
         const session = findSessionForProcess(
-          selectedItem.workspaceId,
-          selectedItem.processName,
-          selectedItem.instance
+          item.workspaceId,
+          item.processName,
+          item.instance
         );
         if (session) {
           await onAttachSession({ sessionId: session.id, viewOnly: true });
         }
       } else {
         onStartProcessAttach({
-          workspaceId: selectedItem.workspaceId,
-          processName: selectedItem.processName,
-          instance: selectedItem.instance,
+          workspaceId: item.workspaceId,
+          processName: item.processName,
+          instance: item.instance,
         });
       }
-    } else if (selectedItem.type === 'process-config-error') {
-      onEditProcesses?.({ workspaceId: selectedItem.workspaceId });
-    } else if (selectedItem.type === 'edit-processes') {
-      onEditProcesses?.({ workspaceId: selectedItem.workspaceId });
-    } else if (selectedItem.type === 'events') {
-      onOpenEvents(selectedItem.workspaceId);
-    } else if (selectedItem.type === 'new-session') {
-      await onAttachSession({ workspaceId: selectedItem.workspaceId });
+    } else if (item.type === 'process-config-error') {
+      onEditProcesses?.({ workspaceId: item.workspaceId });
+    } else if (item.type === 'edit-processes') {
+      onEditProcesses?.({ workspaceId: item.workspaceId });
+    } else if (item.type === 'events') {
+      onOpenEvents(item.workspaceId);
+    } else if (item.type === 'new-session') {
+      await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [selectedItem, toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onEditProcesses, onOpenEvents]);
+  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onEditProcesses, onOpenEvents]);
+
+  const activateSelected = useCallback(async () => {
+    await activateItem(selectedItem);
+  }, [activateItem, selectedItem]);
+
+  const activateIndex = useCallback(async (index: number) => {
+    const clamped = Math.max(0, Math.min(index, tree.length - 1));
+    setSelectedIndex(clamped);
+    await activateItem(tree[clamped] ?? null);
+  }, [activateItem, tree]);
 
   const createNewSession = useCallback(async () => {
     if (!selectedItem) return;
@@ -468,6 +479,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     selectIndex,
     toggleWorkspace,
     activateSelected,
+    activateIndex,
     attachSession: async (params) => {
       await onAttachSession(params);
     },
