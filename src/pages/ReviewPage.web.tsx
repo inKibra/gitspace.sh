@@ -105,12 +105,12 @@ export function ReviewPage({
   }, [sendReviewRequest, projectName, workspaceName]);
 
   useEffect(() => {
-    void loadThreads();
+    void loadThreads().catch(() => {});
     void loadChangedFiles();
   }, [projectName, workspaceName, loadChangedFiles, loadThreads]);
 
   const handleRefresh = useCallback(() => {
-    void loadThreads();
+    void loadThreads().catch(() => {});
     void loadChangedFiles();
   }, [loadThreads, loadChangedFiles]);
 

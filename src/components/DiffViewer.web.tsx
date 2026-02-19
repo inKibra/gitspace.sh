@@ -15,6 +15,7 @@ import {
 import type { HunkDecision, ReviewChangedFile, ReviewThread, ThreadTarget } from '../types/review.js';
 import { SpacesError, toSpacesError } from '../types/errors.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
+import { getReviewDecisionColor } from './review-decision-colors.js';
 
 export interface HunkFocusTarget {
   filePath: string;
@@ -490,6 +491,8 @@ export function DiffViewer({
       await onCreateThread(commentForm.target, commentBody.trim(), commentForm.decision);
       setCommentForm(null);
       setCommentBody('');
+    } catch {
+      // Error is surfaced via review hook state; avoid unhandled promise rejections.
     } finally {
       setSubmitting(false);
     }
@@ -513,7 +516,11 @@ export function DiffViewer({
     const existingThreads = hunkThreadByHeader.get(normalizedHeader) ?? [];
     const primary = pickPrimaryThread(existingThreads);
     if (primary) {
-      await onUpdateThread(primary.id, { decision });
+      try {
+        await onUpdateThread(primary.id, { decision });
+      } catch {
+        // Error is surfaced via review hook state; avoid unhandled promise rejections.
+      }
       return;
     }
 
@@ -521,13 +528,17 @@ export function DiffViewer({
       return;
     }
 
-    await onCreateThread(
-      { kind: 'hunk', file: selectedFile.filePath, hunkHeader: normalizedHeader },
-      decision === 'approved'
-        ? 'Approved hunk via inline controls.'
-        : 'Rejected hunk via inline controls.',
-      decision
-    );
+    try {
+      await onCreateThread(
+        { kind: 'hunk', file: selectedFile.filePath, hunkHeader: normalizedHeader },
+        decision === 'approved'
+          ? 'Approved hunk via inline controls.'
+          : 'Rejected hunk via inline controls.',
+        decision
+      );
+    } catch {
+      // Error is surfaced via review hook state; avoid unhandled promise rejections.
+    }
   }, [selectedFile, hunkThreadByHeader, onUpdateThread, onCreateThread, onHunkFocus]);
 
   const openHunkCommentForm = useCallback((hunkMeta: HunkControlMeta) => {
@@ -620,7 +631,7 @@ export function DiffViewer({
 
     if (meta.kind === 'thread') {
       const thread = meta.thread;
-      const color = thread.decision ? decisionColor(thread.decision) : '#58a6ff';
+      const color = thread.decision ? getReviewDecisionColor(thread.decision) : '#58a6ff';
       const count = thread.comments.length;
 
       return (
@@ -657,7 +668,7 @@ export function DiffViewer({
       );
     }
 
-    const tint = decisionColor(meta.decision);
+    const tint = getReviewDecisionColor(meta.decision);
     return (
       <div style={{ position: 'relative', zIndex: 10, height: 0, overflow: 'visible', pointerEvents: 'none' }}>
         <div
@@ -681,14 +692,18 @@ export function DiffViewer({
         >
           <button
             title="Reject hunk"
-            onClick={() => void setHunkDecision(meta, 'rejected')}
+            onClick={() => {
+              void setHunkDecision(meta, 'rejected').catch(() => {});
+            }}
             style={actionButtonStyle(meta.decision === 'rejected', '#f85149')}
           >
             Reject
           </button>
           <button
             title="Approve hunk"
-            onClick={() => void setHunkDecision(meta, 'approved')}
+            onClick={() => {
+              void setHunkDecision(meta, 'approved').catch(() => {});
+            }}
             style={actionButtonStyle(meta.decision === 'approved', '#22c55e', true)}
           >
             Approve
@@ -962,7 +977,7 @@ export function DiffViewer({
                     setCommentBody('');
                   }
                   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                    void handleSubmitComment();
+                    void handleSubmitComment().catch(() => {});
                   }
                 }}
               />
@@ -970,7 +985,9 @@ export function DiffViewer({
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <button
-                onClick={() => void handleSubmitComment()}
+                onClick={() => {
+                  void handleSubmitComment().catch(() => {});
+                }}
                 disabled={submitting}
                 style={{
                   padding: '8px 16px',
@@ -1087,16 +1104,6 @@ function expandToAbsoluteLines(lines: string[], start: number, total: number): s
     output[absoluteIndex] = lines[index] ?? '';
   }
   return output;
-}
-
-function decisionColor(decision: HunkDecision): string {
-  if (decision === 'approved') {
-    return '#22c55e';
-  }
-  if (decision === 'rejected') {
-    return '#f85149';
-  }
-  return '#d29922';
 }
 
 function actionButtonStyle(active: boolean, color: string, success = false): CSSProperties {

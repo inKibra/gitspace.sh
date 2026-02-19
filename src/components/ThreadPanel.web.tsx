@@ -12,6 +12,7 @@ import { Fragment, useState, useCallback, useEffect, useMemo, useRef, type React
 import type { ReviewThread, HunkDecision } from '../types/review.js';
 import type { HunkFocusTarget } from './DiffViewer.web.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
+import { REVIEW_DECISION_COLORS } from './review-decision-colors.js';
 
 export interface ThreadPanelProps {
   threads: ReviewThread[];
@@ -29,12 +30,6 @@ export interface ThreadPanelProps {
   onOpenThreadTarget?: (threadId: string) => void;
   onClose?: () => void;
 }
-
-const DECISION_COLORS: Record<string, string> = {
-  approved: '#22c55e',
-  rejected: '#f85149',
-  pending: '#d29922',
-};
 
 const SAFE_LINK_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 
@@ -280,6 +275,8 @@ export function ThreadPanel({
       await onAddReply(threadId, replyBody.trim());
       setReplyBody('');
       setReplyingTo(null);
+    } catch {
+      // Error is surfaced via review hook state; avoid unhandled promise rejections.
     } finally {
       setSubmitting(false);
     }
@@ -291,6 +288,8 @@ export function ThreadPanel({
     try {
       await onUpdateComment(editingComment.threadId, editingComment.commentId, editingComment.body.trim());
       setEditingComment(null);
+    } catch {
+      // Error is surfaced via review hook state; avoid unhandled promise rejections.
     } finally {
       setSubmitting(false);
     }
@@ -467,9 +466,9 @@ export function ThreadPanel({
                       fontSize: '11px',
                       padding: '1px 6px',
                       borderRadius: '10px',
-                      background: DECISION_COLORS[decision] + '22',
-                      color: DECISION_COLORS[decision],
-                      border: `1px solid ${DECISION_COLORS[decision]}44`,
+                      background: REVIEW_DECISION_COLORS[decision] + '22',
+                      color: REVIEW_DECISION_COLORS[decision],
+                      border: `1px solid ${REVIEW_DECISION_COLORS[decision]}44`,
                     }}>
                       {decision === 'approved' ? '✓ Approved' : decision === 'rejected' ? '✗ Changes requested' : '⏳ Pending'}
                     </span>
@@ -505,16 +504,18 @@ export function ThreadPanel({
                     {(['approved', 'rejected', 'pending'] as const).map((d) => (
                       <button
                         key={d}
-                        onClick={() => void onUpdateDecision(thread.id, d)}
+                        onClick={() => {
+                          void onUpdateDecision(thread.id, d).catch(() => {});
+                        }}
                         style={{
                           fontSize: '11px',
                           padding: '2px 8px',
                           borderRadius: '4px',
                           border: '1px solid',
                           cursor: 'pointer',
-                          background: decision === d ? DECISION_COLORS[d] + '33' : '#21262d',
-                          color: decision === d ? DECISION_COLORS[d] : '#8b949e',
-                          borderColor: decision === d ? DECISION_COLORS[d] + '66' : '#30363d',
+                          background: decision === d ? REVIEW_DECISION_COLORS[d] + '33' : '#21262d',
+                          color: decision === d ? REVIEW_DECISION_COLORS[d] : '#8b949e',
+                          borderColor: decision === d ? REVIEW_DECISION_COLORS[d] + '66' : '#30363d',
                         }}
                       >
                         {d === 'approved' ? '✓ Approve' : d === 'rejected' ? '✗ Reject' : '⏳ Pending'}
@@ -562,7 +563,9 @@ export function ThreadPanel({
                         />
                         <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
                           <button
-                            onClick={() => void handleSaveEdit()}
+                            onClick={() => {
+                              void handleSaveEdit().catch(() => {});
+                            }}
                             disabled={submitting}
                             style={{
                               fontSize: '11px',
@@ -622,7 +625,9 @@ export function ThreadPanel({
                               Edit
                             </button>
                             <button
-                              onClick={() => void onDeleteComment(thread.id, comment.id)}
+                              onClick={() => {
+                                void onDeleteComment(thread.id, comment.id).catch(() => {});
+                              }}
                               style={{
                                 fontSize: '10px',
                                 padding: '1px 5px',
@@ -664,12 +669,16 @@ export function ThreadPanel({
                       autoFocus
                       onKeyDown={(e) => {
                         if (e.key === 'Escape') { setReplyingTo(null); setReplyBody(''); }
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void handleAddReply(thread.id);
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          void handleAddReply(thread.id).catch(() => {});
+                        }
                       }}
                     />
                     <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
                       <button
-                        onClick={() => void handleAddReply(thread.id)}
+                        onClick={() => {
+                          void handleAddReply(thread.id).catch(() => {});
+                        }}
                         disabled={submitting || !replyBody.trim()}
                         style={{
                           fontSize: '11px',
@@ -716,7 +725,9 @@ export function ThreadPanel({
                       Reply
                     </button>
                     <button
-                      onClick={() => void onResolveThread(thread.id, !thread.resolved)}
+                      onClick={() => {
+                        void onResolveThread(thread.id, !thread.resolved).catch(() => {});
+                      }}
                       style={{
                         fontSize: '11px',
                         padding: '2px 8px',
