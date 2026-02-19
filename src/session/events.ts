@@ -30,7 +30,7 @@ export type BackendEvent =
   | { type: 'command_error'; code?: string; message: string }
   | { type: 'error'; message: string }
   | { type: 'review_response'; requestId: string; result?: ReviewResult; error?: { code: string; message: string } }
-  | { type: 'events'; events: WideEvent[]; liveEventIds: string[] }
+  | { type: 'events'; events: WideEvent[]; liveEventIds: string[]; savedEventFilters?: SavedEventFilter[] }
   | { type: 'process_started'; workspaceId: string; processName: string; sessionId?: string; sessionIds?: string[] }
   | { type: 'process_stopped'; workspaceId: string; processName: string };
 

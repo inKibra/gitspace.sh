@@ -423,7 +423,6 @@ export class RemoteSessionHandler {
         ...workspace,
         id: toCanonicalWorkspaceId(workspace),
       })),
-      savedEventFilters: workspaces.length > 0 ? loadSavedEventFilters(workspaces[0].path) : [],
     });
   }
 
@@ -1082,6 +1081,8 @@ export class RemoteSessionHandler {
         return;
       }
 
+      const savedEventFilters = loadSavedEventFilters(workspaceRef.workspacePath);
+
       const projectConfig = readProjectConfig(workspaceRef.projectName);
       const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
         maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
@@ -1138,6 +1139,7 @@ export class RemoteSessionHandler {
         workspaceId: workspaceRef.workspaceId,
         events: chunk,
         liveEventIds: [] as string[],
+        savedEventFilters,
         requestId,
         chunkIndex,
         totalChunks,

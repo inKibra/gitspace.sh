@@ -330,6 +330,7 @@ export interface EventsListResponse {
   workspaceId: string;
   events: import("../../types/events.js").WideEvent[];
   liveEventIds: string[];
+  savedEventFilters?: import("../../types/events.js").SavedEventFilter[];
   requestId?: string;
   chunkIndex?: number;
   totalChunks?: number;

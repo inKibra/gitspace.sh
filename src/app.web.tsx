@@ -54,6 +54,12 @@ import {
 
 type View = "machines" | "terminal" | "review";
 
+interface PendingProcessAttachTarget {
+  workspaceId: string;
+  processName: string;
+  instance: number;
+}
+
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
 const DELETE_ERROR_CODES = new Set([
@@ -77,6 +83,7 @@ export default function App() {
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
     shift: false,
@@ -530,6 +537,18 @@ export default function App() {
     terminal.requestSessions();
   }, [terminal]);
 
+  const handleStartProcessAttachSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
+    const instance = params.instance ?? 1;
+    setPendingProcessAttach({
+      workspaceId: params.workspaceId,
+      processName: params.processName,
+      instance,
+    });
+    terminal.startProcess(params.workspaceId, params.processName, instance);
+    terminal.requestWorkspaces();
+    terminal.requestSessions();
+  }, [terminal]);
+
   const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
     const workspace = terminal.workspaces.find((item) => item.id === params.workspaceId);
     const workspaceLabel = workspace?.name ?? params.workspaceId;
@@ -544,7 +563,7 @@ export default function App() {
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
     onStartProcess: (params) => handleStartProcessSelection(params),
-    onStartProcessAttach: (params) => handleStartProcessSelection(params),
+    onStartProcessAttach: (params) => handleStartProcessAttachSelection(params),
     onStopProcess: (params) => {
       terminal.stopProcess(params.workspaceId, params.processName);
       terminal.requestWorkspaces();
@@ -565,6 +584,70 @@ export default function App() {
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
   });
+
+  useEffect(() => {
+    if (!pendingProcessAttach) {
+      return;
+    }
+
+    const session = terminal.sessions
+      .filter((item) =>
+        item.workspaceId === pendingProcessAttach.workspaceId &&
+        item.processName === pendingProcessAttach.processName &&
+        (item.processInstance ?? 1) === pendingProcessAttach.instance &&
+        item.exitCode === undefined
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+    if (!session) {
+      return;
+    }
+
+    const target = pendingProcessAttach;
+    setPendingProcessAttach((current) =>
+      current &&
+      current.workspaceId === target.workspaceId &&
+      current.processName === target.processName &&
+      current.instance === target.instance
+        ? null
+        : current
+    );
+
+    void handleAttachSession({ sessionId: session.id, viewOnly: true }).catch((error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    });
+  }, [handleAttachSession, pendingProcessAttach, terminal.sessions]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setPendingProcessAttach((current) => {
+        if (
+          !current ||
+          current.workspaceId !== pendingProcessAttach.workspaceId ||
+          current.processName !== pendingProcessAttach.processName ||
+          current.instance !== pendingProcessAttach.instance
+        ) {
+          return current;
+        }
+
+        toast.error(`Process started but no active session appeared for ${current.processName}#${current.instance}.`);
+        return null;
+      });
+    }, 8000);
+
+    return () => window.clearTimeout(timeout);
+  }, [pendingProcessAttach]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach || !terminal.commandError) {
+      return;
+    }
+    setPendingProcessAttach(null);
+  }, [pendingProcessAttach, terminal.commandError]);
 
   // Inbox hook
   const inboxProps = useInbox({

@@ -145,6 +145,9 @@ export function useSessionEngine() {
             events: event.events,
             liveEventIds: event.liveEventIds,
           });
+          if (event.savedEventFilters) {
+            dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
+          }
           break;
         case 'process_started':
         case 'process_stopped':

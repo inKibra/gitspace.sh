@@ -222,6 +222,12 @@ type AppAction =
   | { type: 'SET_ERROR'; error: string | null }
   | { type: 'SWITCH_PANEL' };
 
+interface PendingProcessAttachTarget {
+  workspaceId: string;
+  processName: string;
+  instance: number;
+}
+
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_VIEW':
@@ -310,6 +316,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
 
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
@@ -1240,11 +1247,97 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [startLocalProcess]);
 
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
-    void startLocalProcess(params.workspaceId, params.processName, params.instance).then(() => {
-      // After starting, find and attach to the session
-      void refreshWorkspaces();
+    const target: PendingProcessAttachTarget = {
+      workspaceId: params.workspaceId,
+      processName: params.processName,
+      instance: params.instance,
+    };
+    setPendingProcessAttach(target);
+    void startLocalProcess(params.workspaceId, params.processName, params.instance)
+      .then(() => {
+        void refreshWorkspaces();
+      })
+      .catch((error) => {
+        setPendingProcessAttach((current) =>
+          current &&
+          current.workspaceId === target.workspaceId &&
+          current.processName === target.processName &&
+          current.instance === target.instance
+            ? null
+            : current
+        );
+        flow.showMessage({
+          title: 'Process Start Failed',
+          message: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+      });
+  }, [flow, refreshWorkspaces, startLocalProcess]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach) {
+      return;
+    }
+
+    const session = sessionInfos
+      .filter((item) =>
+        item.workspaceId === pendingProcessAttach.workspaceId &&
+        item.processName === pendingProcessAttach.processName &&
+        (item.processInstance ?? 1) === pendingProcessAttach.instance &&
+        item.exitCode === undefined
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+    if (!session) {
+      return;
+    }
+
+    const target = pendingProcessAttach;
+    setPendingProcessAttach((current) =>
+      current &&
+      current.workspaceId === target.workspaceId &&
+      current.processName === target.processName &&
+      current.instance === target.instance
+        ? null
+        : current
+    );
+
+    void handleAttachSession({ sessionId: session.id, viewOnly: true }).catch((error) => {
+      flow.showMessage({
+        title: 'Attach Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
     });
-  }, [startLocalProcess, refreshWorkspaces]);
+  }, [flow, handleAttachSession, pendingProcessAttach, sessionInfos]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setPendingProcessAttach((current) => {
+        if (
+          !current ||
+          current.workspaceId !== pendingProcessAttach.workspaceId ||
+          current.processName !== pendingProcessAttach.processName ||
+          current.instance !== pendingProcessAttach.instance
+        ) {
+          return current;
+        }
+
+        flow.showMessage({
+          title: 'Attach Timeout',
+          message: `Process started but no active session was found for ${current.processName}#${current.instance}.`,
+          variant: 'warning',
+        });
+        return null;
+      });
+    }, 8000);
+
+    return () => clearTimeout(timeout);
+  }, [flow, pendingProcessAttach]);
 
   const handleStopProcess = useCallback((params: { workspaceId: string; processName: string }) => {
     void stopLocalProcess(params.workspaceId, params.processName);

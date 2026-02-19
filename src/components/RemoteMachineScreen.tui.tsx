@@ -36,6 +36,12 @@ const COLORS = {
   title: '#00FF88',
 };
 
+interface PendingProcessAttachTarget {
+  workspaceId: string;
+  processName: string;
+  instance: number;
+}
+
 function StatusBar({ hint }: { hint: string }) {
   return (
     <box height={1} width="100%" backgroundColor={COLORS.statusBar} paddingLeft={1}>
@@ -58,6 +64,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
@@ -233,11 +240,88 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
 
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
+    setPendingProcessAttach({
+      workspaceId: params.workspaceId,
+      processName: params.processName,
+      instance: params.instance,
+    });
     void Promise.resolve(remote.startProcess(params.workspaceId, params.processName, params.instance)).finally(() => {
       remote.requestWorkspaces();
       remote.requestSessions();
     });
   }, [remote]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach) {
+      return;
+    }
+
+    const session = remote.sessions
+      .filter((item) =>
+        item.workspaceId === pendingProcessAttach.workspaceId &&
+        item.processName === pendingProcessAttach.processName &&
+        (item.processInstance ?? 1) === pendingProcessAttach.instance &&
+        item.exitCode === undefined
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+    if (!session) {
+      return;
+    }
+
+    const target = pendingProcessAttach;
+    setPendingProcessAttach((current) =>
+      current &&
+      current.workspaceId === target.workspaceId &&
+      current.processName === target.processName &&
+      current.instance === target.instance
+        ? null
+        : current
+    );
+
+    void attachController.attach({ sessionId: session.id, viewOnly: true }).catch((error) => {
+      flow.showMessage({
+        title: 'Attach Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    });
+  }, [attachController, flow, pendingProcessAttach, remote.sessions]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setPendingProcessAttach((current) => {
+        if (
+          !current ||
+          current.workspaceId !== pendingProcessAttach.workspaceId ||
+          current.processName !== pendingProcessAttach.processName ||
+          current.instance !== pendingProcessAttach.instance
+        ) {
+          return current;
+        }
+
+        flow.showMessage({
+          title: 'Attach Timeout',
+          message: `Process started but no active session was found for ${current.processName}#${current.instance}.`,
+          variant: 'warning',
+        });
+        return null;
+      });
+    }, 8000);
+
+    return () => clearTimeout(timeout);
+  }, [flow, pendingProcessAttach]);
+
+  useEffect(() => {
+    if (!pendingProcessAttach || !remote.commandError) {
+      return;
+    }
+    setPendingProcessAttach(null);
+  }, [pendingProcessAttach, remote.commandError]);
 
   const handleStartProcess = useCallback((params: { workspaceId: string; processName: string }) => {
     void Promise.resolve(remote.startProcess(params.workspaceId, params.processName)).finally(() => {

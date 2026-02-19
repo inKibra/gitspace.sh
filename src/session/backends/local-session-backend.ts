@@ -424,7 +424,6 @@ export class LocalSessionBackend implements SessionBackend {
     this.emit({
       type: 'workspaces',
       workspaces: mappedWorkspaces,
-      savedEventFilters: workspaces.length > 0 ? loadSavedEventFilters(workspaces[0].path) : [],
     });
   }
 
@@ -848,9 +847,11 @@ export class LocalSessionBackend implements SessionBackend {
   ): Promise<void> {
     const workspaceRef = resolveWorkspaceRef(workspacePath);
     if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
-      this.emit({ type: 'events', events: [], liveEventIds: [] });
+      this.emit({ type: 'events', events: [], liveEventIds: [], savedEventFilters: [] });
       return;
     }
+
+    const savedEventFilters = loadSavedEventFilters(workspaceRef.workspacePath);
 
     const projectConfig = readProjectConfig(workspaceRef.projectName);
     const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
@@ -891,7 +892,7 @@ export class LocalSessionBackend implements SessionBackend {
       timelineOrder: snapshot.timelineOrder,
     }));
 
-    this.emit({ type: 'events', events, liveEventIds: [] });
+    this.emit({ type: 'events', events, liveEventIds: [], savedEventFilters });
   }
 
   private processSchedulers = new Map<string, NodeJS.Timer>();

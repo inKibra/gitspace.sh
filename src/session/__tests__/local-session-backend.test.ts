@@ -204,6 +204,36 @@ describe('LocalSessionBackend', () => {
     ]);
   });
 
+  it('does not include saved filters in workspace list payloads', async () => {
+    const events: BackendEvent[] = [];
+
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      ensureServer: async () => {},
+      scanWorkspaces: async () => [
+        {
+          id: 'ws-1',
+          name: 'ws-1',
+          path: '/tmp/ws-1',
+          projectName: 'alpha',
+          sessionCount: 0,
+        },
+      ],
+      listSessions: async () => [],
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await backend.connect();
+    await backend.listWorkspaces();
+
+    const workspaceEvent = events.find((event) => event.type === 'workspaces');
+    expect(workspaceEvent).toBeDefined();
+    if (workspaceEvent && workspaceEvent.type === 'workspaces') {
+      expect('savedEventFilters' in workspaceEvent).toBe(false);
+    }
+  });
+
   it('streams PTY data and control frames through local socket transport', async () => {
     const events: BackendEvent[] = [];
     const sentControls: Array<{

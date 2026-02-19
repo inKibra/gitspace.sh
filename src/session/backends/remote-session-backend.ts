@@ -92,6 +92,7 @@ interface PendingEventsChunk {
   totalChunks: number;
   chunks: Map<number, WideEvent[]>;
   liveEventIds: string[];
+  savedEventFilters?: import('../../types/events.js').SavedEventFilter[];
   receivedAtMs: number;
 }
 
@@ -1100,6 +1101,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         type: 'events',
         events: message.events,
         liveEventIds: message.liveEventIds,
+        savedEventFilters: message.savedEventFilters,
       });
       return;
     }
@@ -1111,12 +1113,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       totalChunks,
       chunks: new Map<number, WideEvent[]>(),
       liveEventIds: message.liveEventIds,
+      savedEventFilters: message.savedEventFilters,
       receivedAtMs: Date.now(),
     };
 
     pending.workspaceId = message.workspaceId;
     pending.totalChunks = totalChunks;
     pending.liveEventIds = message.liveEventIds;
+    pending.savedEventFilters = message.savedEventFilters;
     pending.receivedAtMs = Date.now();
     pending.chunks.set(chunkIndex, message.events);
     this.pendingEventChunks.set(requestId, pending);
@@ -1139,6 +1143,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       type: 'events',
       events: merged,
       liveEventIds: pending.liveEventIds,
+      savedEventFilters: pending.savedEventFilters,
     });
   }
 
