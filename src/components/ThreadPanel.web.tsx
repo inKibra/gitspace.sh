@@ -11,6 +11,7 @@
 import { Fragment, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import type { ReviewThread, HunkDecision } from '../types/review.js';
 import type { HunkFocusTarget } from './DiffViewer.web.js';
+import { normalizeHunkHeader } from '../utils/hunk-header.js';
 
 export interface ThreadPanelProps {
   threads: ReviewThread[];
@@ -247,7 +248,10 @@ export function ThreadPanel({
     if (filterMode === 'current-hunk' && hunkFocus) {
       return threads.filter((thread) => {
         if (thread.target.kind === 'hunk') {
-          return thread.target.file === hunkFocus.filePath && thread.target.hunkHeader === hunkFocus.hunkHeader;
+          return (
+            thread.target.file === hunkFocus.filePath &&
+            normalizeHunkHeader(thread.target.hunkHeader) === normalizeHunkHeader(hunkFocus.hunkHeader)
+          );
         }
         if (thread.target.kind === 'line') {
           return doesLineThreadOverlapHunk(thread, hunkFocus);
@@ -417,7 +421,7 @@ export function ThreadPanel({
         }}>
           <span style={{ color: '#58a6ff', fontWeight: 600 }}>Hunk filter</span>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {hunkFocus.hunkHeader}
+            {normalizeHunkHeader(hunkFocus.hunkHeader)}
           </span>
           <button
             onClick={() => onFilterModeChange?.('all')}

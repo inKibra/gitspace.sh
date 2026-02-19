@@ -14,6 +14,7 @@ import {
 } from '@pierre/diffs';
 import type { HunkDecision, ReviewChangedFile, ReviewThread, ThreadTarget } from '../types/review.js';
 import { SpacesError, toSpacesError } from '../types/errors.js';
+import { normalizeHunkHeader } from '../utils/hunk-header.js';
 
 export interface HunkFocusTarget {
   filePath: string;
@@ -109,6 +110,7 @@ const CHANGE_COLOR: Record<ReviewChangedFile['changeType'], string> = {
   new: '#22c55e',
   deleted: '#f85149',
   renamed: '#d29922',
+  copied: '#3fb950',
   modified: '#58a6ff',
 };
 
@@ -116,6 +118,7 @@ const CHANGE_LABEL: Record<ReviewChangedFile['changeType'], string> = {
   new: 'A',
   deleted: 'D',
   renamed: 'R',
+  copied: 'C',
   modified: 'M',
 };
 
@@ -426,9 +429,10 @@ export function DiffViewer({
       if (thread.target.file !== selectedFile.filePath) {
         continue;
       }
-      const list = map.get(thread.target.hunkHeader) ?? [];
+      const normalizedHeader = normalizeHunkHeader(thread.target.hunkHeader);
+      const list = map.get(normalizedHeader) ?? [];
       list.push(thread);
-      map.set(thread.target.hunkHeader, list);
+      map.set(normalizedHeader, list);
     }
 
     return map;
@@ -442,14 +446,15 @@ export function DiffViewer({
     const annotations: DiffLineAnnotation<InlineAnnotationMeta>[] = [];
 
     for (const hunk of selectedLoadedDiff.hunks) {
-      const existingThreads = hunkThreadByHeader.get(hunk.header) ?? [];
+      const normalizedHeader = normalizeHunkHeader(hunk.header);
+      const existingThreads = hunkThreadByHeader.get(normalizedHeader) ?? [];
       const primaryThread = pickPrimaryThread(existingThreads);
       annotations.push({
         side: hunk.anchorSide,
         lineNumber: hunk.anchorLine,
         metadata: {
           kind: 'hunk-control',
-          hunkHeader: hunk.header,
+          hunkHeader: normalizedHeader,
           decision: aggregateHunkDecision(existingThreads),
           threadId: primaryThread?.id,
           threadIds: existingThreads.map((thread) => thread.id),
@@ -504,7 +509,8 @@ export function DiffViewer({
       newEnd: hunkMeta.newEnd,
     });
 
-    const existingThreads = hunkThreadByHeader.get(hunkMeta.hunkHeader) ?? [];
+    const normalizedHeader = normalizeHunkHeader(hunkMeta.hunkHeader);
+    const existingThreads = hunkThreadByHeader.get(normalizedHeader) ?? [];
     const primary = pickPrimaryThread(existingThreads);
     if (primary) {
       await onUpdateThread(primary.id, { decision });
@@ -516,7 +522,7 @@ export function DiffViewer({
     }
 
     await onCreateThread(
-      { kind: 'hunk', file: selectedFile.filePath, hunkHeader: hunkMeta.hunkHeader },
+      { kind: 'hunk', file: selectedFile.filePath, hunkHeader: normalizedHeader },
       decision === 'approved'
         ? 'Approved hunk via inline controls.'
         : 'Rejected hunk via inline controls.',
@@ -536,7 +542,13 @@ export function DiffViewer({
       newStart: hunkMeta.newStart,
       newEnd: hunkMeta.newEnd,
     });
-    setCommentForm({ target: { kind: 'hunk', file: selectedFile.filePath, hunkHeader: hunkMeta.hunkHeader } });
+    setCommentForm({
+      target: {
+        kind: 'hunk',
+        file: selectedFile.filePath,
+        hunkHeader: normalizeHunkHeader(hunkMeta.hunkHeader),
+      },
+    });
     setCommentBody('');
   }, [selectedFile, onHunkFocus]);
 
@@ -1047,11 +1059,15 @@ function formatHunkHeader(hunk: Hunk): string {
   const specs = (hunk.hunkSpecs ?? '').trim();
   const context = hunk.hunkContext ?? '';
 
-  if (!specs) {
-    return context ? `@@ @@ ${context}` : '@@ @@';
+  if (specs.startsWith('@@')) {
+    return normalizeHunkHeader(specs);
   }
 
-  return `@@ ${specs} @@${context ? ` ${context}` : ''}`;
+  if (!specs) {
+    return normalizeHunkHeader(context ? `@@ @@ ${context}` : '@@ @@');
+  }
+
+  return normalizeHunkHeader(`@@ ${specs} @@${context ? ` ${context}` : ''}`);
 }
 
 function expandToAbsoluteLines(lines: string[], start: number, total: number): string[] {

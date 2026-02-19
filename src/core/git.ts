@@ -677,7 +677,7 @@ function parseChangedFilesFromNameStatusZ(stdout: string): ReviewChangedFile[] {
     }
 
     const statusCode = statusToken[0];
-    if (statusCode === 'R') {
+    if (statusCode === 'R' || statusCode === 'C') {
       const prev = tokens[index++];
       const next = tokens[index++];
       if (!prev || !next) {
@@ -686,7 +686,7 @@ function parseChangedFilesFromNameStatusZ(stdout: string): ReviewChangedFile[] {
       files.push({
         filePath: next,
         prevFilePath: prev,
-        changeType: 'renamed',
+        changeType: statusCode === 'R' ? 'renamed' : 'copied',
       });
       continue;
     }

@@ -214,8 +214,9 @@ export type ReviewOperation =
 
 export interface ReviewChangedFile {
   filePath: string;
+  /** Optional old path for renames/copies (source path) */
   prevFilePath?: string;
-  changeType: 'new' | 'deleted' | 'renamed' | 'modified';
+  changeType: 'new' | 'deleted' | 'renamed' | 'copied' | 'modified';
 }
 
 /** Results returned from machine to client */

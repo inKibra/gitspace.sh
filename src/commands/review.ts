@@ -32,6 +32,7 @@ import { isAbsolute, relative, resolve, sep } from 'path';
 import { readProjectConfig, readGlobalConfig, getGitspaceDir } from '../core/config.js';
 import { executeLocalReviewOperation } from '../core/review-executor.js';
 import { logger } from '../utils/logger.js';
+import { normalizeHunkHeader } from '../utils/hunk-header.js';
 import type { HunkDecision, ReviewChangedFile, ReviewThread } from '../types/review.js';
 
 // Match the port used by `gssh serve` local relay (overridable via RELAY_PORT env)
@@ -170,11 +171,12 @@ function parseHunksFromDiff(diff: string): Array<{
   let index = 1;
   for (const line of lines) {
     if (!line.startsWith('@@')) continue;
-    const contextMatch = line.match(/^@@[^@]*@@\s*(.*)$/);
+    const header = normalizeHunkHeader(line);
+    const contextMatch = header.match(/^@@[^@]*@@(?:\s+(.*))?$/);
     const context = contextMatch && contextMatch[1] ? contextMatch[1] : null;
     hunks.push({
       index,
-      header: line,
+      header,
       context,
       targetRef: `hunk:${index}`,
     });
@@ -505,6 +507,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
     logger.error(`Hunk index ${options.index} not found in ${resolvedFile.filePath}.`);
     process.exit(1);
   }
+  const chosenHeader = normalizeHunkHeader(chosen.header);
 
   const threadsResult = await executeLocalReviewOperation({
     op: 'get_threads',
@@ -521,7 +524,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
     (thread) =>
       thread.target.kind === 'hunk' &&
       thread.target.file === resolvedFile.filePath &&
-      thread.target.hunkHeader === chosen.header
+      normalizeHunkHeader(thread.target.hunkHeader) === chosenHeader
   );
 
   let createdOrUpdatedThreadId = existing?.id;
@@ -554,7 +557,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
       target: {
         kind: 'hunk',
         file: resolvedFile.filePath,
-        hunkHeader: chosen.header,
+        hunkHeader: chosenHeader,
       },
       body: body || defaultDecisionBody(decision),
       decision,
@@ -574,7 +577,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
           ok: true,
           file: resolvedFile.filePath,
           hunkIndex: chosen.index,
-          hunkHeader: chosen.header,
+          hunkHeader: chosenHeader,
           targetRef: `hunk:${resolvedFile.filePath}:${chosen.index}`,
           decision: decision ?? null,
           threadId: createdOrUpdatedThreadId ?? null,
@@ -589,7 +592,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
   }
 
   logger.success(
-    `${existing ? 'Updated' : 'Added'} hunk review on ${resolvedFile.filePath} [${chosen.index}] (${chosen.header})`
+    `${existing ? 'Updated' : 'Added'} hunk review on ${resolvedFile.filePath} [${chosen.index}] (${chosenHeader})`
   );
 }
 
