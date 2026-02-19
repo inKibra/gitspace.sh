@@ -2,7 +2,7 @@
  * Events - Shared Hook
  */
 
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 
 export interface WideEventItem {
   eventId: string;
@@ -109,19 +109,19 @@ export function useEvents(props: UseEventsProps): UseEventsReturn {
 
   const selected = filtered[selectedIndex] ?? null;
 
-  const selectSavedFilter = (filter: import("../types/events.js").SavedEventFilter | null) => {
+  const selectSavedFilter = useCallback((filter: import("../types/events.js").SavedEventFilter | null) => {
     setSelectedIndex(0);
     setSelectedKey(null);
     setActiveFilterName(filter?.name ?? null);
     props.onSelectFilter(filter);
-  };
+  }, [props.onSelectFilter]);
 
-  const selectIndex = (index: number) => {
+  const selectIndex = useCallback((index: number) => {
     const clamped = Math.max(0, Math.min(index, filtered.length - 1));
     setSelectedIndex(clamped);
     const selectedEvent = filtered[clamped];
     setSelectedKey(selectedEvent ? getEventKey(selectedEvent) : null);
-  };
+  }, [filtered]);
 
   return {
     filtered,

@@ -4,11 +4,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-  buildProcessHostname,
   buildServeIngressConfig,
-  normalizeHostLabel,
   type ProcessHostEntry,
 } from "../serve";
+import { buildProcessHostname, normalizeHostLabel } from "../../utils/hostnames";
 
 describe("process hosting helpers", () => {
   test("normalizeHostLabel cleans and lowercases", () => {

@@ -50,7 +50,7 @@ function parseFilter(filter?: string): WideEventFilter {
   }
 }
 
-async function resolveEventsDir(options: EventsCommandOptions): Promise<{ eventsDir: string; sessionId: string }> {
+async function resolveEventsDir(options: EventsCommandOptions): Promise<string> {
   if (!options.project) {
     throw new SpacesError('Provide project via --project <name>.', 'USER_ERROR');
   }
@@ -76,15 +76,15 @@ async function resolveEventsDir(options: EventsCommandOptions): Promise<{ events
     throw new SpacesError('No process events directory found for this workspace.', 'USER_ERROR');
   }
 
-  return { eventsDir, sessionId: options.workspace };
+  return eventsDir;
 }
 
 export async function listEvents(options: EventsCommandOptions): Promise<void> {
-  const resolved = await resolveEventsDir(options);
+  const eventsDir = await resolveEventsDir(options);
 
   const filter = parseFilter(options.filter);
   const events = readWideEvents({
-    eventsDir: resolved.eventsDir,
+    eventsDir,
     filter,
     limit: options.limit,
   });
@@ -104,11 +104,11 @@ export async function showEvent(options: EventsCommandOptions): Promise<void> {
     throw new SpacesError('Provide eventId filter: --filter "eventId=<id>"', 'USER_ERROR');
   }
 
-  const resolved = await resolveEventsDir(options);
+  const eventsDir = await resolveEventsDir(options);
 
   const filter = parseFilter(options.filter);
   const events = readWideEvents({
-    eventsDir: resolved.eventsDir,
+    eventsDir,
     filter,
     limit: 1,
   });
@@ -122,11 +122,11 @@ export async function showEvent(options: EventsCommandOptions): Promise<void> {
 }
 
 export async function tailEvents(options: EventsTailOptions): Promise<void> {
-  const resolved = await resolveEventsDir(options);
+  const eventsDir = await resolveEventsDir(options);
 
   const filter = parseFilter(options.filter);
   const events = readWideEvents({
-    eventsDir: resolved.eventsDir,
+    eventsDir,
     filter,
     limit: options.limit ?? 50,
   });

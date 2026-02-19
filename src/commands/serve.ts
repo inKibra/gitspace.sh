@@ -71,7 +71,6 @@ import { parseProcessSessionName } from '../lib/processes/names.js';
 import { resolveWorkspaceRef } from '../lib/events/paths.js';
 import { getGitspaceDir } from '../core/config.js';
 import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js';
-export { buildProcessHostname, normalizeHostLabel };
 import type { ProcessPortConfig } from '../types/processes.js';
 
 /** Package version for daemon status */
