@@ -45,6 +45,7 @@ import {
 } from '../../core/bundle-refresh.js';
 import { buildSessionName } from '../../session/session-name.js';
 import { buildWorkspaceSessionHooks } from '../../session/workspace-shell-hooks.js';
+import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 
 import { logger } from "../../utils/logger.js";
 
@@ -105,17 +106,6 @@ const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
 
 function isMutatingReviewOperation(operation: ReviewOperation): boolean {
   return MUTATING_REVIEW_OPERATIONS.has(operation.op);
-}
-
-function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
-  return `${workspace.projectName}:${workspace.id}`;
-}
-
-function matchesWorkspaceId(
-  workspace: { projectName: string; id: string },
-  workspaceId: string
-): boolean {
-  return workspace.id === workspaceId || toCanonicalWorkspaceId(workspace) === workspaceId;
 }
 
 /**

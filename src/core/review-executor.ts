@@ -26,19 +26,9 @@ import { importGitHubReview, pushGitHubReview } from './github-review.js';
 import { readProjectConfig } from './config.js';
 import { scanWorkspaces } from '../lib/remote-session/workspace-scanner.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
+import { matchesWorkspaceId } from '../utils/workspace-id.js';
 
 type ScanWorkspacesFn = typeof scanWorkspaces;
-
-function toCanonicalWorkspaceId(workspace: { projectName: string; id: string }): string {
-  return `${workspace.projectName}:${workspace.id}`;
-}
-
-function matchesWorkspaceId(
-  workspace: { projectName: string; id: string },
-  workspaceId: string
-): boolean {
-  return workspace.id === workspaceId || toCanonicalWorkspaceId(workspace) === workspaceId;
-}
 
 async function resolveWorkspaceByName(
   projectName: string,

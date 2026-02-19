@@ -971,6 +971,8 @@ registerReviewSubcommands(reviewCommand)
 // Intended to be used from `space` shell function injected into workspace sessions.
 const spaceCommand = program
 	.command('space', { hidden: true })
+	.option('--workspace <name>', 'Workspace name')
+	.option('--project <name>', 'Project name')
 	.description('Workspace-scoped commands')
 
 spaceCommand

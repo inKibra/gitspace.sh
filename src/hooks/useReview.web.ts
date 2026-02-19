@@ -55,11 +55,13 @@ export function useReview({ sendReviewRequest, projectName, workspaceName }: Use
   const [diff, setDiff] = useState<string | null>(null);
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
   const [headBranch, setHeadBranch] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [inFlightCount, setInFlightCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  const loading = inFlightCount > 0;
+
   const run = useCallback(async <T>(fn: () => Promise<T>): Promise<T> => {
-    setLoading(true);
+    setInFlightCount((count) => count + 1);
     setError(null);
     try {
       return await fn();
@@ -68,7 +70,7 @@ export function useReview({ sendReviewRequest, projectName, workspaceName }: Use
       setError(message);
       throw err;
     } finally {
-      setLoading(false);
+      setInFlightCount((count) => (count > 0 ? count - 1 : 0));
     }
   }, []);
 
