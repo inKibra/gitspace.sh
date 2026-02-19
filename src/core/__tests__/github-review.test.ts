@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { importGitHubReview, pushGitHubReview } from '../github-review.js';
-import { readReviewSession, writeReviewSession } from '../review.js';
+import { readReviewSession, updateComment, writeReviewSession } from '../review.js';
 import type { ReviewComment, ReviewThread } from '../../types/review.js';
 
 const OWNER = 'acme';
@@ -402,6 +402,64 @@ describe('github-review sync behavior', () => {
     const secondPush = await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
     expect(secondPush.url).toContain(`/pull/${PR_NUMBER}`);
 
+    const payloadsAfterSecondPush = readPayloadLog(payloadLog);
+    expect(payloadsAfterSecondPush).toHaveLength(0);
+  });
+
+  it('does not re-queue synced local comments after edit', async () => {
+    const now = '2026-02-19T13:00:00Z';
+    const session = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    session.threads.push({
+      id: 'editable-line-thread',
+      target: {
+        kind: 'line',
+        file: 'src/editable.ts',
+        startLine: 21,
+        endLine: 21,
+        side: 'RIGHT',
+      },
+      resolved: false,
+      comments: [
+        {
+          id: 'editable-local-root',
+          threadId: 'editable-line-thread',
+          body: 'Original local note',
+          author: 'local',
+          createdAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    });
+    writeReviewSession(workspacePath, WORKSPACE_NAME, session);
+
+    await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+
+    const afterFirstPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    const firstComment = afterFirstPush.threads
+      .flatMap((thread) => thread.comments)
+      .find((comment) => comment.id === 'editable-local-root') as ReviewComment;
+    expect(firstComment.syncedToGitHubAt).toBeDefined();
+    expect(firstComment.githubId).toBeUndefined();
+
+    updateComment(
+      workspacePath,
+      WORKSPACE_NAME,
+      BASE_BRANCH,
+      'editable-line-thread',
+      'editable-local-root',
+      'Edited local note'
+    );
+
+    const afterEdit = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
+    const editedComment = afterEdit.threads
+      .flatMap((thread) => thread.comments)
+      .find((comment) => comment.id === 'editable-local-root') as ReviewComment;
+    expect(editedComment.body).toBe('Edited local note');
+    expect(editedComment.syncedToGitHubAt).toBeDefined();
+
+    writeFileSync(payloadLog, '', 'utf-8');
+    await pushGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
     const payloadsAfterSecondPush = readPayloadLog(payloadLog);
     expect(payloadsAfterSecondPush).toHaveLength(0);
   });
