@@ -62,6 +62,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const renderer = useRenderer();
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
+  const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
@@ -196,6 +197,17 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [remote.mode]);
 
   useEffect(() => {
+    if (remote.mode !== 'attached') {
+      setIsViewOnlySession(false);
+    }
+  }, [remote.mode]);
+
+  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
+    setIsViewOnlySession(params.viewOnly ?? false);
+    await attachController.attachFromSelection(params);
+  }, [attachController]);
+
+  useEffect(() => {
     if (
       !pendingProcessEditWorkspaceId ||
       !pendingProcessEditValidationArmedRef.current ||
@@ -256,16 +268,33 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [pendingProcessAttach]);
 
   const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
-    setPendingProcessAttach({
+    const target: PendingProcessAttachTarget = {
       workspaceId: params.workspaceId,
       processName: params.processName,
       instance: params.instance,
-    });
-    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName, params.instance)).finally(() => {
-      remote.requestWorkspaces();
-      remote.requestSessions();
-    });
-  }, [remote]);
+    };
+    setPendingProcessAttach(target);
+    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName, params.instance))
+      .catch((error) => {
+        setPendingProcessAttach((current) =>
+          current &&
+          current.workspaceId === target.workspaceId &&
+          current.processName === target.processName &&
+          current.instance === target.instance
+            ? null
+            : current
+        );
+        flow.showMessage({
+          title: 'Process Start Failed',
+          message: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+      })
+      .finally(() => {
+        remote.requestWorkspaces();
+        remote.requestSessions();
+      });
+  }, [flow, remote]);
 
   useEffect(() => {
     if (!pendingProcessAttach) {
@@ -295,14 +324,14 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         : current
     );
 
-    void attachController.attach({ sessionId: session.id, viewOnly: true }).catch((error) => {
+    void handleAttachSession({ sessionId: session.id, viewOnly: true }).catch((error) => {
       flow.showMessage({
         title: 'Attach Failed',
         message: error instanceof Error ? error.message : String(error),
         variant: 'error',
       });
     });
-  }, [attachController, flow, pendingProcessAttach, remote.sessions]);
+  }, [flow, handleAttachSession, pendingProcessAttach, remote.sessions]);
 
   useEffect(() => {
     if (!pendingProcessAttach) {
@@ -397,7 +426,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     workspaces: remote.workspaces,
     sessions: remote.sessions,
     onRequestSessions: () => remote.requestSessions(),
-    onAttachSession: attachController.attachFromSelection,
+    onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
     onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
@@ -424,7 +453,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      await attachController.attach({ sessionId });
+      await handleAttachSession({ sessionId });
     },
     onClose: () => {
       setShowInbox(false);
@@ -671,6 +700,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           onResize={remote.resize}
           onDetach={remote.detachSession}
           setWriteCallback={remote.setWriteCallback}
+          readOnly={isViewOnlySession}
         />
       </Fragment>
     );
