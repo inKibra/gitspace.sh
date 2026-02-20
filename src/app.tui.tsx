@@ -90,6 +90,7 @@ import { useLocalSession } from './hooks/useLocalSession.tui.js';
 import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { loadProcessesConfigWithDiagnostics } from './lib/processes/config.js';
@@ -222,12 +223,6 @@ type AppAction =
   | { type: 'SET_ERROR'; error: string | null }
   | { type: 'SWITCH_PANEL' };
 
-interface PendingProcessAttachTarget {
-  workspaceId: string;
-  processName: string;
-  instance: number;
-}
-
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_VIEW':
@@ -316,12 +311,6 @@ function App({ relayConfig, onQuit }: AppProps) {
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
-  const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
-  const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
-
-  useEffect(() => {
-    pendingProcessAttachRef.current = pendingProcessAttach;
-  }, [pendingProcessAttach]);
 
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
@@ -1246,108 +1235,54 @@ function App({ relayConfig, onQuit }: AppProps) {
     onRefresh: refreshProjects,
   });
 
-  // Process handlers
-  const handleStartProcess = useCallback((params: { workspaceId: string; processName: string }) => {
-    void startLocalProcess(params.workspaceId, params.processName);
-  }, [startLocalProcess]);
-
-  const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
-    const target: PendingProcessAttachTarget = {
-      workspaceId: params.workspaceId,
-      processName: params.processName,
-      instance: params.instance,
-    };
-    setPendingProcessAttach(target);
-    void startLocalProcess(params.workspaceId, params.processName, params.instance)
-      .then(() => {
-        void refreshWorkspaces();
-      })
-      .catch((error) => {
-        setPendingProcessAttach((current) =>
-          current &&
-          current.workspaceId === target.workspaceId &&
-          current.processName === target.processName &&
-          current.instance === target.instance
-            ? null
-            : current
-        );
-        flow.showMessage({
-          title: 'Process Start Failed',
-          message: error instanceof Error ? error.message : String(error),
-          variant: 'error',
-        });
+  const processActions = useProcessActions({
+    sessions: sessionInfos,
+    startProcess: startLocalProcess,
+    stopProcess: stopLocalProcess,
+    attachSession: handleAttachSession,
+    onStartProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
       });
-  }, [flow, refreshWorkspaces, startLocalProcess]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach) {
-      return;
-    }
-
-    const session = sessionInfos
-      .filter((item) =>
-        item.workspaceId === pendingProcessAttach.workspaceId &&
-        item.processName === pendingProcessAttach.processName &&
-        (item.processInstance ?? 1) === pendingProcessAttach.instance &&
-        item.exitCode === undefined
-      )
-      .sort((a, b) => b.createdAt - a.createdAt)[0];
-
-    if (!session) {
-      return;
-    }
-
-    const target = pendingProcessAttach;
-    setPendingProcessAttach((current) =>
-      current &&
-      current.workspaceId === target.workspaceId &&
-      current.processName === target.processName &&
-      current.instance === target.instance
-        ? null
-        : current
-    );
-
-    void handleAttachSession({ sessionId: session.id, viewOnly: true }).catch((error) => {
+    },
+    onStopProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Stop Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onStartProcessAttachError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onAttachError: (error) => {
       flow.showMessage({
         title: 'Attach Failed',
         message: error instanceof Error ? error.message : String(error),
         variant: 'error',
       });
-    });
-  }, [flow, handleAttachSession, pendingProcessAttach, sessionInfos]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach) {
-      return;
-    }
-
-    const target = pendingProcessAttach;
-
-    const timeout = setTimeout(() => {
-      const current = pendingProcessAttachRef.current;
-      if (
-        !current ||
-        current.workspaceId !== target.workspaceId ||
-        current.processName !== target.processName ||
-        current.instance !== target.instance
-      ) {
-        return;
-      }
-
-      setPendingProcessAttach(null);
+    },
+    onAttachTimeout: (target) => {
       flow.showMessage({
         title: 'Attach Timeout',
-        message: `Process started but no active session was found for ${current.processName}#${current.instance}.`,
+        message: `Process started but no active session was found for ${target.processName}#${target.instance}.`,
         variant: 'warning',
       });
-    }, 8000);
+    },
+    onStartProcessAttachFinally: () => {
+      void refreshWorkspaces();
+    },
+  });
 
-    return () => clearTimeout(timeout);
-  }, [flow, pendingProcessAttach]);
-
-  const handleStopProcess = useCallback((params: { workspaceId: string; processName: string }) => {
-    void stopLocalProcess(params.workspaceId, params.processName);
-  }, [stopLocalProcess]);
+  const handleStartProcess = processActions.handleStartProcess;
+  const handleStartProcessAttach = processActions.handleStartProcessAttach;
+  const handleStopProcess = processActions.handleStopProcess;
 
   const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
     const workspace = localWorkspaces.find((item) => item.id === params.workspaceId);
@@ -1362,7 +1297,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     if (workspace) {
       void requestLocalEvents(workspace.path);
     }
-    dispatch({ type: 'SET_VIEW', view: 'events' as AppView });
+    dispatch({ type: 'SET_VIEW', view: 'events' });
   }, [localWorkspaces, requestLocalEvents]);
 
   // Spaces browser hook

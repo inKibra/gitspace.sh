@@ -18,6 +18,7 @@ import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/devic
 import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
@@ -54,12 +55,6 @@ import {
 
 type View = "machines" | "terminal" | "review";
 
-interface PendingProcessAttachTarget {
-  workspaceId: string;
-  processName: string;
-  instance: number;
-}
-
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
 const DELETE_ERROR_CODES = new Set([
@@ -83,7 +78,6 @@ export default function App() {
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
-  const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
     shift: false,
@@ -94,15 +88,10 @@ export default function App() {
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
-  const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
   const eventsKeyboardStateRef = useRef<{
     selectedIndex: number;
     selectIndex: (index: number) => void;
   } | null>(null);
-
-  useEffect(() => {
-    pendingProcessAttachRef.current = pendingProcessAttach;
-  }, [pendingProcessAttach]);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<SessionTerminalHandle>(null);
@@ -524,6 +513,29 @@ export default function App() {
     await attachController.attachFromSelection(params);
   }, [attachController]);
 
+  const processActions = useProcessActions({
+    sessions: terminal.sessions,
+    startProcess: terminal.startProcess,
+    stopProcess: terminal.stopProcess,
+    attachSession: handleAttachSession,
+    onStartProcessError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onStopProcessError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onStartProcessAttachError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onAttachError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onAttachTimeout: (target) => {
+      toast.error(`Process started but no active session appeared for ${target.processName}#${target.instance}.`);
+    },
+    pendingAttachCancelSignal: terminal.commandError,
+  });
+
   // Handle opening review for a workspace
   const handleOpenReview = useCallback((workspace: WorkspaceInfo) => {
     setReviewWorkspace({
@@ -557,33 +569,6 @@ export default function App() {
     });
   }, [attachController, terminal.workspaces]);
 
-  const handleStartProcessSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
-    void terminal.startProcess(params.workspaceId, params.processName, params.instance).catch((error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    });
-  }, [terminal]);
-
-  const handleStartProcessAttachSelection = useCallback((params: { workspaceId: string; processName: string; instance?: number }) => {
-    const instance = params.instance ?? 1;
-    const target: PendingProcessAttachTarget = {
-      workspaceId: params.workspaceId,
-      processName: params.processName,
-      instance,
-    };
-    setPendingProcessAttach(target);
-    void terminal.startProcess(params.workspaceId, params.processName, instance).catch((error) => {
-      setPendingProcessAttach((current) =>
-        current &&
-        current.workspaceId === target.workspaceId &&
-        current.processName === target.processName &&
-        current.instance === target.instance
-          ? null
-          : current
-      );
-      toast.error(error instanceof Error ? error.message : String(error));
-    });
-  }, [terminal]);
-
   const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
     const workspace = terminal.workspaces.find((item) => item.id === params.workspaceId);
     const workspaceLabel = workspace?.name ?? params.workspaceId;
@@ -597,13 +582,9 @@ export default function App() {
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
-    onStartProcess: (params) => handleStartProcessSelection(params),
-    onStartProcessAttach: (params) => handleStartProcessAttachSelection(params),
-    onStopProcess: (params) => {
-      void terminal.stopProcess(params.workspaceId, params.processName).catch((error) => {
-        toast.error(error instanceof Error ? error.message : String(error));
-      });
-    },
+    onStartProcess: (params) => processActions.handleStartProcess(params),
+    onStartProcessAttach: (params) => processActions.handleStartProcessAttach(params),
+    onStopProcess: (params) => processActions.handleStopProcess(params),
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: (workspaceId) => {
       const workspace = terminal.workspaces.find(w => w.id === workspaceId);
@@ -619,71 +600,6 @@ export default function App() {
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
   });
-
-  useEffect(() => {
-    if (!pendingProcessAttach) {
-      return;
-    }
-
-    const session = terminal.sessions
-      .filter((item) =>
-        item.workspaceId === pendingProcessAttach.workspaceId &&
-        item.processName === pendingProcessAttach.processName &&
-        (item.processInstance ?? 1) === pendingProcessAttach.instance &&
-        item.exitCode === undefined
-      )
-      .sort((a, b) => b.createdAt - a.createdAt)[0];
-
-    if (!session) {
-      return;
-    }
-
-    const target = pendingProcessAttach;
-    setPendingProcessAttach((current) =>
-      current &&
-      current.workspaceId === target.workspaceId &&
-      current.processName === target.processName &&
-      current.instance === target.instance
-        ? null
-        : current
-    );
-
-    void handleAttachSession({ sessionId: session.id, viewOnly: true }).catch((error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    });
-  }, [handleAttachSession, pendingProcessAttach, terminal.sessions]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach) {
-      return;
-    }
-
-    const target = pendingProcessAttach;
-
-    const timeout = window.setTimeout(() => {
-      const current = pendingProcessAttachRef.current;
-      if (
-        !current ||
-        current.workspaceId !== target.workspaceId ||
-        current.processName !== target.processName ||
-        current.instance !== target.instance
-      ) {
-        return;
-      }
-
-      setPendingProcessAttach(null);
-      toast.error(`Process started but no active session appeared for ${current.processName}#${current.instance}.`);
-    }, 8000);
-
-    return () => window.clearTimeout(timeout);
-  }, [pendingProcessAttach]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach || !terminal.commandError) {
-      return;
-    }
-    setPendingProcessAttach(null);
-  }, [pendingProcessAttach, terminal.commandError]);
 
   // Inbox hook
   const inboxProps = useInbox({
@@ -997,8 +913,9 @@ export default function App() {
             variant: 'warning',
             confirmLabel: 'Stop',
             onConfirm: () => {
-              void terminal.stopProcess(selected.workspaceId, selected.processName).catch((error) => {
-                toast.error(error instanceof Error ? error.message : String(error));
+              processActions.handleStopProcess({
+                workspaceId: selected.workspaceId,
+                processName: selected.processName,
               });
             },
           });

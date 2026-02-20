@@ -18,6 +18,7 @@ import { FlowTUI } from './Flow.tui.js';
 import { useRemoteTerminal } from '../hooks/useRemoteTerminal.tui.js';
 import { useBundleRefreshAttachFlow } from '../session/index.js';
 import { useAttachController } from '../app/session/useAttachController.js';
+import { useProcessActions } from '../app/session/useProcessActions.js';
 import {
   resolveInboxCommand,
   resolveSessionBrowserCommand,
@@ -35,12 +36,6 @@ const COLORS = {
   error: '#FF4444',
   title: '#00FF88',
 };
-
-interface PendingProcessAttachTarget {
-  workspaceId: string;
-  processName: string;
-  instance: number;
-}
 
 function StatusBar({ hint }: { hint: string }) {
   return (
@@ -65,10 +60,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
-  const [pendingProcessAttach, setPendingProcessAttach] = useState<PendingProcessAttachTarget | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
-  const pendingProcessAttachRef = useRef<PendingProcessAttachTarget | null>(null);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
     onError: (error) => {
@@ -263,125 +256,64 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     setPendingProcessEditWorkspaceId(null);
   }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
 
-  useEffect(() => {
-    pendingProcessAttachRef.current = pendingProcessAttach;
-  }, [pendingProcessAttach]);
-
-  const handleStartProcessAttach = useCallback((params: { workspaceId: string; processName: string; instance: number }) => {
-    const target: PendingProcessAttachTarget = {
-      workspaceId: params.workspaceId,
-      processName: params.processName,
-      instance: params.instance,
-    };
-    setPendingProcessAttach(target);
-    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName, params.instance))
-      .catch((error) => {
-        setPendingProcessAttach((current) =>
-          current &&
-          current.workspaceId === target.workspaceId &&
-          current.processName === target.processName &&
-          current.instance === target.instance
-            ? null
-            : current
-        );
-        flow.showMessage({
-          title: 'Process Start Failed',
-          message: error instanceof Error ? error.message : String(error),
-          variant: 'error',
-        });
-      })
-      .finally(() => {
-        remote.requestWorkspaces();
-        remote.requestSessions();
+  const processActions = useProcessActions({
+    sessions: remote.sessions,
+    startProcess: remote.startProcess,
+    stopProcess: remote.stopProcess,
+    attachSession: handleAttachSession,
+    onStartProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
       });
-  }, [flow, remote]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach) {
-      return;
-    }
-
-    const session = remote.sessions
-      .filter((item) =>
-        item.workspaceId === pendingProcessAttach.workspaceId &&
-        item.processName === pendingProcessAttach.processName &&
-        (item.processInstance ?? 1) === pendingProcessAttach.instance &&
-        item.exitCode === undefined
-      )
-      .sort((a, b) => b.createdAt - a.createdAt)[0];
-
-    if (!session) {
-      return;
-    }
-
-    const target = pendingProcessAttach;
-    setPendingProcessAttach((current) =>
-      current &&
-      current.workspaceId === target.workspaceId &&
-      current.processName === target.processName &&
-      current.instance === target.instance
-        ? null
-        : current
-    );
-
-    void handleAttachSession({ sessionId: session.id, viewOnly: true }).catch((error) => {
+    },
+    onStopProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Stop Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onStartProcessAttachError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onAttachError: (error) => {
       flow.showMessage({
         title: 'Attach Failed',
         message: error instanceof Error ? error.message : String(error),
         variant: 'error',
       });
-    });
-  }, [flow, handleAttachSession, pendingProcessAttach, remote.sessions]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach) {
-      return;
-    }
-
-    const target = pendingProcessAttach;
-
-    const timeout = setTimeout(() => {
-      const current = pendingProcessAttachRef.current;
-      if (
-        !current ||
-        current.workspaceId !== target.workspaceId ||
-        current.processName !== target.processName ||
-        current.instance !== target.instance
-      ) {
-        return;
-      }
-
-      setPendingProcessAttach(null);
+    },
+    onAttachTimeout: (target) => {
       flow.showMessage({
         title: 'Attach Timeout',
-        message: `Process started but no active session was found for ${current.processName}#${current.instance}.`,
+        message: `Process started but no active session was found for ${target.processName}#${target.instance}.`,
         variant: 'warning',
       });
-    }, 8000);
-
-    return () => clearTimeout(timeout);
-  }, [flow, pendingProcessAttach]);
-
-  useEffect(() => {
-    if (!pendingProcessAttach || !remote.commandError) {
-      return;
-    }
-    setPendingProcessAttach(null);
-  }, [pendingProcessAttach, remote.commandError]);
-
-  const handleStartProcess = useCallback((params: { workspaceId: string; processName: string }) => {
-    void Promise.resolve(remote.startProcess(params.workspaceId, params.processName)).finally(() => {
+    },
+    onStartProcessFinally: () => {
       remote.requestWorkspaces();
       remote.requestSessions();
-    });
-  }, [remote]);
-
-  const handleStopProcess = useCallback((params: { workspaceId: string; processName: string }) => {
-    void Promise.resolve(remote.stopProcess(params.workspaceId, params.processName)).finally(() => {
+    },
+    onStopProcessFinally: () => {
       remote.requestWorkspaces();
       remote.requestSessions();
-    });
-  }, [remote]);
+    },
+    onStartProcessAttachFinally: () => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    },
+    pendingAttachCancelSignal: remote.commandError,
+  });
+
+  const handleStartProcess = processActions.handleStartProcess;
+  const handleStartProcessAttach = processActions.handleStartProcessAttach;
+  const handleStopProcess = processActions.handleStopProcess;
 
   const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
     const workspace = remote.workspaces.find((item) => item.id === params.workspaceId);
