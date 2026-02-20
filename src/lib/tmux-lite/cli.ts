@@ -284,10 +284,23 @@ export async function listSessions(): Promise<Session[]> {
 export async function createSession(
   name: string,
   cwd: string,
-  options?: { hooks?: SessionCreateHooks }
+  options?: {
+    hooks?: SessionCreateHooks;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+  }
 ): Promise<Session> {
   await ensureServer();
-  const res = await send({ type: "new", name, cwd, hooks: options?.hooks });
+  const res = await send({
+    type: "new",
+    name,
+    cwd,
+    hooks: options?.hooks,
+    command: options?.command,
+    args: options?.args,
+    env: options?.env,
+  });
   if (res.type === "session") return res.session;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");

@@ -7,6 +7,7 @@ import type {
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
 import type { BackendDescriptor, BackendKey } from './backend.js';
+import type { WideEvent, SavedEventFilter } from '../types/events.js';
 
 export interface ScriptRuntimeState {
   phase: ScriptOutputResponse['phase'];
@@ -35,6 +36,10 @@ export interface BackendSessionState {
   attachedSessionName: string | null;
 
   scriptState: ScriptRuntimeState | null;
+
+  events: WideEvent[];
+  liveEventIds: string[];
+  savedEventFilters: SavedEventFilter[];
 }
 
 export interface SessionEngineState {
@@ -82,4 +87,15 @@ export type SessionEngineAction =
       type: 'SET_COMMAND_ERROR';
       backendKey: BackendKey;
       commandError: { code?: string; message: string } | null;
+    }
+  | {
+      type: 'SET_EVENTS';
+      backendKey: BackendKey;
+      events: WideEvent[];
+      liveEventIds: string[];
+    }
+  | {
+      type: 'SET_SAVED_EVENT_FILTERS';
+      backendKey: BackendKey;
+      filters: SavedEventFilter[];
     };

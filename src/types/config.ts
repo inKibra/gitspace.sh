@@ -64,6 +64,91 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
 };
 
 /**
+ * Wide event ingestion mode
+ */
+export type EventsIngestionMode = 'prefix' | 'json';
+
+/**
+ * Field mapping for wide events
+ */
+export interface EventsFieldConfig {
+  /** Field name for the event name */
+  name: string;
+  /** Field name for the event ID */
+  id: string;
+  /** Field name for the event level */
+  level: string;
+  /** Field name for the timestamp */
+  timestamp: string;
+  /** Field name for the message */
+  message: string;
+}
+
+/**
+ * Rotation settings for wide event logs
+ */
+export interface EventsRotationConfig {
+  /** Max file size in bytes before rotation */
+  maxBytes: number;
+  /** Max file age in minutes before rotation */
+  maxMinutes: number;
+  /** Number of files to retain */
+  keepFiles: number;
+}
+
+/**
+ * Wide event configuration
+ */
+export interface EventsConfig {
+  /** Enable wide event collection */
+  enabled: boolean;
+  /** Ingestion mode (prefix required or json matching) */
+  mode: EventsIngestionMode;
+  /** Prefix for event lines when mode is prefix */
+  prefix: string;
+  /** Field mapping */
+  fields: EventsFieldConfig;
+  /** Rotation settings */
+  rotation: EventsRotationConfig;
+  /** Correlation field for aggregating wide events */
+  correlationField?: string;
+  /** Aggregate wide events as source events stream in */
+  aggregateMode?: 'stream';
+  /** Max timeline entries per wide event */
+  maxTimeline?: number;
+  /** Minimum interval between wide event updates (ms) */
+  updateIntervalMs?: number;
+  /** Snapshot cache size per workspace (bytes) */
+  snapshotCacheMaxBytes?: number;
+}
+
+/**
+ * Default wide event configuration
+ */
+export const DEFAULT_EVENTS_CONFIG: EventsConfig = {
+  enabled: true,
+  mode: 'prefix',
+  prefix: '@event',
+  fields: {
+    name: 'event',
+    id: 'eventId',
+    level: 'level',
+    timestamp: 'timestamp',
+    message: 'message',
+  },
+  rotation: {
+    maxBytes: 25_000_000,
+    maxMinutes: 60,
+    keepFiles: 20,
+  },
+  correlationField: 'requestId',
+  aggregateMode: 'stream',
+  maxTimeline: 200,
+  updateIntervalMs: 250,
+  snapshotCacheMaxBytes: 64 * 1024 * 1024,
+};
+
+/**
  * Linear team info stored in config
  */
 export interface LinearTeamInfo {
@@ -143,6 +228,8 @@ export interface ProjectConfig {
   repository: string;
   /** Base branch for creating worktrees */
   baseBranch: string;
+  /** Wide events configuration */
+  events?: EventsConfig;
   /**
    * @deprecated Use user-level Linear config instead.
    * Kept for backwards compatibility - will be migrated on first access.
@@ -195,5 +282,6 @@ export function createDefaultProjectConfig(
     baseBranch,
     createdAt: now,
     lastAccessed: now,
+    events: { ...DEFAULT_EVENTS_CONFIG },
   };
 }

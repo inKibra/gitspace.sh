@@ -19,6 +19,7 @@ import type {
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import { SpacesError } from '../types/errors.js';
+import type { WideEvent, SavedEventFilter, WideEventFilter } from '../types/events.js';
 import { useSessionEngine } from './useSessionEngine.js';
 
 export type RemoteSessionConnectionStatus =
@@ -94,6 +95,13 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
 
   scriptState: ScriptRuntimeState | null;
   commandError: { code?: string; message: string } | null;
+
+  events: WideEvent[];
+  liveEventIds: string[];
+  savedEventFilters: SavedEventFilter[];
+  startProcess: (workspaceId: string, processName: string, instance?: number) => Promise<void>;
+  stopProcess: (workspaceId: string, processName: string) => Promise<void>;
+  requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
 }
 
 function defaultStatusMapper(
@@ -320,6 +328,35 @@ export function useRemoteSessionClient<ConnectParams>(
     [engine]
   );
 
+  const startProcess = useCallback(async (workspaceId: string, processName: string, instance?: number) => {
+    const result = await withActiveBackend((backendKey) =>
+      engine.startProcess(backendKey, workspaceId, processName, instance)
+    );
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
+  }, [engine, withActiveBackend]);
+
+  const stopProcess = useCallback(async (workspaceId: string, processName: string) => {
+    const result = await withActiveBackend((backendKey) =>
+      engine.stopProcess(backendKey, workspaceId, processName)
+    );
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
+  }, [engine, withActiveBackend]);
+
+  const requestEvents = useCallback((
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ) => {
+    void withActiveBackend((backendKey) =>
+      engine.requestEvents(backendKey, workspacePath, filter, limit, sinceMs)
+    );
+  }, [engine, withActiveBackend]);
+
   useEffect(() => {
     return () => {
       const backendKey = activeBackendKeyRef.current;
@@ -376,5 +413,12 @@ export function useRemoteSessionClient<ConnectParams>(
 
     scriptState: activeBackendState?.scriptState ?? null,
     commandError: activeBackendState?.commandError ?? null,
+
+    events: activeBackendState?.events ?? [],
+    liveEventIds: activeBackendState?.liveEventIds ?? [],
+    savedEventFilters: activeBackendState?.savedEventFilters ?? [],
+    startProcess,
+    stopProcess,
+    requestEvents,
   };
 }

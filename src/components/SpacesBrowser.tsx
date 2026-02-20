@@ -6,10 +6,24 @@
  */
 
 import { useState, useCallback, useMemo, useEffect } from 'react';
+import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
 
 // ============================================================================
 // Types
 // ============================================================================
+
+/** Process summary for workspace */
+export interface WorkspaceProcessInfo {
+  name: string;
+  instances?: number;
+  ports?: WorkspaceProcessPort[];
+}
+
+export interface WorkspaceProcessPort {
+  port: number;
+  name?: string;
+  protocol?: 'http' | 'tcp';
+}
 
 /** Workspace info from machine */
 export interface WorkspaceInfo {
@@ -20,6 +34,9 @@ export interface WorkspaceInfo {
   branch?: string;
   sessionCount: number;
   isStale?: boolean;
+  processes?: WorkspaceProcessInfo[];
+  serveDomain?: string;
+  processConfigError?: string;
 }
 
 /** Session info from machine */
@@ -30,6 +47,9 @@ export interface SessionInfo {
   attached: boolean;
   createdAt: number;
   processTitle?: string;
+  processName?: string;
+  processInstance?: number;
+  exitCode?: number;
 }
 
 /** Tree item types for flattened list */
@@ -37,6 +57,11 @@ export type TreeItem =
   | { type: 'project'; name: string; workspaceCount: number }
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
+  | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
+  | { type: 'process-disabled'; processName: string; workspaceId: string; ports?: WorkspaceProcessPort[] }
+  | { type: 'process-config-error'; workspaceId: string; error: string }
+  | { type: 'edit-processes'; workspaceId: string }
+  | { type: 'events'; workspaceId: string }
   | { type: 'new-session'; workspaceId: string };
 
 /** Tree item with selection state */
@@ -50,7 +75,13 @@ export interface UseSpacesBrowserProps {
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
   onRequestSessions: (workspaceId?: string) => void;
-  onAttachSession: (params: { sessionId?: string; workspaceId?: string }) => void | Promise<void>;
+  onAttachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => void | Promise<void>;
+  onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
+  onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
+  onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
+  onProcessDisabled?: (params: { workspaceId: string; processName: string }) => void;
+  onOpenEvents: (workspaceId: string) => void;
+  onEditProcesses?: (params: { workspaceId: string }) => void;
   onRefresh: () => void | Promise<void>;
   /** Called to refresh sessions after workspace refresh (full refresh by default). */
   onRefreshSessions?: () => void | Promise<void>;
@@ -80,11 +111,17 @@ export interface UseSpacesBrowserReturn {
   selectIndex: (index: number) => void;
   toggleWorkspace: (workspaceId: string) => void;
   activateSelected: () => Promise<void>;
+  activateIndex: (index: number) => Promise<void>;
   /** Direct attach - bypasses state timing issues on mobile */
-  attachSession: (params: { sessionId?: string; workspaceId?: string }) => Promise<void>;
+  attachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => Promise<void>;
+  startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
+  startProcess: (params: { workspaceId: string; processName: string }) => void;
+  stopProcess: (params: { workspaceId: string; processName: string }) => void;
   createNewSession: () => Promise<void>;
   createWorkspace: () => void;
   refresh: () => Promise<void>;
+  openEvents: (workspaceId: string) => void;
+  editProcesses: (params: { workspaceId: string }) => void;
   back: () => void;
 }
 
@@ -142,16 +179,116 @@ function buildTree(
         expanded: isExpanded,
       });
 
-      // If expanded, show sessions and new session action
+      // If expanded, show processes, sessions, events, and new session action
       if (isExpanded) {
-        const workspaceSessions = sessions.filter(s => s.workspaceId === ws.id);
-        for (const session of workspaceSessions) {
+        const workspaceSessions = sessions
+          .filter(s => s.workspaceId === ws.id)
+          .sort((a, b) => {
+            const aProcess = a.processName ? 0 : 1;
+            const bProcess = b.processName ? 0 : 1;
+            if (aProcess !== bProcess) return aProcess - bProcess;
+            return a.name.localeCompare(b.name);
+          });
+        const processSessions = workspaceSessions.filter(s => s.processName);
+        const adHocSessions = workspaceSessions.filter(s => !s.processName);
+
+        // Build process entries from workspace config
+        const processEntries = ws.processes ?? [];
+        const renderedProcessKeys = new Set<string>();
+        const processSessionGroups = new Map<string, SessionInfo[]>();
+        for (const session of processSessions) {
+          const key = `${session.processName ?? ''}:${session.processInstance ?? 1}`;
+          const existing = processSessionGroups.get(key) ?? [];
+          existing.push(session);
+          processSessionGroups.set(key, existing);
+        }
+
+        const getLatestSession = (items: SessionInfo[]): SessionInfo | null => {
+          if (items.length === 0) return null;
+          return [...items].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+        };
+
+        for (const process of processEntries) {
+          const configuredCount = normalizeProcessInstanceCount(process.instances);
+          if (configuredCount === 0) {
+            items.push({
+              type: 'process-disabled',
+              processName: process.name,
+              workspaceId: ws.id,
+              ports: process.ports,
+            });
+            continue;
+          }
+
+          const configuredInstances = Array.from({ length: configuredCount }, (_, idx) => idx + 1);
+          for (const instance of configuredInstances) {
+            const sessionKey = `${process.name}:${instance}`;
+            const matchingSessions = processSessionGroups.get(sessionKey) ?? [];
+            const runningSession = getLatestSession(matchingSessions.filter((session) => session.exitCode === undefined));
+            const latestSession = getLatestSession(matchingSessions);
+
+            let status: 'running' | 'stopped' | 'failed' = 'stopped';
+            if (runningSession) {
+              status = 'running';
+            } else if (latestSession?.exitCode !== undefined) {
+              status = latestSession.exitCode === 0 ? 'stopped' : 'failed';
+            }
+
+            items.push({
+              type: 'process',
+              processName: process.name,
+              instance,
+              workspaceId: ws.id,
+              status,
+              ports: process.ports,
+              serveDomain: ws.serveDomain,
+            });
+            renderedProcessKeys.add(`${process.name}:${instance}`);
+          }
+        }
+
+        // Process sessions not represented by process rows (orphaned/unconfigured)
+        for (const session of processSessions) {
+          const processKey = `${session.processName}:${session.processInstance ?? 1}`;
+          if (renderedProcessKeys.has(processKey)) {
+            continue;
+          }
           items.push({
             type: 'session',
             session,
             workspaceId: ws.id,
           });
         }
+
+        // Ad-hoc sessions
+        for (const session of adHocSessions) {
+          items.push({
+            type: 'session',
+            session,
+            workspaceId: ws.id,
+          });
+        }
+
+        if (ws.processConfigError) {
+          items.push({
+            type: 'process-config-error',
+            workspaceId: ws.id,
+            error: ws.processConfigError,
+          });
+        }
+
+        // Edit processes config action
+        items.push({
+          type: 'edit-processes',
+          workspaceId: ws.id,
+        });
+
+        // Events action
+        items.push({
+          type: 'events',
+          workspaceId: ws.id,
+        });
+
         // New session action
         items.push({
           type: 'new-session',
@@ -182,6 +319,12 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     sessions,
     onRequestSessions,
     onAttachSession,
+    onStartProcess,
+    onStartProcessAttach,
+    onStopProcess,
+    onProcessDisabled,
+    onOpenEvents,
+    onEditProcesses,
     onRefresh,
     onRefreshSessions,
     onBack,
@@ -208,6 +351,20 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   // Selected item
   const selectedItem = tree[selectedIndex] ?? null;
+
+  const findSessionForProcess = useCallback(
+    (workspaceId: string, processName: string, instance: number) =>
+      sessions
+        .filter(
+          (session) =>
+            session.workspaceId === workspaceId &&
+            session.processName === processName &&
+            (session.processInstance ?? 1) === instance &&
+            session.exitCode === undefined
+        )
+        .sort((a, b) => b.createdAt - a.createdAt)[0],
+    [sessions]
+  );
 
   // Computed
   const isEmpty = workspaces.length === 0;
@@ -246,17 +403,64 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     });
   }, [onRequestSessions]);
 
-  const activateSelected = useCallback(async () => {
-    if (!selectedItem) return;
+  const activateItem = useCallback(async (item: TreeItem | null) => {
+    if (!item) return;
 
-    if (selectedItem.type === 'workspace') {
-      toggleWorkspace(selectedItem.workspace.id);
-    } else if (selectedItem.type === 'session') {
-      await onAttachSession({ sessionId: selectedItem.session.id });
-    } else if (selectedItem.type === 'new-session') {
-      await onAttachSession({ workspaceId: selectedItem.workspaceId });
+    if (item.type === 'workspace') {
+      toggleWorkspace(item.workspace.id);
+    } else if (item.type === 'session') {
+      await onAttachSession({
+        sessionId: item.session.id,
+        viewOnly: item.session.processName ? true : undefined,
+      });
+    } else if (item.type === 'process') {
+      if (item.status === 'running') {
+        const session = findSessionForProcess(
+          item.workspaceId,
+          item.processName,
+          item.instance
+        );
+        if (session) {
+          await onAttachSession({ sessionId: session.id, viewOnly: true });
+        } else {
+          onStartProcessAttach({
+            workspaceId: item.workspaceId,
+            processName: item.processName,
+            instance: item.instance,
+          });
+        }
+      } else {
+        onStartProcessAttach({
+          workspaceId: item.workspaceId,
+          processName: item.processName,
+          instance: item.instance,
+        });
+      }
+    } else if (item.type === 'process-disabled') {
+      onProcessDisabled?.({
+        workspaceId: item.workspaceId,
+        processName: item.processName,
+      });
+    } else if (item.type === 'process-config-error') {
+      onEditProcesses?.({ workspaceId: item.workspaceId });
+    } else if (item.type === 'edit-processes') {
+      onEditProcesses?.({ workspaceId: item.workspaceId });
+    } else if (item.type === 'events') {
+      onOpenEvents(item.workspaceId);
+    } else if (item.type === 'new-session') {
+      await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [selectedItem, toggleWorkspace, onAttachSession]);
+  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onOpenEvents]);
+
+  const activateSelected = useCallback(async () => {
+    await activateItem(selectedItem);
+  }, [activateItem, selectedItem]);
+
+  const activateIndex = useCallback(async (index: number) => {
+    const clamped = Math.max(0, Math.min(index, tree.length - 1));
+    setSelectedIndex(clamped);
+    await activateItem(tree[clamped] ?? null);
+  }, [activateItem, tree]);
 
   const createNewSession = useCallback(async () => {
     if (!selectedItem) return;
@@ -264,7 +468,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     let workspaceId: string | null = null;
     if (selectedItem.type === 'workspace') {
       workspaceId = selectedItem.workspace.id;
-    } else if (selectedItem.type === 'session' || selectedItem.type === 'new-session') {
+    } else if ('workspaceId' in selectedItem) {
       workspaceId = selectedItem.workspaceId;
     }
 
@@ -306,12 +510,18 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     selectIndex,
     toggleWorkspace,
     activateSelected,
+    activateIndex,
     attachSession: async (params) => {
       await onAttachSession(params);
     },
+    startProcessAttach: (params) => onStartProcessAttach(params),
+    startProcess: (params) => onStartProcess?.(params),
+    stopProcess: (params) => onStopProcess?.(params),
     createNewSession,
     createWorkspace,
     refresh,
+    openEvents: (workspaceId) => onOpenEvents(workspaceId),
+    editProcesses: (params) => onEditProcesses?.(params),
     back,
   };
 }

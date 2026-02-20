@@ -59,7 +59,7 @@ export class ClientSessionManager {
       accessList: options.accessList,
       handshakeTimeoutMs: options.handshakeTimeoutMs,
     });
-    this.remoteSessionHandler = new RemoteSessionHandler();
+    this.remoteSessionHandler = new RemoteSessionHandler(options.remoteSessionOptions);
   }
 
   private writeToTmuxSocket(session: ClientSession, frame: Buffer): void {
@@ -223,6 +223,7 @@ export class ClientSessionManager {
           session.tmuxSocketWriter = undefined;
           session.state = "browsing";
           session.attachedSessionId = undefined;
+          session.viewOnly = undefined;
           session.sessionSocketPath = undefined;
           session.waitingForResize = undefined;
           session.frameBuffer = undefined;
@@ -256,7 +257,7 @@ export class ClientSessionManager {
       } else {
         // Raw PTY input (STREAM_ID.DATA) - send directly to socket
         // Security: Check write permission before forwarding input
-        if (!canWrite(session.accessType)) {
+        if (session.viewOnly || !canWrite(session.accessType)) {
           console.warn(`[session-manager] Read-only client ${connectionId} attempted PTY write - denied`);
           return null; // Silently drop input from read-only clients
         }
@@ -301,9 +302,14 @@ export class ClientSessionManager {
 
     // Create send callback that captures the raw encrypted response
     // Don't wrap in JSON here - serve.ts handles the relay envelope
+    const sendToClient = this.createSendCallback(connectionId);
     let responseData: Uint8Array | null = null;
     const sendResponse = (encryptedFrame: Uint8Array) => {
-      responseData = encryptedFrame;
+      if (responseData === null) {
+        responseData = encryptedFrame;
+        return;
+      }
+      sendToClient(Buffer.from(encryptedFrame));
     };
 
     // Handle the message through RemoteSessionHandler
@@ -313,6 +319,7 @@ export class ClientSessionManager {
     if (remoteSession.state === "attached" && remoteSession.attachedSessionId) {
       session.state = "attached";
       session.attachedSessionId = remoteSession.attachedSessionId;
+      session.viewOnly = remoteSession.viewOnly ?? false;
       session.sessionSocketPath = remoteSession.sessionSocketPath;
 
       // Connect to tmux-lite session socket for PTY I/O
@@ -386,6 +393,7 @@ export class ClientSessionManager {
   ): Uint8Array | null {
     // Update session state - enter browsing mode (not spawning PTY yet)
     session.state = "browsing";
+    session.viewOnly = undefined;
     session.sessionKeys = established.sessionKeys;
     session.accessType = established.accessType;
     session.sessionId = established.sessionId;
@@ -500,6 +508,11 @@ export class ClientSessionManager {
                   console.log("[session-manager] Session kicked");
                   this.handleDisconnect(connectionId, "Session kicked");
                   return;
+                } else if (event.type === "wide_event") {
+                  const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });
+                  const eventData = new TextEncoder().encode(eventMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, eventData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                 }
                 // Ignore attach-ready and attached - handled by client
               } else if (frame.type === FrameType.PTY) {

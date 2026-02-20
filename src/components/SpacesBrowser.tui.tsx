@@ -5,7 +5,7 @@
  * Receives all state and actions from useSpacesBrowser hook.
  */
 
-import type { UseSpacesBrowserReturn } from './SpacesBrowser.js';
+import type { UseSpacesBrowserReturn, TreeItem } from './SpacesBrowser.js';
 import { formatTime } from './SpacesBrowser.js';
 
 // ============================================================================
@@ -38,6 +38,40 @@ interface SpacesBrowserTUIProps extends UseSpacesBrowserReturn {
 }
 
 // ============================================================================
+// Hint Helper
+// ============================================================================
+
+function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string {
+  if (selectedItem?.type === 'session') {
+    return '[↑↓] Navigate  [Enter] Attach  [x] Kill  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'process') {
+    return selectedItem.status === 'running'
+      ? '[↑↓] Navigate  [Enter] View  [x] Stop  [r] Refresh  [q] Back'
+      : '[↑↓] Navigate  [Enter] Start  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'process-disabled') {
+    return '[↑↓] Navigate  [Enter] Disabled  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'process-config-error') {
+    return '[↑↓] Navigate  [Enter] Fix Config  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'workspace') {
+    return '[↑↓] Navigate  [Enter] Expand  [n] New  [d] Delete  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'edit-processes') {
+    return '[↑↓] Navigate  [Enter] Edit Processes Config  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'events') {
+    return '[↑↓] Navigate  [Enter] Open Events  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'new-session') {
+    return '[↑↓] Navigate  [Enter] New Session  [r] Refresh  [q] Back';
+  }
+  return '[↑↓] Navigate  [Enter] Select  [n] New  [r] Refresh  [q] Back';
+}
+
+// ============================================================================
 // Component
 // ============================================================================
 
@@ -47,6 +81,7 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
     machineName,
     isEmpty,
     focused = true,
+    selectedItem,
   } = props;
 
   // Empty state
@@ -141,6 +176,66 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             );
           }
 
+          if (item.type === 'process') {
+            const statusIcon = item.status === 'running' ? '▶' : item.status === 'failed' ? '✗' : '■';
+            const statusColor = item.status === 'running' ? '#00FF00' : item.status === 'failed' ? '#FF4444' : COLORS.textDim;
+            const textColor = isSelected ? COLORS.selected : COLORS.text;
+            const prefix = isSelected ? '>' : ' ';
+            const portInfo = item.ports?.length ? ` :${item.ports.map(p => p.port).join(',')}` : '';
+
+            return (
+              <box key={`process-${item.workspaceId}-${item.processName}-${item.instance}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}   </text>
+                <text fg={statusColor}>{statusIcon}</text>
+                <text fg={textColor}> {item.processName}#{item.instance}</text>
+                {portInfo && <text fg={COLORS.textDim}>{portInfo}</text>}
+                <text fg={statusColor}> ({item.status})</text>
+              </box>
+            );
+          }
+
+          if (item.type === 'process-disabled') {
+            const textColor = isSelected ? COLORS.selected : '#D29922';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <box key={`process-disabled-${item.workspaceId}-${item.processName}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}   </text>
+                <text fg="#D29922">⏸</text>
+                <text fg={textColor}> {item.processName} (disabled)</text>
+              </box>
+            );
+          }
+
+          if (item.type === 'edit-processes') {
+            const textColor = isSelected ? COLORS.selected : '#FFAA55';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <text key={`edit-processes-${item.workspaceId}`} fg={textColor} height={1}>
+                {prefix}   ⚙ Edit Processes Config
+              </text>
+            );
+          }
+
+          if (item.type === 'process-config-error') {
+            const textColor = isSelected ? COLORS.selected : '#FF6666';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <text key={`process-config-error-${item.workspaceId}`} fg={textColor} height={1}>
+                {prefix}   ⚠ Invalid processes config
+              </text>
+            );
+          }
+
+          if (item.type === 'events') {
+            const textColor = isSelected ? COLORS.selected : '#AA88FF';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <text key={`events-${item.workspaceId}`} fg={textColor} height={1}>
+                {prefix}   ◆ Events
+              </text>
+            );
+          }
+
           if (item.type === 'new-session') {
             const textColor = isSelected ? COLORS.selected : COLORS.newSession;
             return (
@@ -156,7 +251,7 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
 
       {/* Footer hint */}
       <text fg={COLORS.textDim} height={1} paddingLeft={1}>
-        [↑↓] Navigate  [Enter] Select  [n] New  [r] Refresh  [q] Back
+        {getSpacesBrowserHint(selectedItem)}
       </text>
     </box>
   );

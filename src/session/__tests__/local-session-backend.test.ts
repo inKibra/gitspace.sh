@@ -186,6 +186,7 @@ describe('LocalSessionBackend', () => {
       type: 'attached',
       sessionId: 'sess-new',
       sessionName: 'alpha:ws-1:2',
+      viewOnly: false,
     });
 
     expect(events).toContainEqual({
@@ -201,6 +202,36 @@ describe('LocalSessionBackend', () => {
         cwd: '/tmp/ws-1',
       },
     ]);
+  });
+
+  it('does not include saved filters in workspace list payloads', async () => {
+    const events: BackendEvent[] = [];
+
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      ensureServer: async () => {},
+      scanWorkspaces: async () => [
+        {
+          id: 'ws-1',
+          name: 'ws-1',
+          path: '/tmp/ws-1',
+          projectName: 'alpha',
+          sessionCount: 0,
+        },
+      ],
+      listSessions: async () => [],
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await backend.connect();
+    await backend.listWorkspaces();
+
+    const workspaceEvent = events.find((event) => event.type === 'workspaces');
+    expect(workspaceEvent).toBeDefined();
+    if (workspaceEvent && workspaceEvent.type === 'workspaces') {
+      expect('savedEventFilters' in workspaceEvent).toBe(false);
+    }
   });
 
   it('streams PTY data and control frames through local socket transport', async () => {
@@ -284,7 +315,7 @@ describe('LocalSessionBackend', () => {
     expect(sentControls).toContainEqual({ type: 'resize', cols: 100, rows: 30 });
     expect(sentControls).toContainEqual({ type: 'detach' });
     expect(sentPty).toEqual([new Uint8Array([0x41])]);
-    expect(events).toContainEqual({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1' });
+    expect(events).toContainEqual({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1', viewOnly: false });
     expect(events).toContainEqual({ type: 'detached' });
   });
 
@@ -645,6 +676,7 @@ describe('LocalSessionBackend', () => {
         type: 'attached',
         sessionId: 'sess-1',
         sessionName: 'alpha:ws-1:1',
+        viewOnly: false,
       },
     ]);
     expect(detachedEvents).toEqual([{ type: 'detached' }]);
@@ -727,6 +759,7 @@ describe('LocalSessionBackend', () => {
       type: 'attached',
       sessionId: 'sess-1',
       sessionName: 'alpha:ws-1:1',
+      viewOnly: false,
     });
   });
 

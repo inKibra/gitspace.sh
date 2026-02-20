@@ -124,6 +124,33 @@ describe('useAttachController', () => {
     )
   })
 
+  it('passes through viewOnly on existing session attaches', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+      })
+    )
+
+    await result.current.attachFromSelection({ sessionId: 'session-view', viewOnly: true })
+
+    expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
+      {
+        sessionId: 'session-view',
+        viewOnly: true,
+      },
+      {
+        projectName: null,
+      }
+    )
+  })
+
   it('runs lifecycle callbacks for cancelled and failed attach attempts', async () => {
     const onAttachCancelled = mock(() => {})
     const onAttachError = mock(() => {})

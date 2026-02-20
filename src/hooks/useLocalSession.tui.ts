@@ -9,6 +9,7 @@ import {
   type SessionBackend,
 } from '../session/index.js';
 import type { NotificationConfig } from '../notifications/types.js';
+import type { WideEventFilter } from '../types/events.js';
 import { createBunLocalSessionBackend } from '../app/session/createSessionBackend.bun.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
@@ -322,6 +323,33 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     });
   }, [enabled]);
 
+  const startProcess = useCallback(async (workspaceId: string, processName: string, instance?: number) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.startProcess(backendKey, workspaceId, processName, instance);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    });
+  }, [backendKey, runWithBackend]);
+
+  const stopProcess = useCallback(async (workspaceId: string, processName: string) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.stopProcess(backendKey, workspaceId, processName);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    });
+  }, [backendKey, runWithBackend]);
+
+  const requestEvents = useCallback(async (
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.requestEvents(backendKey, workspacePath, filter, limit, sinceMs);
+    });
+  }, [backendKey, runWithBackend]);
+
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     writeCallbackRef.current = fn;
     backendRef.current?.setPtyOutputHandler(fn);
@@ -340,6 +368,9 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     attachedSessionName: localState?.attachedSessionName ?? null,
     scriptState: localState?.scriptState ?? null,
     commandError: localState?.commandError ?? null,
+    events: localState?.events ?? [],
+    liveEventIds: localState?.liveEventIds ?? [],
+    savedEventFilters: localState?.savedEventFilters ?? [],
     requestProjects,
     requestWorkspaces,
     requestSessions,
@@ -354,6 +385,9 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
+    startProcess,
+    stopProcess,
+    requestEvents,
     send,
     resize,
     setWriteCallback,

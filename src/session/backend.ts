@@ -5,6 +5,7 @@ import type {
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
+import type { WideEventFilter } from '../types/events.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -24,6 +25,14 @@ export interface AttachSessionParams {
   cols?: number;
   rows?: number;
   scriptPolicy?: 'auto' | 'skip';
+  /** When true, the client cannot send input to the PTY (view-only mode) */
+  viewOnly?: boolean;
+  /** Custom command to run (skips workspace scripts when set) */
+  command?: string;
+  /** Arguments for the custom command */
+  args?: string[];
+  /** Environment variables for the custom command */
+  env?: Record<string, string>;
 }
 
 export interface DeleteWorkspaceParams {
@@ -73,6 +82,9 @@ export interface SessionBackend {
   updateNotificationConfig(config: NotificationConfig): Promise<void>;
 
   sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult>;
+  startProcess?(workspaceId: string, processName: string, instance?: number): Promise<void>;
+  stopProcess?(workspaceId: string, processName: string): Promise<void>;
+  requestEvents?(workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number): Promise<void>;
 
   writePtyData?(data: Uint8Array): Promise<void>;
   resizePty?(cols: number, rows: number): Promise<void>;

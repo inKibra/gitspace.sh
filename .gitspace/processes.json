@@ -1,0 +1,23 @@
+{
+  "processes": [
+    {
+      "name": "sample-events",
+      "command": "bun",
+      "args": ["scripts/sample-events.ts"],
+      "autostart": false,
+      "events": {
+        "keepRawOutput": false,
+        "correlationField": "requestId",
+        "aggregateMode": "stream",
+        "updateIntervalMs": 200,
+        "maxTimeline": 50
+      },
+      "restart": {
+        "policy": "always",
+        "maxAttempts": 10,
+        "backoffMs": 2000,
+        "maxBackoffMs": 15000
+      }
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PasteEvent } from '@opentui/core';
 import { useKeyboard, useRenderer } from '@opentui/react';
 import type { Identity } from '../types/identity.js';
@@ -18,6 +18,7 @@ import { FlowTUI } from './Flow.tui.js';
 import { useRemoteTerminal } from '../hooks/useRemoteTerminal.tui.js';
 import { useBundleRefreshAttachFlow } from '../session/index.js';
 import { useAttachController } from '../app/session/useAttachController.js';
+import { useProcessActions } from '../app/session/useProcessActions.js';
 import {
   resolveInboxCommand,
   resolveSessionBrowserCommand,
@@ -26,6 +27,7 @@ import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
+import { buildEditProcessesCommand } from '../lib/processes/editor.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -55,7 +57,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const renderer = useRenderer();
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
+  const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
+  const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const pendingProcessEditValidationArmedRef = useRef(false);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const flow = useFlow({
     onError: (error) => {
@@ -90,7 +96,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       return remote.selectedProjectName;
     },
     onBeforeAttach: ({ target, params }) => {
-      if (target === 'workspace' && params.workspaceId) {
+      if (target === 'workspace' && params.workspaceId && !params.command) {
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
@@ -183,11 +189,182 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
   }, [remote.mode]);
 
+  useEffect(() => {
+    if (remote.mode !== 'attached') {
+      setIsViewOnlySession(false);
+    }
+  }, [remote.mode]);
+
+  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
+    setIsViewOnlySession(params.viewOnly ?? false);
+    await attachController.attachFromSelection(params);
+  }, [attachController]);
+
+  useEffect(() => {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      remote.mode !== 'browsing'
+    ) {
+      return;
+    }
+    remote.requestWorkspaces();
+  }, [pendingProcessEditWorkspaceId, remote.mode, remote.requestWorkspaces]);
+
+  useEffect(() => {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      remote.mode !== 'browsing'
+    ) {
+      return;
+    }
+
+    if (
+      pendingProcessEditWorkspacesRef.current &&
+      pendingProcessEditWorkspacesRef.current === remote.workspaces
+    ) {
+      return;
+    }
+    pendingProcessEditWorkspacesRef.current = null;
+
+    const workspace = remote.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    if (!workspace) {
+      pendingProcessEditValidationArmedRef.current = false;
+      setPendingProcessEditWorkspaceId(null);
+      return;
+    }
+
+    if (workspace.processConfigError) {
+      flow.showMessage({
+        title: 'Invalid Processes Config',
+        message: workspace.processConfigError,
+        variant: 'error',
+      });
+    } else {
+      const processCount = workspace.processes?.length ?? 0;
+      flow.showMessage({
+        title: 'Processes Config Updated',
+        message: processCount === 0
+          ? 'Config is valid. No processes are defined yet.'
+          : `Config is valid. ${processCount} process${processCount === 1 ? '' : 'es'} defined.`,
+        variant: 'success',
+      });
+    }
+
+    pendingProcessEditValidationArmedRef.current = false;
+    setPendingProcessEditWorkspaceId(null);
+  }, [flow, pendingProcessEditWorkspaceId, remote.mode, remote.workspaces]);
+
+  const processActions = useProcessActions({
+    sessions: remote.sessions,
+    startProcess: remote.startProcess,
+    stopProcess: remote.stopProcess,
+    attachSession: handleAttachSession,
+    onStartProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onStopProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Stop Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onStartProcessAttachError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onAttachError: (error) => {
+      flow.showMessage({
+        title: 'Attach Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onAttachTimeout: (target) => {
+      flow.showMessage({
+        title: 'Attach Timeout',
+        message: `Process started but no active session was found for ${target.processName}#${target.instance}.`,
+        variant: 'warning',
+      });
+    },
+    onStartProcessFinally: () => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    },
+    onStopProcessFinally: () => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    },
+    onStartProcessAttachFinally: () => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
+    },
+    pendingAttachCancelSignal: remote.commandError,
+  });
+
+  const handleStartProcess = processActions.handleStartProcess;
+  const handleStartProcessAttach = processActions.handleStartProcessAttach;
+  const handleStopProcess = processActions.handleStopProcess;
+
+  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
+    const workspace = remote.workspaces.find((item) => item.id === params.workspaceId);
+    const workspaceLabel = workspace?.name ?? params.workspaceId;
+    flow.showMessage({
+      title: 'Process Disabled',
+      message: `Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`,
+      variant: 'error',
+    });
+  }, [flow, remote.workspaces]);
+
+  const handleOpenEvents = useCallback(() => {
+    flow.showMessage({
+      title: 'Events Unavailable',
+      message: 'Events view is not available in this remote TUI screen yet.',
+      variant: 'info',
+    });
+  }, [flow]);
+
+  const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    pendingProcessEditValidationArmedRef.current = false;
+    pendingProcessEditWorkspacesRef.current = remote.workspaces;
+    setPendingProcessEditWorkspaceId(workspaceId);
+    const commandSpec = buildEditProcessesCommand();
+    void attachController.attach({
+      workspaceId,
+      command: commandSpec.command,
+      args: commandSpec.args,
+    }).then((attached) => {
+      if (!attached) {
+        pendingProcessEditValidationArmedRef.current = false;
+        pendingProcessEditWorkspacesRef.current = null;
+        setPendingProcessEditWorkspaceId(null);
+        return;
+      }
+
+      pendingProcessEditValidationArmedRef.current = true;
+    });
+  }, [attachController, remote.workspaces]);
+
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
     onRequestSessions: () => remote.requestSessions(),
-    onAttachSession: attachController.attachFromSelection,
+    onAttachSession: handleAttachSession,
+    onEditProcesses: handleEditProcesses,
+    onStartProcess: handleStartProcess,
+    onStartProcessAttach: handleStartProcessAttach,
+    onStopProcess: handleStopProcess,
+    onProcessDisabled: handleProcessDisabled,
+    onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,
     onRefreshSessions: () => remote.requestSessions(),
     onBack,
@@ -208,7 +385,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      await attachController.attach({ sessionId });
+      await handleAttachSession({ sessionId });
     },
     onClose: () => {
       setShowInbox(false);
@@ -395,6 +572,19 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
             remote.killSession(selected.session.id);
           },
         });
+      } else if (selected?.type === 'process' && selected.status === 'running') {
+        flow.showConfirm({
+          title: 'Stop Process',
+          message: `Stop process "${selected.processName}"?`,
+          variant: 'warning',
+          confirmLabel: 'Stop',
+          onConfirm: () => {
+            handleStopProcess({
+              workspaceId: selected.workspaceId,
+              processName: selected.processName,
+            });
+          },
+        });
       }
     } else if (browseCommand === 'delete') {
       const selected = spacesBrowserProps.selectedItem;
@@ -442,6 +632,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           onResize={remote.resize}
           onDetach={remote.detachSession}
           setWriteCallback={remote.setWriteCallback}
+          readOnly={isViewOnlySession}
         />
       </Fragment>
     );

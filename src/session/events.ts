@@ -7,11 +7,12 @@ import type {
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
+import type { WideEvent, SavedEventFilter } from '../types/events.js';
 
 export type BackendEvent =
   | { type: 'status'; status: 'disconnected' | 'connecting' | 'connected' | 'error'; error?: string }
   | { type: 'projects'; projects: ProjectInfo[] }
-  | { type: 'workspaces'; workspaces: WorkspaceInfo[] }
+  | { type: 'workspaces'; workspaces: WorkspaceInfo[]; savedEventFilters?: SavedEventFilter[] }
   | { type: 'sessions'; sessions: SessionInfo[] }
   | { type: 'inbox'; items: InboxItem[]; unreadCount: number }
   | {
@@ -23,12 +24,15 @@ export type BackendEvent =
       exitCode?: number;
     }
   | { type: 'notification_config'; config: NotificationConfig }
-  | { type: 'attached'; sessionId: string; sessionName?: string }
+  | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean }
   | { type: 'detached' }
   | { type: 'session_exited'; sessionId: string; exitCode?: number }
   | { type: 'command_error'; code?: string; message: string }
   | { type: 'error'; message: string }
-  | { type: 'review_response'; requestId: string; result?: ReviewResult; error?: { code: string; message: string } };
+  | { type: 'review_response'; requestId: string; result?: ReviewResult; error?: { code: string; message: string } }
+  | { type: 'events'; events: WideEvent[]; liveEventIds: string[]; savedEventFilters?: SavedEventFilter[] }
+  | { type: 'process_started'; workspaceId: string; processName: string; sessionId?: string; sessionIds?: string[] }
+  | { type: 'process_stopped'; workspaceId: string; processName: string };
 
 // Re-export for convenience
 export type { ReviewOperation, ReviewResult };

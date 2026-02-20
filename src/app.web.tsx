@@ -18,8 +18,10 @@ import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/devic
 import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
+import { buildEditProcessesCommand } from './lib/processes/editor.js';
 
 // Import shared components and hooks
 import {
@@ -35,6 +37,9 @@ import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
 import { InboxWeb } from "./components/Inbox.web.js";
+import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
+import { EventsWeb } from "./components/Events.web.js";
+import type { WideEventFilter } from "./types/events.js";
 import {
   useNotifications,
   type ToastNotification,
@@ -69,6 +74,10 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
+  const [showEvents, setShowEvents] = useState(false);
+  const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
+  const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
+  const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
     shift: false,
@@ -76,6 +85,13 @@ export default function App() {
   });
   const [localNotificationConfig, setLocalNotificationConfig] =
     useState<NotificationConfig | null>(null);
+  const [isViewOnlySession, setIsViewOnlySession] = useState(false);
+  const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const pendingProcessEditValidationArmedRef = useRef(false);
+  const eventsKeyboardStateRef = useRef<{
+    selectedIndex: number;
+    selectIndex: (index: number) => void;
+  } | null>(null);
 
   // Terminal ref for external control (focus, sendData)
   const terminalRef = useRef<SessionTerminalHandle>(null);
@@ -165,7 +181,7 @@ export default function App() {
         return;
       }
 
-      if (params.workspaceId) {
+      if (params.workspaceId && !params.command) {
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
@@ -287,6 +303,62 @@ export default function App() {
   }, [terminal.mode, terminal.scriptState?.isRunning, terminal.status]);
 
   useEffect(() => {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      terminal.mode !== 'browsing'
+    ) {
+      return;
+    }
+    terminal.requestWorkspaces();
+  }, [pendingProcessEditWorkspaceId, terminal.mode, terminal.requestWorkspaces]);
+
+  useEffect(() => {
+    if (
+      !pendingProcessEditWorkspaceId ||
+      !pendingProcessEditValidationArmedRef.current ||
+      terminal.mode !== 'browsing'
+    ) {
+      return;
+    }
+
+    if (
+      pendingProcessEditWorkspacesRef.current &&
+      pendingProcessEditWorkspacesRef.current === terminal.workspaces
+    ) {
+      return;
+    }
+    pendingProcessEditWorkspacesRef.current = null;
+
+    const workspace = terminal.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    if (!workspace) {
+      pendingProcessEditValidationArmedRef.current = false;
+      setPendingProcessEditWorkspaceId(null);
+      return;
+    }
+
+    if (workspace.processConfigError) {
+      flow.showMessage({
+        title: 'Invalid Processes Config',
+        message: workspace.processConfigError,
+        variant: 'error',
+      });
+    } else {
+      const processCount = workspace.processes?.length ?? 0;
+      flow.showMessage({
+        title: 'Processes Config Updated',
+        message: processCount === 0
+          ? 'Config is valid. No processes are defined yet.'
+          : `Config is valid. ${processCount} process${processCount === 1 ? '' : 'es'} defined.`,
+        variant: 'success',
+      });
+    }
+
+    pendingProcessEditValidationArmedRef.current = false;
+    setPendingProcessEditWorkspaceId(null);
+  }, [flow, pendingProcessEditWorkspaceId, terminal.mode, terminal.workspaces]);
+
+  useEffect(() => {
     const scriptError = terminal.scriptState?.error;
     if (!scriptError) {
       lastScriptErrorRef.current = null;
@@ -406,6 +478,7 @@ export default function App() {
     terminal.disconnect();
     setSelectedMachine(null);
     setShowScriptTerminal(false);
+    setShowEvents(false);
     setInputMode(false); // Reset input mode when leaving terminal
     setView("machines");
   };
@@ -416,6 +489,7 @@ export default function App() {
     relay.disconnect();
     setSelectedMachine(null);
     setShowScriptTerminal(false);
+    setShowEvents(false);
     setView("machines");
     // Reconnect automatically
     relay.connect();
@@ -434,9 +508,33 @@ export default function App() {
   });
 
   // Handle attach session - show modal for new sessions
-  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string }) => {
+  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
+    setIsViewOnlySession(params.viewOnly ?? false);
     await attachController.attachFromSelection(params);
   }, [attachController]);
+
+  const processActions = useProcessActions({
+    sessions: terminal.sessions,
+    startProcess: terminal.startProcess,
+    stopProcess: terminal.stopProcess,
+    attachSession: handleAttachSession,
+    onStartProcessError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onStopProcessError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onStartProcessAttachError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onAttachError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+    onAttachTimeout: (target) => {
+      toast.error(`Process started but no active session appeared for ${target.processName}#${target.instance}.`);
+    },
+    pendingAttachCancelSignal: terminal.commandError,
+  });
 
   // Handle opening review for a workspace
   const handleOpenReview = useCallback((workspace: WorkspaceInfo) => {
@@ -448,12 +546,55 @@ export default function App() {
     setView('review');
   }, []);
 
+  // Open editor on .gitspace/processes.json in the workspace
+  const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    setIsViewOnlySession(false);
+    pendingProcessEditValidationArmedRef.current = false;
+    pendingProcessEditWorkspacesRef.current = terminal.workspaces;
+    setPendingProcessEditWorkspaceId(workspaceId);
+    const commandSpec = buildEditProcessesCommand();
+    void attachController.attach({
+      workspaceId,
+      command: commandSpec.command,
+      args: commandSpec.args,
+    }).then((attached) => {
+      if (!attached) {
+        pendingProcessEditValidationArmedRef.current = false;
+        pendingProcessEditWorkspacesRef.current = null;
+        setPendingProcessEditWorkspaceId(null);
+        return;
+      }
+
+      pendingProcessEditValidationArmedRef.current = true;
+    });
+  }, [attachController, terminal.workspaces]);
+
+  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
+    const workspace = terminal.workspaces.find((item) => item.id === params.workspaceId);
+    const workspaceLabel = workspace?.name ?? params.workspaceId;
+    toast.error(`Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`);
+  }, [terminal.workspaces]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: terminal.workspaces,
     sessions: terminal.sessions,
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
+    onEditProcesses: handleEditProcesses,
+    onStartProcess: (params) => processActions.handleStartProcess(params),
+    onStartProcessAttach: (params) => processActions.handleStartProcessAttach(params),
+    onStopProcess: (params) => processActions.handleStopProcess(params),
+    onProcessDisabled: handleProcessDisabled,
+    onOpenEvents: (workspaceId) => {
+      const workspace = terminal.workspaces.find(w => w.id === workspaceId);
+      if (workspace) {
+        setEventsWorkspacePath(workspace.path);
+        setEventsWorkspaceLabel(workspace.name);
+        setShowEvents(true);
+        terminal.requestEvents(workspace.path, undefined, undefined, undefined);
+      }
+    },
     onRefresh: terminal.requestWorkspaces,
     onRefreshSessions: () => terminal.requestSessions(),
     onBack: handleBackToMachines,
@@ -473,6 +614,68 @@ export default function App() {
     },
     onClose: () => setShowInbox(false),
   });
+
+  // Events hook
+  const eventsItems: WideEventItem[] = terminal.events.map(toWideEventItem);
+
+  const eventsProps = useEvents({
+    events: eventsItems,
+    liveEventIds: terminal.liveEventIds,
+    savedFilters: terminal.savedEventFilters,
+    onSelectFilter: (filter) => {
+      if (!eventsWorkspacePath) return;
+      if (filter) {
+        const sinceMs = filter.sinceMinutes
+          ? Date.now() - filter.sinceMinutes * 60 * 1000
+          : undefined;
+        terminal.requestEvents(
+          eventsWorkspacePath,
+          filter.filter as WideEventFilter,
+          undefined,
+          sinceMs
+        );
+      } else {
+        terminal.requestEvents(eventsWorkspacePath);
+      }
+    },
+    onClose: () => {
+      setShowEvents(false);
+      setEventsWorkspacePath(null);
+    },
+  });
+
+  useEffect(() => {
+    eventsKeyboardStateRef.current = {
+      selectedIndex: eventsProps.selectedIndex,
+      selectIndex: eventsProps.selectIndex,
+    };
+  }, [eventsProps.selectedIndex, eventsProps.selectIndex]);
+
+  // Events polling when events view is active
+  useEffect(() => {
+    if (!showEvents || !eventsWorkspacePath) return;
+
+    const interval = setInterval(() => {
+      const activeFilter = eventsProps.activeFilterName
+        ? terminal.savedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+        : null;
+
+      if (activeFilter) {
+        const sinceMs = activeFilter.sinceMinutes
+          ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
+          : undefined;
+        terminal.requestEvents(
+          eventsWorkspacePath,
+          activeFilter.filter as WideEventFilter,
+          undefined,
+          sinceMs
+        );
+      } else {
+        terminal.requestEvents(eventsWorkspacePath);
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, terminal.savedEventFilters, terminal.requestEvents]);
 
   // ========== Activity Tracking for Notifications ==========
 
@@ -538,6 +741,13 @@ export default function App() {
     terminal.requestSessions,
     terminal.requestNotificationConfig,
   ]);
+
+  // Reset view-only state when detached
+  useEffect(() => {
+    if (terminal.mode !== 'attached') {
+      setIsViewOnlySession(false);
+    }
+  }, [terminal.mode]);
 
   // ========== Keyboard Handlers ==========
 
@@ -623,9 +833,39 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showInbox, inboxProps.moveUp, inboxProps.moveDown, inboxProps.openThread, inboxProps.closeThread, inboxProps.deleteSelected, inboxProps.deleteThread, inboxProps.clearAll, inboxProps.attachToSession, inboxProps.isViewingThread]);
 
+  // Events keyboard navigation
+  useEffect(() => {
+    if (!showEvents) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (e.key === 'Escape' || e.key === 'q') {
+        e.preventDefault();
+        setShowEvents(false);
+        setEventsWorkspacePath(null);
+      } else if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        const state = eventsKeyboardStateRef.current;
+        if (!state) return;
+        state.selectIndex(state.selectedIndex - 1);
+      } else if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        const state = eventsKeyboardStateRef.current;
+        if (!state) return;
+        state.selectIndex(state.selectedIndex + 1);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showEvents]);
+
   // Spaces browser keyboard navigation
   useEffect(() => {
-    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox || showScriptTerminal) {
+    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox || showScriptTerminal || showEvents) {
       return;
     }
 
@@ -666,6 +906,19 @@ export default function App() {
               terminal.killSession(selected.session.id);
             },
           });
+        } else if (selected?.type === 'process' && selected.status === 'running') {
+          flow.showConfirm({
+            title: 'Stop Process',
+            message: `Stop process "${selected.processName}"?`,
+            variant: 'warning',
+            confirmLabel: 'Stop',
+            onConfirm: () => {
+              processActions.handleStopProcess({
+                workspaceId: selected.workspaceId,
+                processName: selected.processName,
+              });
+            },
+          });
         }
       } else if (command === 'delete') {
         const selected = spacesBrowserProps.selectedItem;
@@ -699,6 +952,7 @@ export default function App() {
     terminal.mode,
     showInbox,
     showScriptTerminal,
+    showEvents,
     spacesBrowserProps,
     flow,
     deleteWorkspaceWithPrompt,
@@ -859,6 +1113,17 @@ export default function App() {
       );
     }
 
+    // Show events if open
+    if (showEvents) {
+      return (
+        <>
+          <EventsWeb {...eventsProps} workspaceLabel={eventsWorkspaceLabel} />
+          <FlowWeb flow={flow} />
+          <Toaster theme="dark" position="top-right" richColors />
+        </>
+      );
+    }
+
     return (
       <>
         <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
@@ -922,11 +1187,19 @@ export default function App() {
         return;
       }
 
+      if (isViewOnlySession) {
+        return;
+      }
+
       terminal.send(new TextEncoder().encode(data));
     };
 
     // Handler for keyboard input - applies virtual modifiers then resets them
     const handleKeyboardData = (data: Uint8Array) => {
+      if (isViewOnlySession) {
+        return;
+      }
+
       const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
       if (hasModifiers) {
         // Apply modifiers and reset
@@ -1027,6 +1300,7 @@ export default function App() {
               allowTapFocus={inputMode || !showMobileControls}
               allowTouchScroll={!inputMode}
               onActivity={handleTerminalActivity}
+              readOnly={isViewOnlySession}
             />
           </div>
           {/* Mobile controls toolbar - show in input mode */}

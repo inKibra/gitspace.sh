@@ -36,9 +36,13 @@ import {
 import { FlowTUI } from './components/Flow.tui.js';
 import { MachineListTUI } from './components/MachineList.tui.js';
 import { SpacesBrowserTUI } from './components/SpacesBrowser.tui.js';
+import type { TreeItem } from './components/SpacesBrowser.js';
 import { ProjectListTUI } from './components/ProjectList.tui.js';
 import { InboxTUI } from './components/Inbox.tui.js';
 import { useInbox } from './components/Inbox.js';
+import { EventsTui } from './components/Events.tui.js';
+import { useEvents, toWideEventItem, type WideEventItem } from './components/Events.js';
+import type { SavedEventFilter, WideEventFilter } from './types/events.js';
 import { toast } from '@opentui-ui/toast';
 import {
   useNotifications,
@@ -86,7 +90,10 @@ import { useLocalSession } from './hooks/useLocalSession.tui.js';
 import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { buildEditProcessesCommand } from './lib/processes/editor.js';
+import { loadProcessesConfigWithDiagnostics } from './lib/processes/config.js';
 import {
   consumeLegacyCleanupReminderForTui,
   initializeSecretRuntime,
@@ -297,6 +304,14 @@ function App({ relayConfig, onQuit }: AppProps) {
   const [settingsFlow, setSettingsFlow] = useState<SettingsFlowState>({ type: 'closed' });
   const [notificationConfig, setNotificationConfig] = useState<NotificationConfig>(DEFAULT_NOTIFICATION_CONFIG);
 
+  // Events view state
+  const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
+
+  // View-only session state (true when attached to a running process session)
+  const [isViewOnlySession, setIsViewOnlySession] = useState(false);
+  const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
     relayConfig,
@@ -334,6 +349,12 @@ function App({ relayConfig, onQuit }: AppProps) {
     commandError: localCommandError,
     getBundleRefreshPlan: getLocalBundleRefreshPlan,
     applyBundleRefresh: applyLocalBundleRefresh,
+    startProcess: startLocalProcess,
+    stopProcess: stopLocalProcess,
+    requestEvents: requestLocalEvents,
+    events: localEvents,
+    liveEventIds: localLiveEventIds,
+    savedEventFilters: localSavedEventFilters,
   } = localSession;
 
   const currentProject =
@@ -416,7 +437,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     onBeforeAttach: ({ target, params }) => {
       sessionSwitchingRef.current = true;
 
-      if (target === 'workspace' && params.workspaceId) {
+      if (target === 'workspace' && params.workspaceId && !params.command) {
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         dispatch({ type: 'SET_VIEW', view: 'scripts' });
       }
@@ -603,15 +624,86 @@ function App({ relayConfig, onQuit }: AppProps) {
   }, [flow, refreshProjects]);
 
   // Attach to session using embedded terminal
-  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string }) => {
+  const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
+    setIsViewOnlySession(params.viewOnly ?? false);
     await attachLocalFromSelection(params);
   }, [attachLocalFromSelection]);
+
+  // Open editor on .gitspace/processes.json in the workspace
+  const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
+    setIsViewOnlySession(false);
+    pendingProcessEditWorkspacesRef.current = localWorkspaces;
+    setPendingProcessEditWorkspaceId(workspaceId);
+    const commandSpec = buildEditProcessesCommand();
+    void attachLocal({
+      workspaceId,
+      command: commandSpec.command,
+      args: commandSpec.args,
+    }).then((attached) => {
+      if (!attached) {
+        pendingProcessEditWorkspacesRef.current = null;
+        setPendingProcessEditWorkspaceId(null);
+      }
+    });
+  }, [attachLocal, localWorkspaces]);
+
+  useEffect(() => {
+    if (!pendingProcessEditWorkspaceId) {
+      return;
+    }
+    if (state.view !== 'projects' || localSessionMode !== 'browsing') {
+      return;
+    }
+
+    if (
+      pendingProcessEditWorkspacesRef.current &&
+      pendingProcessEditWorkspacesRef.current === localWorkspaces
+    ) {
+      return;
+    }
+    pendingProcessEditWorkspacesRef.current = null;
+
+    const workspace = localWorkspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    if (!workspace) {
+      setPendingProcessEditWorkspaceId(null);
+      return;
+    }
+
+    const diagnostics = loadProcessesConfigWithDiagnostics(workspace.path);
+    if (diagnostics.error) {
+      flow.showMessage({
+        title: 'Invalid Processes Config',
+        message: diagnostics.error,
+        variant: 'error',
+      });
+    } else {
+      const processCount = diagnostics.config.processes.length;
+      flow.showMessage({
+        title: 'Processes Config Updated',
+        message: processCount === 0
+          ? 'Config is valid. No processes are defined yet.'
+          : `Config is valid. ${processCount} process${processCount === 1 ? '' : 'es'} defined.`,
+        variant: 'success',
+      });
+    }
+
+    setPendingProcessEditWorkspaceId(null);
+    void refreshWorkspaces();
+  }, [
+    flow,
+    localSessionMode,
+    localWorkspaces,
+    pendingProcessEditWorkspaceId,
+    refreshWorkspaces,
+    state.view,
+  ]);
 
   // Handle terminal detach
   const handleTerminalDetach = useCallback(async () => {
     // Don't navigate away if we're in the middle of switching sessions
     if (sessionSwitchingRef.current) return;
 
+    setIsViewOnlySession(false);
     await detachLocalSession();
     dispatch({ type: 'SET_VIEW', view: 'projects' });
     await refreshWorkspaces();
@@ -1118,6 +1210,9 @@ function App({ relayConfig, onQuit }: AppProps) {
       branch: workspace.branch,
       sessionCount: localSessions.filter((session) => session.workspaceId === workspace.id).length,
       isStale: workspace.isStale,
+      processes: workspace.processes,
+      processConfigError: workspace.processConfigError,
+      serveDomain: workspace.serveDomain,
     }));
 
   const sessionInfos = currentProject
@@ -1140,12 +1235,83 @@ function App({ relayConfig, onQuit }: AppProps) {
     onRefresh: refreshProjects,
   });
 
+  const processActions = useProcessActions({
+    sessions: sessionInfos,
+    startProcess: startLocalProcess,
+    stopProcess: stopLocalProcess,
+    attachSession: handleAttachSession,
+    onStartProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onStopProcessError: (error) => {
+      flow.showMessage({
+        title: 'Process Stop Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onStartProcessAttachError: (error) => {
+      flow.showMessage({
+        title: 'Process Start Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onAttachError: (error) => {
+      flow.showMessage({
+        title: 'Attach Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    },
+    onAttachTimeout: (target) => {
+      flow.showMessage({
+        title: 'Attach Timeout',
+        message: `Process started but no active session was found for ${target.processName}#${target.instance}.`,
+        variant: 'warning',
+      });
+    },
+    onStartProcessAttachFinally: () => {
+      void refreshWorkspaces();
+    },
+  });
+
+  const handleStartProcess = processActions.handleStartProcess;
+  const handleStartProcessAttach = processActions.handleStartProcessAttach;
+  const handleStopProcess = processActions.handleStopProcess;
+
+  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
+    const workspace = localWorkspaces.find((item) => item.id === params.workspaceId);
+    const workspaceLabel = workspace?.name ?? params.workspaceId;
+    toast.error(`Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`);
+  }, [localWorkspaces]);
+
+  const handleOpenEvents = useCallback((workspaceId: string) => {
+    setEventsWorkspaceId(workspaceId);
+    // Find workspace path for events request
+    const workspace = localWorkspaces.find(w => w.id === workspaceId);
+    if (workspace) {
+      void requestLocalEvents(workspace.path);
+    }
+    dispatch({ type: 'SET_VIEW', view: 'events' });
+  }, [localWorkspaces, requestLocalEvents]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
     sessions: sessionInfos,
     onRequestSessions: () => {}, // Sessions already loaded
     onAttachSession: handleAttachSession,
+    onEditProcesses: handleEditProcesses,
+    onStartProcess: handleStartProcess,
+    onStartProcessAttach: handleStartProcessAttach,
+    onStopProcess: handleStopProcess,
+    onProcessDisabled: handleProcessDisabled,
+    onOpenEvents: handleOpenEvents,
     onRefresh: refreshWorkspaces,
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,
@@ -1190,6 +1356,73 @@ function App({ relayConfig, onQuit }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
   });
+
+  // Events hook
+  const eventsItems: WideEventItem[] = localEvents.map(toWideEventItem);
+
+  const eventsProps = useEvents({
+    events: eventsItems,
+    liveEventIds: localLiveEventIds,
+    savedFilters: localSavedEventFilters,
+    onSelectFilter: (filter) => {
+      if (!eventsWorkspaceId) return;
+      const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
+      if (!workspace) return;
+      if (filter) {
+        const sinceMs = filter.sinceMinutes
+          ? Date.now() - filter.sinceMinutes * 60 * 1000
+          : undefined;
+        void requestLocalEvents(
+          workspace.path,
+          filter.filter as WideEventFilter,
+          undefined,
+          sinceMs
+        );
+      } else {
+        void requestLocalEvents(workspace.path);
+      }
+    },
+    onClose: () => {
+      setEventsWorkspaceId(null);
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
+    },
+  });
+
+  // Events polling when events view is active
+  useEffect(() => {
+    if (state.view !== 'events' || !eventsWorkspaceId) return;
+    const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
+    if (!workspace) return;
+
+    const interval = setInterval(() => {
+      const activeFilter = eventsProps.activeFilterName
+        ? localSavedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+        : null;
+
+      if (activeFilter) {
+        const sinceMs = activeFilter.sinceMinutes
+          ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
+          : undefined;
+        void requestLocalEvents(
+          workspace.path,
+          activeFilter.filter as WideEventFilter,
+          undefined,
+          sinceMs
+        );
+      } else {
+        void requestLocalEvents(workspace.path);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [
+    state.view,
+    eventsWorkspaceId,
+    localWorkspaces,
+    eventsProps.activeFilterName,
+    localSavedEventFilters,
+    requestLocalEvents,
+  ]);
 
   // ========== Activity Tracking for Notifications ==========
 
@@ -1424,6 +1657,19 @@ function App({ relayConfig, onQuit }: AppProps) {
         )
       ) {
         dispatch({ type: 'SET_VIEW', view: 'projects' });
+      }
+      return;
+    }
+
+    // Events view keyboard handling
+    if (state.view === 'events') {
+      if (key.name === 'escape' || key.raw === 'q') {
+        setEventsWorkspaceId(null);
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      } else if (key.name === 'up' || key.raw === 'k') {
+        eventsProps.selectIndex(eventsProps.selectedIndex - 1);
+      } else if (key.name === 'down' || key.raw === 'j') {
+        eventsProps.selectIndex(eventsProps.selectedIndex + 1);
       }
       return;
     }
@@ -1906,10 +2152,23 @@ function App({ relayConfig, onQuit }: AppProps) {
             }
           }
         } else if (command === 'kill') {
-          // Kill session
+          // Kill session or stop running process
           const selected = spacesBrowserProps.selectedItem;
           if (selected?.type === 'session') {
             handleDeleteSession(selected.session.id, selected.session.name);
+          } else if (selected?.type === 'process' && selected.status === 'running') {
+            flow.showConfirm({
+              title: 'Stop Process',
+              message: `Stop process "${selected.processName}"?`,
+              variant: 'warning',
+              confirmLabel: 'Stop',
+              onConfirm: () => {
+                void handleStopProcess({
+                  workspaceId: selected.workspaceId,
+                  processName: selected.processName,
+                });
+              },
+            });
           }
         } else if (command === 'refresh') {
           try {
@@ -2050,6 +2309,18 @@ function App({ relayConfig, onQuit }: AppProps) {
     );
   }
 
+  // Events view
+  if (state.view === 'events') {
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <EventsTui {...eventsProps} />
+        <FlowTUI flow={flow} />
+        <StatusBar hint="[Esc/q] Back  [j/k] Navigate" />
+      </Fragment>
+    );
+  }
+
   // Local terminal view (backend-driven attach lifecycle)
   if (state.view === 'scripts') {
     const phase = localScriptState?.phase ?? 'pre';
@@ -2092,6 +2363,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           interceptShiftTab={!!notifications.activeToast}
           modalOpen={flow.isOpen}
           onActivity={handleTerminalActivity}
+          readOnly={isViewOnlySession}
         />
         <FlowTUI flow={flow} />
       </Fragment>
@@ -2172,7 +2444,7 @@ function App({ relayConfig, onQuit }: AppProps) {
       <StatusBar
         hint={state.panelFocus === 'projects'
           ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
-          : '[Tab] Switch  [Enter] Open/Join  [n] New Workspace  [d] Delete  [x] Kill  [,] Settings  [?] Help  [q] Quit'
+          : getWorkspacesPanelHint(spacesBrowserProps.selectedItem)
         }
       />
 
@@ -2558,6 +2830,41 @@ function SettingsFlowModal({ flow }: { flow: SettingsFlowState }) {
       </box>
     </box>
   );
+}
+
+// ============================================================================
+// Status Bar Helpers
+// ============================================================================
+
+function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): string {
+  if (selectedItem?.type === 'session') {
+    return '[Tab] Switch  [Enter] Attach  [x] Kill  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'process') {
+    if (selectedItem.status === 'running') {
+      return '[Tab] Switch  [Enter] View  [x] Stop  [,] Settings  [?] Help  [q] Quit';
+    }
+    return '[Tab] Switch  [Enter] Start  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'workspace') {
+    return '[Tab] Switch  [Enter] Expand  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'process-disabled') {
+    return '[Tab] Switch  [Enter] Disabled  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'process-config-error') {
+    return '[Tab] Switch  [Enter] Fix Process Config  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'edit-processes') {
+    return '[Tab] Switch  [Enter] Edit Processes Config  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'events') {
+    return '[Tab] Switch  [Enter] Open Events  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'new-session') {
+    return '[Tab] Switch  [Enter] New Session  [,] Settings  [?] Help  [q] Quit';
+  }
+  return '[Tab] Switch  [Enter] Open  [n] New Workspace  [,] Settings  [?] Help  [q] Quit';
 }
 
 // ============================================================================

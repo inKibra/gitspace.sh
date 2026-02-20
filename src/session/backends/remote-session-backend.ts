@@ -8,6 +8,7 @@ import {
   type ClearInboxRequest,
   type ClientToMachineMessage,
   type DeleteWorkspaceRequest,
+  type GetEventsRequest,
   type GetInboxRequest,
   type GetBundleRefreshPlanRequest,
   type GetNotificationConfigRequest,
@@ -19,12 +20,16 @@ import {
   type MarkInboxReadRequest,
   type ReviewRequest,
   type ReviewResponse,
+  type EventsListResponse,
   type ScriptOutputResponse,
   type SessionCtrl,
+  type StartProcessRequest,
+  type StopProcessRequest,
   type UpdateNotificationConfigRequest,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
+import type { WideEvent, WideEventFilter } from '../../types/events.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
@@ -80,6 +85,15 @@ interface SessionEventMessage {
   cols?: number;
   rows?: number;
   code?: number;
+}
+
+interface PendingEventsChunk {
+  workspaceId: string;
+  totalChunks: number;
+  chunks: Map<number, WideEvent[]>;
+  liveEventIds: string[];
+  savedEventFilters?: import('../../types/events.js').SavedEventFilter[];
+  receivedAtMs: number;
 }
 
 export interface RemoteSessionSocketHandlers {
@@ -169,6 +183,9 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'bundle_refresh_plan',
   'bundle_refresh_applied',
   'review_response',
+  'events_list',
+  'process_started',
+  'process_stopped',
 ]);
 
 function isHandshakeEnvelope(value: unknown): value is HandshakeEnvelope {
@@ -294,6 +311,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private mode: 'browsing' | 'attached' = 'browsing';
   private attachedSessionId: string | null = null;
+  private viewOnly = false;
   private handshakeState: THandshakeState | null = null;
   private sessionKeys: SessionKeys | null = null;
   private isConnected = false;
@@ -332,6 +350,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private pendingEventChunks = new Map<string, PendingEventsChunk>();
 
   constructor(options: RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHello, TServerAuth>) {
     this.descriptor = options.descriptor;
@@ -421,6 +440,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async attachSession(params: AttachSessionParams): Promise<void> {
+    this.viewOnly = params.viewOnly ?? false;
     const command: AttachSessionRequest = {
       type: 'attach_session',
       sessionId: params.sessionId,
@@ -429,6 +449,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       cols: params.cols,
       rows: params.rows,
       scriptPolicy: params.scriptPolicy,
+      viewOnly: params.viewOnly,
+      command: params.command,
+      args: params.args,
+      env: params.env,
     };
     await this.sendCommand(command);
   }
@@ -647,7 +671,45 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+  async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
+    const command: StartProcessRequest = {
+      type: 'start_process',
+      workspaceId,
+      processName,
+      instance,
+    };
+    await this.sendCommand(command);
+  }
+
+  async stopProcess(workspaceId: string, processName: string): Promise<void> {
+    const command: StopProcessRequest = {
+      type: 'stop_process',
+      workspaceId,
+      processName,
+    };
+    await this.sendCommand(command);
+  }
+
+  async requestEvents(
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ): Promise<void> {
+    const command: GetEventsRequest = {
+      type: 'get_events',
+      workspacePath,
+      filter,
+      limit,
+      sinceMs,
+    };
+    await this.sendCommand(command);
+  }
+
   async writePtyData(data: Uint8Array): Promise<void> {
+    if (this.viewOnly) {
+      return;
+    }
     this.assertConnected();
 
     const key = this.sessionKeys;
@@ -895,7 +957,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.emit({ type: 'projects', projects: message.projects });
         return;
       case 'workspace_list':
-        this.emit({ type: 'workspaces', workspaces: message.workspaces });
+        this.emit({
+          type: 'workspaces',
+          workspaces: message.workspaces,
+          savedEventFilters: message.savedEventFilters,
+        });
         return;
       case 'session_list':
         this.emit({ type: 'sessions', sessions: message.sessions });
@@ -907,11 +973,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           type: 'attached',
           sessionId: message.sessionId,
           sessionName: message.sessionName,
+          viewOnly: this.viewOnly,
         });
         return;
       case 'detached':
         this.mode = 'browsing';
         this.attachedSessionId = null;
+        this.viewOnly = false;
         this.emit({ type: 'detached' });
         return;
       case 'session_exited':
@@ -963,6 +1031,25 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.resolveReviewRequest(message);
         return;
       }
+      case 'events_list':
+        this.handleEventsList(message);
+        return;
+      case 'process_started':
+        this.emit({
+          type: 'process_started',
+          workspaceId: message.workspaceId,
+          processName: message.processName,
+          sessionId: message.sessionId,
+          sessionIds: message.sessionIds,
+        });
+        return;
+      case 'process_stopped':
+        this.emit({
+          type: 'process_stopped',
+          workspaceId: message.workspaceId,
+          processName: message.processName,
+        });
+        return;
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
         if (message.workspaceId) {
@@ -992,6 +1079,71 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       done: message.done,
       error: message.error,
       exitCode: message.exitCode,
+    });
+  }
+
+  private prunePendingEventChunks(nowMs = Date.now()): void {
+    const ttlMs = 30_000;
+    for (const [requestId, pending] of this.pendingEventChunks) {
+      if (nowMs - pending.receivedAtMs > ttlMs) {
+        this.pendingEventChunks.delete(requestId);
+      }
+    }
+  }
+
+  private handleEventsList(message: EventsListResponse): void {
+    const totalChunks = message.totalChunks ?? 1;
+    const chunkIndex = message.chunkIndex ?? 0;
+    const requestId = message.requestId;
+
+    if (!requestId || totalChunks <= 1) {
+      this.emit({
+        type: 'events',
+        events: message.events,
+        liveEventIds: message.liveEventIds,
+        savedEventFilters: message.savedEventFilters,
+      });
+      return;
+    }
+
+    this.prunePendingEventChunks();
+
+    const pending = this.pendingEventChunks.get(requestId) ?? {
+      workspaceId: message.workspaceId,
+      totalChunks,
+      chunks: new Map<number, WideEvent[]>(),
+      liveEventIds: message.liveEventIds,
+      savedEventFilters: message.savedEventFilters,
+      receivedAtMs: Date.now(),
+    };
+
+    pending.workspaceId = message.workspaceId;
+    pending.totalChunks = totalChunks;
+    pending.liveEventIds = message.liveEventIds;
+    pending.savedEventFilters = message.savedEventFilters;
+    pending.receivedAtMs = Date.now();
+    pending.chunks.set(chunkIndex, message.events);
+    this.pendingEventChunks.set(requestId, pending);
+
+    if (pending.chunks.size < pending.totalChunks) {
+      return;
+    }
+
+    const merged: WideEvent[] = [];
+    for (let idx = 0; idx < pending.totalChunks; idx += 1) {
+      const chunk = pending.chunks.get(idx);
+      if (!chunk) {
+        return;
+      }
+      merged.push(...chunk);
+    }
+
+    this.pendingEventChunks.delete(requestId);
+    this.emit({
+      type: 'events',
+      events: merged,
+      liveEventIds: pending.liveEventIds,
+      savedEventFilters: pending.savedEventFilters,
     });
   }
 
@@ -1215,6 +1367,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.sessionKeys = null;
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
+    this.pendingEventChunks.clear();
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
     this.rejectAllPendingReviewRequests('Remote session disconnected');

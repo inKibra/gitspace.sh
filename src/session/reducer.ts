@@ -21,6 +21,9 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
     attachedSessionId: null,
     attachedSessionName: null,
     scriptState: null,
+    events: [],
+    liveEventIds: [],
+    savedEventFilters: [],
   };
 }
 
@@ -229,6 +232,37 @@ export function sessionEngineReducer(
             mode: attached ? 'attached' : 'browsing',
             attachedSessionId: action.sessionId,
             attachedSessionName: nextSessionName,
+          },
+        },
+      };
+    }
+
+    case 'SET_EVENTS': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            events: action.events,
+            liveEventIds: action.liveEventIds,
+          },
+        },
+      };
+    }
+
+    case 'SET_SAVED_EVENT_FILTERS': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            savedEventFilters: action.filters,
           },
         },
       };

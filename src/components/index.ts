@@ -27,6 +27,8 @@ export {
 
 // SpacesBrowser
 export type {
+  WorkspaceProcessInfo,
+  WorkspaceProcessPort,
   WorkspaceInfo,
   SessionInfo,
   TreeItem,

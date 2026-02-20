@@ -416,6 +416,110 @@ describe('RemoteSessionBackend', () => {
     expect(callbackTwoOutput).toEqual(['while-cleared', 'after-restore']);
   });
 
+  it('emits workspace-scoped saved filters from events_list', async () => {
+    const socket = createFakeSocket();
+    const events: BackendEvent[] = [];
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    backend.onEvent((event) => events.push(event));
+    await connectAndHandshake(backend, socket);
+
+    const savedFilters = [{ name: 'Errors', filter: { level: 'error' as const }, sinceMinutes: 30 }];
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'events_list',
+        workspaceId: 'alpha:ws-2',
+        events: [],
+        liveEventIds: [],
+        savedEventFilters: savedFilters,
+      })
+    );
+    await Bun.sleep(0);
+
+    expect(events).toContainEqual({
+      type: 'events',
+      events: [],
+      liveEventIds: [],
+      savedEventFilters: savedFilters,
+    });
+  });
+
+  it('preserves saved filters when merging chunked events_list payloads', async () => {
+    const socket = createFakeSocket();
+    const events: BackendEvent[] = [];
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    backend.onEvent((event) => events.push(event));
+    await connectAndHandshake(backend, socket);
+
+    const savedFilters = [{ name: 'Web', filter: { processName: 'web' } }];
+    const common = {
+      type: 'events_list' as const,
+      workspaceId: 'alpha:ws-2',
+      requestId: 'req-1',
+      totalChunks: 2,
+      liveEventIds: [],
+      savedEventFilters: savedFilters,
+    };
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        ...common,
+        chunkIndex: 0,
+        events: [],
+      })
+    );
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        ...common,
+        chunkIndex: 1,
+        events: [],
+      })
+    );
+    await Bun.sleep(0);
+
+    expect(events).toContainEqual({
+      type: 'events',
+      events: [],
+      liveEventIds: [],
+      savedEventFilters: savedFilters,
+    });
+  });
+
   it('refreshes workspace and scoped session list after kill when workspace is known', async () => {
     const socket = createFakeSocket();
 

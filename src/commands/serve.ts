@@ -9,7 +9,9 @@
  * Supports daemon mode with start/stop/status subcommands.
  */
 
-import { watch, appendFileSync, existsSync, writeFileSync } from 'fs';
+import { watch, appendFileSync, existsSync, writeFileSync, readdirSync } from 'fs';
+import { join } from 'path';
+import { createHash } from 'crypto';
 import { spawn, type Subprocess } from 'bun';
 import { logger } from '../utils/logger.js';
 import { promptPassword, promptConfirm } from '../utils/prompts.js';
@@ -39,7 +41,7 @@ import {
   NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
-import { readHostConfig } from './host.js';
+import { getServeTokenKey, readHostConfig, type HostConfig } from './host.js';
 import { createRelayServer } from '../relay/server.js';
 import { generateRelayIdentity } from '../relay/identity.js';
 import { signMessage } from '../relay/signing.js';
@@ -59,9 +61,17 @@ import {
   getServeLogFile,
   setAccessCommandHandler,
   ensureServeDaemonDir,
+  getServeDaemonDir,
   type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
+import { listSessions } from '../lib/tmux-lite/cli.js';
+import { loadProcessesConfig } from '../lib/processes/config.js';
+import { parseProcessSessionName } from '../lib/processes/names.js';
+import { resolveWorkspaceRef } from '../lib/events/paths.js';
+import { getGitspaceDir } from '../core/config.js';
+import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js';
+import type { ProcessPortConfig } from '../types/processes.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -453,6 +463,345 @@ function stopCloudflared(): void {
 }
 
 // ============================================================================
+// Process Hosting (Serve Tunnel)
+// ============================================================================
+
+export interface ProcessHostEntry {
+  hostname: string;
+  service: string;
+  protocol: 'http' | 'tcp';
+  workspaceId: string;
+  processName: string;
+  instance: number;
+  port: number;
+  portName?: string;
+}
+
+const SERVE_CONFIG_PATH = () => join(getServeDaemonDir(), 'serve-tunnel.yml');
+const SERVE_REFRESH_INTERVAL_MS = 5000;
+const SERVE_READY_TIMEOUT_MS = 5000;
+const MAX_WORKSPACE_PATH_CACHE_SIZE = 256;
+
+export function buildServeIngressConfig(entries: ProcessHostEntry[]): string {
+  const lines = ['ingress:'];
+  for (const entry of entries) {
+    lines.push(`  - hostname: ${entry.hostname}`);
+    lines.push(`    service: ${entry.service}`);
+  }
+  lines.push('  - service: http_status:404');
+  return `${lines.join('\n')}\n`;
+}
+
+function hashConfig(config: string): string {
+  return createHash('sha256').update(config).digest('hex');
+}
+
+function findWorkspacePathById(workspaceId: string): string | null {
+  const spacesDir = getGitspaceDir();
+  if (!existsSync(spacesDir)) {
+    return null;
+  }
+  const entries = readdirSync(spacesDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === 'app') continue;
+    const candidate = join(spacesDir, entry.name, 'workspaces', workspaceId);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function waitForCloudflaredReady(proc: Subprocess): Promise<boolean> {
+  const result = await Promise.race([
+    proc.exited.then((code) => ({ code })),
+    Bun.sleep(SERVE_READY_TIMEOUT_MS).then(() => ({ code: null })),
+  ]);
+  return result.code === null;
+}
+
+class ServeProcessHostManager {
+  private serveDomain: string;
+  private tunnelToken: string;
+  private process: Subprocess | null = null;
+  private configHash: string | null = null;
+  private registry: ProcessHostEntry[] = [];
+  private refreshPromise: Promise<void> | null = null;
+  private restartAttempts = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private workspacePathCache = new Map<string, string>();
+
+  constructor(options: { serveDomain: string; tunnelToken: string }) {
+    this.serveDomain = options.serveDomain;
+    this.tunnelToken = options.tunnelToken;
+  }
+
+  get domain(): string {
+    return this.serveDomain;
+  }
+
+  get entries(): ProcessHostEntry[] {
+    return [...this.registry];
+  }
+
+  get isActive(): boolean {
+    return this.process !== null;
+  }
+
+  async refresh(): Promise<void> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+    this.refreshPromise = this.refreshInternal().finally(() => {
+      this.refreshPromise = null;
+    });
+    return this.refreshPromise;
+  }
+
+  stop(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    if (this.process) {
+      this.process.kill();
+      this.process = null;
+    }
+    this.workspacePathCache.clear();
+  }
+
+  private async refreshInternal(): Promise<void> {
+    const entries = await this.collectProcessHosts();
+    const sorted = entries.sort((a, b) => a.hostname.localeCompare(b.hostname));
+    const config = buildServeIngressConfig(sorted);
+    const nextHash = hashConfig(config);
+
+    if (this.configHash === nextHash && this.process) {
+      this.registry = sorted;
+      return;
+    }
+
+    ensureServeDaemonDir();
+    const configPath = SERVE_CONFIG_PATH();
+    writeFileSync(configPath, config, 'utf-8');
+
+    const swapped = await this.swapProcess(configPath);
+    if (swapped) {
+      this.registry = sorted;
+      this.configHash = nextHash;
+      logger.dim(`Serve tunnel updated (${sorted.length} routes)`);
+      return;
+    }
+
+    this.handleStartupFailure();
+  }
+
+  private async collectProcessHosts(): Promise<ProcessHostEntry[]> {
+    let sessions: Awaited<ReturnType<typeof listSessions>> = [];
+    try {
+      sessions = await listSessions();
+    } catch {
+      return [];
+    }
+    const configCache = new Map<string, ReturnType<typeof loadProcessesConfig>>();
+    const entries: ProcessHostEntry[] = [];
+    const seenWorkspaceIds = new Set<string>();
+
+    for (const session of sessions) {
+      const parsed = parseProcessSessionName(session.name);
+      const processName = parsed?.processName;
+      if (!processName) continue;
+      const instance = parsed?.instance ?? 1;
+
+      let workspaceRef = resolveWorkspaceRef(session.cwd);
+      if (!workspaceRef && parsed?.workspaceId) {
+        const cached = this.workspacePathCache.get(parsed.workspaceId);
+        const workspacePath = cached ?? findWorkspacePathById(parsed.workspaceId);
+        if (workspacePath) {
+          this.setCachedWorkspacePath(parsed.workspaceId, workspacePath);
+          workspaceRef = resolveWorkspaceRef(workspacePath);
+          seenWorkspaceIds.add(parsed.workspaceId);
+        }
+      }
+      if (!workspaceRef) continue;
+      seenWorkspaceIds.add(workspaceRef.workspaceId);
+      if (parsed?.workspaceId) {
+        seenWorkspaceIds.add(parsed.workspaceId);
+      }
+
+      const config = configCache.get(workspaceRef.workspacePath) ?? loadProcessesConfig(workspaceRef.workspacePath);
+      configCache.set(workspaceRef.workspacePath, config);
+      const definition = config.processes.find((process) => process.name === processName);
+      const ports = (definition?.ports ?? []).filter((port): port is ProcessPortConfig => Boolean(port));
+
+      for (const port of ports) {
+        if (!Number.isInteger(port.port) || port.port <= 0) {
+          continue;
+        }
+        const trimmedPortName = port.name?.trim();
+        const portLabel = trimmedPortName && trimmedPortName.length > 0 ? trimmedPortName : String(port.port);
+        const hostname = buildProcessHostname(
+          this.serveDomain,
+          workspaceRef.workspaceId,
+          processName,
+          instance,
+          portLabel
+        );
+        const protocol = port.protocol === 'tcp' ? 'tcp' : 'http';
+        const service = `${protocol}://127.0.0.1:${port.port}`;
+        entries.push({
+          hostname,
+          service,
+          protocol,
+          workspaceId: workspaceRef.workspaceId,
+          processName,
+          instance,
+          port: port.port,
+          portName: port.name,
+        });
+      }
+    }
+
+    const deduped = new Map<string, ProcessHostEntry>();
+    for (const entry of entries) {
+      if (!deduped.has(entry.hostname)) {
+        deduped.set(entry.hostname, entry);
+      }
+    }
+    this.pruneWorkspacePathCache(seenWorkspaceIds);
+    return Array.from(deduped.values());
+  }
+
+  private async swapProcess(configPath: string): Promise<boolean> {
+    const nextProcess = this.spawnProcess(configPath);
+    const ready = await waitForCloudflaredReady(nextProcess);
+    if (!ready) {
+      nextProcess.kill();
+      return false;
+    }
+
+    const previous = this.process;
+    this.process = nextProcess;
+    this.restartAttempts = 0;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    if (previous) {
+      previous.kill();
+    }
+    return true;
+  }
+
+  private spawnProcess(configPath: string): Subprocess {
+    const proc = spawn(['cloudflared', 'tunnel', '--config', configPath, 'run'], {
+      env: { ...process.env, TUNNEL_TOKEN: this.tunnelToken },
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    handleCloudflaredOutput(proc);
+
+    proc.exited.then((exitCode) => {
+      if (exitCode !== 0 && this.process === proc) {
+        this.handleCrash();
+      }
+    });
+
+    return proc;
+  }
+
+  private handleCrash(): void {
+    this.process = null;
+    this.scheduleRetry('crashed');
+  }
+
+  private handleStartupFailure(): void {
+    this.scheduleRetry('failed to start');
+  }
+
+  private scheduleRetry(reason: 'crashed' | 'failed to start'): void {
+    if (this.retryTimer) {
+      return;
+    }
+
+    this.restartAttempts += 1;
+    if (this.restartAttempts > MAX_CLOUDFLARED_RESTARTS) {
+      logger.error(`serve tunnel ${reason} ${MAX_CLOUDFLARED_RESTARTS} times, giving up`);
+      return;
+    }
+
+    logger.info(`Restarting serve tunnel (${reason}) (attempt ${this.restartAttempts}/${MAX_CLOUDFLARED_RESTARTS})...`);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.refresh();
+    }, CLOUDFLARED_RESTART_DELAY);
+  }
+
+  private setCachedWorkspacePath(workspaceId: string, workspacePath: string): void {
+    if (this.workspacePathCache.has(workspaceId)) {
+      this.workspacePathCache.delete(workspaceId);
+    }
+    this.workspacePathCache.set(workspaceId, workspacePath);
+
+    while (this.workspacePathCache.size > MAX_WORKSPACE_PATH_CACHE_SIZE) {
+      const oldest = this.workspacePathCache.keys().next().value;
+      if (!oldest) {
+        break;
+      }
+      this.workspacePathCache.delete(oldest);
+    }
+  }
+
+  private pruneWorkspacePathCache(seenWorkspaceIds: Set<string>): void {
+    for (const key of this.workspacePathCache.keys()) {
+      if (!seenWorkspaceIds.has(key)) {
+        this.workspacePathCache.delete(key);
+      }
+    }
+  }
+}
+
+async function startServeProcessHosting(hostConfig: HostConfig): Promise<ServeProcessHostManager | null> {
+  const serveSubdomain = hostConfig.serveSubdomain ?? `${hostConfig.subdomain}.serve`;
+  const serveDomain = `${serveSubdomain}.gitspace.sh`;
+  const tunnelToken = await getSecret(getServeTokenKey(hostConfig.subdomain));
+
+  if (!tunnelToken) {
+    logger.warning(`No serve tunnel token found for ${serveDomain}`);
+    logger.dim(`Run: gssh host reserve ${hostConfig.subdomain} (to get token)`);
+    return null;
+  }
+
+  if (!await isCloudflaredInstalled()) {
+    logger.warning('cloudflared is not installed');
+    return null;
+  }
+
+  const manager = new ServeProcessHostManager({ serveDomain, tunnelToken });
+  await manager.refresh();
+  if (manager.isActive) {
+    logger.success(`Serve tunnel active: https://${serveDomain}`);
+    logger.dim(`  Wildcard: https://*.${serveDomain}`);
+  } else {
+    logger.warning(`Serve tunnel failed to start for https://${serveDomain}; retrying in background`);
+  }
+  return manager;
+}
+
+function stopServeProcessHosting(
+  manager: ServeProcessHostManager | null,
+  timer: ReturnType<typeof setInterval> | null
+): void {
+  if (timer) {
+    clearInterval(timer);
+  }
+  manager?.stop();
+}
+
+// ============================================================================
 // Serve Command
 // ============================================================================
 
@@ -541,6 +890,8 @@ export async function serve(options: {
   logger.log('');
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
   let localRelayIdentity: ReturnType<typeof generateRelayIdentity> | null = null;
+  let processHostManager: ServeProcessHostManager | null = null;
+  let processHostRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
   if (hostConfig?.subdomain) {
     logger.bold('gitspace.sh Hosting:');
@@ -575,7 +926,21 @@ export async function serve(options: {
       logger.dim('  Hosting not active (tunnel token missing)');
       logger.log('');
     }
+
+    processHostManager = await startServeProcessHosting(hostConfig);
+    if (processHostManager) {
+      processHostRefreshTimer = setInterval(() => {
+        void processHostManager?.refresh();
+      }, SERVE_REFRESH_INTERVAL_MS);
+    }
   }
+
+  const remoteSessionOptions = processHostManager
+    ? {
+        processHostDomain: processHostManager.domain,
+        onProcessesChanged: () => processHostManager?.refresh(),
+      }
+    : undefined;
 
   // If gitspace.sh hosting is active, connect to local relay instead of external
   if (localRelayServer && localRelayIdentity) {
@@ -588,6 +953,7 @@ export async function serve(options: {
       relay: localRelayUrl,
       identity,
       accessList,
+      remoteSessionOptions,
     });
 
     // Initialize session manager (starts tmux-lite server)
@@ -617,6 +983,7 @@ export async function serve(options: {
       logger.log('');
       logger.info('Shutting down...');
       stopCloudflared();
+      stopServeProcessHosting(processHostManager, processHostRefreshTimer);
       sessionManager.cleanup();
       localRelayServer?.stop();
       process.exit(0);
@@ -639,6 +1006,7 @@ export async function serve(options: {
     relay: relayUrl,
     identity,
     accessList,
+    remoteSessionOptions,
   });
 
   // Initialize session manager (starts tmux-lite server)
@@ -674,7 +1042,7 @@ export async function serve(options: {
   logger.log('');
 
   // Step 6: Handle shutdown
-  setupShutdownHandlers(sessionManager);
+  setupShutdownHandlers(sessionManager, false, () => stopServeProcessHosting(processHostManager, processHostRefreshTimer));
 
   // Keep process alive
   await new Promise(() => {
@@ -1115,13 +1483,18 @@ function updateSessionDisplay(sessionManager: ClientSessionManager): void {
 /**
  * Set up shutdown handlers
  */
-function setupShutdownHandlers(sessionManager: ClientSessionManager, isDaemon: boolean = false): void {
+function setupShutdownHandlers(
+  sessionManager: ClientSessionManager,
+  isDaemon: boolean = false,
+  cleanup?: () => void
+): void {
   const shutdown = () => {
     logger.log('');
     logger.info('Shutting down...');
 
     // Stop cloudflared if running
     stopCloudflared();
+    cleanup?.();
 
     clearRelayConfig();
     sessionManager.cleanup();
@@ -1339,6 +1712,8 @@ export async function serveStart(options: {
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
   let localRelayIdentity: ReturnType<typeof generateRelayIdentity> | null = null;
   let effectiveRelayUrl = relayUrl || '';
+  let processHostManager: ServeProcessHostManager | null = null;
+  let processHostRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
   // Initialize daemon state
   setDaemonState({
@@ -1384,15 +1759,30 @@ export async function serveStart(options: {
       });
     }
 
+    processHostManager = await startServeProcessHosting(hostConfig);
+    if (processHostManager) {
+      processHostRefreshTimer = setInterval(() => {
+        void processHostManager?.refresh();
+      }, SERVE_REFRESH_INTERVAL_MS);
+    }
+
     // Use local relay (machine will authenticate via challenge-response)
     effectiveRelayUrl = `ws://127.0.0.1:${LOCAL_RELAY_PORT}/ws`;
   }
+
+  const remoteSessionOptions = processHostManager
+    ? {
+        processHostDomain: processHostManager.domain,
+        onProcessesChanged: () => processHostManager?.refresh(),
+      }
+    : undefined;
 
   // Create session manager
   const sessionManager = new ClientSessionManager({
     relay: effectiveRelayUrl,
     identity,
     accessList,
+    remoteSessionOptions,
   });
 
   // Initialize session manager (starts tmux-lite server)
@@ -1442,7 +1832,7 @@ export async function serveStart(options: {
   });
 
   // Set up shutdown handlers with daemon cleanup
-  setupShutdownHandlers(sessionManager, true);
+  setupShutdownHandlers(sessionManager, true, () => stopServeProcessHosting(processHostManager, processHostRefreshTimer));
 
   // Keep process alive
   await new Promise(() => {});

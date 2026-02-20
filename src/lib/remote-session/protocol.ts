@@ -51,6 +51,36 @@ export interface AttachSessionRequest {
   cols?: number;          // Terminal dimensions
   rows?: number;
   scriptPolicy?: 'auto' | 'skip';
+  command?: string;       // Command to run (process sessions)
+  args?: string[];        // Command arguments
+  env?: Record<string, string>;  // Environment variables
+  /** When true, the server blocks PTY writes from this client */
+  viewOnly?: boolean;
+}
+
+/** Request wide events for a workspace */
+export interface GetEventsRequest {
+  type: "get_events";
+  workspacePath: string;
+  processName?: string;
+  filter?: import("../../types/events.js").WideEventFilter;
+  limit?: number;
+  sinceMs?: number;
+}
+
+/** Start a process in a workspace */
+export interface StartProcessRequest {
+  type: "start_process";
+  workspaceId: string;
+  processName: string;
+  instance?: number;
+}
+
+/** Stop a process in a workspace */
+export interface StopProcessRequest {
+  type: "stop_process";
+  workspaceId: string;
+  processName: string;
 }
 
 /** Request list of projects on the machine */
@@ -139,6 +169,9 @@ export interface WorkspaceInfo {
   branch?: string;      // Git branch if available
   sessionCount: number; // Number of active sessions
   isStale?: boolean;    // No activity for 30+ days
+  serveDomain?: string; // Hosting domain for process ports
+  processes?: { name: string; instances?: number; ports?: import("../../types/processes.js").ProcessPortConfig[] }[];
+  processConfigError?: string;
 }
 
 /** Session information */
@@ -150,12 +183,15 @@ export interface SessionInfo {
   createdAt: number;
   processTitle?: string;  // Current process (e.g., "vim", "npm run dev")
   exitCode?: number;      // If session has exited
+  processName?: string;   // Managed process name
+  processInstance?: number; // Managed process instance number
 }
 
 /** Response with workspace list */
 export interface WorkspaceListResponse {
   type: "workspace_list";
   workspaces: WorkspaceInfo[];
+  savedEventFilters?: import("../../types/events.js").SavedEventFilter[];
 }
 
 /** Response with session list */
@@ -288,6 +324,34 @@ export interface ReviewResponse {
   error?: { code: string; message: string };
 }
 
+/** Response with wide events list */
+export interface EventsListResponse {
+  type: "events_list";
+  workspaceId: string;
+  events: import("../../types/events.js").WideEvent[];
+  liveEventIds: string[];
+  savedEventFilters?: import("../../types/events.js").SavedEventFilter[];
+  requestId?: string;
+  chunkIndex?: number;
+  totalChunks?: number;
+}
+
+/** Process started response */
+export interface ProcessStartedResponse {
+  type: "process_started";
+  workspaceId: string;
+  processName: string;
+  sessionId?: string;
+  sessionIds?: string[];
+}
+
+/** Process stopped response */
+export interface ProcessStoppedResponse {
+  type: "process_stopped";
+  workspaceId: string;
+  processName: string;
+}
+
 // ============================================================================
 // Union Types
 // ============================================================================
@@ -307,7 +371,10 @@ export type ClientToMachineMessage =
   | UpdateNotificationConfigRequest
   | GetBundleRefreshPlanRequest
   | ApplyBundleRefreshRequest
-  | ReviewRequest;
+  | ReviewRequest
+  | GetEventsRequest
+  | StartProcessRequest
+  | StopProcessRequest;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
@@ -328,7 +395,10 @@ export type MachineToClientMessage =
   | ScriptOutputResponse
   | BundleRefreshPlanResponse
   | BundleRefreshAppliedResponse
-  | ReviewResponse;
+  | ReviewResponse
+  | EventsListResponse
+  | ProcessStartedResponse
+  | ProcessStoppedResponse;
 
 /** All remote session messages */
 export type RemoteSessionMessage =
@@ -367,6 +437,7 @@ export function serializeRemoteMessage(msg: RemoteSessionMessage): string {
 export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListWorkspacesRequest
   | ListSessionsRequest
-  | AttachSessionRequest {
-  return ["list_workspaces", "list_sessions", "attach_session"].includes(msg.type);
+  | AttachSessionRequest
+  | GetEventsRequest {
+  return ["list_workspaces", "list_sessions", "attach_session", "get_events"].includes(msg.type);
 }

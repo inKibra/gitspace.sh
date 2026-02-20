@@ -23,9 +23,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
     items,
     machineName,
     isEmpty,
-    selectIndex,
-    toggleWorkspace,
-    attachSession,
+    activateIndex,
     refresh,
     back,
     onReview,
@@ -74,9 +72,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`ws-${ws.id}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log('[SpacesBrowser] Workspace clicked:', ws.id, ws.name);
-                  selectIndex(index);
-                  toggleWorkspace(ws.id);
+                  void activateIndex(index);
                 }}
                 className={`
                   px-4 py-4 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[56px]
@@ -126,9 +122,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 key={`session-${session.id}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log('[SpacesBrowser] Session clicked:', session.id, session.name);
-                  selectIndex(index);
-                  attachSession({ sessionId: session.id });
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px]
@@ -151,15 +145,115 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'process') {
+            const statusIcon = item.status === 'running' ? '▶' : item.status === 'failed' ? '✗' : '■';
+            const statusColor = item.status === 'running' ? 'text-[#3fb950]' : item.status === 'failed' ? 'text-[#f85149]' : 'text-[#8b949e]';
+            const portInfo = item.ports?.length ? ` :${item.ports.map(p => p.port).join(',')}` : '';
+
+            return (
+              <div
+                key={`process-${item.workspaceId}-${item.processName}-${item.instance}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px]
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <span className={`w-2.5 h-2.5 flex-shrink-0 ${statusColor}`}>{statusIcon}</span>
+                  <div className="min-w-0 flex-1">
+                    <span className="text-[#e6edf3] truncate block">{item.processName}#{item.instance}</span>
+                    {portInfo && <span className="text-xs text-[#8b949e] truncate block">{portInfo}</span>}
+                  </div>
+                </div>
+                <span className={`text-xs ${statusColor} flex-shrink-0 ml-2`}>{item.status}</span>
+              </div>
+            );
+          }
+
+          if (item.type === 'process-disabled') {
+            return (
+              <div
+                key={`process-disabled-${item.workspaceId}-${item.processName}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[52px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#d29922]">⏸ {item.processName} (disabled)</span>
+              </div>
+            );
+          }
+
+          if (item.type === 'process-config-error') {
+            return (
+              <div
+                key={`process-config-error-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+                title={item.error}
+              >
+                <span className="text-[#f85149]">⚠ Invalid processes config</span>
+              </div>
+            );
+          }
+
+          if (item.type === 'edit-processes') {
+            return (
+              <div
+                key={`edit-processes-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#ffaa55]">⚙ Edit Processes Config</span>
+              </div>
+            );
+          }
+
+          if (item.type === 'events') {
+            return (
+              <div
+                key={`events-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#d2a8ff]">◆ Events</span>
+              </div>
+            );
+          }
+
           if (item.type === 'new-session') {
             return (
               <div
                 key={`new-${item.workspaceId}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log('[SpacesBrowser] New session clicked for workspace:', item.workspaceId);
-                  selectIndex(index);
-                  attachSession({ workspaceId: item.workspaceId });
+                  void activateIndex(index);
                 }}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center

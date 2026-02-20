@@ -16,6 +16,8 @@ interface Props {
   allowTapFocus?: boolean;
   /** Whether touch scrolling is enabled. Default: true. Disable when using floating controls. */
   allowTouchScroll?: boolean;
+  /** When true, keyboard input is disabled (view-only mode) */
+  readOnly?: boolean;
 }
 
 /** Methods exposed via ref for external control */
@@ -64,7 +66,7 @@ function shouldHandleIosWordInput(event: InputEvent): boolean {
 }
 
 export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function SessionTerminal(
-  { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true, allowTouchScroll = true },
+  { onData, setWriteCallback, onResize, onActivity, allowTapFocus = true, allowTouchScroll = true, readOnly = false },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -74,6 +76,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   const onActivityRef = useRef(onActivity);
   const onResizeRef = useRef(onResize);
   const allowTapFocusRef = useRef(allowTapFocus);
+  const readOnlyRef = useRef(readOnly);
 
   // Touch state with accumulated delta pattern
   const touchStateRef = useRef<{
@@ -108,6 +111,11 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   useEffect(() => {
     allowTouchScrollRef.current = allowTouchScroll;
   }, [allowTouchScroll]);
+
+  // Keep readOnly ref in sync
+  useEffect(() => {
+    readOnlyRef.current = readOnly;
+  }, [readOnly]);
 
   const tryConsumePageNavigation = useCallback((direction: PageDirection): boolean => {
     const terminal = terminalRef.current as unknown as TerminalViewportLike | null;
@@ -217,6 +225,9 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         term.loadAddon(fitAddon);
 
         term.onData((data: string) => {
+          if (readOnlyRef.current) {
+            return;
+          }
           onActivityRef.current?.();
           onDataRef.current(new TextEncoder().encode(data));
         });
@@ -225,6 +236,9 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           if (event.key === 'Tab' && event.shiftKey) {
             event.preventDefault();
             event.stopPropagation();
+            if (readOnlyRef.current) {
+              return;
+            }
             onDataRef.current(new TextEncoder().encode('\x1b[Z'));
             return;
           }
@@ -272,7 +286,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         };
 
         const handleInputFallback = (event: Event) => {
-          if (!isIOS || !helperTextarea || isComposing) {
+          if (!isIOS || !helperTextarea || isComposing || readOnlyRef.current) {
             return;
           }
 

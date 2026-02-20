@@ -52,11 +52,26 @@ import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
+import type { WideEventFilter } from '../../types/events.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
+import { parseProcessSessionName } from '../../lib/processes/names.js';
+import {
+  loadProcessesConfig,
+  loadProcessesConfigWithDiagnostics,
+  getProcessDefinition,
+} from '../../lib/processes/config.js';
+import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../../lib/processes/manager.js';
+import { startProcessScheduler } from '../../lib/processes/scheduler.js';
+import { normalizeProcessInstanceCount } from '../../lib/processes/instances.js';
+import { readWorkspaceSnapshots } from '../../lib/events/reader.js';
+import { resolveWorkspaceRef } from '../../lib/events/paths.js';
+import { loadSavedEventFilters } from '../../lib/events/filters.js';
+import { readProjectConfig } from '../../core/config.js';
+import { existsSync } from 'fs';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -325,6 +340,7 @@ export class LocalSessionBackend implements SessionBackend {
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private viewOnly = false;
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
@@ -390,13 +406,24 @@ export class LocalSessionBackend implements SessionBackend {
       counts.set(session.cwd, current + 1);
     }
 
-    this.emit({
-      type: 'workspaces',
-      workspaces: workspaces.map((workspace) => ({
+    const mappedWorkspaces = workspaces.map((workspace) => {
+      const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
+      return {
         ...workspace,
         id: toCanonicalWorkspaceId(workspace),
         sessionCount: counts.get(workspace.path) ?? 0,
-      })),
+        processes: processConfig.config.processes.map((p) => ({
+          name: p.name,
+          instances: p.instances,
+          ports: p.ports,
+        })),
+        processConfigError: processConfig.error ?? undefined,
+      };
+    });
+
+    this.emit({
+      type: 'workspaces',
+      workspaces: mappedWorkspaces,
     });
   }
 
@@ -410,9 +437,21 @@ export class LocalSessionBackend implements SessionBackend {
 
     const filtered = sessions
       .map((session) => {
-        const workspace = workspaceByPath.get(session.cwd);
-        const id = workspace ? toCanonicalWorkspaceId(workspace) : 'unknown';
-        return toSessionInfo(session, id);
+        const parsed = parseProcessSessionName(session.name);
+        let workspace = workspaceByPath.get(session.cwd);
+        if (!workspace && parsed) {
+          workspace = workspaces.find((w) => w.id === parsed.workspaceId);
+        }
+        if (!workspace) {
+          workspace = workspaces.find((w) => session.cwd.startsWith(w.path));
+        }
+        const id = workspace ? toCanonicalWorkspaceId(workspace) : (parsed?.workspaceId ? `unknown:${parsed.workspaceId}` : 'unknown');
+        const info = toSessionInfo(session, id);
+        return {
+          ...info,
+          processName: parsed?.processName,
+          processInstance: parsed?.instance,
+        };
       })
       .filter((session) => {
         if (!workspaceId) {
@@ -431,6 +470,7 @@ export class LocalSessionBackend implements SessionBackend {
     if (!this.connected) {
       await this.connect();
     }
+    this.viewOnly = params.viewOnly ?? false;
 
     let targetSession: TmuxSession | null = null;
 
@@ -453,72 +493,6 @@ export class LocalSessionBackend implements SessionBackend {
         throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
       }
 
-      let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-
-      const scriptResult = await this.deps.prepareWorkspaceForSession({
-        projectName: workspace.projectName,
-        workspacePath: workspace.path,
-        workspaceName: workspace.id,
-        interactiveScripts: false,
-        bundleMode: 'error-if-changed',
-        scriptPolicy: params.scriptPolicy ?? 'auto',
-        onOutput: (data) => {
-          this.emitPtyData(data);
-          this.emit({
-            type: 'script_output',
-            phase: currentPhase,
-            data,
-          });
-        },
-        onPhaseStart: (phase) => {
-          currentPhase = phase;
-        },
-      });
-
-      if (!scriptResult.success) {
-        const bundleNeedsRefresh =
-          'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh;
-
-        if ('bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh) {
-          this.emit({
-            type: 'command_error',
-            code: 'BUNDLE_REFRESH_REQUIRED',
-            message: scriptResult.error,
-          });
-        } else {
-          this.emit({
-            type: 'command_error',
-            code: scriptFailureCodeForPhase(scriptResult.phase),
-            message: scriptResult.error,
-          });
-        }
-
-        this.emit({
-          type: 'script_output',
-          phase: scriptResult.phase,
-          data: new Uint8Array(0),
-          done: true,
-          error: scriptResult.error,
-        });
-
-        const error = new SpacesError(
-          `Workspace scripts failed during ${scriptResult.phase}: ${scriptResult.error}`
-        ) as Error & { code?: string };
-        if (bundleNeedsRefresh) {
-          error.code = 'BUNDLE_REFRESH_REQUIRED';
-        } else {
-          error.code = scriptFailureCodeForPhase(scriptResult.phase);
-        }
-        throw error;
-      }
-
-      this.emit({
-        type: 'script_output',
-        phase: currentPhase,
-        data: new Uint8Array(0),
-        done: true,
-      });
-
       const sessions = await this.deps.listSessions();
       const fullName = buildSessionName({
         projectName: workspace.projectName,
@@ -526,9 +500,85 @@ export class LocalSessionBackend implements SessionBackend {
         requestedName: params.sessionName,
         sessions,
       });
-      targetSession = await this.deps.createSession(fullName, workspace.path, {
-        hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
-      });
+
+      if (params.command) {
+        // Skip workspace scripts when a custom command is specified
+        targetSession = await this.deps.createSession(fullName, workspace.path, {
+          command: params.command,
+          args: params.args,
+          env: params.env,
+        });
+      } else {
+        let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+
+        const scriptResult = await this.deps.prepareWorkspaceForSession({
+          projectName: workspace.projectName,
+          workspacePath: workspace.path,
+          workspaceName: workspace.id,
+          interactiveScripts: false,
+          bundleMode: 'error-if-changed',
+          scriptPolicy: params.scriptPolicy ?? 'auto',
+          onOutput: (data) => {
+            this.emitPtyData(data);
+            this.emit({
+              type: 'script_output',
+              phase: currentPhase,
+              data,
+            });
+          },
+          onPhaseStart: (phase) => {
+            currentPhase = phase;
+          },
+        });
+
+        if (!scriptResult.success) {
+          const bundleNeedsRefresh =
+            'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh;
+
+          if ('bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh) {
+            this.emit({
+              type: 'command_error',
+              code: 'BUNDLE_REFRESH_REQUIRED',
+              message: scriptResult.error,
+            });
+          } else {
+            this.emit({
+              type: 'command_error',
+              code: scriptFailureCodeForPhase(scriptResult.phase),
+              message: scriptResult.error,
+            });
+          }
+
+          this.emit({
+            type: 'script_output',
+            phase: scriptResult.phase,
+            data: new Uint8Array(0),
+            done: true,
+            error: scriptResult.error,
+          });
+
+          const error = new SpacesError(
+            `Workspace scripts failed during ${scriptResult.phase}: ${scriptResult.error}`
+          ) as Error & { code?: string };
+          if (bundleNeedsRefresh) {
+            error.code = 'BUNDLE_REFRESH_REQUIRED';
+          } else {
+            error.code = scriptFailureCodeForPhase(scriptResult.phase);
+          }
+          throw error;
+        }
+
+        this.emit({
+          type: 'script_output',
+          phase: currentPhase,
+          data: new Uint8Array(0),
+          done: true,
+        });
+
+        targetSession = await this.deps.createSession(fullName, workspace.path, {
+          hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
+        });
+      }
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
     }
@@ -544,12 +594,16 @@ export class LocalSessionBackend implements SessionBackend {
     const hadAttached = this.attachedSessionId !== null;
     await this.closeSessionSocket(false);
     this.attachedSessionId = null;
+    this.viewOnly = false;
     if (hadAttached) {
       this.emit({ type: 'detached' });
     }
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
+    if (this.viewOnly) {
+      return;
+    }
     const socket = this.sessionSocket;
     if (!socket || !this.attachedSessionId) {
       throw new SpacesError('No attached local session', 'SYSTEM_ERROR', 2);
@@ -703,6 +757,146 @@ export class LocalSessionBackend implements SessionBackend {
     this.emit({ type: 'notification_config', config: updated });
   }
 
+  async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find(
+      (w) => w.id === workspaceId || toCanonicalWorkspaceId(w) === workspaceId
+    );
+    if (!workspace) {
+      throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
+    }
+
+    const processConfig = loadProcessesConfig(workspace.path);
+    const processDefinition = getProcessDefinition(processConfig, processName);
+    if (!processDefinition) {
+      throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
+    }
+    if (normalizeProcessInstanceCount(processDefinition.instances) === 0) {
+      throw new SpacesError(`Process is disabled (instances: 0): ${processName}`, 'USER_ERROR', 1);
+    }
+
+    const specs = getProcessSpecs(workspace.path).filter((s) =>
+      s.name === processName && (instance === undefined || s.instance === instance)
+    );
+    if (specs.length === 0) {
+      throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
+    }
+
+    const sessionIds: string[] = [];
+    const startedSpecs: typeof specs = [];
+    try {
+      for (const spec of specs) {
+        const result = await startProcessInstance(workspace.path, spec);
+        sessionIds.push(result.sessionId);
+        startedSpecs.push(spec);
+      }
+    } catch (error) {
+      for (const startedSpec of startedSpecs) {
+        try {
+          await stopProcessInstance(workspace.path, startedSpec);
+        } catch {
+          // Best-effort rollback; preserve original start error
+        }
+      }
+      throw error;
+    }
+
+    if (!this.processSchedulers.has(workspace.path)) {
+      this.processSchedulers.set(workspace.path, startProcessScheduler(workspace.path));
+    }
+
+    this.emit({
+      type: 'process_started',
+      workspaceId,
+      processName,
+      sessionId: sessionIds[0],
+      sessionIds,
+    });
+  }
+
+  async stopProcess(workspaceId: string, processName: string): Promise<void> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find(
+      (w) => w.id === workspaceId || toCanonicalWorkspaceId(w) === workspaceId
+    );
+    if (!workspace) {
+      throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
+    }
+
+    const specs = getProcessSpecs(workspace.path).filter((s) => s.name === processName);
+    if (specs.length === 0) {
+      throw new SpacesError(`Process not found: ${processName}`, 'USER_ERROR', 1);
+    }
+
+    for (const spec of specs) {
+      await stopProcessInstance(workspace.path, spec);
+    }
+
+    this.emit({
+      type: 'process_stopped',
+      workspaceId,
+      processName,
+    });
+  }
+
+  async requestEvents(
+    workspacePath: string,
+    filter?: WideEventFilter,
+    limit?: number,
+    sinceMs?: number,
+  ): Promise<void> {
+    const workspaceRef = resolveWorkspaceRef(workspacePath);
+    if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
+      this.emit({ type: 'events', events: [], liveEventIds: [], savedEventFilters: [] });
+      return;
+    }
+
+    const savedEventFilters = loadSavedEventFilters(workspaceRef.workspacePath);
+
+    const projectConfig = readProjectConfig(workspaceRef.projectName);
+    const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
+      maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
+      maxTimeline: projectConfig.events?.maxTimeline,
+    });
+
+    const filtered = snapshots
+      .filter((snapshot) => {
+        if (sinceMs !== undefined && snapshot.updatedAt < sinceMs) return false;
+        if (!filter) return true;
+        if (filter.processName && snapshot.processName !== filter.processName) return false;
+        if (filter.level && snapshot.level !== filter.level) return false;
+        if (filter.message && !snapshot.message.includes(filter.message)) return false;
+        if (filter.eventName && snapshot.eventName !== filter.eventName) return false;
+        if (filter.correlationId && snapshot.correlationId !== filter.correlationId) return false;
+        return true;
+      })
+      .slice(0, limit ?? 200);
+
+    const events = filtered.map((snapshot) => ({
+      eventId: snapshot.lastEventId,
+      eventName: snapshot.eventName,
+      level: snapshot.level,
+      timestamp: new Date(snapshot.updatedAt).toISOString(),
+      timestampMs: snapshot.updatedAt,
+      message: snapshot.message,
+      sessionId: '',
+      workspaceId: workspaceRef.workspaceId,
+      projectName: workspaceRef.projectName,
+      processName: snapshot.processName,
+      processInstance: snapshot.processInstance,
+      raw: snapshot.raw ?? {},
+      kind: 'wide' as const,
+      correlationId: snapshot.correlationId,
+      timeline: Object.values(snapshot.timelineMap),
+      timelineMap: snapshot.timelineMap,
+      timelineOrder: snapshot.timelineOrder,
+    }));
+
+    this.emit({ type: 'events', events, liveEventIds: [], savedEventFilters });
+  }
+
+  private processSchedulers = new Map<string, NodeJS.Timer>();
+
   private async attachToSessionSocket(
     session: TmuxSession,
     params: AttachSessionParams
@@ -763,6 +957,7 @@ export class LocalSessionBackend implements SessionBackend {
                   type: 'attached',
                   sessionId: session.id,
                   sessionName: session.name,
+                  viewOnly: this.viewOnly,
                 });
                 settleResolve();
                 return;

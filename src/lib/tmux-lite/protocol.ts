@@ -100,7 +100,15 @@ export interface SessionCreateHooks {
 
 export type Command =
   | { type: "list" }
-  | { type: "new"; name?: string; cwd: string; hooks?: SessionCreateHooks }
+  | {
+      type: "new";
+      name?: string;
+      cwd: string;
+      hooks?: SessionCreateHooks;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+    }
   | { type: "attach"; id: string; force?: boolean }
   | { type: "kill"; id: string }
   | { type: "kill-server" }
@@ -178,7 +186,8 @@ export type SessionEvent =
   | { type: "attach-ready"; cols: number; rows: number }
   | { type: "attached" }
   | { type: "exited"; code: number }
-  | { type: "kicked" };
+  | { type: "kicked" }
+  | { type: "wide_event"; event: Record<string, unknown> };
 
 /** A decoded frame from the session socket */
 export interface SessionFrame {
