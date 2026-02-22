@@ -116,7 +116,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<void
         logger.log('');
         logger.dim('No subdomains reserved yet.');
         logger.dim('To enable remote access, reserve a subdomain:');
-        logger.command('  gssh host reserve <name>');
+        logger.command('  gssh user host reserve <name>');
       }
       return;
     }
@@ -140,7 +140,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<void
       } else {
         logger.log('');
         logger.dim('Select a primary subdomain for this machine:');
-        logger.command('  gssh host set-primary <name>');
+        logger.command('  gssh user host set-primary <name>');
       }
     }
 
@@ -209,7 +209,7 @@ async function getAuthToken(): Promise<string> {
   const token = await getSecret('GITSPACE_TOKEN');
   if (!token) {
     throw new SpacesError(
-      'Not logged in.\n\nRun: gssh auth login',
+      'Not logged in.\n\nRun: gssh user auth login',
       'USER_ERROR'
     );
   }
@@ -223,7 +223,7 @@ async function getAuthHeaders(
   const identity = getPublicKeyWithoutPassword();
   if (!identity) {
     throw new SpacesError(
-      'Identity not found.\n\nRun: gssh identity init',
+      'Identity not found.\n\nRun: gssh user identity init',
       'USER_ERROR',
       1
     );
@@ -351,7 +351,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
   }
 
   logger.log('');
-  logger.log("Run 'spaces' to start hosting.");
+  logger.log("Run 'gssh machine serve start' to start hosting.");
 }
 
 // ============================================================================
@@ -367,10 +367,10 @@ export async function hostRelease(subdomain?: string): Promise<void> {
   // If no subdomain specified, show list and exit
   if (!subdomain) {
     logger.log('Please specify a subdomain to release:');
-    logger.command('  gssh host release <subdomain>');
+    logger.command('  gssh user host release <subdomain>');
     logger.log('');
     logger.log('To see your subdomains:');
-    logger.command('  gssh host list');
+    logger.command('  gssh user host list');
     return;
   }
 
@@ -423,7 +423,7 @@ export async function hostList(): Promise<void> {
     logger.log('No subdomains reserved.');
     logger.log('');
     logger.log('Reserve one with:');
-    logger.command('  gssh host reserve <name>');
+    logger.command('  gssh user host reserve <name>');
     return;
   }
 
@@ -443,7 +443,7 @@ export async function hostList(): Promise<void> {
 // ============================================================================
 
 /**
- * Set a subdomain as primary for `gssh serve`
+ * Set a subdomain as primary for `gssh machine serve start`
  */
 export async function hostSetPrimary(subdomain: string): Promise<void> {
   const headers = await getAuthHeaders();
@@ -478,7 +478,7 @@ export async function hostStatus(): Promise<void> {
     headers = await getAuthHeaders();
   } catch {
     logger.log('Not logged in or identity not found');
-    logger.dim('Run: gssh auth login');
+    logger.dim('Run: gssh user auth login');
     return;
   }
 
@@ -494,7 +494,7 @@ export async function hostStatus(): Promise<void> {
     const primary = subdomains.find((s) => s.is_primary && s.status === 'active');
     if (!primary) {
       logger.log('No primary subdomain set.');
-      logger.dim('Run: gssh host reserve <name>');
+      logger.dim('Run: gssh user host reserve <name>');
       return;
     }
 

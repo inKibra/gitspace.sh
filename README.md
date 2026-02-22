@@ -77,7 +77,7 @@ You can also use traditional CLI commands:
 #### 1. Add Your First Project
 
 ```bash
-gssh add project
+gssh project add
 ```
 
 Select a GitHub repository, and GitSpace will:
@@ -90,20 +90,20 @@ Select a GitHub repository, and GitSpace will:
 
 ```bash
 # Create a workspace from a Linear issue (if configured)
-gssh add
+gssh workspace add --project my-project
 
 # Or create a workspace with a custom name
-gssh add my-feature
+gssh workspace add my-feature --project my-project
 ```
 
-#### 3. Switch Between Workspaces
+#### 3. Target a Workspace
 
 ```bash
-# Interactive selection
-gssh switch
+# List workspaces in a project
+gssh workspace list --project <project-name>
 
-# Switch to a specific workspace
-gssh switch my-feature
+# Show context for a specific workspace
+gssh workspace context --project my-project --workspace my-feature
 ```
 
 ### Workspace Session Mode (`space`)
@@ -112,7 +112,7 @@ When GitSpace opens a workspace-scoped terminal session, it injects a `space` sh
 
 - Use `space ...` for workspace operations without repeating `--project` and `--workspace`
 - `gssh` commands are restricted in this mode to avoid cross-workspace mistakes
-- `gssh tmux ...` is blocked inside workspace sessions
+- `gssh machine tmux ...` is blocked inside workspace sessions
 
 Examples:
 
@@ -226,8 +226,8 @@ fi
 Bundles can be loaded from:
 
 1. **In-repo** (automatic): `.gitspace/` directory in the cloned repository
-2. **Local path**: `gssh add project --bundle-path /path/to/bundle/`
-3. **Remote URL**: `gssh add project --bundle-url https://example.com/bundle.zip`
+2. **Local path**: `gssh project add --bundle-path /path/to/bundle/`
+3. **Remote URL**: `gssh project add --bundle-url https://example.com/bundle.zip`
 
 ## Commands Reference
 
@@ -235,12 +235,12 @@ Bundles can be loaded from:
 
 Launch the interactive terminal UI.
 
-### `gssh add project`
+### `gssh project add`
 
 Add a new project from GitHub.
 
 ```bash
-gssh add project [options]
+gssh project add [options]
 
 Options:
   --bundle-url <url>     Load bundle from remote URL (zip archive)
@@ -251,12 +251,12 @@ Options:
   --linear-key <key>     Provide Linear API key via flag
 ```
 
-### `gssh add [workspace-name]`
+### `gssh workspace add [workspace-name] --project <project-name>`
 
 Create a new workspace in the current project.
 
 ```bash
-gssh add [workspace-name] [options]
+gssh workspace add [workspace-name] --project <project-name> [options]
 
 Options:
   --branch <name>        Specify different branch name from workspace name
@@ -264,68 +264,50 @@ Options:
   --no-setup             Skip setup commands
 ```
 
-### `gssh switch [workspace-name]`
+### `gssh workspace context --project <project-name> --workspace <workspace-name>`
 
-Switch to a workspace in the current project.
+Show the resolved workspace context.
 
 ```bash
-gssh switch [workspace-name]
-# Alias: gssh sw
+gssh workspace context --project <project-name> --workspace <workspace-name>
 ```
 
-### `gssh switch project [project-name]`
+Use `--project` on workspace commands to target a project.
 
-Switch to a different project.
-
-### `gssh list [subcommand]`
+### `gssh project list` / `gssh workspace list --project <project-name>`
 
 List projects or workspaces.
 
 ```bash
-gssh list [subcommand] [options]
-# Alias: gssh ls
-
-Subcommands:
-  projects               List all projects
-  workspaces             List workspaces in current project (default)
+gssh project list [options]
+gssh workspace list --project <project-name> [options]
 
 Options:
   --json                 Output in JSON format
   --verbose              Show additional details
 ```
 
-### `gssh remove workspace [workspace-name]`
+### `gssh workspace remove [workspace-name] --project <project-name>`
 
 Remove a workspace.
 
 ```bash
-gssh remove workspace [workspace-name] [options]
-# Alias: gssh rm workspace
+gssh workspace remove [workspace-name] --project <project-name> [options]
 
 Options:
   --force                Skip confirmation prompts
   --keep-branch          Don't delete git branch when removing workspace
 ```
 
-### `gssh remove project [project-name]`
+### `gssh project remove [project-name]`
 
 Remove a project.
 
 ```bash
-gssh remove project [project-name] [options]
-# Alias: gssh rm project
+gssh project remove [project-name] [options]
 
 Options:
   --force                Skip confirmation prompts
-```
-
-### `gssh directory`
-
-Print the current project directory path.
-
-```bash
-gssh directory
-# Alias: gssh dir
 ```
 
 ## Configuration
@@ -405,9 +387,6 @@ inside each workspace so they can vary by branch:
 ### Environment Variables
 
 ```bash
-# Set the current project (overrides global config)
-export SPACES_CURRENT_PROJECT="my-app"
-
 # Available in scripts (from bundle onboarding):
 # <KEY>                - Value by exact bundle config key name
 # <NORMALIZED_KEY>     - Uppercase snake-case alias (e.g. teamName -> TEAM_NAME)
@@ -445,19 +424,19 @@ The easiest way to get remote access is through [gitspace.sh](https://gitspace.s
 
 ```bash
 # 1. Initialize machine identity on your control host
-gssh identity init --label "Control Host"
-gssh identity show
+gssh user identity init
+gssh user identity show
 
 # 2. Authenticate with gitspace.sh
-gssh auth login
+gssh user auth login
 
 # 3. Reserve your subdomain (e.g., yourname.gitspace.sh)
-gssh host reserve yourname
-gssh host status
+gssh user host reserve yourname
+gssh user host status
 
 # 4. Start serving
-gssh serve start
-gssh serve status
+gssh machine serve start
+gssh machine serve status
 gssh status
 
 # 5. Access from browser at https://yourname.gitspace.sh
@@ -473,14 +452,13 @@ For complete control, run your own relay:
 # Terminal 1: Start relay server
 gssh relay start --port 4480
 
-# Terminal 2: Initialize identity and start serving
-gssh identity init --label "My MacBook"
-gssh serve start --relay ws://localhost:4480/ws
+# Terminal 2: Create relay-machine invite token
+gssh invite relay-machine create --relay ws://localhost:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --label "My MacBook"
 
-# Terminal 3: Create invite for remote access
-gssh share create
-
-# Share the invite URL with collaborators
+# Terminal 3: Initialize identity, enroll, and start serving
+gssh user identity init
+gssh machine enroll --invite "ws://localhost:4480/ws#<TOKEN>" --label "My MacBook"
+gssh machine serve start --relay ws://localhost:4480/ws
 ```
 
 ### Identity Management
@@ -488,11 +466,11 @@ gssh share create
 Every machine and client has a cryptographic identity (Ed25519 + X25519 keypair):
 
 ```bash
-# Create machine identity (stored in ~/gitspace/.identity/)
-gssh identity init --label "My MacBook"
+# Create machine identity (stored in OS keychain)
+gssh user identity init
 
 # View identity fingerprint
-gssh identity show
+gssh user identity show
 ```
 
 ### Access Control
@@ -501,57 +479,65 @@ Control who can connect to your machine:
 
 ```bash
 # List authorized clients
-gssh access list
+gssh machine access list
 
-# Add a client by public key
-gssh access add gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "Work Laptop"
+# Add a collaborator by user root key
+gssh machine access add gssh-user:BASE64_SIGNING_KEY --label "Work Laptop"
 
 # Remove client access
-gssh access remove <client-identity-id-or-label>
+gssh machine access remove <user-id-or-label>
 ```
 
 ### Creating Invites
 
-Share access via signed invite tokens:
+Grant relay and machine access with root-signed invite tokens:
 
 ```bash
-# Create invite (24h default)
-gssh share create
+# Invite a user to relay membership
+gssh invite relay-user create gssh-user:BASE64_KEY --relay ws://localhost:4480/ws
 
-# Custom expiration
-gssh share create --expires 7d
+# Invite a user to a specific machine ACL
+gssh invite machine-user create <machine-id> gssh-user:BASE64_KEY --relay ws://localhost:4480/ws
 ```
 
 ### Connecting Remotely
 
 ```bash
-# Connect using invite token
-gssh connect <invite-token>
+# Accept a user-targeted invite token
+gssh user auth invite accept <token>
 
-# Connect via TUI with relay
-gssh --relay wss://relay.example.com
+# Connect directly after ACL grant
+gssh client connect <machine-id>
+
+# Browse machines on a relay
+gssh client machines list --relay wss://relay.example.com
 ```
 
 ### Remote Access Commands
 
 | Command | Description |
 |---------|-------------|
-| `gssh auth login` | Authenticate with gitspace.sh (GitHub OAuth) |
-| `gssh auth logout` | Sign out of gitspace.sh |
-| `gssh host reserve <name>` | Reserve a subdomain on gitspace.sh |
-| `gssh host status` | Show hosting status |
-| `gssh identity init` | Create machine/client identity |
-| `gssh identity show` | Display identity fingerprint |
-| `gssh access add <key>` | Authorize a client |
-| `gssh access list` | List authorized clients |
-| `gssh access remove <key>` | Revoke client access |
-| `gssh serve` | Start machine daemon |
-| `gssh serve start` | Start serve as background daemon |
-| `gssh serve stop` | Stop background serve daemon |
+| `gssh user auth login` | Authenticate with gitspace.sh (GitHub OAuth) |
+| `gssh user auth logout` | Sign out of gitspace.sh |
+| `gssh user host reserve <name>` | Reserve a subdomain on gitspace.sh |
+| `gssh user host status` | Show hosting status |
+| `gssh user identity init` | Create user root identity |
+| `gssh user identity show` | Display identity fingerprint |
+| `gssh machine access add <gssh-user:...>` | Grant machine full access |
+| `gssh machine access list` | List machine collaborators |
+| `gssh machine access remove <user-id|label>` | Revoke machine full access |
+| `gssh machine serve start --foreground` | Start machine daemon |
+| `gssh machine serve start` | Start serve as background daemon |
+| `gssh machine serve stop` | Stop background serve daemon |
 | `gssh cloud status` | Show cloud control status on current control node |
 | `gssh cloud list` | List cloud workspaces from control store |
-| `gssh share create` | Create invite token |
-| `gssh connect <token>` | Connect to remote machine |
+| `gssh invite relay-user create <gssh-user:...> --relay <url>` | Create relay membership invite |
+| `gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url>` | Create machine ACL invite |
+| `gssh invite list --relay <url>` | List root-signed invites |
+| `gssh invite revoke <invite-id> --relay <url>` | Revoke root-signed invite |
+| `gssh user auth invite accept <token>` | Accept relay-user or machine-user invite |
+| `gssh client connect <target>` | Connect to remote machine |
+| `gssh client machines list --relay <url>` | List accessible remote machines |
 | `gssh status` | Show all daemon statuses |
 
 ### Relay Server Commands
@@ -561,11 +547,11 @@ For self-hosted relay servers:
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start relay server |
-| `gssh relay authorize <key>` | Authorize a machine |
-| `gssh relay revoke <key>` | Revoke machine authorization |
-| `gssh relay machines` | List registered machines |
-| `gssh relay trusted` | List trusted relays |
-| `gssh relay untrust <url>` | Remove relay trust |
+| `gssh relay access add <gssh-user:...>` | Grant relay membership |
+| `gssh relay access remove <user-id|label>` | Revoke relay membership |
+| `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
+| `gssh relay machines list` | List registered machines |
+| `gssh relay machines revoke <machine-id>` | Revoke machine registration |
 
 ### Terminal Multiplexer (tmux-lite)
 
@@ -573,12 +559,12 @@ Manage terminal sessions:
 
 | Command | Description |
 |---------|-------------|
-| `gssh tmux start` | Start tmux-lite daemon |
-| `gssh tmux stop` | Stop tmux-lite daemon |
-| `gssh tmux list` | List sessions |
-| `gssh tmux attach <id>` | Attach to session |
-| `gssh tmux new` | Create new session |
-| `gssh tmux kill <id>` | Kill session |
+| `gssh machine tmux start` | Start tmux-lite daemon |
+| `gssh machine tmux stop` | Stop tmux-lite daemon |
+| `gssh machine tmux list` | List sessions |
+| `gssh machine tmux attach <id>` | Attach to session |
+| `gssh machine tmux new` | Create new session |
+| `gssh machine tmux kill <id>` | Kill session |
 
 ### Environment Variables
 
@@ -586,9 +572,6 @@ Manage terminal sessions:
 # Relay server
 RELAY_PORT=4480              # Default relay port
 RELAY_BIND=0.0.0.0           # Bind address
-
-# Machine identity
-GSSH_IDENTITY_PATH=~/gitspace/.identity/  # Identity storage
 
 # gitspace.sh
 GITSPACE_API_URL=https://api.gitspace.sh   # API endpoint

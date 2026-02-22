@@ -4,11 +4,9 @@
  * Commands for managing bundle configuration and refresh.
  */
 
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
-import { getCurrentProject, getGitspaceDir, getProjectBaseDir, getProjectWorkspacesDir } from '../core/config.js';
+import { getProjectWorkspacesDir } from '../core/config.js';
 import {
   detectBundleChanges,
   formatBundleChangeDetails,
@@ -17,9 +15,6 @@ import {
 } from '../core/bundle-refresh.js';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
-
-const execAsync = promisify(exec);
 
 /**
  * Options for bundle refresh command
@@ -27,105 +22,55 @@ const execAsync = promisify(exec);
 export interface BundleRefreshCommandOptions {
   /** Force refresh even if no changes detected */
   force?: boolean;
-  /** Project name (defaults to current project) */
-  project?: string;
+  /** Project name */
+  project: string;
+  /** Workspace name */
+  workspace: string;
 }
 
 /**
  * Options for bundle status command
  */
 export interface BundleStatusOptions {
-  /** Project name (defaults to current project) */
-  project?: string;
+  /** Project name */
+  project: string;
+  /** Workspace name */
+  workspace: string;
 }
 
 /**
- * Detect if the current working directory is inside a workspace
- * Returns the workspace path if found, undefined otherwise
- */
-function detectWorkspaceFromCwd(projectName: string): string | undefined {
-  const workspacesDir = getProjectWorkspacesDir(projectName);
-
-  const context = detectWorkspaceContextFromCwd(process.cwd(), getGitspaceDir());
-  if (!context || context.projectName !== projectName) {
-    return undefined;
-  }
-
-  const workspacePath = join(workspacesDir, context.workspaceName);
-  if (existsSync(workspacePath)) {
-    return workspacePath;
-  }
-
-  return undefined;
-}
-
-/**
- * Pull latest changes in the base directory
- */
-async function pullBaseRepo(baseDir: string): Promise<void> {
-  logger.info('Pulling latest changes in base repository...');
-
-  try {
-    await execAsync('git fetch origin', { cwd: baseDir });
-
-    // Get current branch
-    const { stdout: branchOutput } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: baseDir });
-    const currentBranch = branchOutput.trim();
-
-    // Pull current branch
-    await execAsync(`git pull origin ${currentBranch}`, { cwd: baseDir });
-
-    logger.success('Base repository updated');
-  } catch (error) {
-    logger.warning(`Could not pull latest changes: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    logger.dim('Continuing with existing bundle state...');
-  }
-}
-
-/**
- * Refresh bundle onboarding for the current project
+ * Refresh bundle onboarding for a project
  *
  * Re-runs onboarding steps with previous values as defaults.
  * Useful when bundle.json has been updated with new configuration.
  */
 export async function bundleRefresh(options: BundleRefreshCommandOptions): Promise<void> {
-  const projectName = options.project || getCurrentProject();
+  const projectName = options.project;
+  const workspaceName = options.workspace;
 
-  if (!projectName) {
+  if (!projectName || !workspaceName) {
     throw new SpacesError(
-      'No project selected. Use "gssh switch project" or specify --project',
+      'Project and workspace are required. Use `--project <name> --workspace <name>`.',
       'USER_ERROR',
       1
     );
   }
 
-  logger.info(`Checking bundle for project: ${projectName}`);
-
-  // First, try to detect if user is in a workspace directory
-  let workspacePath = detectWorkspaceFromCwd(projectName);
-
-  if (workspacePath) {
-    logger.dim(`Using current workspace: ${workspacePath}`);
-  } else {
-    // Fall back to base directory after pulling latest
-    const baseDir = getProjectBaseDir(projectName);
-
-    if (!existsSync(baseDir)) {
-      throw new SpacesError(
-        `Project base directory not found: ${baseDir}`,
-        'USER_ERROR',
-        1
-      );
-    }
-
-    // Pull latest to ensure we have current bundle.json
-    await pullBaseRepo(baseDir);
-    workspacePath = baseDir;
-    logger.dim('Using base repository (no workspace detected in current directory)');
+  const workspacePath = join(getProjectWorkspacesDir(projectName), workspaceName);
+  if (!existsSync(workspacePath)) {
+    throw new SpacesError(
+      `Workspace not found: ${workspacePath}`,
+      'USER_ERROR',
+      1,
+    );
   }
+
+  logger.info(`Checking bundle for workspace: ${projectName}/${workspaceName}`);
+  logger.dim(`Workspace path: ${workspacePath}`);
 
   const refreshOptions: BundleRefreshOptions = {
     force: options.force,
+    allowBaseFallback: false,
   };
 
   const result = await refreshBundle(projectName, workspacePath, refreshOptions);
@@ -156,44 +101,36 @@ export async function bundleRefresh(options: BundleRefreshCommandOptions): Promi
 }
 
 /**
- * Show bundle status for the current project
+ * Show bundle status for a project
  *
  * Displays information about the current bundle configuration.
  */
 export async function bundleStatus(options: BundleStatusOptions): Promise<void> {
-  const projectName = options.project || getCurrentProject();
+  const projectName = options.project;
+  const workspaceName = options.workspace;
 
-  if (!projectName) {
+  if (!projectName || !workspaceName) {
     throw new SpacesError(
-      'No project selected. Use "gssh switch project" or specify --project',
+      'Project and workspace are required. Use `--project <name> --workspace <name>`.',
       'USER_ERROR',
       1
     );
   }
 
-  // First, try to detect if user is in a workspace directory
-  let workspacePath = detectWorkspaceFromCwd(projectName);
-
-  if (!workspacePath) {
-    // Fall back to base directory after pulling latest
-    const baseDir = getProjectBaseDir(projectName);
-
-    if (!existsSync(baseDir)) {
-      throw new SpacesError(
-        `Project base directory not found: ${baseDir}`,
-        'USER_ERROR',
-        1
-      );
-    }
-
-    // Pull latest to ensure we have current bundle.json
-    await pullBaseRepo(baseDir);
-    workspacePath = baseDir;
+  const workspacePath = join(getProjectWorkspacesDir(projectName), workspaceName);
+  if (!existsSync(workspacePath)) {
+    throw new SpacesError(
+      `Workspace not found: ${workspacePath}`,
+      'USER_ERROR',
+      1,
+    );
   }
 
-  const changes = detectBundleChanges(projectName, workspacePath);
+  const changes = detectBundleChanges(projectName, workspacePath, {
+    allowBaseFallback: false,
+  });
 
-  logger.bold(`\nBundle Status: ${projectName}\n`);
+  logger.bold(`\nBundle Status: ${projectName}/${workspaceName}\n`);
 
   if (!changes.hasBundle) {
     if (changes.parseError) {
@@ -225,7 +162,7 @@ export async function bundleStatus(options: BundleStatusOptions): Promise<void> 
       .map((line) => `  - ${line}`)
       .join('\n');
     logger.log(details);
-    logger.log('Run "gssh bundle refresh" to update configuration');
+    logger.log('Run "gssh workspace bundle refresh --project <name> --workspace <name>" to update configuration');
   } else {
     logger.success('Bundle is up to date');
   }

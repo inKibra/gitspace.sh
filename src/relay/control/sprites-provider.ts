@@ -4,7 +4,7 @@
  * Sprites is a Firecracker microVM service (by Fly.io) that provides:
  * - Persistent ext4 volumes
  * - Auto-hibernation / wake-on-connect
- * - Services API for auto-restarting processes (e.g. `gssh serve`)
+ * - Services API for auto-restarting processes (e.g. `gssh machine serve start`)
  *
  * This module wraps the Sprites REST API and maps their sprite states
  * to the internal CloudWorkspaceStatus type.
@@ -309,7 +309,7 @@ export class SpritesProvider {
     }
 
     await this.execWorkspaceCommand(providerWorkspaceId, {
-      command: ['bash', '-lc', 'if command -v gssh >/dev/null 2>&1; then gssh serve stop || true; fi'],
+      command: ['bash', '-lc', 'if command -v gssh >/dev/null 2>&1; then gssh machine serve stop || true; fi'],
     });
 
     const postStop = await this.request<{ status?: string; state?: string }>(

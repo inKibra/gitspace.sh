@@ -1,12 +1,12 @@
 /**
- * Types for the gssh serve command
+ * Types for the `gssh machine serve` command group
  *
  * Defines configuration, session state, and events for the machine-side daemon.
  */
 
 import type { PTYSession } from "./pty-session.js";
 import type { Identity, SessionKeys, AccessType } from "../types/identity.js";
-import type { AccessControlList } from "../lib/tmux-lite/crypto/access-control.js";
+import type { UserRootAccessCheck } from "../lib/tmux-lite/handshake-handler.js";
 import type { RemoteSessionHandlerOptions } from "../lib/remote-session/index.js";
 import { FrameType } from "../lib/tmux-lite/protocol.js";
 
@@ -18,7 +18,7 @@ import { FrameType } from "../lib/tmux-lite/protocol.js";
  * Check if an access type grants write permission (terminal input)
  *
  * Only 'full' access allows writing to the terminal.
- * 'session-invite' is read-only.
+ * 'view' is read-only.
  */
 export function canWrite(accessType: AccessType | undefined): boolean {
   return accessType === 'full';
@@ -38,7 +38,7 @@ export function canManage(accessType: AccessType | undefined): boolean {
  * Check if a client can attach to a specific session
  *
  * - 'full' access can attach to any session
- * - 'session-invite' can only attach to the specific session they were invited to
+ * - 'view' can only attach to the specific session they were invited to
  */
 export function canAttachSession(
   accessType: AccessType | undefined,
@@ -46,7 +46,7 @@ export function canAttachSession(
   targetSessionId: string
 ): boolean {
   if (accessType === 'full') return true;
-  if (accessType === 'session-invite') {
+  if (accessType === 'view') {
     return grantedSessionId === targetSessionId;
   }
   return false;
@@ -62,8 +62,6 @@ export interface ServeOptions {
   relay: string;
   /** Machine identity for authentication */
   identity: Identity;
-  /** Access control list for authorized clients */
-  accessList: AccessControlList;
   /** Remote session handler configuration */
   remoteSessionOptions?: RemoteSessionHandlerOptions;
   /** Shell to spawn (default: $SHELL or /bin/bash) */
@@ -72,6 +70,10 @@ export interface ServeOptions {
   env?: Record<string, string>;
   /** Handshake timeout in milliseconds (default: 30000) */
   handshakeTimeoutMs?: number;
+  /** Owner user root ID for strict access_list authorization */
+  ownerUserRootId?: string;
+  /** Callback for user-root ACL checks */
+  checkUserRootAccess?: UserRootAccessCheck;
 }
 
 // ============================================================================
@@ -105,7 +107,7 @@ export interface ClientSession {
   sessionKeys?: SessionKeys;
   /** Granted access type */
   accessType?: AccessType;
-  /** Session ID for session-invite access */
+  /** Session ID for view access */
   sessionId?: string;
   /** Peer's identity ID */
   peerIdentityId?: string;

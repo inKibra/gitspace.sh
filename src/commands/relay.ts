@@ -3,11 +3,8 @@
  *
  * Handles:
  * - `gssh relay start` - Start the relay server
- * - `gssh relay authorize` - Authorize a machine
- * - `gssh relay revoke` - Revoke a machine's authorization
- * - `gssh relay machines` - List authorized machines
- * - `gssh relay trusted` - List trusted relays (machine-side)
- * - `gssh relay untrust` - Remove relay trust (machine-side)
+ * - `gssh relay access ...` - Manage relay-level user-root grants
+ * - `gssh relay machines ...` - Manage registered machines
  */
 
 import { logger } from "../utils/logger.js";
@@ -17,20 +14,18 @@ import chalk from "chalk";
 import {
   loadOrCreateRelayIdentity,
   formatRelayFingerprint,
-  type RelayIdentity,
 } from "../relay/identity.js";
+import { loadUserRootIdentity } from "../core/user-identity.js";
+import { parseUserRootPublicKey } from "../lib/tmux-lite/crypto/user-identity.js";
 import {
-  getAuthorizedMachines,
-  addAuthorizedMachine,
-  removeAuthorizedMachine,
-  computeMachineFingerprint,
-  type AuthorizedMachine,
-} from "../relay/authorization.js";
+  grantRelayAccess,
+  listRelayAccessList,
+  revokeRelayAccess,
+} from "../relay/auth/store.js";
 import {
-  getTrustedRelays,
-  removeTrustedRelay,
-  type TrustedRelay,
-} from "../core/trusted-relays.js";
+  listVaultMachinesForOwner,
+  removeVaultMachine,
+} from "../relay/control/store.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -112,204 +107,155 @@ export async function startRelay(options: {
   }
 }
 
-// ============================================================================
-// Authorization Commands
-// ============================================================================
+function resolveClientUserRootId(user: string): string {
+  const trimmed = user.trim();
+  if (!trimmed) {
+    throw new SpacesError('User key is required', 'USER_ERROR', 1);
+  }
 
-/**
- * Authorize a machine to connect to this relay
- *
- * @param spacesPubKey - Machine public key in gssh-pub:SIGNING:KEYEXCHANGE format
- * @param options - Command options
- */
-export async function authorizeMachine(
-  spacesPubKey: string,
-  options: { label?: string }
-): Promise<void> {
-  const entry = addAuthorizedMachine(spacesPubKey, options.label);
+  if (trimmed.startsWith('gssh-user:')) {
+    return parseUserRootPublicKey(trimmed).userRootId;
+  }
 
-  if (!entry) {
+  return trimmed;
+}
+
+async function requireOwnerUserRootId(): Promise<string> {
+  const userRoot = await loadUserRootIdentity();
+  if (!userRoot) {
     throw new SpacesError(
-      `Invalid public key format. Expected: gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY\n` +
-        `Get this from \`gssh identity show\` on the machine you want to authorize.`,
-      "USER_ERROR",
-      1
+      'User root identity is required. Run `gssh user identity init` first.',
+      'USER_ERROR',
+      1,
     );
   }
+  return userRoot.id;
+}
 
-  logger.log("");
-  logger.success("Machine authorized!");
-  logger.log("");
-  logger.log(`  Fingerprint: ${chalk.cyan(entry.fingerprint)}`);
+export async function addRelayAccess(
+  user: string,
+  options: { label?: string }
+): Promise<void> {
+  const ownerUserRootId = await requireOwnerUserRootId();
+  const clientUserRootId = resolveClientUserRootId(user);
+
+  if (clientUserRootId === ownerUserRootId) {
+    throw new SpacesError('Owner does not need a relay access grant.', 'USER_ERROR', 1);
+  }
+
+  const entry = grantRelayAccess({
+    ownerUserRootId,
+    clientUserRootId,
+    label: options.label,
+  });
+
+  logger.success('Relay access granted');
+  logger.log(`  User:  ${chalk.cyan(entry.clientUserRootId)}`);
   if (entry.label) {
-    logger.log(`  Label:       ${chalk.yellow(entry.label)}`);
+    logger.log(`  Label: ${chalk.yellow(entry.label)}`);
   }
-  logger.log("");
 }
 
-/**
- * Revoke a machine's authorization
- *
- * @param fingerprintOrLabel - Fingerprint or label of machine to revoke
- */
-export async function revokeMachine(fingerprintOrLabel: string): Promise<void> {
-  const removed = removeAuthorizedMachine(fingerprintOrLabel);
+export async function listRelayAccess(options: { json?: boolean } = {}): Promise<void> {
+  const ownerUserRootId = await requireOwnerUserRootId();
+  const entries = listRelayAccessList(ownerUserRootId);
 
+  if (options.json) {
+    console.log(JSON.stringify(entries, null, 2));
+    return;
+  }
+
+  if (entries.length === 0) {
+    logger.info('No relay access grants.');
+    return;
+  }
+
+  logger.bold('Relay Access Grants:');
+  logger.log('');
+  const userWidth = 20;
+  const labelWidth = 24;
+  logger.dim('USER ROOT'.padEnd(userWidth) + 'LABEL'.padEnd(labelWidth) + 'GRANTED');
+  logger.dim('─'.repeat(userWidth + labelWidth + 12));
+
+  for (const entry of entries) {
+    const userCol = entry.clientUserRootId.slice(0, userWidth - 1).padEnd(userWidth);
+    const labelCol = (entry.label || '-').slice(0, labelWidth - 1).padEnd(labelWidth);
+    const dateCol = entry.grantedAt.split('T')[0] ?? entry.grantedAt;
+    logger.log(chalk.cyan(userCol) + labelCol + chalk.dim(dateCol));
+  }
+}
+
+export async function removeRelayAccess(
+  userOrLabel: string,
+  options: { force?: boolean } = {},
+): Promise<void> {
+  const ownerUserRootId = await requireOwnerUserRootId();
+  const entries = listRelayAccessList(ownerUserRootId);
+  const query = userOrLabel.trim();
+  const parsedId = query.startsWith('gssh-user:') ? parseUserRootPublicKey(query).userRootId : query;
+
+  const direct = entries.find((entry) => entry.clientUserRootId === parsedId);
+  const prefixMatches = direct ? [] : entries.filter((entry) => entry.clientUserRootId.startsWith(parsedId));
+  const labelMatch = direct || prefixMatches.length === 1
+    ? null
+    : entries.find((entry) => entry.label?.toLowerCase() === query.toLowerCase());
+  const target = direct ?? (prefixMatches.length === 1 ? prefixMatches[0] : labelMatch);
+
+  if (!target) {
+    throw new SpacesError(`No relay access grant found for '${userOrLabel}'.`, 'USER_ERROR', 1);
+  }
+
+  if (!options.force) {
+    logger.log(`Remove relay access for ${chalk.cyan(target.clientUserRootId)}?`);
+  }
+
+  const removed = revokeRelayAccess(ownerUserRootId, target.clientUserRootId);
   if (!removed) {
-    const machines = getAuthorizedMachines();
-
-    if (machines.length === 0) {
-      throw new SpacesError("No machines are authorized.", "USER_ERROR", 1);
-    }
-
-    logger.error(`No machine found matching: ${fingerprintOrLabel}`);
-    logger.log("");
-    logger.log("Authorized machines:");
-    for (const m of machines) {
-      logger.log(`  ${m.fingerprint} ${m.label ? `(${m.label})` : ""}`);
-    }
-    throw new SpacesError("Machine not found.", "USER_ERROR", 1);
+    throw new SpacesError('Failed to revoke relay access.', 'SYSTEM_ERROR', 2);
   }
 
-  logger.log("");
-  logger.success("Machine authorization revoked.");
-  logger.log("");
-  logger.log(`  Fingerprint: ${chalk.cyan(removed.fingerprint)}`);
-  if (removed.label) {
-    logger.log(`  Label:       ${chalk.yellow(removed.label)}`);
-  }
-  logger.log("");
+  logger.success(`Relay access revoked for ${target.clientUserRootId}`);
 }
 
-/**
- * List all authorized machines
- */
-export async function listMachines(): Promise<void> {
-  const machines = getAuthorizedMachines();
+export async function listRelayMachines(options: { json?: boolean } = {}): Promise<void> {
+  const ownerUserRootId = await requireOwnerUserRootId();
+  const machines = listVaultMachinesForOwner(ownerUserRootId);
+
+  if (options.json) {
+    console.log(JSON.stringify(machines, null, 2));
+    return;
+  }
 
   if (machines.length === 0) {
-    logger.log("");
-    logger.info("No machines authorized.");
-    logger.log("");
-    logger.log("Authorize a machine:");
-    logger.log("  gssh relay authorize gssh-pub:... --label 'My Machine'");
-    logger.log("");
+    logger.info('No machines registered for this owner.');
     return;
   }
 
-  logger.log("");
-  logger.bold("Authorized Machines:");
-  logger.log("");
-
-  // Header
-  const fpWidth = 20;
+  logger.bold('Relay Machines:');
+  logger.log('');
+  const machineWidth = 20;
   const labelWidth = 24;
-  const dateWidth = 12;
-
-  logger.dim(
-    "FINGERPRINT".padEnd(fpWidth) +
-      "LABEL".padEnd(labelWidth) +
-      "AUTHORIZED"
-  );
-  logger.dim("─".repeat(fpWidth + labelWidth + dateWidth));
-
-  // Entries
-  for (const m of machines) {
-    const fp = m.fingerprint.padEnd(fpWidth);
-    const label = (m.label || "-").substring(0, labelWidth - 1).padEnd(labelWidth);
-    const date = new Date(m.authorizedAt).toISOString().split("T")[0];
-
-    logger.log(chalk.cyan(fp) + label + chalk.dim(date));
+  logger.dim('MACHINE ID'.padEnd(machineWidth) + 'LABEL'.padEnd(labelWidth) + 'LAST CONNECTED');
+  logger.dim('─'.repeat(machineWidth + labelWidth + 16));
+  for (const machine of machines) {
+    const machineCol = machine.machineId.slice(0, machineWidth - 1).padEnd(machineWidth);
+    const labelCol = (machine.label || '-').slice(0, labelWidth - 1).padEnd(labelWidth);
+    const lastConnected = machine.lastConnectedAt.split('T')[0] ?? machine.lastConnectedAt;
+    logger.log(chalk.cyan(machineCol) + labelCol + chalk.dim(lastConnected));
   }
-
-  logger.log("");
-  logger.dim(`Total: ${machines.length} machine(s)`);
-  logger.log("");
 }
 
-// ============================================================================
-// Trusted Relay Commands (Machine-side)
-// ============================================================================
-
-/**
- * List all trusted relays
- */
-export async function listTrustedRelays(): Promise<void> {
-  const relays = getTrustedRelays();
-
-  if (relays.length === 0) {
-    logger.log("");
-    logger.info("No trusted relays.");
-    logger.log("");
-    logger.log("Connect to a relay to establish trust:");
-    logger.log("  gssh serve --relay wss://relay.example.com");
-    logger.log("");
-    return;
+export async function revokeRelayMachine(machineId: string): Promise<void> {
+  const ownerUserRootId = await requireOwnerUserRootId();
+  const machine = listVaultMachinesForOwner(ownerUserRootId).find((entry) => entry.machineId === machineId);
+  if (!machine) {
+    throw new SpacesError(`Machine '${machineId}' not found for this owner.`, 'USER_ERROR', 1);
   }
 
-  logger.log("");
-  logger.bold("Trusted Relays:");
-  logger.log("");
-
-  // Header
-  const urlWidth = 32;
-  const fpWidth = 20;
-  const labelWidth = 16;
-
-  logger.dim(
-    "URL".padEnd(urlWidth) +
-      "FINGERPRINT".padEnd(fpWidth) +
-      "LABEL"
-  );
-  logger.dim("─".repeat(urlWidth + fpWidth + labelWidth));
-
-  // Entries
-  for (const r of relays) {
-    const url = r.url.substring(0, urlWidth - 1).padEnd(urlWidth);
-    const fp = r.fingerprint.padEnd(fpWidth);
-    const label = (r.label || "-").substring(0, labelWidth - 1);
-
-    logger.log(chalk.cyan(url) + fp + chalk.dim(label));
-  }
-
-  logger.log("");
-  logger.dim(`Total: ${relays.length} relay(s)`);
-  logger.log("");
-}
-
-/**
- * Remove trust for a relay
- *
- * @param urlOrFingerprint - URL, fingerprint, or label of relay to untrust
- */
-export async function untrustRelay(urlOrFingerprint: string): Promise<void> {
-  const removed = removeTrustedRelay(urlOrFingerprint);
-
+  const removed = removeVaultMachine(machineId);
   if (!removed) {
-    const relays = getTrustedRelays();
-
-    if (relays.length === 0) {
-      throw new SpacesError("No relays are trusted.", "USER_ERROR", 1);
-    }
-
-    logger.error(`No relay found matching: ${urlOrFingerprint}`);
-    logger.log("");
-    logger.log("Trusted relays:");
-    for (const r of relays) {
-      logger.log(`  ${r.url} (${r.fingerprint}${r.label ? `, ${r.label}` : ""})`);
-    }
-    throw new SpacesError("Relay not found.", "USER_ERROR", 1);
+    throw new SpacesError(`Failed to remove machine '${machineId}'.`, 'SYSTEM_ERROR', 2);
   }
 
-  logger.log("");
-  logger.success("Relay trust removed.");
-  logger.log("");
-  logger.log(`  URL:         ${chalk.cyan(removed.url)}`);
-  logger.log(`  Fingerprint: ${removed.fingerprint}`);
-  if (removed.label) {
-    logger.log(`  Label:       ${chalk.yellow(removed.label)}`);
-  }
-  logger.log("");
-  logger.dim("You will be prompted to trust this relay again on next connection.");
-  logger.log("");
+  logger.success(`Removed machine ${machineId}`);
 }

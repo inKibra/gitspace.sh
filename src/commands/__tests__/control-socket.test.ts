@@ -111,7 +111,7 @@ describe('control socket – control_meta command', () => {
   test('returns control_meta with unbound owner when no owner is set', async () => {
     const response = await queryControlMeta();
     expect(response).not.toBeNull();
-    expect(response!.schemaVersion).toBe(3);
+    expect(response!.schemaVersion).toBe(4);
     expect(response!.ownerIdentityId).toBeUndefined();
     expect(response!.updatedAt.length).toBeGreaterThan(0);
   });

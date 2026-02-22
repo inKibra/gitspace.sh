@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSpacesDir } from '../../core/config.js';
 import { SpacesError } from '../../types/errors.js';
@@ -10,16 +10,19 @@ import type {
   CloudBootstrapTokenRecord,
   CloudWorkspaceRecord,
   ControlMeta,
+  VaultAccessListEntry,
+  VaultMachineRecord,
+  VaultMachineUnlockKeyRecord,
+  VaultMetaKey,
 } from './types.js';
 
-const CONTROL_SCHEMA_VERSION = 3;
+const CONTROL_SCHEMA_VERSION = 4;
 const CONTROL_DIR_OVERRIDE_ENV = 'GITSPACE_CONTROL_DIR';
 
 const META_KEY_SCHEMA_VERSION = 'schema_version';
 const META_KEY_OWNER_IDENTITY_ID = 'owner_identity_id';
 const META_KEY_CREATED_AT = 'created_at';
 const META_KEY_UPDATED_AT = 'updated_at';
-const META_KEY_LEGACY_META_IMPORTED = 'legacy_meta_imported';
 const META_KEY_RELAY_IDENTITY_ID = 'relay_identity_id';
 const META_KEY_RELAY_SIGNING_PUBLIC_KEY = 'relay_signing_public_key';
 const META_KEY_RELAY_FINGERPRINT = 'relay_fingerprint';
@@ -43,10 +46,6 @@ export function getControlDirPath(): string {
 
 export function getControlDbPath(): string {
   return join(getControlDirPath(), 'control.db');
-}
-
-export function getLegacyControlMetaPath(): string {
-  return join(getControlDirPath(), 'meta.json');
 }
 
 function ensureControlDir(): void {
@@ -107,40 +106,6 @@ function bootstrapControlMeta(db: Database): void {
   }
 }
 
-function importLegacyMetaIfPresent(db: Database): void {
-  const alreadyImported = getMetaValue(db, META_KEY_LEGACY_META_IMPORTED) === '1';
-  if (alreadyImported) {
-    return;
-  }
-
-  const legacyPath = getLegacyControlMetaPath();
-  if (!existsSync(legacyPath)) {
-    setMetaValue(db, META_KEY_LEGACY_META_IMPORTED, '1');
-    return;
-  }
-
-  try {
-    const content = readFileSync(legacyPath, 'utf-8');
-    const legacy = JSON.parse(content) as Partial<ControlMeta>;
-
-    if (legacy.createdAt && !getMetaValue(db, META_KEY_CREATED_AT)) {
-      setMetaValue(db, META_KEY_CREATED_AT, legacy.createdAt);
-    }
-
-    if (legacy.ownerIdentityId && !getMetaValue(db, META_KEY_OWNER_IDENTITY_ID)) {
-      setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, legacy.ownerIdentityId);
-    }
-  } catch (error) {
-    throw new SpacesError(
-      `Failed to import legacy control metadata: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      'SYSTEM_ERROR',
-      2
-    );
-  }
-
-  setMetaValue(db, META_KEY_LEGACY_META_IMPORTED, '1');
-}
-
 function readControlMetaFromDb(db: Database): ControlMeta {
   const createdAt = getMetaValue(db, META_KEY_CREATED_AT) ?? nowIso();
   const updatedAt = getMetaValue(db, META_KEY_UPDATED_AT) ?? createdAt;
@@ -168,7 +133,6 @@ function withControlDb<T>(handler: (db: Database) => T): T {
 
   try {
     applyControlMigrations(db);
-    importLegacyMetaIfPresent(db);
     bootstrapControlMeta(db);
     return handler(db);
   } finally {
@@ -1433,5 +1397,373 @@ export function listCloudWorkspaces(): CloudWorkspaceRecord[] {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
+  });
+}
+
+// ============================================================================
+// Vault Meta
+// ============================================================================
+
+export function getVaultMeta(key: VaultMetaKey): string | undefined {
+  return withControlDb((db) => {
+    const row = db.query('SELECT value FROM vault_meta WHERE key = ?').get(key) as
+      | { value: string }
+      | null;
+    return row?.value;
+  });
+}
+
+export function setVaultMeta(key: VaultMetaKey, value: string): void {
+  withControlDb((db) => {
+    db.query(
+      `
+      INSERT INTO vault_meta(key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE
+      SET value = excluded.value
+      `
+    ).run(key, value);
+  });
+}
+
+export function isVaultInitialized(): boolean {
+  return getVaultMeta('vault_initialized') === '1';
+}
+
+// ============================================================================
+// Vault Machines CRUD
+// ============================================================================
+
+export interface UpsertVaultMachineInput {
+  machineId: string;
+  ownerUserRootId: string;
+  signingKey: string;
+  keyExchangeKey: string;
+  label?: string;
+}
+
+/**
+ * Insert or update a persistent machine registration.
+ * On re-registration, verifies ownership and signing key match.
+ * Returns the upserted record.
+ */
+export function upsertVaultMachine(
+  input: UpsertVaultMachineInput
+): { success: true; record: VaultMachineRecord } | { success: false; error: string } {
+  return withControlDb((db) => {
+    const now = nowIso();
+
+    const existing = db.query(
+      'SELECT machine_id, owner_user_root_id, signing_key FROM vault_machines WHERE machine_id = ?'
+    ).get(input.machineId) as {
+      machine_id: string;
+      owner_user_root_id: string;
+      signing_key: string;
+    } | null;
+
+    if (existing) {
+      // Security: Verify ownership — must be same user root
+      if (existing.owner_user_root_id !== input.ownerUserRootId) {
+        return {
+          success: false as const,
+          error: 'Machine already registered by different owner',
+        };
+      }
+      // Security: Verify signing key matches — prevents key substitution
+      if (existing.signing_key !== input.signingKey) {
+        return {
+          success: false as const,
+          error: 'Signing key mismatch — machine identity has changed',
+        };
+      }
+
+      // Safe to update
+      db.query(
+        `
+        UPDATE vault_machines
+        SET key_exchange_key = ?, label = COALESCE(?, label), last_connected_at = ?
+        WHERE machine_id = ?
+        `
+      ).run(input.keyExchangeKey, input.label ?? null, now, input.machineId);
+
+      const updated = db.query(
+        'SELECT * FROM vault_machines WHERE machine_id = ?'
+      ).get(input.machineId) as VaultMachineRow;
+
+      return { success: true as const, record: mapVaultMachineRow(updated) };
+    }
+
+    // New registration
+    db.query(
+      `
+      INSERT INTO vault_machines (
+        machine_id, owner_user_root_id, signing_key, key_exchange_key,
+        label, registered_at, last_connected_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `
+    ).run(
+      input.machineId,
+      input.ownerUserRootId,
+      input.signingKey,
+      input.keyExchangeKey,
+      input.label ?? null,
+      now,
+      now
+    );
+
+    return {
+      success: true as const,
+      record: {
+        machineId: input.machineId,
+        ownerUserRootId: input.ownerUserRootId,
+        signingKey: input.signingKey,
+        keyExchangeKey: input.keyExchangeKey,
+        label: input.label,
+        registeredAt: now,
+        lastConnectedAt: now,
+      },
+    };
+  });
+}
+
+interface VaultMachineRow {
+  machine_id: string;
+  owner_user_root_id: string;
+  signing_key: string;
+  key_exchange_key: string;
+  label: string | null;
+  registered_at: string;
+  last_connected_at: string;
+}
+
+function mapVaultMachineRow(row: VaultMachineRow): VaultMachineRecord {
+  return {
+    machineId: row.machine_id,
+    ownerUserRootId: row.owner_user_root_id,
+    signingKey: row.signing_key,
+    keyExchangeKey: row.key_exchange_key,
+    label: row.label ?? undefined,
+    registeredAt: row.registered_at,
+    lastConnectedAt: row.last_connected_at,
+  };
+}
+
+export function getVaultMachine(machineId: string): VaultMachineRecord | undefined {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT * FROM vault_machines WHERE machine_id = ?'
+    ).get(machineId) as VaultMachineRow | null;
+    return row ? mapVaultMachineRow(row) : undefined;
+  });
+}
+
+export function getVaultMachineBySigningKey(signingKey: string): VaultMachineRecord | undefined {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT * FROM vault_machines WHERE signing_key = ?'
+    ).get(signingKey) as VaultMachineRow | null;
+    return row ? mapVaultMachineRow(row) : undefined;
+  });
+}
+
+export function listVaultMachines(ownerUserRootId?: string): VaultMachineRecord[] {
+  return withControlDb((db) => {
+    const rows = ownerUserRootId
+      ? (db.query(
+          'SELECT * FROM vault_machines WHERE owner_user_root_id = ? ORDER BY last_connected_at DESC'
+        ).all(ownerUserRootId) as VaultMachineRow[])
+      : (db.query(
+          'SELECT * FROM vault_machines ORDER BY last_connected_at DESC'
+        ).all() as VaultMachineRow[]);
+    return rows.map(mapVaultMachineRow);
+  });
+}
+
+export function updateVaultMachineLastConnected(machineId: string): void {
+  withControlDb((db) => {
+    db.query(
+      'UPDATE vault_machines SET last_connected_at = ? WHERE machine_id = ?'
+    ).run(nowIso(), machineId);
+  });
+}
+
+export function removeVaultMachine(machineId: string): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM vault_machines WHERE machine_id = ?'
+    ).run(machineId);
+    return result.changes > 0;
+  });
+}
+
+export function listVaultMachinesForOwner(ownerUserRootId: string): VaultMachineRecord[] {
+  return listVaultMachines(ownerUserRootId);
+}
+
+// ============================================================================
+// Vault Machine Unlock Keys CRUD
+// ============================================================================
+
+/**
+ * Store an encrypted machine unlock key in the vault.
+ * The unlock key is encrypted with the vault key (AES-256-GCM) before storage.
+ */
+export function setVaultMachineUnlockKey(
+  machineId: string,
+  encryptedUnlockKey: string
+): void {
+  const now = nowIso();
+  withControlDb((db) => {
+    db.query(
+      `
+      INSERT INTO vault_machine_unlock_keys (machine_id, encrypted_unlock_key, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(machine_id) DO UPDATE
+      SET encrypted_unlock_key = excluded.encrypted_unlock_key,
+          updated_at = excluded.updated_at
+      `
+    ).run(machineId, encryptedUnlockKey, now, now);
+  });
+}
+
+export function getVaultMachineUnlockKey(
+  machineId: string
+): VaultMachineUnlockKeyRecord | undefined {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT * FROM vault_machine_unlock_keys WHERE machine_id = ?'
+    ).get(machineId) as {
+      machine_id: string;
+      encrypted_unlock_key: string;
+      created_at: string;
+      updated_at: string;
+    } | null;
+
+    if (!row) return undefined;
+
+    return {
+      machineId: row.machine_id,
+      encryptedUnlockKey: row.encrypted_unlock_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  });
+}
+
+export function removeVaultMachineUnlockKey(machineId: string): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM vault_machine_unlock_keys WHERE machine_id = ?'
+    ).run(machineId);
+    return result.changes > 0;
+  });
+}
+
+export function listVaultMachineUnlockKeys(): VaultMachineUnlockKeyRecord[] {
+  return withControlDb((db) => {
+    const rows = db.query(
+      'SELECT * FROM vault_machine_unlock_keys ORDER BY updated_at DESC'
+    ).all() as Array<{
+      machine_id: string;
+      encrypted_unlock_key: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      machineId: row.machine_id,
+      encryptedUnlockKey: row.encrypted_unlock_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  });
+}
+
+// ============================================================================
+// Vault Access List CRUD
+// ============================================================================
+
+export interface GrantVaultAccessInput {
+  ownerUserRootId: string;
+  clientUserRootId: string;
+  label?: string;
+}
+
+/**
+ * Grant access to a client user root ID for a given owner.
+ * Upserts — if the same (owner, client) pair exists, updates the label.
+ */
+export function grantVaultAccess(input: GrantVaultAccessInput): VaultAccessListEntry {
+  return withControlDb((db) => {
+    const now = nowIso();
+    db.query(
+      `
+      INSERT INTO vault_access_list (owner_user_root_id, client_user_root_id, label, granted_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(owner_user_root_id, client_user_root_id) DO UPDATE
+      SET label = COALESCE(excluded.label, vault_access_list.label),
+          granted_at = excluded.granted_at
+      `
+    ).run(input.ownerUserRootId, input.clientUserRootId, input.label ?? null, now);
+
+    const row = db.query(
+      `
+      SELECT * FROM vault_access_list
+      WHERE owner_user_root_id = ? AND client_user_root_id = ?
+      `
+    ).get(input.ownerUserRootId, input.clientUserRootId) as VaultAccessRow;
+
+    return mapVaultAccessRow(row);
+  });
+}
+
+interface VaultAccessRow {
+  id: number;
+  owner_user_root_id: string;
+  client_user_root_id: string;
+  label: string | null;
+  granted_at: string;
+}
+
+function mapVaultAccessRow(row: VaultAccessRow): VaultAccessListEntry {
+  return {
+    id: row.id,
+    ownerUserRootId: row.owner_user_root_id,
+    clientUserRootId: row.client_user_root_id,
+    label: row.label ?? undefined,
+    grantedAt: row.granted_at,
+  };
+}
+
+export function revokeVaultAccess(
+  ownerUserRootId: string,
+  clientUserRootId: string
+): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM vault_access_list WHERE owner_user_root_id = ? AND client_user_root_id = ?'
+    ).run(ownerUserRootId, clientUserRootId);
+    return result.changes > 0;
+  });
+}
+
+export function listVaultAccessList(ownerUserRootId: string): VaultAccessListEntry[] {
+  return withControlDb((db) => {
+    const rows = db.query(
+      'SELECT * FROM vault_access_list WHERE owner_user_root_id = ? ORDER BY granted_at DESC'
+    ).all(ownerUserRootId) as VaultAccessRow[];
+    return rows.map(mapVaultAccessRow);
+  });
+}
+
+export function isVaultAccessGranted(
+  ownerUserRootId: string,
+  clientUserRootId: string
+): boolean {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT 1 FROM vault_access_list WHERE owner_user_root_id = ? AND client_user_root_id = ?'
+    ).get(ownerUserRootId, clientUserRootId);
+    return row !== null;
   });
 }

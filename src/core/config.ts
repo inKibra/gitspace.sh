@@ -217,20 +217,9 @@ export function updateProjectConfig(
 }
 
 /**
- * Get current project name from env var or global config
- * Resolution order:
- * 1. SPACES_CURRENT_PROJECT environment variable
- * 2. currentProject field in global config
- * 3. null if neither is set
+ * Get current project name from global config.
  */
 export function getCurrentProject(): string | null {
-	// Check environment variable first
-	const envProject = process.env.SPACES_CURRENT_PROJECT
-	if (envProject) {
-		return envProject
-	}
-
-	// Fall back to global config
 	const globalConfig = readGlobalConfig()
 	return globalConfig.currentProject
 }

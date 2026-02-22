@@ -86,6 +86,7 @@ describe('useMachineDirectory', () => {
         resolveClientConfig: async () => ({
           relayUrl: 'ws://localhost:4480/ws',
           clientIdentityId: 'client-1',
+          deviceCertificate: 'test-device-cert',
           identity: { id: 'identity-1' },
           context: { publicKey: 'pubkey-1' },
           signer: (message) => ({ ...message, signature: { sig: 'x' } }),

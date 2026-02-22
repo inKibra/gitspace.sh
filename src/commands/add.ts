@@ -1,6 +1,6 @@
 /**
  * Add command implementation
- * Handles both 'gssh add project' and 'gssh add [workspace-name]'
+ * Handles project/workspace creation for the namespaced CLI.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
@@ -11,7 +11,6 @@ import {
   setCurrentProject,
   getProjectBaseDir,
   getProjectWorkspacesDir,
-  getCurrentProject,
   getAllProjectNames,
   projectExists,
 } from '../core/config.js';
@@ -108,7 +107,7 @@ export async function addProject(options: {
     const existingConfig = readProjectConfig(existingProject);
     if (existingConfig.repository === selectedRepo) {
       throw new SpacesError(
-        `Repository ${selectedRepo} is already tracked by project "${existingProject}"\n\nTo use that project:\n  gssh switch project ${existingProject}`,
+        `Repository ${selectedRepo} is already tracked by project "${existingProject}"\n\nUse that project with:\n  gssh workspace list --project ${existingProject}`,
         'USER_ERROR',
         1
       );
@@ -220,11 +219,10 @@ export async function addProject(options: {
  * Add a new workspace
  */
 export async function addWorkspace(
-  workspaceNameArg?: string,
-  options: Partial<CreateWorkspaceOptions> = {}
+  workspaceNameArg: string | undefined,
+  options: (Partial<CreateWorkspaceOptions> & { project: string })
 ): Promise<void> {
-  // Get current project
-  const currentProject = getCurrentProject();
+  const currentProject = options.project;
   if (!currentProject) {
     throw new NoProjectError();
   }

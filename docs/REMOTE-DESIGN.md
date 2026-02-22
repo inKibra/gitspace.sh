@@ -13,7 +13,7 @@ GitSpace enables developers to run persistent terminal sessions on their local m
 │                                                                              │
 │  LOCAL MACHINE              RELAY                      REMOTE ACCESS        │
 │  ┌─────────────────┐       ┌─────────────────┐        ┌─────────────────┐   │
-│  │ gssh serve      │       │ WebSocket relay │        │ Browser         │   │
+│  │ gssh machine serve start --foreground      │       │ WebSocket relay │        │ Browser         │   │
 │  │ └─ tmux-lite    │◀═════▶│ (blind router)  │◀══════▶│ CLI             │   │
 │  │    server       │  E2E  │                 │  E2E   │ TUI             │   │
 │  └─────────────────┘       └─────────────────┘        └─────────────────┘   │
@@ -40,8 +40,8 @@ Unlike password-based systems, GitSpace uses cryptographic identities for access
 │  ├── X25519 key exchange keypair (establishes encryption)                   │
 │  └── Unique identifier (derived from signing public key)                    │
 │                                                                              │
-│  Access is granted by PUBLIC KEY, not passwords:                            │
-│  • Machine owner runs: gssh access add <client-public-key>                  │
+│  Access is granted by USER ROOT identity, not passwords:                    │
+│  • Machine owner runs: gssh machine access add <gssh-user:...>              │
 │  • Client can now connect and perform X3DH handshake                        │
 │  • No shared secrets needed - cryptographic proof of identity               │
 │                                                                              │
@@ -78,7 +78,6 @@ Unlike password-based systems, GitSpace uses cryptographic identities for access
 | Access Type | Description | Capabilities |
 |-------------|-------------|--------------|
 | `full` | Permanent access grant | Browse all projects/workspaces, create/attach/kill sessions, manage access |
-| `session-invite` | One-time session access | View specific session only, no browsing, read-only |
 
 ### What the Relay Can See
 
@@ -93,7 +92,7 @@ Unlike password-based systems, GitSpace uses cryptographic identities for access
 │  • Connection timestamps                   • Commands and output            │
 │  • Data volume (bytes)                     • File contents                  │
 │  • Online/offline status                   • Session names                  │
-│  • Access list (public keys only)          • Workspace information          │
+│  • ACL + invite metadata                   • Workspace information          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -150,14 +149,14 @@ After a client connects through the relay, X3DH establishes session encryption:
 │     Send client_auth:                                                      │
 │     ├── Ed25519 signature                                                  │
 │     ├── signingPublicKey                                                   │
-│     └── inviteToken (if via invite)                                        │
+│     └── authorization metadata (ACL-backed)                                │
 │                                                                            │
 │                                          8. Verify signature               │
-│                                          9. Check access list again        │
+│                                          9. Check ACL policy again         │
 │                                                                            │
 │  10. Receive server_auth:               ◀───────────────────────────────   │
 │      ├── Ed25519 signature                                                 │
-│      └── accessType (full/session-invite)                                  │
+│      └── accessType (full)                                                 │
 │                                                                            │
 │  11. Both derive session keys via HKDF                                     │
 │      ├── sendKey (client → machine)                                        │
@@ -240,7 +239,7 @@ const sessionId = hkdf(sha256, masterSecret, 'session', 'spaces-v1-session-id', 
 
 ## Components
 
-### 1. Machine Daemon (`gssh serve`)
+### 1. Machine Daemon (`gssh machine serve start --foreground`)
 
 **Location:** User's local machine
 **Role:** Session management, PTY handling, encryption endpoint
@@ -337,56 +336,36 @@ src/
 ### Granting Access
 
 ```bash
-# On the machine owner's side
-$ gssh access add gssh_pk_abc123...
+# Grant relay membership
+gssh relay access add gssh-user:BASE64_SIGNING_KEY --label "Brad's Phone"
 
-  ✓ Added client: gssh_pk_abc123...
-
-  Label (optional): Brad's Phone
-  Access type: full
+# Grant machine full access
+gssh machine access add gssh-user:BASE64_SIGNING_KEY --label "Brad's Phone"
 ```
 
-### Access List Storage
+### ACL Storage
 
-Access entries are stored locally on the machine:
+Persistent grants are user-root keyed:
 
 ```typescript
-interface AccessEntry {
-  clientIdentityId: string;      // Derived from public key
-  signingPublicKey: string;      // Ed25519 public key (base64)
-  keyExchangePublicKey: string;  // X25519 public key (base64)
-  label?: string;                // Human-readable name
-  grantedAt: number;             // Unix timestamp
-  accessType: 'full' | 'session-invite';
-  sessionId?: string;            // For session-invite only
-  expiresAt?: number;            // Optional expiration
+interface RelayAccessGrant {
+  ownerUserRootId: string;
+  clientUserRootId: string;
+  label?: string;
+  grantedAt: number;
+}
+
+interface MachineAccessGrant {
+  machineId: string;
+  ownerUserRootId: string;
+  clientUserRootId: string;
+  role: 'full';
+  label?: string;
+  grantedAt: number;
 }
 ```
 
-### Global Access Lists
-
-When using a relay with an account, access can be managed at the account level:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  GLOBAL ACCESS                                                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Account: brad@example.com                                                   │
-│  ├── Machine: brad-macbook (online)                                         │
-│  ├── Machine: brad-server (offline)                                         │
-│  └── Global Access List:                                                    │
-│      ├── Alice's Phone (full access to all machines)                        │
-│      └── Bob's Laptop (full access to brad-macbook only)                   │
-│                                                                              │
-│  When global access is updated:                                              │
-│  1. Relay receives add_global_access message                                │
-│  2. Relay broadcasts access_update to all connected machines                │
-│  3. Machines update their local access list                                 │
-│  4. New connections immediately respect updated access                      │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+Access is granted via owner-managed ACL entries and root-signed invite acceptance.
 
 ---
 
@@ -448,7 +427,7 @@ When using a relay with an account, access can be managed at the account level:
 
 ## Daemon Management
 
-The `gssh serve` command can run as a daemon with status monitoring:
+The `gssh machine serve start --foreground` command can run as a daemon with status monitoring:
 
 ### Status Socket Protocol
 
@@ -475,13 +454,13 @@ interface StatusResponse {
 
 ```bash
 # Start daemon (foreground)
-gssh serve --relay wss://relay.example.com
+gssh machine serve start --relay wss://relay.example.com
 
 # Start daemon (background)
-gssh serve start --relay wss://relay.example.com
+gssh machine serve start --relay wss://relay.example.com
 
 # Stop daemon
-gssh serve stop
+gssh machine serve stop
 
 # Show status
 gssh status
@@ -495,13 +474,13 @@ gssh status
 
 ```bash
 # Authenticate with GitHub
-gssh auth login
+gssh user auth login
 
 # Reserve a subdomain
-gssh host reserve myname
+gssh user host reserve myname
 
 # Start serving (connects to gitspace.sh relay + Cloudflare tunnel)
-gssh serve start
+gssh machine serve start
 ```
 
 ### Self-Hosted Relay
@@ -510,11 +489,14 @@ gssh serve start
 # Start relay server
 gssh relay start --port 8080
 
-# Authorize machine
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "My Machine"
+# Create machine enrollment invite on relay
+gssh invite relay-machine create --relay ws://localhost:8080/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --label "My Machine"
+
+# Enroll machine using relay-machine invite token
+gssh machine enroll --invite "ws://localhost:8080/ws#<TOKEN>" --label "My Machine"
 
 # Connect machine
-gssh serve --relay ws://localhost:8080/ws
+gssh machine serve start --relay ws://localhost:8080/ws
 ```
 
 ---
@@ -527,8 +509,8 @@ gssh serve --relay ws://localhost:8080/ws
 |--------|------------|
 | Relay compromise | E2E encryption - relay sees only encrypted bytes |
 | Network interception | TLS + E2E encryption with forward secrecy |
-| Stolen client key | Revoke access: `gssh access remove <key>` |
-| Machine key compromise | Regenerate identity: `gssh identity init --force` |
+| Stolen client key | Revoke access: `gssh machine access remove <user-id|label>` |
+| Machine key compromise | Regenerate identity: `gssh user identity init --force` |
 | Replay attacks | Per-frame random nonces, session keys |
 | Man-in-the-middle | X3DH with identity verification |
 
@@ -544,9 +526,9 @@ gssh serve --relay ws://localhost:8080/ws
 
 1. **Protect your identity directory** - Located at `~/gitspace/.identity/`
 2. **Use labeled access entries** - Know who has access
-3. **Audit access regularly** - Run `gssh access list`
+3. **Audit access regularly** - Run `gssh machine access list`
 4. **Revoke unused access** - Remove former collaborators
-5. **Use session invites for demos** - Time-limited, read-only
+5. **Use short-lived invites for demos** - Grant and revoke quickly
 
 ---
 

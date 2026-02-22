@@ -13,94 +13,104 @@ import {
 } from "../protocol";
 
 describe("parseMessage", () => {
-  describe("authorize_client validation", () => {
-    const validAuthorizeClient = {
-      type: "authorize_client",
-      machineId: "R0lENwJ57_naVQ3h",
-      clientIdentityId: "vyPe20Hv1pnlKo89",
-      signingKey: "vyPe20Hv1pnlKo89BOvn5XuJzPXarq5/hjim96fZ/dM=",
-      keyExchangeKey: "/NOCKBrpy+5hST69/NF2rXutunFakeKey123456789=",
-      accessType: "full",
+  describe("direct auth message validation", () => {
+    const validSignature = {
+      sig: "dGVzdC1zaWduYXR1cmU=",
+      pub: "dGVzdC1wdWJsaWMta2V5",
+      ts: Date.now(),
     };
 
-    test("parses valid authorize_client message", () => {
-      const result = parseMessage(JSON.stringify(validAuthorizeClient));
+    test("parses valid list_machines message", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).not.toBeNull();
-      expect(result?.type).toBe("authorize_client");
+      expect(result?.type).toBe("list_machines");
     });
 
-    test("rejects message with undefined accessType", () => {
-      const msg = { ...validAuthorizeClient };
-      delete (msg as any).accessType;
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects list_machines without deviceCertificate", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with null accessType", () => {
-      const msg = { ...validAuthorizeClient, accessType: null };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects list_machines with empty deviceCertificate", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with invalid accessType string", () => {
-      const msg = { ...validAuthorizeClient, accessType: "admin" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects list_machines without signature", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+      }));
       expect(result).toBeNull();
     });
 
-    test("accepts accessType 'full'", () => {
-      const msg = { ...validAuthorizeClient, accessType: "full" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("parses valid connect_to_machine message", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).not.toBeNull();
+      expect(result?.type).toBe("connect_to_machine");
     });
 
-    test("accepts accessType 'session-invite'", () => {
-      const msg = { ...validAuthorizeClient, accessType: "session-invite" };
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).not.toBeNull();
-    });
-
-    test("rejects message with empty signingKey", () => {
-      const msg = { ...validAuthorizeClient, signingKey: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects connect_to_machine without signature", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with empty keyExchangeKey", () => {
-      const msg = { ...validAuthorizeClient, keyExchangeKey: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects connect_to_machine without deviceCertificate", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with empty clientIdentityId", () => {
-      const msg = { ...validAuthorizeClient, clientIdentityId: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects connect_to_machine with empty clientIdentityId", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with empty machineId", () => {
-      const msg = { ...validAuthorizeClient, machineId: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects legacy connect_with_invite messages", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_with_invite",
+        inviteId: "invite1234abcd567",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
-    });
-
-    test("accepts message with valid sessionId", () => {
-      const msg = { ...validAuthorizeClient, sessionId: "session-123" };
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).not.toBeNull();
-    });
-
-    test("rejects message with invalid sessionId characters", () => {
-      const msg = { ...validAuthorizeClient, sessionId: "session with spaces" };
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).toBeNull();
-    });
-
-    test("accepts message without sessionId (undefined)", () => {
-      const msg = { ...validAuthorizeClient };
-      delete (msg as any).sessionId;
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).not.toBeNull();
     });
   });
 

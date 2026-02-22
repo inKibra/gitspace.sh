@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { getPublicKeyWithoutPassword, keypairExists, readRelayConfig } from '../core/identity.js';
+import { loadUserRootIdentity } from '../core/user-identity.js';
 import {
   queryControlMeta,
   queryServeStatus,
@@ -31,11 +32,13 @@ import {
 import { formatRelayFingerprint, getRelayPublicIdentity } from '../relay/identity.js';
 import { SpritesProvider } from '../relay/control/sprites-provider.js';
 import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/workspace-identity.js';
+import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
+import { registerRootInvite } from '../relay/auth/store.js';
 
 function requireLocalIdentityId(): string {
   if (!keypairExists()) {
     throw new SpacesError(
-      'No local identity found. Initialize identity first:\n  gssh identity init',
+      'No local identity found. Initialize identity first:\n  gssh user identity init',
       'USER_ERROR',
       1
     );
@@ -59,6 +62,12 @@ interface CloudBootstrapRelayInfo {
   relayFingerprint: string;
 }
 
+interface CloudEnrollmentInvite {
+  token: string;
+  inviteId: string;
+  expiresAt: string;
+}
+
 function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
   const hostConfig = readHostConfig();
   const relayConfig = readRelayConfig();
@@ -70,7 +79,7 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
 
   if (!relayUrl) {
     throw new SpacesError(
-      'No relay URL found for cloud bootstrap. Start `gssh serve start` once (or configure hosting) before launching cloud workspaces.',
+      'No relay URL found for cloud bootstrap. Start `gssh machine serve start` once (or configure hosting) before launching cloud workspaces.',
       'USER_ERROR',
       1
     );
@@ -92,7 +101,7 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
   const relayPublicIdentity = getRelayPublicIdentity();
   if (!relayPublicIdentity) {
     throw new SpacesError(
-      'Relay identity is not initialized yet. Start `gssh serve start` (hosted mode) to initialize and pin relay identity first.',
+      'Relay identity is not initialized yet. Start `gssh machine serve start` (hosted mode) to initialize and pin relay identity first.',
       'USER_ERROR',
       1
     );
@@ -115,11 +124,69 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
   };
 }
 
+async function createCloudEnrollmentInvite(
+  workspaceId: string,
+  relayInfo: CloudBootstrapRelayInfo,
+  machineSigningKey: string,
+  machineKeyExchangeKey: string,
+  expiresAtIso: string,
+): Promise<CloudEnrollmentInvite> {
+  const owner = await loadUserRootIdentity();
+  if (!owner) {
+    throw new SpacesError(
+      'User root identity is required for cloud enrollment invites. Run `gssh user identity init` first.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const expiresAtMs = Date.parse(expiresAtIso);
+  if (!Number.isFinite(expiresAtMs)) {
+    throw new SpacesError('Invalid cloud invite expiry value.', 'SYSTEM_ERROR', 2);
+  }
+
+  const token = createRootInviteToken({
+    type: 'relay-machine',
+    owner,
+    relayUrl: relayInfo.relayUrl,
+    targetMachineSigningKey: machineSigningKey,
+    targetMachineKeyExchangeKey: machineKeyExchangeKey,
+    expiresAt: expiresAtMs,
+    maxUses: 1,
+    label: `cloud:${workspaceId}`,
+  });
+
+  const parsed = parseRootInviteToken(token);
+  if (!parsed || parsed.type !== 'relay-machine') {
+    throw new SpacesError('Failed to create relay-machine invite token for cloud bootstrap.', 'SYSTEM_ERROR', 2);
+  }
+
+  registerRootInvite({
+    inviteId: parsed.inviteId,
+    ownerUserRootId: parsed.ownerUserRootId,
+    inviteType: parsed.type,
+    relayUrl: parsed.relayUrl,
+    token,
+    maxUses: parsed.maxUses,
+    expiresAt: new Date(parsed.expiresAt).toISOString(),
+    label: parsed.label,
+    machineId: parsed.targetMachineId,
+    targetMachineSigningKey: parsed.targetMachineSigningKey,
+    targetMachineKeyExchangeKey: parsed.targetMachineKeyExchangeKey,
+  });
+
+  return {
+    token,
+    inviteId: parsed.inviteId,
+    expiresAt: new Date(parsed.expiresAt).toISOString(),
+  };
+}
+
 export async function cloudStatus(): Promise<void> {
   const serveStatus = await queryServeStatus();
   if (!serveStatus) {
     throw new SpacesError(
-      'Serve daemon is not running. Start it with:\n  gssh serve start',
+      'Serve daemon is not running. Start it with:\n  gssh machine serve start',
       'USER_ERROR',
       1
     );
@@ -257,6 +324,14 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
     ownerIdentityId: identityId,
   });
 
+  const enrollmentInvite = await createCloudEnrollmentInvite(
+    workspaceId,
+    relayInfo,
+    workspaceIdentity.signingPublicKey,
+    workspaceIdentity.keyExchangePublicKey,
+    bootstrap.expiresAt,
+  );
+
   logCloudEvent({
     workspaceId,
     eventType: 'launch_started',
@@ -269,6 +344,8 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
       relayFingerprint: relayInfo.relayFingerprint,
       bootstrapTokenId: bootstrap.tokenId,
       bootstrapExpiresAt: bootstrap.expiresAt,
+      enrollmentInviteId: enrollmentInvite.inviteId,
+      enrollmentInviteExpiresAt: enrollmentInvite.expiresAt,
     },
   });
 
@@ -290,6 +367,7 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
         GSSH_OWNER_IDENTITY_ID: identityId,
         GSSH_RELAY_URL: relayInfo.relayUrl,
         GSSH_RELAY_PUBKEY: relayInfo.relaySigningPublicKey,
+        GSSH_ENROLLMENT_TOKEN: enrollmentInvite.token,
       },
     });
   } catch (error) {
@@ -327,6 +405,7 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
       spriteId: providerResult.providerWorkspaceId,
       rawState: providerResult.rawState,
       bootstrapTokenId: bootstrap.tokenId,
+      enrollmentInviteId: enrollmentInvite.inviteId,
       relayUrl: relayInfo.relayUrl,
     },
   });
@@ -338,7 +417,8 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
       workspaceId,
       relayInfo,
       'launch',
-      bootstrap.token
+      bootstrap.token,
+      enrollmentInvite.token,
     );
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -352,6 +432,8 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
   logger.log(`  Sprite ID:          ${providerResult.providerWorkspaceId}`);
   logger.log(`  Bootstrap token ID: ${bootstrap.tokenId}`);
   logger.log(`  Bootstrap expires:  ${bootstrap.expiresAt}`);
+  logger.log(`  Enroll invite ID:   ${enrollmentInvite.inviteId}`);
+  logger.log(`  Enroll expires:     ${enrollmentInvite.expiresAt}`);
   logger.log(`  Status:             bootstrapping`);
   logger.log('');
   logger.dim('  The VM should bootstrap and connect back to the relay using the one-time token.');
@@ -441,11 +523,11 @@ function buildSpriteServeStartCommand(): string[] {
     '  echo "gssh CLI not found in sprite image and auto-install failed" >&2',
     '  exit 127',
     'fi',
-    'if pgrep -f "[g]ssh serve" >/dev/null 2>&1; then',
+    'if pgrep -f "[g]ssh machine serve" >/dev/null 2>&1; then',
     '  if [ -n "${GSSH_UNLOCK_TOKEN:-}" ]; then',
-    '    gssh serve stop >/dev/null 2>&1 || true',
+    '    gssh machine serve stop >/dev/null 2>&1 || true',
     '  else',
-    '    echo "gssh serve already running"',
+    '    echo "gssh machine serve already running"',
     '    exit 0',
     '  fi',
     'fi',
@@ -457,10 +539,14 @@ function buildSpriteServeStartCommand(): string[] {
     '  echo "GSSH_RELAY_PUBKEY is required" >&2',
     '  exit 1',
     'fi',
+    'if [ -z "${GSSH_ENROLLMENT_TOKEN:-}" ]; then',
+    '  echo "GSSH_ENROLLMENT_TOKEN is required" >&2',
+    '  exit 1',
+    'fi',
     'if [ -n "${GSSH_UNLOCK_TOKEN:-}" ]; then',
-    '  gssh serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --workspace-id "$GSSH_WORKSPACE_ID" --unlock-token "$GSSH_UNLOCK_TOKEN" --ignore-keychain-and-skip-secrets',
+    '  gssh machine serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --workspace-id "$GSSH_WORKSPACE_ID" --unlock-token "$GSSH_UNLOCK_TOKEN" --enrollment-token "$GSSH_ENROLLMENT_TOKEN" --ignore-keychain-and-skip-secrets',
     'else',
-    '  gssh serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --ignore-keychain-and-skip-secrets',
+    '  gssh machine serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --enrollment-token "$GSSH_ENROLLMENT_TOKEN" --ignore-keychain-and-skip-secrets',
     'fi',
   ].join('\n');
 
@@ -473,7 +559,8 @@ async function runWorkspaceBootstrapExec(
   workspaceId: string,
   relayInfo: CloudBootstrapRelayInfo,
   phase: 'launch' | 'resume',
-  bootstrapToken?: string
+  bootstrapToken: string | undefined,
+  enrollmentToken: string,
 ): Promise<void> {
   logCloudEvent({
     workspaceId,
@@ -490,6 +577,7 @@ async function runWorkspaceBootstrapExec(
   if (bootstrapToken) {
     env.GSSH_UNLOCK_TOKEN = bootstrapToken;
   }
+  env.GSSH_ENROLLMENT_TOKEN = enrollmentToken;
 
   const execResult = await provider.execWorkspaceCommand(providerWorkspaceId, {
     command,
@@ -553,21 +641,27 @@ export async function cloudResume(
   const ws = requireWorkspace(workspaceId);
   const relayInfo = resolveCloudBootstrapRelayInfo(identityId);
 
-  if (!injectedProvider) {
-    const storedIdentity = await getWorkspaceIdentity(workspaceId);
-    if (!storedIdentity) {
-      throw new SpacesError(
-        `No escrowed workspace identity found for '${workspaceId}'. This workspace cannot be resumed securely.`,
-        'USER_ERROR',
-        1
-      );
-    }
+  const storedIdentity = await getWorkspaceIdentity(workspaceId);
+  if (!storedIdentity) {
+    throw new SpacesError(
+      `No escrowed workspace identity found for '${workspaceId}'. This workspace cannot be resumed securely.`,
+      'USER_ERROR',
+      1
+    );
   }
 
   const unlock = createCloudUnlockToken({
     workspaceId,
     ownerIdentityId: identityId,
   });
+
+  const enrollmentInvite = await createCloudEnrollmentInvite(
+    workspaceId,
+    relayInfo,
+    storedIdentity.signingPublicKey,
+    storedIdentity.keyExchangePublicKey,
+    unlock.expiresAt,
+  );
 
   logger.log('');
   logger.log(`Resuming workspace ${workspaceId}...`);
@@ -582,6 +676,7 @@ export async function cloudResume(
       metadata: {
         rawState: result.rawState,
         unlockTokenId: unlock.tokenId,
+        enrollmentInviteId: enrollmentInvite.inviteId,
       },
     });
 
@@ -592,7 +687,8 @@ export async function cloudResume(
         workspaceId,
         relayInfo,
         'resume',
-        unlock.token
+        unlock.token,
+        enrollmentInvite.token,
       );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -603,6 +699,8 @@ export async function cloudResume(
 
     logger.log('');
     logger.success(`  Workspace ${workspaceId} resumed (status: bootstrapping).`);
+    logger.log(`  Unlock token ID:    ${unlock.tokenId}`);
+    logger.log(`  Enroll invite ID:   ${enrollmentInvite.inviteId}`);
     logger.log('');
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -649,7 +747,7 @@ export async function cloudList(): Promise<void> {
   const serveStatus = await queryServeStatus();
   if (!serveStatus) {
     throw new SpacesError(
-      'Serve daemon is not running. Start it with:\n  gssh serve start',
+      'Serve daemon is not running. Start it with:\n  gssh machine serve start',
       'USER_ERROR',
       1
     );

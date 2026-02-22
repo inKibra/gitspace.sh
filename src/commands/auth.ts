@@ -1,7 +1,7 @@
 /**
  * Authentication commands for gitspace.sh
  *
- * Handles 'gssh auth login', 'gssh auth logout', 'gssh auth status'
+ * Handles 'gssh user auth login', 'gssh user auth logout', 'gssh user auth status'
  */
 
 import open from 'open';
@@ -232,7 +232,7 @@ export async function authStatus(): Promise<void> {
 
   if (!token) {
     logger.log('Not logged in');
-    logger.dim('Run: gssh auth login');
+    logger.dim('Run: gssh user auth login');
     return;
   }
 
@@ -240,7 +240,7 @@ export async function authStatus(): Promise<void> {
   try {
     const deviceFingerprint = getDeviceFingerprint();
     if (!deviceFingerprint) {
-      logger.log('Identity not found. Run: gssh identity init');
+      logger.log('Identity not found. Run: gssh user identity init');
       return;
     }
 
@@ -253,7 +253,7 @@ export async function authStatus(): Promise<void> {
 
     if (!res.ok) {
       logger.log('Session expired or invalid');
-      logger.dim('Run: gssh auth login');
+      logger.dim('Run: gssh user auth login');
       return;
     }
 

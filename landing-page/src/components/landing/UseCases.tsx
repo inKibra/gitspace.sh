@@ -10,7 +10,7 @@ export function UseCases() {
       stars: 5
     },
     {
-      quote: "We share view-only links in Slack. Everyone can watch the agent work without stepping on each other. Game changer for debugging.",
+      quote: "We issue short-lived invite grants in Slack channels. Everyone can watch the agent work without stepping on each other. Game changer for debugging.",
       author: "Tech lead",
       role: "8-person startup",
       stars: 5

@@ -2,7 +2,7 @@
  * Serve daemon management
  *
  * Handles daemonization, PID/socket management, and status queries
- * for the gssh serve command.
+ * for the `gssh machine serve` command group.
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
@@ -143,8 +143,6 @@ export interface StatusResponse {
 export type ControlMessage =
   | { type: 'status' }
   | { type: 'shutdown' }
-  | { type: 'add_access'; clientIdentityId: string; signingKey: string; keyExchangeKey: string; label?: string; accessType: 'full' | 'session-invite'; sessionId?: string }
-  | { type: 'remove_access'; clientIdentityId: string }
   | { type: 'control_meta' }
   | { type: 'assert_owner'; identityId: string }
   | { type: 'list_cloud_workspaces'; identityId: string };
@@ -202,30 +200,6 @@ export function updateDaemonState(updates: Partial<DaemonState>): void {
 }
 
 // ============================================================================
-// Access Command Handler
-// ============================================================================
-
-/** Handler for access control commands from CLI */
-export interface AccessCommandHandler {
-  addAccess(entry: {
-    clientIdentityId: string;
-    signingKey: string;
-    keyExchangeKey: string;
-    label?: string;
-    accessType: 'full' | 'session-invite';
-    sessionId?: string;
-  }): Promise<{ success: boolean; error?: string }>;
-
-  removeAccess(clientIdentityId: string): Promise<{ success: boolean; error?: string }>;
-}
-
-let accessHandler: AccessCommandHandler | null = null;
-
-export function setAccessCommandHandler(handler: AccessCommandHandler): void {
-  accessHandler = handler;
-}
-
-// ============================================================================
 // Status Socket Server
 // ============================================================================
 
@@ -268,35 +242,6 @@ export function startStatusServer(): void {
             socket.end();
             // Trigger graceful shutdown
             process.emit('SIGTERM');
-          } else if (msg.type === 'add_access') {
-            if (!accessHandler) {
-              socket.write(JSON.stringify({ type: 'error', message: 'Access handler not registered' }));
-            } else {
-              const result = await accessHandler.addAccess({
-                clientIdentityId: msg.clientIdentityId,
-                signingKey: msg.signingKey,
-                keyExchangeKey: msg.keyExchangeKey,
-                label: msg.label,
-                accessType: msg.accessType,
-                sessionId: msg.sessionId,
-              });
-              if (result.success) {
-                socket.write(JSON.stringify({ type: 'ok' }));
-              } else {
-                socket.write(JSON.stringify({ type: 'error', message: result.error || 'Failed to add access' }));
-              }
-            }
-          } else if (msg.type === 'remove_access') {
-            if (!accessHandler) {
-              socket.write(JSON.stringify({ type: 'error', message: 'Access handler not registered' }));
-            } else {
-              const result = await accessHandler.removeAccess(msg.clientIdentityId);
-              if (result.success) {
-                socket.write(JSON.stringify({ type: 'ok' }));
-              } else {
-                socket.write(JSON.stringify({ type: 'error', message: result.error || 'Failed to remove access' }));
-              }
-            }
           } else if (msg.type === 'control_meta') {
             const meta = readControlMeta();
             socket.write(JSON.stringify({
@@ -442,107 +387,6 @@ export async function sendShutdownCommand(): Promise<boolean> {
 
     // Timeout after 2 seconds
     setTimeout(() => resolve(false), 2000);
-  });
-}
-
-/**
- * Send add_access command to running daemon
- */
-export async function sendAddAccessCommand(entry: {
-  clientIdentityId: string;
-  signingKey: string;
-  keyExchangeKey: string;
-  label?: string;
-  accessType: 'full' | 'session-invite';
-  sessionId?: string;
-}): Promise<{ success: boolean; error?: string }> {
-  const socketPath = getServeSocketPath();
-  if (!existsSync(socketPath)) return { success: false, error: 'Daemon not running' };
-
-  return new Promise((resolve) => {
-    Bun.connect({
-      unix: socketPath,
-      socket: {
-        data(socket, data) {
-          try {
-            const response = JSON.parse(data.toString());
-            if (response.type === 'ok') {
-              resolve({ success: true });
-            } else if (response.type === 'error') {
-              resolve({ success: false, error: response.message });
-            } else {
-              resolve({ success: false, error: 'Unexpected response' });
-            }
-          } catch {
-            resolve({ success: false, error: 'Invalid response' });
-          }
-        },
-        error() {
-          resolve({ success: false, error: 'Connection error' });
-        },
-        open(socket) {
-          socket.write(JSON.stringify({
-            type: 'add_access',
-            ...entry,
-          }));
-        },
-        connectError() {
-          resolve({ success: false, error: 'Could not connect to daemon' });
-        },
-      },
-    }).catch(() => {
-      resolve({ success: false, error: 'Connection failed' });
-    });
-
-    // Timeout after 5 seconds
-    setTimeout(() => resolve({ success: false, error: 'Timeout' }), 5000);
-  });
-}
-
-/**
- * Send remove_access command to running daemon
- */
-export async function sendRemoveAccessCommand(clientIdentityId: string): Promise<{ success: boolean; error?: string }> {
-  const socketPath = getServeSocketPath();
-  if (!existsSync(socketPath)) return { success: false, error: 'Daemon not running' };
-
-  return new Promise((resolve) => {
-    Bun.connect({
-      unix: socketPath,
-      socket: {
-        data(socket, data) {
-          try {
-            const response = JSON.parse(data.toString());
-            if (response.type === 'ok') {
-              resolve({ success: true });
-            } else if (response.type === 'error') {
-              resolve({ success: false, error: response.message });
-            } else {
-              resolve({ success: false, error: 'Unexpected response' });
-            }
-          } catch {
-            resolve({ success: false, error: 'Invalid response' });
-          }
-        },
-        error() {
-          resolve({ success: false, error: 'Connection error' });
-        },
-        open(socket) {
-          socket.write(JSON.stringify({
-            type: 'remove_access',
-            clientIdentityId,
-          }));
-        },
-        connectError() {
-          resolve({ success: false, error: 'Could not connect to daemon' });
-        },
-      },
-    }).catch(() => {
-      resolve({ success: false, error: 'Connection failed' });
-    });
-
-    // Timeout after 5 seconds
-    setTimeout(() => resolve({ success: false, error: 'Timeout' }), 5000);
   });
 }
 

@@ -19,7 +19,11 @@ import {
   type HandshakeMessage,
 } from "../../../handshake-handler.js";
 import { AccessControlList } from "../../access-control.js";
-import { createInviteToken } from "../../invites.js";
+import { createDeviceCertificate } from "../../device-cert.js";
+import {
+  generateMnemonic,
+  mnemonicToUserIdentity,
+} from "../../user-identity.js";
 import type {
   Identity,
   SessionKeys,
@@ -51,8 +55,7 @@ export interface HandshakeRunResult {
  * Authorization options for handshake
  */
 export type AuthorizationOption =
-  | { type: "access_list" }
-  | { type: "invite"; accessType?: AccessType; sessionId?: string; validityMs?: number };
+  | { type: "access_list" };
 
 /**
  * Run a complete 4-message X3DH handshake between client and machine
@@ -92,9 +95,14 @@ export async function runCompleteHandshake(
   authorization: AuthorizationOption
 ): Promise<HandshakeRunResult> {
   const relay = createMockRelay();
+  const ownerRoot = mnemonicToUserIdentity(generateMnemonic());
+  const ownerUserRootId = ownerRoot.id;
   const handler = new HandshakeHandler({
     identity: machineIdentity,
-    accessList,
+    ownerUserRootId,
+    checkUserRootAccess: async (ownerUserRootIdArg, clientUserRootId) => {
+      return ownerUserRootIdArg === ownerUserRootId && clientUserRootId === ownerUserRootId;
+    },
   });
 
   let clientState: X3DHClientState | null = null;
@@ -156,22 +164,31 @@ export async function runCompleteHandshake(
 
     // Step 3: Client creates and sends ClientAuth
     let authData: X3DHAuthMessage["authorization"];
-    if (authorization.type === "access_list") {
-      authData = { type: "access_list" };
-    } else {
-      // Create invite token
-      const inviteToken = createInviteToken(machineIdentity, "wss://test.relay", {
-        accessType: authorization.accessType,
-        sessionId: authorization.sessionId,
-        validityMs: authorization.validityMs ?? 3600000,
-      });
-      authData = { type: "invite", inviteToken };
+    let deviceCertificate: string;
+
+    if (authorization.type !== "access_list") {
+      return {
+        success: false,
+        error: "Unsupported authorization type in test helper",
+        messageCount: relay.getMessageHistory().length,
+      };
     }
+
+    authData = { type: "access_list" };
+    const isAuthorized = accessList.getEntry(clientIdentity.id) !== undefined;
+    const certRoot = isAuthorized ? ownerRoot : mnemonicToUserIdentity(generateMnemonic());
+    const cert = createDeviceCertificate(
+      certRoot,
+      clientIdentity.signing.publicKey,
+      clientIdentity.keyExchange.publicKey,
+    );
+    deviceCertificate = JSON.stringify(cert);
 
     const { state: stateAfterAuth, message: clientAuth, sessionKeys } = createClientAuth(
       clientState,
       clientIdentity,
-      authData
+      authData,
+      deviceCertificate,
     );
     clientState = stateAfterAuth;
     clientSessionKeys = sessionKeys;
@@ -310,7 +327,6 @@ export function createHandshakeScenario(): {
   relay: MockRelay;
   clientIdentity: Identity;
   machineIdentity: Identity;
-  accessList: AccessControlList;
   handler: HandshakeHandler;
   addClientToAccessList: (accessType?: AccessType, sessionId?: string) => void;
 } {
@@ -319,9 +335,14 @@ export function createHandshakeScenario(): {
 
   const { client, machine } = createTestIdentityPair();
   const accessList = new AccessControlList();
+  const ownerRoot = mnemonicToUserIdentity(generateMnemonic());
+  const ownerUserRootId = ownerRoot.id;
   const handler = new HandshakeHandler({
     identity: machine,
-    accessList,
+    ownerUserRootId,
+    checkUserRootAccess: async (ownerUserRootIdArg, clientUserRootId) => {
+      return ownerUserRootIdArg === ownerUserRootId && clientUserRootId === ownerUserRootId;
+    },
   });
   const relay = createMockRelay();
 
@@ -329,7 +350,6 @@ export function createHandshakeScenario(): {
     relay,
     clientIdentity: client,
     machineIdentity: machine,
-    accessList,
     handler,
     addClientToAccessList: (accessType?: AccessType, sessionId?: string) => {
       accessList.addEntry(toPublicIdentity(client), accessType, sessionId);

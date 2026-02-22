@@ -111,16 +111,16 @@ npm install -g gitspace
 # or: pnpm install -g gitspace
 
 # 2. Create identity
-gssh identity init
+gssh user identity init
 
 # 3. Login to gitspace.sh
-gssh auth login
+gssh user auth login
 
 # 4. Reserve your subdomain
-gssh host reserve yourname
+gssh user host reserve yourname
 
 # 5. Start serving
-gssh serve
+gssh machine serve start --foreground
 
 # 6. Access from browser: https://yourname.gitspace.sh`} multiLine />
 
@@ -135,8 +135,8 @@ gh auth login
 gssh
 
 # Or via CLI:
-gssh add project    # Add a GitHub repo
-gssh add my-feature # Create a workspace`} multiLine />
+gssh project add    # Add a GitHub repo
+gssh workspace add my-feature --project my-project # Create a workspace`} multiLine />
         </div>
       );
 
@@ -234,27 +234,26 @@ yarn global add gitspace`} multiLine />
           <h1 className="text-4xl font-bold mb-6">CLI Commands</h1>
 
           <h3 className="text-xl font-semibold text-white mb-4">Projects</h3>
-          <CodeBlock code={`gssh add project              # Add from GitHub (interactive)
-gssh add project --org myorg  # Filter by organization
-gssh switch project myapp     # Switch to a project
-gssh list projects            # List all projects
-gssh remove project myapp     # Remove a project`} multiLine language="bash" />
+          <CodeBlock code={`gssh project add              # Add from GitHub (interactive)
+gssh project add --org myorg  # Filter by organization
+gssh workspace list --project myapp     # List workspaces in a project
+gssh project list            # List all projects
+gssh project remove myapp     # Remove a project`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Workspaces</h3>
-          <CodeBlock code={`gssh add my-feature           # Create workspace
-gssh add --from develop       # Create from specific branch
-gssh switch my-feature        # Switch to workspace
-gssh switch                   # Interactive selection
-gssh list                     # List workspaces
-gssh remove workspace my-feature`} multiLine language="bash" />
+          <CodeBlock code={`gssh workspace add my-feature --project my-project           # Create workspace
+gssh workspace add --from develop --project my-project       # Create from specific branch
+gssh workspace context --project my-project --workspace my-feature        # Show workspace context
+gssh workspace list --project <project-name>                     # List workspaces
+gssh workspace remove my-feature --project my-project`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Other Commands</h3>
-          <CodeBlock code={`gssh directory   # Print current project path
-gssh status      # Show daemon statuses`} multiLine language="bash" />
+          <CodeBlock code={`gssh project list   # List projects
+gssh status         # Show daemon statuses`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Command Options</h3>
 
-          <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh add project</code></h4>
+          <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh project add</code></h4>
           <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-6 ml-2 text-sm">
             <li><code className="text-zinc-300">--bundle-url &lt;url&gt;</code> - Load bundle from remote URL (zip archive)</li>
             <li><code className="text-zinc-300">--bundle-path &lt;path&gt;</code> - Load bundle from local directory</li>
@@ -263,14 +262,14 @@ gssh status      # Show daemon statuses`} multiLine language="bash" />
             <li><code className="text-zinc-300">--org &lt;org&gt;</code> - Filter repos to specific organization</li>
           </ul>
 
-          <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh add [workspace-name]</code></h4>
+          <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh workspace add [workspace-name] --project &lt;project-name&gt;</code></h4>
           <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-6 ml-2 text-sm">
             <li><code className="text-zinc-300">--branch &lt;name&gt;</code> - Specify different branch name from workspace name</li>
             <li><code className="text-zinc-300">--from &lt;branch&gt;</code> - Create from specific branch instead of base</li>
             <li><code className="text-zinc-300">--no-setup</code> - Skip setup commands</li>
           </ul>
 
-          <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh remove workspace</code></h4>
+          <h4 className="text-lg font-medium text-zinc-300 mb-3">Options for <code className="text-green-400">gssh workspace remove [workspace-name] --project &lt;project-name&gt;</code></h4>
           <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-6 ml-2 text-sm">
             <li><code className="text-zinc-300">--force</code> - Skip confirmation prompts</li>
             <li><code className="text-zinc-300">--keep-branch</code> - Don't delete git branch when removing</li>
@@ -393,24 +392,24 @@ echo "Has API key: $API_KEY"`} />
           </p>
 
           <CodeBlock code={`# 1. Create identity
-gssh identity init
+gssh user identity init
 
 # 2. Login with GitHub
-gssh auth login
+gssh user auth login
 
 # 3. Reserve subdomain
-gssh host reserve yourname
+gssh user host reserve yourname
 
 # 4. Start serving
-gssh serve
+gssh machine serve start --foreground
 
 # 5. Access: https://yourname.gitspace.sh`} multiLine />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Manage Subdomains</h3>
-          <CodeBlock code={`gssh host list              # List your subdomains
-gssh host set-primary name  # Set primary
-gssh host release name      # Release subdomain
-gssh host status            # Show status`} multiLine language="bash" />
+          <CodeBlock code={`gssh user host list              # List your subdomains
+gssh user host set-primary name  # Set primary
+gssh user host release name      # Release subdomain
+gssh user host status            # Show status`} multiLine language="bash" />
         </div>
       );
 
@@ -424,27 +423,29 @@ gssh host status            # Show status`} multiLine language="bash" />
           <h3 className="text-xl font-semibold text-white mb-4">1. Start Relay</h3>
           <CodeBlock code="gssh relay start --port 4480" />
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">2. Authorize Machine</h3>
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">2. Create Enrollment Invite</h3>
           <CodeBlock
             code={`# On the machine
-gssh identity init --label "My Mac"
-gssh identity show
+gssh user identity init
+gssh user identity show
 
 # On the relay host
-gssh relay authorize gssh-pub:<keys> --label "My Mac"`}
+gssh invite relay-machine create --relay ws://localhost:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --label "My Mac"`}
             multiLine
           />
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">3. Serve</h3>
-          <CodeBlock code="gssh serve --relay ws://localhost:4480/ws" />
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">3. Enroll + Serve</h3>
+          <CodeBlock code={`gssh machine enroll --invite "ws://localhost:4480/ws#<TOKEN>" --label "My Mac"
+gssh machine serve start --relay ws://localhost:4480/ws`} multiLine language="bash" />
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">4. Create Invite</h3>
-          <CodeBlock code="gssh share create" />
-          <p className="text-zinc-500 text-sm mt-2">Output: <code className="text-green-400">https://gitspace.sh/join#&lt;TOKEN&gt;</code></p>
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">4. Invite Collaborator</h3>
+          <CodeBlock code="gssh invite machine-user create <machine-id> gssh-user:<BASE64_KEY> --relay ws://localhost:4480/ws" />
+          <p className="text-zinc-500 text-sm mt-2">Output: root-signed invite token for collaborator acceptance</p>
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">5. Connect from Client</h3>
-          <CodeBlock code={`gssh identity init --label "Laptop"
-gssh connect https://gitspace.sh/join#<TOKEN>`} multiLine />
+          <CodeBlock code={`gssh user identity init
+gssh user auth invite accept <TOKEN>
+gssh client connect <machine-id>`} multiLine />
         </div>
       );
 
@@ -457,8 +458,8 @@ gssh connect https://gitspace.sh/join#<TOKEN>`} multiLine />
             Every machine and client has a cryptographic identity:
           </p>
 
-          <CodeBlock code={`gssh identity init [--label <name>] [--force]
-gssh identity show [--fingerprint] [--json]`} multiLine language="bash" />
+          <CodeBlock code={`gssh user identity init [--force]
+gssh user identity show [--fingerprint] [--json]`} multiLine language="bash" />
 
           <p className="text-zinc-500 text-sm mt-4">
             Identity storage: <code className="text-zinc-300">~/gitspace/.identity/</code>
@@ -476,22 +477,22 @@ gssh identity show [--fingerprint] [--json]`} multiLine language="bash" />
           <h1 className="text-4xl font-bold mb-6">Access Control</h1>
 
           <h3 className="text-xl font-semibold text-white mb-4">Grant Access</h3>
-          <CodeBlock code={`gssh access add gssh-pub:<keys> --label "Brad's Phone"`} />
+          <CodeBlock code={`gssh machine access add gssh-user:<signing-key> --label "Brad's Phone"`} />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Manage Access</h3>
-          <CodeBlock code={`gssh access list [--json]
-gssh access remove "Brad's Phone"
-gssh access remove <key-prefix> --force`} multiLine language="bash" />
+          <CodeBlock code={`gssh machine access list [--json]
+gssh machine access remove "Brad's Phone"
+gssh machine access remove <user-id>`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Connect Without Invite (Pre-Authorized)</h3>
-          <CodeBlock code="gssh --relay ws://relay.example.com/ws" />
+          <CodeBlock code="gssh client connect --machine <machine-id> --relay ws://relay.example.com/ws" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Public Key Format</h3>
           <p className="text-zinc-400 mb-4 text-sm">
-            Public keys are displayed in this format:
+            User root keys use this format:
           </p>
           <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 font-mono text-sm text-green-400 break-all">
-            gssh-pub:&lt;BASE64_SIGNING_PUBLIC_KEY&gt;:&lt;BASE64_KEY_EXCHANGE_PUBLIC_KEY&gt;
+            gssh-user:&lt;BASE64_SIGNING_PUBLIC_KEY&gt;
           </div>
         </div>
       );
@@ -533,11 +534,6 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
                   <td className="px-4 py-3">Relay port</td>
                   <td className="px-4 py-3">4480</td>
                 </tr>
-                <tr className="border-b border-zinc-800">
-                  <td className="px-4 py-3 font-mono text-green-400">SPACES_CURRENT_PROJECT</td>
-                  <td className="px-4 py-3">Override project</td>
-                  <td className="px-4 py-3">Config</td>
-                </tr>
               </tbody>
             </table>
           </div>
@@ -559,20 +555,20 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
               <h4 className="text-white font-bold mb-2">"No identity found"</h4>
-              <CodeBlock code="gssh identity init --label 'My Device'" />
+              <CodeBlock code="gssh user identity init" />
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
               <h4 className="text-white font-bold mb-2">"Failed to unlock identity"</h4>
               <p className="text-zinc-400 text-sm mb-2">You're entering the wrong password. If forgotten, recreate:</p>
-              <CodeBlock code="gssh identity init --force" />
+              <CodeBlock code="gssh user identity init --force" />
               <p className="text-zinc-500 text-sm">Warning: This invalidates existing invites and access grants</p>
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
               <h4 className="text-white font-bold mb-2">"Machine offline"</h4>
               <ul className="list-disc list-inside text-zinc-400 text-sm space-y-1 ml-2">
-                <li>Ensure <code className="text-zinc-300">gssh serve</code> is running on the target machine</li>
+                <li>Ensure <code className="text-zinc-300">gssh machine serve start --foreground</code> is running on the target machine</li>
                 <li>Check the machine can reach the relay URL</li>
                 <li>Verify the machine is authorized on the relay</li>
               </ul>
@@ -580,14 +576,15 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
               <h4 className="text-white font-bold mb-2">"Client not authorized"</h4>
-              <p className="text-zinc-400 text-sm mb-2">You need an invite or your public key must be added:</p>
-              <CodeBlock code="gssh access add <your-public-key> --label 'Name'" />
+              <p className="text-zinc-400 text-sm mb-2">You need owner-granted relay + machine access:</p>
+              <CodeBlock code={`gssh relay access add <gssh-user:...>
+gssh machine access add <gssh-user:...>`} multiLine language="bash" />
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
               <h4 className="text-white font-bold mb-2">"Invite expired"</h4>
               <p className="text-zinc-400 text-sm mb-2">Create a new invite with longer expiration:</p>
-              <CodeBlock code="gssh share create --expires 7d" />
+              <CodeBlock code="gssh invite machine-user create <machine-id> <gssh-user:...> --relay ws://relay.example.com/ws --expires 7d" />
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
@@ -649,7 +646,7 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
           <dl className="grid gap-6">
             <div>
               <dt className="text-white font-bold mb-1">Machine</dt>
-              <dd className="text-zinc-400 text-sm">Device running <code className="text-zinc-300">gssh serve</code></dd>
+              <dd className="text-zinc-400 text-sm">Device running <code className="text-zinc-300">gssh machine serve start --foreground</code></dd>
             </div>
             <div>
               <dt className="text-white font-bold mb-1">Client</dt>
@@ -657,7 +654,7 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
             </div>
             <div>
               <dt className="text-white font-bold mb-1">Relay</dt>
-              <dd className="text-zinc-400 text-sm">WebSocket router (default: <code className="text-zinc-300">wss://relay.gitspace.sh</code>)</dd>
+              <dd className="text-zinc-400 text-sm">WebSocket router that forwards encrypted traffic between machines and clients</dd>
             </div>
             <div>
               <dt className="text-white font-bold mb-1">Relay Identity</dt>
@@ -729,7 +726,7 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
           <p className="text-zinc-400 mb-4">
             Run the setup wizard to configure your Linear API key and select teams:
           </p>
-          <CodeBlock code="gssh linear setup" />
+          <CodeBlock code="gssh user config linear setup" />
 
           <p className="text-zinc-400 mb-4">
             The wizard will:
@@ -745,7 +742,7 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
           <p className="text-zinc-400 mb-4">
             Configure Linear for a specific project:
           </p>
-          <CodeBlock code="gssh linear setup --project myapp" />
+          <CodeBlock code="gssh user config linear setup --project myapp" />
 
           <p className="text-zinc-400 mb-4">
             You can choose to:
@@ -756,12 +753,12 @@ gssh access remove <key-prefix> --force`} multiLine language="bash" />
           </ul>
 
           <h3 className="text-xl font-semibold text-white mb-4">Commands</h3>
-          <CodeBlock code={`gssh linear setup                 # User-level setup wizard
-gssh linear setup --project app   # Project-specific config (key + teams)
-gssh linear show                  # Show user-level config
-gssh linear show --project app    # Show project config
-gssh linear clear                 # Clear user-level config
-gssh linear clear --project app   # Clear project config (including API key)`} multiLine language="bash" />
+          <CodeBlock code={`gssh user config linear setup                 # User-level setup wizard
+gssh user config linear setup --project app   # Project-specific config (key + teams)
+gssh user config linear show                  # Show user-level config
+gssh user config linear show --project app    # Show project config
+gssh user config linear clear                 # Clear user-level config
+gssh user config linear clear --project app   # Clear project config (including API key)`} multiLine language="bash" />
 
           <h3 className="text-xl font-semibold text-white mb-4 mt-8">Creating Workspaces from Issues</h3>
           <p className="text-zinc-400 mb-4">
@@ -769,7 +766,7 @@ gssh linear clear --project app   # Clear project config (including API key)`} m
           </p>
           <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-8 ml-2">
             <li>In the TUI, select "Create from Linear issue" when adding a workspace</li>
-            <li>Or use the CLI: <code className="text-zinc-300">gssh add</code> and select "Create from Linear issue"</li>
+            <li>Or use the CLI: <code className="text-zinc-300">gssh workspace add --project my-project</code> and select "Create from Linear issue"</li>
           </ul>
 
           <p className="text-zinc-400 mb-4">
@@ -785,7 +782,7 @@ gssh linear clear --project app   # Clear project config (including API key)`} m
             <li>Go to Linear → Settings → API</li>
             <li>Under "Personal API keys", click "Create key"</li>
             <li>Give it a name (e.g., "GitSpace")</li>
-            <li>Copy the key and paste it when prompted by <code className="text-zinc-300">gssh linear setup</code></li>
+            <li>Copy the key and paste it when prompted by <code className="text-zinc-300">gssh user config linear setup</code></li>
           </ol>
         </div>
       );

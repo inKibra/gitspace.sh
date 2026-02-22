@@ -31,6 +31,7 @@ export type RelaySigner = <T extends object>(message: T) => T;
 export interface RelayMachineDirectoryClientOptions<TSocket> {
   relayUrl: string;
   clientIdentityId: string;
+  deviceCertificate: string;
   socketAdapter: RelaySocketAdapter<TSocket>;
   signer?: RelaySigner;
   pingIntervalMs?: number;
@@ -174,9 +175,15 @@ export class RelayMachineDirectoryClient<TSocket> {
   }
 
   private requestMachineList(): void {
+    if (!this.options.deviceCertificate) {
+      this.emitError('Device certificate is required for machine listing');
+      return;
+    }
+
     const baseMessage = {
       type: 'list_machines' as const,
       clientIdentityId: this.options.clientIdentityId,
+      deviceCertificate: this.options.deviceCertificate,
     };
 
     const message = this.options.signer

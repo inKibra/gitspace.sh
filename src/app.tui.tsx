@@ -853,7 +853,7 @@ function App({ relayConfig, onQuit }: AppProps) {
       if (!linearConfig.apiKey || linearConfig.teamKeys.length === 0) {
         flow.showMessage({
           title: 'Not Configured',
-          message: "Linear is not configured. Run 'gssh linear setup' to configure.",
+          message: "Linear is not configured. Run 'gssh user config linear setup' to configure.",
           variant: 'warning',
         });
         setWorkspaceFlow({ type: 'closed' });

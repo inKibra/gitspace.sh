@@ -28,6 +28,7 @@ import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
 import { buildEditProcessesCommand } from '../lib/processes/editor.js';
+import { createLocalDeviceCertificate } from '../core/user-identity.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -55,6 +56,7 @@ export interface RemoteMachineScreenProps {
 export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: RemoteMachineScreenProps) {
   const remote = useRemoteTerminal();
   const renderer = useRenderer();
+  const [deviceCertificate, setDeviceCertificate] = useState<string | null>(null);
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
@@ -69,6 +71,33 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       console.error(`[tui] Remote machine flow error: ${error.message}`);
     },
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    setDeviceCertificate(null);
+
+    void createLocalDeviceCertificate(identity)
+      .then((cert) => {
+        if (!cancelled) {
+          setDeviceCertificate(cert);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        flow.showMessage({
+          title: 'Identity Error',
+          message,
+          variant: 'error',
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [flow, identity]);
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: remote.commandError ?? null,
@@ -161,17 +190,22 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [remote.mode, remote.setWriteCallback, showScriptTerminal]);
 
   useEffect(() => {
+    if (!deviceCertificate) {
+      return;
+    }
+
     void remote.connect({
       relayUrl,
       identity,
       machineId: machine.machineId,
       machineLabel: machine.label,
+      deviceCertificate,
     });
 
     return () => {
       remote.disconnect();
     };
-  }, [identity, machine.label, machine.machineId, relayUrl]);
+  }, [deviceCertificate, identity, machine.label, machine.machineId, relayUrl]);
 
   useEffect(() => {
     if (remote.status !== 'established' || remote.mode !== 'browsing') {

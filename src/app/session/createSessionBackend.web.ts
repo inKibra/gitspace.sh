@@ -61,9 +61,8 @@ export interface WebRemoteSessionConnectParams {
   ws: WebSocket
   identity: Identity
   machineId: string
+  deviceCertificate: string
   relayUrl?: string
-  inviteId?: string
-  inviteToken?: string
 }
 
 export function createWebRemoteSessionBackend(
@@ -94,8 +93,7 @@ export function createWebRemoteSessionBackend(
       socketAdapter: browserRemoteSocketAdapter,
       identity: params.identity,
       machineId: params.machineId,
-      inviteId: params.inviteId,
-      inviteToken: params.inviteToken,
+      deviceCertificate: params.deviceCertificate,
       signer: signRelayMessage,
       crypto: browserCryptoAdapter,
       handshake: browserHandshakeAdapter,

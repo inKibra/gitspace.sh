@@ -1,7 +1,7 @@
 /**
  * Serve command implementation
  *
- * Handles 'gssh serve' to start a machine-side daemon that accepts
+ * Handles 'gssh machine serve ...' to start a machine-side daemon that accepts
  * remote connections, authenticates clients via X3DH, and spawns PTY sessions.
  *
  * Also handles gitspace.sh hosting via Cloudflare Tunnels when configured.
@@ -9,7 +9,7 @@
  * Supports daemon mode with start/stop/status subcommands.
  */
 
-import { watch, appendFileSync, existsSync, writeFileSync, readdirSync } from 'fs';
+import { appendFileSync, existsSync, writeFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import { spawn, type Subprocess } from 'bun';
@@ -32,11 +32,9 @@ import {
   writeRelayConfig,
   clearRelayConfig,
 } from '../core/identity.js';
-import { readAccessList, getAccessListPath } from '../core/access.js';
-import { AccessControlList } from '../lib/tmux-lite/crypto/access-control.js';
+import { loadUserRootIdentity } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
 import type { ServeEventHandler } from '../serve/types.js';
-import type { AccessEntry } from '../types/identity.js';
 import type { Identity, StoredIdentity } from '../types/identity.js';
 import {
   NoIdentityError,
@@ -65,7 +63,6 @@ import {
   queryServeStatus,
   sendShutdownCommand,
   getServeLogFile,
-  setAccessCommandHandler,
   ensureServeDaemonDir,
   getServeDaemonDir,
   type StatusResponse,
@@ -78,7 +75,14 @@ import { resolveWorkspaceRef } from '../lib/events/paths.js';
 import { getGitspaceDir } from '../core/config.js';
 import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js';
 import type { ProcessPortConfig } from '../types/processes.js';
-import { bindControlOwner, bindControlRelayIdentity, ensureControlStore } from '../relay/control/store.js';
+import {
+  bindControlOwner,
+  bindControlRelayIdentity,
+  ensureControlStore,
+  getVaultMeta,
+  setVaultMeta,
+} from '../relay/control/store.js';
+import { isMachineAccessGranted } from '../relay/auth/store.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -100,24 +104,57 @@ const CLOUDFLARED_RESTART_DELAY = 5000;
 // Helper Functions
 // ============================================================================
 
-/**
- * Validate that an access entry has required keys
- * @param entry - Access entry to validate
- * @param logLabel - Label for logging if validation fails
- * @returns true if valid, false if missing required keys
- */
-function isValidAccessEntry(entry: AccessEntry, logLabel?: string): boolean {
-  const label = logLabel || entry.label || entry.identityId.substring(0, 12) + '...';
+interface UserRootAuthorizationConfig {
+  ownerUserRootId: string;
+  checkUserRootAccess: (
+    ownerUserRootId: string,
+    clientUserRootId: string,
+    machineId?: string,
+  ) => Promise<boolean>;
+}
 
-  if (!entry.keyExchangePublicKey || entry.keyExchangePublicKey.length === 0) {
-    logger.warning(`Skipping access entry with missing keyExchangePublicKey: ${label}`);
-    return false;
+async function resolveUserRootAuthorizationConfig(): Promise<UserRootAuthorizationConfig> {
+  const userRoot = await loadUserRootIdentity();
+  if (!userRoot) {
+    throw new SpacesError(
+      'User root identity is required for serve authorization. Run `gssh user identity init` or `gssh user identity recover` first.',
+      'USER_ERROR',
+      1,
+    );
   }
-  if (!entry.signingPublicKey || entry.signingPublicKey.length === 0) {
-    logger.warning(`Skipping access entry with missing signingPublicKey: ${label}`);
-    return false;
+
+  ensureControlStore();
+
+  const existingOwner = getVaultMeta('owner_user_root_id');
+  if (existingOwner && existingOwner !== userRoot.id) {
+    throw new SpacesError(
+      `Relay owner mismatch: store is bound to ${existingOwner}, current user root is ${userRoot.id}`,
+      'USER_ERROR',
+      1,
+    );
   }
-  return true;
+
+  if (!existingOwner) {
+    setVaultMeta('owner_user_root_id', userRoot.id);
+  }
+
+  return {
+    ownerUserRootId: userRoot.id,
+    checkUserRootAccess: async (
+      ownerUserRootId: string,
+      clientUserRootId: string,
+      machineId?: string,
+    ) => {
+      try {
+        if (!machineId) {
+          return false;
+        }
+        return isMachineAccessGranted(machineId, ownerUserRootId, clientUserRootId);
+      } catch {
+        return false;
+      }
+    },
+  };
 }
 
 /**
@@ -142,7 +179,7 @@ function createEventHandler(
 
       case 'client_authenticated':
         logger.success(`[${timestamp}] Client ${event.identityId.substring(0, 12)}... authenticated`);
-        logger.dim(`           Access: ${event.accessType === 'full' ? 'Full access' : `Session invite${event.sessionId ? ` (${event.sessionId})` : ''}`}`);
+        logger.dim(`           Access: ${event.accessType === 'full' ? 'Full access' : `View-only${event.sessionId ? ` (${event.sessionId})` : ''}`}`);
         updateSessionDisplay(sessionManager);
         break;
 
@@ -204,7 +241,7 @@ async function verifyRelayTrust(
     logger.error(`Received:  ${relayFingerprint}`);
     logger.log('');
     logger.error('The relay identity has changed. This could indicate a man-in-the-middle attack.');
-    logger.error('If this is expected, remove the old trust with: gssh relay untrust ' + relayUrl);
+    logger.error('If this is expected, remove the old relay entry from ~/.gitspace/.identity/trusted-relays.json and retry.');
     return { trusted: false, reason: 'Relay identity mismatch - possible security threat' };
   }
 
@@ -414,7 +451,8 @@ function signChallengeAndCreateRegistration(
   machineId: string,
   publicIdentity: PublicIdentity,
   bootstrapToken?: string,
-  registerPermit?: string
+  registerPermit?: string,
+  enrollmentToken?: string,
 ): { challengeResponse: string; message: object } | null {
   try {
     const nonceBytes = new Uint8Array(Buffer.from(challenge, 'base64'));
@@ -433,6 +471,7 @@ function signChallengeAndCreateRegistration(
         challengeResponse,
         bootstrapToken,
         registerPermit,
+        enrollmentToken,
       },
     };
   } catch (err) {
@@ -492,7 +531,7 @@ async function startCloudflared(subdomain: string): Promise<boolean> {
   const tunnelToken = await getSecret(`TUNNEL_TOKEN_${subdomain}`);
   if (!tunnelToken) {
     logger.warning(`No tunnel token found for ${subdomain}.gitspace.sh`);
-    logger.dim('Run: gssh host reserve ' + subdomain + ' (to get token)');
+    logger.dim('Run: gssh user host reserve ' + subdomain + ' (to get token)');
     return false;
   }
 
@@ -928,7 +967,7 @@ async function startServeProcessHosting(hostConfig: HostConfig): Promise<ServePr
 
   if (!tunnelToken) {
     logger.warning(`No serve tunnel token found for ${serveDomain}`);
-    logger.dim(`Run: gssh host reserve ${hostConfig.subdomain} (to get token)`);
+    logger.dim(`Run: gssh user host reserve ${hostConfig.subdomain} (to get token)`);
     return null;
   }
 
@@ -1009,14 +1048,11 @@ export async function serve(options: {
     );
   }
 
-  // Step 2: Load access control list
-  const accessList = new AccessControlList();
-  const entries = readAccessList();
-  accessList.import(entries);
-
   await initializeSecretRuntime({
     ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
   });
+
+  const userRootAuth = await resolveUserRootAuthorizationConfig();
 
   // Step 3: Check for gitspace.sh hosting or explicit relay
   const hostConfig = readHostConfig();
@@ -1027,10 +1063,10 @@ export async function serve(options: {
     throw new SpacesError(
       'No relay configured.\n\n' +
       'Either set up gitspace.sh hosting:\n' +
-      '  gssh auth login\n' +
-      '  gssh host reserve <subdomain>\n\n' +
+      '  gssh user auth login\n' +
+      '  gssh user host reserve <subdomain>\n\n' +
       'Or specify a relay explicitly:\n' +
-      '  gssh serve start --relay ws://localhost:4480/ws',
+      '  gssh machine serve start --relay ws://localhost:4480/ws',
       'USER_ERROR'
     );
   }
@@ -1046,7 +1082,7 @@ export async function serve(options: {
     logger.log(`  Relay: ${relayUrl}`);
   }
   logger.log('');
-  logger.dim(`Access list: ${entries.length} authorized ${entries.length === 1 ? 'client' : 'clients'}`);
+  logger.dim('Access control: relay ACL + machine ACL (user-root keyed)');
   logger.log('');
   let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
   let localRelayIdentity: Awaited<ReturnType<typeof loadOrCreateRelayIdentity>> | null = null;
@@ -1127,8 +1163,9 @@ export async function serve(options: {
     const sessionManager = new ClientSessionManager({
       relay: localRelayUrl,
       identity,
-      accessList,
       remoteSessionOptions,
+      ownerUserRootId: userRootAuth.ownerUserRootId,
+      checkUserRootAccess: userRootAuth.checkUserRootAccess,
     });
 
     // Initialize session manager (starts tmux-lite server)
@@ -1141,7 +1178,7 @@ export async function serve(options: {
     // Connect to local relay (no token needed - uses challenge-response auth)
     logger.info('Registering with local relay...');
     try {
-      await connectToRelay(localRelayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey, undefined, options.bootstrapToken);
+      await connectToRelay(localRelayUrl, machineId, publicIdentity, sessionManager, eventHandler, signingPrivateKey, undefined, options.bootstrapToken);
     } catch (error) {
       logger.error(`Failed to register with local relay: ${error instanceof Error ? error.message : String(error)}`);
       localRelayServer.stop();
@@ -1180,8 +1217,9 @@ export async function serve(options: {
   const sessionManager = new ClientSessionManager({
     relay: relayUrl,
     identity,
-    accessList,
     remoteSessionOptions,
+    ownerUserRootId: userRootAuth.ownerUserRootId,
+    checkUserRootAccess: userRootAuth.checkUserRootAccess,
   });
 
   // Initialize session manager (starts tmux-lite server)
@@ -1195,9 +1233,9 @@ export async function serve(options: {
   logger.info('Connecting to relay...');
 
   try {
-    await connectToRelay(relayUrl, machineId, publicIdentity, sessionManager, eventHandler, accessList, signingPrivateKey, options.relayPubkey, options.bootstrapToken);
+    await connectToRelay(relayUrl, machineId, publicIdentity, sessionManager, eventHandler, signingPrivateKey, options.relayPubkey, options.bootstrapToken);
 
-    // Save relay config for share command
+    // Save relay config for machine access commands
     writeRelayConfig({
       relayUrl,
       machineId,
@@ -1244,19 +1282,15 @@ async function connectToRelay(
   publicIdentity: PublicIdentity,
   sessionManager: ClientSessionManager,
   eventHandler: ServeEventHandler,
-  accessList: AccessControlList,
   signingPrivateKey?: Uint8Array,
   relayPubkey?: string,
   bootstrapToken?: string,
-  registerPermit?: string
+  registerPermit?: string,
+  enrollmentToken?: string,
 ): Promise<void> {
   // Build WebSocket URL with machine role (no token in URL - auth via challenge-response)
   const url = new URL(relayUrl);
   url.searchParams.set('role', 'machine');
-
-  // Track current entries for diffing
-  let currentEntries = readAccessList();
-  let accessWatcher: ReturnType<typeof watch> | null = null;
 
   return new Promise((resolve, reject) => {
     let reconnectAttempts = 0;
@@ -1278,94 +1312,6 @@ async function connectToRelay(
         ws.send(JSON.stringify(signed));
       } else {
         ws.send(JSON.stringify(msg));
-      }
-    };
-
-    // Watch access list file for changes
-    const startAccessWatcher = () => {
-      const accessPath = getAccessListPath();
-
-      // Create empty access list if it doesn't exist (watcher requires file to exist)
-      if (!existsSync(accessPath)) {
-        writeFileSync(accessPath, '[]', 'utf-8');
-      }
-
-      // Debounce to avoid multiple triggers
-      let debounceTimeout: ReturnType<typeof setTimeout> | null = null;
-
-      accessWatcher = watch(accessPath, (eventType) => {
-        if (eventType !== 'change') return;
-
-        // Debounce
-        if (debounceTimeout) clearTimeout(debounceTimeout);
-        debounceTimeout = setTimeout(() => {
-          syncAccessList();
-        }, 100);
-      });
-
-      logger.dim('Watching access list for changes');
-    };
-
-    // Sync access list changes to relay
-    const syncAccessList = () => {
-      if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
-
-      try {
-        const newEntries = readAccessList();
-
-        // Find added entries
-        const added = newEntries.filter(
-          (newEntry) => !currentEntries.find((e) => e.identityId === newEntry.identityId)
-        );
-
-        // Find removed entries
-        const removed = currentEntries.filter(
-          (oldEntry) => !newEntries.find((e) => e.identityId === oldEntry.identityId)
-        );
-
-        // Send authorize messages for new entries (signed)
-        for (const entry of added) {
-          // Validate entry before sending - skip entries with missing keys
-          if (!isValidAccessEntry(entry)) {
-            continue;
-          }
-
-          signAndSend(currentWs, {
-            type: 'authorize_client',
-            machineId,
-            clientIdentityId: entry.identityId,
-            signingKey: entry.signingPublicKey,
-            keyExchangeKey: entry.keyExchangePublicKey,
-            accessType: entry.accessType,
-            sessionId: entry.sessionId,
-          });
-          logger.success(`Access granted: ${entry.label || entry.identityId.substring(0, 12)}...`);
-
-          // Also update local access list
-          accessList.addEntry({
-            id: entry.identityId,
-            signingPublicKey: entry.signingPublicKey,
-            keyExchangePublicKey: entry.keyExchangePublicKey,
-          }, entry.accessType, entry.sessionId);
-        }
-
-        // Send revoke messages for removed entries (signed)
-        for (const entry of removed) {
-          signAndSend(currentWs, {
-            type: 'revoke_client',
-            machineId,
-            clientIdentityId: entry.identityId,
-          });
-          logger.warning(`Access revoked: ${entry.label || entry.identityId.substring(0, 12)}...`);
-
-          // Also update local access list
-          accessList.removeEntry(entry.identityId);
-        }
-
-        // Update current entries
-        currentEntries = newEntries;
-      } catch (error) {
-        logger.error(`Failed to sync access list: ${error instanceof Error ? error.message : String(error)}`);
       }
     };
 
@@ -1468,7 +1414,8 @@ async function connectToRelay(
                 machineId,
                 publicIdentity,
                 bootstrapToken,
-                registerPermit
+                registerPermit,
+                enrollmentToken,
               );
 
               if (!registration) {
@@ -1484,67 +1431,6 @@ async function connectToRelay(
             case 'registered':
               // Machine registered successfully
               eventHandler({ type: 'relay_connected' });
-
-              // Send initial access list entries to relay (signed)
-              for (const entry of currentEntries) {
-                // Validate entry before sending - skip entries with missing keys
-                if (!isValidAccessEntry(entry)) {
-                  continue;
-                }
-
-                signAndSend(ws, {
-                  type: 'authorize_client',
-                  machineId,
-                  clientIdentityId: entry.identityId,
-                  signingKey: entry.signingPublicKey,
-                  keyExchangeKey: entry.keyExchangePublicKey,
-                  accessType: entry.accessType,
-                  sessionId: entry.sessionId,
-                });
-                logger.dim(`Synced access: ${entry.label || entry.identityId.substring(0, 12)}...`);
-              }
-
-              // Start watching access list for changes
-              if (!accessWatcher) {
-                startAccessWatcher();
-              }
-
-              // Register access command handler for CLI commands
-              setAccessCommandHandler({
-                async addAccess(entry) {
-                  if (!currentWs || currentWs.readyState !== WebSocket.OPEN) {
-                    return { success: false, error: 'Not connected to relay' };
-                  }
-                  try {
-                    signAndSend(currentWs, {
-                      type: 'add_global_access',
-                      clientIdentityId: entry.clientIdentityId,
-                      signingKey: entry.signingKey,
-                      keyExchangeKey: entry.keyExchangeKey,
-                      label: entry.label,
-                      accessType: entry.accessType,
-                      sessionId: entry.sessionId,
-                    });
-                    return { success: true };
-                  } catch (err) {
-                    return { success: false, error: err instanceof Error ? err.message : 'Send failed' };
-                  }
-                },
-                async removeAccess(clientIdentityId) {
-                  if (!currentWs || currentWs.readyState !== WebSocket.OPEN) {
-                    return { success: false, error: 'Not connected to relay' };
-                  }
-                  try {
-                    signAndSend(currentWs, {
-                      type: 'remove_global_access',
-                      clientIdentityId,
-                    });
-                    return { success: true };
-                  } catch (err) {
-                    return { success: false, error: err instanceof Error ? err.message : 'Send failed' };
-                  }
-                },
-              });
 
               if (!resolved) {
                 resolved = true;
@@ -1590,50 +1476,6 @@ async function connectToRelay(
               if (!resolved) {
                 reject(new Error(msg.message));
               }
-              break;
-
-            case 'access_list':
-              // Full access list from relay - sync to local access list
-              logger.dim(`Received ${msg.entries?.length || 0} access entries from relay`);
-              if (msg.entries && Array.isArray(msg.entries)) {
-                for (const entry of msg.entries) {
-                  accessList.addEntry({
-                    id: entry.clientIdentityId,
-                    signingPublicKey: entry.signingKey,
-                    keyExchangePublicKey: entry.keyExchangeKey,
-                  }, entry.accessType === 'full' ? 'full' : 'session-invite', entry.sessionId);
-                }
-              }
-              break;
-
-            case 'access_update':
-              // Incremental access update from relay
-              if (msg.added && Array.isArray(msg.added)) {
-                for (const entry of msg.added) {
-                  accessList.addEntry({
-                    id: entry.clientIdentityId,
-                    signingPublicKey: entry.signingKey,
-                    keyExchangePublicKey: entry.keyExchangeKey,
-                  }, entry.accessType === 'full' ? 'full' : 'session-invite', entry.sessionId);
-                  logger.success(`Access granted (from relay): ${entry.label || entry.clientIdentityId.substring(0, 12)}...`);
-                }
-              }
-              if (msg.removed && Array.isArray(msg.removed)) {
-                for (const clientId of msg.removed) {
-                  accessList.removeEntry(clientId);
-                  logger.warning(`Access revoked (from relay): ${clientId.substring(0, 12)}...`);
-                }
-              }
-              break;
-
-            case 'client_authorized':
-              // Acknowledgment that client authorization was registered with relay
-              // No action needed - the authorization was already applied locally
-              break;
-
-            case 'client_revoked':
-              // Acknowledgment that client revocation was registered with relay
-              // No action needed - the revocation was already applied locally
               break;
 
             default:
@@ -1713,6 +1555,7 @@ export async function serveStart(options: {
   relay?: string;
   relayPubkey?: string;
   bootstrapToken?: string;
+  enrollmentToken?: string;
   unlockToken?: string;
   workspaceId?: string;
   passwordStdin?: boolean;
@@ -1733,6 +1576,7 @@ export async function serveStart(options: {
   let signingPrivateKey: Uint8Array | null = null;
   let publicIdentity: PublicIdentity | null = null;
   let registerPermit: string | undefined;
+  let enrollmentToken = options.enrollmentToken;
 
   const loadPasswordFromStdin = async (): Promise<string> => {
     const reader = process.stdin;
@@ -1774,6 +1618,9 @@ export async function serveStart(options: {
       if (!options.workspaceId) {
         throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
       }
+      if (!options.enrollmentToken) {
+        throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
+      }
     } else {
       if (!keypairExists()) {
         throw new NoIdentityError();
@@ -1810,6 +1657,7 @@ export async function serveStart(options: {
     if (options.relay) serveArgs.push('--relay', options.relay);
     if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
     if (options.bootstrapToken) serveArgs.push('--bootstrap-token', options.bootstrapToken);
+    if (options.enrollmentToken) serveArgs.push('--enrollment-token', options.enrollmentToken);
     if (options.unlockToken) serveArgs.push('--unlock-token', options.unlockToken);
     if (options.workspaceId) serveArgs.push('--workspace-id', options.workspaceId);
     if (options.ignoreKeychainAndSkipSecrets) {
@@ -1875,6 +1723,10 @@ export async function serveStart(options: {
       cleanupServeFiles();
       throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
     }
+    if (!options.enrollmentToken) {
+      cleanupServeFiles();
+      throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
+    }
 
     const unlocked = await fetchIdentityViaUnlockToken(
       options.relay,
@@ -1924,15 +1776,19 @@ export async function serveStart(options: {
   writeServePid(process.pid);
   startStatusServer();
 
-  // Load access control list
-  const accessList = new AccessControlList();
-  const entries = readAccessList();
-  accessList.import(entries);
-
   try {
     await initializeSecretRuntime({
       ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
     });
+  } catch (error) {
+    stopStatusServer();
+    cleanupServeFiles();
+    throw error;
+  }
+
+  let userRootAuth: UserRootAuthorizationConfig;
+  try {
+    userRootAuth = await resolveUserRootAuthorizationConfig();
   } catch (error) {
     stopStatusServer();
     cleanupServeFiles();
@@ -1959,10 +1815,10 @@ export async function serveStart(options: {
     throw new SpacesError(
       'No relay configured.\n\n' +
       'Either set up gitspace.sh hosting:\n' +
-      '  gssh auth login\n' +
-      '  gssh host reserve <subdomain>\n\n' +
+      '  gssh user auth login\n' +
+      '  gssh user host reserve <subdomain>\n\n' +
       'Or specify a relay explicitly:\n' +
-      '  gssh serve start --relay ws://localhost:4480/ws',
+      '  gssh machine serve start --relay ws://localhost:4480/ws',
       'USER_ERROR'
     );
   }
@@ -2047,8 +1903,9 @@ export async function serveStart(options: {
   const sessionManager = new ClientSessionManager({
     relay: effectiveRelayUrl,
     identity,
-    accessList,
     remoteSessionOptions,
+    ownerUserRootId: userRootAuth.ownerUserRootId,
+    checkUserRootAccess: userRootAuth.checkUserRootAccess,
   });
 
   // Initialize session manager (starts tmux-lite server)
@@ -2083,11 +1940,11 @@ export async function serveStart(options: {
       publicIdentity,
       sessionManager,
       eventHandler,
-      accessList,
       signingPrivateKey,
       options.relayPubkey,
       options.bootstrapToken,
-      registerPermit
+      registerPermit,
+      enrollmentToken,
     );
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
@@ -2101,7 +1958,7 @@ export async function serveStart(options: {
     );
   }
 
-  // Save relay config for share/access commands
+  // Save relay config for machine access commands
   writeRelayConfig({
     relayUrl: effectiveRelayUrl,
     machineId,
@@ -2183,7 +2040,7 @@ export async function serveStatus(): Promise<void> {
     const lines = [
       'Status:   \x1b[90m○ not running\x1b[0m',
       '',
-      'Run: \x1b[36mgssh serve start\x1b[0m',
+      'Run: \x1b[36mgssh machine serve start\x1b[0m',
     ];
     logger.log(box(lines));
     return;

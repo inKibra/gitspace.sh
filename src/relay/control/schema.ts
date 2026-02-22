@@ -111,6 +111,66 @@ const CONTROL_MIGRATIONS: ControlMigration[] = [
       `,
     ],
   },
+  {
+    version: 4,
+    statements: [
+      // ---- Vault metadata (vault salt, key check) ----
+      `
+      CREATE TABLE IF NOT EXISTS vault_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+      `,
+
+      // ---- Persistent machine registry ----
+      `
+      CREATE TABLE IF NOT EXISTS vault_machines (
+        machine_id TEXT PRIMARY KEY,
+        owner_user_root_id TEXT NOT NULL,
+        signing_key TEXT NOT NULL,
+        key_exchange_key TEXT NOT NULL,
+        label TEXT,
+        registered_at TEXT NOT NULL,
+        last_connected_at TEXT NOT NULL
+      )
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_vault_machines_owner
+      ON vault_machines(owner_user_root_id)
+      `,
+      `
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_machines_signing_key
+      ON vault_machines(signing_key)
+      `,
+
+      // ---- Encrypted machine unlock keys (sealed with vault key) ----
+      `
+      CREATE TABLE IF NOT EXISTS vault_machine_unlock_keys (
+        machine_id TEXT PRIMARY KEY,
+        encrypted_unlock_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (machine_id) REFERENCES vault_machines(machine_id) ON DELETE CASCADE
+      )
+      `,
+
+      // ---- Access control list keyed by user root ID ----
+      `
+      CREATE TABLE IF NOT EXISTS vault_access_list (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_root_id TEXT NOT NULL,
+        client_user_root_id TEXT NOT NULL,
+        label TEXT,
+        granted_at TEXT NOT NULL,
+        UNIQUE(owner_user_root_id, client_user_root_id)
+      )
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_vault_access_list_owner
+      ON vault_access_list(owner_user_root_id)
+      `,
+    ],
+  },
 ];
 
 function ensureMigrationsTable(db: Database): void {

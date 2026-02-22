@@ -77,7 +77,7 @@ export interface RemoteClientSession {
   sessionKeys: SessionKeys;
   /** Access type granted to this client */
   accessType?: AccessType;
-  /** For session-invite: the specific session ID access was granted to */
+  /** For view: the specific session ID access was granted to */
   grantedSessionId?: string;
   /** Attached tmux-lite session ID (set after attach_session) */
   attachedSessionId?: string;
@@ -107,7 +107,7 @@ function canAttachSession(
   targetSessionId: string
 ): boolean {
   if (accessType === 'full') return true;
-  if (accessType === 'session-invite') {
+  if (accessType === 'view') {
     return grantedSessionId === targetSessionId;
   }
   return false;

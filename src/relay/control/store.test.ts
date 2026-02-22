@@ -1,15 +1,22 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   bindControlOwner,
   ensureControlStore,
   getControlDbPath,
-  getLegacyControlMetaPath,
   listCloudWorkspaces,
-  readControlMeta,
 } from './store.js';
+import {
+  consumeRootInviteToken,
+  getRootInviteByToken,
+  listRootInvites,
+  registerRootInvite,
+  revokeRootInvite,
+} from '../auth/store.js';
+import { createRootInviteToken, parseRootInviteToken } from '../../lib/tmux-lite/crypto/root-invites.js';
+import { generateMnemonic, mnemonicToUserIdentity } from '../../lib/tmux-lite/crypto/user-identity.js';
 
 let originalHome: string | undefined;
 let originalControlDirOverride: string | undefined;
@@ -46,7 +53,7 @@ describe('control store', () => {
     const meta = ensureControlStore();
 
     expect(existsSync(getControlDbPath())).toBe(true);
-    expect(meta.schemaVersion).toBe(2);
+    expect(meta.schemaVersion).toBe(4);
     expect(meta.createdAt.length).toBeGreaterThan(0);
     expect(meta.updatedAt.length).toBeGreaterThan(0);
     expect(meta.ownerIdentityId).toBeUndefined();
@@ -63,33 +70,115 @@ describe('control store', () => {
     expect(() => bindControlOwner('owner-2')).toThrow(/owner mismatch/i);
   });
 
-  test('imports legacy meta owner into sqlite control store', () => {
-    const legacyMetaPath = getLegacyControlMetaPath();
-    mkdirSync(join(testHomeDir, '.relay', 'control'), { recursive: true });
-    writeFileSync(
-      legacyMetaPath,
-      JSON.stringify(
-        {
-          schemaVersion: 1,
-          ownerIdentityId: 'legacy-owner',
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    );
-
-    ensureControlStore();
-    const meta = readControlMeta();
-
-    expect(meta.ownerIdentityId).toBe('legacy-owner');
-  });
-
   test('lists cloud workspaces as empty by default', () => {
     ensureControlStore();
     const workspaces = listCloudWorkspaces();
     expect(workspaces).toEqual([]);
+  });
+
+  test('registers and lists root invites', () => {
+    ensureControlStore();
+    const owner = mnemonicToUserIdentity(generateMnemonic());
+    const target = mnemonicToUserIdentity(generateMnemonic());
+    const token = createRootInviteToken({
+      type: 'relay-user',
+      owner,
+      relayUrl: 'wss://relay.example.test/ws',
+      targetUserRootSigningKey: Buffer.from(target.signing.publicKey).toString('base64'),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 2,
+      label: 'test invite',
+    });
+    const parsed = parseRootInviteToken(token);
+    expect(parsed).not.toBeNull();
+
+    const created = registerRootInvite({
+      inviteId: parsed!.inviteId,
+      ownerUserRootId: parsed!.ownerUserRootId,
+      inviteType: parsed!.type,
+      relayUrl: parsed!.relayUrl,
+      token,
+      maxUses: parsed!.maxUses,
+      expiresAt: new Date(parsed!.expiresAt).toISOString(),
+      label: parsed!.label,
+      targetUserRootId: parsed!.type === 'relay-user' ? parsed!.targetUserRootId : undefined,
+    });
+
+    expect(created.ownerUserRootId).toBe(owner.id);
+    expect(created.maxUses).toBe(2);
+
+    const listed = listRootInvites(owner.id, { includeExpired: true, includeRevoked: true });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.inviteId).toBe(created.inviteId);
+  });
+
+  test('looks up and consumes root invites', () => {
+    ensureControlStore();
+    const owner = mnemonicToUserIdentity(generateMnemonic());
+    const target = mnemonicToUserIdentity(generateMnemonic());
+    const token = createRootInviteToken({
+      type: 'relay-user',
+      owner,
+      relayUrl: 'wss://relay.example.test/ws',
+      targetUserRootSigningKey: Buffer.from(target.signing.publicKey).toString('base64'),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+    const parsed = parseRootInviteToken(token);
+    expect(parsed).not.toBeNull();
+
+    registerRootInvite({
+      inviteId: parsed!.inviteId,
+      ownerUserRootId: parsed!.ownerUserRootId,
+      inviteType: parsed!.type,
+      relayUrl: parsed!.relayUrl,
+      token,
+      maxUses: parsed!.maxUses,
+      expiresAt: new Date(parsed!.expiresAt).toISOString(),
+      targetUserRootId: parsed!.type === 'relay-user' ? parsed!.targetUserRootId : undefined,
+    });
+
+    const valid = getRootInviteByToken(parsed!.inviteId, parsed!.ownerUserRootId, token);
+    expect(valid).not.toBeNull();
+
+    const consumed = consumeRootInviteToken(parsed!.inviteId, parsed!.ownerUserRootId, token);
+    expect(consumed).not.toBeNull();
+    expect(consumed?.usedCount).toBe(1);
+
+    const secondConsume = consumeRootInviteToken(parsed!.inviteId, parsed!.ownerUserRootId, token);
+    expect(secondConsume).toBeNull();
+  });
+
+  test('revoked root invite cannot be looked up by token', () => {
+    ensureControlStore();
+    const owner = mnemonicToUserIdentity(generateMnemonic());
+    const target = mnemonicToUserIdentity(generateMnemonic());
+    const token = createRootInviteToken({
+      type: 'relay-user',
+      owner,
+      relayUrl: 'wss://relay.example.test/ws',
+      targetUserRootSigningKey: Buffer.from(target.signing.publicKey).toString('base64'),
+      expiresAt: Date.now() + 60_000,
+      maxUses: null,
+    });
+    const parsed = parseRootInviteToken(token);
+    expect(parsed).not.toBeNull();
+
+    const created = registerRootInvite({
+      inviteId: parsed!.inviteId,
+      ownerUserRootId: parsed!.ownerUserRootId,
+      inviteType: parsed!.type,
+      relayUrl: parsed!.relayUrl,
+      token,
+      maxUses: parsed!.maxUses,
+      expiresAt: new Date(parsed!.expiresAt).toISOString(),
+      targetUserRootId: parsed!.type === 'relay-user' ? parsed!.targetUserRootId : undefined,
+    });
+
+    const revoked = revokeRootInvite(owner.id, created.inviteId);
+    expect(revoked).toBe(true);
+
+    const lookup = getRootInviteByToken(parsed!.inviteId, parsed!.ownerUserRootId, token);
+    expect(lookup).toBeNull();
   });
 });

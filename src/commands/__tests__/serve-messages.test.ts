@@ -15,11 +15,8 @@ import type { RelayToMachineMessage } from "../../relay/protocol";
 const RELAY_TO_MACHINE_MESSAGE_TYPES: RelayToMachineMessage["type"][] = [
   "relay_identity",
   "challenge",
+  "unlock_grant",
   "registered",
-  "access_list",
-  "access_update",
-  "client_authorized",
-  "client_revoked",
   "client_connected",
   "client_disconnected",
   "data",
@@ -31,21 +28,18 @@ const RELAY_TO_MACHINE_MESSAGE_TYPES: RelayToMachineMessage["type"][] = [
  */
 const CRITICAL_MESSAGE_TYPES = [
   "relay_identity",   // Must respond with register_machine
-  "registered",       // Must sync access list
+  "registered",       // Marks machine registration complete
+  "unlock_grant",     // Must process encrypted unlock payload
   "client_connected", // Must set up session
   "client_disconnected", // Must clean up session
   "data",            // Must route to session
   "error",           // Must log/handle error
-  "access_list",     // Must update local ACL
-  "access_update",   // Must update local ACL
 ];
 
 /**
  * Message types that are acknowledgments (can be no-ops).
  */
 const ACKNOWLEDGMENT_MESSAGE_TYPES = [
-  "client_authorized",
-  "client_revoked",
   "challenge", // Only used if relay sends separate challenge (usually included in relay_identity)
 ];
 
@@ -53,7 +47,7 @@ describe("serve message handler coverage", () => {
   test("documents all relay-to-machine message types", () => {
     // This test documents the expected message types.
     // If the protocol adds new types, this test should be updated.
-    expect(RELAY_TO_MACHINE_MESSAGE_TYPES).toHaveLength(11);
+    expect(RELAY_TO_MACHINE_MESSAGE_TYPES).toHaveLength(8);
   });
 
   test("critical message types are a subset of all types", () => {
@@ -98,68 +92,29 @@ describe("message type handling requirements", () => {
     expect(requirements.expectedResponse).toContain("challengeResponse");
   });
 
-  test("registered triggers access list sync", () => {
+  test("registered confirms relay connection", () => {
     const requirements = {
       type: "registered",
       requiredFields: ["machineId"],
       sideEffects: [
-        "Sync all access entries to relay",
-        "Start access list file watcher",
-        "Set up access command handler",
+        "Mark relay connected",
+        "Resolve pending connection promise",
       ],
     };
 
     expect(requirements.sideEffects.length).toBeGreaterThan(0);
   });
 
-  test("client_authorized is an acknowledgment", () => {
+  test("unlock_grant carries encrypted identity payload", () => {
     const requirements = {
-      type: "client_authorized",
-      requiredFields: ["clientIdentityId"],
-      sideEffects: [], // No action needed - authorization was already applied locally
-      note: "Sent by relay to confirm authorize_client was processed",
+      type: "unlock_grant",
+      requiredFields: ["workspaceId", "tokenId", "registerPermit", "ciphertext", "relayEphemeralKey", "salt", "expiresAt"],
+      sideEffects: ["Unseal payload", "Continue bootstrapping"],
     };
 
-    expect(requirements.sideEffects).toHaveLength(0);
+    expect(requirements.requiredFields).toContain("registerPermit");
   });
 
-  test("client_revoked is an acknowledgment", () => {
-    const requirements = {
-      type: "client_revoked",
-      requiredFields: ["clientIdentityId"],
-      sideEffects: [], // No action needed - revocation was already applied locally
-      note: "Sent by relay to confirm revoke_client was processed",
-    };
-
-    expect(requirements.sideEffects).toHaveLength(0);
-  });
-
-  test("access_list requires full ACL replacement", () => {
-    const requirements = {
-      type: "access_list",
-      requiredFields: ["entries"],
-      sideEffects: [
-        "Update local access control list with all entries",
-      ],
-      note: "Sent on reconnect to sync full state",
-    };
-
-    expect(requirements.requiredFields).toContain("entries");
-  });
-
-  test("access_update requires incremental ACL update", () => {
-    const requirements = {
-      type: "access_update",
-      requiredFields: ["added", "removed"],
-      sideEffects: [
-        "Add new entries to local ACL",
-        "Remove revoked entries from local ACL",
-      ],
-    };
-
-    expect(requirements.requiredFields).toContain("added");
-    expect(requirements.requiredFields).toContain("removed");
-  });
 });
 
 describe("error scenarios", () => {

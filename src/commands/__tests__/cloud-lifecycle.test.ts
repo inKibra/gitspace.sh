@@ -233,7 +233,7 @@ describe('cloudResume', () => {
     seedWorkspace('ws-r4', 'hibernated');
     const provider = makeMockProvider({
       exec: async () => {
-        throw new Error('could not start gssh serve');
+        throw new Error('could not start gssh machine serve');
       },
     });
 

@@ -36,6 +36,8 @@ export interface RegisterMachineMessage {
   bootstrapToken?: string;
   /** One-time register permit minted by unlock_request */
   registerPermit?: string;
+  /** One-time relay-machine invite token for machine enrollment */
+  enrollmentToken?: string;
   /** Ed25519 signature of message */
   signature?: SignatureBlock;
 }
@@ -49,37 +51,6 @@ export interface UnlockRequestMessage {
   ephemeralKey: string;
 }
 
-/** Machine registers an invite */
-export interface RegisterInviteMessage {
-  type: "register_invite";
-  inviteId: string;
-  machineId: string;
-  expiresAt: number;
-  maxUses: number | null;
-}
-
-/** Machine authorizes a client */
-export interface AuthorizeClientMessage {
-  type: "authorize_client";
-  machineId: string;
-  clientIdentityId: string;
-  signingKey: string;
-  keyExchangeKey: string;
-  accessType: 'full' | 'session-invite';
-  sessionId?: string;
-  /** Ed25519 signature of message */
-  signature?: SignatureBlock;
-}
-
-/** Machine revokes client authorization */
-export interface RevokeClientMessage {
-  type: "revoke_client";
-  machineId: string;
-  clientIdentityId: string;
-  /** Ed25519 signature of message */
-  signature?: SignatureBlock;
-}
-
 /** Machine sends data to a specific client */
 export interface MachineDataMessage {
   type: "data";
@@ -87,53 +58,43 @@ export interface MachineDataMessage {
   data: string; // base64 encoded
 }
 
-/** Machine responds to identity challenge */
-export interface ChallengeResponseMessage {
-  type: "challenge_response";
-  /** Signature of the challenge nonce (base64) */
-  signature: string;
-}
+// ============================================================================
+// Client → Relay Messages (Owner/Admin)
+// ============================================================================
 
-/** Machine requests to add global access */
-export interface AddGlobalAccessMessage {
-  type: "add_global_access";
-  clientIdentityId: string;
-  signingKey: string;
-  keyExchangeKey: string;
-  label?: string;
-  accessType: 'full' | 'session-invite';
-  sessionId?: string;
-  /** If set, only applies to specific machines */
-  machineIds?: string[];
+/**
+ * Client (owner) unlocks the relay vault.
+ *
+ * The client proves ownership by providing an HMAC proof derived from the
+ * user root private key and a challenge nonce. The relay then re-derives
+ * the vault key and unlocks encrypted machine data.
+ *
+ * Flow:
+ * 1. Client connects as role=client
+ * 2. Client sends unlock_relay with userRootPublicKey + proof
+ * 3. Relay verifies proof, derives vault key, unlocks vault
+ * 4. Relay responds with unlock_relay_result
+ */
+export interface UnlockRelayMessage {
+  type: "unlock_relay";
+  /** Owner's user root Ed25519 signing public key (base64) */
+  userRootPublicKey: string;
+  /** HMAC-SHA256 proof: HMAC(relay_challenge, user_root_private_key) (base64) */
+  proof: string;
   /** Ed25519 signature of message */
-  signature?: SignatureBlock;
-}
-
-/** Machine requests to remove global access */
-export interface RemoveGlobalAccessMessage {
-  type: "remove_global_access";
-  clientIdentityId: string;
-  /** Ed25519 signature of message */
-  signature?: SignatureBlock;
+  signature: SignatureBlock;
 }
 
 // ============================================================================
-// Client → Relay Messages
+// Client → Relay Messages (Regular)
 // ============================================================================
 
 /** Client requests list of machines they can connect to */
 export interface ListMachinesMessage {
   type: "list_machines";
   clientIdentityId: string;
-  /** Ed25519 signature of message */
-  signature: SignatureBlock;
-}
-
-/** Client connects using an invite */
-export interface ConnectWithInviteMessage {
-  type: "connect_with_invite";
-  inviteId: string;
-  clientIdentityId: string;
+  /** JSON-serialized DeviceCertificate for user-root derivation */
+  deviceCertificate: string;
   /** Ed25519 signature of message */
   signature: SignatureBlock;
 }
@@ -143,7 +104,45 @@ export interface ConnectToMachineMessage {
   type: "connect_to_machine";
   machineId: string;
   clientIdentityId: string;
+  /** JSON-serialized DeviceCertificate for user-root derivation */
+  deviceCertificate: string;
   /** Ed25519 signature of message */
+  signature: SignatureBlock;
+}
+
+/** Client creates a root-signed invite on the relay */
+export interface CreateRootInviteMessage {
+  type: 'create_root_invite';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  inviteToken: string;
+  signature: SignatureBlock;
+}
+
+/** Client lists root-signed invites they own */
+export interface ListRootInvitesMessage {
+  type: 'list_root_invites';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  inviteType?: 'relay-user' | 'relay-machine' | 'machine-user';
+  signature: SignatureBlock;
+}
+
+/** Client revokes a root-signed invite they own */
+export interface RevokeRootInviteMessage {
+  type: 'revoke_root_invite';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  inviteId: string;
+  signature: SignatureBlock;
+}
+
+/** Client accepts an invite targeted to their user root */
+export interface AcceptRootInviteMessage {
+  type: 'accept_root_invite';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  inviteToken: string;
   signature: SignatureBlock;
 }
 
@@ -207,59 +206,11 @@ export interface UnlockGrantMessage {
   expiresAt: string;
 }
 
-/** Access list sync from relay to machine */
-export interface AccessListMessage {
-  type: "access_list";
-  entries: {
-    clientIdentityId: string;
-    signingKey: string;
-    keyExchangeKey: string;
-    label?: string;
-    accessType: 'full' | 'session-invite';
-    sessionId?: string;
-    grantedAt: number;
-  }[];
-  /** Protocol version */
-  protocolVersion?: number;
-  /** Ed25519 signature of message (signed by relay) */
-  signature?: SignatureBlock;
-}
-
-/** Incremental access list update from relay to machine */
-export interface AccessUpdateMessage {
-  type: "access_update";
-  added: {
-    clientIdentityId: string;
-    signingKey: string;
-    keyExchangeKey: string;
-    label?: string;
-    accessType: 'full' | 'session-invite';
-    sessionId?: string;
-    grantedAt: number;
-  }[];
-  removed: string[]; // clientIdentityIds to remove
-  /** Ed25519 signature of message (signed by relay) */
-  signature?: SignatureBlock;
-}
-
-/** Client authorization confirmation */
-export interface ClientAuthorizedMessage {
-  type: "client_authorized";
-  clientIdentityId: string;
-}
-
-/** Client revocation confirmation */
-export interface ClientRevokedMessage {
-  type: "client_revoked";
-  clientIdentityId: string;
-}
-
 /** Client connected notification */
 export interface ClientConnectedMessage {
   type: "client_connected";
   connectionId: string;
   clientIdentityId?: string;
-  viaInvite?: string;
 }
 
 /** Client disconnected notification */
@@ -280,6 +231,16 @@ export interface DataFromClientMessage {
 // Relay → Client Messages
 // ============================================================================
 
+/** Vault unlock result */
+export interface UnlockRelayResultMessage {
+  type: "unlock_relay_result";
+  success: boolean;
+  /** Error message if success=false */
+  error?: string;
+  /** Number of machine unlock keys available after unlock */
+  machineCount?: number;
+}
+
 /** Machine list response */
 export interface MachineListMessage {
   type: "machine_list";
@@ -288,7 +249,7 @@ export interface MachineListMessage {
     label?: string;
     online: boolean;
     isAuthorized: boolean;
-    accessType?: 'full' | 'session-invite';
+    accessType?: 'full' | 'view';
     sessionId?: string;
     lastConnectedAt?: number;
   }[];
@@ -305,6 +266,47 @@ export interface ConnectionEstablishedMessage {
 export interface ConnectionFailedMessage {
   type: "connection_failed";
   reason: string;
+}
+
+/** Root invite created confirmation */
+export interface RootInviteCreatedMessage {
+  type: 'root_invite_created';
+  inviteId: string;
+}
+
+/** Root invite revoked confirmation */
+export interface RootInviteRevokedMessage {
+  type: 'root_invite_revoked';
+  inviteId: string;
+}
+
+/** Root invite accepted confirmation */
+export interface RootInviteAcceptedMessage {
+  type: 'root_invite_accepted';
+  inviteId: string;
+  inviteType: 'relay-user' | 'relay-machine' | 'machine-user';
+  granted: 'relay' | 'machine';
+  machineId?: string;
+}
+
+/** Root invite list response */
+export interface RootInviteListMessage {
+  type: 'root_invite_list';
+  invites: {
+    inviteId: string;
+    inviteType: 'relay-user' | 'relay-machine' | 'machine-user';
+    relayUrl: string;
+    label?: string;
+    maxUses: number | null;
+    usedCount: number;
+    expiresAt: string;
+    createdAt: string;
+    revokedAt?: string;
+    targetUserRootId?: string;
+    machineId?: string;
+    targetMachineSigningKey?: string;
+    targetMachineKeyExchangeKey?: string;
+  }[];
 }
 
 /** Data from machine */
@@ -332,19 +334,17 @@ export interface ErrorMessage {
 export type MachineToRelayMessage =
   | RegisterMachineMessage
   | UnlockRequestMessage
-  | RegisterInviteMessage
-  | AuthorizeClientMessage
-  | RevokeClientMessage
-  | MachineDataMessage
-  | ChallengeResponseMessage
-  | AddGlobalAccessMessage
-  | RemoveGlobalAccessMessage;
+  | MachineDataMessage;
 
 /** All messages from client to relay */
 export type ClientToRelayMessage =
+  | UnlockRelayMessage
   | ListMachinesMessage
-  | ConnectWithInviteMessage
   | ConnectToMachineMessage
+  | CreateRootInviteMessage
+  | ListRootInvitesMessage
+  | RevokeRootInviteMessage
+  | AcceptRootInviteMessage
   | ClientDataMessage
   | ClientHandshakeMessage;
 
@@ -354,10 +354,6 @@ export type RelayToMachineMessage =
   | ChallengeMessage
   | UnlockGrantMessage
   | RegisteredMessage
-  | AccessListMessage
-  | AccessUpdateMessage
-  | ClientAuthorizedMessage
-  | ClientRevokedMessage
   | ClientConnectedMessage
   | ClientDisconnectedMessage
   | DataFromClientMessage
@@ -365,9 +361,14 @@ export type RelayToMachineMessage =
 
 /** All messages from relay to client */
 export type RelayToClientMessage =
+  | UnlockRelayResultMessage
   | MachineListMessage
   | ConnectionEstablishedMessage
   | ConnectionFailedMessage
+  | RootInviteCreatedMessage
+  | RootInviteRevokedMessage
+  | RootInviteAcceptedMessage
+  | RootInviteListMessage
   | DataFromMachineMessage
   | ErrorMessage;
 
@@ -497,13 +498,6 @@ function isValidKeyString(key: unknown): key is string {
 }
 
 /**
- * Validate accessType value
- */
-function isValidAccessType(accessType: unknown): accessType is 'full' | 'session-invite' {
-  return accessType === 'full' || accessType === 'session-invite';
-}
-
-/**
  * Validate specific message types and return properly typed result.
  * Each case returns the specific message type after validation,
  * eliminating the need for unsafe casts.
@@ -519,6 +513,7 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       if (msg.protocolVersion !== undefined && typeof msg.protocolVersion !== 'number') return null;
       if (msg.bootstrapToken !== undefined && !isValidIdentifier(msg.bootstrapToken)) return null;
       if (msg.registerPermit !== undefined && !isValidIdentifier(msg.registerPermit)) return null;
+      if (msg.enrollmentToken !== undefined && !isValidKeyString(msg.enrollmentToken)) return null;
       return {
         type: "register_machine",
         machineId: msg.machineId,
@@ -529,6 +524,7 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         protocolVersion: msg.protocolVersion,
         bootstrapToken: msg.bootstrapToken,
         registerPermit: msg.registerPermit,
+        enrollmentToken: msg.enrollmentToken,
       };
     }
 
@@ -544,66 +540,14 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       };
     }
 
-    case "register_invite": {
-      if (!isValidIdentifier(msg.inviteId)) return null;
-      if (!isValidIdentifier(msg.machineId)) return null;
-      if (typeof msg.expiresAt !== "number") return null;
-      if (msg.maxUses !== null && msg.maxUses !== undefined && typeof msg.maxUses !== "number") return null;
-      return {
-        type: "register_invite",
-        inviteId: msg.inviteId,
-        machineId: msg.machineId,
-        expiresAt: msg.expiresAt,
-        maxUses: msg.maxUses ?? null,
-      };
-    }
-
-    case "authorize_client": {
-      if (!isValidIdentifier(msg.machineId)) return null;
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      if (!isValidKeyString(msg.signingKey)) return null;
-      if (!isValidKeyString(msg.keyExchangeKey)) return null;
-      if (!isValidAccessType(msg.accessType)) return null;
-      if (msg.sessionId !== undefined && !isValidIdentifier(msg.sessionId)) return null;
-      return {
-        type: "authorize_client",
-        machineId: msg.machineId,
-        clientIdentityId: msg.clientIdentityId,
-        signingKey: msg.signingKey,
-        keyExchangeKey: msg.keyExchangeKey,
-        accessType: msg.accessType,
-        sessionId: msg.sessionId,
-      };
-    }
-
-    case "revoke_client": {
-      if (!isValidIdentifier(msg.machineId)) return null;
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      return {
-        type: "revoke_client",
-        machineId: msg.machineId,
-        clientIdentityId: msg.clientIdentityId,
-      };
-    }
-
     case "list_machines": {
       if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
       if (!isValidSignatureBlock(msg.signature)) return null;
       return {
         type: "list_machines",
         clientIdentityId: msg.clientIdentityId,
-        signature: msg.signature,
-      };
-    }
-
-    case "connect_with_invite": {
-      if (!isValidIdentifier(msg.inviteId)) return null;
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      if (!isValidSignatureBlock(msg.signature)) return null;
-      return {
-        type: "connect_with_invite",
-        inviteId: msg.inviteId,
-        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
         signature: msg.signature,
       };
     }
@@ -611,12 +555,101 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
     case "connect_to_machine": {
       if (!isValidIdentifier(msg.machineId)) return null;
       if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
       if (!isValidSignatureBlock(msg.signature)) return null;
       return {
         type: "connect_to_machine",
         machineId: msg.machineId,
         clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
         signature: msg.signature,
+      };
+    }
+
+    case 'create_root_invite': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (!isValidKeyString(msg.inviteToken)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+      return {
+        type: 'create_root_invite',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        inviteToken: msg.inviteToken,
+        signature: msg.signature,
+      };
+    }
+
+    case 'list_root_invites': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (
+        msg.inviteType !== undefined &&
+        msg.inviteType !== 'relay-user' &&
+        msg.inviteType !== 'relay-machine' &&
+        msg.inviteType !== 'machine-user'
+      ) {
+        return null;
+      }
+      if (!isValidSignatureBlock(msg.signature)) return null;
+      return {
+        type: 'list_root_invites',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        inviteType: msg.inviteType,
+        signature: msg.signature,
+      };
+    }
+
+    case 'revoke_root_invite': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (!isValidIdentifier(msg.inviteId)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+      return {
+        type: 'revoke_root_invite',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        inviteId: msg.inviteId,
+        signature: msg.signature,
+      };
+    }
+
+    case 'accept_root_invite': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (!isValidKeyString(msg.inviteToken)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+      return {
+        type: 'accept_root_invite',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        inviteToken: msg.inviteToken,
+        signature: msg.signature,
+      };
+    }
+
+    case "unlock_relay": {
+      if (!isValidKeyString(msg.userRootPublicKey)) return null;
+      if (!isValidBase64(msg.proof)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+      return {
+        type: "unlock_relay",
+        userRootPublicKey: msg.userRootPublicKey,
+        proof: msg.proof,
+        signature: msg.signature,
+      };
+    }
+
+    case "unlock_relay_result": {
+      if (typeof msg.success !== "boolean") return null;
+      if (msg.error !== undefined && typeof msg.error !== "string") return null;
+      if (msg.machineCount !== undefined && typeof msg.machineCount !== "number") return null;
+      return {
+        type: "unlock_relay_result",
+        success: msg.success,
+        error: msg.error,
+        machineCount: msg.machineCount,
       };
     }
 
@@ -652,23 +685,12 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       return { type: "registered", machineId: msg.machineId };
     }
 
-    case "client_authorized": {
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      return { type: "client_authorized", clientIdentityId: msg.clientIdentityId };
-    }
-
-    case "client_revoked": {
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      return { type: "client_revoked", clientIdentityId: msg.clientIdentityId };
-    }
-
     case "client_connected": {
       if (!isValidIdentifier(msg.connectionId)) return null;
       return {
         type: "client_connected",
         connectionId: msg.connectionId,
         clientIdentityId: typeof msg.clientIdentityId === "string" ? msg.clientIdentityId : undefined,
-        viaInvite: typeof msg.viaInvite === "string" ? msg.viaInvite : undefined,
       };
     }
 
@@ -706,6 +728,52 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       return {
         type: "connection_failed",
         reason: msg.reason,
+      };
+    }
+
+    case 'root_invite_created': {
+      if (!isValidIdentifier(msg.inviteId)) return null;
+      return {
+        type: 'root_invite_created',
+        inviteId: msg.inviteId,
+      };
+    }
+
+    case 'root_invite_revoked': {
+      if (!isValidIdentifier(msg.inviteId)) return null;
+      return {
+        type: 'root_invite_revoked',
+        inviteId: msg.inviteId,
+      };
+    }
+
+    case 'root_invite_accepted': {
+      if (!isValidIdentifier(msg.inviteId)) return null;
+      if (
+        msg.inviteType !== 'relay-user' &&
+        msg.inviteType !== 'relay-machine' &&
+        msg.inviteType !== 'machine-user'
+      ) {
+        return null;
+      }
+      if (msg.granted !== 'relay' && msg.granted !== 'machine') {
+        return null;
+      }
+      if (msg.machineId !== undefined && !isValidIdentifier(msg.machineId)) return null;
+      return {
+        type: 'root_invite_accepted',
+        inviteId: msg.inviteId,
+        inviteType: msg.inviteType,
+        granted: msg.granted,
+        machineId: msg.machineId,
+      };
+    }
+
+    case 'root_invite_list': {
+      if (!Array.isArray(msg.invites)) return null;
+      return {
+        type: 'root_invite_list',
+        invites: msg.invites as RootInviteListMessage['invites'],
       };
     }
 
@@ -758,60 +826,6 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         relayEphemeralKey: msg.relayEphemeralKey,
         salt: msg.salt,
         expiresAt: msg.expiresAt,
-      };
-    }
-
-    case "challenge_response": {
-      if (!isValidBase64(msg.signature)) return null;
-      return {
-        type: "challenge_response",
-        signature: msg.signature,
-      };
-    }
-
-    case "add_global_access": {
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      if (!isValidKeyString(msg.signingKey)) return null;
-      if (!isValidKeyString(msg.keyExchangeKey)) return null;
-      if (msg.label !== undefined && !isValidLabel(msg.label)) return null;
-      if (msg.accessType !== 'full' && msg.accessType !== 'session-invite') return null;
-      if (msg.sessionId !== undefined && !isValidIdentifier(msg.sessionId)) return null;
-      if (msg.machineIds !== undefined && !Array.isArray(msg.machineIds)) return null;
-      return {
-        type: "add_global_access",
-        clientIdentityId: msg.clientIdentityId,
-        signingKey: msg.signingKey,
-        keyExchangeKey: msg.keyExchangeKey,
-        label: msg.label,
-        accessType: msg.accessType,
-        sessionId: msg.sessionId,
-        machineIds: msg.machineIds,
-      };
-    }
-
-    case "remove_global_access": {
-      if (!isValidIdentifier(msg.clientIdentityId)) return null;
-      return {
-        type: "remove_global_access",
-        clientIdentityId: msg.clientIdentityId,
-      };
-    }
-
-    case "access_list": {
-      if (!Array.isArray(msg.entries)) return null;
-      return {
-        type: "access_list",
-        entries: msg.entries as AccessListMessage["entries"],
-      };
-    }
-
-    case "access_update": {
-      if (!Array.isArray(msg.added)) return null;
-      if (!Array.isArray(msg.removed)) return null;
-      return {
-        type: "access_update",
-        added: msg.added as AccessUpdateMessage["added"],
-        removed: msg.removed as string[],
       };
     }
 

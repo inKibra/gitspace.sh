@@ -54,16 +54,12 @@ interface RelayDataMessage {
 }
 
 type RelayConnectMessage =
-  | {
-      type: 'connect_with_invite';
-      inviteId: string;
-      clientIdentityId: string;
-    }
-  | {
-      type: 'connect_to_machine';
-      machineId: string;
-      clientIdentityId: string;
-    };
+  {
+    type: 'connect_to_machine';
+    machineId: string;
+    clientIdentityId: string;
+    deviceCertificate: string;
+  };
 
 interface HandshakeEnvelope {
   type: 'handshake';
@@ -71,9 +67,7 @@ interface HandshakeEnvelope {
   data: unknown;
 }
 
-type AuthorizationPayload =
-  | { type: 'invite'; inviteToken: string }
-  | { type: 'access_list' };
+type AuthorizationPayload = { type: 'access_list' };
 
 interface PtyOutputMessage {
   type: 'pty_output';
@@ -134,7 +128,8 @@ export interface RemoteSessionHandshakeAdapter<THandshakeState, TServerHello, TS
   createClientAuth: (
     state: THandshakeState,
     identity: Identity,
-    authorization: AuthorizationPayload
+    authorization: AuthorizationPayload,
+    deviceCertificate: string
   ) => {
     state: THandshakeState;
     message: unknown;
@@ -157,8 +152,7 @@ export interface RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHe
   socketAdapter: RemoteSessionSocketAdapter<TSocket>;
   identity: Identity;
   machineId: string;
-  inviteId?: string;
-  inviteToken?: string;
+  deviceCertificate: string;
   signer: <T extends object>(message: T, identity: Identity) => T;
   crypto: RemoteSessionCryptoAdapter;
   handshake: RemoteSessionHandshakeAdapter<THandshakeState, TServerHello, TServerAuth>;
@@ -302,8 +296,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private readonly socketAdapter: RemoteSessionSocketAdapter<TSocket>;
   private readonly identity: Identity;
   private readonly machineId: string;
-  private readonly inviteId?: string;
-  private readonly inviteToken?: string;
+  private readonly deviceCertificate: string;
   private readonly signer: <T extends object>(message: T, identity: Identity) => T;
   private readonly crypto: RemoteSessionCryptoAdapter;
   private readonly handshake: RemoteSessionHandshakeAdapter<THandshakeState, TServerHello, TServerAuth>;
@@ -358,8 +351,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.socketAdapter = options.socketAdapter;
     this.identity = options.identity;
     this.machineId = options.machineId;
-    this.inviteId = options.inviteId;
-    this.inviteToken = options.inviteToken;
+    this.deviceCertificate = options.deviceCertificate;
     this.signer = options.signer;
     this.crypto = options.crypto;
     this.handshake = options.handshake;
@@ -761,17 +753,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private sendRelayConnectMessage(): void {
-    const relayMessage: RelayConnectMessage = this.inviteId
-      ? {
-          type: 'connect_with_invite',
-          inviteId: this.inviteId,
-          clientIdentityId: this.identity.id,
-        }
-      : {
-          type: 'connect_to_machine',
-          machineId: this.machineId,
-          clientIdentityId: this.identity.id,
-        };
+    const relayMessage: RelayConnectMessage = {
+      type: 'connect_to_machine',
+      machineId: this.machineId,
+      clientIdentityId: this.identity.id,
+      deviceCertificate: this.deviceCertificate,
+    };
 
     const signed = this.signer(relayMessage, this.identity);
     this.socketAdapter.send(this.socket, JSON.stringify(signed));
@@ -905,11 +892,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
       this.handshakeState = nextState;
 
-      const authorization: AuthorizationPayload = this.inviteToken
-        ? { type: 'invite', inviteToken: this.inviteToken }
-        : { type: 'access_list' };
+      const authorization: AuthorizationPayload = { type: 'access_list' };
 
-      const auth = this.handshake.createClientAuth(nextState, this.identity, authorization);
+      const auth = this.handshake.createClientAuth(
+        nextState,
+        this.identity,
+        authorization,
+        this.deviceCertificate,
+      );
       this.handshakeState = auth.state;
       this.sessionKeys = auth.sessionKeys;
 

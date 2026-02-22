@@ -2,13 +2,13 @@
  * Configuration CLI commands
  *
  * Commands:
- *   gssh config notifications         - Configure notification settings
- *   gssh config notifications --show  - Show current settings
- *   gssh config notifications --reset - Reset to defaults
+ *   gssh user config notifications         - Configure notification settings
+ *   gssh user config notifications --show  - Show current settings
+ *   gssh user config notifications --reset - Reset to defaults
  *
- *   gssh config linear                - Configure Linear integration
- *   gssh config linear --show         - Show Linear config
- *   gssh config linear --clear        - Clear Linear config
+ *   gssh user config linear setup     - Configure Linear integration
+ *   gssh user config linear show      - Show Linear config
+ *   gssh user config linear clear     - Clear Linear config
  */
 
 import { logger } from '../utils/logger.js'
@@ -225,7 +225,7 @@ async function interactiveNotificationSetup(): Promise<void> {
 	})
 
 	logger.success('\nNotification settings saved')
-	logger.warning('Note: You must restart "gssh serve" (or "gssh tmux") for changes to take effect.')
+	logger.warning('Note: You must restart "gssh machine serve start" (or "gssh machine tmux start") for changes to take effect.')
 
 	// Show summary
 	const enabledTypes = Object.entries(types)

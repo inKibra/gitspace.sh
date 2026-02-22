@@ -5,7 +5,7 @@
  * 1. Identity signature proof (Issue 1)
  * 2. Permission enforcement (Issue 2)
  * 3. Machine takeover prevention (Issue 3)
- * 4. Single-use invite enforcement (Issue 4)
+ * 4. Access-list-only authorization enforcement
  */
 
 import { describe, it, expect, beforeEach } from "bun:test";
@@ -20,7 +20,8 @@ import {
 } from "../../handshake.js";
 import { HandshakeHandler, type HandshakeMessage } from "../../../handshake-handler.js";
 import { AccessControlList } from "../../access-control.js";
-import { createInviteToken } from "../../invites.js";
+import { createDeviceCertificate } from "../../device-cert.js";
+import { generateMnemonic, mnemonicToUserIdentity } from "../../user-identity.js";
 import { sign } from "../../identity.js";
 import {
   createTestIdentity,
@@ -42,6 +43,16 @@ import {
 } from "../../../../../__tests__/test-utils.js";
 import type { ServerWebSocket } from "bun";
 import type { WebSocketData } from "../../../../../relay/types.js";
+
+function buildDeviceCertificateFor(identity: Identity): string {
+  const userRoot = mnemonicToUserIdentity(generateMnemonic());
+  const cert = createDeviceCertificate(
+    userRoot,
+    identity.signing.publicKey,
+    identity.keyExchange.publicKey,
+  );
+  return JSON.stringify(cert);
+}
 
 // ============================================================================
 // Issue 1: Identity Signature Proof Tests
@@ -100,7 +111,8 @@ describe("Issue 1: Identity Signature Proof", () => {
     const { message: clientAuth } = createClientAuth(
       clientStateAfterServerHello!,
       client, // Use client's keys for signing
-      { type: "access_list" }
+      { type: "access_list" },
+      buildDeviceCertificateFor(client),
     );
 
     // Forge the identity key to claim impersonator's identity
@@ -135,7 +147,8 @@ describe("Issue 1: Identity Signature Proof", () => {
     const { message: clientAuth } = createClientAuth(
       clientStateAfterServerHello!,
       client,
-      { type: "access_list" }
+      { type: "access_list" },
+      buildDeviceCertificateFor(client),
     );
 
     // Remove the signature using type-safe utility
@@ -171,7 +184,8 @@ describe("Issue 1: Identity Signature Proof", () => {
     const { message: clientAuth } = createClientAuth(
       clientStateAfterServerHello!,
       client,
-      { type: "access_list" }
+      { type: "access_list" },
+      buildDeviceCertificateFor(client),
     );
 
     // Create a wrong signature (signed by other identity)
@@ -213,29 +227,13 @@ describe("Issue 2: Permission Enforcement", () => {
       expect(result.machineSession?.accessType).toBe("full");
     });
 
-    it("should grant session-invite access via invite token", async () => {
-      const { client, machine } = createTestIdentityPair();
-      const accessList = new AccessControlList();
-      // Don't add client to access list - use invite
-
-      const result = await runCompleteHandshake(
-        client,
-        machine,
-        accessList,
-        { type: "invite", accessType: "session-invite", sessionId: "test-session-123" }
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.machineSession?.accessType).toBe("session-invite");
-      expect(result.machineSession?.sessionId).toBe("test-session-123");
-    });
   });
 
-  describe("Access type from access list", () => {
-    it("should respect session-invite access type from access list", async () => {
+  describe("Access type from access_list authorization", () => {
+    it("should always return full access for access_list authorization", async () => {
       const { client, machine } = createTestIdentityPair();
       const accessList = new AccessControlList();
-      accessList.addEntry(toPublicIdentity(client), "session-invite", "session-abc");
+      accessList.addEntry(toPublicIdentity(client), "view", "session-abc");
 
       const result = await runCompleteHandshake(
         client,
@@ -245,8 +243,8 @@ describe("Issue 2: Permission Enforcement", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.machineSession?.accessType).toBe("session-invite");
-      expect(result.machineSession?.sessionId).toBe("session-abc");
+      expect(result.machineSession?.accessType).toBe("full");
+      expect(result.machineSession?.sessionId).toBeUndefined();
     });
   });
 });
@@ -278,7 +276,7 @@ describe("Issue 3: Machine Takeover Prevention", () => {
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.registration.machineId).toBe(machine.id);
-      expect(result.registration.accountId).toBe("account-alice");
+      expect(result.registration.ownerUserRootId).toBe("account-alice");
     }
   });
 
@@ -315,7 +313,7 @@ describe("Issue 3: Machine Takeover Prevention", () => {
     expect(result2.success).toBe(true);
   });
 
-  it("should reject re-registration from different account", () => {
+  it("should reject re-registration from different owner", () => {
     const machine = createTestIdentity("Machine");
     const mockWs1 = asMockWs<ServerWebSocket<WebSocketData>>(
       createMockWebSocket({ data: { machineId: machine.id, connectionId: "conn-1" } })
@@ -348,7 +346,7 @@ describe("Issue 3: Machine Takeover Prevention", () => {
 
     expect(result2.success).toBe(false);
     if (!result2.success) {
-      expect(result2.error).toContain("different account");
+      expect(result2.error).toContain("different owner");
     }
   });
 
@@ -389,185 +387,5 @@ describe("Issue 3: Machine Takeover Prevention", () => {
     if (!result2.success) {
       expect(result2.error).toContain("Signing key mismatch");
     }
-  });
-});
-
-// ============================================================================
-// Issue 4: Single-Use Invite Enforcement Tests
-// ============================================================================
-
-describe("Issue 4: Single-Use Invite Enforcement", () => {
-  it("should NOT add client to access list for singleUse=true invites", async () => {
-    const { client, machine } = createTestIdentityPair();
-    const accessList = new AccessControlList();
-
-    // Verify client is not in access list initially
-    expect(accessList.getEntry(client.id)).toBeUndefined();
-
-    // Create single-use invite
-    const inviteToken = createInviteToken(machine, "wss://test.relay", {
-      accessType: "full",
-      singleUse: true,
-      validityMs: 3600000,
-    });
-
-    // Create handler with the access list
-    const handler = new HandshakeHandler({
-      identity: machine,
-      accessList,
-    });
-
-    // Run handshake with single-use invite
-    const connectionId = "test-conn-1";
-
-    // ClientHello
-    const { state: clientState, message: clientHello } = createClientHello(machine.id);
-    const helloResult = await handler.processMessage(connectionId, {
-      type: "handshake",
-      phase: "client_hello",
-      data: clientHello,
-    });
-    expect(helloResult.type).toBe("reply");
-    if (!isReplyResult(helloResult)) throw new Error("Expected reply");
-
-    // Process ServerHello
-    const serverHello = getReplyData<X3DHResponseMessage>(helloResult);
-    const stateAfterServerHello = processServerHello(clientState, serverHello);
-    expect(stateAfterServerHello).not.toBeNull();
-
-    // ClientAuth with single-use invite
-    const { message: clientAuth } = createClientAuth(
-      stateAfterServerHello!,
-      client,
-      { type: "invite", inviteToken }
-    );
-
-    const authResult = await handler.processMessage(connectionId, {
-      type: "handshake",
-      phase: "client_auth",
-      data: clientAuth,
-    });
-
-    // Should succeed
-    expect(authResult.type).toBe("established");
-
-    // Client should NOT be in access list (single-use)
-    expect(accessList.getEntry(client.id)).toBeUndefined();
-  });
-
-  it("should add client to access list for singleUse=false invites", async () => {
-    const { client, machine } = createTestIdentityPair();
-    const accessList = new AccessControlList();
-
-    // Verify client is not in access list initially
-    expect(accessList.getEntry(client.id)).toBeUndefined();
-
-    // Create reusable invite (singleUse=false)
-    const inviteToken = createInviteToken(machine, "wss://test.relay", {
-      accessType: "full",
-      singleUse: false,
-      validityMs: 3600000,
-    });
-
-    // Create handler with the access list
-    const handler = new HandshakeHandler({
-      identity: machine,
-      accessList,
-    });
-
-    // Run handshake with reusable invite
-    const connectionId = "test-conn-2";
-
-    // ClientHello
-    const { state: clientState, message: clientHello } = createClientHello(machine.id);
-    const helloResult = await handler.processMessage(connectionId, {
-      type: "handshake",
-      phase: "client_hello",
-      data: clientHello,
-    });
-    expect(helloResult.type).toBe("reply");
-    if (!isReplyResult(helloResult)) throw new Error("Expected reply");
-
-    // Process ServerHello
-    const serverHello = getReplyData<X3DHResponseMessage>(helloResult);
-    const stateAfterServerHello = processServerHello(clientState, serverHello);
-    expect(stateAfterServerHello).not.toBeNull();
-
-    // ClientAuth with reusable invite
-    const { message: clientAuth } = createClientAuth(
-      stateAfterServerHello!,
-      client,
-      { type: "invite", inviteToken }
-    );
-
-    const authResult = await handler.processMessage(connectionId, {
-      type: "handshake",
-      phase: "client_auth",
-      data: clientAuth,
-    });
-
-    // Should succeed
-    expect(authResult.type).toBe("established");
-
-    // Client SHOULD be in access list (not single-use)
-    const entry = accessList.getEntry(client.id);
-    expect(entry).toBeDefined();
-    expect(entry?.accessType).toBe("full");
-  });
-
-  it("should grant session access for single-use invite during connection", async () => {
-    const { client, machine } = createTestIdentityPair();
-    const accessList = new AccessControlList();
-
-    // Create single-use session-invite
-    const inviteToken = createInviteToken(machine, "wss://test.relay", {
-      accessType: "session-invite",
-      sessionId: "session-xyz",
-      singleUse: true,
-      validityMs: 3600000,
-    });
-
-    const handler = new HandshakeHandler({
-      identity: machine,
-      accessList,
-    });
-
-    const connectionId = "test-conn-3";
-
-    // ClientHello
-    const { state: clientState, message: clientHello } = createClientHello(machine.id);
-    const helloResult = await handler.processMessage(connectionId, {
-      type: "handshake",
-      phase: "client_hello",
-      data: clientHello,
-    });
-    if (!isReplyResult(helloResult)) throw new Error("Expected reply");
-
-    // Process ServerHello
-    const serverHello = getReplyData<X3DHResponseMessage>(helloResult);
-    const stateAfterServerHello = processServerHello(clientState, serverHello);
-
-    // ClientAuth with single-use invite
-    const { message: clientAuth } = createClientAuth(
-      stateAfterServerHello!,
-      client,
-      { type: "invite", inviteToken }
-    );
-
-    const authResult = await handler.processMessage(connectionId, {
-      type: "handshake",
-      phase: "client_auth",
-      data: clientAuth,
-    });
-
-    // Should succeed with session access
-    expect(authResult.type).toBe("established");
-    if (authResult.type === "established") {
-      expect(authResult.session.accessType).toBe("session-invite");
-      expect(authResult.session.sessionId).toBe("session-xyz");
-    }
-
-    // But client should NOT be permanently in access list
-    expect(accessList.getEntry(client.id)).toBeUndefined();
   });
 });

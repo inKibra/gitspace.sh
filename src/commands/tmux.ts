@@ -2,13 +2,13 @@
  * tmux-lite daemon management commands
  *
  * Commands:
- *   gssh tmux start       - Start the tmux-lite server daemon
- *   gssh tmux stop        - Stop the tmux-lite server daemon
- *   gssh tmux status      - Show server status
- *   gssh tmux list        - List sessions
- *   gssh tmux new [name]  - Create and attach to a new session
- *   gssh tmux attach <id> - Attach to a session
- *   gssh tmux kill <id>   - Kill a session
+ *   gssh machine tmux start       - Start the tmux-lite server daemon
+ *   gssh machine tmux stop        - Stop the tmux-lite server daemon
+ *   gssh machine tmux status      - Show server status
+ *   gssh machine tmux list        - List sessions
+ *   gssh machine tmux new [name]  - Create and attach to a new session
+ *   gssh machine tmux attach <id> - Attach to a session
+ *   gssh machine tmux kill <id>   - Kill a session
  */
 
 import { logger } from "../utils/logger.js";
@@ -136,7 +136,7 @@ export async function statusTmux(): Promise<void> {
     const lines = [
       `Status:   \x1b[90m○ not running\x1b[0m`,
       "",
-      `Run: \x1b[36mgssh tmux start\x1b[0m`,
+      `Run: \x1b[36mgssh machine tmux start\x1b[0m`,
     ];
     logger.log(box(lines));
     return;
@@ -179,7 +179,7 @@ export async function listTmux(): Promise<void> {
 
   if (!(await isServerRunning())) {
     logger.info("tmux-lite server not running");
-    logger.dim("Run: gssh tmux start");
+    logger.dim("Run: gssh machine tmux start");
     return;
   }
 
@@ -259,7 +259,7 @@ export async function attachTmux(id: string, options: { force?: boolean } = {}):
 
   if (!(await isServerRunning())) {
     logger.error("tmux-lite server not running");
-    logger.dim("Run: gssh tmux start");
+    logger.dim("Run: gssh machine tmux start");
     return;
   }
 
@@ -268,7 +268,7 @@ export async function attachTmux(id: string, options: { force?: boolean } = {}):
 
   if (!session) {
     logger.error(`Session not found: ${id}`);
-    logger.dim("Run: gssh tmux list");
+    logger.dim("Run: gssh machine tmux list");
     return;
   }
 
@@ -308,7 +308,7 @@ export async function killTmux(id: string): Promise<void> {
 
   if (!session) {
     logger.error(`Session not found: ${id}`);
-    logger.dim("Run: gssh tmux list");
+    logger.dim("Run: gssh machine tmux list");
     return;
   }
 

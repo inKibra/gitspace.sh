@@ -107,7 +107,10 @@ export function MachineListTUI(props: MachineListTUIProps) {
           </box>
         )}
         <text fg={COLORS.textDim} paddingTop={2}>
-          Run: gssh access add "YOUR_KEY"
+          Run: gssh relay access add gssh-user:...
+        </text>
+        <text fg={COLORS.textDim}>
+          Then: gssh machine access add gssh-user:... --machine MACHINE_ID
         </text>
       </box>
     );

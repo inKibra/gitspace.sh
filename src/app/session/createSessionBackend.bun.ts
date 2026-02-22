@@ -17,9 +17,8 @@ export interface BunRemoteSessionConnectParams {
   relayUrl: string
   identity: Identity
   machineId: string
+  deviceCertificate: string
   machineLabel?: string
-  inviteId?: string
-  inviteToken?: string
 }
 
 export function createBunRemoteSessionBackend(
@@ -53,8 +52,7 @@ export function createBunRemoteSessionBackend(
       socketAdapter: nodeRemoteSocketAdapter,
       identity: params.identity,
       machineId: params.machineId,
-      inviteId: params.inviteId,
-      inviteToken: params.inviteToken,
+      deviceCertificate: params.deviceCertificate,
       signer: (message, identity) => createNodeRelaySigner(identity)(message),
       crypto: nodeRemoteCryptoAdapter,
       handshake: nodeRemoteHandshakeAdapter,

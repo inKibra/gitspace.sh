@@ -20,9 +20,30 @@ import {
 } from "./__tests__/helpers/auth";
 import { startRelayServer } from "./__tests__/helpers/ports";
 import type { Server } from "bun";
-import type { Identity } from "../types/identity";
+import type { Identity, UserRootIdentity } from "../types/identity";
 import { generateEphemeralKeypair } from "../lib/tmux-lite/crypto/keyexchange";
-import { createCloudBootstrapToken, ensureControlStore, upsertCloudWorkspace } from "./control/store";
+import {
+  createCloudBootstrapToken,
+  ensureControlStore,
+  listVaultMachinesForOwner,
+  setVaultMeta,
+  upsertCloudWorkspace,
+} from "./control/store";
+import {
+  grantMachineAccess,
+  grantRelayAccess,
+  listMachineAccessList,
+  listRelayAccessList,
+  registerRootInvite,
+  revokeMachineAccess,
+  revokeRelayAccess,
+} from "./auth/store";
+import { createDeviceCertificate } from "../lib/tmux-lite/crypto/device-cert";
+import {
+  createRootInviteToken,
+  parseRootInviteToken,
+} from "../lib/tmux-lite/crypto/root-invites";
+import { generateMnemonic, mnemonicToUserIdentity } from "../lib/tmux-lite/crypto/user-identity";
 
 const TEST_HOST = "127.0.0.1";
 let relayUrl = "";
@@ -34,10 +55,23 @@ const testMachine1 = createTestIdentity("Test Machine 1");
 const testMachine2 = createTestIdentity("Test Machine 2");
 const testClient1 = createTestIdentity("Test Client 1");
 const testClient2 = createTestIdentity("Test Client 2");
+const ownerUserRoot = mnemonicToUserIdentity(generateMnemonic());
+const client1UserRoot = mnemonicToUserIdentity(generateMnemonic());
+const client2UserRoot = mnemonicToUserIdentity(generateMnemonic());
+const outsiderUserRoot = mnemonicToUserIdentity(generateMnemonic());
 
 let server: Server<any>;
+let tempControlDir: string;
+let previousControlDir: string | undefined;
 
 beforeAll(async () => {
+  previousControlDir = process.env.GITSPACE_CONTROL_DIR;
+  tempControlDir = mkdtempSync(join(tmpdir(), "gssh-relay-server-test-"));
+  process.env.GITSPACE_CONTROL_DIR = tempControlDir;
+  ensureControlStore();
+  setVaultMeta("vault_initialized", "1");
+  setVaultMeta("owner_user_root_id", ownerUserRoot.id);
+
   server = startRelayServer({
     bind: TEST_HOST,
     hostname: TEST_HOST,
@@ -70,12 +104,97 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.stop(true);
+
+  if (previousControlDir === undefined) {
+    delete process.env.GITSPACE_CONTROL_DIR;
+  } else {
+    process.env.GITSPACE_CONTROL_DIR = previousControlDir;
+  }
+
+  rmSync(tempControlDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   // Clear registries between tests
   clearAllRegistries();
+
+  // Clear relay + machine ACL grants for owner between tests.
+  for (const entry of listRelayAccessList(ownerUserRoot.id)) {
+    revokeRelayAccess(ownerUserRoot.id, entry.clientUserRootId);
+  }
+  for (const machine of listVaultMachinesForOwner(ownerUserRoot.id)) {
+    for (const entry of listMachineAccessList(machine.machineId, ownerUserRoot.id)) {
+      revokeMachineAccess(machine.machineId, ownerUserRoot.id, entry.clientUserRootId);
+    }
+  }
 });
+
+function buildDeviceCertificate(identity: Identity, userRoot = client1UserRoot): string {
+  const cert = createDeviceCertificate(
+    userRoot,
+    identity.signing.publicKey,
+    identity.keyExchange.publicKey,
+  );
+  return JSON.stringify(cert);
+}
+
+function createRelayMachineEnrollmentInviteToken(
+  machine: Identity,
+  options: {
+    owner?: UserRootIdentity;
+    expiresAt?: number;
+    maxUses?: number | null;
+    label?: string;
+  } = {},
+): string {
+  const {
+    owner = ownerUserRoot,
+    expiresAt = Date.now() + 60_000,
+    maxUses = 1,
+    label,
+  } = options;
+
+  return createRootInviteToken({
+    type: 'relay-machine',
+    owner,
+    relayUrl,
+    targetMachineSigningKey: Buffer.from(machine.signing.publicKey).toString('base64'),
+    targetMachineKeyExchangeKey: Buffer.from(machine.keyExchange.publicKey).toString('base64'),
+    expiresAt,
+    maxUses,
+    label,
+  });
+}
+
+function registerRootInviteTokenForTests(token: string): void {
+  const parsed = parseRootInviteToken(token);
+  if (!parsed) {
+    throw new Error('Failed to parse root invite token in test setup');
+  }
+
+  registerRootInvite({
+    inviteId: parsed.inviteId,
+    ownerUserRootId: parsed.ownerUserRootId,
+    inviteType: parsed.type,
+    relayUrl: parsed.relayUrl,
+    token,
+    maxUses: parsed.maxUses,
+    expiresAt: new Date(parsed.expiresAt).toISOString(),
+    label: parsed.label,
+    targetUserRootId:
+      parsed.type === 'relay-user' || parsed.type === 'machine-user'
+        ? parsed.targetUserRootId
+        : undefined,
+    machineId:
+      parsed.type === 'relay-machine'
+        ? parsed.targetMachineId
+        : parsed.type === 'machine-user'
+          ? parsed.machineId
+          : undefined,
+    targetMachineSigningKey: parsed.type === 'relay-machine' ? parsed.targetMachineSigningKey : undefined,
+    targetMachineKeyExchangeKey: parsed.type === 'relay-machine' ? parsed.targetMachineKeyExchangeKey : undefined,
+  });
+}
 
 // ============================================================================
 // Helper to connect a machine with full challenge-response flow
@@ -83,9 +202,9 @@ beforeEach(() => {
 
 async function connectAndRegisterMachine(
   identity: Identity,
-  options?: { label?: string }
+  options?: { label?: string; enrollmentToken?: string; registerPermit?: string }
 ): Promise<WebSocket> {
-  const { label = identity.label } = options ?? {};
+  const { label = identity.label, enrollmentToken, registerPermit } = options ?? {};
 
   const url = new URL(relayUrl);
   url.searchParams.set("role", "machine");
@@ -122,14 +241,24 @@ async function connectAndRegisterMachine(
   const publicIdentity = toPublicIdentity(identity);
 
   // Send register_machine
-  ws.send(JSON.stringify({
+  const registerMessage: Record<string, unknown> = {
     type: "register_machine",
     machineId: identity.id,
     signingKey: publicIdentity.signingPublicKey,
     keyExchangeKey: publicIdentity.keyExchangePublicKey,
     challengeResponse: signature,
     label,
-  }));
+  };
+
+  if (enrollmentToken) {
+    registerMessage.enrollmentToken = enrollmentToken;
+  }
+
+  if (registerPermit) {
+    registerMessage.registerPermit = registerPermit;
+  }
+
+  ws.send(JSON.stringify(registerMessage));
 
   // Wait for registered
   await new Promise<void>((resolve, reject) => {
@@ -348,6 +477,54 @@ describe("Challenge-response authentication", () => {
     ws.close();
   });
 
+  test("non-preauthorized machine can register with enrollment token", async () => {
+    const enrollmentMachine = createTestIdentity("Enrollment Machine");
+    const enrollmentToken = createRelayMachineEnrollmentInviteToken(enrollmentMachine, {
+      label: "enroll-test",
+    });
+    registerRootInviteTokenForTests(enrollmentToken);
+
+    const ws = await connectAndRegisterMachine(enrollmentMachine, {
+      enrollmentToken,
+    });
+
+    const ownerMachines = listVaultMachinesForOwner(ownerUserRoot.id);
+    expect(ownerMachines.some((m) => m.machineId === enrollmentMachine.id)).toBe(true);
+
+    ws.close();
+  });
+
+  test("machine enrolled with token can reconnect without token", async () => {
+    const enrollmentMachine = createTestIdentity("Enrollment Reconnect Machine");
+    const enrollmentToken = createRelayMachineEnrollmentInviteToken(enrollmentMachine, {
+      label: "enroll-reconnect",
+    });
+    registerRootInviteTokenForTests(enrollmentToken);
+
+    const first = await connectAndRegisterMachine(enrollmentMachine, {
+      enrollmentToken,
+    });
+    first.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const second = await connectAndRegisterMachine(enrollmentMachine);
+    expect(second.readyState).toBe(WebSocket.OPEN);
+    second.close();
+  });
+
+  test("enrollment token owner mismatch is rejected", async () => {
+    const enrollmentMachine = createTestIdentity("Mismatched Enrollment Owner");
+    const enrollmentToken = createRelayMachineEnrollmentInviteToken(enrollmentMachine, {
+      owner: outsiderUserRoot,
+      label: "owner-mismatch",
+    });
+    registerRootInviteTokenForTests(enrollmentToken);
+
+    await expect(connectAndRegisterMachine(enrollmentMachine, {
+      enrollmentToken,
+    })).rejects.toThrow(/owner/i);
+  });
+
   test("missing challengeResponse is rejected", async () => {
     const ws = new WebSocket(`${relayUrl}?role=machine`);
 
@@ -392,114 +569,127 @@ describe("Challenge-response authentication", () => {
 // ============================================================================
 
 describe("Protocol messages", () => {
-  test("invite registration flow", async () => {
-    const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "test-invite-001";
-
-    // Register invite
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
-      machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
-      maxUses: 5,
-    }));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      machineWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
+  test("create/list/revoke root invite flow", async () => {
+    const ownerClient = createTestIdentity("Owner Invite Client");
+    const inviteToken = createRootInviteToken({
+      type: "relay-user",
+      owner: ownerUserRoot,
+      relayUrl,
+      targetUserRootSigningKey: Buffer.from(client1UserRoot.signing.publicKey).toString("base64"),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 2,
+      label: "relay-user-flow",
     });
+    const parsed = parseRootInviteToken(inviteToken);
+    expect(parsed).not.toBeNull();
 
-    expect(response.type).toBe("registered");
-    expect(response.machineId).toBe(testMachine1.id);
+    const ownerWs = await connectClient(relayUrl);
 
-    machineWs.close();
+    const created = await sendAndWait<any>(
+      ownerWs,
+      signClientMessage({
+        type: "create_root_invite",
+        clientIdentityId: ownerClient.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(ownerClient, ownerUserRoot),
+      }, ownerClient),
+      "root_invite_created",
+    );
+
+    expect(created.type).toBe("root_invite_created");
+    expect(created.inviteId).toBe(parsed!.inviteId);
+
+    const listed = await sendAndWait<any>(
+      ownerWs,
+      signClientMessage({
+        type: "list_root_invites",
+        clientIdentityId: ownerClient.id,
+        deviceCertificate: buildDeviceCertificate(ownerClient, ownerUserRoot),
+      }, ownerClient),
+      "root_invite_list",
+    );
+
+    expect(listed.type).toBe("root_invite_list");
+    expect(listed.invites.some((invite: { inviteId: string }) => invite.inviteId === parsed!.inviteId)).toBe(true);
+
+    const revoked = await sendAndWait<any>(
+      ownerWs,
+      signClientMessage({
+        type: "revoke_root_invite",
+        clientIdentityId: ownerClient.id,
+        inviteId: parsed!.inviteId,
+        deviceCertificate: buildDeviceCertificate(ownerClient, ownerUserRoot),
+      }, ownerClient),
+      "root_invite_revoked",
+    );
+
+    expect(revoked.type).toBe("root_invite_revoked");
+    expect(revoked.inviteId).toBe(parsed!.inviteId);
+
+    ownerWs.close();
   });
 
-  test("client connect with invite flow", async () => {
-    const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "test-invite-002";
-    const clientIdentityId = testClient1.id;
-
-    // Register invite
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
-      machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
-      maxUses: null,
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+  test("accept_root_invite grants relay access", async () => {
+    const ownerClient = createTestIdentity("Owner Invite Creator");
+    const inviteToken = createRootInviteToken({
+      type: "relay-user",
+      owner: ownerUserRoot,
+      relayUrl,
+      targetUserRootSigningKey: Buffer.from(client2UserRoot.signing.publicKey).toString("base64"),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+      label: "accept-relay-user",
     });
 
-    // Set up machine to receive client_connected
-    const machineReceivedConnection = new Promise<any>((resolve) => {
-      machineWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-    });
+    const ownerWs = await connectClient(relayUrl);
+    await sendAndWait<any>(
+      ownerWs,
+      signClientMessage({
+        type: "create_root_invite",
+        clientIdentityId: ownerClient.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(ownerClient, ownerUserRoot),
+      }, ownerClient),
+      "root_invite_created",
+    );
 
-    // Connect client (no token needed)
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
+    const targetWs = await connectClient(relayUrl);
+    const accepted = await sendAndWait<any>(
+      targetWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient2.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
+      }, testClient2),
+      "root_invite_accepted",
+    );
 
-    await new Promise<void>((resolve, reject) => {
-      clientWs.onopen = () => resolve();
-      clientWs.onerror = () => reject(new Error("Client connection failed"));
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+    expect(accepted.type).toBe("root_invite_accepted");
+    expect(accepted.inviteType).toBe("relay-user");
+    expect(accepted.granted).toBe("relay");
+    expect(
+      listRelayAccessList(ownerUserRoot.id).some((entry) => entry.clientUserRootId === client2UserRoot.id),
+    ).toBe(true);
 
-    // Client connects with invite
-    const signedConnect = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    // Wait for connection_established
-    const clientResponse = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    expect(clientResponse.type).toBe("connection_established");
-    expect(clientResponse.machineId).toBe(testMachine1.id);
-
-    // Machine should have received client_connected
-    const machineMsg = await machineReceivedConnection;
-    expect(machineMsg.type).toBe("client_connected");
-    expect(machineMsg.clientIdentityId).toBe(clientIdentityId);
-    expect(machineMsg.viaInvite).toBe(inviteId);
-
-    machineWs.close();
-    clientWs.close();
+    ownerWs.close();
+    targetWs.close();
   });
 
   test("machine to client data routing", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "test-invite-003";
-    const clientIdentityId = testClient1.id;
-
-    // Register invite
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "proto-routing",
+    });
+    grantMachineAccess({
       machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
-      maxUses: null,
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "proto-routing",
     });
 
-    // Store connectionId when machine receives client_connected
     let clientConnectionId = "";
     const gotConnectionId = new Promise<void>((resolve) => {
       machineWs.onmessage = (event) => {
@@ -511,40 +701,22 @@ describe("Protocol messages", () => {
       };
     });
 
-    // Connect client
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
+    const clientWs = await connectClient(relayUrl);
+    const connectResult = await sendAndWait<any>(
+      clientWs,
+      signClientMessage({
+        type: "connect_to_machine",
+        machineId: testMachine1.id,
+        clientIdentityId: testClient1.id,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+      }, testClient1),
+      "connection_established",
+    );
 
-    await new Promise<void>((resolve, reject) => {
-      clientWs.onopen = () => resolve();
-      clientWs.onerror = () => reject(new Error("Client connection failed"));
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    const signedConnect = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    // Wait for connection established
-    await new Promise<void>((resolve) => {
-      clientWs.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "connection_established") resolve();
-      };
-    });
-
+    expect(connectResult.type).toBe("connection_established");
     await gotConnectionId;
 
-    // Set up client to receive data
-    const clientReceivedData = new Promise<any>((resolve) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-    });
-
-    // Machine sends data to client
+    const clientReceivedData = waitForMessage<any>(clientWs, "data", 2000);
     const testData = Buffer.from("Hello from machine").toString("base64");
     machineWs.send(JSON.stringify({
       type: "data",
@@ -562,23 +734,18 @@ describe("Protocol messages", () => {
 
   test("client to machine data routing", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "test-invite-004";
-    const clientIdentityId = testClient1.id;
-
-    // Register invite
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "proto-routing",
+    });
+    grantMachineAccess({
       machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
-      maxUses: null,
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "proto-routing",
     });
 
-    // Wait for client_connected
     let expectedClientConnectionId = "";
     const clientConnectedPromise = new Promise<void>((resolve) => {
       machineWs.onmessage = (event) => {
@@ -590,40 +757,22 @@ describe("Protocol messages", () => {
       };
     });
 
-    // Connect client
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
+    const clientWs = await connectClient(relayUrl);
+    const connectResult = await sendAndWait<any>(
+      clientWs,
+      signClientMessage({
+        type: "connect_to_machine",
+        machineId: testMachine1.id,
+        clientIdentityId: testClient1.id,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+      }, testClient1),
+      "connection_established",
+    );
 
-    await new Promise<void>((resolve, reject) => {
-      clientWs.onopen = () => resolve();
-      clientWs.onerror = () => reject(new Error("Client connection failed"));
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    const signedConnect = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    // Wait for connection established
-    await new Promise<void>((resolve) => {
-      clientWs.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "connection_established") resolve();
-      };
-    });
-
+    expect(connectResult.type).toBe("connection_established");
     await clientConnectedPromise;
 
-    // Set up machine to receive data
-    const machineReceivedData = new Promise<any>((resolve) => {
-      machineWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-    });
-
-    // Client sends data to machine
+    const machineReceivedData = waitForMessage<any>(machineWs, "data", 2000);
     const testData = Buffer.from("Hello from client").toString("base64");
     clientWs.send(JSON.stringify({
       type: "data",
@@ -764,38 +913,23 @@ describe("Client signature enforcement", () => {
     clientWs.close();
   });
 
-  test("connect_with_invite rejects missing signature", async () => {
-    const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "test-invite-unsigned";
-
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
-      machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
-      maxUses: 1,
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
-    });
-
+  test("legacy connect_with_invite is rejected", async () => {
     const clientWs = await connectClient(relayUrl);
 
     const response = await sendAndWait<any>(
       clientWs,
       {
         type: "connect_with_invite",
-        inviteId,
+        inviteId: "legacy-invite",
         clientIdentityId: testClient1.id,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
       },
       "error"
     );
 
     expect(response.type).toBe("error");
-    expect(response.code).toBe("INVALID_SIGNATURE");
+    expect(response.code).toBe("INVALID_REQUEST");
 
-    machineWs.close();
     clientWs.close();
   });
 
@@ -807,6 +941,7 @@ describe("Client signature enforcement", () => {
       type: "connect_to_machine",
       machineId: testMachine1.id,
       clientIdentityId: testClient2.id,
+      deviceCertificate: "{}",
     }, testClient1);
 
     const response = await sendAndWait<any>(clientWs, signed, "error");
@@ -824,99 +959,56 @@ describe("Client signature enforcement", () => {
 // ============================================================================
 
 describe("Machine listing flow", () => {
-  test("client can list machines they are authorized for", async () => {
-    const clientIdentityId = testClient1.id;
-
-    // Register two machines
+  test("lists only machines granted through relay + machine ACL", async () => {
     const machine1Ws = await connectAndRegisterMachine(testMachine1, { label: "Machine One" });
     const machine2Ws = await connectAndRegisterMachine(testMachine2, { label: "Machine Two" });
 
-    // Authorize client on both machines
-    machine1Ws.send(JSON.stringify({
-      type: "authorize_client",
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "client-1",
+    });
+    grantMachineAccess({
       machineId: testMachine1.id,
-      clientIdentityId,
-      signingKey: "client-key",
-      keyExchangeKey: "client-kx",
-      accessType: "full",
-    }));
-
-    await new Promise<void>((resolve) => {
-      machine1Ws.onmessage = () => resolve();
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "machine-1-grant",
     });
 
-    machine2Ws.send(JSON.stringify({
-      type: "authorize_client",
-      machineId: testMachine2.id,
-      clientIdentityId,
-      signingKey: "client-key",
-      keyExchangeKey: "client-kx",
-      accessType: "full",
-    }));
-
-    await new Promise<void>((resolve) => {
-      machine2Ws.onmessage = () => resolve();
-    });
-
-    // Connect client and list machines
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
+    const clientWs = await connectClient(relayUrl);
     const signedList = signClientMessage({
       type: "list_machines",
-      clientIdentityId,
+      clientIdentityId: testClient1.id,
+      deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
     }, testClient1);
-    clientWs.send(JSON.stringify(signedList));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+    const response = await sendAndWait<any>(clientWs, signedList, "machine_list");
 
     expect(response.type).toBe("machine_list");
-    expect(response.machines).toHaveLength(2);
-
-    const machineIds = response.machines.map((m: any) => m.machineId).sort();
-    expect(machineIds).toEqual([testMachine1.id, testMachine2.id].sort());
-
-    // Both should be online
-    expect(response.machines.every((m: any) => m.online)).toBe(true);
+    expect(response.machines).toHaveLength(1);
+    expect(response.machines[0].machineId).toBe(testMachine1.id);
+    expect(response.machines[0].online).toBe(true);
 
     machine1Ws.close();
     machine2Ws.close();
     clientWs.close();
   });
 
-  test("client sees empty list when not authorized for any machine", async () => {
-    const clientIdentityId = testClient2.id;
-
-    // Register a machine but don't authorize the client
+  test("returns empty list when machine ACL grant is missing", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
 
-    // Connect client and list machines
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client2UserRoot.id,
+      label: "relay-only",
     });
 
+    const clientWs = await connectClient(relayUrl);
     const signedList = signClientMessage({
       type: "list_machines",
-      clientIdentityId,
+      clientIdentityId: testClient2.id,
+      deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
     }, testClient2);
-    clientWs.send(JSON.stringify(signedList));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+    const response = await sendAndWait<any>(clientWs, signedList, "machine_list");
 
     expect(response.type).toBe("machine_list");
     expect(response.machines).toHaveLength(0);
@@ -925,51 +1017,31 @@ describe("Machine listing flow", () => {
     clientWs.close();
   });
 
-  test("machine shows offline status when disconnected", async () => {
-    const clientIdentityId = testClient2.id;
-
-    // Register machine
+  test("shows offline status for granted machine after disconnect", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1, { label: "Offline Test Machine" });
 
-    // Authorize client
-    machineWs.send(JSON.stringify({
-      type: "authorize_client",
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "client-1",
+    });
+    grantMachineAccess({
       machineId: testMachine1.id,
-      clientIdentityId,
-      signingKey: "client-key",
-      keyExchangeKey: "client-kx",
-      accessType: "full",
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "machine-1-grant",
     });
 
-    // Disconnect machine
     machineWs.close();
-
-    // Give server time to process disconnect
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // Connect client and list machines
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
+    const clientWs = await connectClient(relayUrl);
     const signedList = signClientMessage({
       type: "list_machines",
-      clientIdentityId,
-    }, testClient2);
-    clientWs.send(JSON.stringify(signedList));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+      clientIdentityId: testClient1.id,
+      deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+    }, testClient1);
+    const response = await sendAndWait<any>(clientWs, signedList, "machine_list");
 
     expect(response.type).toBe("machine_list");
     expect(response.machines).toHaveLength(1);
@@ -985,115 +1057,95 @@ describe("Machine listing flow", () => {
 // ============================================================================
 
 describe("Direct machine connection", () => {
-  test("client can connect directly to machine", async () => {
-    const clientIdentityId = testClient1.id;
-
-    // Register machine
+  test("connects directly when relay + machine ACL grants exist", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
 
-    // Set up machine to receive client_connected
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "client-1",
+    });
+    grantMachineAccess({
+      machineId: testMachine1.id,
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "machine-1-grant",
+    });
+
     const machineReceivedConnection = new Promise<any>((resolve) => {
       machineWs.onmessage = (event) => {
         resolve(JSON.parse(event.data));
       };
     });
 
-    // Connect client directly (no invite needed in new flow - auth at X3DH level)
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
+    const clientWs = await connectClient(relayUrl);
     const signedConnect = signClientMessage({
       type: "connect_to_machine",
       machineId: testMachine1.id,
-      clientIdentityId,
+      clientIdentityId: testClient1.id,
+      deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
     }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
 
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    // In new auth model, connect_to_machine succeeds - auth happens via X3DH
+    const response = await sendAndWait<any>(clientWs, signedConnect, "connection_established");
     expect(response.type).toBe("connection_established");
     expect(response.machineId).toBe(testMachine1.id);
 
-    // Machine should receive client_connected WITHOUT viaInvite
     const machineMsg = await machineReceivedConnection;
     expect(machineMsg.type).toBe("client_connected");
-    expect(machineMsg.clientIdentityId).toBe(clientIdentityId);
-    expect(machineMsg.viaInvite).toBeUndefined();
+    expect(machineMsg.clientIdentityId).toBe(testClient1.id);
 
     machineWs.close();
     clientWs.close();
   });
 
-  test("client cannot connect to non-existent machine", async () => {
-    const clientIdentityId = testClient2.id;
-
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
-    const signedConnect = signClientMessage({
-      type: "connect_to_machine",
-      machineId: "non-existent-machine",
-      clientIdentityId,
-    }, testClient2);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    expect(response.type).toBe("error");
-    expect(response.message.toLowerCase()).toContain("not found");
-
-    clientWs.close();
-  });
-
-  test("client cannot connect to offline machine", async () => {
-    const clientIdentityId = testClient2.id;
-
-    // Register machine then disconnect
+  test("rejects direct connect when relay ACL grant is missing", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
-    machineWs.close();
-    await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // Try to connect
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
+    grantMachineAccess({
+      machineId: testMachine1.id,
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client2UserRoot.id,
+      label: "machine-only",
     });
 
+    const clientWs = await connectClient(relayUrl);
     const signedConnect = signClientMessage({
       type: "connect_to_machine",
       machineId: testMachine1.id,
-      clientIdentityId,
+      clientIdentityId: testClient2.id,
+      deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
     }, testClient2);
-    clientWs.send(JSON.stringify(signedConnect));
 
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
+    const response = await sendAndWait<any>(clientWs, signedConnect, "error");
+    expect(response.type).toBe("error");
+    expect(response.message.toLowerCase()).toContain("not authorized");
+
+    machineWs.close();
+    clientWs.close();
+  });
+
+  test("rejects direct connect when machine ACL grant is missing", async () => {
+    const machineWs = await connectAndRegisterMachine(testMachine1);
+
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client2UserRoot.id,
+      label: "relay-only",
     });
 
-    expect(response.type).toBe("error");
-    expect(response.message.toLowerCase()).toContain("offline");
+    const clientWs = await connectClient(relayUrl);
+    const signedConnect = signClientMessage({
+      type: "connect_to_machine",
+      machineId: testMachine1.id,
+      clientIdentityId: testClient2.id,
+      deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
+    }, testClient2);
 
+    const response = await sendAndWait<any>(clientWs, signedConnect, "error");
+    expect(response.type).toBe("error");
+    expect(response.message.toLowerCase()).toContain("not authorized");
+
+    machineWs.close();
     clientWs.close();
   });
 });
@@ -1103,117 +1155,69 @@ describe("Direct machine connection", () => {
 // ============================================================================
 
 describe("Authorization management", () => {
-  test("machine can authorize a client", async () => {
-    const clientIdentityId = testClient1.id;
-
-    // Register machine
+  test("granting machine ACL enables direct connect immediately", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
 
-    // Authorize client
-    machineWs.send(JSON.stringify({
-      type: "authorize_client",
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client2UserRoot.id,
+      label: "relay-only",
+    });
+
+    const clientWs = await connectClient(relayUrl);
+    const connectMsg = {
+      type: "connect_to_machine" as const,
       machineId: testMachine1.id,
-      clientIdentityId,
-      signingKey: "client-key",
-      keyExchangeKey: "client-kx",
-      accessType: "full",
-    }));
+      clientIdentityId: testClient2.id,
+      deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
+    };
 
-    const response = await new Promise<any>((resolve, reject) => {
-      machineWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
+    const denied = await sendAndWait<any>(clientWs, signClientMessage(connectMsg, testClient2), "error");
+    expect(denied.type).toBe("error");
+
+    grantMachineAccess({
+      machineId: testMachine1.id,
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client2UserRoot.id,
+      label: "machine-enabled",
     });
 
-    expect(response.type).toBe("client_authorized");
-    expect(response.clientIdentityId).toBe(clientIdentityId);
-
-    // Verify by listing machines from client
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
-    const signedList = signClientMessage({
-      type: "list_machines",
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedList));
-
-    const listResponse = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    expect(listResponse.machines).toHaveLength(1);
-    expect(listResponse.machines[0].machineId).toBe(testMachine1.id);
+    const established = await sendAndWait<any>(clientWs, signClientMessage(connectMsg, testClient2), "connection_established");
+    expect(established.type).toBe("connection_established");
 
     machineWs.close();
     clientWs.close();
   });
 
-  test("machine can revoke client authorization", async () => {
-    const clientIdentityId = testClient2.id;
-
-    // Register machine
+  test("revoking relay ACL removes machine visibility", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
 
-    // Authorize client
-    machineWs.send(JSON.stringify({
-      type: "authorize_client",
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "client-1",
+    });
+    grantMachineAccess({
       machineId: testMachine1.id,
-      clientIdentityId,
-      signingKey: "client-key",
-      keyExchangeKey: "client-kx",
-      accessType: "full",
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "machine-1-grant",
     });
 
-    // Now revoke
-    machineWs.send(JSON.stringify({
-      type: "revoke_client",
-      machineId: testMachine1.id,
-      clientIdentityId,
-    }));
+    const clientWs = await connectClient(relayUrl);
+    const listMsg = {
+      type: "list_machines" as const,
+      clientIdentityId: testClient1.id,
+      deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+    };
 
-    const response = await new Promise<any>((resolve, reject) => {
-      machineWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+    const beforeRevoke = await sendAndWait<any>(clientWs, signClientMessage(listMsg, testClient1), "machine_list");
+    expect(beforeRevoke.machines).toHaveLength(1);
 
-    expect(response.type).toBe("client_revoked");
-    expect(response.clientIdentityId).toBe(clientIdentityId);
+    revokeRelayAccess(ownerUserRoot.id, client1UserRoot.id);
 
-    // Verify by listing machines from client - should be empty
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
-    const signedList = signClientMessage({
-      type: "list_machines",
-      clientIdentityId,
-    }, testClient2);
-    clientWs.send(JSON.stringify(signedList));
-
-    const listResponse = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    expect(listResponse.machines).toHaveLength(0);
+    const afterRevoke = await sendAndWait<any>(clientWs, signClientMessage(listMsg, testClient1), "machine_list");
+    expect(afterRevoke.machines).toHaveLength(0);
 
     machineWs.close();
     clientWs.close();
@@ -1225,151 +1229,102 @@ describe("Authorization management", () => {
 // ============================================================================
 
 describe("Invite edge cases", () => {
-  test("rejects expired invite", async () => {
-    const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "expired-invite-001";
-    const clientIdentityId = testClient1.id;
-
-    // Register expired invite
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
-      machineId: testMachine1.id,
-      expiresAt: Date.now() - 1000, // Already expired
-      maxUses: null,
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+  test("rejects expired root invite", async () => {
+    const inviteToken = createRootInviteToken({
+      type: "relay-user",
+      owner: ownerUserRoot,
+      relayUrl,
+      targetUserRootSigningKey: Buffer.from(client1UserRoot.signing.publicKey).toString("base64"),
+      expiresAt: Date.now() - 1_000,
+      maxUses: 1,
+      label: "expired-relay-user",
     });
+    registerRootInviteTokenForTests(inviteToken);
 
-    // Try to use expired invite
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
-    const signedConnect = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+    const clientWs = await connectClient(relayUrl);
+    const response = await sendAndWait<any>(
+      clientWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient1.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+      }, testClient1),
+      "error",
+    );
 
     expect(response.type).toBe("error");
-    expect(response.message.toLowerCase()).toMatch(/expired|invalid/);
+    expect(response.message.toLowerCase()).toContain("expired");
 
-    machineWs.close();
     clientWs.close();
   });
 
-  test("rejects invite after max uses exhausted", async () => {
-    const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "limited-invite-001";
-
-    // Register invite with maxUses = 1
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
-      machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
+  test("rejects root invite after max uses exhausted", async () => {
+    const inviteToken = createRootInviteToken({
+      type: "relay-user",
+      owner: ownerUserRoot,
+      relayUrl,
+      targetUserRootSigningKey: Buffer.from(client1UserRoot.signing.publicKey).toString("base64"),
+      expiresAt: Date.now() + 60_000,
       maxUses: 1,
-    }));
-
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+      label: "single-use-relay-user",
     });
+    registerRootInviteTokenForTests(inviteToken);
 
-    // Set up machine to receive client_connected
-    const machineReceivedFirst = new Promise<void>((resolve) => {
-      machineWs.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "client_connected") resolve();
-      };
-    });
+    const firstClientWs = await connectClient(relayUrl);
+    const firstAccepted = await sendAndWait<any>(
+      firstClientWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient1.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+      }, testClient1),
+      "root_invite_accepted",
+    );
+    expect(firstAccepted.type).toBe("root_invite_accepted");
+    firstClientWs.close();
 
-    // First client uses the invite
-    const client1Ws = new WebSocket(`${relayUrl}?role=client`);
+    const secondClientWs = await connectClient(relayUrl);
+    const secondResponse = await sendAndWait<any>(
+      secondClientWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient1.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+      }, testClient1),
+      "error",
+    );
 
-    await new Promise<void>((resolve) => {
-      client1Ws.onopen = () => resolve();
-    });
+    expect(secondResponse.type).toBe("error");
+    expect(secondResponse.message.toLowerCase()).toMatch(/not found|exhausted/);
 
-    const signedFirst = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId: testClient1.id,
-    }, testClient1);
-    client1Ws.send(JSON.stringify(signedFirst));
-
-    await new Promise<void>((resolve) => {
-      client1Ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "connection_established") resolve();
-      };
-    });
-
-    await machineReceivedFirst;
-
-    // Second client tries to use the same invite
-    const client2Ws = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      client2Ws.onopen = () => resolve();
-    });
-
-    const signedSecond = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId: testClient2.id,
-    }, testClient2);
-    client2Ws.send(JSON.stringify(signedSecond));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      client2Ws.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    expect(response.type).toBe("error");
-    expect(response.message.toLowerCase()).toMatch(/not found|invalid|expired|exhausted/);
-
-    machineWs.close();
-    client1Ws.close();
-    client2Ws.close();
+    secondClientWs.close();
   });
 
-  test("rejects non-existent invite", async () => {
-    const clientIdentityId = testClient1.id;
-
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
+  test("rejects non-existent root invite", async () => {
+    const inviteToken = createRootInviteToken({
+      type: "relay-user",
+      owner: ownerUserRoot,
+      relayUrl,
+      targetUserRootSigningKey: Buffer.from(client1UserRoot.signing.publicKey).toString("base64"),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+      label: "not-registered-relay-user",
     });
 
-    const signedConnect = signClientMessage({
-      type: "connect_with_invite",
-      inviteId: "non-existent-invite",
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
+    const clientWs = await connectClient(relayUrl);
+    const response = await sendAndWait<any>(
+      clientWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient1.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+      }, testClient1),
+      "error",
+    );
 
     expect(response.type).toBe("error");
     expect(response.message.toLowerCase()).toContain("not found");
@@ -1377,53 +1332,62 @@ describe("Invite edge cases", () => {
     clientWs.close();
   });
 
-  test("invite fails when machine is offline", async () => {
+  test("machine-user invite requires relay membership before acceptance", async () => {
     const machineWs = await connectAndRegisterMachine(testMachine1);
-    const inviteId = "offline-machine-invite";
-    const clientIdentityId = testClient1.id;
-
-    // Register invite
-    machineWs.send(JSON.stringify({
-      type: "register_invite",
-      inviteId,
+    const inviteToken = createRootInviteToken({
+      type: "machine-user",
+      owner: ownerUserRoot,
+      relayUrl,
       machineId: testMachine1.id,
-      expiresAt: Date.now() + 3600000,
-      maxUses: null,
-    }));
+      targetUserRootSigningKey: Buffer.from(client2UserRoot.signing.publicKey).toString("base64"),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+      label: "machine-user-relay-required",
+    });
+    registerRootInviteTokenForTests(inviteToken);
 
-    await new Promise<void>((resolve) => {
-      machineWs.onmessage = () => resolve();
+    const targetWs = await connectClient(relayUrl);
+    const denied = await sendAndWait<any>(
+      targetWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient2.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
+      }, testClient2),
+      "error",
+    );
+
+    expect(denied.type).toBe("error");
+    expect(denied.message.toLowerCase()).toContain("relay membership");
+
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client2UserRoot.id,
+      label: "machine-user-accept",
     });
 
-    // Disconnect machine
+    const accepted = await sendAndWait<any>(
+      targetWs,
+      signClientMessage({
+        type: "accept_root_invite",
+        clientIdentityId: testClient2.id,
+        inviteToken,
+        deviceCertificate: buildDeviceCertificate(testClient2, client2UserRoot),
+      }, testClient2),
+      "root_invite_accepted",
+    );
+
+    expect(accepted.type).toBe("root_invite_accepted");
+    expect(accepted.inviteType).toBe("machine-user");
+    expect(accepted.granted).toBe("machine");
+    expect(
+      listMachineAccessList(testMachine1.id, ownerUserRoot.id).some(
+        (entry) => entry.clientUserRootId === client2UserRoot.id,
+      ),
+    ).toBe(true);
+
     machineWs.close();
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // Try to use invite while machine is offline
-    const clientWs = new WebSocket(`${relayUrl}?role=client`);
-
-    await new Promise<void>((resolve) => {
-      clientWs.onopen = () => resolve();
-    });
-
-    const signedConnect = signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId,
-    }, testClient1);
-    clientWs.send(JSON.stringify(signedConnect));
-
-    const response = await new Promise<any>((resolve, reject) => {
-      clientWs.onmessage = (event) => {
-        resolve(JSON.parse(event.data));
-      };
-      setTimeout(() => reject(new Error("Timeout")), 2000);
-    });
-
-    // Should fail because machine is offline
-    expect(response.type).toBe("error");
-    expect(response.message.toLowerCase()).toContain("offline");
-
-    clientWs.close();
+    targetWs.close();
   });
 });

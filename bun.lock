@@ -12,6 +12,7 @@
         "@opentui-ui/toast": "^0.0.5",
         "@opentui/core": "^0.1.77",
         "@opentui/react": "^0.1.77",
+        "@scure/bip39": "^2.0.1",
         "@types/ws": "^8.18.1",
         "@xterm/addon-serialize": "^0.13.0",
         "@xterm/headless": "^5.5.0",
@@ -39,10 +40,10 @@
         "typescript": "^5.9.3",
       },
       "optionalDependencies": {
-        "@gitspace/darwin-arm64": "0.2.0-rc.17",
-        "@gitspace/darwin-x64": "0.2.0-rc.17",
-        "@gitspace/linux-arm64": "0.2.0-rc.17",
-        "@gitspace/linux-x64": "0.2.0-rc.17",
+        "@gitspace/darwin-arm64": "0.2.0-rc.20",
+        "@gitspace/darwin-x64": "0.2.0-rc.20",
+        "@gitspace/linux-arm64": "0.2.0-rc.20",
+        "@gitspace/linux-x64": "0.2.0-rc.20",
       },
     },
   },
@@ -63,7 +64,7 @@
 
     "@eslint/js": ["@eslint/js@8.57.1", "", {}, "sha512-d9zaMRSTIKDLhctzH12MtXvJKSSUhaHcjV+2Z+GK+EEY7XKpP5yR4x+N3TAcHTcu963nIr+TMcCb4DBCYX1z6Q=="],
 
-    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.17", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-aPei17D31di296UBdqOt59HrdvcIRL2oVGVRWT4etCIESgjTyhZQcCLsIezsWI4E4/9DQAqaLAfTif7TsuCRHQ=="],
+    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.20", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-bRlt6OKBsB38y+qzlmZtNRtnEKSmkxKu+hi19lYtSoPa9lR0zr+A6TiUpWLnB09B2++Xsj5aiN0KnNe/G4wk0Q=="],
 
     "@graphql-typed-document-node/core": ["@graphql-typed-document-node/core@3.2.0", "", { "peerDependencies": { "graphql": "^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0" } }, "sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ=="],
 
@@ -194,6 +195,10 @@
     "@opentui/core-win32-x64": ["@opentui/core-win32-x64@0.1.77", "", { "os": "win32", "cpu": "x64" }, "sha512-c7GijsbvVgnlzd2murIbwuwrGbcv76KdUw6WlVv7a0vex50z6xJCpv1keGzpe0QfxrZ/6fFEFX7JnwGLno0wjA=="],
 
     "@opentui/react": ["@opentui/react@0.1.77", "", { "dependencies": { "@opentui/core": "0.1.77", "react-reconciler": "^0.32.0" }, "peerDependencies": { "react": ">=19.0.0", "react-devtools-core": "^7.0.1", "ws": "^8.18.0" } }, "sha512-KBepAzBfdgo9+6Gf89D1KtSJiasNQHLCauJRQkAFGJGsgRoaV9MeChYPtXT+cKfucjcYmj6A3IaGWghpvhGltQ=="],
+
+    "@scure/base": ["@scure/base@2.0.0", "", {}, "sha512-3E1kpuZginKkek01ovG8krQ0Z44E3DHPjc5S2rjJw9lZn3KSQOs8S7wqikF/AH7iRanHypj85uGyxk0XAyC37w=="],
+
+    "@scure/bip39": ["@scure/bip39@2.0.1", "", { "dependencies": { "@noble/hashes": "2.0.1", "@scure/base": "2.0.0" } }, "sha512-PsxdFj/d2AcJcZDX1FXN3dDgitDDTmwf78rKZq1a6c1P1Nan1X/Sxc7667zU3U+AN60g7SxxP0YCVw2H/hBycg=="],
 
     "@sec-ant/readable-stream": ["@sec-ant/readable-stream@0.4.1", "", {}, "sha512-831qok9r2t8AlxLko40y2ebgSDhenenCatLVeW/uBtnHPyhHOvG0C7TvfgecV+wHzIm5KUICgzmVpWS+IMEAeg=="],
 

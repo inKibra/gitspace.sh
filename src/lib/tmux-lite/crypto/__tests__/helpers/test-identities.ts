@@ -128,7 +128,7 @@ export function createIdentityFixtures(): {
  * @param acl - AccessControlList to populate
  * @param identities - Identities to add to the list
  * @param accessType - Access type to grant (optional, default: 'full')
- * @param sessionId - Session ID for session-invite (optional)
+ * @param sessionId - Session ID for view (optional)
  */
 export function populateAccessList(
   acl: import("../../access-control.js").AccessControlList,

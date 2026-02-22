@@ -11,7 +11,6 @@ import { FloatingControls } from "./components/FloatingControls.web";
 import { useTerminal } from "./hooks/useTerminal.web";
 import { useRelayConnection } from "./hooks/useRelayConnection.web";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
-import { parseInviteFromHash } from "./lib/invite.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
 import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/device.web";
@@ -98,13 +97,6 @@ export default function App() {
   const lastScriptErrorRef = useRef<string | null>(null);
   const lastCommandErrorRef = useRef<string | null>(null);
   const suppressDeleteScriptFailureModalRef = useRef(false);
-
-  // Invite params from URL
-  const [inviteParams, setInviteParams] = useState<{
-    machineId?: string;
-    inviteId?: string;
-    inviteToken?: string;
-  } | null>(null);
 
   // Review workspace/project state
   const [reviewWorkspace, setReviewWorkspace] = useState<{
@@ -259,21 +251,8 @@ export default function App() {
     setLocalNotificationConfig(terminal.notificationConfig);
   }, [terminal.notificationConfig]);
 
-  // Parse invite from URL hash on load, and review params from query string
+  // Parse review params from query string on load
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash.startsWith("#invite=")) {
-      parseInviteFromHash(hash).then((invite) => {
-        if (invite) {
-          setInviteParams({
-            machineId: invite.machineId,
-            inviteId: invite.inviteId,
-            inviteToken: invite.inviteToken,
-          });
-        }
-      });
-    }
-
     const params = new URLSearchParams(window.location.search);
     if (params.get('view') === 'review') {
       const ws = params.get('workspace');
@@ -438,12 +417,13 @@ export default function App() {
 
   // Copy access command to clipboard
   const copyAccessCommand = async () => {
-    if (relay.publicKey) {
-      const command = `gssh access add "${relay.publicKey}"`;
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
+    const command = [
+      'gssh relay access add gssh-user:...',
+      'gssh machine access add gssh-user:... --machine <machine-id>',
+    ].join('\n');
+    await navigator.clipboard.writeText(command);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   // Handle machine selection - go directly to terminal/workspaces view
@@ -453,8 +433,9 @@ export default function App() {
     // Get WebSocket and identity from relay connection
     const ws = relay.getWebSocket();
     const identity = relay.identity;
-    if (!ws || !identity) {
-      console.error("No WebSocket or identity available");
+    const deviceCertificate = relay.deviceCertificate;
+    if (!ws || !identity || !deviceCertificate) {
+      console.error("No WebSocket, identity, or device certificate available");
       return;
     }
 
@@ -468,8 +449,7 @@ export default function App() {
       ws,
       identity,
       machineId: machine.machineId,
-      inviteId: inviteParams?.inviteId,
-      inviteToken: inviteParams?.inviteToken,
+      deviceCertificate,
     });
   };
 
@@ -1400,11 +1380,11 @@ export default function App() {
                   {relay.publicKey}
                 </code>
                 <p className="text-xs text-[#6e7681] mb-2">
-                  To get access, have the machine owner run:
+                  To get full access, the machine owner must run both commands with your `gssh-user` key:
                 </p>
                 <div className="flex items-center gap-2">
                   <code className="flex-1 text-xs text-[#e6edf3] bg-[#161b22] px-2 py-2 rounded font-mono overflow-x-auto border border-[#30363d]">
-                    gssh access add "{relay.publicKey.slice(0, 20)}..."
+                    {'gssh relay access add gssh-user:...\ngssh machine access add gssh-user:... --machine MACHINE_ID'}
                   </code>
                   <button
                     onClick={copyAccessCommand}
@@ -1430,7 +1410,7 @@ export default function App() {
                 <div className="text-[#8b949e] mb-2">No machines available</div>
                 <p className="text-sm text-[#6e7681]">
                   {relay.status === "connected"
-                    ? "The machine may not be online. Check if 'gssh serve' is running."
+                    ? "The machine may not be online. Check if 'gssh machine serve start' is running."
                     : "Unable to connect to relay."}
                 </p>
               </div>

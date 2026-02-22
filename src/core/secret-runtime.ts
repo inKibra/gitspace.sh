@@ -139,7 +139,7 @@ export function consumeLegacyCleanupReminderForTui(): string | null {
   }
 
   state.legacyReminderConsumed = true;
-  return 'Legacy keychain entries are still present. Run `gssh migrate cleanup-legacy` once you are confident the unified keychain storage is stable.';
+  return 'Legacy keychain entries are still present. Run `gssh user migrate cleanup-legacy` once you are confident the unified keychain storage is stable.';
 }
 
 export function shouldSkipSecretDependentScripts(

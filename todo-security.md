@@ -44,7 +44,7 @@
 - [ ] Session enumeration possible without granular permission check (`src/lib/remote-session/session-handler.ts:246`)
 - [ ] Unix socket permissions not explicitly set (`src/serve/daemon.ts:228`)
 - [ ] Relay port/bind parameters not validated (`src/commands/relay.ts:49-51`)
-- [x] Access list file permissions (`src/core/access.ts`)
+- [x] Access list file permissions (legacy module removed in identity cutover)
 
 ### P3 - Backlog
 - [ ] No signing key rotation mechanism (`src/core/identity.ts`)
@@ -58,7 +58,7 @@
 ## Removed / Not Applicable After Verification
 
 - Subdomain token endpoint does verify active status (`worker/src/handlers/subdomains.ts:262`)
-- accountId is always set (fallbacks to machineId) (`src/relay/server.ts:436`)
+- ownerUserRootId is always set after machine registration (`src/relay/server.ts`)
 - JWT clock skew entry references a file not present in this repo (`jwt.ts`)
 - Custom timingSafeEqual entry references a file not present in this repo (`jwt.ts`)
 

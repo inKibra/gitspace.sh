@@ -1,17 +1,17 @@
 /**
  * Connect command implementation
  *
- * Handles 'gssh connect <invite>' to connect to a remote machine
- * via an invite token or URL, or lists available machines when no
- * invite is provided.
+ * Handles 'gssh client connect <target>' to connect to a remote machine
+ * via relay + machine ACL authorization, or lists available machines
+ * when no target is provided.
  */
 
 import { logger } from '../utils/logger.js';
 import { promptPassword, promptConfirm, promptInput, selectOne } from '../utils/prompts.js';
-import { loadKeypair, keypairExists } from '../core/identity.js';
-import { parseInviteToken, isInviteExpired } from '../lib/tmux-lite/crypto/invites.js';
+import { loadKeypair, keypairExists, readRelayConfig } from '../core/identity.js';
+import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import WebSocket from 'ws';
-import { createHash } from 'crypto';
+import chalk from 'chalk';
 import { buildRemoteBackendKey } from './connect-key.js';
 import {
   RemoteSessionBackend,
@@ -25,35 +25,45 @@ import {
   NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
-import type { InviteToken } from '../types/identity.js';
 import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
 
 /**
- * Connect to a remote machine via invite token
+ * Connect to a remote machine using relay + machine ACL authorization.
  *
- * @param inviteTokenOrUrl - Invite token (base64url) or URL containing token
+ * @param target - Machine ID
  * @param options - Command options
  */
 export async function connectToRemote(
-  inviteTokenOrUrl?: string,
-  options: { relay?: string } = {}
+  target?: string,
+  options: { relay?: string; machine?: string } = {}
 ): Promise<void> {
-  // Invite is required for connection
-  if (!inviteTokenOrUrl) {
+  if (!target && !options.machine) {
     throw new SpacesError(
-      'Invite token or URL required.\n\nUsage:\n  gssh connect <invite-url>\n  gssh connect <invite-token>\n\nGet an invite from the machine owner using:\n  gssh share create',
+      'Connection target required.\n\nUsage:\n  gssh client connect <machine-id> --relay <url>\n  gssh client connect --machine <id> --relay <url>\n\nList available machines:\n  gssh client machines list --relay <url>',
       'USER_ERROR',
       1
     );
   }
 
-  // Step 1: Parse invite from URL or raw token
-  const token = extractAndValidateToken(inviteTokenOrUrl);
+  const machineId = options.machine ?? target;
+  if (!machineId) {
+    throw new SpacesError('Machine ID is required.', 'USER_ERROR', 1);
+  }
 
-  // Step 2: Display connection details and confirm
-  displayConnectionDetails(token);
+  const relayUrl = options.relay ?? readRelayConfig()?.relayUrl;
+  if (!relayUrl) {
+    throw new SpacesError('Relay URL is required. Pass --relay <url>.', 'USER_ERROR', 1);
+  }
+
+  logger.log('');
+  logger.bold('Remote Connection Details:');
+  logger.log('');
+  logger.log(`  Machine:     ${machineId}`);
+  logger.log('  Access:      Full access (relay + machine ACL required)');
+  logger.log(`  Relay:       ${relayUrl}`);
+  logger.log('');
 
   const confirmed = await promptConfirm('Connect to this machine?', true);
   if (!confirmed) {
@@ -81,34 +91,27 @@ export async function connectToRemote(
     );
   }
 
-  // Step 4: Connect to relay and establish remote session backend
-  const relayUrl = options.relay ?? token.relayUrl;
-  const rawInviteToken =
-    inviteTokenOrUrl.includes('#')
-      ? extractTokenFromUrl(inviteTokenOrUrl) ?? inviteTokenOrUrl
-      : inviteTokenOrUrl;
-  const inviteId = createHash('sha256').update(rawInviteToken).digest('hex').substring(0, 16);
+  const deviceCertificate = await createLocalDeviceCertificate(identity);
 
   logger.info('Connecting to relay...');
 
   const socketUrl = new URL(relayUrl);
   socketUrl.searchParams.set('role', 'client');
 
-  const backendKey = buildRemoteBackendKey(relayUrl, token.machineId);
+  const backendKey = buildRemoteBackendKey(relayUrl, machineId);
   const backend = new RemoteSessionBackend({
     descriptor: {
       key: backendKey,
       kind: 'remote',
-      label: token.machineId,
+      label: machineId,
       relayUrl,
-      machineId: token.machineId,
+      machineId,
     },
     socket: new WebSocket(socketUrl.toString()),
     socketAdapter: nodeRemoteSocketAdapter,
     identity,
-    machineId: token.machineId,
-    inviteId,
-    inviteToken: rawInviteToken,
+    machineId,
+    deviceCertificate,
     signer: (message, identity) => createNodeRelaySigner(identity)(message),
     crypto: nodeRemoteCryptoAdapter,
     handshake: nodeRemoteHandshakeAdapter,
@@ -150,7 +153,7 @@ export async function connectToRemote(
 
   logger.success('Connected!');
   logger.log('');
-  logger.dim(`Access: ${token.accessType === 'full' ? 'Full access' : 'Session invite'}`);
+  logger.dim('Access: Full access');
 
   try {
     const terminalSize = getTerminalSize();
@@ -159,55 +162,35 @@ export async function connectToRemote(
       cancel: () => void;
     };
 
-    if (token.accessType === 'session-invite' && token.sessionId) {
-      logger.dim(`Session: ${token.sessionId}`);
-      attachWait = waitForBackendEvent(
-        backend,
-        (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-        30000,
-        'attach confirmation'
-      );
-      try {
-        await backend.attachSession({
-          sessionId: token.sessionId,
-          cols: terminalSize.cols,
-          rows: terminalSize.rows,
-        });
-      } catch (error) {
-        attachWait.cancel();
-        throw error;
-      }
-    } else {
-      const workspace = await selectWorkspaceForFullAccess(backend);
-      if (!workspace) {
-        logger.info('Cancelled');
-        return;
-      }
+    const workspace = await selectWorkspaceForFullAccess(backend);
+    if (!workspace) {
+      logger.info('Cancelled');
+      return;
+    }
 
-      const sessionName = await promptInput('Session name (optional):');
-      if (sessionName === null) {
-        logger.info('Cancelled');
-        return;
-      }
+    const sessionName = await promptInput('Session name (optional):');
+    if (sessionName === null) {
+      logger.info('Cancelled');
+      return;
+    }
 
-      attachWait = waitForBackendEvent(
-        backend,
-        (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-        30000,
-        'attach confirmation'
-      );
+    attachWait = waitForBackendEvent(
+      backend,
+      (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+      30000,
+      'attach confirmation'
+    );
 
-      try {
-        await backend.attachSession({
-          workspaceId: workspace.id,
-          sessionName: sessionName || undefined,
-          cols: terminalSize.cols,
-          rows: terminalSize.rows,
-        });
-      } catch (error) {
-        attachWait.cancel();
-        throw error;
-      }
+    try {
+      await backend.attachSession({
+        workspaceId: workspace.id,
+        sessionName: sessionName || undefined,
+        cols: terminalSize.cols,
+        rows: terminalSize.rows,
+      });
+    } catch (error) {
+      attachWait.cancel();
+      throw error;
     }
 
     const attached = await attachWait.promise;
@@ -223,98 +206,113 @@ export async function connectToRemote(
   }
 }
 
-/**
- * Extract token from URL or validate raw token
- */
-function extractAndValidateToken(input: string): InviteToken {
-  // Try to extract from URL
-  let rawToken = input;
-
-  if (input.includes('#')) {
-    const extracted = extractTokenFromUrl(input);
-    if (extracted) {
-      rawToken = extracted;
-    }
+export async function listRemoteMachines(options: {
+  relay?: string;
+  json?: boolean;
+}): Promise<void> {
+  if (!options.relay) {
+    throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
   }
 
-  // Parse and validate token
-  const token = parseInviteToken(rawToken);
-  if (!token) {
-    throw new SpacesError(
-      'Invalid invite token. Check that the token is complete and not corrupted.',
-      'USER_ERROR',
-      1
-    );
+  if (!keypairExists()) {
+    throw new NoIdentityError();
   }
 
-  if (isInviteExpired(token)) {
-    throw new SpacesError(
-      'This invite has expired. Please request a new one.',
-      'USER_ERROR',
-      1
-    );
+  const password = await promptPassword('Enter password to unlock identity:');
+  if (!password) {
+    logger.info('Cancelled');
+    return;
   }
 
-  return token;
-}
+  const identity = await loadKeypair(password);
+  const deviceCertificate = await createLocalDeviceCertificate(identity);
+  const signer = createNodeRelaySigner(identity);
 
-/**
- * Extract token from a URL like https://gitspace.sh/join#TOKEN
- */
-function extractTokenFromUrl(url: string): string | null {
-  try {
-    const urlObj = new URL(url);
-    const hash = urlObj.hash;
-    if (hash && hash.length > 1) {
-      return hash.substring(1); // Remove leading #
-    }
-    return null;
-  } catch {
-    // Not a valid URL, might be raw token
-    if (url.includes('#')) {
-      return url.split('#')[1] || null;
-    }
-    return null;
+  const relayUrl = options.relay;
+  const socketUrl = new URL(relayUrl);
+  socketUrl.searchParams.set('role', 'client');
+
+  type MachineRow = {
+    machineId: string;
+    label?: string;
+    online: boolean;
+    isAuthorized: boolean;
+    accessType?: 'full' | 'view';
+    sessionId?: string;
+    lastConnectedAt?: number;
+  };
+
+  const machines = await new Promise<MachineRow[]>((resolve, reject) => {
+    const ws = new WebSocket(socketUrl.toString());
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error('Timed out waiting for machine list'));
+    }, 15000);
+
+    ws.onopen = () => {
+      const message = signer({
+        type: 'list_machines' as const,
+        clientIdentityId: identity.id,
+        deviceCertificate,
+      });
+      ws.send(JSON.stringify(message));
+    };
+
+    ws.onerror = (error) => {
+      clearTimeout(timeout);
+      reject(new Error(error.message || 'WebSocket connection failed'));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const text = typeof event.data === 'string'
+          ? event.data
+          : new TextDecoder().decode(event.data as ArrayBuffer);
+        const msg = JSON.parse(text) as { type?: string; machines?: MachineRow[]; message?: string };
+
+        if (msg.type === 'error') {
+          clearTimeout(timeout);
+          ws.close();
+          reject(new Error(msg.message || 'Relay returned an error'));
+          return;
+        }
+
+        if (msg.type === 'machine_list') {
+          clearTimeout(timeout);
+          ws.close();
+          resolve(Array.isArray(msg.machines) ? msg.machines : []);
+        }
+      } catch (error) {
+        clearTimeout(timeout);
+        ws.close();
+        reject(error);
+      }
+    };
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(machines, null, 2));
+    return;
   }
-}
 
-/**
- * Display connection details from invite token
- */
-function displayConnectionDetails(token: InviteToken): void {
-  const expiresAt = new Date(token.expiresAt);
-  const now = new Date();
-  const hoursRemaining = Math.round(
-    (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60)
-  );
-
-  let expiryStr: string;
-  if (hoursRemaining < 1) {
-    const minutesRemaining = Math.round(
-      (expiresAt.getTime() - now.getTime()) / (1000 * 60)
-    );
-    expiryStr = `${minutesRemaining} minutes`;
-  } else if (hoursRemaining < 24) {
-    expiryStr = `${hoursRemaining} hours`;
-  } else {
-    const daysRemaining = Math.round(hoursRemaining / 24);
-    expiryStr = `${daysRemaining} days`;
+  if (machines.length === 0) {
+    logger.info('No machines available for this identity.');
+    return;
   }
 
+  logger.bold('Machines:');
   logger.log('');
-  logger.bold('Remote Connection Details:');
-  logger.log('');
-  logger.log(`  Machine:     ${token.machineId}`);
-  logger.log(`  Access:      ${token.accessType === 'full' ? 'Full access' : 'Session invite'}`);
-  if (token.sessionId) {
-    logger.log(`  Session:     ${token.sessionId}`);
+  const machineWidth = 20;
+  const labelWidth = 24;
+  logger.dim('MACHINE ID'.padEnd(machineWidth) + 'LABEL'.padEnd(labelWidth) + 'STATUS');
+  logger.dim('─'.repeat(machineWidth + labelWidth + 10));
+
+  for (const machine of machines) {
+    const machineCol = machine.machineId.slice(0, machineWidth - 1).padEnd(machineWidth);
+    const labelCol = (machine.label || '-').slice(0, labelWidth - 1).padEnd(labelWidth);
+    const status = machine.online ? 'online' : 'offline';
+    logger.log(chalk.cyan(machineCol) + labelCol + (machine.online ? chalk.green(status) : chalk.dim(status)));
   }
-  logger.log(`  Expires:     ${expiryStr} (${expiresAt.toLocaleString()})`);
-  logger.log(`  Relay:       ${token.relayUrl}`);
-  if (token.singleUse) {
-    logger.dim('  (Single-use invite)');
-  }
-  logger.log('');
 }
 
 /**

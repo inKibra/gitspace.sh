@@ -21,13 +21,13 @@ Client:  ws://relay:port/ws?role=client
 3. Machine signs the nonce with its Ed25519 private key
 4. Machine sends `register_machine` including `challengeResponse`
 5. Relay verifies the signature and checks the signing key is authorized
-6. Relay sends `registered` confirmation and `access_list`
+6. Relay sends `registered` confirmation
 
 ### Client Routing
 1. Client connects with `?role=client`
 2. Client signs relay messages (see "Message Signing")
 3. Relay verifies the signature and binds `clientIdentityId` to the signing key
-4. Relay routes via invite or direct authorization
+4. Relay routes via owner+ACL authorization
 
 ---
 
@@ -39,8 +39,8 @@ All messages are JSON. The relay routes based on message type.
 
 The following client messages require an Ed25519 signature block:
 - `list_machines`
-- `connect_with_invite`
 - `connect_to_machine`
+- `unlock_relay`
 
 Signature format:
 ```json
@@ -55,17 +55,9 @@ Signature format:
 
 ### Machine → Relay
 
-#### Challenge Response (Deprecated)
-Relay sends `relay_identity` with a challenge nonce; machines should include the
-signature in `register_machine.challengeResponse`. The standalone
-`challenge_response` message is deprecated.
-```json
-{
-  "type": "challenge_response",
-  "signature": "base64-ed25519-signature-of-nonce"
-}
-```
-Response: `{ "type": "registered", "machineId": "abc123" }`
+#### Machine Registration Challenge
+Relay sends `relay_identity` with a challenge nonce. Machines must include the
+nonce signature in `register_machine.challengeResponse`.
 
 #### Register Machine
 ```json
@@ -80,83 +72,13 @@ Response: `{ "type": "registered", "machineId": "abc123" }`
 ```
 Response: `{ "type": "registered", "machineId": "abc123" }`
 
-After successful registration, relay sends the global access list:
-```json
-{
-  "type": "access_list",
-  "entries": [
-    {
-      "clientIdentityId": "client-xyz",
-      "signingKey": "base64-ed25519-public",
-      "keyExchangeKey": "base64-x25519-public",
-      "label": "Brad's Phone",
-      "accessType": "full",
-      "grantedAt": 1704067200000
-    }
-  ]
-}
-```
+#### Root Invite Management (Client-signed)
 
-#### Register Invite
-```json
-{
-  "type": "register_invite",
-  "inviteId": "hash-of-token",
-  "machineId": "abc123",
-  "expiresAt": 1704067200000,
-  "maxUses": 5
-}
-```
-Response: `{ "type": "registered", "machineId": "abc123" }`
-
-#### Authorize Client
-```json
-{
-  "type": "authorize_client",
-  "machineId": "abc123",
-  "clientIdentityId": "client-xyz",
-  "signingKey": "base64-ed25519-public",
-  "keyExchangeKey": "base64-x25519-public",
-  "permissions": { "read": true, "write": true, "manage": false }
-}
-```
-Response: `{ "type": "client_authorized", "clientIdentityId": "client-xyz" }`
-
-#### Revoke Client
-```json
-{
-  "type": "revoke_client",
-  "machineId": "abc123",
-  "clientIdentityId": "client-xyz"
-}
-```
-Response: `{ "type": "client_revoked", "clientIdentityId": "client-xyz" }`
-
-#### Add Global Access
-Grant a client access to all machines on this account:
-```json
-{
-  "type": "add_global_access",
-  "clientIdentityId": "client-xyz",
-  "signingKey": "base64-ed25519-public",
-  "keyExchangeKey": "base64-x25519-public",
-  "label": "Brad's Phone",
-  "accessType": "full",
-  "machineIds": ["abc123", "def456"]
-}
-```
-`accessType`: `"full"` or `"session-invite"`
-`machineIds`: Optional - if set, only applies to specific machines
-Response: `{ "type": "client_authorized", "clientIdentityId": "client-xyz" }`
-
-#### Remove Global Access
-```json
-{
-  "type": "remove_global_access",
-  "clientIdentityId": "client-xyz"
-}
-```
-Response: `{ "type": "client_revoked", "clientIdentityId": "client-xyz" }`
+Root-signed invites are managed by clients through relay commands:
+- `create_root_invite`
+- `list_root_invites`
+- `revoke_root_invite`
+- `accept_root_invite`
 
 #### Send Data to Client
 ```json
@@ -170,21 +92,6 @@ Response: `{ "type": "client_revoked", "clientIdentityId": "client-xyz" }`
 ---
 
 ### Client → Relay
-
-#### Connect with Invite
-```json
-{
-  "type": "connect_with_invite",
-  "inviteId": "hash-of-token",
-  "clientIdentityId": "client-xyz",
-  "signature": {
-    "sig": "base64-ed25519-signature",
-    "pub": "base64-ed25519-public",
-    "ts": 1704067200000
-  }
-}
-```
-Response: `{ "type": "connection_established", "machineId": "abc123", "connectionId": "conn-123" }`
 
 #### Connect to Machine (Direct)
 ```json
@@ -231,7 +138,7 @@ Response:
       "label": "Server",
       "online": false,
       "isAuthorized": true,
-      "accessType": "session-invite",
+      "accessType": "view",
       "sessionId": "session-123",
       "lastConnectedAt": 1704060000000
     }
@@ -265,54 +172,14 @@ Sent immediately after a machine connects. Includes relay signing key and a chal
 ```
 The machine must respond by sending `register_machine` with `challengeResponse`.
 
-#### Access List
-Sent after successful registration with all authorized clients:
-```json
-{
-  "type": "access_list",
-  "entries": [
-    {
-      "clientIdentityId": "client-xyz",
-      "signingKey": "base64-ed25519-public",
-      "keyExchangeKey": "base64-x25519-public",
-      "label": "Brad's Phone",
-      "accessType": "full",
-      "sessionId": null,
-      "grantedAt": 1704067200000
-    }
-  ]
-}
-```
-
-#### Access Update
-Incremental update when global access changes:
-```json
-{
-  "type": "access_update",
-  "added": [
-    {
-      "clientIdentityId": "new-client",
-      "signingKey": "base64-ed25519-public",
-      "keyExchangeKey": "base64-x25519-public",
-      "label": "New Device",
-      "accessType": "full",
-      "grantedAt": 1704067200000
-    }
-  ],
-  "removed": ["old-client-id"]
-}
-```
-
 #### Client Connected
 ```json
 {
   "type": "client_connected",
   "connectionId": "conn-123",
-  "clientIdentityId": "client-xyz",
-  "viaInvite": "invite-id"
+  "clientIdentityId": "client-xyz"
 }
 ```
-`viaInvite` is optional - only present when connecting via invite.
 
 #### Client Disconnected
 ```json
@@ -413,7 +280,7 @@ After `connection_established`, client and machine perform X3DH handshake:
   "data": {
     "signature": "base64-ed25519-signature",
     "signingKey": "base64-ed25519-public",
-    "inviteToken": "base64url-invite"  // if connecting via invite
+    "authorization": { "type": "access_list" }
   }
 }
 ```
@@ -502,10 +369,9 @@ Control message example (resize):
 │  2. Receive relay_identity with challenge                                    │
 │  3. Send register_machine (challengeResponse + keys)                         │
 │  4. Receive "registered" confirmation                                        │
-│  5. Optionally register invites                                              │
-│  6. Wait for client_connected notifications                                  │
-│  7. Handle handshakes and route data                                         │
-│  8. On disconnect: relay marks machine offline                               │
+│  5. Wait for client_connected notifications                                  │
+│  6. Handle handshakes and route data                                         │
+│  7. On disconnect: relay marks machine offline                               │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -514,7 +380,7 @@ Control message example (resize):
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  1. Connect to relay (ws://...?role=client)                                  │
-│  2. Send connect_with_invite OR connect_to_machine (signed)                  │
+│  2. Send connect_to_machine (signed)                                         │
 │  3. Receive connection_established (or error)                                │
 │  4. Perform X3DH handshake                                                   │
 │  5. Exchange encrypted terminal data                                         │
@@ -541,19 +407,15 @@ The relay routes messages based on:
 | Message Type | From | Routed To |
 |--------------|------|-----------|
 | `register_*` | Machine | Handled by relay |
-| `authorize_client` | Machine | Handled by relay |
-| `revoke_client` | Machine | Handled by relay |
-| `add_global_access` | Machine | Handled by relay → broadcasts to all machines |
-| `remove_global_access` | Machine | Handled by relay → broadcasts to all machines |
-| `challenge_response` | Machine | Handled by relay |
+| `unlock_request` | Machine | Handled by relay |
 | `connect_*` | Client | Handled by relay |
 | `list_machines` | Client | Handled by relay |
+| `unlock_relay` | Client | Handled by relay |
 | `data` | Machine | Target client (by connectionId) |
 | `data` | Client | Connected machine |
 | `handshake` | Client | Connected machine (wrapped in data) |
 | `challenge` | Relay | Target machine |
-| `access_list` | Relay | Target machine |
-| `access_update` | Relay | All connected machines |
+| `unlock_grant` | Relay | Target machine |
 
 ---
 

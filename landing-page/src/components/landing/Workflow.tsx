@@ -26,7 +26,7 @@ export function Workflow() {
               </div>
               
               <code className="bg-black/50 px-3 py-1 rounded text-sm font-mono text-green-400/80 mb-2 border border-white/5 w-full md:w-auto truncate max-w-[200px]">
-                  gssh add feature-x
+                  gssh workspace add feature-x --project my-project
               </code>
               
               <p className="text-zinc-500 text-sm">
@@ -86,7 +86,7 @@ export function Workflow() {
               </div>
               
               <code className="bg-black/50 px-3 py-1 rounded text-sm font-mono text-green-400/80 mb-2 border border-white/5 w-full md:w-auto truncate max-w-[200px]">
-                  gssh switch feature-x
+                  gssh workspace context --project my-project --workspace feature-x
               </code>
               
               <p className="text-zinc-500 text-sm">

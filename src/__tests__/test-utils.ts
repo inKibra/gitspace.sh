@@ -22,7 +22,7 @@ export interface WebSocketData {
   machineId: string;
   role: "machine" | "client";
   connectionId: string;
-  accountId: string;
+  ownerUserRootId: string;
   clientIdentityId?: string;
 }
 
@@ -89,7 +89,7 @@ export function createMockWebSocket(config: MockWebSocketConfig = {}): MockWebSo
       machineId: config.data?.machineId ?? "test-machine",
       role: config.data?.role ?? "machine",
       connectionId: config.data?.connectionId ?? "conn-1",
-      accountId: config.data?.accountId ?? "test-account",
+      ownerUserRootId: config.data?.ownerUserRootId ?? "test-owner",
       clientIdentityId: config.data?.clientIdentityId,
     },
     send: createMockFn<[string], void>(config.sendMock),
@@ -107,7 +107,7 @@ export function createMockWebSocket(config: MockWebSocketConfig = {}): MockWebSo
  *
  * @example
  * const mockWs = asMockWs(createMockWebSocket({ data: { machineId: "test" } }));
- * registerMachine("id", "account", "key", "kxKey", mockWs);
+ * registerMachine("id", "owner-user-root", "key", "kxKey", mockWs);
  */
 export function asMockWs<T>(mock: MockWebSocket): T {
   return mock as unknown as T;

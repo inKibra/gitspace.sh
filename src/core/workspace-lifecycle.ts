@@ -57,7 +57,7 @@ export type PrepareWorkspaceForSessionResult =
     };
 
 const BUNDLE_REFRESH_REQUIRED_MESSAGE =
-  'Run "gssh bundle refresh" and retry.';
+  'Run "gssh workspace bundle refresh --project <name> --workspace <name>" and retry.';
 
 /**
  * Prepare a workspace for session use.

@@ -14,7 +14,7 @@ The relay is the bridge between your machine and remote clients. It routes E2E e
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
 │  Your Mac       │◀═════▶│  Relay Server   │◀═════▶│  Browser/CLI    │
 │                 │  wss  │                 │  wss  │                 │
-│  gssh serve     │       │  Routes by:     │       │  Terminal view  │
+│  gssh machine serve start --foreground     │       │  Routes by:     │       │  Terminal view  │
 │  (PTY sessions) │       │  - machine ID   │       │  (xterm.js)     │
 │                 │       │  - connection   │       │                 │
 └─────────────────┘       └─────────────────┘       └─────────────────┘
@@ -53,14 +53,13 @@ See [PROTOCOL.md](./PROTOCOL.md) for the encryption protocol details.
 
 ### 1. Machine Connection
 
-When `gssh serve` starts, it opens a WebSocket to `ws://relay:port/ws?role=machine`:
+When `gssh machine serve start --foreground` starts, it opens a WebSocket to `ws://relay:port/ws?role=machine`:
 
 ```
 → Relay sends relay_identity with challenge nonce
 → Machine signs nonce with Ed25519 private key
 → Machine sends register_machine with signingKey/keyExchangeKey + challengeResponse
 → Relay verifies signature and that signingKey is authorized
-→ Relay sends access_list with authorized clients
 → Machine is now registered and ready
 ```
 
@@ -72,7 +71,7 @@ Browser or CLI connects to `ws://relay:port/ws?role=client`:
 
 ```
 → Sign list/connect messages with Ed25519 identity
-→ Connect via invite OR directly (if pre-authorized)
+→ Connect directly to a machine (after ACL grant)
 → Relay routes to the target machine
 → Perform X3DH handshake with machine
 → Exchange E2E encrypted terminal data
@@ -84,12 +83,12 @@ The relay verifies signatures, checks authorization, and creates a bidirectional
 
 ## Routing Architecture
 
-The relay maintains four registries:
+The relay maintains three registries:
 
 ### Machine Registry
 ```typescript
 machines: Map<machineId, {
-  accountId: string,
+  ownerUserRootId: string,
   signingKey: string,      // Ed25519 public key
   keyExchangeKey: string,  // X25519 public key
   label: string,
@@ -98,43 +97,38 @@ machines: Map<machineId, {
 }>
 ```
 
-### Invite Registry
+### Relay ACL Registry
+User-root keyed relay membership grants:
 ```typescript
-invites: Map<inviteId, {
-  machineId: string,
-  expiresAt: number,
-  maxUses: number,
-  usedCount: number
-}>
-```
-
-### Machine Authorization Registry
-Per-machine client access:
-```typescript
-authorizations: Map<machineId, Map<clientIdentityId, {
-  signingKey: string,
-  keyExchangeKey: string,
-  accessType: 'full' | 'session-invite',
-  sessionId?: string,
+relayAccess: Map<ownerUserRootId, Map<clientUserRootId, {
   label?: string,
   grantedAt: number
 }>>
 ```
 
-### Global Access Registry
-Account-level access that applies to all machines:
+### Machine ACL Registry
+Per-machine full-access grants keyed by user root:
 ```typescript
-globalAccess: Map<accountId, Map<clientIdentityId, {
-  signingKey: string,
-  keyExchangeKey: string,
-  accessType: 'full' | 'session-invite',
+machineAccess: Map<machineId, Map<clientUserRootId, {
+  ownerUserRootId: string,
   label?: string,
-  grantedAt: number,
-  machineIds?: string[]  // If set, only applies to specific machines
+  grantedAt: number
 }>>
 ```
 
-When a machine connects, it receives the combined access list from both registries.
+### Root Invite Registry
+Root-signed invites used for relay-user, relay-machine, and machine-user grants:
+```typescript
+rootInvites: Map<inviteId, {
+  ownerUserRootId: string,
+  inviteType: "relay-user" | "relay-machine" | "machine-user",
+  tokenHash: string,
+  expiresAt: string,
+  maxUses: number | null,
+  usedCount: number,
+  revokedAt?: string
+}>
+```
 
 ---
 
@@ -199,30 +193,14 @@ When machine goes offline:
 
 ### Client Authentication
 
-Clients sign relay messages with their Ed25519 identity. Then either:
-
-1. **Via Invite** - `connect_with_invite` with invite ID
-   - Relay validates invite exists and isn't expired/exhausted
-   - Relay decrements use count
-   - Routes to target machine
-
-2. **Direct** - `connect_to_machine` with machine ID + client identity
-   - Relay checks both per-machine and global authorization registries
-   - Client must be pre-authorized
+Clients sign relay messages with their Ed25519 identity and connect with `connect_to_machine`.
+Relay verifies device certificates, derives client user root IDs, and enforces owner+ACL policy.
 
 ### Authorization Flow
 
-1. Client connects with invite → routed to machine
-2. Machine performs X3DH handshake, validates invite signature
-3. Machine sends `authorize_client` to relay (unless single-use invite)
-4. Client is now authorized for future direct connections
-
-### Global Access Flow
-
-1. Machine owner sends `add_global_access` via any connected machine
-2. Relay adds to global access registry
-3. Relay broadcasts `access_update` to all connected machines in the account
-4. All machines update their local access lists immediately
+1. Full access uses direct connect + cert-based user-root derivation.
+2. Relay enforces relay ACL and machine ACL together.
+3. Root-signed invite acceptance grants relay/machine ACL entries.
 
 ---
 
@@ -233,13 +211,13 @@ The relay server and its management are controlled via the `gssh relay` command 
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start the relay server |
-| `gssh relay authorize <pubkey>` | Authorize a machine by its public key |
-| `gssh relay revoke <pubkey>` | Revoke a machine's authorization |
-| `gssh relay machines` | List authorized machines |
-| `gssh relay trusted` | List trusted relays (client-side) |
-| `gssh relay untrust <url>` | Remove relay trust (client-side) |
-
-**Note:** There is no separate `gssh machine` command group. Machine authorization is managed through the relay commands above.
+| `gssh relay access add <gssh-user:...>` | Grant relay membership |
+| `gssh relay access remove <user-id|label>` | Revoke relay membership |
+| `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite token |
+| `gssh invite list --relay <url>` | List root-signed invites |
+| `gssh invite revoke <invite-id> --relay <url>` | Revoke root-signed invite |
+| `gssh relay machines list` | List authorized machines |
+| `gssh relay machines revoke <machine-id>` | Revoke machine authorization |
 
 ---
 
@@ -249,8 +227,8 @@ The relay server and its management are controlled via the `gssh relay` command 
 |-----------|----------|
 | Invalid signature | `{ type: "error", code: "INVALID_SIGNATURE" }` |
 | Machine offline | `{ type: "error", code: "OFFLINE" }` |
-| Invite not found | `{ type: "error", code: "NOT_FOUND" }` |
-| Invite expired | `{ type: "error", code: "INVALID" }` |
+| Root invite not found | `{ type: "error", code: "NOT_FOUND" }` |
+| Root invite expired | `{ type: "error", code: "INVALID" }` |
 | Not authorized | `{ type: "error", code: "FORBIDDEN" }` |
 | Machine re-registration conflict | `{ success: false, error: "..." }` |
 
@@ -267,7 +245,6 @@ Returns:
 {
   "machineCount": 5,
   "onlineMachineCount": 3,
-  "inviteCount": 12,
   "authorizationCount": 8,
   "connectedClients": 7
 }
@@ -296,9 +273,9 @@ The server is essentially:
 ### Cloudflare Hosting (Implemented)
 
 Users can expose their machine at `yourname.gitspace.sh`:
-- `gssh auth login` - Authenticate with GitHub
-- `gssh host reserve <name>` - Reserve a subdomain
-- `gssh serve` - Connects to gitspace.sh relay + Cloudflare tunnel
+- `gssh user auth login` - Authenticate with GitHub
+- `gssh user host reserve <name>` - Reserve a subdomain
+- `gssh machine serve start --foreground` - Connects to gitspace.sh relay + Cloudflare tunnel
 
 See [GATEWAY-WORKER.md](./GATEWAY-WORKER.md) for the gateway architecture.
 

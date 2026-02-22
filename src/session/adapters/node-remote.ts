@@ -106,7 +106,7 @@ function isServerAuth(data: unknown): data is X3DHResultMessage {
     return false;
   }
   if (result.type === 'accepted') {
-    return result.accessType === 'full' || result.accessType === 'session-invite';
+    return result.accessType === 'full' || result.accessType === 'view';
   }
   if (result.type === 'rejected') {
     return typeof result.reason === 'string';

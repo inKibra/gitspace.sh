@@ -54,7 +54,7 @@ Gitspaces are lightweight, isolated environments that can be used for:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              USER LAYER                                      │
 │                                                                              │
-│   spaces CLI ─────► Terminal access (E2E encrypted)                         │
+│   gssh CLI ───────► Terminal access (E2E encrypted)                         │
 │   Browser ─────────► Preview URLs (https://pr-123.preview.gitspace.sh)      │
 │   GitHub ──────────► Webhooks (push, PR events)                             │
 └──────────────────────────────────────────────┬──────────────────────────────┘

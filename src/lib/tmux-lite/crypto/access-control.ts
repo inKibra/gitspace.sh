@@ -6,7 +6,7 @@
  *
  * Access types:
  * - 'full': Complete machine access (browse, create sessions, etc.)
- * - 'session-invite': View-only access to a specific session
+ * - 'view': View-only access to a specific session
  *
  * @module access-control
  */
@@ -22,7 +22,7 @@ import { verify, deriveIdentityId } from "./identity.js";
 // Constants
 // ============================================================================
 
-/** Default access type for new entries via `gssh access add` */
+/** Default access type for newly created ACL entries */
 export const DEFAULT_ACCESS_TYPE: AccessType = 'full';
 
 // ============================================================================
@@ -60,8 +60,8 @@ export function isAccessExpired(entry: AccessEntry): boolean {
  * // Add a new identity with full access
  * const entry = acl.addEntry(publicIdentity);
  *
- * // Add a session invite (view-only)
- * const invite = acl.addEntry(publicIdentity, 'session-invite', 'session-123');
+ * // Add a view-only session grant
+ * const invite = acl.addEntry(publicIdentity, 'view', 'session-123');
  *
  * // Check access
  * if (acl.hasAccess(identityId)) {
@@ -86,7 +86,7 @@ export class AccessControlList {
    *
    * @param publicIdentity - Public identity information to add
    * @param accessType - Access type to grant (default: 'full')
-   * @param sessionId - For session-invite: the specific session ID
+   * @param sessionId - For view: the specific session ID
    * @returns The created access entry
    */
   addEntry(
@@ -153,7 +153,7 @@ export class AccessControlList {
    *
    * @param identityId - Identity ID to check
    * @param sessionId - Session ID to check access for
-   * @returns True if the identity has access (full or session-invite for this session)
+   * @returns True if the identity has access (full or view for this session)
    */
   hasSessionAccess(identityId: string, sessionId: string): boolean {
     const entry = this.entries.get(identityId);
@@ -164,8 +164,8 @@ export class AccessControlList {
     if (entry.accessType === 'full') {
       return true;
     }
-    // Session invite can only access the specific session
-    return entry.accessType === 'session-invite' && entry.sessionId === sessionId;
+    // View-only access can only access the specific session
+    return entry.accessType === 'view' && entry.sessionId === sessionId;
   }
 
   /**
@@ -199,7 +199,7 @@ export class AccessControlList {
    *
    * @param identityId - Identity ID to update
    * @param accessType - New access type
-   * @param sessionId - For session-invite: the specific session ID
+   * @param sessionId - For view: the specific session ID
    * @returns True if the entry was updated, false if it doesn't exist
    */
   updateAccessType(

@@ -1,12 +1,11 @@
 /**
  * Remove command implementation
- * Handles 'gssh remove workspace' and 'gssh remove project'
+ * Handles project/workspace removal for the namespaced CLI.
  */
 
 import { existsSync, readdirSync } from 'fs'
 import { join } from 'path'
 import {
-	getCurrentProject,
 	readProjectConfig,
 	getProjectWorkspacesDir,
 	getProjectDir,
@@ -26,13 +25,14 @@ import { SpacesError, NoProjectError } from '../types/errors.js'
  * Handles interactive prompts and delegates to core deletion logic
  */
 export async function removeWorkspace(
-	workspaceNameArg?: string,
+	workspaceNameArg: string | undefined,
 	options: {
+		project: string
 		force?: boolean
 		keepBranch?: boolean
-	} = {}
+	}
 ): Promise<void> {
-	const currentProject = getCurrentProject()
+	const currentProject = options.project
 	if (!currentProject) {
 		throw new NoProjectError()
 	}

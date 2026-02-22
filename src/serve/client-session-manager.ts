@@ -29,7 +29,6 @@ import { createBufferedSocketWriter } from "../utils/bun-socket-writer.js";
  * const manager = new ClientSessionManager({
  *   relay: "wss://relay.example.com",
  *   identity: machineIdentity,
- *   accessList: acl,
  * });
  *
  * manager.onEvent((event) => {
@@ -56,8 +55,9 @@ export class ClientSessionManager {
     this.options = options;
     this.handshakeHandler = new HandshakeHandler({
       identity: options.identity,
-      accessList: options.accessList,
       handshakeTimeoutMs: options.handshakeTimeoutMs,
+      ownerUserRootId: options.ownerUserRootId,
+      checkUserRootAccess: options.checkUserRootAccess,
     });
     this.remoteSessionHandler = new RemoteSessionHandler(options.remoteSessionOptions);
   }

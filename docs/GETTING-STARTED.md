@@ -76,8 +76,8 @@ All terminal data is encrypted using keys derived from an X3DH (Extended Triple 
 │                                                                              │
 │  YOUR MACHINE                    RELAY SERVER              REMOTE CLIENT    │
 │  ┌─────────────────────┐        ┌─────────────────┐       ┌─────────────┐  │
-│  │ gssh serve          │        │ gssh relay      │       │ gssh        │  │
-│  │                     │        │                 │       │ connect     │  │
+│  │ gssh machine serve start --foreground          │        │ gssh relay start │      │ gssh client connect │  │
+│  │                     │        │                 │       │             │  │
 │  │ ┌─────────────────┐ │        │ ┌─────────────┐ │       │             │  │
 │  │ │ Identity        │ │        │ │ Machine     │ │       │ ┌─────────┐ │  │
 │  │ │ (Ed25519+X25519)│ │        │ │ Registry    │ │       │ │Identity │ │  │
@@ -104,7 +104,7 @@ All terminal data is encrypted using keys derived from an X3DH (Extended Triple 
 
 ### Owner model
 
-For hosted setup, the owner is the machine/operator that configures GitSpace and runs `gssh serve start`.
+For hosted setup, the owner is the machine/operator that configures GitSpace and runs `gssh machine serve start`.
 That host is your control node for identity, access, and relay-connected machines.
 
 ### Step 1: Install GitSpace CLI
@@ -123,57 +123,48 @@ gh auth login
 ### Step 3: Set up machine identity
 
 ```bash
-gssh identity init --label "My Control Host"
-gssh identity show
+gssh user identity init
+gssh user identity show
 ```
 
-`gssh serve` requires an existing identity.
+`gssh machine serve start --foreground` requires an existing identity.
 
 ### Step 4: Authenticate with gitspace.sh
 
 ```bash
-gssh auth login
+gssh user auth login
 ```
 
 ### Step 5: Reserve your subdomain
 
 ```bash
-gssh host reserve <yourname>
-gssh host status
+gssh user host reserve <yourname>
+gssh user host status
 ```
 
 ### Step 6: Start serving
 
 ```bash
-gssh serve start
-gssh serve status
+gssh machine serve start
+gssh machine serve status
 gssh status
 gssh cloud status
 ```
 
 Then open `https://<yourname>.gitspace.sh`.
 
-### Step 7: Create an invite
+### Step 7: Create and accept an invite
 
-To let someone connect, create a signed invite:
+To let someone connect, create a root-signed invite and have them accept it:
 
 ```bash
-# Create an invite (expires in 24 hours by default)
-gssh share create
+# On owner machine: invite user to relay + machine access
+gssh invite relay-user create gssh-user:BASE64_KEY --relay wss://relay.example.com/ws
+gssh invite machine-user create <machine-id> gssh-user:BASE64_KEY --relay wss://relay.example.com/ws
 
-# Create an invite with custom expiration
-gssh share create --expires 7d
-
-# Output: Invite token that can be shared
+# On collaborator machine: accept invite token(s)
+gssh user auth invite accept <token>
 ```
-
-The invite is a self-contained, signed token that includes:
-- Your machine's public identity
-- The relay URL
-- Access type (full or session-invite)
-- Expiration time
-
-**Note:** When you create an invite, it's automatically registered with the relay server. This allows clients to connect via the invite ID without needing to present the full token to the relay.
 
 ### Step 8: Connect from another device
 
@@ -181,15 +172,15 @@ On the remote device:
 
 ```bash
 # Create a client identity (first time only)
-gssh identity init --label "Work Laptop"
+gssh user identity init
 
-# Connect using the invite
-gssh connect <invite-url-or-token>
+# Connect after ACL grants are accepted
+gssh client connect <machine-id>
 ```
 
 The connection flow:
-1. Client connects to relay and signs connect_with_invite
-2. Client presents invite ID to relay
+1. Client connects to relay and signs `connect_to_machine`
+2. Relay verifies owner + ACL authorization
 3. Relay routes client to your machine
 4. X3DH handshake establishes encryption
 5. PTY session starts
@@ -203,9 +194,13 @@ If you are not using gitspace.sh hosting, run your own relay and point serve at 
 # Relay host
 gssh relay start --port 4480
 
+# Create relay-machine invite token
+gssh invite relay-machine create --relay ws://<relay-host>:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --label "My Machine"
+
 # Machine host
-gssh identity init --label "My Machine"
-gssh serve start --relay ws://<relay-host>:4480/ws
+gssh user identity init
+gssh machine enroll --invite "ws://<relay-host>:4480/ws#<TOKEN>" --label "My Machine"
+gssh machine serve start --relay ws://<relay-host>:4480/ws
 ```
 
 ---
@@ -214,11 +209,11 @@ gssh serve start --relay ws://<relay-host>:4480/ws
 
 ### Viewing Authorized Clients
 
-After a client connects via invite, they're added to your access list:
+Machine ACL entries are persistent `full` grants:
 
 ```bash
 # List all authorized clients
-gssh access list
+gssh machine access list
 
 # Output:
 # ID                      Label           Access Type    Added
@@ -228,11 +223,11 @@ gssh access list
 
 ### Adding Access Directly
 
-You can add a client's public key directly without an invite:
+You can add a client's public key directly without an invite flow:
 
 ```bash
-# Add a client by their public key
-gssh access add gssh_pk_abc123... --label "Brad's Phone"
+# Add a collaborator by user root key
+gssh machine access add gssh-user:BASE64_SIGNING_KEY --label "Brad's Phone"
 ```
 
 ### Revoking Access
@@ -240,8 +235,8 @@ gssh access add gssh_pk_abc123... --label "Brad's Phone"
 Remove a client from your access list:
 
 ```bash
-# Remove by public key
-gssh access remove gssh_pk_abc123...
+# Remove by user id or label
+gssh machine access remove <user-id-or-label>
 ```
 
 ---
@@ -296,12 +291,12 @@ gssh access remove gssh_pk_abc123...
 
 ## Connection Flow Details
 
-### Initial Connection (via Invite)
+### Initial Connection (ACL-authorized)
 
 ```
 Client                     Relay                      Machine
    │                         │                           │
-   │──connect_with_invite───▶│                           │
+   │──connect_to_machine─────▶│                           │
    │                         │──client_connected────────▶│
    │◀──connection_established│                           │
    │                         │                           │
@@ -318,7 +313,7 @@ Client                     Relay                      Machine
 
 ### Direct Connection (Pre-authorized)
 
-Once a client is in your access list, they can connect directly:
+Once a collaborator is in your machine ACL, they connect directly:
 
 ```
 Client                     Relay                      Machine
@@ -350,25 +345,32 @@ Each machine needs its own identity:
 
 ```bash
 # On machine 1
-gssh identity init --label "Desktop"
-gssh serve --relay wss://relay.example.com/ws
+gssh user identity init
+gssh machine serve start --relay wss://relay.example.com/ws
 
 # On machine 2
-gssh identity init --label "Server"
-gssh serve --relay wss://relay.example.com/ws
+gssh user identity init
+gssh machine serve start --relay wss://relay.example.com/ws
 ```
 
-Authorize each machine on the relay host:
+Create relay-machine enrollment invites for each machine:
 
 ```bash
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "Desktop"
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "Server"
+gssh invite relay-machine create --relay wss://relay.example.com/ws --machine-signing-key <DESKTOP_SIGNING_KEY> --machine-key-exchange-key <DESKTOP_X25519_KEY> --label "Desktop"
+gssh invite relay-machine create --relay wss://relay.example.com/ws --machine-signing-key <SERVER_SIGNING_KEY> --machine-key-exchange-key <SERVER_X25519_KEY> --label "Server"
 ```
 
-Clients can list machines they're authorized for:
+Then enroll each machine with the token returned by the relay:
 
 ```bash
-gssh connect --list
+gssh machine enroll --invite "wss://relay.example.com/ws#<token>" --label "Desktop"
+gssh machine enroll --invite "wss://relay.example.com/ws#<token>" --label "Server"
+```
+
+Clients can list machines they can access:
+
+```bash
+gssh client machines list --relay wss://relay.example.com/ws
 # Output:
 # Machine ID        Label      Status
 # abc123...         Desktop    online
@@ -388,14 +390,14 @@ gssh connect --list
 
 ### "Client not authorized"
 
-The client's identity is not in the machine's access list. Either:
+The collaborator is not authorized by relay and machine ACL. Either:
 - Use an invite to connect first
-- Have the machine owner add your public key: `gssh access add <public-key> --label "Name"`
+- Have the owner grant relay and machine access: `gssh relay access add <gssh-user:...>` and `gssh machine access add <gssh-user:...>`
 
 ### "Machine offline"
 
 The machine isn't connected to the relay. Ensure:
-- `gssh serve` is running on the machine
+- `gssh machine serve start --foreground` is running on the machine
 - The machine can reach the relay URL
 
 ### "Invite not found"
@@ -403,7 +405,7 @@ The machine isn't connected to the relay. Ensure:
 The invite may have:
 - Expired (check `--expires` when creating)
 - Been revoked by the machine owner
-- Not been registered with the relay (ensure `gssh serve` was running when invite was created)
+- Not been registered with the relay (ensure `gssh machine serve start --foreground` was running when invite was created)
 
 ### "Handshake timeout"
 

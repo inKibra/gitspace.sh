@@ -8,7 +8,6 @@
  * - Sending/receiving encrypted frames
  */
 
-import { createHash } from "crypto";
 import {
   createFrame,
   openFrame,
@@ -39,8 +38,8 @@ export interface RelayClientConfig {
   machineId?: string;
   /** Client's identity for authentication */
   identity: Identity;
-  /** Invite token (if connecting via invite) */
-  inviteToken?: string;
+  /** JSON-serialized device certificate for relay + handshake authorization */
+  deviceCertificate: string;
 }
 
 /** Connection state */
@@ -209,13 +208,7 @@ export class RelayClient {
 
         // Need to send protocol message for routing
         // Then wait for connection_established before starting handshake
-        if (this.config.inviteToken) {
-          // Client connecting via invite - send connect_with_invite
-          this.sendConnectWithInvite();
-        } else {
-          // Direct connection to machine - send connect_to_machine
-          this.sendConnectToMachine();
-        }
+        this.sendConnectToMachine();
         // Handshake will start when we receive connection_established
       };
 
@@ -273,35 +266,16 @@ export class RelayClient {
   }
 
   /**
-   * Send connect_with_invite protocol message for relay routing
-   */
-  private sendConnectWithInvite(): void {
-    if (!this.ws || !this.config.inviteToken) {
-      return;
-    }
-
-    // Generate inviteId from token hash (same as share.ts)
-    const inviteId = createHash("sha256")
-      .update(this.config.inviteToken)
-      .digest("hex")
-      .substring(0, 16);
-
-    const clientIdentityId = this.config.identity.id;
-
-    console.log("[relay-client] Sending connect_with_invite");
-    const signed = this.signClientMessage({
-      type: "connect_with_invite",
-      inviteId,
-      clientIdentityId,
-    });
-    this.ws.send(JSON.stringify(signed));
-  }
-
-  /**
    * Send connect_to_machine protocol message for direct connection
    */
   private sendConnectToMachine(): void {
     if (!this.ws) {
+      return;
+    }
+
+    if (!this.config.deviceCertificate) {
+      this.events.onError?.(new Error("Device certificate is required for direct connections"));
+      this.disconnect();
       return;
     }
 
@@ -313,6 +287,7 @@ export class RelayClient {
       type: "connect_to_machine",
       machineId,
       clientIdentityId,
+      deviceCertificate: this.config.deviceCertificate,
     });
     this.ws.send(JSON.stringify(signed));
   }
@@ -399,14 +374,13 @@ export class RelayClient {
           }
 
           // Create and send ClientAuth
-          const authorization: X3DHAuthMessage["authorization"] = this.config.inviteToken
-            ? { type: "invite", inviteToken: this.config.inviteToken }
-            : { type: "access_list" };
+          const authorization: X3DHAuthMessage["authorization"] = { type: "access_list" };
 
           const { state, message, sessionKeys } = createClientAuth(
             newState,
             this.config.identity,
-            authorization
+            authorization,
+            this.config.deviceCertificate,
           );
 
           this.handshakeState = state;

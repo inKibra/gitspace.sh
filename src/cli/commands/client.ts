@@ -1,0 +1,42 @@
+/**
+ * gssh client connect <machine-id>
+ *
+ * Client-side connection to a remote machine.
+ *
+ * @module cli/commands/client
+ */
+
+import type { Command } from 'commander';
+import { withErrorHandler } from '../error.js';
+
+export function registerClientCommands(parent: Command): void {
+  const cmd = parent
+    .command('client')
+    .description('Connect to remote machines as a client');
+
+  const machines = cmd
+    .command('machines')
+    .description('Browse machines available on a relay');
+
+  machines
+    .command('list')
+    .description('List machines you can access')
+    .requiredOption('--relay <url>', 'Relay URL')
+    .option('--json', 'Output in JSON format')
+    .action(withErrorHandler(async (options) => {
+      const { listRemoteMachines } = await import('../../commands/connect.js');
+      await listRemoteMachines(options);
+    }));
+
+  // gssh client connect <machine-id>
+  cmd
+    .command('connect')
+    .description('Connect to a machine using relay + machine ACL authorization')
+    .argument('[target]', 'Machine ID')
+    .option('--relay <url>', 'Override relay URL')
+    .option('--machine <id>', 'Machine ID for direct mode')
+    .action(withErrorHandler(async (target, options) => {
+      const { connectToRemote } = await import('../../commands/connect.js');
+      await connectToRemote(target, options);
+    }));
+}
