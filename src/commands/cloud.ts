@@ -554,11 +554,11 @@ function buildSpriteServeStartCommand(): string[] {
     '  echo "GSSH_ENROLLMENT_TOKEN is required" >&2',
     '  exit 1',
     'fi',
-    'if [ -n "${GSSH_UNLOCK_TOKEN:-}" ]; then',
-    '  gssh machine serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --workspace-id "$GSSH_WORKSPACE_ID" --unlock-token "$GSSH_UNLOCK_TOKEN" --enrollment-token "$GSSH_ENROLLMENT_TOKEN" --ignore-keychain-and-skip-secrets',
-    'else',
-    '  gssh machine serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --enrollment-token "$GSSH_ENROLLMENT_TOKEN" --ignore-keychain-and-skip-secrets',
+    'if [ -z "${GSSH_UNLOCK_TOKEN:-}" ]; then',
+    '  echo "GSSH_UNLOCK_TOKEN is required" >&2',
+    '  exit 1',
     'fi',
+    'gssh machine serve start --relay "$GSSH_RELAY_URL" --relay-pubkey "$GSSH_RELAY_PUBKEY" --workspace-id "$GSSH_WORKSPACE_ID" --unlock-token "$GSSH_UNLOCK_TOKEN" --enrollment-token "$GSSH_ENROLLMENT_TOKEN" --ignore-keychain-and-skip-secrets',
   ].join('\n');
 
   return ['bash', '-lc', script];
@@ -570,7 +570,7 @@ async function runWorkspaceBootstrapExec(
   workspaceId: string,
   relayInfo: CloudBootstrapRelayInfo,
   phase: 'launch' | 'resume',
-  bootstrapToken: string | undefined,
+  bootstrapToken: string,
   enrollmentToken: string,
 ): Promise<void> {
   logCloudEvent({
@@ -584,11 +584,9 @@ async function runWorkspaceBootstrapExec(
     GSSH_WORKSPACE_ID: workspaceId,
     GSSH_RELAY_URL: relayInfo.relayUrl,
     GSSH_RELAY_PUBKEY: relayInfo.relaySigningPublicKey,
+    GSSH_UNLOCK_TOKEN: bootstrapToken,
+    GSSH_ENROLLMENT_TOKEN: enrollmentToken,
   };
-  if (bootstrapToken) {
-    env.GSSH_UNLOCK_TOKEN = bootstrapToken;
-  }
-  env.GSSH_ENROLLMENT_TOKEN = enrollmentToken;
 
   const execResult = await provider.execWorkspaceCommand(providerWorkspaceId, {
     command,
@@ -688,52 +686,50 @@ export async function cloudResume(
   logger.log('');
   logger.log(`Resuming workspace ${workspaceId}...`);
 
+  let resumeResult: Awaited<ReturnType<CloudLifecycleProvider['resumeWorkspace']>>;
   try {
-    const result = await provider.resumeWorkspace(ws.providerWorkspaceId);
-    updateCloudWorkspaceStatus(workspaceId, result.status === 'ready' ? 'bootstrapping' : result.status);
-    logCloudEvent({
-      workspaceId,
-      eventType: 'workspace_resumed',
-      message: `Workspace resumed`,
-      metadata: {
-        rawState: result.rawState,
-        unlockTokenId: unlock.tokenId,
-        enrollmentInviteId: enrollmentInvite.inviteId,
-      },
-    });
-
-    try {
-      await runWorkspaceBootstrapExec(
-        provider,
-        ws.providerWorkspaceId,
-        workspaceId,
-        relayInfo,
-        'resume',
-        unlock.token,
-        enrollmentInvite.token,
-      );
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      updateCloudWorkspaceStatus(workspaceId, 'error', msg);
-      logCloudEvent({ workspaceId, eventType: 'resume_exec_failed', message: msg });
-      throw new SpacesError(`Failed to run resume bootstrap command: ${msg}`, 'SYSTEM_ERROR', 2);
-    }
-
-    logger.log('');
-    logger.success(`  Workspace ${workspaceId} resumed (status: bootstrapping).`);
-    logger.log(`  Unlock token ID:    ${unlock.tokenId}`);
-    logger.log(`  Enroll invite ID:   ${enrollmentInvite.inviteId}`);
-    logger.log('');
+    resumeResult = await provider.resumeWorkspace(ws.providerWorkspaceId);
   } catch (error) {
-    if (error instanceof SpacesError && error.message.startsWith('Failed to run resume bootstrap command:')) {
-      throw error;
-    }
-
     const msg = error instanceof Error ? error.message : String(error);
     updateCloudWorkspaceStatus(workspaceId, 'error', msg);
     logCloudEvent({ workspaceId, eventType: 'resume_failed', message: msg });
     throw new SpacesError(`Failed to resume workspace: ${msg}`, 'SYSTEM_ERROR', 2);
   }
+
+  updateCloudWorkspaceStatus(workspaceId, resumeResult.status === 'ready' ? 'bootstrapping' : resumeResult.status);
+  logCloudEvent({
+    workspaceId,
+    eventType: 'workspace_resumed',
+    message: `Workspace resumed`,
+    metadata: {
+      rawState: resumeResult.rawState,
+      unlockTokenId: unlock.tokenId,
+      enrollmentInviteId: enrollmentInvite.inviteId,
+    },
+  });
+
+  try {
+    await runWorkspaceBootstrapExec(
+      provider,
+      ws.providerWorkspaceId,
+      workspaceId,
+      relayInfo,
+      'resume',
+      unlock.token,
+      enrollmentInvite.token,
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    updateCloudWorkspaceStatus(workspaceId, 'error', msg);
+    logCloudEvent({ workspaceId, eventType: 'resume_exec_failed', message: msg });
+    throw new SpacesError(`Failed to run resume bootstrap command: ${msg}`, 'SYSTEM_ERROR', 2);
+  }
+
+  logger.log('');
+  logger.success(`  Workspace ${workspaceId} resumed (status: bootstrapping).`);
+  logger.log(`  Unlock token ID:    ${unlock.tokenId}`);
+  logger.log(`  Enroll invite ID:   ${enrollmentInvite.inviteId}`);
+  logger.log('');
 }
 
 // ── cloud destroy ─────────────────────────────────────────────────────────────
