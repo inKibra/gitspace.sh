@@ -525,7 +525,7 @@ gssh client machines list --relay wss://relay.example.com
 | `gssh user identity show` | Display identity fingerprint |
 | `gssh machine access add <gssh-user:...>` | Grant machine full access |
 | `gssh machine access list` | List machine collaborators |
-| `gssh machine access remove <user-id|label>` | Revoke machine full access |
+| `gssh machine access remove <user-id\|label>` | Revoke machine full access |
 | `gssh machine serve start --foreground` | Start machine daemon |
 | `gssh machine serve start` | Start serve as background daemon |
 | `gssh machine serve stop` | Stop background serve daemon |
@@ -548,7 +548,7 @@ For self-hosted relay servers:
 |---------|-------------|
 | `gssh relay start` | Start relay server |
 | `gssh relay access add <gssh-user:...>` | Grant relay membership |
-| `gssh relay access remove <user-id|label>` | Revoke relay membership |
+| `gssh relay access remove <user-id\|label>` | Revoke relay membership |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
 | `gssh relay machines list` | List registered machines |
 | `gssh relay machines revoke <machine-id>` | Revoke machine registration |

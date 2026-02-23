@@ -29,6 +29,7 @@ import {
   validateMnemonic,
   mnemonicToUserIdentity,
   formatUserRootPublicKey,
+  formatSigningPublicKeyFingerprint,
 } from '../lib/tmux-lite/crypto/user-identity.js';
 import { createDeviceCertificate } from '../lib/tmux-lite/crypto/device-cert.js';
 import type { Identity } from '../types/identity.js';
@@ -66,6 +67,14 @@ function mnemonicToStored(mnemonic: string, createdAt: number): StoredUserRootId
     mnemonic,
     createdAt,
   };
+}
+
+function normalizeMnemonicInput(mnemonic: string): string {
+  return mnemonic
+    .normalize('NFKD')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
 }
 
 function storedToIdentity(stored: StoredUserRootIdentity): UserRootIdentity {
@@ -106,7 +115,7 @@ export async function initFromMnemonic(
   mnemonic: string,
   force: boolean = false,
 ): Promise<UserRootIdentity> {
-  const normalizedMnemonic = mnemonic.trim().toLowerCase().replace(/\s+/g, ' ');
+  const normalizedMnemonic = normalizeMnemonicInput(mnemonic);
 
   // Validate mnemonic
   if (!validateMnemonic(normalizedMnemonic)) {
@@ -249,7 +258,9 @@ export async function removeUserRootIdentity(): Promise<boolean> {
  * @returns true if mnemonic matches stored identity
  */
 export async function verifyMnemonicMatchesStored(mnemonic: string): Promise<boolean> {
-  if (!validateMnemonic(mnemonic)) {
+  const normalizedMnemonic = normalizeMnemonicInput(mnemonic);
+
+  if (!validateMnemonic(normalizedMnemonic)) {
     return false;
   }
 
@@ -258,7 +269,7 @@ export async function verifyMnemonicMatchesStored(mnemonic: string): Promise<boo
     return false;
   }
 
-  const derived = mnemonicToUserIdentity(mnemonic);
+  const derived = mnemonicToUserIdentity(normalizedMnemonic);
   return derived.id === stored.id;
 }
 
@@ -297,14 +308,5 @@ export async function createLocalDeviceCertificate(identity: Identity): Promise<
  * @returns Fingerprint string like "ab:cd:ef:12:34:56:78:90"
  */
 export function formatFingerprint(signingPublicKey: Uint8Array): string {
-  const { createHash } = require('crypto') as typeof import('crypto');
-  const hash = createHash('sha256').update(signingPublicKey).digest('hex');
-  const first16 = hash.substring(0, 16);
-
-  const parts: string[] = [];
-  for (let i = 0; i < first16.length; i += 2) {
-    parts.push(first16.substring(i, i + 2));
-  }
-
-  return parts.join(':');
+  return formatSigningPublicKeyFingerprint(signingPublicKey);
 }

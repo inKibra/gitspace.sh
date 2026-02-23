@@ -137,7 +137,7 @@ export async function bundleStatus(options: BundleStatusOptions): Promise<void> 
       logger.error('Bundle file exists but could not be parsed:');
       logger.log(`  ${changes.parseError}`);
     } else {
-      logger.log('No bundle found in this project');
+      logger.log('No bundle found for this workspace');
       logger.dim('Bundles are defined in .gitspace/bundle.json');
     }
     return;

@@ -84,7 +84,7 @@ gssh
 │   ├── start [--port <n>] [--bind <addr>] [--hostname <host>] [--label <label>]
 │   ├── access add <gssh-user:...> [--label <label>]
 │   ├── access list [--json]
-│   ├── access remove <user-id|label>
+│   ├── access remove <user-id\|label>
 │   ├── machines list
 │   └── machines revoke <machine-id>
 ├── invite
@@ -98,7 +98,7 @@ gssh
 │   ├── enroll --invite <relay-machine-invite-token> [--label <name>]
 │   ├── access add <gssh-user:...> [--label <label>] [--machine <id>]
 │   ├── access list [--json] [--machine <id>]
-│   ├── access remove <user-id|label> [--machine <id>]
+│   ├── access remove <user-id\|label> [--machine <id>]
 │   └── tmux start|stop|status|list|new|attach|kill
 ├── client
 │   ├── machines list [--relay <url>]

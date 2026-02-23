@@ -82,7 +82,7 @@ export interface BundleRefreshOptions {
   allowBaseFallback?: boolean;
 }
 
-interface BundleResolutionOptions {
+export interface BundleResolutionOptions {
   allowBaseFallback?: boolean;
 }
 

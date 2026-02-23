@@ -22,6 +22,10 @@ import {
   type BackendEvent,
 } from '../session/index.js';
 import {
+  RelayMachineDirectoryClient,
+  nodeRelaySocketAdapter,
+} from '../relay-client/index.js';
+import {
   NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
@@ -229,8 +233,6 @@ export async function listRemoteMachines(options: {
   const signer = createNodeRelaySigner(identity);
 
   const relayUrl = options.relay;
-  const socketUrl = new URL(relayUrl);
-  socketUrl.searchParams.set('role', 'client');
 
   type MachineRow = {
     machineId: string;
@@ -243,51 +245,44 @@ export async function listRemoteMachines(options: {
   };
 
   const machines = await new Promise<MachineRow[]>((resolve, reject) => {
-    const ws = new WebSocket(socketUrl.toString());
+    const client = new RelayMachineDirectoryClient<WebSocket>({
+      relayUrl,
+      clientIdentityId: identity.id,
+      deviceCertificate,
+      socketAdapter: nodeRelaySocketAdapter,
+      signer,
+      onMachineList: (listed) => {
+        finish(undefined, listed as MachineRow[]);
+      },
+      onError: (message) => {
+        finish(new Error(message));
+      },
+    });
+
     const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error('Timed out waiting for machine list'));
+      finish(new Error('Timed out waiting for machine list'));
     }, 15000);
 
-    ws.onopen = () => {
-      const message = signer({
-        type: 'list_machines' as const,
-        clientIdentityId: identity.id,
-        deviceCertificate,
-      });
-      ws.send(JSON.stringify(message));
-    };
-
-    ws.onerror = (error) => {
-      clearTimeout(timeout);
-      reject(new Error(error.message || 'WebSocket connection failed'));
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const text = typeof event.data === 'string'
-          ? event.data
-          : new TextDecoder().decode(event.data as ArrayBuffer);
-        const msg = JSON.parse(text) as { type?: string; machines?: MachineRow[]; message?: string };
-
-        if (msg.type === 'error') {
-          clearTimeout(timeout);
-          ws.close();
-          reject(new Error(msg.message || 'Relay returned an error'));
-          return;
-        }
-
-        if (msg.type === 'machine_list') {
-          clearTimeout(timeout);
-          ws.close();
-          resolve(Array.isArray(msg.machines) ? msg.machines : []);
-        }
-      } catch (error) {
-        clearTimeout(timeout);
-        ws.close();
-        reject(error);
+    let finished = false;
+    const finish = (error?: Error, listed?: MachineRow[]) => {
+      if (finished) {
+        return;
       }
+      finished = true;
+      clearTimeout(timeout);
+      client.disconnect();
+
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(listed ?? []);
     };
+
+    void client.connect().catch((error) => {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    });
   });
 
   if (options.json) {

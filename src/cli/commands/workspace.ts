@@ -284,9 +284,9 @@ function registerWorkspaceSessionCommands(workspace: Command): void {
   )
     .argument('[name]', 'Session name')
     .action(withErrorHandler(async (name, options) => {
-      useExplicitContext(options);
+      const ctx = useExplicitContext(options);
       const { newTmux } = await import('../../commands/tmux.js');
-      await newTmux(name);
+      await newTmux(name, getWorkspacePath(ctx.project, ctx.workspace!));
     }));
 
   // gssh workspace session attach --project <p> --workspace <w> --session <id>

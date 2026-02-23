@@ -4,6 +4,20 @@
 
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
+import { SpacesError } from '../../types/errors.js';
+
+function parseRelayPort(rawPort: string): number {
+  if (!/^\d+$/.test(rawPort)) {
+    throw new SpacesError('Port must be an integer between 1 and 65535.', 'USER_ERROR', 1);
+  }
+
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new SpacesError('Port must be an integer between 1 and 65535.', 'USER_ERROR', 1);
+  }
+
+  return port;
+}
 
 export function registerRelayCommands(parent: Command): void {
   const cmd = parent
@@ -20,7 +34,7 @@ export function registerRelayCommands(parent: Command): void {
     .action(withErrorHandler(async (options) => {
       const { startRelay } = await import('../../commands/relay.js');
       await startRelay({
-        port: parseInt(options.port, 10),
+        port: parseRelayPort(options.port),
         bind: options.bind,
         hostname: options.hostname,
         label: options.label,

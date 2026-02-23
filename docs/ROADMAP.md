@@ -397,7 +397,7 @@ gssh user identity show          # Show fingerprint
 # Access control
 gssh machine access add <gssh-user:...>    # Grant machine full access
 gssh machine access list                   # List machine collaborators
-gssh machine access remove <user-id|label> # Revoke machine full access
+gssh machine access remove <user-id\|label> # Revoke machine full access
 
 # Invites
 gssh invite relay-user create <gssh-user:...> --relay <url>                # Create relay membership invite

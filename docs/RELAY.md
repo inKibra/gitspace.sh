@@ -83,7 +83,7 @@ The relay verifies signatures, checks authorization, and creates a bidirectional
 
 ## Routing Architecture
 
-The relay maintains three registries:
+The relay maintains four registries:
 
 ### Machine Registry
 ```typescript
@@ -212,7 +212,7 @@ The relay server and its management are controlled via the `gssh relay` command 
 |---------|-------------|
 | `gssh relay start` | Start the relay server |
 | `gssh relay access add <gssh-user:...>` | Grant relay membership |
-| `gssh relay access remove <user-id|label>` | Revoke relay membership |
+| `gssh relay access remove <user-id\|label>` | Revoke relay membership |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite token |
 | `gssh invite list --relay <url>` | List root-signed invites |
 | `gssh invite revoke <invite-id> --relay <url>` | Revoke root-signed invite |

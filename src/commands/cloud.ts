@@ -703,6 +703,10 @@ export async function cloudResume(
     logger.log(`  Enroll invite ID:   ${enrollmentInvite.inviteId}`);
     logger.log('');
   } catch (error) {
+    if (error instanceof SpacesError && error.message.startsWith('Failed to run resume bootstrap command:')) {
+      throw error;
+    }
+
     const msg = error instanceof Error ? error.message : String(error);
     updateCloudWorkspaceStatus(workspaceId, 'error', msg);
     logCloudEvent({ workspaceId, eventType: 'resume_failed', message: msg });

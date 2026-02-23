@@ -171,6 +171,23 @@ export function formatUserRootPublicKey(identity: UserRootIdentity): string {
 }
 
 /**
+ * Format a short fingerprint from a signing public key.
+ *
+ * SHA-256 hash, first 16 hex chars, colon-separated pairs.
+ */
+export function formatSigningPublicKeyFingerprint(signingPublicKey: Uint8Array): string {
+  const hashHex = Buffer.from(sha256(signingPublicKey)).toString('hex');
+  const first16 = hashHex.substring(0, 16);
+
+  const parts: string[] = [];
+  for (let i = 0; i < first16.length; i += 2) {
+    parts.push(first16.substring(i, i + 2));
+  }
+
+  return parts.join(':');
+}
+
+/**
  * Parse a user root public key string
  *
  * @param publicKeyStr - String in format "gssh-user:BASE64_SIGNING_KEY"

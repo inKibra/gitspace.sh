@@ -43,9 +43,6 @@ import {
 import { getServeTokenKey, readHostConfig, type HostConfig } from './host.js';
 import { createRelayServer } from '../relay/server.js';
 import { formatRelayFingerprint, loadOrCreateRelayIdentity } from '../relay/identity.js';
-import { signMessage } from '../relay/signing.js';
-import { PROTOCOL_VERSION } from '../relay/protocol.js';
-import { ed25519 } from '@noble/curves/ed25519.js';
 import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
 import { generateEphemeralKeypair, validateX25519PublicKey, x25519SharedSecret } from '../lib/tmux-lite/crypto/keyexchange.js';
 import { open } from '../lib/tmux-lite/crypto/secretbox.js';
@@ -83,6 +80,11 @@ import {
   setVaultMeta,
 } from '../relay/control/store.js';
 import { isMachineAccessGranted } from '../relay/auth/store.js';
+import {
+  connectMachineRelay,
+  requestUnlockGrantViaRelay,
+  type PublicIdentity,
+} from '../relay-client/machine-relay-client.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -194,6 +196,7 @@ function createEventHandler(
 
       case 'relay_disconnected':
         logger.warning(`Disconnected from ${relayName}: ${event.code} ${event.reason}`);
+        clearRelayConfig();
         break;
 
       case 'relay_reconnecting':
@@ -332,175 +335,34 @@ async function fetchIdentityViaUnlockToken(
   unlockToken: string
 ): Promise<UnlockIdentityResult> {
   const ephemeral = generateEphemeralKeypair();
-  const url = new URL(relayUrl);
-  url.searchParams.set('role', 'machine');
-  url.searchParams.set('m', `unlock-${Date.now().toString(36)}`);
-
-  return await new Promise<UnlockIdentityResult>((resolve, reject) => {
-    let completed = false;
-    const ws = new WebSocket(url.toString());
-
-    const fail = (message: string) => {
-      if (completed) return;
-      completed = true;
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      reject(new SpacesError(message, 'USER_ERROR', 1));
-    };
-
-    ws.onerror = () => {
-      fail('Failed to connect to relay for unlock request');
-    };
-
-    ws.onclose = () => {
-      if (!completed) {
-        fail('Relay closed unlock connection before unlock grant was received');
-      }
-    };
-
-    ws.onmessage = async (event) => {
-      let msg: Record<string, unknown>;
-      try {
-        const raw = typeof event.data === 'string'
-          ? event.data
-          : new TextDecoder().decode(event.data as ArrayBuffer);
-        msg = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        fail('Invalid unlock response from relay');
-        return;
-      }
-
-      if (msg.type === 'relay_identity') {
-        const trust = await verifyRelayTrust(
-          relayUrl,
-          String(msg.publicKey ?? ''),
-          String(msg.fingerprint ?? ''),
-          typeof msg.label === 'string' ? msg.label : undefined,
-          relayPubkey
-        );
-
-        if (!trust.trusted) {
-          fail(trust.reason);
-          return;
-        }
-
-        ws.send(JSON.stringify({
-          type: 'unlock_request',
-          workspaceId,
-          unlockToken,
-          ephemeralKey: Buffer.from(ephemeral.publicKey).toString('base64'),
-        }));
-        return;
-      }
-
-      if (msg.type === 'unlock_grant') {
-        const ciphertext = typeof msg.ciphertext === 'string' ? msg.ciphertext : '';
-        const relayEphemeralKey = typeof msg.relayEphemeralKey === 'string' ? msg.relayEphemeralKey : '';
-        const salt = typeof msg.salt === 'string' ? msg.salt : '';
-        const registerPermit = typeof msg.registerPermit === 'string' ? msg.registerPermit : '';
-        if (!ciphertext || !relayEphemeralKey || !salt || !registerPermit) {
-          fail('Unlock grant did not include identity material');
-          return;
-        }
-
-        try {
-          const parsed = decryptUnlockGrant(
-            relayEphemeralKey,
-            salt,
-            ciphertext,
-            ephemeral.privateKey
-          );
-          const identity = deserializeIdentity(parsed);
-          if (completed) return;
-          completed = true;
-          ws.close();
-          resolve({
-            identity,
-            registerPermit,
-          });
-        } catch (error) {
-          fail(`Failed to parse unlock identity payload: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        return;
-      }
-
-      if (msg.type === 'error') {
-        const code = typeof msg.code === 'string' ? msg.code : 'ERROR';
-        const message = typeof msg.message === 'string' ? msg.message : 'Unlock request failed';
-        fail(`[${code}] ${message}`);
-      }
-    };
-  });
-}
-
-/**
- * Sign a challenge and create registration message
- *
- * @param challenge - Base64 challenge from relay
- * @param signingPrivateKey - Private key for signing
- * @param machineId - Machine ID
- * @param publicIdentity - Public identity info
- * @returns Signed message data or null on error
- */
-function signChallengeAndCreateRegistration(
-  challenge: string,
-  signingPrivateKey: Uint8Array,
-  machineId: string,
-  publicIdentity: PublicIdentity,
-  bootstrapToken?: string,
-  registerPermit?: string,
-  enrollmentToken?: string,
-): { challengeResponse: string; message: object } | null {
   try {
-    const nonceBytes = new Uint8Array(Buffer.from(challenge, 'base64'));
-    const signature = ed25519.sign(nonceBytes, signingPrivateKey);
-    const challengeResponse = Buffer.from(signature).toString('base64');
+    const grant = await requestUnlockGrantViaRelay({
+      relayUrl,
+      relayPubkey,
+      workspaceId,
+      unlockToken,
+      ephemeralKey: Buffer.from(ephemeral.publicKey).toString('base64'),
+      verifyRelayTrust,
+    });
 
+    const parsed = decryptUnlockGrant(
+      grant.relayEphemeralKey,
+      grant.salt,
+      grant.ciphertext,
+      ephemeral.privateKey,
+    );
+    const identity = deserializeIdentity(parsed);
     return {
-      challengeResponse,
-      message: {
-        type: 'register_machine',
-        machineId,
-        signingKey: publicIdentity.signingPublicKey,
-        keyExchangeKey: publicIdentity.keyExchangePublicKey,
-        label: publicIdentity.label,
-        protocolVersion: PROTOCOL_VERSION,
-        challengeResponse,
-        bootstrapToken,
-        registerPermit,
-        enrollmentToken,
-      },
+      identity,
+      registerPermit: grant.registerPermit,
     };
-  } catch (err) {
-    logger.error(`Failed to sign challenge: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+  } catch (error) {
+    throw new SpacesError(
+      error instanceof Error ? error.message : String(error),
+      'USER_ERROR',
+      1,
+    );
   }
-}
-
-/**
- * Create a data message for sending to a client via relay
- */
-function createDataMessage(connectionId: string, data: Uint8Array | Buffer): string {
-  return JSON.stringify({
-    type: 'data',
-    connectionId,
-    data: Buffer.from(data).toString('base64'),
-  });
-}
-
-/**
- * Create a send callback for a client connection
- */
-function createSendCallback(
-  ws: WebSocket,
-  connectionId: string
-): (data: Uint8Array | Buffer) => void {
-  return (sendData) => {
-    ws.send(createDataMessage(connectionId, sendData));
-  };
 }
 
 // ============================================================================
@@ -1264,16 +1126,6 @@ export async function serve(options: {
 }
 
 /**
- * Public identity type for registration
- */
-interface PublicIdentity {
-  id: string;
-  signingPublicKey: string;
-  keyExchangePublicKey: string;
-  label?: string;
-}
-
-/**
  * Connect to relay WebSocket with protocol message support
  */
 async function connectToRelay(
@@ -1288,207 +1140,19 @@ async function connectToRelay(
   registerPermit?: string,
   enrollmentToken?: string,
 ): Promise<void> {
-  // Build WebSocket URL with machine role (no token in URL - auth via challenge-response)
-  const url = new URL(relayUrl);
-  url.searchParams.set('role', 'machine');
-
-  return new Promise((resolve, reject) => {
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 10;
-    const baseReconnectDelay = 1000;
-    const maxReconnectDelay = 30000;
-    let resolved = false;
-    let currentWs: WebSocket | null = null;
-
-    // Decode public key for message signing
-    const signingPublicKey = signingPrivateKey
-      ? new Uint8Array(Buffer.from(publicIdentity.signingPublicKey, 'base64'))
-      : null;
-
-    // Helper to sign and send a message
-    const signAndSend = (ws: WebSocket, msg: object) => {
-      if (signingPrivateKey && signingPublicKey) {
-        const signed = signMessage(msg, signingPrivateKey, signingPublicKey);
-        ws.send(JSON.stringify(signed));
-      } else {
-        ws.send(JSON.stringify(msg));
-      }
-    };
-
-    const connect = () => {
-      console.log(`[serve] Connecting to relay: ${url.toString()}`);
-      const ws = new WebSocket(url.toString());
-      ws.binaryType = 'arraybuffer';
-      currentWs = ws;
-
-      ws.onopen = () => {
-        console.log('[serve] WebSocket connected, waiting for relay identity...');
-        reconnectAttempts = 0;
-        // Don't send register_machine yet - wait for relay_identity message
-      };
-
-      ws.onclose = (event) => {
-        console.log(`[serve] WebSocket closed: code=${event.code} reason=${event.reason || 'none'}`);
-        eventHandler({
-          type: 'relay_disconnected',
-          code: event.code,
-          reason: event.reason || 'Connection closed',
-        });
-
-        // Clear relay config on disconnect
-        clearRelayConfig();
-
-        // Attempt reconnection
-        if (reconnectAttempts < maxReconnectAttempts) {
-          reconnectAttempts++;
-          const delay = Math.min(
-            baseReconnectDelay * Math.pow(2, reconnectAttempts - 1) + Math.random() * 1000,
-            maxReconnectDelay
-          );
-          eventHandler({ type: 'relay_reconnecting', attempt: reconnectAttempts });
-          setTimeout(connect, delay);
-        }
-      };
-
-      ws.onerror = (err) => {
-        console.log('[serve] WebSocket error:', err);
-        // Only reject on initial connection
-        if (!resolved && reconnectAttempts === 0) {
-          reject(new Error('WebSocket connection failed'));
-        }
-      };
-
-      ws.onmessage = async (event) => {
-        try {
-          // Parse message
-          const data = event.data;
-          let msg: any;
-
-          if (typeof data === 'string') {
-            msg = JSON.parse(data);
-          } else {
-            const str = new TextDecoder().decode(data as ArrayBuffer);
-            try {
-              msg = JSON.parse(str);
-            } catch {
-              logger.warning('Received binary data without JSON envelope');
-              return;
-            }
-          }
-
-          // Handle protocol messages
-          switch (msg.type) {
-            case 'relay_identity': {
-              // Relay is identifying itself and providing a challenge
-              const { publicKey: relayPublicKey, fingerprint: relayFingerprint, label: relayLabel, challenge } = msg;
-
-              console.log(`[serve] Received relay identity: ${relayFingerprint}${relayLabel ? ` (${relayLabel})` : ''}`);
-
-              // Step 1: Verify relay trust
-              const trustResult = await verifyRelayTrust(
-                relayUrl,
-                relayPublicKey,
-                relayFingerprint,
-                relayLabel,
-                relayPubkey
-              );
-
-              if (!trustResult.trusted) {
-                ws.close(1008, trustResult.reason);
-                if (!resolved) {
-                  reject(new Error(trustResult.reason));
-                }
-                return;
-              }
-
-              // Step 2: Sign the challenge and send register_machine
-              if (!signingPrivateKey) {
-                logger.error('No signing key available for challenge-response');
-                ws.close(1008, 'No signing key');
-                return;
-              }
-
-              const registration = signChallengeAndCreateRegistration(
-                challenge,
-                signingPrivateKey,
-                machineId,
-                publicIdentity,
-                bootstrapToken,
-                registerPermit,
-                enrollmentToken,
-              );
-
-              if (!registration) {
-                ws.close(1008, 'Challenge signing failed');
-                return;
-              }
-
-              signAndSend(ws, registration.message);
-              console.log('[serve] Sent register_machine with challenge response');
-              break;
-            }
-
-            case 'registered':
-              // Machine registered successfully
-              eventHandler({ type: 'relay_connected' });
-
-              if (!resolved) {
-                resolved = true;
-                resolve();
-              }
-              break;
-
-            case 'client_connected':
-              // New client connection
-              sessionManager.handleConnect(msg.connectionId);
-              // Set up send callback for this connection
-              sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
-              break;
-
-            case 'client_disconnected':
-              // Client disconnected
-              sessionManager.handleDisconnect(msg.connectionId, msg.reason || 'Client disconnected');
-              break;
-
-            case 'data':
-              // Data from client - connectionId tells us which client
-              if (msg.data && msg.connectionId) {
-                const messageData = Buffer.from(msg.data, 'base64');
-
-                // Ensure send callback is set
-                if (!sessionManager.getSession(msg.connectionId)) {
-                  sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
-                }
-
-                const response = await sessionManager.handleMessage(
-                  msg.connectionId,
-                  messageData
-                );
-
-                if (response) {
-                  ws.send(createDataMessage(msg.connectionId, response));
-                }
-              }
-              break;
-
-            case 'error':
-              logger.error(`Relay error: ${msg.message} (${msg.code})`);
-              if (!resolved) {
-                reject(new Error(msg.message));
-              }
-              break;
-
-            default:
-              logger.dim(`Unknown message type: ${msg.type}`);
-          }
-        } catch (error) {
-          logger.error(`Message handling error: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      };
-    };
-
-    connect();
-  });
+  await connectMachineRelay(
+    relayUrl,
+    machineId,
+    publicIdentity,
+    sessionManager,
+    eventHandler,
+    verifyRelayTrust,
+    signingPrivateKey,
+    relayPubkey,
+    bootstrapToken,
+    registerPermit,
+    enrollmentToken,
+  );
 }
 
 /**
@@ -1653,7 +1317,7 @@ export async function serveStart(options: {
     // Detect if we're running as a compiled binary vs dev mode
     const isCompiled = !process.execPath.endsWith('bun');
 
-    const serveArgs = ['serve', 'start', '--foreground'];
+    const serveArgs = ['machine', 'serve', 'start', '--foreground'];
     if (options.relay) serveArgs.push('--relay', options.relay);
     if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
     if (options.bootstrapToken) serveArgs.push('--bootstrap-token', options.bootstrapToken);

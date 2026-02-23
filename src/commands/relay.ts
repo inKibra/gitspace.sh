@@ -26,6 +26,7 @@ import {
   listVaultMachinesForOwner,
   removeVaultMachine,
 } from "../relay/control/store.js";
+import { promptConfirm } from "../utils/prompts.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -114,7 +115,15 @@ function resolveClientUserRootId(user: string): string {
   }
 
   if (trimmed.startsWith('gssh-user:')) {
-    return parseUserRootPublicKey(trimmed).userRootId;
+    try {
+      return parseUserRootPublicKey(trimmed).userRootId;
+    } catch (error) {
+      throw new SpacesError(
+        error instanceof Error ? error.message : 'Invalid user root public key.',
+        'USER_ERROR',
+        1,
+      );
+    }
   }
 
   return trimmed;
@@ -192,7 +201,7 @@ export async function removeRelayAccess(
   const ownerUserRootId = await requireOwnerUserRootId();
   const entries = listRelayAccessList(ownerUserRootId);
   const query = userOrLabel.trim();
-  const parsedId = query.startsWith('gssh-user:') ? parseUserRootPublicKey(query).userRootId : query;
+  const parsedId = resolveClientUserRootId(query);
 
   const direct = entries.find((entry) => entry.clientUserRootId === parsedId);
   const prefixMatches = direct ? [] : entries.filter((entry) => entry.clientUserRootId.startsWith(parsedId));
@@ -206,7 +215,13 @@ export async function removeRelayAccess(
   }
 
   if (!options.force) {
-    logger.log(`Remove relay access for ${chalk.cyan(target.clientUserRootId)}?`);
+    const confirmed = await promptConfirm(
+      `Remove relay access for ${target.clientUserRootId}?`
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
   }
 
   const removed = revokeRelayAccess(ownerUserRootId, target.clientUserRootId);
@@ -240,7 +255,9 @@ export async function listRelayMachines(options: { json?: boolean } = {}): Promi
   for (const machine of machines) {
     const machineCol = machine.machineId.slice(0, machineWidth - 1).padEnd(machineWidth);
     const labelCol = (machine.label || '-').slice(0, labelWidth - 1).padEnd(labelWidth);
-    const lastConnected = machine.lastConnectedAt.split('T')[0] ?? machine.lastConnectedAt;
+    const lastConnected = machine.lastConnectedAt
+      ? machine.lastConnectedAt.split('T')[0] ?? machine.lastConnectedAt
+      : '-';
     logger.log(chalk.cyan(machineCol) + labelCol + chalk.dim(lastConnected));
   }
 }

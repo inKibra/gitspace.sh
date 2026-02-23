@@ -198,7 +198,7 @@ src/
 | `gssh user identity show` | Display identity fingerprint |
 | `gssh machine access add <gssh-user:...>` | Grant machine full access |
 | `gssh machine access list` | List machine collaborators |
-| `gssh machine access remove <user-id|label>` | Remove machine full access |
+| `gssh machine access remove <user-id\|label>` | Remove machine full access |
 | `gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url>` | Create machine ACL invite |
 
 ### Remote Access
@@ -216,7 +216,7 @@ src/
 |---------|-------------|
 | `gssh relay start` | Start relay server |
 | `gssh relay access add <gssh-user:...>` | Grant relay membership |
-| `gssh relay access remove <user-id|label>` | Revoke relay membership |
+| `gssh relay access remove <user-id\|label>` | Revoke relay membership |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite token |
 | `gssh relay machines list` | List authorized machines |
 | `gssh relay machines revoke <machine-id>` | Revoke machine authorization |

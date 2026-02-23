@@ -14,6 +14,7 @@
 
 import { join } from 'path';
 import { getProjectWorkspacesDir } from '../core/config.js';
+import { SpacesError } from '../types/errors.js';
 
 // ============================================================================
 // Types
@@ -40,14 +41,14 @@ export interface WorkspaceContext {
  *
  * @param options - CLI options containing project and optional workspace
  * @returns Resolved context
- * @throws {Error} If project is missing (should not happen if requiredOption is set)
+ * @throws {SpacesError} If project is missing (should not happen if requiredOption is set)
  */
 export function resolveExplicitContext(options: {
   project: string;
   workspace?: string;
 }): WorkspaceContext {
   if (!options.project) {
-    throw new Error('--project is required for workspace commands');
+    throw new SpacesError('--project is required for workspace commands', 'USER_ERROR', 1);
   }
   return {
     project: options.project,

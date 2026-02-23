@@ -509,7 +509,7 @@ gssh machine serve start --relay ws://localhost:8080/ws
 |--------|------------|
 | Relay compromise | E2E encryption - relay sees only encrypted bytes |
 | Network interception | TLS + E2E encryption with forward secrecy |
-| Stolen client key | Revoke access: `gssh machine access remove <user-id|label>` |
+| Stolen client key | Revoke access: `gssh machine access remove <user-id\|label>` |
 | Machine key compromise | Regenerate identity: `gssh user identity init --force` |
 | Replay attacks | Per-frame random nonces, session keys |
 | Man-in-the-middle | X3DH with identity verification |

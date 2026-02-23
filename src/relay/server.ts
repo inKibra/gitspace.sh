@@ -180,6 +180,8 @@ import {
   isRelayAccessGranted,
   listRootInvites,
   registerRootInvite,
+  revokeMachineAccess,
+  revokeRelayAccess,
   revokeRootInvite,
   consumeRootInviteToken,
 } from "./auth/store.js";
@@ -1358,22 +1360,30 @@ async function handleProtocolMessage(
         return;
       }
 
-      const consumed = consumeRootInviteToken(
-        parsedInvite.inviteId,
-        parsedInvite.ownerUserRootId,
-        acceptMsg.inviteToken,
-      );
-      if (!consumed) {
-        ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
-        return;
-      }
-
       if (parsedInvite.type === 'relay-user') {
+        const hadRelayAccess = isRelayAccessGranted(
+          parsedInvite.ownerUserRootId,
+          clientRootResult.userRootId,
+        );
+
         grantRelayAccess({
           ownerUserRootId: parsedInvite.ownerUserRootId,
           clientUserRootId: clientRootResult.userRootId,
           label: parsedInvite.label,
         });
+
+        const consumed = consumeRootInviteToken(
+          parsedInvite.inviteId,
+          parsedInvite.ownerUserRootId,
+          acceptMsg.inviteToken,
+        );
+        if (!consumed) {
+          if (!hadRelayAccess) {
+            revokeRelayAccess(parsedInvite.ownerUserRootId, clientRootResult.userRootId);
+          }
+          ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
+          return;
+        }
 
         ws.send(serializeMessage({
           type: 'root_invite_accepted',
@@ -1384,12 +1394,35 @@ async function handleProtocolMessage(
         return;
       }
 
+      const hadMachineAccess = isMachineAccessGranted(
+        parsedInvite.machineId,
+        parsedInvite.ownerUserRootId,
+        clientRootResult.userRootId,
+      );
+
       grantMachineAccess({
         machineId: parsedInvite.machineId,
         ownerUserRootId: parsedInvite.ownerUserRootId,
         clientUserRootId: clientRootResult.userRootId,
         label: parsedInvite.label,
       });
+
+      const consumed = consumeRootInviteToken(
+        parsedInvite.inviteId,
+        parsedInvite.ownerUserRootId,
+        acceptMsg.inviteToken,
+      );
+      if (!consumed) {
+        if (!hadMachineAccess) {
+          revokeMachineAccess(
+            parsedInvite.machineId,
+            parsedInvite.ownerUserRootId,
+            clientRootResult.userRootId,
+          );
+        }
+        ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
+        return;
+      }
 
       ws.send(serializeMessage({
         type: 'root_invite_accepted',

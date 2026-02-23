@@ -1,4 +1,3 @@
-import WebSocket from 'ws';
 import chalk from 'chalk';
 import { logger } from '../utils/logger.js';
 import { promptPassword } from '../utils/prompts.js';
@@ -7,6 +6,7 @@ import { createLocalDeviceCertificate, loadUserRootIdentity } from '../core/user
 import { parseUserRootPublicKey } from '../lib/tmux-lite/crypto/user-identity.js';
 import { createNodeRelaySigner } from '../session/adapters/node-remote.js';
 import { deriveIdentityId } from '../lib/tmux-lite/crypto/identity.js';
+import { RelayRequestClient, nodeRelaySocketAdapter } from '../relay-client/index.js';
 import {
   createRootInviteToken,
   parseRootInviteToken,
@@ -135,87 +135,49 @@ async function sendRelayRequest<T>(
   createPayload: () => RelayRequestPayload,
   onMessage: (msg: Record<string, unknown>) => T | null,
 ): Promise<T> {
-  const socketUrl = new URL(relayUrl);
-  socketUrl.searchParams.set('role', 'client');
-
-  return await new Promise<T>((resolve, reject) => {
-    const ws = new WebSocket(socketUrl.toString());
-    const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error('Timed out waiting for relay response'));
-    }, 20000);
-
-    let finished = false;
-
-    const fail = (error: Error) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      reject(error);
-    };
-
-    const succeed = (value: T) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      resolve(value);
-    };
-
-    ws.onopen = () => {
-      try {
-        ws.send(JSON.stringify(createPayload()));
-      } catch (error) {
-        fail(new Error(error instanceof Error ? error.message : String(error)));
-      }
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const raw = typeof event.data === 'string'
-          ? event.data
-          : new TextDecoder().decode(event.data as ArrayBuffer);
-        const msg = JSON.parse(raw) as Record<string, unknown>;
-
-        if (msg.type === 'error') {
-          const code = typeof msg.code === 'string' ? msg.code : 'ERROR';
-          const message = typeof msg.message === 'string' ? msg.message : 'Relay request failed';
-          fail(new Error(`[${code}] ${message}`));
-          return;
-        }
-
-        const parsed = onMessage(msg);
-        if (parsed !== null) {
-          succeed(parsed);
-        }
-      } catch (error) {
-        fail(new Error(error instanceof Error ? error.message : String(error)));
-      }
-    };
-
-    ws.onerror = (event) => {
-      fail(new Error(event.message || 'Failed to connect to relay'));
-    };
-
-    ws.onclose = () => {
-      if (!finished) {
-        fail(new Error('Relay closed connection before request completed'));
-      }
-    };
+  const client = new RelayRequestClient({
+    relayUrl,
+    socketAdapter: nodeRelaySocketAdapter,
+    timeoutMs: 20000,
   });
+
+  try {
+    return await client.sendRequest(createPayload, onMessage);
+  } catch (error) {
+    if (error instanceof SpacesError) {
+      throw error;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const relayCodeMatch = message.match(/^\[([A-Z_]+)]\s+/);
+    const relayCode = relayCodeMatch?.[1];
+    const userErrorCodes = new Set([
+      'FORBIDDEN',
+      'UNAUTHORIZED',
+      'NOT_FOUND',
+      'INVALID_REQUEST',
+      'IDENTITY_MISMATCH',
+    ]);
+
+    throw new SpacesError(
+      message,
+      relayCode && userErrorCodes.has(relayCode) ? 'USER_ERROR' : 'SYSTEM_ERROR',
+      relayCode && userErrorCodes.has(relayCode) ? 1 : 2,
+    );
+  }
 }
 
 function parseTargetUserKey(user: string): { userRootId: string; signingKeyBase64: string } {
-  const parsed = parseUserRootPublicKey(user.trim());
+  let parsed: { userRootId: string; signingPublicKey: Uint8Array };
+  try {
+    parsed = parseUserRootPublicKey(user.trim());
+  } catch (error) {
+    throw new SpacesError(
+      error instanceof Error ? error.message : 'Invalid user root public key format.',
+      'USER_ERROR',
+      1,
+    );
+  }
   return {
     userRootId: parsed.userRootId,
     signingKeyBase64: Buffer.from(parsed.signingPublicKey).toString('base64'),
@@ -241,7 +203,7 @@ async function createInviteViaRelay(
         return null;
       }
       if (typeof msg.inviteId !== 'string') {
-        throw new Error('Invalid root_invite_created response');
+        throw new SpacesError('Invalid root_invite_created response', 'SYSTEM_ERROR', 2);
       }
       return { inviteId: msg.inviteId };
     },
@@ -432,7 +394,7 @@ export async function listInvites(options: {
         return null;
       }
       if (!Array.isArray(msg.invites)) {
-        throw new Error('Invalid root_invite_list response');
+        throw new SpacesError('Invalid root_invite_list response', 'SYSTEM_ERROR', 2);
       }
       return { invites: msg.invites as InviteListItem[] };
     },
@@ -537,7 +499,7 @@ export async function acceptInviteForUser(
         (msg.inviteType !== 'relay-user' && msg.inviteType !== 'relay-machine' && msg.inviteType !== 'machine-user') ||
         (msg.granted !== 'relay' && msg.granted !== 'machine')
       ) {
-        throw new Error('Invalid root_invite_accepted response');
+        throw new SpacesError('Invalid root_invite_accepted response', 'SYSTEM_ERROR', 2);
       }
 
       return {

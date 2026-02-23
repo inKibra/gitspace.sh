@@ -210,7 +210,7 @@ export async function listTmux(): Promise<void> {
 /**
  * Create and attach to a new tmux-lite session
  */
-export async function newTmux(name?: string): Promise<void> {
+export async function newTmux(name?: string, cwdOverride?: string): Promise<void> {
   // Check for nested session
   if (isNested()) {
     logger.error("Already inside a tmux-lite session");
@@ -227,7 +227,7 @@ export async function newTmux(name?: string): Promise<void> {
     await ensureServer();
   }
 
-  const cwd = process.cwd();
+  const cwd = cwdOverride ?? process.cwd();
   const session = await createSession(name || "session", cwd);
 
   logger.log(`Created session: ${session.name} (id: ${session.id})`);
