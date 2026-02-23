@@ -34,6 +34,7 @@ import { logger } from '../utils/logger.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
 import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
 import type { HunkDecision, ReviewChangedFile, ReviewThread } from '../types/review.js';
+import { SpacesError } from '../types/errors.js';
 
 // Match the port used by `gssh machine serve start` local relay (overridable via RELAY_PORT env)
 const DEFAULT_PORT = parseInt(process.env.RELAY_PORT ?? '4480', 10);
@@ -196,7 +197,7 @@ function parseDecisionFlags(options: {
   ].filter((value): value is HunkDecision => value !== null);
 
   if (selected.length > 1) {
-    throw new Error('Choose only one decision flag: --approve, --reject, or --pending.');
+    throw new SpacesError('Choose only one decision flag: --approve, --reject, or --pending.', 'USER_ERROR', 1);
   }
 
   return selected[0];
@@ -220,7 +221,7 @@ async function getChangedFilesForContext(ctx: {
   });
 
   if (result.op !== 'changed_files') {
-    throw new Error(`Unexpected response from get_changed_files: ${result.op}`);
+    throw new SpacesError(`Unexpected response from get_changed_files: ${result.op}`, 'SYSTEM_ERROR', 2);
   }
 
   return result.files;
@@ -247,14 +248,18 @@ function resolveChangedFile(
 
   if (suffixMatches.length > 1) {
     const choices = suffixMatches.slice(0, 8).map((file) => `- ${file.filePath}`).join('\n');
-    throw new Error(
-      `File path is ambiguous: ${inputFile}\nMatches:\n${choices}\nPlease provide a full path.`
+    throw new SpacesError(
+      `File path is ambiguous: ${inputFile}\nMatches:\n${choices}\nPlease provide a full path.`,
+      'USER_ERROR',
+      1,
     );
   }
 
   const sample = changedFiles.slice(0, 12).map((file) => `- ${file.filePath}`).join('\n');
-  throw new Error(
-    `File is not changed in this workspace: ${inputFile}\nChanged files:\n${sample}`
+  throw new SpacesError(
+    `File is not changed in this workspace: ${inputFile}\nChanged files:\n${sample}`,
+    'USER_ERROR',
+    1,
   );
 }
 

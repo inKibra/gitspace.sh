@@ -58,12 +58,22 @@ function parseMaxUses(value: string | undefined): number | null {
 }
 
 function parseBase64Key(key: string, label: string): Uint8Array {
-  let parsed: Uint8Array;
-  try {
-    parsed = new Uint8Array(Buffer.from(key, 'base64'));
-  } catch {
+  const normalized = key.trim();
+  if (
+    normalized.length === 0 ||
+    normalized.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)
+  ) {
     throw new SpacesError(`${label} must be base64.`, 'USER_ERROR', 1);
   }
+
+  const decoded = Buffer.from(normalized, 'base64');
+  const reencoded = decoded.toString('base64');
+  if (reencoded !== normalized) {
+    throw new SpacesError(`${label} must be base64.`, 'USER_ERROR', 1);
+  }
+
+  const parsed = new Uint8Array(decoded);
 
   if (parsed.length !== 32) {
     throw new SpacesError(`${label} must be a 32-byte base64 key.`, 'USER_ERROR', 1);

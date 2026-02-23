@@ -308,7 +308,7 @@ function decryptUnlockGrant(
 ): StoredIdentity {
   const relayEphemeralPublicKey = new Uint8Array(Buffer.from(relayEphemeralKeyBase64, 'base64'));
   if (!validateX25519PublicKey(relayEphemeralPublicKey)) {
-    throw new Error('Relay unlock key is invalid');
+    throw new SpacesError('Relay unlock key is invalid', 'USER_ERROR', 1);
   }
 
   const salt = new Uint8Array(Buffer.from(saltBase64, 'base64'));
@@ -317,7 +317,7 @@ function decryptUnlockGrant(
   const key = deriveUnlockKey(sharedSecret, salt);
   const plaintext = open(ciphertext, key);
   if (!plaintext) {
-    throw new Error('Failed to decrypt unlock grant');
+    throw new SpacesError('Failed to decrypt unlock grant', 'USER_ERROR', 1);
   }
 
   return JSON.parse(plaintext.toString('utf-8')) as StoredIdentity;

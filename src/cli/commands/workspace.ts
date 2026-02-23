@@ -11,6 +11,7 @@
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
 import { useExplicitContext, getWorkspacePath } from '../workspace-context.js';
+import { SpacesError } from '../../types/errors.js';
 
 // ============================================================================
 // Helpers
@@ -436,7 +437,7 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
       const ctx = useExplicitContext(options);
       const { bundleRefresh } = await import('../../commands/bundle.js');
       if (!ctx.workspace) {
-        throw new Error('--workspace is required for bundle refresh');
+        throw new SpacesError('--workspace is required for bundle refresh', 'USER_ERROR', 1);
       }
       await bundleRefresh({
         project: ctx.project,
@@ -455,7 +456,7 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
       const ctx = useExplicitContext(options);
       const { bundleStatus } = await import('../../commands/bundle.js');
       if (!ctx.workspace) {
-        throw new Error('--workspace is required for bundle status');
+        throw new SpacesError('--workspace is required for bundle status', 'USER_ERROR', 1);
       }
       await bundleStatus({
         project: ctx.project,

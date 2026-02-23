@@ -383,6 +383,8 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
       id: workspaceId,
       provider: 'sprites',
       providerWorkspaceId: '',
+      machineId: workspaceIdentity.id,
+      machinePublicKey: workspaceIdentity.signingPublicKey,
       repo,
       branch,
       status: 'error',
@@ -397,6 +399,8 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
     id: workspaceId,
     provider: 'sprites',
     providerWorkspaceId: providerResult.providerWorkspaceId,
+    machineId: workspaceIdentity.id,
+    machinePublicKey: workspaceIdentity.signingPublicKey,
     repo,
     branch,
     status: 'bootstrapping',
@@ -596,7 +600,11 @@ async function runWorkspaceBootstrapExec(
     const stderrSnippet = execResult.stderr.trim().slice(0, 200);
     const stdoutSnippet = execResult.stdout.trim().slice(0, 200);
     const outputSnippet = stderrSnippet || stdoutSnippet || 'no output';
-    throw new Error(`Bootstrap command exited with code ${execResult.exitCode}: ${outputSnippet}`);
+    throw new SpacesError(
+      `Bootstrap command exited with code ${execResult.exitCode}: ${outputSnippet}`,
+      'SYSTEM_ERROR',
+      2,
+    );
   }
 
   logCloudEvent({
