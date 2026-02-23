@@ -275,8 +275,12 @@ export async function createRelayMachineInvite(options: {
     throw new SpacesError('User root identity is required. Run `gssh user identity init` first.', 'USER_ERROR', 1);
   }
 
-  parseBase64Key(options.machineSigningKey, 'Machine signing key');
-  parseBase64Key(options.machineKeyExchangeKey, 'Machine key exchange key');
+  const normalizedMachineSigningKey = Buffer.from(
+    parseBase64Key(options.machineSigningKey, 'Machine signing key')
+  ).toString('base64');
+  const normalizedMachineKeyExchangeKey = Buffer.from(
+    parseBase64Key(options.machineKeyExchangeKey, 'Machine key exchange key')
+  ).toString('base64');
 
   const relayUrl = resolveRelayUrl(options.relay);
   const duration = parseDuration(options.expires ?? '24h');
@@ -286,8 +290,8 @@ export async function createRelayMachineInvite(options: {
     type: 'relay-machine',
     owner,
     relayUrl,
-    targetMachineSigningKey: options.machineSigningKey,
-    targetMachineKeyExchangeKey: options.machineKeyExchangeKey,
+    targetMachineSigningKey: normalizedMachineSigningKey,
+    targetMachineKeyExchangeKey: normalizedMachineKeyExchangeKey,
     expiresAt: Date.now() + duration.milliseconds,
     maxUses,
     label: options.label,

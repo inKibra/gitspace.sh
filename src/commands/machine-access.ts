@@ -138,7 +138,7 @@ export async function listAccessKeys(
   const entries = listMachineAccessList(machineId, owner.id);
 
   if (options.json) {
-    console.log(JSON.stringify(entries, null, 2));
+    logger.log(JSON.stringify(entries, null, 2));
     return;
   }
 

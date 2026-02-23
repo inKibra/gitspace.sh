@@ -218,7 +218,7 @@ export async function cloudStatus(): Promise<void> {
     const localIdentity = getPublicKeyWithoutPassword();
     if (localIdentity) {
       const ownerAssertion = await sendAssertOwnerCommand(localIdentity.id);
-      logger.log(`  Local identity:${localIdentity.id}`);
+      logger.log(`  Local identity: ${localIdentity.id}`);
       logger.log(`  Owner access:  ${ownerAssertion.success ? 'yes' : `no (${ownerAssertion.error ?? 'not owner'})`}`);
     }
   }

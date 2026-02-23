@@ -37,7 +37,10 @@ import type { HunkDecision, ReviewChangedFile, ReviewThread } from '../types/rev
 import { SpacesError } from '../types/errors.js';
 
 // Match the port used by `gssh machine serve start` local relay (overridable via RELAY_PORT env)
-const DEFAULT_PORT = parseInt(process.env.RELAY_PORT ?? '4480', 10);
+const DEFAULT_PORT = (() => {
+  const parsed = Number.parseInt(process.env.RELAY_PORT ?? '4480', 10);
+  return Number.isNaN(parsed) ? 4480 : parsed;
+})();
 
 // ============================================================================
 // Helpers
