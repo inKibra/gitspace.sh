@@ -1,7 +1,7 @@
-import { input } from '@inquirer/prompts';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
+import { promptInput } from '../utils/prompts.js';
 import { getPublicKeyWithoutPassword, keypairExists, readRelayConfig } from '../core/identity.js';
 import { loadUserRootIdentity } from '../core/user-identity.js';
 import {
@@ -233,20 +233,27 @@ export async function cloudSetup(): Promise<void> {
 
   const existing = await getSpritesToken();
   if (existing) {
-    const masked = `${existing.slice(0, 6)}${'*'.repeat(Math.max(0, existing.length - 10))}${existing.slice(-4)}`;
+    const masked = existing.length > 10
+      ? `${existing.slice(0, 6)}${'*'.repeat(existing.length - 10)}${existing.slice(-4)}`
+      : '*'.repeat(existing.length);
     logger.log(`  Current Sprites token: ${masked}`);
     logger.log('');
   }
 
-  const token = await input({
-    message: 'Enter your Sprites.dev API token:',
+  const token = await promptInput('Enter your Sprites.dev API token:', {
     validate: (value) => {
       if (!value || !value.trim()) return 'Token cannot be empty';
       return true;
     },
   });
 
-  await setSpritesToken(token);
+  if (!token) {
+    logger.info('Cancelled');
+    logger.log('');
+    return;
+  }
+
+  await setSpritesToken(token.trim());
 
   logger.log('');
   logger.success('  Sprites token saved to keychain.');
@@ -584,6 +591,13 @@ async function runWorkspaceBootstrapExec(
     env,
     dir: '/home/sprite',
   });
+
+  if (execResult.exitCode !== 0) {
+    const stderrSnippet = execResult.stderr.trim().slice(0, 200);
+    const stdoutSnippet = execResult.stdout.trim().slice(0, 200);
+    const outputSnippet = stderrSnippet || stdoutSnippet || 'no output';
+    throw new Error(`Bootstrap command exited with code ${execResult.exitCode}: ${outputSnippet}`);
+  }
 
   logCloudEvent({
     workspaceId,

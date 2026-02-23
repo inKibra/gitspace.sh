@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CloudLifecycleProvider } from '../cloud.js';
 import { cloudDestroy, cloudResume, cloudStop } from '../cloud.js';
+import { generateMnemonic, mnemonicToUserIdentity } from '../../lib/tmux-lite/crypto/user-identity.js';
 import {
   bindControlOwner,
   ensureControlStore,
@@ -24,12 +25,14 @@ import {
   listCloudEvents,
   upsertCloudWorkspace,
 } from '../../relay/control/store.js';
+import { ensureWorkspaceIdentity } from '../../relay/control/workspace-identity.js';
 import type { CloudWorkspaceStatus } from '../../relay/control/types.js';
 
 // ── mock identity so requireLocalIdentityId() returns a fixed owner ───────────
 //   We mock core/identity at module level so it applies before any import.
 
 const OWNER_ID = 'owner-lifecycle-test-001';
+const TEST_USER_ROOT_IDENTITY = mnemonicToUserIdentity(generateMnemonic());
 
 mock.module('../../core/identity.js', () => ({
   keypairExists: () => true,
@@ -38,6 +41,10 @@ mock.module('../../core/identity.js', () => ({
     relayUrl: 'wss://relay.test/ws',
     trustedRelays: [],
   }),
+}));
+
+mock.module('../../core/user-identity.js', () => ({
+  loadUserRootIdentity: async () => TEST_USER_ROOT_IDENTITY,
 }));
 
 // ── mock provider factory ─────────────────────────────────────────────────────
@@ -89,6 +96,11 @@ function seedWorkspace(id: string, status: CloudWorkspaceStatus = 'ready') {
     branch: 'main',
     status,
   });
+}
+
+async function seedWorkspaceWithIdentity(id: string, status: CloudWorkspaceStatus = 'ready') {
+  seedWorkspace(id, status);
+  await ensureWorkspaceIdentity(id);
 }
 
 // ── stop ──────────────────────────────────────────────────────────────────────
@@ -159,7 +171,7 @@ describe('cloudResume', () => {
       resume: async (id) => { resumeCalls.push(id); return { providerWorkspaceId: id, status: 'ready', rawState: 'started' }; },
     });
 
-    seedWorkspace('ws-f', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-f', 'hibernated');
     await cloudResume('ws-f', provider);
 
     expect(resumeCalls).toHaveLength(1);
@@ -167,21 +179,21 @@ describe('cloudResume', () => {
   });
 
   test('sets workspace to bootstrapping after wake and exec', async () => {
-    seedWorkspace('ws-g', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-g', 'hibernated');
     await cloudResume('ws-g', makeMockProvider());
     const ws = getCloudWorkspace('ws-g');
     expect(ws?.status).toBe('bootstrapping');
   });
 
   test('logs a workspace_resumed event', async () => {
-    seedWorkspace('ws-h', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-h', 'hibernated');
     await cloudResume('ws-h', makeMockProvider());
     const events = listCloudEvents({ workspaceId: 'ws-h' });
     expect(events.some((e) => e.eventType === 'workspace_resumed')).toBe(true);
   });
 
   test('issues unlock token event on resume', async () => {
-    seedWorkspace('ws-h2', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-h2', 'hibernated');
     await cloudResume('ws-h2', makeMockProvider());
     const events = listCloudEvents({ workspaceId: 'ws-h2' });
     expect(events.some((e) => e.eventType === 'unlock_token_issued')).toBe(true);
@@ -196,7 +208,7 @@ describe('cloudResume', () => {
       },
     });
 
-    seedWorkspace('ws-r1', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-r1', 'hibernated');
     await cloudResume('ws-r1', provider);
 
     expect(execCalls).toHaveLength(1);
@@ -209,14 +221,29 @@ describe('cloudResume', () => {
   });
 
   test('logs resume_exec_succeeded after bootstrap exec success', async () => {
-    seedWorkspace('ws-r2', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-r2', 'hibernated');
     await cloudResume('ws-r2', makeMockProvider());
     const events = listCloudEvents({ workspaceId: 'ws-r2' });
     expect(events.some((e) => e.eventType === 'resume_exec_succeeded')).toBe(true);
   });
 
+  test('treats non-zero bootstrap exec exit code as failure', async () => {
+    await seedWorkspaceWithIdentity('ws-r2b', 'hibernated');
+    const provider = makeMockProvider({
+      exec: async () => ({ exitCode: 127, stdout: '', stderr: 'gssh not found' }),
+    });
+
+    await expect(cloudResume('ws-r2b', provider)).rejects.toThrow(/exited with code 127/i);
+
+    const ws = getCloudWorkspace('ws-r2b');
+    expect(ws?.status).toBe('error');
+
+    const events = listCloudEvents({ workspaceId: 'ws-r2b' });
+    expect(events.some((e) => e.eventType === 'resume_exec_failed')).toBe(true);
+  });
+
   test('sets workspace status to error when resume exec fails', async () => {
-    seedWorkspace('ws-r3', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-r3', 'hibernated');
     const provider = makeMockProvider({
       exec: async () => {
         throw new Error('bootstrap command failed');
@@ -230,7 +257,7 @@ describe('cloudResume', () => {
   });
 
   test('logs resume_exec_failed when bootstrap exec fails', async () => {
-    seedWorkspace('ws-r4', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-r4', 'hibernated');
     const provider = makeMockProvider({
       exec: async () => {
         throw new Error('could not start gssh machine serve');
@@ -248,7 +275,7 @@ describe('cloudResume', () => {
   });
 
   test('sets workspace status to error when provider call fails', async () => {
-    seedWorkspace('ws-i', 'hibernated');
+    await seedWorkspaceWithIdentity('ws-i', 'hibernated');
     const provider = makeMockProvider({ resume: async () => { throw new Error('vm wake failed'); } });
     try { await cloudResume('ws-i', provider); } catch {}
     const ws = getCloudWorkspace('ws-i');

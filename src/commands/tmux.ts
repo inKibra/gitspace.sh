@@ -11,6 +11,7 @@
  *   gssh machine tmux kill <id>   - Kill a session
  */
 
+import chalk from "chalk";
 import { logger } from "../utils/logger.js";
 import {
   ensureServer,
@@ -136,7 +137,7 @@ export async function statusTmux(): Promise<void> {
     const lines = [
       `Status:   \x1b[90m○ not running\x1b[0m`,
       "",
-      `Run: \x1b[36mgssh machine tmux start\x1b[0m`,
+      `Run: ${chalk.cyan("gssh machine tmux start")}`,
     ];
     logger.log(box(lines));
     return;

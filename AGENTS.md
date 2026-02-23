@@ -91,7 +91,7 @@ src/
 │   │       ├── secretbox.ts    # AES-256-GCM encryption
 │   │       ├── frames.ts       # Encrypted frame format
 │   │       ├── handshake.ts    # X3DH protocol steps
-│   │       ├── invites.ts      # Signed invite tokens
+│   │       ├── root-invites.ts # Signed root invite tokens
 │   │       └── access-control.ts # ACL checking
 │   └── remote-session/         # Remote session handling
 │       ├── session-handler.ts  # Handle remote client commands
@@ -269,7 +269,7 @@ src/
 
 ## Remote Access Architecture
 
-```
+```text
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
 │  Your Machine   │       │  Relay Server   │       │  Remote Client  │
 │                 │       │                 │       │                 │

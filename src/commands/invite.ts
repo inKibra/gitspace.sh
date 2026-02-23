@@ -401,7 +401,7 @@ export async function listInvites(options: {
   );
 
   if (options.json) {
-    console.log(JSON.stringify(response.invites, null, 2));
+    logger.log(JSON.stringify(response.invites, null, 2));
     return;
   }
 
