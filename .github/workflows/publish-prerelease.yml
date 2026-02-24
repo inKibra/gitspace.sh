@@ -11,10 +11,10 @@ on:
         description: 'npm dist-tag'
         required: false
         type: choice
-        default: 'next'
+        default: 'latest'
         options:
-          - next
           - latest
+          - next
 
 # Prevent concurrent publishes from racing
 concurrency:
@@ -94,11 +94,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
 
       # Ensure npm is new enough for OIDC trusted publishing (requires 11.5.1+)
       - name: Update npm
         run: npm install -g npm@latest
+
+      # Confirm OIDC tokens are present before attempting publish
+      - name: Verify OIDC environment
+        run: |
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_URL" || (echo "Missing OIDC token URL" && exit 1)
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" || (echo "Missing OIDC token" && exit 1)
+          echo "OIDC environment confirmed"
 
       - name: Download platform artifacts
         uses: actions/download-artifact@v4
@@ -132,11 +138,11 @@ jobs:
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             echo "Publishing @gitspace/$target@${{ needs.resolve-version.outputs.version }}..."
-            npm publish ./npm/$target --access public --tag ${{ inputs.dist_tag || 'next' }}
+            npm publish ./npm/$target --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
           done
 
       - name: Publish main package
-        run: npm publish . --access public --tag ${{ inputs.dist_tag || 'next' }}
+        run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
 
       - name: Commit version bump and tag
         run: |
