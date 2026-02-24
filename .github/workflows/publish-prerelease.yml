@@ -154,10 +154,26 @@ jobs:
       - name: Publish main package
         run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
 
-      - name: Tag release
+      - name: Tag release and open version-bump PR
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ needs.resolve-version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Push the git tag
           git tag "v${VERSION}"
           git push --tags
+
+          # Create a branch and open a PR for the version bump
+          BRANCH="chore/version-bump-v${VERSION}"
+          git checkout -b "$BRANCH"
+          git add package.json
+          git commit -m "chore: bump version to v${VERSION}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: bump version to v${VERSION}" \
+            --body "Automated version bump after publishing \`v${VERSION}\` to npm." \
+            --base develop \
+            --head "$BRANCH"
