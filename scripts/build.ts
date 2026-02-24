@@ -196,7 +196,7 @@ async function createPlatformPackage(target: TargetKey) {
     },
     repository: {
       type: "git",
-      url: "https://github.com/inkibra/gitspace.sh.git"
+      url: "https://github.com/inKibra/gitspace.sh.git"
     },
     homepage: "https://gitspace.sh",
     license: "SEE LICENSE IN LICENSE"
