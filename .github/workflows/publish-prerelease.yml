@@ -36,13 +36,23 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          CURRENT=$(jq -r .version package.json)
           if [ -n "${{ inputs.version }}" ]; then
             NEW_VERSION="${{ inputs.version }}"
-          elif [[ "$CURRENT" =~ ^(.+)-rc\.([0-9]+)$ ]]; then
-            NEW_VERSION="${BASH_REMATCH[1]}-rc.$((${BASH_REMATCH[2]} + 1))"
           else
-            NEW_VERSION="${CURRENT}-rc.1"
+            # Read latest published rc from npm registry to avoid needing a
+            # version-bump commit pushed back to the protected develop branch.
+            PUBLISHED=$(npm view gitspace dist-tags.latest 2>/dev/null || true)
+            if [[ "$PUBLISHED" =~ ^(.+)-rc\.([0-9]+)$ ]]; then
+              NEW_VERSION="${BASH_REMATCH[1]}-rc.$((${BASH_REMATCH[2]} + 1))"
+            else
+              # Fall back to package.json when no rc has been published yet
+              CURRENT=$(jq -r .version package.json)
+              if [[ "$CURRENT" =~ ^(.+)-rc\.([0-9]+)$ ]]; then
+                NEW_VERSION="${BASH_REMATCH[1]}-rc.$((${BASH_REMATCH[2]} + 1))"
+              else
+                NEW_VERSION="${CURRENT}-rc.1"
+              fi
+            fi
           fi
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Publishing version: $NEW_VERSION"
@@ -134,30 +144,20 @@ jobs:
           ' package.json > "$tmp"
           mv "$tmp" package.json
 
-      - name: Debug OIDC context
-        run: |
-          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
-          echo "GITHUB_REPOSITORY_OWNER=$GITHUB_REPOSITORY_OWNER"
-          echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
-          echo "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF"
-
       - name: Publish platform packages
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             echo "Publishing @gitspace/$target@${{ needs.resolve-version.outputs.version }}..."
-            npm publish ./npm/$target --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }} --loglevel verbose
+            npm publish ./npm/$target --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
           done
 
       - name: Publish main package
-        run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }} --loglevel verbose
+        run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
 
-      - name: Commit version bump and tag
+      - name: Tag release
         run: |
           VERSION="${{ needs.resolve-version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json
-          git commit -m "chore: publish v${VERSION}"
           git tag "v${VERSION}"
-          git push
           git push --tags
