@@ -22,8 +22,9 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  id-token: write  # required for OIDC trusted publishing
-  contents: write  # required for version bump commit + tag push
+  id-token: write       # required for OIDC trusted publishing
+  contents: write       # required for tag push + version-bump branch
+  pull-requests: write  # required for opening version-bump PR
 
 jobs:
   resolve-version:
