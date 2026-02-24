@@ -1,0 +1,150 @@
+name: Publish Prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.2.0-rc.21). Leave blank to auto-increment rc.N'
+        required: false
+        type: string
+      dist_tag:
+        description: 'npm dist-tag'
+        required: false
+        type: choice
+        default: 'next'
+        options:
+          - next
+          - latest
+
+# Prevent concurrent publishes from racing
+concurrency:
+  group: publish-prerelease
+  cancel-in-progress: false
+
+permissions:
+  id-token: write  # required for OIDC trusted publishing
+  contents: write  # required for version bump commit + tag push
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          CURRENT=$(jq -r .version package.json)
+          if [ -n "${{ inputs.version }}" ]; then
+            NEW_VERSION="${{ inputs.version }}"
+          elif [[ "$CURRENT" =~ ^(.+)-rc\.([0-9]+)$ ]]; then
+            NEW_VERSION="${BASH_REMATCH[1]}-rc.$((${BASH_REMATCH[2]} + 1))"
+          else
+            NEW_VERSION="${CURRENT}-rc.1"
+          fi
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $NEW_VERSION"
+
+  build:
+    needs: resolve-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+          - target: darwin-x64
+            runner: macos-13
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Set version
+        run: |
+          tmp=$(mktemp)
+          jq --arg v "${{ needs.resolve-version.outputs.version }}" '.version = $v' package.json > "$tmp"
+          mv "$tmp" package.json
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build binary and create npm package
+        run: bun scripts/build.ts --target=${{ matrix.target }} --npm
+
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.target }}
+          path: npm/${{ matrix.target }}/
+          retention-days: 1
+
+  publish:
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Ensure npm is new enough for OIDC trusted publishing (requires 11.5.1+)
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-*
+          path: npm-artifacts/
+
+      # download-artifact puts each artifact in npm-artifacts/npm-{target}/
+      # restructure to npm/{target}/ as expected by npm publish
+      - name: Arrange npm packages
+        run: |
+          for dir in npm-artifacts/npm-*/; do
+            target="${dir#npm-artifacts/npm-}"
+            target="${target%/}"
+            mkdir -p "npm/$target"
+            cp -r "$dir"/* "npm/$target/"
+          done
+          chmod 755 npm/*/bin/gssh
+
+      - name: Update package.json version
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          tmp=$(mktemp)
+          jq --arg v "$VERSION" '
+            .version = $v |
+            .optionalDependencies = (.optionalDependencies | with_entries(.value = $v))
+          ' package.json > "$tmp"
+          mv "$tmp" package.json
+
+      - name: Publish platform packages
+        run: |
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            echo "Publishing @gitspace/$target@${{ needs.resolve-version.outputs.version }}..."
+            npm publish ./npm/$target --access public --tag ${{ inputs.dist_tag || 'next' }}
+          done
+
+      - name: Publish main package
+        run: npm publish . --access public --tag ${{ inputs.dist_tag || 'next' }}
+
+      - name: Commit version bump and tag
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore: publish v${VERSION}"
+          git tag "v${VERSION}"
+          git push
+          git push --tags
