@@ -134,6 +134,13 @@ jobs:
           ' package.json > "$tmp"
           mv "$tmp" package.json
 
+      - name: Debug OIDC context
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REPOSITORY_OWNER=$GITHUB_REPOSITORY_OWNER"
+          echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
+          echo "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF"
+
       - name: Publish platform packages
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
