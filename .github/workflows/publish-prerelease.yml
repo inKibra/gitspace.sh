@@ -54,9 +54,9 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
           - target: darwin-x64
-            runner: macos-13
+            runner: macos-15-intel
           - target: linux-x64
             runner: ubuntu-latest
           - target: linux-arm64

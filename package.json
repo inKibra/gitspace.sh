@@ -5,6 +5,7 @@
   "bin": {
     "gssh": "./bin/gssh"
   },
+  "files": ["bin", "README.md", "LICENSE"],
   "type": "module",
   "scripts": {
     "dev": "bun src/index.ts",
