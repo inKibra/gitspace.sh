@@ -97,7 +97,7 @@ jobs:
 
       # Ensure npm is new enough for OIDC trusted publishing (requires 11.5.1+)
       - name: Update npm
-        run: npm install -g npm@latest
+        run: npm install -g npm@latest && npm --version
 
       # Confirm OIDC tokens are present before attempting publish
       - name: Verify OIDC environment
@@ -138,11 +138,11 @@ jobs:
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             echo "Publishing @gitspace/$target@${{ needs.resolve-version.outputs.version }}..."
-            npm publish ./npm/$target --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
+            npm publish ./npm/$target --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }} --loglevel verbose
           done
 
       - name: Publish main package
-        run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
+        run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }} --loglevel verbose
 
       - name: Commit version bump and tag
         run: |
