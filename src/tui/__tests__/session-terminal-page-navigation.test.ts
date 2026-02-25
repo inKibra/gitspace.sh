@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   canConsumePageNavigationInViewport,
   getPageNavigationEscapeSequence,
+  shouldBypassScrollboxKeyHandling,
   shouldConsumePageNavigationInScrollbox,
 } from '../../components/session-terminal-page-navigation.js'
 
@@ -90,5 +91,17 @@ describe('session terminal page navigation helpers', () => {
   it('returns standard escape sequences for page keys', () => {
     expect(getPageNavigationEscapeSequence('up')).toBe('\x1b[5~')
     expect(getPageNavigationEscapeSequence('down')).toBe('\x1b[6~')
+  })
+
+  it('bypasses scrollbox key handling for terminal navigation keys', () => {
+    expect(shouldBypassScrollboxKeyHandling('up')).toBe(true)
+    expect(shouldBypassScrollboxKeyHandling('down')).toBe(true)
+    expect(shouldBypassScrollboxKeyHandling('home')).toBe(true)
+    expect(shouldBypassScrollboxKeyHandling('end')).toBe(true)
+    expect(shouldBypassScrollboxKeyHandling('pageup')).toBe(true)
+    expect(shouldBypassScrollboxKeyHandling('pagedown')).toBe(true)
+
+    expect(shouldBypassScrollboxKeyHandling('left')).toBe(false)
+    expect(shouldBypassScrollboxKeyHandling(undefined)).toBe(false)
   })
 })

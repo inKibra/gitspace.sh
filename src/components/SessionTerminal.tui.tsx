@@ -14,6 +14,7 @@ import { toast } from '@opentui-ui/toast';
 import { copyToClipboard } from '../utils/clipboard.js';
 import {
   getPageNavigationEscapeSequence,
+  shouldBypassScrollboxKeyHandling,
   shouldConsumePageNavigationInScrollbox,
 } from './session-terminal-page-navigation.js';
 
@@ -260,6 +261,10 @@ export function SessionTerminal({
   useKeyboard((key) => {
     if (modalOpen) {
       return;
+    }
+
+    if (shouldBypassScrollboxKeyHandling(key.name)) {
+      key.preventDefault();
     }
 
     if (key.name === 'escape' && key.ctrl) {

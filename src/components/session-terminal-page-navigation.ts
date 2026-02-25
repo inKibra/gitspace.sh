@@ -1,5 +1,14 @@
 export type PageDirection = 'up' | 'down';
 
+const SESSION_SCROLLBOX_BYPASS_KEYS = new Set([
+  'up',
+  'down',
+  'home',
+  'end',
+  'pageup',
+  'pagedown',
+]);
+
 interface ScrollboxPageNavigationState {
   direction: PageDirection;
   scrollTop: number;
@@ -45,4 +54,12 @@ export function canConsumePageNavigationInViewport({
 
 export function getPageNavigationEscapeSequence(direction: PageDirection): string {
   return direction === 'up' ? '\x1b[5~' : '\x1b[6~';
+}
+
+export function shouldBypassScrollboxKeyHandling(keyName?: string): boolean {
+  if (!keyName) {
+    return false;
+  }
+
+  return SESSION_SCROLLBOX_BYPASS_KEYS.has(keyName);
 }
