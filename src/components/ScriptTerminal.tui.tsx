@@ -2,17 +2,37 @@
  * ScriptTerminal - read-only terminal for workspace script output.
  */
 
-import { useState, useRef, useCallback, useEffect, useImperativeHandle, forwardRef } from 'react';
-import { extend, useRenderer } from '@opentui/react';
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  forwardRef,
+} from 'react';
+import { extend, useKeyboard, useRenderer } from '@opentui/react';
+import type { ScrollBoxRenderable } from '@opentui/core';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import { toast } from '@opentui-ui/toast';
 import type { WorkspaceScriptPhase } from '../types/script-phase.js';
 import { copyToClipboard } from '../utils/clipboard.js';
-import { ScriptTerminalBuffer } from './script-terminal-buffer.tui.js';
+import { shouldConsumePageNavigationInScrollbox } from './session-terminal-page-navigation.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
 
 type ScriptPhase = WorkspaceScriptPhase | 'remove';
+
+type PhaseStatus = 'running' | 'complete' | 'failed';
+
+interface PhaseTerminalState {
+  id: string;
+  phase: ScriptPhase;
+  status: PhaseStatus;
+  error?: string;
+  exitCode?: number;
+  outputChunks: Buffer[];
+  target: GhosttyTerminalRenderable | null;
+}
 
 export interface ScriptTerminalProps {
   phase: ScriptPhase;
@@ -20,6 +40,7 @@ export interface ScriptTerminalProps {
   isRunning: boolean;
   error?: string;
   exitCode?: number;
+  modalOpen?: boolean;
 }
 
 export interface ScriptTerminalHandle {
@@ -29,6 +50,7 @@ export interface ScriptTerminalHandle {
 const COLORS = {
   statusBar: '#333333',
   phase: '#00FF88',
+  phaseActive: '#00AAFF',
   textDim: '#888888',
   runningHint: '#FFAA00',
   error: '#FF4444',
@@ -36,10 +58,10 @@ const COLORS = {
 };
 
 const PHASE_NAMES: Record<ScriptPhase, string> = {
-  pre: 'Pre Scripts',
-  setup: 'Setup Scripts',
-  select: 'Select Scripts',
-  remove: 'Remove Scripts',
+  pre: 'Pre',
+  setup: 'Setup',
+  select: 'Select',
+  remove: 'Remove',
 };
 
 function getTerminalSize(reservedRows: number) {
@@ -58,14 +80,67 @@ function getTerminalSize(reservedRows: number) {
   };
 }
 
+function toPhaseStatus(isRunning: boolean, error?: string): PhaseStatus {
+  if (isRunning) {
+    return 'running';
+  }
+  if (error) {
+    return 'failed';
+  }
+  return 'complete';
+}
+
+function createPhaseEntry(
+  phase: ScriptPhase,
+  isRunning: boolean,
+  error?: string,
+  exitCode?: number
+): PhaseTerminalState {
+  return {
+    id: `${phase}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    phase,
+    status: toPhaseStatus(isRunning, error),
+    error,
+    exitCode,
+    outputChunks: [],
+    target: null,
+  };
+}
+
+function getPhaseMarker(status: PhaseStatus): string {
+  switch (status) {
+    case 'complete':
+      return ' ok';
+    case 'failed':
+      return ' x';
+    case 'running':
+    default:
+      return ' ...';
+  }
+}
+
 export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalProps>(
-  function ScriptTerminal({ phase, workspaceName, isRunning, error, exitCode }, ref) {
-    const showErrorBanner = !!error && !isRunning;
-    const reservedRows = 2 + (showErrorBanner ? 1 : 0);
-    const [termSize, setTermSize] = useState(() => getTerminalSize(reservedRows));
+  function ScriptTerminal({ phase, workspaceName, isRunning, error, exitCode, modalOpen = false }, ref) {
     const renderer = useRenderer();
 
-    const bufferRef = useRef<ScriptTerminalBuffer>(new ScriptTerminalBuffer());
+    const [phaseEntries, setPhaseEntries] = useState<PhaseTerminalState[]>(() => [
+      createPhaseEntry(phase, isRunning, error, exitCode),
+    ]);
+    const phaseEntriesRef = useRef<PhaseTerminalState[]>(phaseEntries);
+    const previousPhaseRef = useRef<ScriptPhase>(phase);
+    const [activePhaseIndex, setActivePhaseIndex] = useState(0);
+    const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null);
+
+    const activeEntry = phaseEntries[activePhaseIndex] ?? phaseEntries[phaseEntries.length - 1];
+    const activeError = activeEntry?.status === 'failed' ? activeEntry.error : undefined;
+
+    const showErrorBanner = !!activeError && !isRunning;
+    const reservedRows = 3 + (showErrorBanner ? 1 : 0);
+    const [termSize, setTermSize] = useState(() => getTerminalSize(reservedRows));
+
+    useEffect(() => {
+      phaseEntriesRef.current = phaseEntries;
+    }, [phaseEntries]);
 
     useEffect(() => {
       const onResize = () => {
@@ -77,6 +152,59 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
         process.removeListener('SIGWINCH', onResize);
       };
     }, [reservedRows]);
+
+    useEffect(() => {
+      const switchedPhase = previousPhaseRef.current !== phase;
+      previousPhaseRef.current = phase;
+
+      setPhaseEntries((prev) => {
+        if (prev.length === 0) {
+          return [createPhaseEntry(phase, isRunning, error, exitCode)];
+        }
+
+        const last = prev[prev.length - 1];
+        if (last.phase === phase) {
+          const next = [...prev];
+          next[next.length - 1] = {
+            ...last,
+            status: toPhaseStatus(isRunning, error),
+            error,
+            exitCode,
+          };
+          return next;
+        }
+
+        const next = [...prev];
+        if (next.length > 0 && next[next.length - 1]?.status === 'running') {
+          next[next.length - 1] = {
+            ...next[next.length - 1],
+            status: 'complete',
+          };
+        }
+        next.push(createPhaseEntry(phase, isRunning, error, exitCode));
+        return next;
+      });
+
+      if (switchedPhase) {
+        setActivePhaseIndex(phaseEntriesRef.current.length);
+      }
+    }, [phase, isRunning, error, exitCode]);
+
+    useEffect(() => {
+      setActivePhaseIndex((current) => {
+        const maxIndex = phaseEntries.length - 1;
+        if (maxIndex < 0) {
+          return 0;
+        }
+        if (current > maxIndex) {
+          return maxIndex;
+        }
+        if (current < 0) {
+          return 0;
+        }
+        return current;
+      });
+    }, [phaseEntries.length]);
 
     const handleMouseUp = useCallback(async () => {
       const text = renderer.getSelection()?.getSelectedText();
@@ -94,13 +222,94 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
       renderer.clearSelection();
     }, [renderer]);
 
+    useKeyboard((key) => {
+      if (modalOpen) {
+        return;
+      }
+
+      if (key.name === 'left' || key.raw === '[') {
+        setActivePhaseIndex((current) => Math.max(0, current - 1));
+        return;
+      }
+
+      if (key.name === 'right' || key.raw === ']') {
+        setActivePhaseIndex((current) => Math.min(phaseEntriesRef.current.length - 1, current + 1));
+        return;
+      }
+
+      const scrollBox = scrollBoxRef.current;
+      if (!scrollBox) {
+        return;
+      }
+
+      if (key.name === 'up' || key.raw === 'k') {
+        scrollBox.scrollBy(-1);
+        return;
+      }
+
+      if (key.name === 'down' || key.raw === 'j') {
+        scrollBox.scrollBy(1);
+        return;
+      }
+
+      if (
+        key.name === 'pageup' &&
+        shouldConsumePageNavigationInScrollbox({
+          direction: 'up',
+          scrollTop: scrollBox.scrollTop,
+          scrollHeight: scrollBox.scrollHeight,
+          viewportHeight: scrollBox.viewport.height,
+        })
+      ) {
+        scrollBox.scrollBy(-1, 'viewport');
+        return;
+      }
+
+      if (
+        key.name === 'pagedown' &&
+        shouldConsumePageNavigationInScrollbox({
+          direction: 'down',
+          scrollTop: scrollBox.scrollTop,
+          scrollHeight: scrollBox.scrollHeight,
+          viewportHeight: scrollBox.viewport.height,
+        })
+      ) {
+        scrollBox.scrollBy(1, 'viewport');
+      }
+    });
+
     const feed = useCallback((data: Uint8Array) => {
-      bufferRef.current.feed(data);
+      const entries = phaseEntriesRef.current;
+      if (entries.length === 0) {
+        return;
+      }
+
+      const chunk = Buffer.from(data);
+      const current = entries[entries.length - 1];
+      if (!current) {
+        return;
+      }
+
+      current.outputChunks.push(chunk);
+      current.target?.feed(chunk);
     }, []);
 
-    const setTerminalRef = useCallback((el: GhosttyTerminalRenderable | null) => {
-      bufferRef.current.setTarget(el);
-    }, []);
+    const setActiveTerminalRef = useCallback((el: GhosttyTerminalRenderable | null) => {
+      const entries = phaseEntriesRef.current;
+      const current = entries[activePhaseIndex];
+      if (!current) {
+        return;
+      }
+
+      const justMounted = current.target === null && el !== null;
+      current.target = el;
+
+      if (!justMounted || !el || current.outputChunks.length === 0) {
+        return;
+      }
+
+      el.feed(Buffer.concat(current.outputChunks));
+    }, [activePhaseIndex]);
 
     useImperativeHandle(ref, () => ({ feed }), [feed]);
 
@@ -116,6 +325,13 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
         ? COLORS.error
         : COLORS.success;
 
+    const stickyToBottom = isRunning && activePhaseIndex === phaseEntries.length - 1;
+    const phaseHint = isRunning
+      ? '[c] Cancel  [mouse] Select+copy'
+      : activeError
+        ? '[[/]] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [mouse] Select+copy'
+        : '[[/]] Phase  [↑/↓ PgUp/PgDn] Scroll  [mouse] Select+copy';
+
     return (
       <box flexDirection="column" flexGrow={1}>
         <box
@@ -127,21 +343,37 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
           paddingRight={1}
         >
           <box flexGrow={1} flexDirection="row">
-            <text fg={COLORS.phase}>{PHASE_NAMES[phase]}</text>
+            {phaseEntries.map((entry, index) => {
+              const isActive = index === activePhaseIndex;
+              const color = isActive ? COLORS.phaseActive : COLORS.phase;
+              return (
+                <text key={entry.id} fg={color}>
+                  {index > 0 ? ' ' : ''}[{PHASE_NAMES[entry.phase]}{getPhaseMarker(entry.status)}]
+                </text>
+              );
+            })}
             <text fg={COLORS.textDim}> - {workspaceName}</text>
           </box>
           <text fg={statusColor}>{statusText}</text>
         </box>
 
+        <box height={1} width="100%" backgroundColor="#222222" paddingLeft={1}>
+          <text fg={COLORS.textDim}>{phaseHint}</text>
+        </box>
+
         <scrollbox
+          ref={(el: ScrollBoxRenderable | null) => {
+            scrollBoxRef.current = el;
+          }}
           flexGrow={1}
           viewportCulling={true}
-          stickyScroll={true}
+          stickyScroll={stickyToBottom}
           stickyStart="bottom"
           onMouseUp={handleMouseUp}
         >
           <ghostty-terminal
-            ref={setTerminalRef}
+            key={activeEntry?.id ?? 'script-terminal-empty'}
+            ref={setActiveTerminalRef}
             persistent={true}
             showCursor={false}
             cols={termSize.cols}
@@ -149,9 +381,9 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
           />
         </scrollbox>
 
-        {error && !isRunning && (
+        {activeError && !isRunning && (
           <box height={1} width="100%" backgroundColor="#331111" paddingLeft={1}>
-            <text fg={COLORS.error}>{error}</text>
+            <text fg={COLORS.error}>{activeError}</text>
           </box>
         )}
       </box>

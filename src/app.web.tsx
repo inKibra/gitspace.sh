@@ -65,6 +65,15 @@ const DELETE_ERROR_CODES = new Set([
   'NOT_FOUND',
 ]);
 
+const SCRIPT_ERROR_CODES = new Set([
+  'SCRIPT_CANCELLED',
+  'SCRIPT_FAILED',
+  'PRE_SCRIPT_FAILED',
+  'SETUP_SCRIPT_FAILED',
+  'SELECT_SCRIPT_FAILED',
+  'REMOVE_SCRIPT_FAILED',
+]);
+
 export default function App() {
   const [view, setView] = useState<View>("machines");
   const [selectedMachine, setSelectedMachine] = useState<MachineInfo | null>(null);
@@ -97,6 +106,7 @@ export default function App() {
   const terminalRef = useRef<SessionTerminalHandle>(null);
   const lastScriptErrorRef = useRef<string | null>(null);
   const lastCommandErrorRef = useRef<string | null>(null);
+  const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const suppressDeleteScriptFailureModalRef = useRef(false);
 
   // Review workspace/project state
@@ -175,12 +185,16 @@ export default function App() {
       }
 
       if (params.workspaceId && !params.command) {
+        lastScriptWorkspaceIdRef.current = params.workspaceId;
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
       }
     },
     onAttachCancelled: ({ target }) => {
+      if (target === 'workspace' && showScriptTerminal) {
+        return;
+      }
       if (target === 'workspace') {
         setShowScriptTerminal(false);
       }
@@ -364,6 +378,11 @@ export default function App() {
       return;
     }
 
+    if (terminal.commandError?.code && SCRIPT_ERROR_CODES.has(terminal.commandError.code)) {
+      lastScriptErrorRef.current = scriptError;
+      return;
+    }
+
     if (lastScriptErrorRef.current === scriptError) {
       return;
     }
@@ -374,7 +393,7 @@ export default function App() {
       message: scriptError,
       variant: 'error',
     });
-  }, [flow, terminal.scriptState?.error]);
+  }, [flow, terminal.commandError?.code, terminal.scriptState?.error]);
 
   useEffect(() => {
     if (!terminal.commandError) {
@@ -396,13 +415,9 @@ export default function App() {
       return;
     }
 
-    const isScriptFailure =
-      terminal.commandError.code === 'SCRIPT_CANCELLED' ||
-      terminal.commandError.code === 'SCRIPT_FAILED' ||
-      terminal.commandError.code === 'PRE_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SETUP_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SELECT_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'REMOVE_SCRIPT_FAILED';
+    const isScriptFailure = terminal.commandError.code
+      ? SCRIPT_ERROR_CODES.has(terminal.commandError.code)
+      : false;
 
     if (isScriptFailure) {
       if (!terminal.scriptState) {
@@ -1114,7 +1129,22 @@ export default function App() {
           error={terminal.scriptState?.error}
           exitCode={terminal.scriptState?.exitCode}
           setWriteCallback={terminal.setWriteCallback}
-          onBack={() => setShowScriptTerminal(false)}
+          canAttachAnyway={Boolean(!isRunning && terminal.scriptState?.error && lastScriptWorkspaceIdRef.current)}
+          onAttachAnyway={async () => {
+            const workspaceId = lastScriptWorkspaceIdRef.current;
+            if (!workspaceId) {
+              return;
+            }
+
+            await attachController.attach({
+              workspaceId,
+              scriptPolicy: 'skip',
+            });
+          }}
+          onBack={() => {
+            lastScriptWorkspaceIdRef.current = null;
+            setShowScriptTerminal(false);
+          }}
           onCancel={() => {
             terminal.cancelPendingScripts();
           }}

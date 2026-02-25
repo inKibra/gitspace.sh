@@ -24,6 +24,17 @@ interface FlowWebProps {
 export function FlowWeb({ flow }: FlowWebProps) {
   const { flow: state, isOpen, handleConfirm, handleCancel, moveUp, moveDown } = flow;
 
+  const copyCurrentMessage = () => {
+    const message = state.type === 'message' || state.type === 'confirm'
+      ? state.message
+      : null;
+    if (!message || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+      return;
+    }
+
+    void navigator.clipboard.writeText(message);
+  };
+
   // Debug: log when modal state changes
   useEffect(() => {
     if (isOpen) {
@@ -54,12 +65,15 @@ export function FlowWeb({ flow }: FlowWebProps) {
       } else if (state.type === 'confirm' && (e.key === 'n' || e.key === 'N')) {
         e.preventDefault();
         handleCancel();
+      } else if ((state.type === 'message' || state.type === 'confirm') && (e.key === 'c' || e.key === 'C')) {
+        e.preventDefault();
+        copyCurrentMessage();
       }
     };
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isOpen, state.type, handleConfirm, handleCancel, moveUp, moveDown]);
+  }, [copyCurrentMessage, isOpen, state.type, handleConfirm, handleCancel, moveUp, moveDown]);
 
   if (!isOpen) return null;
 
@@ -76,7 +90,7 @@ export function FlowWeb({ flow }: FlowWebProps) {
       />
       {/* Modal */}
       <div className="relative" style={{ zIndex: 10000, position: 'relative' }}>
-        {renderModal(state, flow)}
+        {renderModal(state, flow, copyCurrentMessage)}
       </div>
     </div>
   );
@@ -89,7 +103,7 @@ export function FlowWeb({ flow }: FlowWebProps) {
 // Modal Renderers
 // ============================================================================
 
-function renderModal(state: FlowState, flow: UseFlowReturn) {
+function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: () => void) {
   switch (state.type) {
     case 'none':
       return null;
@@ -97,10 +111,16 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
     case 'message':
       return (
         <Modal title={state.title}>
-          <p className={`mb-4 ${getVariantClass(state.variant)}`}>
+          <p className={`mb-4 whitespace-pre-wrap max-h-80 overflow-y-auto ${getVariantClass(state.variant)}`}>
             {state.message}
           </p>
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={copyCurrentMessage}
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
+            >
+              Copy (C)
+            </button>
             <button
               onClick={flow.handleConfirm}
               className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
@@ -146,10 +166,16 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
     case 'confirm':
       return (
         <Modal title={state.title}>
-          <p className={`mb-4 ${getVariantClass(state.variant)}`}>
+          <p className={`mb-4 whitespace-pre-wrap max-h-80 overflow-y-auto ${getVariantClass(state.variant)}`}>
             {state.message}
           </p>
           <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
+            <button
+              onClick={copyCurrentMessage}
+              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
+            >
+              Copy (C)
+            </button>
             <button
               onClick={flow.handleCancel}
               className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"

@@ -266,6 +266,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   // Track when we're switching sessions (to prevent detach handler from navigating away)
   const sessionSwitchingRef = useRef(false);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
+  const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const renderer = useRenderer();
 
   // Shared Flow hook (for non-workspace flows)
@@ -423,6 +424,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       sessionSwitchingRef.current = true;
 
       if (target === 'workspace' && params.workspaceId && !params.command) {
+        lastScriptWorkspaceIdRef.current = params.workspaceId;
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         dispatch({ type: 'SET_VIEW', view: 'scripts' });
       }
@@ -430,7 +432,10 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     onAttachSuccess: () => {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
-    onAttachCancelled: () => {
+    onAttachCancelled: ({ target }) => {
+      if (target === 'workspace' && state.view === 'scripts') {
+        return;
+      }
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onAttachError: ({ target, message }) => {
@@ -1395,12 +1400,31 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
 
       if (
         !localScriptState?.isRunning &&
+        (key.raw === 'a' || key.name === 'a') &&
+        !!localScriptState?.error &&
+        !!lastScriptWorkspaceIdRef.current
+      ) {
+        const workspaceId = lastScriptWorkspaceIdRef.current;
+        if (!workspaceId) {
+          return;
+        }
+
+        await attachLocal({
+          workspaceId,
+          scriptPolicy: 'skip',
+        });
+        return;
+      }
+
+      if (
+        !localScriptState?.isRunning &&
         (
           key.name === 'escape' ||
           key.name === 'n' ||
           key.raw === 'n'
         )
       ) {
+        lastScriptWorkspaceIdRef.current = null;
         dispatch({ type: 'SET_VIEW', view: 'projects' });
       }
       return;
@@ -1964,9 +1988,17 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
           isRunning={isRunning}
           error={localScriptState?.error}
           exitCode={localScriptState?.exitCode}
+          modalOpen={flow.isOpen}
         />
         {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar hint={isRunning ? '[Running scripts... c: cancel + attach anyway]' : '[Esc/n] Back to workspaces'} rightHint={keyboardModeHint} />
+        <StatusBar
+          hint={isRunning
+            ? '[Running scripts... c: cancel + attach anyway]'
+            : localScriptState?.error
+              ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
+              : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back'}
+          rightHint={keyboardModeHint}
+        />
       </Fragment>
     );
   }

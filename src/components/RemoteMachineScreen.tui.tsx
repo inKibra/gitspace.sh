@@ -66,6 +66,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
+  const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const flow = useFlow({
     onError: (error) => {
       remote.disconnect();
@@ -127,12 +128,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
     onBeforeAttach: ({ target, params }) => {
       if (target === 'workspace' && params.workspaceId && !params.command) {
+        lastScriptWorkspaceIdRef.current = params.workspaceId;
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
       }
     },
     onAttachCancelled: ({ target }) => {
+      if (target === 'workspace' && showScriptTerminal) {
+        return;
+      }
       if (target === 'workspace') {
         setShowScriptTerminal(false);
       }
@@ -555,8 +560,27 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
       if (
         !remote.scriptState?.isRunning &&
+        !!remote.scriptState?.error &&
+        (key.raw === 'a' || key.name === 'a') &&
+        !!lastScriptWorkspaceIdRef.current
+      ) {
+        const workspaceId = lastScriptWorkspaceIdRef.current;
+        if (!workspaceId) {
+          return;
+        }
+
+        await attachController.attach({
+          workspaceId,
+          scriptPolicy: 'skip',
+        });
+        return;
+      }
+
+      if (
+        !remote.scriptState?.isRunning &&
         (key.name === 'escape' || key.name === 'n' || key.raw === 'n')
       ) {
+        lastScriptWorkspaceIdRef.current = null;
         setShowScriptTerminal(false);
       }
       return;
@@ -723,9 +747,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           isRunning={isRunning}
           error={remote.scriptState?.error}
           exitCode={remote.scriptState?.exitCode}
+          modalOpen={flow.isOpen}
         />
         {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar hint={isRunning ? '[Running scripts... c: cancel + attach anyway]' : '[Esc/n] Back to workspaces'} />
+        <StatusBar
+          hint={isRunning
+            ? '[Running scripts... c: cancel + attach anyway]'
+            : remote.scriptState?.error
+              ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
+              : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back'}
+        />
       </Fragment>
     );
   }

@@ -217,27 +217,6 @@ async function showNoChangeRetryPrompt(
   });
 }
 
-async function showScriptFailureRetryPrompt(
-  flow: UseBundleRefreshAttachFlowOptions['flow'],
-  message: string
-): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    flow.showConfirm({
-      title: 'Workspace Scripts Failed',
-      message: `${message}\n\nAttach anyway and skip scripts for this session?`,
-      variant: 'warning',
-      confirmLabel: 'Attach anyway',
-      cancelLabel: 'Cancel',
-      onConfirm: () => {
-        resolve(true);
-      },
-      onCancel: () => {
-        resolve(false);
-      },
-    });
-  });
-}
-
 async function runRefreshWizard(
   flow: UseBundleRefreshAttachFlowOptions['flow'],
   plan: BundleRefreshPlan
@@ -467,41 +446,17 @@ export function useBundleRefreshAttachFlow(
     [clearPendingAttach]
   );
 
-  const executeScriptFailureOverride = useCallback(
+  const executeScriptFailureNotice = useCallback(
     async (pending: PendingAttach, message: string): Promise<boolean> => {
       const currentOptions = optionsRef.current;
-      const attachAnyway = await showScriptFailureRetryPrompt(currentOptions.flow, message);
-      if (!attachAnyway) {
-        currentOptions.flow.showMessage({
-          title: 'Session Attach Cancelled',
-          message: 'Session attach was cancelled after script failure.',
-          variant: 'warning',
-        });
-        return false;
-      }
-
-      try {
-        // Do not block ScriptTerminal with loading overlays while attach retries.
-        currentOptions.flow.close();
-        await Promise.resolve(currentOptions.attachSession({
-          ...pending.params,
-          scriptPolicy: 'skip',
-        }));
-        currentOptions.flow.close();
-        return true;
-      } catch (error) {
-        const latestOptions = optionsRef.current;
-        latestOptions.flow.close();
-        latestOptions.flow.showMessage({
-          title: 'Session Attach Failed',
-          message: toErrorMessage(error, 'Failed to attach session after script failure.'),
-          variant: 'error',
-        });
-        return false;
-      } finally {
-        lastHandledAttemptRef.current = pending.attemptId;
-        clearPendingAttach(pending.attemptId);
-      }
+      currentOptions.flow.showMessage({
+        title: 'Workspace Script Failed',
+        message,
+        variant: 'error',
+      });
+      lastHandledAttemptRef.current = pending.attemptId;
+      clearPendingAttach(pending.attemptId);
+      return false;
     },
     [clearPendingAttach]
   );
@@ -545,7 +500,7 @@ export function useBundleRefreshAttachFlow(
 
         if (code && SCRIPT_FAILURE_CODES.has(code)) {
           lastHandledAttemptRef.current = pending.attemptId;
-          return executeScriptFailureOverride(
+          return executeScriptFailureNotice(
             pending,
             toErrorMessage(error, 'Workspace scripts failed while preparing the session.')
           );
@@ -556,7 +511,7 @@ export function useBundleRefreshAttachFlow(
         throw error;
       }
     },
-    [clearPendingAttach, executeBundleRefresh, executeScriptFailureOverride, schedulePendingAttachExpiry]
+    [clearPendingAttach, executeBundleRefresh, executeScriptFailureNotice, schedulePendingAttachExpiry]
   );
 
   useEffect(() => {
@@ -586,13 +541,13 @@ export function useBundleRefreshAttachFlow(
     }
 
     if (SCRIPT_FAILURE_CODES.has(commandError.code)) {
-      void executeScriptFailureOverride(pending, commandError.message);
+      void executeScriptFailureNotice(pending, commandError.message);
       return;
     }
 
     lastHandledAttemptRef.current = pending.attemptId;
     clearPendingAttach(pending.attemptId);
-  }, [clearPendingAttach, executeBundleRefresh, executeScriptFailureOverride, options.commandError]);
+  }, [clearPendingAttach, executeBundleRefresh, executeScriptFailureNotice, options.commandError]);
 
   useEffect(() => {
     return () => {

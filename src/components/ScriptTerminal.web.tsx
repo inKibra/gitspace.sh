@@ -12,6 +12,8 @@ interface Props {
   error?: string;
   exitCode?: number;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
+  canAttachAnyway?: boolean;
+  onAttachAnyway?: () => void | Promise<void>;
   onBack: () => void;
   onCancel?: () => void;
 }
@@ -30,6 +32,8 @@ export function ScriptTerminal({
   error,
   exitCode,
   setWriteCallback,
+  canAttachAnyway = false,
+  onAttachAnyway,
   onBack,
   onCancel,
 }: Props) {
@@ -69,12 +73,24 @@ export function ScriptTerminal({
             </button>
           )}
           {!isRunning && (
-            <button
-              onClick={onBack}
-              className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] border border-[#30363d]"
-            >
-              Back
-            </button>
+            <>
+              {canAttachAnyway && onAttachAnyway && (
+                <button
+                  onClick={() => {
+                    void onAttachAnyway();
+                  }}
+                  className="px-3 py-2 text-sm bg-[#0f3d2e] hover:bg-[#14553f] rounded text-[#b6f2d6] border border-[#2f8f68]"
+                >
+                  Attach Anyway
+                </button>
+              )}
+              <button
+                onClick={onBack}
+                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] border border-[#30363d]"
+              >
+                Back
+              </button>
+            </>
           )}
         </div>
       </div>
