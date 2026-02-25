@@ -227,14 +227,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
 export interface AppProps {
   relayConfig?: RelayConfig;
   onQuit?: () => void;
+  keyboardMode: 'kitty' | 'vt';
 }
 
 // ============================================================================
 // Main App Component
 // ============================================================================
 
-function App({ relayConfig, onQuit }: AppProps) {
+function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   const isRemoteMode = !!relayConfig;
+  const keyboardModeHint = `kbd: ${keyboardMode}`;
 
   // Force re-render counter for resize
   const [, forceUpdate] = useState(0);
@@ -1893,7 +1895,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         <Toaster position="top-right" />
         <box flexDirection="column" flexGrow={1}>
           <MachineListTUI {...machineListProps} focused={true} />
-          <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" />
+          <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" rightHint={keyboardModeHint} />
           <FlowTUI flow={flow} />
         </box>
       </Fragment>
@@ -1942,7 +1944,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         <Toaster position="top-right" />
         <EventsTui {...eventsProps} />
         <FlowTUI flow={flow} />
-        <StatusBar hint="[Esc/q] Back  [j/k] Navigate" />
+        <StatusBar hint="[Esc/q] Back  [j/k] Navigate" rightHint={keyboardModeHint} />
       </Fragment>
     );
   }
@@ -1964,7 +1966,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           exitCode={localScriptState?.exitCode}
         />
         {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar hint={isRunning ? '[Running scripts... c: cancel + attach anyway]' : '[Esc/n] Back to workspaces'} />
+        <StatusBar hint={isRunning ? '[Running scripts... c: cancel + attach anyway]' : '[Esc/n] Back to workspaces'} rightHint={keyboardModeHint} />
       </Fragment>
     );
   }
@@ -2072,6 +2074,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
           : getWorkspacesPanelHint(spacesBrowserProps.selectedItem)
         }
+        rightHint={keyboardModeHint}
       />
 
       {/* Flow modal overlay */}
@@ -2336,10 +2339,118 @@ function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): stri
 // Status Bar Component
 // ============================================================================
 
-function StatusBar({ hint }: { hint: string }) {
+function StatusBar({ hint, rightHint }: { hint: string; rightHint?: string }) {
   return (
-    <box width="100%" height={1} backgroundColor={COLORS.statusBar}>
-      <text fg={COLORS.textDim} paddingLeft={1}>{hint}</text>
+    <box width="100%" height={1} backgroundColor={COLORS.statusBar} flexDirection="row" paddingLeft={1} paddingRight={1}>
+      <box flexGrow={1}>
+        <text fg={COLORS.textDim}>{hint}</text>
+      </box>
+      {!!rightHint && <text fg={COLORS.textDim}>{rightHint}</text>}
+    </box>
+  );
+}
+
+type RequestedKeyboardMode = 'auto' | 'kitty' | 'vt';
+type ResolvedKeyboardMode = 'kitty' | 'vt';
+
+const TUI_KEYBOARD_MODE_ENV = 'GSSH_TUI_KEYBOARD_MODE';
+
+function resolveRequestedKeyboardMode(): RequestedKeyboardMode {
+  const raw = process.env[TUI_KEYBOARD_MODE_ENV]?.trim().toLowerCase();
+  if (!raw) {
+    return 'auto';
+  }
+
+  if (raw === 'auto' || raw === 'kitty' || raw === 'vt') {
+    return raw;
+  }
+
+  logger.warning(
+    `Ignoring invalid ${TUI_KEYBOARD_MODE_ENV}=${JSON.stringify(raw)} (expected auto|kitty|vt)`
+  );
+  return 'auto';
+}
+
+function looksLikeKittyEnterLeak(buffer: string): boolean {
+  return (
+    /\x1b\[(?:13|127)(?::\d+)*(?:;\d+(?::\d+)*)?u$/.test(buffer) ||
+    /;(?:\d+(?::\d+)*)u$/.test(buffer)
+  );
+}
+
+function createRendererForKeyboardMode(mode: ResolvedKeyboardMode) {
+  return createCliRenderer({
+    exitOnCtrlC: false,
+    targetFps: 30,
+    useMouse: true,
+    useKittyKeyboard: mode === 'vt' ? null : undefined,
+  });
+}
+
+function KeyboardWelcomeGate({
+  requestedMode,
+  onResolve,
+}: {
+  requestedMode: RequestedKeyboardMode;
+  onResolve: (mode: ResolvedKeyboardMode) => void;
+}) {
+  const resolvedRef = useRef(false);
+  const observedBufferRef = useRef('');
+  const preferredMode: ResolvedKeyboardMode = requestedMode === 'vt' ? 'vt' : 'kitty';
+
+  const resolveOnce = useCallback((mode: ResolvedKeyboardMode) => {
+    if (resolvedRef.current) {
+      return;
+    }
+
+    resolvedRef.current = true;
+    onResolve(mode);
+  }, [onResolve]);
+
+  useKeyboard((key) => {
+    if (resolvedRef.current) {
+      return;
+    }
+
+    if (key.name === 'return' || key.name === 'enter' || key.name === 'linefeed') {
+      key.preventDefault?.();
+      resolveOnce(preferredMode);
+      return;
+    }
+
+    if (requestedMode !== 'auto') {
+      return;
+    }
+
+    const chunk = key.raw || key.sequence || '';
+    if (!chunk) {
+      return;
+    }
+
+    observedBufferRef.current = (observedBufferRef.current + chunk).slice(-128);
+    if (looksLikeKittyEnterLeak(observedBufferRef.current)) {
+      key.preventDefault?.();
+      resolveOnce('vt');
+    }
+  });
+
+  const modeText =
+    requestedMode === 'auto'
+      ? 'auto (trying kitty first)'
+      : requestedMode === 'kitty'
+        ? 'kitty (forced)'
+        : 'vt compatibility (forced)';
+
+  return (
+    <box width="100%" height="100%" justifyContent="center" alignItems="center">
+      <box flexDirection="column" alignItems="center" gap={1} borderStyle="rounded" borderColor={COLORS.border} paddingLeft={3} paddingRight={3} paddingTop={1} paddingBottom={1}>
+        <text fg={COLORS.title}>Welcome to GitSpace</text>
+        <text fg={COLORS.text}>Press Enter to start</text>
+        <text fg={COLORS.textDim}>Keyboard mode: {modeText}</text>
+        {requestedMode === 'auto' && (
+          <text fg={COLORS.textDim}>If Enter decoding looks broken, we auto-switch to VT mode.</text>
+        )}
+      </box>
     </box>
   );
 }
@@ -2359,16 +2470,16 @@ export async function launchTUI(
     ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
   });
 
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    targetFps: 30,
-    useMouse: true,
-  });
-  const root = createRoot(renderer);
+  const requestedKeyboardMode = resolveRequestedKeyboardMode();
+  const initialKeyboardMode: ResolvedKeyboardMode = requestedKeyboardMode === 'vt' ? 'vt' : 'kitty';
+
+  let renderer = await createRendererForKeyboardMode(initialKeyboardMode);
+  let root = createRoot(renderer);
+  let activeRenderer = renderer;
 
   // Clean exit handler
   const handleQuit = () => {
-    renderer.destroy();
+    activeRenderer.destroy();
 
     const legacyReminder = consumeLegacyCleanupReminderForTui();
     if (legacyReminder) {
@@ -2389,6 +2500,29 @@ export async function launchTUI(
     process.stdout.write('\x1b[0m'); // Reset colors
   });
 
-  root.render(<App relayConfig={relayConfig} onQuit={handleQuit} />);
-  renderer.start();
+  const resolvedKeyboardMode = await new Promise<ResolvedKeyboardMode>((resolve) => {
+    root.render(
+      <KeyboardWelcomeGate
+        requestedMode={requestedKeyboardMode}
+        onResolve={(mode) => resolve(mode)}
+      />
+    );
+    activeRenderer.start();
+  });
+
+  if (
+    requestedKeyboardMode === 'auto' &&
+    resolvedKeyboardMode === 'vt' &&
+    initialKeyboardMode !== 'vt'
+  ) {
+    activeRenderer.destroy();
+    renderer = await createRendererForKeyboardMode('vt');
+    activeRenderer = renderer;
+    root = createRoot(renderer);
+    root.render(<App relayConfig={relayConfig} onQuit={handleQuit} keyboardMode={resolvedKeyboardMode} />);
+    renderer.start();
+    return;
+  }
+
+  root.render(<App relayConfig={relayConfig} onQuit={handleQuit} keyboardMode={resolvedKeyboardMode} />);
 }
