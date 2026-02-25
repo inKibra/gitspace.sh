@@ -30,7 +30,9 @@ describe("generateNonce", () => {
 describe("encrypt/decrypt", () => {
   test("encrypts and decrypts data", () => {
     const plaintext = Buffer.from("Hello, World!");
-    const { nonce, ciphertext } = encrypt(plaintext, testKey);
+    const result = encrypt(plaintext, testKey);
+    expect(result).not.toBeNull();
+    const { nonce, ciphertext } = result!;
 
     expect(nonce.length).toBe(NONCE_LENGTH);
     expect(ciphertext.length).toBe(plaintext.length + AUTH_TAG_LENGTH);
@@ -42,7 +44,9 @@ describe("encrypt/decrypt", () => {
 
   test("encrypts empty data", () => {
     const plaintext = Buffer.from("");
-    const { nonce, ciphertext } = encrypt(plaintext, testKey);
+    const result = encrypt(plaintext, testKey);
+    expect(result).not.toBeNull();
+    const { nonce, ciphertext } = result!;
 
     expect(ciphertext.length).toBe(AUTH_TAG_LENGTH);
 
@@ -53,7 +57,9 @@ describe("encrypt/decrypt", () => {
 
   test("encrypts large data", () => {
     const plaintext = randomBytes(1024 * 1024); // 1MB
-    const { nonce, ciphertext } = encrypt(plaintext, testKey);
+    const result = encrypt(plaintext, testKey);
+    expect(result).not.toBeNull();
+    const { nonce, ciphertext } = result!;
 
     const decrypted = decrypt(ciphertext, nonce, testKey);
     expect(decrypted).not.toBeNull();
@@ -64,14 +70,23 @@ describe("encrypt/decrypt", () => {
     const plaintext = Buffer.from("Hello, World!");
     const result1 = encrypt(plaintext, testKey);
     const result2 = encrypt(plaintext, testKey);
+    expect(result1).not.toBeNull();
+    expect(result2).not.toBeNull();
 
-    expect(result1.nonce.equals(result2.nonce)).toBe(false);
-    expect(result1.ciphertext.equals(result2.ciphertext)).toBe(false);
+    expect(result1!.nonce.equals(result2!.nonce)).toBe(false);
+    expect(result1!.ciphertext.equals(result2!.ciphertext)).toBe(false);
+  });
+
+  test("returns null for wrong key length", () => {
+    const plaintext = Buffer.from("Hello, World!");
+    expect(encrypt(plaintext, randomBytes(16))).toBeNull();
+    expect(encrypt(plaintext, randomBytes(31))).toBeNull();
+    expect(encrypt(plaintext, randomBytes(0))).toBeNull();
   });
 
   test("decryption fails with wrong key", () => {
     const plaintext = Buffer.from("Hello, World!");
-    const { nonce, ciphertext } = encrypt(plaintext, testKey);
+    const { nonce, ciphertext } = encrypt(plaintext, testKey)!;
 
     const wrongKey = randomBytes(32);
     const decrypted = decrypt(ciphertext, nonce, wrongKey);
@@ -80,7 +95,7 @@ describe("encrypt/decrypt", () => {
 
   test("decryption fails with wrong nonce", () => {
     const plaintext = Buffer.from("Hello, World!");
-    const { ciphertext } = encrypt(plaintext, testKey);
+    const { ciphertext } = encrypt(plaintext, testKey)!;
 
     const wrongNonce = generateNonce();
     const decrypted = decrypt(ciphertext, wrongNonce, testKey);
@@ -89,7 +104,7 @@ describe("encrypt/decrypt", () => {
 
   test("decryption fails with tampered ciphertext", () => {
     const plaintext = Buffer.from("Hello, World!");
-    const { nonce, ciphertext } = encrypt(plaintext, testKey);
+    const { nonce, ciphertext } = encrypt(plaintext, testKey)!;
 
     // Tamper with the ciphertext
     ciphertext[0] ^= 0xff;
@@ -99,7 +114,7 @@ describe("encrypt/decrypt", () => {
 
   test("decryption fails with tampered auth tag", () => {
     const plaintext = Buffer.from("Hello, World!");
-    const { nonce, ciphertext } = encrypt(plaintext, testKey);
+    const { nonce, ciphertext } = encrypt(plaintext, testKey)!;
 
     // Tamper with the auth tag (last 16 bytes)
     ciphertext[ciphertext.length - 1] ^= 0xff;
@@ -110,7 +125,7 @@ describe("encrypt/decrypt", () => {
   test("accepts Uint8Array inputs", () => {
     const plaintext = new Uint8Array([1, 2, 3, 4, 5]);
     const key = new Uint8Array(testKey);
-    const { nonce, ciphertext } = encrypt(plaintext, key);
+    const { nonce, ciphertext } = encrypt(plaintext, key)!;
 
     const decrypted = decrypt(ciphertext, nonce, key);
     expect(decrypted).not.toBeNull();

@@ -117,9 +117,12 @@ function decodeToken(encoded: string): string | null {
     return null;
   }
 
-  const value = trimmed.startsWith(`${ROOT_INVITE_TOKEN_PREFIX}:`)
-    ? trimmed.slice(ROOT_INVITE_TOKEN_PREFIX.length + 1)
-    : trimmed;
+  // Require the canonical prefix — bare base64url strings are rejected to
+  // prevent accidentally treating arbitrary data as invite tokens.
+  if (!trimmed.startsWith(`${ROOT_INVITE_TOKEN_PREFIX}:`)) {
+    return null;
+  }
+  const value = trimmed.slice(ROOT_INVITE_TOKEN_PREFIX.length + 1);
 
   if (!value) {
     return null;

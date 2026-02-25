@@ -111,6 +111,21 @@ export interface RunScriptsOptions {
    * Called with raw output from stdout/stderr. Only works when nonInteractive is true.
    */
   onOutput?: (data: Buffer) => void;
+  /** Optional cancellation signal for in-flight script execution. */
+  signal?: AbortSignal;
+}
+
+export class ScriptExecutionCancelledError extends Error {
+  readonly code = 'SCRIPT_CANCELLED';
+
+  constructor(message: string = 'Script execution cancelled by user.') {
+    super(message);
+    this.name = 'ScriptExecutionCancelledError';
+  }
+}
+
+export function isScriptExecutionCancelledError(error: unknown): error is ScriptExecutionCancelledError {
+  return error instanceof ScriptExecutionCancelledError;
 }
 
 type BundleValueKind = 'value' | 'secret';
@@ -243,6 +258,10 @@ export async function runScriptsInTerminal(
   repository: string,
   options?: RunScriptsOptions
 ): Promise<void> {
+  if (options?.signal?.aborted) {
+    throw new ScriptExecutionCancelledError();
+  }
+
   const scripts = discoverScripts(scriptsDir);
 
   if (scripts.length === 0) {
@@ -272,6 +291,10 @@ export async function runScriptsInTerminal(
   }
 
   for (const scriptPath of scripts) {
+    if (options?.signal?.aborted) {
+      throw new ScriptExecutionCancelledError();
+    }
+
     await new Promise<void>((resolve, reject) => {
       const scriptName = scriptPath.split('/').pop() || scriptPath;
       logger.dim(`  $ ${scriptName} ${workspaceName} ${repository}`);
@@ -289,6 +312,42 @@ export async function runScriptsInTerminal(
         env: scriptEnv,
       });
 
+      let settled = false;
+      let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const settle = (fn: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer);
+          forceKillTimer = null;
+        }
+
+        if (options?.signal) {
+          options.signal.removeEventListener('abort', handleAbort);
+        }
+
+        fn();
+      };
+
+      const handleAbort = () => {
+        if (settled) {
+          return;
+        }
+
+        child.kill('SIGTERM');
+        forceKillTimer = setTimeout(() => {
+          child.kill('SIGKILL');
+        }, 1500);
+      };
+
+      if (options?.signal) {
+        options.signal.addEventListener('abort', handleAbort, { once: true });
+      }
+
       // Capture output in non-interactive mode for logging on failure
       // Also stream to onOutput callback if provided (for TUI/Web terminal display)
       let output = '';
@@ -304,31 +363,44 @@ export async function runScriptsInTerminal(
       }
 
       child.on('close', (code: number | null) => {
-        if (code !== 0) {
-          // Log captured output on failure in non-interactive mode
-          if (options?.nonInteractive && output) {
-            logger.debug(`Script output:\n${output}`);
-          }
-          reject(
-            new SpacesError(
-              formatScriptFailureMessage(scriptName, code, output),
-              'SYSTEM_ERROR',
-              2
-            )
-          );
-        } else {
-          resolve();
+        if (options?.signal?.aborted) {
+          settle(() => reject(new ScriptExecutionCancelledError()));
+          return;
         }
+
+        if (code !== 0) {
+          settle(() => {
+            // Log captured output on failure in non-interactive mode
+            if (options?.nonInteractive && output) {
+              logger.debug(`Script output:\n${output}`);
+            }
+            reject(
+              new SpacesError(
+                formatScriptFailureMessage(scriptName, code, output),
+                'SYSTEM_ERROR',
+                2
+              )
+            );
+          });
+          return;
+        }
+
+        settle(resolve);
       });
 
       child.on('error', (error: Error) => {
-        reject(
+        if (options?.signal?.aborted) {
+          settle(() => reject(new ScriptExecutionCancelledError()));
+          return;
+        }
+
+        settle(() => reject(
           new SpacesError(
             `Failed to run script: ${error.message}`,
             'SYSTEM_ERROR',
             2
           )
-        );
+        ));
       });
     });
   }

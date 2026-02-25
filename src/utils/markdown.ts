@@ -5,8 +5,11 @@
 
 import { writeFileSync } from 'fs'
 import { join, extname } from 'path'
-import type { LinearIssue as Issue, LinearAttachment } from '../types/workspace'
+import type { LinearIssue as Issue } from '../types/workspace'
+import type { SessionLinearIssueSummary } from '../types/lifecycle.js'
 import { logger } from './logger.js'
+
+type MarkdownIssue = Issue | SessionLinearIssueSummary
 
 /**
  * Convert a string to kebab-case for branch names
@@ -121,7 +124,7 @@ function getExtensionFromUrl(url: string): string {
  */
 async function downloadAndLocalizeImages(
 	description: string,
-	attachments: LinearAttachment[],
+	attachments: Array<{ url: string; title: string | null }>,
 	promptDir: string,
 	linearApiKey?: string
 ): Promise<string> {
@@ -190,6 +193,10 @@ async function downloadAndLocalizeImages(
 	return localizedDescription
 }
 
+function isSessionLinearIssueSummary(issue: MarkdownIssue): issue is SessionLinearIssueSummary {
+	return 'assigneeName' in issue
+}
+
 /**
  * Generate markdown content for an issue
  * Follows the exact template format from the specification
@@ -200,22 +207,25 @@ async function downloadAndLocalizeImages(
  * @returns Markdown formatted string
  */
 export async function generateMarkdown(
-	issue: Issue,
+	issue: MarkdownIssue,
 	promptDir?: string,
 	linearApiKey?: string
 ): Promise<string> {
-	const assignee = await issue.assignee
-	const state = await issue.state
-
-	const assigneeName = assignee?.name || 'unassigned'
+	const assigneeName = isSessionLinearIssueSummary(issue)
+		? issue.assigneeName || 'unassigned'
+		: (await issue.assignee)?.name || 'unassigned'
+	const stateName = isSessionLinearIssueSummary(issue)
+		? issue.stateName || 'Unknown'
+		: (await issue.state)?.name || 'Unknown'
 
 	let description = issue.description || 'No description provided.'
 
 	// Download and localize images if promptDir is provided
 	if (promptDir && issue.description) {
 		try {
-			// Fetch attachments (lazy-loaded - only called when needed)
-			const attachments = await issue.attachments()
+			const attachments = isSessionLinearIssueSummary(issue)
+				? issue.attachments
+				: await issue.attachments()
 
 			description = await downloadAndLocalizeImages(
 				issue.description,
@@ -235,7 +245,7 @@ export async function generateMarkdown(
 
 **linear url:** ${issue.url}
 **assignee:** ${assigneeName}
-**state:** ${state?.name ?? 'Unknown'}
+**state:** ${stateName}
 
 ## description
 

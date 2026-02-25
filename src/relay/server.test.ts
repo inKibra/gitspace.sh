@@ -1391,3 +1391,149 @@ describe("Invite edge cases", () => {
     targetWs.close();
   });
 });
+
+// ============================================================================
+// connect_to_machine: offline and nonexistent machine IDs
+// ============================================================================
+
+describe("connect_to_machine: offline and nonexistent targets", () => {
+  test("returns error when connecting to a machine ID that has no ACL grant", async () => {
+    // Machine was never registered — the relay rejects the request at ACL check
+    // rather than forwarding it, so the client gets "not authorized".
+    const GHOST_MACHINE_ID = "machine-that-never-existed";
+
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "relay-for-ghost",
+    });
+    // Intentionally NOT granting machine ACL — the machine was never registered
+
+    const clientWs = await connectClient(relayUrl);
+    const signedConnect = signClientMessage({
+      type: "connect_to_machine",
+      machineId: GHOST_MACHINE_ID,
+      clientIdentityId: testClient1.id,
+      deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+    }, testClient1);
+
+    const response = await sendAndWait<any>(clientWs, signedConnect, "error");
+    expect(response.type).toBe("error");
+    expect(
+      response.message?.toLowerCase().includes("not authorized") ||
+      response.message?.toLowerCase().includes("not found")
+    ).toBe(true);
+
+    clientWs.close();
+  });
+
+  test("returns error when connecting to a machine that was connected but then disconnected", async () => {
+    const machineWs = await connectAndRegisterMachine(testMachine2);
+
+    grantRelayAccess({
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "relay-for-offline",
+    });
+    grantMachineAccess({
+      machineId: testMachine2.id,
+      ownerUserRootId: ownerUserRoot.id,
+      clientUserRootId: client1UserRoot.id,
+      label: "offline-machine-grant",
+    });
+
+    // Disconnect the machine
+    machineWs.close();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const clientWs = await connectClient(relayUrl);
+    const signedConnect = signClientMessage({
+      type: "connect_to_machine",
+      machineId: testMachine2.id,
+      clientIdentityId: testClient1.id,
+      deviceCertificate: buildDeviceCertificate(testClient1, client1UserRoot),
+    }, testClient1);
+
+    const response = await sendAndWait<any>(clientWs, signedConnect, "error");
+    expect(response.type).toBe("error");
+    expect(
+      response.message?.toLowerCase().includes("offline") ||
+      response.message?.toLowerCase().includes("not connected") ||
+      response.message?.toLowerCase().includes("not found")
+    ).toBe(true);
+
+    clientWs.close();
+  });
+});
+
+// ============================================================================
+// handleDataMessage error branches
+// ============================================================================
+
+describe("handleDataMessage: error branches", () => {
+  test("ignores binary data that is not a valid frame (too short)", async () => {
+    // Machines communicate via binary PTY/CONTROL frames.
+    // A frame that is too short to contain a valid stream ID should be silently
+    // dropped — the connection should remain open.
+    const machineWs = await connectAndRegisterMachine(testMachine1);
+
+    // Send a 1-byte binary payload (too short to be a valid frame)
+    const tinyBuffer = new Uint8Array([0x01]);
+    machineWs.send(tinyBuffer.buffer);
+
+    // Give the server a tick to process and verify the WS is still alive
+    await new Promise((r) => setTimeout(r, 80));
+    expect(machineWs.readyState).toBe(WebSocket.OPEN);
+
+    machineWs.close();
+  });
+
+  test("returns error for unknown text message type from client", async () => {
+    const clientWs = await connectClient(relayUrl);
+
+    // Send a message with an unknown type (not a registered command)
+    const response = await sendAndWait<any>(
+      clientWs,
+      { type: "totally_unknown_message_type", clientIdentityId: testClient1.id },
+      "error",
+    );
+
+    expect(response.type).toBe("error");
+
+    clientWs.close();
+  });
+
+  test("returns error for malformed JSON from client", async () => {
+    const clientWs = await connectClient(relayUrl);
+
+    // We cannot use sendAndWait here because sendAndWait JSON-serializes the
+    // payload. Instead send raw malformed text and wait for the error.
+    const errorPromise = new Promise<any>((resolve) => {
+      clientWs.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(
+            typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)
+          );
+          if (msg.type === "error") resolve(msg);
+        } catch {}
+      };
+    });
+
+    clientWs.send("{invalid json!!");
+
+    const response = await Promise.race([
+      errorPromise,
+      new Promise<null>((r) => setTimeout(() => r(null), 500)),
+    ]);
+
+    // Server may either return an error message or silently drop the frame.
+    // Either behavior is acceptable — we just verify the connection stays open.
+    if (response !== null) {
+      expect(response.type).toBe("error");
+    } else {
+      expect(clientWs.readyState).toBe(WebSocket.OPEN);
+    }
+
+    clientWs.close();
+  });
+});

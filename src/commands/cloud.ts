@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { promptInput } from '../utils/prompts.js';
@@ -31,6 +33,7 @@ import {
 } from '../relay/control/store.js';
 import { formatRelayFingerprint, getRelayPublicIdentity } from '../relay/identity.js';
 import { SpritesProvider } from '../relay/control/sprites-provider.js';
+import { getCloudBootstrapBundleSource, CLOUD_BOOTSTRAP_BUNDLE_FILENAME } from '../cloud/bootstrap-bundle.generated.js';
 import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/workspace-identity.js';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';
@@ -182,6 +185,49 @@ async function createCloudEnrollmentInvite(
   };
 }
 
+let runtimeBootstrapBundleCache: string | null = null;
+
+async function resolveBootstrapBundleSource(): Promise<string> {
+  const embedded = getCloudBootstrapBundleSource();
+  if (embedded) {
+    return embedded;
+  }
+
+  if (runtimeBootstrapBundleCache) {
+    return runtimeBootstrapBundleCache;
+  }
+
+  const entryPath = join(import.meta.dir, '../cloud/bootstrap-entry.ts');
+  if (!existsSync(entryPath)) {
+    throw new SpacesError(
+      'Cloud bootstrap bundle is missing. Run `bun scripts/build.ts` to generate embedded bootstrap assets.',
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  const result = await Bun.build({
+    entrypoints: [entryPath],
+    target: 'bun',
+    format: 'esm',
+    minify: true,
+    splitting: false,
+    sourcemap: 'none',
+  });
+
+  if (!result.success || result.outputs.length === 0) {
+    const details = result.logs.map((log) => log.message).join('\n');
+    throw new SpacesError(
+      `Failed to build cloud bootstrap bundle${details ? `:\n${details}` : ''}`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  runtimeBootstrapBundleCache = await result.outputs[0]!.text();
+  return runtimeBootstrapBundleCache;
+}
+
 export async function cloudStatus(): Promise<void> {
   const serveStatus = await queryServeStatus();
   if (!serveStatus) {
@@ -279,17 +325,54 @@ export interface CloudLaunchOptions {
   image?: string;
 }
 
-export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
+export interface CloudLaunchProvider {
+  createWorkspace(options: {
+    name: string;
+    repo: string;
+    branch: string;
+    image?: string;
+    env: Record<string, string>;
+  }): Promise<{ providerWorkspaceId: string; rawState: string }>;
+  execWorkspaceCommand(
+    id: string,
+    options: { command: string[]; env?: Record<string, string>; dir?: string }
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  writeWorkspaceFile?(
+    id: string,
+    options: { path: string; contents: string | Uint8Array; workingDir?: string; mode?: string; mkdir?: boolean }
+  ): Promise<{ path: string; size: number; mode?: string }>;
+}
+
+export interface CloudLaunchDependencies {
+  identityId?: string;
+  token?: string;
+  relayInfo?: CloudBootstrapRelayInfo;
+  workspaceId?: string;
+  workspaceIdentity?: Awaited<ReturnType<typeof ensureWorkspaceIdentity>>;
+  provider?: CloudLaunchProvider;
+  createEnrollmentInvite?: (
+    workspaceId: string,
+    relayInfo: CloudBootstrapRelayInfo,
+    machineSigningKey: string,
+    machineKeyExchangeKey: string,
+    expiresAtIso: string
+  ) => Promise<CloudEnrollmentInvite>;
+}
+
+export async function cloudLaunch(
+  options: CloudLaunchOptions,
+  dependencies: CloudLaunchDependencies = {}
+): Promise<void> {
   const { repo, branch = 'main', image } = options;
 
   // 1. Require identity
-  const identityId = requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? requireLocalIdentityId();
 
   // 2. Assert owner (reads control store directly — no daemon required for launch)
   assertControlOwner(identityId);
 
   // 3. Require Sprites token
-  const token = await getSpritesToken();
+  const token = dependencies.token ?? await getSpritesToken();
   if (!token) {
     throw new SpacesError(
       'No Sprites token configured. Run:\n  gssh cloud setup',
@@ -299,10 +382,10 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
   }
 
   // 4. Resolve relay bootstrap info and generate a local workspace ID
-  const relayInfo = resolveCloudBootstrapRelayInfo(identityId);
-  const workspaceId = `ws-${randomUUID().slice(0, 8)}`;
+  const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
+  const workspaceId = dependencies.workspaceId ?? `ws-${randomUUID().slice(0, 8)}`;
   const appId = `gssh-${identityId.slice(0, 12)}`;
-  const workspaceIdentity = await ensureWorkspaceIdentity(workspaceId);
+  const workspaceIdentity = dependencies.workspaceIdentity ?? await ensureWorkspaceIdentity(workspaceId);
 
   logger.log(`  Relay URL:  ${relayInfo.relayUrl}`);
   logger.log(`  Relay FP:   ${relayInfo.relayFingerprint}`);
@@ -331,13 +414,23 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
     ownerIdentityId: identityId,
   });
 
-  const enrollmentInvite = await createCloudEnrollmentInvite(
-    workspaceId,
-    relayInfo,
-    workspaceIdentity.signingPublicKey,
-    workspaceIdentity.keyExchangePublicKey,
-    bootstrap.expiresAt,
-  );
+  const createEnrollmentInvite = dependencies.createEnrollmentInvite ?? createCloudEnrollmentInvite;
+  let enrollmentInvite: Awaited<ReturnType<typeof createCloudEnrollmentInvite>>;
+  try {
+    enrollmentInvite = await createEnrollmentInvite(
+      workspaceId,
+      relayInfo,
+      workspaceIdentity.signingPublicKey,
+      workspaceIdentity.keyExchangePublicKey,
+      bootstrap.expiresAt,
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    // Tombstone the workspace record so it doesn't dangle in bootstrapping state
+    tombstoneCloudWorkspace(workspaceId);
+    logCloudEvent({ workspaceId, eventType: 'launch_failed', message: `Failed to create enrollment invite: ${msg}` });
+    throw new SpacesError(`Failed to create enrollment invite: ${msg}`, 'SYSTEM_ERROR', 2);
+  }
 
   logCloudEvent({
     workspaceId,
@@ -357,8 +450,8 @@ export async function cloudLaunch(options: CloudLaunchOptions): Promise<void> {
   });
 
   // 6. Call Sprites API
-  const provider = new SpritesProvider({ token, appId });
-  let providerResult: Awaited<ReturnType<SpritesProvider['createWorkspace']>>;
+  const provider = dependencies.provider ?? new SpritesProvider({ token, appId });
+  let providerResult: Awaited<ReturnType<CloudLaunchProvider['createWorkspace']>>;
 
   try {
     logger.dim('  Creating Sprites VM...');
@@ -462,7 +555,24 @@ export interface CloudLifecycleProvider {
     id: string,
     options: { command: string[]; env?: Record<string, string>; dir?: string }
   ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  writeWorkspaceFile?(
+    id: string,
+    options: { path: string; contents: string | Uint8Array; workingDir?: string; mode?: string; mkdir?: boolean }
+  ): Promise<{ path: string; size: number; mode?: string }>;
   destroyWorkspace(id: string): Promise<void>;
+}
+
+export interface CloudLifecycleDependencies {
+  identityId?: string;
+  relayInfo?: CloudBootstrapRelayInfo;
+  workspaceIdentity?: Awaited<ReturnType<typeof getWorkspaceIdentity>>;
+  createEnrollmentInvite?: (
+    workspaceId: string,
+    relayInfo: CloudBootstrapRelayInfo,
+    machineSigningKey: string,
+    machineKeyExchangeKey: string,
+    expiresAtIso: string
+  ) => Promise<CloudEnrollmentInvite>;
 }
 
 // ── Shared provider factory ───────────────────────────────────────────────────
@@ -496,7 +606,9 @@ function requireWorkspace(workspaceId: string) {
   return ws;
 }
 
-function buildSpriteServeStartCommand(): string[] {
+const SPRITE_BOOTSTRAP_SCRIPT_PATH = `/tmp/${CLOUD_BOOTSTRAP_BUNDLE_FILENAME}`;
+
+function buildLegacySpriteServeStartCommand(): string[] {
   const script = [
     'set -eu',
     'if command -v npm >/dev/null 2>&1; then',
@@ -564,8 +676,46 @@ function buildSpriteServeStartCommand(): string[] {
   return ['bash', '-lc', script];
 }
 
+function buildBundleSpriteServeStartCommand(): string[] {
+  const script = [
+    'set -eu',
+    'if [ -z "${GSSH_RELAY_URL:-}" ]; then',
+    '  echo "GSSH_RELAY_URL is required" >&2',
+    '  exit 1',
+    'fi',
+    'if [ -z "${GSSH_RELAY_PUBKEY:-}" ]; then',
+    '  echo "GSSH_RELAY_PUBKEY is required" >&2',
+    '  exit 1',
+    'fi',
+    'if [ -z "${GSSH_ENROLLMENT_TOKEN:-}" ]; then',
+    '  echo "GSSH_ENROLLMENT_TOKEN is required" >&2',
+    '  exit 1',
+    'fi',
+    'if [ -z "${GSSH_UNLOCK_TOKEN:-}" ]; then',
+    '  echo "GSSH_UNLOCK_TOKEN is required" >&2',
+    '  exit 1',
+    'fi',
+    'if ! command -v bun >/dev/null 2>&1; then',
+    '  echo "bun runtime is required in the sprite image for cloud bootstrap" >&2',
+    '  exit 127',
+    'fi',
+    `if [ ! -f "${SPRITE_BOOTSTRAP_SCRIPT_PATH}" ]; then`,
+    `  echo "Bootstrap bundle not found at ${SPRITE_BOOTSTRAP_SCRIPT_PATH}" >&2`,
+    '  exit 127',
+    'fi',
+    `nohup bun "${SPRITE_BOOTSTRAP_SCRIPT_PATH}" >/tmp/gssh-serve.log 2>&1 &`,
+    'sleep 2',
+    `if ! pgrep -f "${CLOUD_BOOTSTRAP_BUNDLE_FILENAME}" >/dev/null 2>&1 && ! pgrep -f "[g]ssh machine serve" >/dev/null 2>&1; then`,
+    '  cat /tmp/gssh-serve.log >&2 || true',
+    '  exit 1',
+    'fi',
+  ].join('\n');
+
+  return ['bash', '-lc', script];
+}
+
 async function runWorkspaceBootstrapExec(
-  provider: CloudLifecycleProvider,
+  provider: Pick<CloudLifecycleProvider, 'execWorkspaceCommand' | 'writeWorkspaceFile'>,
   providerWorkspaceId: string,
   workspaceId: string,
   relayInfo: CloudBootstrapRelayInfo,
@@ -579,7 +729,22 @@ async function runWorkspaceBootstrapExec(
     message: 'Running bootstrap command via Sprites exec',
   });
 
-  const command = buildSpriteServeStartCommand();
+  const hasBundleWriter = typeof provider.writeWorkspaceFile === 'function';
+
+  if (hasBundleWriter) {
+    const bundleSource = await resolveBootstrapBundleSource();
+    await provider.writeWorkspaceFile!(providerWorkspaceId, {
+      path: SPRITE_BOOTSTRAP_SCRIPT_PATH,
+      workingDir: '/',
+      mkdir: true,
+      mode: '0644',
+      contents: bundleSource,
+    });
+  }
+
+  const command = hasBundleWriter
+    ? buildBundleSpriteServeStartCommand()
+    : buildLegacySpriteServeStartCommand();
   const env: Record<string, string> = {
     GSSH_WORKSPACE_ID: workspaceId,
     GSSH_RELAY_URL: relayInfo.relayUrl,
@@ -621,9 +786,10 @@ async function runWorkspaceBootstrapExec(
 
 export async function cloudStop(
   workspaceId: string,
-  injectedProvider?: CloudLifecycleProvider
+  injectedProvider?: CloudLifecycleProvider,
+  dependencies: CloudLifecycleDependencies = {}
 ): Promise<void> {
-  const identityId = requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
 
@@ -654,14 +820,15 @@ export async function cloudStop(
 
 export async function cloudResume(
   workspaceId: string,
-  injectedProvider?: CloudLifecycleProvider
+  injectedProvider?: CloudLifecycleProvider,
+  dependencies: CloudLifecycleDependencies = {}
 ): Promise<void> {
-  const identityId = requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
-  const relayInfo = resolveCloudBootstrapRelayInfo(identityId);
+  const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
 
-  const storedIdentity = await getWorkspaceIdentity(workspaceId);
+  const storedIdentity = dependencies.workspaceIdentity ?? await getWorkspaceIdentity(workspaceId);
   if (!storedIdentity) {
     throw new SpacesError(
       `No escrowed workspace identity found for '${workspaceId}'. This workspace cannot be resumed securely.`,
@@ -675,7 +842,8 @@ export async function cloudResume(
     ownerIdentityId: identityId,
   });
 
-  const enrollmentInvite = await createCloudEnrollmentInvite(
+  const createEnrollmentInvite = dependencies.createEnrollmentInvite ?? createCloudEnrollmentInvite;
+  const enrollmentInvite = await createEnrollmentInvite(
     workspaceId,
     relayInfo,
     storedIdentity.signingPublicKey,
@@ -736,9 +904,10 @@ export async function cloudResume(
 
 export async function cloudDestroy(
   workspaceId: string,
-  injectedProvider?: CloudLifecycleProvider
+  injectedProvider?: CloudLifecycleProvider,
+  dependencies: CloudLifecycleDependencies = {}
 ): Promise<void> {
-  const identityId = requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
 

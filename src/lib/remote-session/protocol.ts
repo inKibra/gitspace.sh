@@ -22,6 +22,10 @@ export type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from "../../types/bundle-refresh.js";
+export type {
+  SessionLinearIssueSummary,
+  WorkspaceSource,
+} from "../../types/lifecycle.js";
 
 // Re-export attached mode control types from tmux-lite
 // These are used in attached mode for resize/detach/attach-init
@@ -58,6 +62,11 @@ export interface AttachSessionRequest {
   viewOnly?: boolean;
 }
 
+/** Cancel a currently running attach workflow (typically stuck scripts). */
+export interface CancelPendingAttachRequest {
+  type: 'cancel_pending_attach';
+}
+
 /** Request wide events for a workspace */
 export interface GetEventsRequest {
   type: "get_events";
@@ -86,6 +95,50 @@ export interface StopProcessRequest {
 /** Request list of projects on the machine */
 export interface ListProjectsRequest {
   type: "list_projects";
+}
+
+/** Request list of GitHub repositories visible to the machine user */
+export interface ListGithubReposRequest {
+  type: "list_github_repos";
+  org?: string;
+}
+
+/** Request list of remote branches for a project */
+export interface ListRemoteBranchesRequest {
+  type: "list_remote_branches";
+  projectName: string;
+}
+
+/** Request list of Linear issues for workspace creation */
+export interface ListLinearIssuesRequest {
+  type: "list_linear_issues";
+  projectName: string;
+}
+
+/** Create a project on the machine */
+export interface CreateProjectRequest {
+  type: "create_project";
+  repository: string;
+  projectName?: string;
+  baseBranch?: string;
+  setCurrent?: boolean;
+}
+
+/** Create a workspace in an existing project */
+export interface CreateWorkspaceRequest {
+  type: "create_workspace";
+  projectName: string;
+  workspaceName: string;
+  branchName?: string;
+  baseBranch?: string;
+  workspaceSource?: import("../../types/lifecycle.js").WorkspaceSource;
+  linearIssue?: import("../../types/lifecycle.js").SessionLinearIssueSummary;
+}
+
+/** Delete a project and all its workspaces */
+export interface DeleteProjectRequest {
+  type: "delete_project";
+  projectName: string;
 }
 
 /** Kill a session */
@@ -227,6 +280,7 @@ export interface ErrorResponse {
   code: string;
   message: string;
   workspaceId?: string;
+  projectName?: string;
 }
 
 /** Project information */
@@ -241,6 +295,49 @@ export interface ProjectInfo {
 export interface ProjectListResponse {
   type: "project_list";
   projects: ProjectInfo[];
+}
+
+/** Response with GitHub repository list */
+export interface GithubRepoListResponse {
+  type: "github_repo_list";
+  repos: string[];
+}
+
+/** Response with remote branch list */
+export interface RemoteBranchListResponse {
+  type: "remote_branch_list";
+  projectName: string;
+  branches: string[];
+}
+
+/** Response with Linear issue list */
+export interface LinearIssueListResponse {
+  type: "linear_issue_list";
+  projectName: string;
+  issues: import("../../types/lifecycle.js").SessionLinearIssueSummary[];
+}
+
+/** Project created successfully */
+export interface ProjectCreatedResponse {
+  type: "project_created";
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+}
+
+/** Workspace created successfully */
+export interface WorkspaceCreatedResponse {
+  type: "workspace_created";
+  projectName: string;
+  workspaceId: string;
+  workspaceName: string;
+  branchName: string;
+}
+
+/** Project deleted successfully */
+export interface ProjectDeletedResponse {
+  type: "project_deleted";
+  projectName: string;
 }
 
 /** Session killed response */
@@ -361,7 +458,14 @@ export type ClientToMachineMessage =
   | ListWorkspacesRequest
   | ListSessionsRequest
   | AttachSessionRequest
+  | CancelPendingAttachRequest
   | ListProjectsRequest
+  | ListGithubReposRequest
+  | ListRemoteBranchesRequest
+  | ListLinearIssuesRequest
+  | CreateProjectRequest
+  | CreateWorkspaceRequest
+  | DeleteProjectRequest
   | KillSessionRequest
   | DeleteWorkspaceRequest
   | GetInboxRequest
@@ -385,6 +489,12 @@ export type MachineToClientMessage =
   | SessionExitedResponse
   | ErrorResponse
   | ProjectListResponse
+  | GithubRepoListResponse
+  | RemoteBranchListResponse
+  | LinearIssueListResponse
+  | ProjectCreatedResponse
+  | WorkspaceCreatedResponse
+  | ProjectDeletedResponse
   | SessionKilledResponse
   | WorkspaceDeletedResponse
   | InboxListResponse
@@ -438,6 +548,25 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListWorkspacesRequest
   | ListSessionsRequest
   | AttachSessionRequest
+  | CancelPendingAttachRequest
+  | ListGithubReposRequest
+  | ListRemoteBranchesRequest
+  | ListLinearIssuesRequest
+  | CreateProjectRequest
+  | CreateWorkspaceRequest
+  | DeleteProjectRequest
   | GetEventsRequest {
-  return ["list_workspaces", "list_sessions", "attach_session", "get_events"].includes(msg.type);
+  return [
+    "list_workspaces",
+    "list_sessions",
+    "attach_session",
+    'cancel_pending_attach',
+    "list_github_repos",
+    "list_remote_branches",
+    "list_linear_issues",
+    "create_project",
+    "create_workspace",
+    "delete_project",
+    "get_events",
+  ].includes(msg.type);
 }

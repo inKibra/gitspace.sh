@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { SessionTerminal, type SessionTerminalHandle } from "./components/SessionTerminal.web";
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
 import {
@@ -19,6 +19,7 @@ import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow
 import { useAttachController } from './app/session/useAttachController.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 
@@ -230,6 +231,20 @@ export default function App() {
     },
   });
 
+  const lifecycleController = useLifecycleController({
+    flow,
+    listGithubRepos: terminal.listGithubRepos,
+    listRemoteBranches: terminal.listRemoteBranches,
+    listLinearIssues: terminal.listLinearIssues,
+    createProject: terminal.createProject,
+    createWorkspace: terminal.createWorkspace,
+    deleteProject: terminal.deleteProject,
+    getProjectNames: () => terminal.projects.map((project) => project.name),
+    refreshProjects: () => terminal.requestProjects(),
+    refreshWorkspaces: () => terminal.requestWorkspaces(),
+    refreshSessions: () => terminal.requestSessions(),
+  });
+
   useEffect(() => {
     let mounted = true;
     void browserPreferencesService.getNotificationConfig().then((config) => {
@@ -382,6 +397,7 @@ export default function App() {
     }
 
     const isScriptFailure =
+      terminal.commandError.code === 'SCRIPT_CANCELLED' ||
       terminal.commandError.code === 'SCRIPT_FAILED' ||
       terminal.commandError.code === 'PRE_SCRIPT_FAILED' ||
       terminal.commandError.code === 'SETUP_SCRIPT_FAILED' ||
@@ -580,6 +596,24 @@ export default function App() {
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
   });
+
+  const selectedProjectName = useMemo(() => {
+    const selected = spacesBrowserProps.selectedItem;
+    if (!selected) {
+      return null;
+    }
+    if (selected.type === 'project') {
+      return selected.name;
+    }
+    if (selected.type === 'workspace') {
+      return selected.workspace.projectName;
+    }
+    if ('workspaceId' in selected && typeof selected.workspaceId === 'string') {
+      const separator = selected.workspaceId.indexOf(':');
+      return separator > 0 ? selected.workspaceId.slice(0, separator) : null;
+    }
+    return null;
+  }, [spacesBrowserProps.selectedItem]);
 
   // Inbox hook
   const inboxProps = useInbox({
@@ -867,7 +901,7 @@ export default function App() {
       } else if (command === 'activate') {
         spacesBrowserProps.activateSelected();
       } else if (command === 'new') {
-        spacesBrowserProps.createNewSession();
+        lifecycleController.openCreateMenu(selectedProjectName);
       } else if (command === 'refresh') {
         spacesBrowserProps.refresh();
       } else if (command === 'back') {
@@ -902,7 +936,9 @@ export default function App() {
         }
       } else if (command === 'delete') {
         const selected = spacesBrowserProps.selectedItem;
-        if (selected?.type === 'workspace') {
+        if (selected?.type === 'project') {
+          lifecycleController.openDeleteProjectFlow(selected.name);
+        } else if (selected?.type === 'workspace') {
           const sessionCount = selected.workspace.sessionCount || 0;
           flow.showConfirmTyped({
             title: 'Delete Workspace',
@@ -934,7 +970,9 @@ export default function App() {
     showScriptTerminal,
     showEvents,
     spacesBrowserProps,
+    selectedProjectName,
     flow,
+    lifecycleController,
     deleteWorkspaceWithPrompt,
   ]);
 
@@ -969,6 +1007,9 @@ export default function App() {
       if ((e.key === 'Escape' || e.key === 'q') && !terminal.scriptState?.isRunning) {
         e.preventDefault();
         setShowScriptTerminal(false);
+      } else if ((e.key === 'c' || e.key === 'C') && terminal.scriptState?.isRunning) {
+        e.preventDefault();
+        terminal.cancelPendingScripts();
       }
     };
 
@@ -1074,6 +1115,9 @@ export default function App() {
           exitCode={terminal.scriptState?.exitCode}
           setWriteCallback={terminal.setWriteCallback}
           onBack={() => setShowScriptTerminal(false)}
+          onCancel={() => {
+            terminal.cancelPendingScripts();
+          }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
         <Toaster theme="dark" position="top-right" richColors />

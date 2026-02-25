@@ -1,21 +1,9 @@
 /**
- * Sprites.dev cloud provider integration.
- *
- * Sprites is a Firecracker microVM service (by Fly.io) that provides:
- * - Persistent ext4 volumes
- * - Auto-hibernation / wake-on-connect
- * - Services API for auto-restarting processes (e.g. `gssh machine serve start`)
- *
- * This module wraps the Sprites REST API and maps their sprite states
- * to the internal CloudWorkspaceStatus type.
- *
- * API base: https://api.sprites.dev/v1
- * Docs: https://sprites.dev/api
+ * Sprites.dev cloud provider integration (SDK-backed).
  */
 
+import { APIError, ExecError, SpritesClient, type Sprite } from '@fly/sprites';
 import type { CloudWorkspaceStatus } from './types.js';
-
-// ── Error type ────────────────────────────────────────────────────────────────
 
 export class SpritesProviderError extends Error {
   readonly statusCode: number;
@@ -27,46 +15,29 @@ export class SpritesProviderError extends Error {
   }
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
 export interface SpritesProviderOptions {
-  /** Sprites.dev API token */
   token: string;
-  /**
-   * Legacy option retained for compatibility.
-   * Sprites v1 API is org-scoped by token and does not use app IDs.
-   */
   appId: string;
-  /** Override the API base URL (useful for testing) */
   baseUrl?: string;
 }
 
 export interface CreateWorkspaceOptions {
-  /** Stable sprite name; we use workspaceId */
   name: string;
   repo: string;
   branch: string;
-  /** Docker image to boot the VM from */
   image?: string;
-  /** Extra environment variables to inject at boot */
   env?: Record<string, string>;
 }
 
 export interface WorkspaceStatusResult {
-  /** Sprites machine ID */
   providerWorkspaceId: string;
-  /** Mapped internal status */
   status: CloudWorkspaceStatus;
-  /** Raw Sprites machine state string */
   rawState: string;
 }
 
 export interface ExecWorkspaceCommandOptions {
-  /** Command + args, e.g. ['bash', '-lc', 'echo hello'] */
   command: string[];
-  /** Optional environment variables injected only for this command */
   env?: Record<string, string>;
-  /** Optional working directory */
   dir?: string;
 }
 
@@ -76,74 +47,34 @@ export interface ExecWorkspaceCommandResult {
   stderr: string;
 }
 
-const SPRITE_STREAM_STDOUT = 0x01;
-const SPRITE_STREAM_STDERR = 0x02;
-const SPRITE_STREAM_EXIT = 0x03;
-
-function decodeUtf8(bytes: Uint8Array): string {
-  return new TextDecoder().decode(bytes);
+export interface WriteWorkspaceFileOptions {
+  path: string;
+  contents: string | Uint8Array;
+  workingDir?: string;
+  mode?: string;
+  mkdir?: boolean;
 }
 
-function parseSpriteExecBinaryResponse(bytes: Uint8Array): ExecWorkspaceCommandResult {
-  let stdout = '';
-  let stderr = '';
-  let exitCode = 0;
+export interface WriteWorkspaceFileResult {
+  path: string;
+  size: number;
+  mode?: string;
+}
 
-  const isMarker = (value: number): boolean =>
-    value === SPRITE_STREAM_STDOUT ||
-    value === SPRITE_STREAM_STDERR ||
-    value === SPRITE_STREAM_EXIT;
+const SPRITES_API_BASE = 'https://api.sprites.dev';
 
-  let i = 0;
-  while (i < bytes.length) {
-    const marker = bytes[i];
-
-    if (!isMarker(marker)) {
-      stdout += decodeUtf8(bytes.subarray(i));
-      break;
-    }
-
-    if (marker === SPRITE_STREAM_EXIT) {
-      if (i + 1 < bytes.length) {
-        exitCode = bytes[i + 1] ?? 0;
-        i += 2;
-        continue;
-      }
-      i += 1;
-      continue;
-    }
-
-    const streamStart = i + 1;
-    let streamEnd = streamStart;
-    while (streamEnd < bytes.length && !isMarker(bytes[streamEnd] ?? 0)) {
-      streamEnd += 1;
-    }
-
-    const chunk = decodeUtf8(bytes.subarray(streamStart, streamEnd));
-    if (marker === SPRITE_STREAM_STDOUT) {
-      stdout += chunk;
-    } else if (marker === SPRITE_STREAM_STDERR) {
-      stderr += chunk;
-    }
-
-    i = streamEnd;
+function normalizeSdkBaseUrl(baseUrl?: string): string {
+  if (!baseUrl) {
+    return SPRITES_API_BASE;
   }
 
-  return { stdout, stderr, exitCode };
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  if (trimmed.endsWith('/v1')) {
+    return trimmed.slice(0, -3);
+  }
+  return trimmed;
 }
 
-// ── State mapping ─────────────────────────────────────────────────────────────
-
-/**
- * Map Sprites machine states to internal CloudWorkspaceStatus.
- *
- * Sprites states (from their API docs):
- *   cold     – stopped, persistent disk retained
- *   warm     – waking / provisioning
- *   running  – active runtime
- *
- * Legacy states are still mapped for compatibility with older responses.
- */
 function mapSpritesState(state: string): CloudWorkspaceStatus {
   switch (state) {
     case 'running':
@@ -169,15 +100,48 @@ function mapSpritesState(state: string): CloudWorkspaceStatus {
   }
 }
 
-// ── API constants ─────────────────────────────────────────────────────────────
+function parseState(sprite: { status?: string } & Record<string, unknown>): string {
+  const maybeState = sprite['state'];
+  if (typeof sprite.status === 'string' && sprite.status.length > 0) {
+    return sprite.status;
+  }
+  if (typeof maybeState === 'string' && maybeState.length > 0) {
+    return maybeState;
+  }
+  return 'cold';
+}
 
-const SPRITES_API_BASE = 'https://api.sprites.dev/v1';
+function isRetryableStatus(statusCode: number): boolean {
+  return statusCode === 408 || statusCode === 409 || statusCode === 429 || (statusCode >= 500 && statusCode <= 504);
+}
 
-// ── Provider ──────────────────────────────────────────────────────────────────
+function isAlreadyExistsError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes('already exists') || normalized.includes('already taken');
+}
+
+function toText(value: string | Buffer): string {
+  return typeof value === 'string' ? value : value.toString('utf8');
+}
+
+function toProviderError(error: unknown, defaultMessage: string): SpritesProviderError {
+  if (error instanceof SpritesProviderError) {
+    return error;
+  }
+
+  if (error instanceof APIError) {
+    return new SpritesProviderError(`Sprites API error: ${error.message}`, error.statusCode ?? 0);
+  }
+
+  if (error instanceof Error) {
+    return new SpritesProviderError(error.message || defaultMessage, 0);
+  }
+
+  return new SpritesProviderError(defaultMessage, 0);
+}
 
 export class SpritesProvider {
-  private readonly token: string;
-  private readonly baseUrl: string;
+  private readonly client: SpritesClient;
 
   constructor(options: SpritesProviderOptions) {
     if (!options.token || !options.token.trim()) {
@@ -186,119 +150,86 @@ export class SpritesProvider {
     if (!options.appId || !options.appId.trim()) {
       throw new SpritesProviderError('SpritesProvider requires a non-empty appId.', 0);
     }
-    this.token = options.token.trim();
-    this.baseUrl = options.baseUrl?.replace(/\/$/, '') ?? SPRITES_API_BASE;
-  }
 
-  // ── Private HTTP helpers ───────────────────────────────────────────────────
-
-  private authHeaders(): Record<string, string> {
-    return {
-      'Authorization': `Bearer ${this.token}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    };
-  }
-
-  private spritesBaseUrl(): string {
-    return `${this.baseUrl}/sprites`;
-  }
-
-  private spriteUrl(spriteName: string): string {
-    return `${this.spritesBaseUrl()}/${encodeURIComponent(spriteName)}`;
-  }
-
-  private async request<T>(
-    url: string,
-    init: RequestInit
-  ): Promise<T> {
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        ...this.authHeaders(),
-        ...(init.headers as Record<string, string> | undefined ?? {}),
-      },
+    this.client = new SpritesClient(options.token.trim(), {
+      baseURL: normalizeSdkBaseUrl(options.baseUrl),
+      timeout: 60_000,
     });
-
-    const rawText = await response.text();
-
-    if (!response.ok) {
-      let message: string;
-      try {
-        const body = rawText ? JSON.parse(rawText) as { error?: string; message?: string } : null;
-        message = body?.error ?? body?.message ?? (rawText || `HTTP ${response.status}`);
-      } catch {
-        message = rawText || `HTTP ${response.status}`;
-      }
-      throw new SpritesProviderError(
-        `Sprites API error: ${message}`,
-        response.status
-      );
-    }
-
-    if (!rawText) {
-      return {} as T;
-    }
-
-    try {
-      return JSON.parse(rawText) as T;
-    } catch {
-      return rawText as T;
-    }
   }
 
-  private async requestRaw(url: string, init: RequestInit): Promise<{ ok: boolean; status: number; bytes: Uint8Array }> {
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        ...this.authHeaders(),
-        ...(init.headers as Record<string, string> | undefined ?? {}),
-      },
-    });
+  private toWorkspaceStatusResult(
+    fallbackName: string,
+    sprite: { name?: string; status?: string } & Record<string, unknown>,
+  ): WorkspaceStatusResult {
+    const providerWorkspaceId = sprite.name ?? fallbackName;
+    const rawState = parseState(sprite);
 
     return {
-      ok: response.ok,
-      status: response.status,
-      bytes: new Uint8Array(await response.arrayBuffer()),
-    };
-  }
-
-  // ── Public API ─────────────────────────────────────────────────────────────
-
-  /**
-   * Create a new Sprites machine for a cloud workspace.
-   * Returns a partial WorkspaceStatusResult with status='provisioning'.
-   */
-  async createWorkspace(options: CreateWorkspaceOptions): Promise<WorkspaceStatusResult> {
-    const body = {
-      name: options.name,
-    };
-
-    const sprite = await this.request<{ id?: string; name?: string; status?: string; state?: string }>(
-      this.spritesBaseUrl(),
-      { method: 'POST', body: JSON.stringify(body) }
-    );
-
-    const spriteName = sprite.name ?? options.name;
-    const rawState = sprite.status ?? sprite.state ?? 'cold';
-
-    return {
-      providerWorkspaceId: spriteName,
+      providerWorkspaceId,
       status: mapSpritesState(rawState),
       rawState,
     };
   }
 
-  /**
-   * Stop (hibernate) a running Sprites machine.
-   */
-  async stopWorkspace(providerWorkspaceId: string): Promise<WorkspaceStatusResult> {
-    const sprite = await this.request<{ status?: string; state?: string }>(
-      this.spriteUrl(providerWorkspaceId),
-      { method: 'GET' }
-    );
+  private async getSpriteIfExists(name: string): Promise<Sprite | null> {
+    try {
+      return await this.client.getSprite(name);
+    } catch (error) {
+      if (error instanceof APIError) {
+        if (error.statusCode === 404 || isRetryableStatus(error.statusCode ?? 0)) {
+          return null;
+        }
+      }
+      throw toProviderError(error, 'Failed to fetch sprite');
+    }
+  }
 
-    const currentState = sprite.status ?? sprite.state ?? 'cold';
+  async createWorkspace(options: CreateWorkspaceOptions): Promise<WorkspaceStatusResult> {
+    const createRetryDelaysMs = [1000, 2500];
+    const maxAttempts = 1 + createRetryDelaysMs.length;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const sprite = await this.client.createSprite(options.name);
+        return this.toWorkspaceStatusResult(options.name, sprite as unknown as Record<string, unknown>);
+      } catch (error) {
+        const providerError = toProviderError(error, 'Failed to create sprite');
+        const canRecoverByExisting = isRetryableStatus(providerError.statusCode)
+          || isAlreadyExistsError(providerError.message);
+
+        if (canRecoverByExisting) {
+          for (const waitMs of [0, 500, 1200, 2500, 5000, 9000]) {
+            if (waitMs > 0) {
+              await Bun.sleep(waitMs);
+            }
+
+            const existing = await this.getSpriteIfExists(options.name);
+            if (existing) {
+              return this.toWorkspaceStatusResult(options.name, existing as unknown as Record<string, unknown>);
+            }
+          }
+        }
+
+        if (attempt >= maxAttempts) {
+          throw providerError;
+        }
+
+        await Bun.sleep(createRetryDelaysMs[attempt - 1] ?? 2000);
+      }
+    }
+
+    throw new SpritesProviderError('Sprites create failed unexpectedly', 500);
+  }
+
+  async stopWorkspace(providerWorkspaceId: string): Promise<WorkspaceStatusResult> {
+    let sprite: Sprite;
+    try {
+      sprite = await this.client.getSprite(providerWorkspaceId);
+    } catch (error) {
+      throw toProviderError(error, 'Failed to fetch sprite for stop');
+    }
+
+    const currentState = parseState(sprite as unknown as Record<string, unknown>);
     const currentMapped = mapSpritesState(currentState);
     if (currentMapped === 'hibernated') {
       return {
@@ -312,13 +243,15 @@ export class SpritesProvider {
       command: ['bash', '-lc', 'if command -v gssh >/dev/null 2>&1; then gssh machine serve stop || true; fi'],
     });
 
-    const postStop = await this.request<{ status?: string; state?: string }>(
-      this.spriteUrl(providerWorkspaceId),
-      { method: 'GET' }
-    );
-    const postStopState = postStop.status ?? postStop.state ?? 'warm';
-    const mapped = mapSpritesState(postStopState);
+    let postStop: Sprite;
+    try {
+      postStop = await this.client.getSprite(providerWorkspaceId);
+    } catch (error) {
+      throw toProviderError(error, 'Failed to fetch sprite after stop');
+    }
 
+    const postStopState = parseState(postStop as unknown as Record<string, unknown>);
+    const mapped = mapSpritesState(postStopState);
     return {
       providerWorkspaceId,
       status: mapped === 'ready' ? 'offline' : mapped,
@@ -326,125 +259,117 @@ export class SpritesProvider {
     };
   }
 
-  /**
-   * Resume (start) a hibernated Sprites machine.
-   */
   async resumeWorkspace(providerWorkspaceId: string): Promise<WorkspaceStatusResult> {
-    const sprite = await this.request<{ status?: string; state?: string }>(
-      this.spriteUrl(providerWorkspaceId),
-      { method: 'GET' }
-    );
-    const rawState = sprite.status ?? sprite.state ?? 'cold';
-
-    return {
-      providerWorkspaceId,
-      status: mapSpritesState(rawState),
-      rawState,
-    };
+    try {
+      const sprite = await this.client.getSprite(providerWorkspaceId);
+      const rawState = parseState(sprite as unknown as Record<string, unknown>);
+      return {
+        providerWorkspaceId,
+        status: mapSpritesState(rawState),
+        rawState,
+      };
+    } catch (error) {
+      throw toProviderError(error, 'Failed to resume sprite');
+    }
   }
 
-  /**
-   * Permanently destroy a Sprites machine (irreversible).
-   */
   async destroyWorkspace(providerWorkspaceId: string): Promise<void> {
-    await this.request<unknown>(
-      this.spriteUrl(providerWorkspaceId),
-      { method: 'DELETE' }
-    );
+    try {
+      await this.client.deleteSprite(providerWorkspaceId);
+    } catch (error) {
+      throw toProviderError(error, 'Failed to destroy sprite');
+    }
   }
 
-  /**
-   * Get the current status of a Sprites machine.
-   */
   async getWorkspaceStatus(providerWorkspaceId: string): Promise<WorkspaceStatusResult> {
-    const sprite = await this.request<{ status?: string; state?: string }>(
-      this.spriteUrl(providerWorkspaceId),
-      { method: 'GET' }
-    );
-    const rawState = sprite.status ?? sprite.state ?? 'cold';
-
-    return {
-      providerWorkspaceId,
-      status: mapSpritesState(rawState),
-      rawState,
-    };
+    try {
+      const sprite = await this.client.getSprite(providerWorkspaceId);
+      const rawState = parseState(sprite as unknown as Record<string, unknown>);
+      return {
+        providerWorkspaceId,
+        status: mapSpritesState(rawState),
+        rawState,
+      };
+    } catch (error) {
+      throw toProviderError(error, 'Failed to fetch sprite status');
+    }
   }
 
-  /**
-   * Execute a one-off command in a workspace VM.
-   *
-   * Uses the Sprites exec endpoint, which also wakes the VM when cold.
-   */
   async execWorkspaceCommand(
     providerWorkspaceId: string,
-    options: ExecWorkspaceCommandOptions
+    options: ExecWorkspaceCommandOptions,
   ): Promise<ExecWorkspaceCommandResult> {
     if (!Array.isArray(options.command) || options.command.length === 0) {
       throw new SpritesProviderError('execWorkspaceCommand requires a non-empty command array.', 0);
     }
 
-    const query = new URLSearchParams();
-    for (const part of options.command) {
-      query.append('cmd', part);
-    }
-    if (options.dir) {
-      query.set('dir', options.dir);
-    }
-    if (options.env) {
-      for (const [key, value] of Object.entries(options.env)) {
-        query.append('env', `${key}=${value}`);
+    const [file, ...args] = options.command;
+    const sprite = this.client.sprite(providerWorkspaceId);
+
+    try {
+      const result = await sprite.execFile(file!, args, {
+        env: options.env,
+        cwd: options.dir,
+      });
+
+      return {
+        exitCode: result.exitCode,
+        stdout: toText(result.stdout),
+        stderr: toText(result.stderr),
+      };
+    } catch (error) {
+      if (error instanceof ExecError) {
+        return {
+          exitCode: error.exitCode,
+          stdout: toText(error.stdout),
+          stderr: toText(error.stderr),
+        };
       }
+
+      throw toProviderError(error, 'Sprites exec failed');
+    }
+  }
+
+  async writeWorkspaceFile(
+    providerWorkspaceId: string,
+    options: WriteWorkspaceFileOptions,
+  ): Promise<WriteWorkspaceFileResult> {
+    if (!options.path || !options.path.trim()) {
+      throw new SpritesProviderError('writeWorkspaceFile requires a non-empty path.', 0);
     }
 
-    const url = `${this.baseUrl}/sprites/${encodeURIComponent(providerWorkspaceId)}/exec?${query.toString()}`;
-    const response = await this.requestRaw(url, {
-      method: 'POST',
-    });
+    const sprite = this.client.sprite(providerWorkspaceId);
+    const fs = sprite.filesystem(options.workingDir ?? '/');
+    const data = typeof options.contents === 'string'
+      ? Buffer.from(options.contents, 'utf8')
+      : Buffer.from(options.contents);
 
-    if (!response.ok) {
-      const rawText = decodeUtf8(response.bytes);
-      let message = `HTTP ${response.status}`;
-      if (rawText) {
-        try {
-          const parsed = JSON.parse(rawText) as { error?: string; message?: string };
-          message = parsed.error ?? parsed.message ?? rawText;
-        } catch {
-          message = rawText;
+    const parentPath = options.path.includes('/')
+      ? options.path.slice(0, options.path.lastIndexOf('/'))
+      : '';
+
+    try {
+      if (options.mkdir && parentPath) {
+        await fs.mkdir(parentPath, { recursive: true });
+      }
+
+      let mode: number | undefined;
+      if (options.mode) {
+        const parsedMode = Number.parseInt(options.mode, 8);
+        if (!Number.isNaN(parsedMode)) {
+          mode = parsedMode;
         }
       }
-      throw new SpritesProviderError(`Sprites exec failed: ${message}`, response.status);
+
+      await fs.writeFile(options.path, data, mode !== undefined ? { mode } : undefined);
+    } catch (error) {
+      throw toProviderError(error, 'Sprites fs write failed');
     }
 
-    const bytes = response.bytes;
-    let parsedResult: ExecWorkspaceCommandResult;
-
-    if (bytes.length > 0 && (bytes[0] === SPRITE_STREAM_STDOUT || bytes[0] === SPRITE_STREAM_STDERR || bytes[0] === SPRITE_STREAM_EXIT)) {
-      parsedResult = parseSpriteExecBinaryResponse(bytes);
-    } else {
-      const rawText = decodeUtf8(bytes);
-      let parsed: { exit_code?: number; exitCode?: number; stdout?: string; stderr?: string } | null = null;
-      try {
-        parsed = rawText ? JSON.parse(rawText) as { exit_code?: number; exitCode?: number; stdout?: string; stderr?: string } : null;
-      } catch {
-        parsed = null;
-      }
-
-      parsedResult = {
-        exitCode: parsed?.exit_code ?? parsed?.exitCode ?? 0,
-        stdout: parsed?.stdout ?? rawText,
-        stderr: parsed?.stderr ?? '',
-      };
-    }
-
-    const { exitCode, stdout, stderr } = parsedResult;
-
-    if (exitCode !== 0) {
-      throw new SpritesProviderError(
-        `Sprites exec command failed with exit code ${exitCode}${stderr ? `: ${stderr}` : ''}`,
-        200
-      );
-    }
-
-    return { exitCode, stdout, stderr };
+    return {
+      path: options.path,
+      size: data.byteLength,
+      mode: options.mode,
+    };
   }
 }

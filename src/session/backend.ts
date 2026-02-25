@@ -6,6 +6,7 @@ import type {
 } from '../types/bundle-refresh.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEventFilter } from '../types/events.js';
+import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -44,6 +45,30 @@ export interface DeleteWorkspaceParams {
   timeoutMs?: number;
 }
 
+export interface CreateProjectParams {
+  repository: string;
+  projectName?: string;
+  baseBranch?: string;
+  setCurrent?: boolean;
+}
+
+export interface CreateWorkspaceParams {
+  projectName: string;
+  workspaceName: string;
+  branchName?: string;
+  baseBranch?: string;
+  workspaceSource?: WorkspaceSource;
+  linearIssue?: SessionLinearIssueSummary;
+}
+
+export interface DeleteProjectParams {
+  /**
+   * Optional timeout for delete completion when waiting on remote responses.
+   * Ignored by local backend.
+   */
+  timeoutMs?: number;
+}
+
 /**
  * Canonical backend contract used by shared session engine.
  */
@@ -54,11 +79,19 @@ export interface SessionBackend {
   disconnect(): Promise<void>;
 
   listProjects(): Promise<void>;
+  listGithubRepos(org?: string): Promise<string[]>;
+  listRemoteBranches(projectName: string): Promise<string[]>;
+  listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]>;
   listWorkspaces(): Promise<void>;
   listSessions(workspaceId?: string): Promise<void>;
 
+  createProject(params: CreateProjectParams): Promise<void>;
+  createWorkspace(params: CreateWorkspaceParams): Promise<void>;
+  deleteProject(projectName: string, params?: DeleteProjectParams): Promise<void>;
+
   attachSession(params: AttachSessionParams): Promise<void>;
   detachSession(): Promise<void>;
+  cancelPendingScripts?(): Promise<void>;
 
   killSession(sessionId: string): Promise<void>;
   deleteWorkspace(

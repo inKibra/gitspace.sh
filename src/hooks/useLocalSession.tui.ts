@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useSessionEngine,
   type AttachSessionParams,
+  type CreateProjectParams,
+  type CreateWorkspaceParams,
+  type DeleteProjectParams,
   type DeleteWorkspaceParams,
   type BundleRefreshPlan,
   type BundleRefreshSubmission,
@@ -10,6 +13,7 @@ import {
 } from '../session/index.js';
 import type { NotificationConfig } from '../notifications/types.js';
 import type { WideEventFilter } from '../types/events.js';
+import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
 import { createBunLocalSessionBackend } from '../app/session/createSessionBackend.bun.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
@@ -189,6 +193,47 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     });
   }, [backendKey, runWithBackend]);
 
+  const listGithubRepos = useCallback(async (org?: string): Promise<string[]> => {
+    let repos: string[] | null = null;
+    await runWithBackend(async (sessionEngine) => {
+      repos = await sessionEngine.listGithubRepos(backendKey, org);
+    }, { strict: true });
+
+    if (!repos) {
+      throw new SpacesError('GitHub repository list unavailable', 'SYSTEM_ERROR', 2);
+    }
+
+    return repos;
+  }, [backendKey, runWithBackend]);
+
+  const listRemoteBranches = useCallback(async (projectName: string): Promise<string[]> => {
+    let branches: string[] | null = null;
+    await runWithBackend(async (sessionEngine) => {
+      branches = await sessionEngine.listRemoteBranches(backendKey, projectName);
+    }, { strict: true });
+
+    if (!branches) {
+      throw new SpacesError('Remote branch list unavailable', 'SYSTEM_ERROR', 2);
+    }
+
+    return branches;
+  }, [backendKey, runWithBackend]);
+
+  const listLinearIssues = useCallback(async (
+    projectName: string
+  ): Promise<SessionLinearIssueSummary[]> => {
+    let issues: SessionLinearIssueSummary[] | null = null;
+    await runWithBackend(async (sessionEngine) => {
+      issues = await sessionEngine.listLinearIssues(backendKey, projectName);
+    }, { strict: true });
+
+    if (!issues) {
+      throw new SpacesError('Linear issue list unavailable', 'SYSTEM_ERROR', 2);
+    }
+
+    return issues;
+  }, [backendKey, runWithBackend]);
+
   const requestWorkspaces = useCallback(async () => {
     await runWithBackend(async (sessionEngine) => {
       await sessionEngine.listWorkspaces(backendKey);
@@ -199,6 +244,32 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     await runWithBackend(async (sessionEngine) => {
       await sessionEngine.listSessions(backendKey, workspaceId);
     });
+  }, [backendKey, runWithBackend]);
+
+  const createProject = useCallback(async (params: CreateProjectParams) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.createProject(backendKey, params);
+      await sessionEngine.listProjects(backendKey);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    }, { strict: true });
+  }, [backendKey, runWithBackend]);
+
+  const createWorkspace = useCallback(async (params: CreateWorkspaceParams) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.createWorkspace(backendKey, params);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    }, { strict: true });
+  }, [backendKey, runWithBackend]);
+
+  const deleteProject = useCallback(async (projectName: string, params?: DeleteProjectParams) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.deleteProject(backendKey, projectName, params);
+      await sessionEngine.listProjects(backendKey);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    }, { strict: true });
   }, [backendKey, runWithBackend]);
 
   const requestInbox = useCallback(async () => {
@@ -245,6 +316,12 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
       await sessionEngine.listSessions(backendKey);
       await sessionEngine.listWorkspaces(backendKey);
     }, { strict: true });
+  }, [backendKey, runWithBackend]);
+
+  const cancelPendingScripts = useCallback(async () => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.cancelPendingScripts(backendKey);
+    });
   }, [backendKey, runWithBackend]);
 
   const killSession = useCallback(async (sessionId: string) => {
@@ -372,8 +449,14 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     liveEventIds: localState?.liveEventIds ?? [],
     savedEventFilters: localState?.savedEventFilters ?? [],
     requestProjects,
+    listGithubRepos,
+    listRemoteBranches,
+    listLinearIssues,
     requestWorkspaces,
     requestSessions,
+    createProject,
+    createWorkspace,
+    deleteProject,
     requestInbox,
     clearInbox,
     markInboxRead,
@@ -381,6 +464,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     updateNotificationConfig,
     attachSession,
     detachSession,
+    cancelPendingScripts,
     killSession,
     deleteWorkspace,
     getBundleRefreshPlan,

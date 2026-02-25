@@ -11,13 +11,12 @@
  *   – destroy is best-effort (tombstones even if provider call fails)
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CloudLifecycleProvider } from '../cloud.js';
+import type { CloudLifecycleDependencies, CloudLifecycleProvider } from '../cloud.js';
 import { cloudDestroy, cloudResume, cloudStop } from '../cloud.js';
-import { generateMnemonic, mnemonicToUserIdentity } from '../../lib/tmux-lite/crypto/user-identity.js';
 import {
   bindControlOwner,
   ensureControlStore,
@@ -25,27 +24,34 @@ import {
   listCloudEvents,
   upsertCloudWorkspace,
 } from '../../relay/control/store.js';
-import { ensureWorkspaceIdentity } from '../../relay/control/workspace-identity.js';
 import type { CloudWorkspaceStatus } from '../../relay/control/types.js';
 
-// ── mock identity so requireLocalIdentityId() returns a fixed owner ───────────
-//   We mock core/identity at module level so it applies before any import.
-
 const OWNER_ID = 'owner-lifecycle-test-001';
-const TEST_USER_ROOT_IDENTITY = mnemonicToUserIdentity(generateMnemonic());
+const TEST_RELAY_INFO = {
+  relayUrl: 'wss://relay.test/ws',
+  relaySigningPublicKey: 'A'.repeat(64),
+  relayFingerprint: 'fp:AAAAAAAA',
+};
 
-mock.module('../../core/identity.js', () => ({
-  keypairExists: () => true,
-  getPublicKeyWithoutPassword: () => ({ id: OWNER_ID }),
-  readRelayConfig: () => ({
-    relayUrl: 'wss://relay.test/ws',
-    trustedRelays: [],
+const TEST_WORKSPACE_IDENTITY = {
+  id: 'machine-lifecycle-test',
+  signingPublicKey: 'B'.repeat(64),
+  signingSecretKey: 'C'.repeat(128),
+  keyExchangePublicKey: 'D'.repeat(64),
+  keyExchangePrivateKey: 'E'.repeat(64),
+  createdAt: Date.now(),
+};
+
+const lifecycleDeps: CloudLifecycleDependencies = {
+  identityId: OWNER_ID,
+  relayInfo: TEST_RELAY_INFO,
+  workspaceIdentity: TEST_WORKSPACE_IDENTITY,
+  createEnrollmentInvite: async (workspaceId) => ({
+    token: `invite-${workspaceId}`,
+    inviteId: `invite-id-${workspaceId}`,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
   }),
-}));
-
-mock.module('../../core/user-identity.js', () => ({
-  loadUserRootIdentity: async () => TEST_USER_ROOT_IDENTITY,
-}));
+};
 
 // ── mock provider factory ─────────────────────────────────────────────────────
 
@@ -98,9 +104,8 @@ function seedWorkspace(id: string, status: CloudWorkspaceStatus = 'ready') {
   });
 }
 
-async function seedWorkspaceWithIdentity(id: string, status: CloudWorkspaceStatus = 'ready') {
+function seedWorkspaceWithIdentity(id: string, status: CloudWorkspaceStatus = 'ready') {
   seedWorkspace(id, status);
-  await ensureWorkspaceIdentity(id);
 }
 
 // ── stop ──────────────────────────────────────────────────────────────────────
@@ -110,7 +115,7 @@ describe('cloudStop', () => {
   afterEach(teardown);
 
   test('throws for unknown workspace id', async () => {
-    await expect(cloudStop('nonexistent', makeMockProvider())).rejects.toThrow(/not found/i);
+    await expect(cloudStop('nonexistent', makeMockProvider(), lifecycleDeps)).rejects.toThrow(/not found/i);
   });
 
   test('calls provider stopWorkspace with providerWorkspaceId', async () => {
@@ -120,7 +125,7 @@ describe('cloudStop', () => {
     });
 
     seedWorkspace('ws-a');
-    await cloudStop('ws-a', provider);
+    await cloudStop('ws-a', provider, lifecycleDeps);
 
     expect(stopCalls).toHaveLength(1);
     expect(stopCalls[0]).toBe('sprite-ws-a');
@@ -128,14 +133,14 @@ describe('cloudStop', () => {
 
   test('updates workspace status to hibernated in control store', async () => {
     seedWorkspace('ws-b');
-    await cloudStop('ws-b', makeMockProvider());
+    await cloudStop('ws-b', makeMockProvider(), lifecycleDeps);
     const ws = getCloudWorkspace('ws-b');
     expect(ws?.status).toBe('hibernated');
   });
 
   test('logs a workspace_stopped event', async () => {
     seedWorkspace('ws-c');
-    await cloudStop('ws-c', makeMockProvider());
+    await cloudStop('ws-c', makeMockProvider(), lifecycleDeps);
     const events = listCloudEvents({ workspaceId: 'ws-c' });
     expect(events.some((e) => e.eventType === 'workspace_stopped')).toBe(true);
   });
@@ -143,7 +148,7 @@ describe('cloudStop', () => {
   test('sets workspace status to error when provider call fails', async () => {
     seedWorkspace('ws-d');
     const provider = makeMockProvider({ stop: async () => { throw new Error('sprites api down'); } });
-    try { await cloudStop('ws-d', provider); } catch {}
+    try { await cloudStop('ws-d', provider, lifecycleDeps); } catch {}
     const ws = getCloudWorkspace('ws-d');
     expect(ws?.status).toBe('error');
   });
@@ -151,7 +156,7 @@ describe('cloudStop', () => {
   test('propagates provider errors wrapped in SpacesError', async () => {
     seedWorkspace('ws-e');
     const provider = makeMockProvider({ stop: async () => { throw new Error('quota exceeded'); } });
-    await expect(cloudStop('ws-e', provider)).rejects.toThrow(/quota exceeded/i);
+    await expect(cloudStop('ws-e', provider, lifecycleDeps)).rejects.toThrow(/quota exceeded/i);
   });
 });
 
@@ -162,7 +167,7 @@ describe('cloudResume', () => {
   afterEach(teardown);
 
   test('throws for unknown workspace id', async () => {
-    await expect(cloudResume('nonexistent', makeMockProvider())).rejects.toThrow(/not found/i);
+    await expect(cloudResume('nonexistent', makeMockProvider(), lifecycleDeps)).rejects.toThrow(/not found/i);
   });
 
   test('calls provider resumeWorkspace with providerWorkspaceId', async () => {
@@ -172,7 +177,7 @@ describe('cloudResume', () => {
     });
 
     await seedWorkspaceWithIdentity('ws-f', 'hibernated');
-    await cloudResume('ws-f', provider);
+    await cloudResume('ws-f', provider, lifecycleDeps);
 
     expect(resumeCalls).toHaveLength(1);
     expect(resumeCalls[0]).toBe('sprite-ws-f');
@@ -180,21 +185,21 @@ describe('cloudResume', () => {
 
   test('sets workspace to bootstrapping after wake and exec', async () => {
     await seedWorkspaceWithIdentity('ws-g', 'hibernated');
-    await cloudResume('ws-g', makeMockProvider());
+    await cloudResume('ws-g', makeMockProvider(), lifecycleDeps);
     const ws = getCloudWorkspace('ws-g');
     expect(ws?.status).toBe('bootstrapping');
   });
 
   test('logs a workspace_resumed event', async () => {
     await seedWorkspaceWithIdentity('ws-h', 'hibernated');
-    await cloudResume('ws-h', makeMockProvider());
+    await cloudResume('ws-h', makeMockProvider(), lifecycleDeps);
     const events = listCloudEvents({ workspaceId: 'ws-h' });
     expect(events.some((e) => e.eventType === 'workspace_resumed')).toBe(true);
   });
 
   test('issues unlock token event on resume', async () => {
     await seedWorkspaceWithIdentity('ws-h2', 'hibernated');
-    await cloudResume('ws-h2', makeMockProvider());
+    await cloudResume('ws-h2', makeMockProvider(), lifecycleDeps);
     const events = listCloudEvents({ workspaceId: 'ws-h2' });
     expect(events.some((e) => e.eventType === 'unlock_token_issued')).toBe(true);
   });
@@ -209,7 +214,7 @@ describe('cloudResume', () => {
     });
 
     await seedWorkspaceWithIdentity('ws-r1', 'hibernated');
-    await cloudResume('ws-r1', provider);
+    await cloudResume('ws-r1', provider, lifecycleDeps);
 
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0].id).toBe('sprite-ws-r1');
@@ -222,7 +227,7 @@ describe('cloudResume', () => {
 
   test('logs resume_exec_succeeded after bootstrap exec success', async () => {
     await seedWorkspaceWithIdentity('ws-r2', 'hibernated');
-    await cloudResume('ws-r2', makeMockProvider());
+    await cloudResume('ws-r2', makeMockProvider(), lifecycleDeps);
     const events = listCloudEvents({ workspaceId: 'ws-r2' });
     expect(events.some((e) => e.eventType === 'resume_exec_succeeded')).toBe(true);
   });
@@ -233,7 +238,7 @@ describe('cloudResume', () => {
       exec: async () => ({ exitCode: 127, stdout: '', stderr: 'gssh not found' }),
     });
 
-    await expect(cloudResume('ws-r2b', provider)).rejects.toThrow(/exited with code 127/i);
+    await expect(cloudResume('ws-r2b', provider, lifecycleDeps)).rejects.toThrow(/exited with code 127/i);
 
     const ws = getCloudWorkspace('ws-r2b');
     expect(ws?.status).toBe('error');
@@ -250,7 +255,7 @@ describe('cloudResume', () => {
       },
     });
 
-    await expect(cloudResume('ws-r3', provider)).rejects.toThrow(/bootstrap command failed/i);
+    await expect(cloudResume('ws-r3', provider, lifecycleDeps)).rejects.toThrow(/bootstrap command failed/i);
 
     const ws = getCloudWorkspace('ws-r3');
     expect(ws?.status).toBe('error');
@@ -265,7 +270,7 @@ describe('cloudResume', () => {
     });
 
     try {
-      await cloudResume('ws-r4', provider);
+      await cloudResume('ws-r4', provider, lifecycleDeps);
     } catch {
       // expected
     }
@@ -277,7 +282,7 @@ describe('cloudResume', () => {
   test('sets workspace status to error when provider call fails', async () => {
     await seedWorkspaceWithIdentity('ws-i', 'hibernated');
     const provider = makeMockProvider({ resume: async () => { throw new Error('vm wake failed'); } });
-    try { await cloudResume('ws-i', provider); } catch {}
+    try { await cloudResume('ws-i', provider, lifecycleDeps); } catch {}
     const ws = getCloudWorkspace('ws-i');
     expect(ws?.status).toBe('error');
   });
@@ -290,7 +295,7 @@ describe('cloudDestroy', () => {
   afterEach(teardown);
 
   test('throws for unknown workspace id', async () => {
-    await expect(cloudDestroy('nonexistent', makeMockProvider())).rejects.toThrow(/not found/i);
+    await expect(cloudDestroy('nonexistent', makeMockProvider(), lifecycleDeps)).rejects.toThrow(/not found/i);
   });
 
   test('calls provider destroyWorkspace with providerWorkspaceId', async () => {
@@ -300,7 +305,7 @@ describe('cloudDestroy', () => {
     });
 
     seedWorkspace('ws-j');
-    await cloudDestroy('ws-j', provider);
+    await cloudDestroy('ws-j', provider, lifecycleDeps);
 
     expect(destroyCalls).toHaveLength(1);
     expect(destroyCalls[0]).toBe('sprite-ws-j');
@@ -308,14 +313,14 @@ describe('cloudDestroy', () => {
 
   test('tombstones the workspace in control store (status=destroyed)', async () => {
     seedWorkspace('ws-k');
-    await cloudDestroy('ws-k', makeMockProvider());
+    await cloudDestroy('ws-k', makeMockProvider(), lifecycleDeps);
     const ws = getCloudWorkspace('ws-k');
     expect(ws?.status).toBe('destroyed');
   });
 
   test('logs a workspace_destroyed event', async () => {
     seedWorkspace('ws-l');
-    await cloudDestroy('ws-l', makeMockProvider());
+    await cloudDestroy('ws-l', makeMockProvider(), lifecycleDeps);
     const events = listCloudEvents({ workspaceId: 'ws-l' });
     expect(events.some((e) => e.eventType === 'workspace_destroyed')).toBe(true);
   });
@@ -324,7 +329,7 @@ describe('cloudDestroy', () => {
     seedWorkspace('ws-m');
     const provider = makeMockProvider({ destroy: async () => { throw new Error('404 not found'); } });
     // Should NOT throw — destroy is best-effort
-    await cloudDestroy('ws-m', provider);
+    await cloudDestroy('ws-m', provider, lifecycleDeps);
     const ws = getCloudWorkspace('ws-m');
     expect(ws?.status).toBe('destroyed');
   });

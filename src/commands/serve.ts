@@ -1117,6 +1117,19 @@ export async function serveStart(options: {
   writeServePid(process.pid);
   startStatusServer();
 
+  // Guard: clean up the PID file if the process crashes unexpectedly after it
+  // has been written.  Without these handlers an orphaned PID file would cause
+  // the parent (and subsequent `gssh machine serve start` invocations) to
+  // believe the daemon is still running.
+  const cleanupOnCrash = (reason: unknown) => {
+    logger.error(`[serve] fatal: ${reason instanceof Error ? reason.message : String(reason)}`);
+    stopStatusServer();
+    cleanupServeFiles();
+    process.exit(1);
+  };
+  process.once('uncaughtException', cleanupOnCrash);
+  process.once('unhandledRejection', cleanupOnCrash);
+
   try {
     await initializeSecretRuntime({
       ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,

@@ -1400,12 +1400,17 @@ async function handleProtocolMessage(
         clientRootResult.userRootId,
       );
 
-      grantMachineAccess({
-        machineId: parsedInvite.machineId,
-        ownerUserRootId: parsedInvite.ownerUserRootId,
-        clientUserRootId: clientRootResult.userRootId,
-        label: parsedInvite.label,
-      });
+      try {
+        grantMachineAccess({
+          machineId: parsedInvite.machineId,
+          ownerUserRootId: parsedInvite.ownerUserRootId,
+          clientUserRootId: clientRootResult.userRootId,
+          label: parsedInvite.label,
+        });
+      } catch (err) {
+        ws.send(serializeMessage(createErrorMessage("INTERNAL_ERROR", "Failed to grant machine access")));
+        return;
+      }
 
       const consumed = consumeRootInviteToken(
         parsedInvite.inviteId,

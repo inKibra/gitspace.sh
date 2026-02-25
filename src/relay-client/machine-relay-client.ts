@@ -49,13 +49,22 @@ export async function requestUnlockGrantViaRelay(options: {
   url.searchParams.set('role', 'machine');
   url.searchParams.set('m', `unlock-${Date.now().toString(36)}`);
 
+  const configuredTimeoutMs = Number.parseInt(process.env.GSSH_UNLOCK_REQUEST_TIMEOUT_MS ?? '30000', 10);
+  const timeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+    ? configuredTimeoutMs
+    : 30000;
+
   return await new Promise<UnlockGrantResponse>((resolve, reject) => {
     let completed = false;
     const ws = new WebSocket(url.toString());
+    const timeoutId = setTimeout(() => {
+      fail('Timed out waiting for relay unlock grant');
+    }, timeoutMs);
 
     const fail = (message: string) => {
       if (completed) return;
       completed = true;
+      clearTimeout(timeoutId);
       try {
         ws.close();
       } catch {
@@ -121,6 +130,7 @@ export async function requestUnlockGrantViaRelay(options: {
 
         if (completed) return;
         completed = true;
+        clearTimeout(timeoutId);
         ws.close();
         resolve({
           ciphertext,
@@ -260,6 +270,11 @@ export async function connectMachineRelay(
           );
           eventHandler({ type: 'relay_reconnecting', attempt: reconnectAttempts });
           setTimeout(connect, delay);
+        } else {
+          // All reconnect attempts exhausted — reject the outer promise so the
+          // caller does not hang indefinitely waiting for a connection that will
+          // never succeed.
+          reject(new Error(`WebSocket reconnect failed after ${maxReconnectAttempts} attempts`));
         }
       };
 

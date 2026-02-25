@@ -179,6 +179,14 @@ describe('isBrowseMessage', () => {
     expect(isBrowseMessage(msg)).toBe(true);
   });
 
+  it('should return true for list_remote_branches', () => {
+    expect(isBrowseMessage({ type: 'list_remote_branches', projectName: 'p1' })).toBe(true);
+  });
+
+  it('should return true for list_linear_issues', () => {
+    expect(isBrowseMessage({ type: 'list_linear_issues', projectName: 'p1' })).toBe(true);
+  });
+
   it('should return false for start_process', () => {
     const msg: StartProcessRequest = {
       type: 'start_process',
@@ -218,6 +226,12 @@ describe('ClientToMachineMessage type coverage', () => {
     { type: 'list_sessions' },
     { type: 'attach_session' },
     { type: 'list_projects' },
+    { type: 'list_github_repos' },
+    { type: 'list_remote_branches', projectName: 'p1' },
+    { type: 'list_linear_issues', projectName: 'p1' },
+    { type: 'create_project', repository: 'org/repo' },
+    { type: 'create_workspace', projectName: 'p1', workspaceName: 'w1' },
+    { type: 'delete_project', projectName: 'p1' },
     { type: 'kill_session', sessionId: 's1' },
     { type: 'delete_workspace', workspaceId: 'w1', projectName: 'p1' },
     { type: 'get_inbox' },
@@ -232,9 +246,9 @@ describe('ClientToMachineMessage type coverage', () => {
     { type: 'stop_process', workspaceId: 'w1', processName: 'web' },
   ];
 
-  it('should include all 16 client message types', () => {
+  it('should include all 22 client message types', () => {
     const types = new Set(clientMessages.map(m => m.type));
-    expect(types.size).toBe(16);
+    expect(types.size).toBe(22);
   });
 
   it('should all parse successfully via round-trip', () => {
@@ -260,6 +274,12 @@ describe('MachineToClientMessage type coverage', () => {
     { type: 'session_exited', sessionId: 's1', exitCode: 0 },
     { type: 'error', code: 'TEST', message: 'test error' },
     { type: 'project_list', projects: [] },
+    { type: 'github_repo_list', repos: [] },
+    { type: 'remote_branch_list', projectName: 'p1', branches: ['main'] },
+    { type: 'linear_issue_list', projectName: 'p1', issues: [] },
+    { type: 'project_created', projectName: 'p1', repository: 'org/repo', baseBranch: 'main' },
+    { type: 'workspace_created', projectName: 'p1', workspaceId: 'p1:w1', workspaceName: 'w1', branchName: 'w1' },
+    { type: 'project_deleted', projectName: 'p1' },
     { type: 'session_killed', sessionId: 's1', workspaceId: 'w1' },
     { type: 'workspace_deleted', workspaceId: 'w1' },
     { type: 'inbox_list', items: [], unreadCount: 0 },
@@ -275,9 +295,9 @@ describe('MachineToClientMessage type coverage', () => {
     { type: 'process_stopped', workspaceId: 'w1', processName: 'web' },
   ];
 
-  it('should include all 20 machine message types', () => {
+  it('should include all 26 machine message types', () => {
     const types = new Set(machineMessages.map(m => m.type));
-    expect(types.size).toBe(20);
+    expect(types.size).toBe(26);
   });
 
   it('should all parse successfully via round-trip', () => {

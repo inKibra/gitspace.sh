@@ -27,6 +27,7 @@ import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
+import { useLifecycleController } from '../app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from '../lib/processes/editor.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
 
@@ -173,6 +174,20 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         variant: 'error',
       });
     },
+  });
+
+  const lifecycleController = useLifecycleController({
+    flow,
+    listGithubRepos: remote.listGithubRepos,
+    listRemoteBranches: remote.listRemoteBranches,
+    listLinearIssues: remote.listLinearIssues,
+    createProject: remote.createProject,
+    createWorkspace: remote.createWorkspace,
+    deleteProject: remote.deleteProject,
+    getProjectNames: () => remote.projects.map((project) => project.name),
+    refreshProjects: () => remote.requestProjects(),
+    refreshWorkspaces: () => remote.requestWorkspaces(),
+    refreshSessions: () => remote.requestSessions(),
   });
 
   useEffect(() => {
@@ -405,6 +420,24 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     machineName: machine.label || machine.machineId,
   });
 
+  const selectedProjectName = useMemo(() => {
+    const selected = spacesBrowserProps.selectedItem;
+    if (!selected) {
+      return null;
+    }
+    if (selected.type === 'project') {
+      return selected.name;
+    }
+    if (selected.type === 'workspace') {
+      return selected.workspace.projectName;
+    }
+    if ('workspaceId' in selected && typeof selected.workspaceId === 'string') {
+      const separator = selected.workspaceId.indexOf(':');
+      return separator > 0 ? selected.workspaceId.slice(0, separator) : null;
+    }
+    return null;
+  }, [spacesBrowserProps.selectedItem]);
+
   const inboxProps = useInbox({
     items: remote.inbox,
     unreadCount: remote.inboxUnreadCount,
@@ -515,6 +548,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
 
     if (showScriptTerminal) {
+      if (remote.scriptState?.isRunning && (key.raw === 'c' || key.name === 'c')) {
+        remote.cancelPendingScripts();
+        return;
+      }
+
       if (
         !remote.scriptState?.isRunning &&
         (key.name === 'escape' || key.name === 'n' || key.raw === 'n')
@@ -588,7 +626,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     } else if (browseCommand === 'activate') {
       spacesBrowserProps.activateSelected();
     } else if (browseCommand === 'new') {
-      spacesBrowserProps.createNewSession();
+      lifecycleController.openCreateMenu(selectedProjectName);
     } else if (browseCommand === 'refresh') {
       spacesBrowserProps.refresh();
     } else if (browseCommand === 'open-inbox') {
@@ -622,7 +660,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       }
     } else if (browseCommand === 'delete') {
       const selected = spacesBrowserProps.selectedItem;
-      if (selected?.type === 'workspace') {
+      if (selected?.type === 'project') {
+        lifecycleController.openDeleteProjectFlow(selected.name);
+      } else if (selected?.type === 'workspace') {
         flow.showConfirmTyped({
           title: 'Delete Workspace',
           message: `Delete workspace "${selected.workspace.name}"?`,
@@ -685,7 +725,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           exitCode={remote.scriptState?.exitCode}
         />
         {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar hint={isRunning ? '[Running scripts...]' : '[Esc/n] Back to workspaces'} />
+        <StatusBar hint={isRunning ? '[Running scripts... c: cancel + attach anyway]' : '[Esc/n] Back to workspaces'} />
       </Fragment>
     );
   }
@@ -718,7 +758,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       </box>
       <SpacesBrowserTUI {...spacesBrowserProps} focused={true} />
       <FlowTUI flow={flow} />
-      <StatusBar hint="[↑↓] Navigate  [Enter] Open/Join  [n] New Session  [x] Kill  [d] Delete  [i] Inbox  [Esc] Back" />
+      <StatusBar hint="[↑↓] Navigate  [Enter] Open/Join  [n] Create  [x] Kill  [d] Delete  [i] Inbox  [Esc] Back" />
     </box>
   );
 }

@@ -435,23 +435,28 @@ export function getCloudWorkspaceByMachinePublicKey(
 /**
  * Update only the status (and optional error message) of a workspace.
  * Passing a non-error status clears any previous error.
+ *
+ * @returns `true` if a row was updated, `false` if no workspace with that id
+ *   was found (silently no-ops instead of throwing so callers can decide how
+ *   to handle a missing workspace).
  */
 export function updateCloudWorkspaceStatus(
   id: string,
   status: CloudWorkspaceRecord['status'],
   error?: string
-): void {
+): boolean {
   const now = nowIso();
   // Non-error statuses clear the stored error field
   const errorValue = status === 'error' ? (error ?? null) : null;
-  withControlDb((db) => {
-    db.query(
+  return withControlDb((db) => {
+    const result = db.query(
       `
       UPDATE cloud_workspaces
       SET status = ?, error = ?, updated_at = ?
       WHERE id = ?
       `
     ).run(status, errorValue, now, id);
+    return result.changes > 0;
   });
 }
 

@@ -13,6 +13,7 @@ interface Props {
   exitCode?: number;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
   onBack: () => void;
+  onCancel?: () => void;
 }
 
 const PHASE_LABELS: Record<ScriptPhase, string> = {
@@ -30,6 +31,7 @@ export function ScriptTerminal({
   exitCode,
   setWriteCallback,
   onBack,
+  onCancel,
 }: Props) {
   useEffect(() => {
     return () => {
@@ -58,6 +60,14 @@ export function ScriptTerminal({
         </div>
         <div className="flex items-center gap-3">
           <span className={`text-sm ${statusColor}`}>{statusText}</span>
+          {isRunning && onCancel && (
+            <button
+              onClick={onCancel}
+              className="px-3 py-2 text-sm bg-[#4d2d00] hover:bg-[#6b3f00] rounded text-[#ffd8a8] border border-[#8b5a2b]"
+            >
+              Cancel Scripts
+            </button>
+          )}
           {!isRunning && (
             <button
               onClick={onBack}

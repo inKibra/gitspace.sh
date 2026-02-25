@@ -324,7 +324,9 @@ export function SessionTerminal({
       f9: '20~', f10: '21~', f11: '23~', f12: '24~',
     };
 
-    if (key.ctrl && key.name && key.name.length === 1 && /[a-z]/i.test(key.name)) {
+    if (key.name === 'return' || key.name === 'enter') {
+      data = '\r';
+    } else if (key.ctrl && key.name && key.name.length === 1 && /[a-z]/i.test(key.name)) {
       const charCode = key.name.toLowerCase().charCodeAt(0) - 96;
       data = String.fromCharCode(charCode);
     } else if (key.shift && key.name === 'tab') {
@@ -344,7 +346,7 @@ export function SessionTerminal({
     } else if (key.name === 'pagedown') {
       data = getPageNavigationEscapeSequence('down');
     } else if (key.sequence) {
-      data = key.sequence;
+      data = key.sequence === '\n' ? '\r' : key.sequence;
     } else if (key.raw) {
       data = key.raw;
     }

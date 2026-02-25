@@ -28,16 +28,20 @@ export function generateNonce(): Buffer {
 }
 
 /**
- * Encrypt data using ChaCha20-Poly1305
+ * Encrypt data using AES-256-GCM
  *
  * @param data - Plaintext data to encrypt
- * @param key - 256-bit key (from deriveKey)
- * @returns Object with nonce and ciphertext (includes auth tag)
+ * @param key - 256-bit (32-byte) key (from deriveKey)
+ * @returns Object with nonce and ciphertext (includes auth tag), or null if
+ *   the key has the wrong length.
  */
 export function encrypt(
   data: Uint8Array | Buffer,
   key: Uint8Array | Buffer
-): { nonce: Buffer; ciphertext: Buffer } {
+): { nonce: Buffer; ciphertext: Buffer } | null {
+  if (key.length !== 32) {
+    return null;
+  }
   const nonce = generateNonce();
 
   const cipher = createCipheriv(ALGORITHM, key, nonce, {
@@ -54,12 +58,12 @@ export function encrypt(
 }
 
 /**
- * Decrypt data using ChaCha20-Poly1305
+ * Decrypt data using AES-256-GCM
  *
  * @param ciphertext - Encrypted data (includes auth tag at end)
  * @param nonce - Nonce used for encryption
- * @param key - 256-bit key (same as used for encryption)
- * @returns Decrypted plaintext, or null if authentication failed
+ * @param key - 256-bit (32-byte) key (same as used for encryption)
+ * @returns Decrypted plaintext, or null if authentication failed or key has wrong length
  */
 export function decrypt(
   ciphertext: Uint8Array | Buffer,
@@ -98,7 +102,11 @@ export function seal(
   data: Uint8Array | Buffer,
   key: Uint8Array | Buffer
 ): Buffer {
-  const { nonce, ciphertext } = encrypt(data, key);
+  const result = encrypt(data, key);
+  if (!result) {
+    throw new Error('seal: invalid key length (expected 32 bytes)');
+  }
+  const { nonce, ciphertext } = result;
   return Buffer.concat([nonce, ciphertext]);
 }
 

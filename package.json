@@ -19,7 +19,8 @@
     "build": "bun scripts/build.ts",
     "build:all": "bun scripts/build.ts --all",
     "build:npm": "bun scripts/build.ts --npm",
-    "relay": "bun src/relay/index.ts"
+    "relay": "bun src/relay/index.ts",
+    "e2e:on-demand": "bash scripts/e2e/run-on-demand.sh"
   },
   "optionalDependencies": {
     "@gitspace/darwin-arm64": "0.2.0-rc.24",
@@ -45,6 +46,7 @@
   "author": "inKibra, Inc.",
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
+    "@fly/sprites": "0.0.1-rc37",
     "@inquirer/prompts": "^7.10.1",
     "@linear/sdk": "^29.0.0",
     "@noble/curves": "^2.0.1",

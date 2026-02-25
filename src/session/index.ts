@@ -4,8 +4,17 @@ export type {
   BackendDescriptor,
   SessionBackend,
   AttachSessionParams,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
   DeleteWorkspaceParams,
 } from './backend.js';
+
+export type {
+  WorkspaceSource,
+  SessionLinearAttachmentSummary,
+  SessionLinearIssueSummary,
+} from '../types/lifecycle.js';
 
 export type {
   BundleRefreshStep,

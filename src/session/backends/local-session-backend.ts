@@ -29,6 +29,16 @@ import { scanWorkspaces } from '../../lib/remote-session/workspace-scanner.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
 import {
+  createProjectForSession,
+  createWorkspaceForSession,
+  deleteProjectForSession,
+  listGithubReposForSession,
+  listLinearIssuesForSession,
+  listRemoteBranchesForSession,
+  type SessionCreateProjectParams,
+  type SessionCreateWorkspaceParams,
+} from '../../core/session-lifecycle.js';
+import {
   getBundleRefreshPlan as getBundleRefreshPlanCore,
   applyBundleRefreshSubmission,
 } from '../../core/bundle-refresh.js';
@@ -44,6 +54,9 @@ import { buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
   DeleteWorkspaceParams,
   SessionBackend,
 } from '../backend.js';
@@ -53,6 +66,7 @@ import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bun
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
 import type { WideEventFilter } from '../../types/events.js';
+import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
@@ -84,6 +98,12 @@ export interface LocalSessionBackendDependencies {
   getNotificationConfig: typeof getNotificationConfig;
   updateNotificationConfig: typeof updateNotificationConfig;
   listProjectSummaries: typeof listProjectSummaries;
+  listGithubReposForSession: typeof listGithubReposForSession;
+  listRemoteBranchesForSession: typeof listRemoteBranchesForSession;
+  listLinearIssuesForSession: typeof listLinearIssuesForSession;
+  createProjectForSession: (params: SessionCreateProjectParams) => Promise<unknown>;
+  createWorkspaceForSession: (params: SessionCreateWorkspaceParams) => Promise<unknown>;
+  deleteProjectForSession: typeof deleteProjectForSession;
   scanWorkspaces: typeof scanWorkspaces;
   deleteWorkspaceCore: typeof deleteWorkspaceCore;
   prepareWorkspaceForSession: typeof prepareWorkspaceForSession;
@@ -171,6 +191,15 @@ function toWorkspaceDeleteErrorCode(error: unknown): WorkspaceDeleteErrorCode | 
   }
 
   return undefined;
+}
+
+function getErrorCode(error: unknown, fallback: string): string {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return fallback;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && code.length > 0 ? code : fallback;
 }
 
 function getDefaultTerminalSize(): { cols: number; rows: number } {
@@ -317,6 +346,12 @@ function buildDeps(
     getNotificationConfig,
     updateNotificationConfig,
     listProjectSummaries,
+    listGithubReposForSession,
+    listRemoteBranchesForSession,
+    listLinearIssuesForSession,
+    createProjectForSession,
+    createWorkspaceForSession,
+    deleteProjectForSession,
     scanWorkspaces,
     deleteWorkspaceCore,
     prepareWorkspaceForSession,
@@ -341,6 +376,7 @@ export class LocalSessionBackend implements SessionBackend {
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
   private viewOnly = false;
+  private pendingAttachAbortController: AbortController | null = null;
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
@@ -374,6 +410,9 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async disconnect(): Promise<void> {
+    this.pendingAttachAbortController?.abort();
+    this.pendingAttachAbortController = null;
+
     await this.closeSessionSocket(false);
     this.connected = false;
     const wasAttached = this.attachedSessionId !== null;
@@ -392,6 +431,18 @@ export class LocalSessionBackend implements SessionBackend {
       isCurrent: project.isCurrent,
     }));
     this.emit({ type: 'projects', projects });
+  }
+
+  async listGithubRepos(org?: string): Promise<string[]> {
+    return this.deps.listGithubReposForSession(org);
+  }
+
+  async listRemoteBranches(projectName: string): Promise<string[]> {
+    return this.deps.listRemoteBranchesForSession(projectName);
+  }
+
+  async listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]> {
+    return this.deps.listLinearIssuesForSession(projectName);
   }
 
   async listWorkspaces(): Promise<void> {
@@ -466,6 +517,48 @@ export class LocalSessionBackend implements SessionBackend {
     this.emit({ type: 'sessions', sessions: filtered });
   }
 
+  async createProject(params: CreateProjectParams): Promise<void> {
+    try {
+      await this.deps.createProjectForSession(params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: 'command_error',
+        code: getErrorCode(error, 'CREATE_PROJECT_FAILED'),
+        message,
+      });
+      throw error;
+    }
+  }
+
+  async createWorkspace(params: CreateWorkspaceParams): Promise<void> {
+    try {
+      await this.deps.createWorkspaceForSession(params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: 'command_error',
+        code: getErrorCode(error, 'CREATE_WORKSPACE_FAILED'),
+        message,
+      });
+      throw error;
+    }
+  }
+
+  async deleteProject(projectName: string, _params: DeleteProjectParams = {}): Promise<void> {
+    try {
+      await this.deps.deleteProjectForSession({ projectName });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: 'command_error',
+        code: getErrorCode(error, 'DELETE_PROJECT_FAILED'),
+        message,
+      });
+      throw error;
+    }
+  }
+
   async attachSession(params: AttachSessionParams): Promise<void> {
     if (!this.connected) {
       await this.connect();
@@ -510,6 +603,8 @@ export class LocalSessionBackend implements SessionBackend {
         });
       } else {
         let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+        const attachAbortController = new AbortController();
+        this.pendingAttachAbortController = attachAbortController;
 
         const scriptResult = await this.deps.prepareWorkspaceForSession({
           projectName: workspace.projectName,
@@ -518,6 +613,7 @@ export class LocalSessionBackend implements SessionBackend {
           interactiveScripts: false,
           bundleMode: 'error-if-changed',
           scriptPolicy: params.scriptPolicy ?? 'auto',
+          signal: attachAbortController.signal,
           onOutput: (data) => {
             this.emitPtyData(data);
             this.emit({
@@ -529,9 +625,14 @@ export class LocalSessionBackend implements SessionBackend {
           onPhaseStart: (phase) => {
             currentPhase = phase;
           },
+        }).finally(() => {
+          if (this.pendingAttachAbortController === attachAbortController) {
+            this.pendingAttachAbortController = null;
+          }
         });
 
         if (!scriptResult.success) {
+          const scriptsCancelled = 'cancelled' in scriptResult && scriptResult.cancelled === true;
           const bundleNeedsRefresh =
             'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh;
 
@@ -539,6 +640,12 @@ export class LocalSessionBackend implements SessionBackend {
             this.emit({
               type: 'command_error',
               code: 'BUNDLE_REFRESH_REQUIRED',
+              message: scriptResult.error,
+            });
+          } else if (scriptsCancelled) {
+            this.emit({
+              type: 'command_error',
+              code: 'SCRIPT_CANCELLED',
               message: scriptResult.error,
             });
           } else {
@@ -562,6 +669,8 @@ export class LocalSessionBackend implements SessionBackend {
           ) as Error & { code?: string };
           if (bundleNeedsRefresh) {
             error.code = 'BUNDLE_REFRESH_REQUIRED';
+          } else if (scriptsCancelled) {
+            error.code = 'SCRIPT_CANCELLED';
           } else {
             error.code = scriptFailureCodeForPhase(scriptResult.phase);
           }
@@ -598,6 +707,10 @@ export class LocalSessionBackend implements SessionBackend {
     if (hadAttached) {
       this.emit({ type: 'detached' });
     }
+  }
+
+  async cancelPendingScripts(): Promise<void> {
+    this.pendingAttachAbortController?.abort();
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
