@@ -348,7 +348,7 @@ describe("HandshakeHandler user-root-keyed ACL", () => {
     expect(session.accessType).toBe("full");
   });
 
-  test("non-owner with user root in vault ACL is accepted", async () => {
+  test("non-owner with valid device cert is rejected in owner-only mode", async () => {
     const { client, machine } = createTestIdentityPair();
 
     // Create user roots for owner and collaborator
@@ -368,16 +368,9 @@ describe("HandshakeHandler user-root-keyed ACL", () => {
     const ownerUserRootId = deriveIdentityId(ownerRoot.signing.publicKey);
     const collabUserRootId = deriveIdentityId(collabRoot.signing.publicKey);
 
-    const accessList = new AccessControlList();
-    // Client is NOT in device ACL
-
     const handler = new HandshakeHandler({
       identity: machine,
       ownerUserRootId,
-      checkUserRootAccess: async (owner, clientRoot) => {
-        // Simulate vault access check — collab is granted
-        return owner === ownerUserRootId && clientRoot === collabUserRootId;
-      },
     });
 
     // Phase 1: ClientHello
@@ -412,9 +405,10 @@ describe("HandshakeHandler user-root-keyed ACL", () => {
       data: clientAuth,
     });
 
-    expect(authResult.type).toBe("established");
-    const session = (authResult as any).session;
-    expect(session.accessType).toBe("full");
+    expect(authResult.type).toBe("reply");
+    const serverAuth = (authResult as any).message.data;
+    expect(serverAuth.result.type).toBe("rejected");
+    expect(serverAuth.result.reason).toBe("Only the owner user root is authorized");
   });
 
   test("client rejected when not in device ACL and no device cert", async () => {
@@ -430,7 +424,6 @@ describe("HandshakeHandler user-root-keyed ACL", () => {
     const handler = new HandshakeHandler({
       identity: machine,
       ownerUserRootId,
-      checkUserRootAccess: async () => true, // Would accept if cert present
     });
 
     const { state: clientState, message: clientHello } = createClientHello();
@@ -482,7 +475,6 @@ describe("HandshakeHandler user-root-keyed ACL", () => {
     const handler = new HandshakeHandler({
       identity: machine,
       ownerUserRootId,
-      checkUserRootAccess: async () => false, // Not in vault ACL
     });
 
     const { state: clientState, message: clientHello } = createClientHello();
@@ -530,7 +522,7 @@ describe("HandshakeHandler user-root-keyed ACL", () => {
 
     const accessList = new AccessControlList();
 
-    // No ownerUserRootId or checkUserRootAccess.
+    // No ownerUserRootId configured.
     const handler = new HandshakeHandler({
       identity: machine,
     });

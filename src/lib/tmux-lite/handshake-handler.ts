@@ -37,19 +37,6 @@ import type {
 // Types
 // ============================================================================
 
-/**
- * Callback to check user-root-keyed access (e.g., via vault_access_list).
- *
- * @param ownerUserRootId - The machine owner's user root ID
- * @param clientUserRootId - The connecting client's user root ID (from device cert)
- * @returns true if the client's user root is authorized
- */
-export type UserRootAccessCheck = (
-  ownerUserRootId: string,
-  clientUserRootId: string,
-  machineId?: string,
-) => boolean | Promise<boolean>;
-
 /** Configuration for HandshakeHandler */
 export interface HandshakeHandlerConfig {
   /** Machine's identity for authentication */
@@ -57,15 +44,8 @@ export interface HandshakeHandlerConfig {
   /** Handshake timeout in milliseconds (default: 30000) */
   handshakeTimeoutMs?: number;
   /**
-   * Optional user-root-keyed access check.
-   * When a client presents a valid device certificate, this callback is used
-   * to check if the client's user root ID is authorized (via vault_access_list).
-   */
-  checkUserRootAccess?: UserRootAccessCheck;
-  /**
    * Machine owner's user root ID.
-   * Required for user-root-keyed ACL checks — if the client's device cert
-   * maps to the same user root, they are auto-accepted as owner.
+   * If the client's device cert maps to the same user root, they are accepted.
    */
   ownerUserRootId?: string;
 }
@@ -279,7 +259,7 @@ export class HandshakeHandler {
       };
     }
 
-    // Check authorization (device-keyed, then user-root-keyed fallback)
+    // Check authorization (owner-only user-root policy)
     const authCheck = await this.checkAuthorization(
       authResult.authorization,
       authResult.userRootId
@@ -331,7 +311,7 @@ export class HandshakeHandler {
     };
   }
 
-  /** Check client authorization via user-root ACL. */
+  /** Check client authorization via owner-only user-root policy. */
   private async checkAuthorization(
     authorization: X3DHAuthMessage["authorization"],
     userRootId?: string
@@ -361,29 +341,9 @@ export class HandshakeHandler {
       };
     }
 
-    if (!this.config.checkUserRootAccess) {
-      return {
-        type: "rejected",
-        reason: "Machine user-root ACL is not configured",
-      };
-    }
-
-    // Check vault access list via callback
-    const granted = await this.config.checkUserRootAccess(
-      this.config.ownerUserRootId,
-      userRootId,
-      this.config.identity.id,
-    );
-    if (granted) {
-      return {
-        type: "accepted",
-        accessType: "full",
-      };
-    }
-
     return {
       type: "rejected",
-      reason: "User root is not authorized",
+      reason: "Only the owner user root is authorized",
     };
   }
 

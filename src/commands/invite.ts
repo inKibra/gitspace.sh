@@ -3,7 +3,6 @@ import { logger } from '../utils/logger.js';
 import { promptPassword } from '../utils/prompts.js';
 import { keypairExists, loadKeypair, readRelayConfig } from '../core/identity.js';
 import { createLocalDeviceCertificate, loadUserRootIdentity } from '../core/user-identity.js';
-import { parseUserRootPublicKey } from '../lib/tmux-lite/crypto/user-identity.js';
 import { createNodeRelaySigner } from '../session/adapters/node-remote.js';
 import { deriveIdentityId } from '../lib/tmux-lite/crypto/identity.js';
 import { RelayRequestClient, nodeRelaySocketAdapter } from '../relay-client/index.js';
@@ -74,7 +73,6 @@ function parseBase64Key(key: string, label: string): Uint8Array {
   }
 
   const parsed = new Uint8Array(decoded);
-
   if (parsed.length !== 32) {
     throw new SpacesError(`${label} must be a 32-byte base64 key.`, 'USER_ERROR', 1);
   }
@@ -177,23 +175,6 @@ async function sendRelayRequest<T>(
   }
 }
 
-function parseTargetUserKey(user: string): { userRootId: string; signingKeyBase64: string } {
-  let parsed: { userRootId: string; signingPublicKey: Uint8Array };
-  try {
-    parsed = parseUserRootPublicKey(user.trim());
-  } catch (error) {
-    throw new SpacesError(
-      error instanceof Error ? error.message : 'Invalid user root public key format.',
-      'USER_ERROR',
-      1,
-    );
-  }
-  return {
-    userRootId: parsed.userRootId,
-    signingKeyBase64: Buffer.from(parsed.signingPublicKey).toString('base64'),
-  };
-}
-
 async function createInviteViaRelay(
   relayUrl: string,
   inviteToken: string,
@@ -218,48 +199,6 @@ async function createInviteViaRelay(
       return { inviteId: msg.inviteId };
     },
   );
-}
-
-export async function createRelayUserInvite(user: string, options: {
-  relay?: string;
-  expires?: string;
-  maxUses?: string;
-  label?: string;
-}): Promise<void> {
-  const owner = await loadUserRootIdentity();
-  if (!owner) {
-    throw new SpacesError('User root identity is required. Run `gssh user identity init` first.', 'USER_ERROR', 1);
-  }
-
-  const relayUrl = resolveRelayUrl(options.relay);
-  const target = parseTargetUserKey(user);
-  const duration = parseDuration(options.expires ?? '24h');
-  const maxUses = parseMaxUses(options.maxUses);
-
-  const inviteToken = createRootInviteToken({
-    type: 'relay-user',
-    owner,
-    relayUrl,
-    targetUserRootSigningKey: target.signingKeyBase64,
-    expiresAt: Date.now() + duration.milliseconds,
-    maxUses,
-    label: options.label,
-  });
-  const parsedInvite = parseRootInviteToken(inviteToken);
-  if (!parsedInvite) {
-    throw new SpacesError('Failed to build invite token', 'SYSTEM_ERROR', 2);
-  }
-
-  await createInviteViaRelay(relayUrl, inviteToken);
-
-  logger.success('Relay-user invite created');
-  logger.log(`  Invite ID: ${chalk.cyan(parsedInvite.inviteId)}`);
-  logger.log(`  Target:    ${chalk.cyan(target.userRootId)}`);
-  logger.log(`  Expires:   ${formatDate(parsedInvite.expiresAt)} (${duration.humanReadable})`);
-  logger.log(`  Max uses:  ${parsedInvite.maxUses === null ? 'unlimited' : parsedInvite.maxUses}`);
-  logger.log('');
-  logger.bold('Invite Token:');
-  logger.log(inviteToken);
 }
 
 export async function createRelayMachineInvite(options: {
@@ -316,66 +255,13 @@ export async function createRelayMachineInvite(options: {
   logger.dim(`  gssh machine enroll --invite "${inviteToken}"`);
 }
 
-export async function createMachineUserInvite(
-  machineId: string,
-  user: string,
-  options: {
-    relay?: string;
-    expires?: string;
-    maxUses?: string;
-    label?: string;
-  },
-): Promise<void> {
-  const owner = await loadUserRootIdentity();
-  if (!owner) {
-    throw new SpacesError('User root identity is required. Run `gssh user identity init` first.', 'USER_ERROR', 1);
-  }
-
-  const relayUrl = resolveRelayUrl(options.relay);
-  const target = parseTargetUserKey(user);
-  const duration = parseDuration(options.expires ?? '24h');
-  const maxUses = parseMaxUses(options.maxUses);
-
-  const inviteToken = createRootInviteToken({
-    type: 'machine-user',
-    owner,
-    relayUrl,
-    machineId,
-    targetUserRootSigningKey: target.signingKeyBase64,
-    expiresAt: Date.now() + duration.milliseconds,
-    maxUses,
-    label: options.label,
-  });
-  const parsedInvite = parseRootInviteToken(inviteToken);
-  if (!parsedInvite || parsedInvite.type !== 'machine-user') {
-    throw new SpacesError('Failed to build machine-user invite token', 'SYSTEM_ERROR', 2);
-  }
-
-  await createInviteViaRelay(relayUrl, inviteToken);
-
-  logger.success('Machine-user invite created');
-  logger.log(`  Invite ID: ${chalk.cyan(parsedInvite.inviteId)}`);
-  logger.log(`  Machine:   ${chalk.cyan(parsedInvite.machineId)}`);
-  logger.log(`  Target:    ${chalk.cyan(target.userRootId)}`);
-  logger.log(`  Expires:   ${formatDate(parsedInvite.expiresAt)} (${duration.humanReadable})`);
-  logger.log(`  Max uses:  ${parsedInvite.maxUses === null ? 'unlimited' : parsedInvite.maxUses}`);
-  logger.log('');
-  logger.bold('Invite Token:');
-  logger.log(inviteToken);
-}
-
 export async function listInvites(options: {
   relay?: string;
   type?: RootInviteType;
   json?: boolean;
 }): Promise<void> {
-  if (
-    options.type !== undefined &&
-    options.type !== 'relay-user' &&
-    options.type !== 'relay-machine' &&
-    options.type !== 'machine-user'
-  ) {
-    throw new SpacesError('Invalid invite type. Use relay-user, relay-machine, or machine-user.', 'USER_ERROR', 1);
+  if (options.type !== undefined && options.type !== 'relay-machine') {
+    throw new SpacesError('Invalid invite type. Only relay-machine is supported.', 'USER_ERROR', 1);
   }
 
   const relayUrl = resolveRelayUrl(options.relay);
@@ -391,7 +277,6 @@ export async function listInvites(options: {
     expiresAt: string;
     createdAt: string;
     revokedAt?: string;
-    targetUserRootId?: string;
     machineId?: string;
   };
 
@@ -401,7 +286,7 @@ export async function listInvites(options: {
       type: 'list_root_invites' as const,
       clientIdentityId: context.identityId,
       deviceCertificate: context.deviceCertificate,
-      inviteType: options.type,
+      inviteType: 'relay-machine',
     }),
     (msg) => {
       if (msg.type !== 'root_invite_list') {
@@ -432,9 +317,6 @@ export async function listInvites(options: {
     logger.log(`  Expires: ${invite.expiresAt}`);
     if (invite.machineId) {
       logger.log(`  Machine: ${invite.machineId}`);
-    }
-    if (invite.targetUserRootId) {
-      logger.log(`  User:    ${invite.targetUserRootId}`);
     }
     if (invite.label) {
       logger.log(`  Label:   ${invite.label}`);
@@ -467,75 +349,6 @@ export async function revokeInvite(inviteId: string, options: { relay?: string }
   );
 
   logger.success(`Revoked invite ${inviteId}`);
-}
-
-export async function acceptInviteForUser(
-  token: string,
-  options: { relay?: string } = {},
-): Promise<void> {
-  const parsedInvite = parseRootInviteToken(token);
-  if (!parsedInvite) {
-    throw new SpacesError('Invalid invite token format or signature.', 'USER_ERROR', 1);
-  }
-
-  if (parsedInvite.type === 'relay-machine') {
-    throw new SpacesError(
-      'This is a machine enrollment invite. Use `gssh machine enroll --invite <token>`.',
-      'USER_ERROR',
-      1,
-    );
-  }
-
-  const relayUrl = resolveRelayUrl(options.relay, token);
-  const context = await loadSignedClientContext();
-
-  type AcceptedResult = {
-    inviteId: string;
-    inviteType: RootInviteType;
-    granted: 'relay' | 'machine';
-    machineId?: string;
-  };
-
-  const result = await sendRelayRequest<AcceptedResult>(
-    relayUrl,
-    () => context.relaySigner({
-      type: 'accept_root_invite' as const,
-      clientIdentityId: context.identityId,
-      deviceCertificate: context.deviceCertificate,
-      inviteToken: token,
-    }),
-    (msg) => {
-      if (msg.type !== 'root_invite_accepted') {
-        return null;
-      }
-      if (
-        typeof msg.inviteId !== 'string' ||
-        (msg.inviteType !== 'relay-user' && msg.inviteType !== 'relay-machine' && msg.inviteType !== 'machine-user') ||
-        (msg.granted !== 'relay' && msg.granted !== 'machine')
-      ) {
-        throw new SpacesError('Invalid root_invite_accepted response', 'SYSTEM_ERROR', 2);
-      }
-
-      return {
-        inviteId: msg.inviteId,
-        inviteType: msg.inviteType,
-        granted: msg.granted,
-        machineId: typeof msg.machineId === 'string' ? msg.machineId : undefined,
-      };
-    },
-  );
-
-  if (result.granted === 'relay') {
-    logger.success('Relay access granted');
-    logger.log(`  Invite: ${result.inviteId}`);
-    return;
-  }
-
-  logger.success('Machine access granted');
-  logger.log(`  Invite:  ${result.inviteId}`);
-  if (result.machineId) {
-    logger.log(`  Machine: ${result.machineId}`);
-  }
 }
 
 export function deriveMachineIdFromSigningKey(signingKeyBase64: string): string {

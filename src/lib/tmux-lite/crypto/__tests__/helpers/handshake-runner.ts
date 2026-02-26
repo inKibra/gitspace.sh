@@ -100,9 +100,6 @@ export async function runCompleteHandshake(
   const handler = new HandshakeHandler({
     identity: machineIdentity,
     ownerUserRootId,
-    checkUserRootAccess: async (ownerUserRootIdArg, clientUserRootId) => {
-      return ownerUserRootIdArg === ownerUserRootId && clientUserRootId === ownerUserRootId;
-    },
   });
 
   let clientState: X3DHClientState | null = null;
@@ -340,9 +337,6 @@ export function createHandshakeScenario(): {
   const handler = new HandshakeHandler({
     identity: machine,
     ownerUserRootId,
-    checkUserRootAccess: async (ownerUserRootIdArg, clientUserRootId) => {
-      return ownerUserRootIdArg === ownerUserRootId && clientUserRootId === ownerUserRootId;
-    },
   });
   const relay = createMockRelay();
 

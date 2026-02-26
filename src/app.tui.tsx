@@ -937,7 +937,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       if (repos.length === 0) {
         flow.showMessage({
           title: 'No Repositories',
-          message: 'No GitHub repositories found. Make sure you are logged in with `gh auth login`.',
+          message: 'No GitHub repositories found. You can still create projects by entering a git remote URL.',
           variant: 'warning',
         });
         setProjectFlow({ type: 'closed' });

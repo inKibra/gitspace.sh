@@ -4,7 +4,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   readProjectConfig,
   createProject,
@@ -14,11 +14,12 @@ import {
   getAllProjectNames,
   projectExists,
 } from '../core/config.js';
-import { checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
+import { checkCommandExists, checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
-import { listAllRepos, cloneRepository } from '../core/github.js';
+import { listAllRepos } from '../core/github.js';
 import {
+  cloneRepository,
   getDefaultBranch,
   createWorktree,
   checkRemoteBranch,
@@ -66,26 +67,63 @@ export async function addProject(options: {
 }): Promise<void> {
   // Check dependencies
   await ensureDependencies();
-  await checkGitHubAuth();
+  const canUseGitHubPicker = await checkCommandExists('gh');
+  let selectedRepo: string;
 
-  // List all GitHub repositories
-  logger.info('Fetching repositories...');
-  const repos = await listAllRepos(options.org);
+  if (canUseGitHubPicker) {
+    const source = await selectItem([
+      'Enter git remote URL',
+      'Choose GitHub repository',
+    ], 'How would you like to add a project?');
 
-  if (repos.length === 0) {
-    throw new SpacesError(
-      'No repositories found',
-      'USER_ERROR',
-      1
-    );
-  }
+    if (!source) {
+      logger.info('Cancelled');
+      return;
+    }
 
-  // Select repository
-  const selectedRepo = await selectItem(repos, 'Select a repository:');
+    if (source === 'Choose GitHub repository') {
+      await checkGitHubAuth();
+      logger.info('Fetching repositories...');
+      const repos = await listAllRepos(options.org);
 
-  if (!selectedRepo) {
-    logger.info('Cancelled');
-    return;
+      if (repos.length === 0) {
+        throw new SpacesError(
+          'No repositories found',
+          'USER_ERROR',
+          1
+        );
+      }
+
+      const pickedRepo = await selectItem(repos, 'Select a repository:');
+      if (!pickedRepo) {
+        logger.info('Cancelled');
+        return;
+      }
+      selectedRepo = pickedRepo;
+    } else {
+      const manualRepo = await promptInput('Enter git remote URL (or owner/repo):', {
+        validate: (input) => input.trim().length > 0 || 'Repository is required',
+      });
+
+      if (!manualRepo) {
+        logger.info('Cancelled');
+        return;
+      }
+
+      selectedRepo = manualRepo.trim();
+    }
+  } else {
+    logger.info('GitHub CLI not found. Using direct git remote flow.');
+    const manualRepo = await promptInput('Enter git remote URL (or owner/repo):', {
+      validate: (input) => input.trim().length > 0 || 'Repository is required',
+    });
+
+    if (!manualRepo) {
+      logger.info('Cancelled');
+      return;
+    }
+
+    selectedRepo = manualRepo.trim();
   }
 
   logger.success(`Selected: ${selectedRepo}`);
@@ -118,6 +156,7 @@ export async function addProject(options: {
   const baseDir = getProjectBaseDir(projectName);
 
   if (!options.noClone) {
+    mkdirSync(dirname(baseDir), { recursive: true });
     logger.info(`Cloning to ${baseDir}...`);
     await cloneRepository(selectedRepo, baseDir);
     logger.success(`Cloned to ${baseDir}`);

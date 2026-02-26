@@ -2,7 +2,7 @@
  * Connect command implementation
  *
  * Handles 'gssh client connect <target>' to connect to a remote machine
- * via relay + machine ACL authorization, or lists available machines
+ * via owner identity authorization, or lists available machines
  * when no target is provided.
  */
 
@@ -34,7 +34,7 @@ import type {
 } from '../lib/remote-session/protocol.js';
 
 /**
- * Connect to a remote machine using relay + machine ACL authorization.
+ * Connect to a remote machine as the owner identity.
  *
  * @param target - Machine ID
  * @param options - Command options
@@ -65,7 +65,7 @@ export async function connectToRemote(
   logger.bold('Remote Connection Details:');
   logger.log('');
   logger.log(`  Machine:     ${machineId}`);
-  logger.log('  Access:      Full access (relay + machine ACL required)');
+  logger.log('  Access:      Owner identity required');
   logger.log(`  Relay:       ${relayUrl}`);
   logger.log('');
 

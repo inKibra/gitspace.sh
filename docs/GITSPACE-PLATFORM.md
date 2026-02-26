@@ -1,6 +1,7 @@
 # gitspace.sh Platform Specification
 
 > **Complete specification for the gitspace.sh hosting platform**
+> **Historical Document** - retained for context only; not the active runtime contract.
 
 ---
 

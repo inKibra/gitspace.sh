@@ -1,10 +1,12 @@
-# Relay Protocol Reference
+# Relay Protocol Reference (Owner-Only)
 
-This document describes the WebSocket protocol between machines, clients, and the relay server.
+Protocol version: 3 (target owner-only cutover)
+
+This document defines the WebSocket protocol between machine, owner client, and relay.
 
 ---
 
-## Connection URLs
+## 1) Connection URLs
 
 ```
 Machine: ws://relay:port/ws?role=machine
@@ -13,36 +15,30 @@ Client:  ws://relay:port/ws?role=client
 
 ---
 
-## Authentication
+## 2) Authentication and Authorization
 
 ### Machine Registration
-1. Machine connects with `?role=machine`
-2. Relay sends `relay_identity` with a random challenge nonce
-3. Machine signs the nonce with its Ed25519 private key
-4. Machine sends `register_machine` including `challengeResponse`
-5. Relay verifies the signature and checks the signing key is authorized
-6. Relay sends `registered` confirmation
 
-### Client Routing
-1. Client connects with `?role=client`
-2. Client signs relay messages (see "Message Signing")
-3. Relay verifies the signature and binds `clientIdentityId` to the signing key
-4. Relay routes via owner+ACL authorization
+1. Machine connects with `?role=machine`.
+2. Relay sends `relay_identity` with challenge nonce.
+3. Machine signs challenge with Ed25519 private key.
+4. Machine sends `register_machine` with challenge response and keys.
+5. Relay verifies signature and machine ownership binding.
+6. Relay responds with `registered`.
+
+### Owner Client Routing
+
+1. Client connects with `?role=client`.
+2. Client signs routing and sync messages.
+3. Relay verifies signature and derives owner root identity.
+4. Relay permits only owner-owned resources.
 
 ---
 
-## Message Types
+## 3) Signature Block
 
-All messages are JSON. The relay routes based on message type.
+Required on security-sensitive client messages.
 
-### Message Signing (Protocol v2)
-
-The following client messages require an Ed25519 signature block:
-- `list_machines`
-- `connect_to_machine`
-- `unlock_relay`
-
-Signature format:
 ```json
 {
   "signature": {
@@ -53,34 +49,48 @@ Signature format:
 }
 ```
 
-### Machine → Relay
+Signed message types:
 
-#### Machine Registration Challenge
-Relay sends `relay_identity` with a challenge nonce. Machines must include the
-nonce signature in `register_machine.challengeResponse`.
-
-#### Register Machine
-```json
-{
-  "type": "register_machine",
-  "machineId": "abc123",
-  "signingKey": "base64-ed25519-public",
-  "keyExchangeKey": "base64-x25519-public",
-  "challengeResponse": "base64-ed25519-signature-of-nonce",
-  "label": "My MacBook"
-}
-```
-Response: `{ "type": "registered", "machineId": "abc123" }`
-
-#### Root Invite Management (Client-signed)
-
-Root-signed invites are managed by clients through relay commands:
+- `list_machines`
+- `connect_to_machine`
 - `create_root_invite`
 - `list_root_invites`
 - `revoke_root_invite`
-- `accept_root_invite`
+- `owner_sync_compare`
+- `owner_sync_pull`
+- `owner_sync_push`
+- `owner_sync_lock`
+- `owner_sync_unlock`
 
-#### Send Data to Client
+---
+
+## 4) Message Types
+
+All messages are JSON.
+
+### 4.1 Machine -> Relay
+
+#### `register_machine`
+
+```json
+{
+  "type": "register_machine",
+  "machineId": "macbook-01",
+  "signingKey": "base64-ed25519-public",
+  "keyExchangeKey": "base64-x25519-public",
+  "challengeResponse": "base64-ed25519-signature",
+  "label": "My MacBook"
+}
+```
+
+Relay response:
+
+```json
+{ "type": "registered", "machineId": "macbook-01" }
+```
+
+#### `data`
+
 ```json
 {
   "type": "data",
@@ -91,28 +101,14 @@ Root-signed invites are managed by clients through relay commands:
 
 ---
 
-### Client → Relay
+### 4.2 Client -> Relay
 
-#### Connect to Machine (Direct)
-```json
-{
-  "type": "connect_to_machine",
-  "machineId": "abc123",
-  "clientIdentityId": "client-xyz",
-  "signature": {
-    "sig": "base64-ed25519-signature",
-    "pub": "base64-ed25519-public",
-    "ts": 1704067200000
-  }
-}
-```
-Response: `{ "type": "connection_established", "machineId": "abc123", "connectionId": "conn-123" }`
+#### `list_machines`
 
-#### List Machines
 ```json
 {
   "type": "list_machines",
-  "clientIdentityId": "client-xyz",
+  "clientIdentityId": "owner-device-01",
   "signature": {
     "sig": "base64-ed25519-signature",
     "pub": "base64-ed25519-public",
@@ -120,34 +116,51 @@ Response: `{ "type": "connection_established", "machineId": "abc123", "connectio
   }
 }
 ```
-Response:
+
+Relay response:
+
 ```json
 {
   "type": "machine_list",
   "machines": [
     {
-      "machineId": "abc123",
+      "machineId": "macbook-01",
       "label": "My MacBook",
       "online": true,
-      "isAuthorized": true,
-      "accessType": "full",
+      "isOwner": true,
       "lastConnectedAt": 1704067200000
-    },
-    {
-      "machineId": "def456",
-      "label": "Server",
-      "online": false,
-      "isAuthorized": true,
-      "accessType": "view",
-      "sessionId": "session-123",
-      "lastConnectedAt": 1704060000000
     }
   ]
 }
 ```
-Note: Only machines the client is authorized for are returned.
 
-#### Send Data to Machine
+#### `connect_to_machine`
+
+```json
+{
+  "type": "connect_to_machine",
+  "machineId": "macbook-01",
+  "clientIdentityId": "owner-device-01",
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Relay response:
+
+```json
+{
+  "type": "connection_established",
+  "machineId": "macbook-01",
+  "connectionId": "conn-123"
+}
+```
+
+#### `data`
+
 ```json
 {
   "type": "data",
@@ -157,10 +170,254 @@ Note: Only machines the client is authorized for are returned.
 
 ---
 
-### Relay → Machine
+### 4.3 Invite Management (Enrollment Only)
 
-#### Relay Identity
-Sent immediately after a machine connects. Includes relay signing key and a challenge nonce.
+Only `relay-machine` invites are valid.
+
+#### `create_root_invite`
+
+```json
+{
+  "type": "create_root_invite",
+  "inviteType": "relay-machine",
+  "relayUrl": "wss://relay.example.com/ws",
+  "machineSigningKey": "base64-ed25519-public",
+  "machineKeyExchangeKey": "base64-x25519-public",
+  "expiresInMs": 86400000,
+  "maxUses": 1,
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Relay response:
+
+```json
+{
+  "type": "root_invite_created",
+  "inviteId": "inv-123",
+  "inviteToken": "wss://relay.example.com/ws#<TOKEN>",
+  "inviteType": "relay-machine"
+}
+```
+
+#### `list_root_invites`
+
+```json
+{
+  "type": "list_root_invites",
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+#### `revoke_root_invite`
+
+```json
+{
+  "type": "revoke_root_invite",
+  "inviteId": "inv-123",
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+---
+
+### 4.4 Owner Sync Protocol
+
+#### Shared Types
+
+```ts
+type SyncCategory =
+  | "fundamental"
+  | "integrations"
+  | "project/workspace"
+  | "preferences";
+
+interface OwnerSyncRecord {
+  ownerUserRootId: string;
+  category: SyncCategory;
+  revision: number;
+  updatedAt: number;
+  writerId: string;
+  checksum: string;
+  ciphertext: string;
+}
+```
+
+#### `owner_sync_compare`
+
+```json
+{
+  "type": "owner_sync_compare",
+  "clientIdentityId": "owner-device-01",
+  "deviceCertificate": "{...serialized device cert...}",
+  "localRevisions": {
+    "fundamental": 5,
+    "integrations": 2,
+    "project/workspace": 19,
+    "preferences": 4
+  },
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "type": "owner_sync_compare_result",
+  "serverRevisions": {
+    "fundamental": 6,
+    "integrations": 2,
+    "project/workspace": 20,
+    "preferences": 4
+  },
+  "changedCategories": ["fundamental", "project/workspace"]
+}
+```
+
+#### `owner_sync_pull`
+
+```json
+{
+  "type": "owner_sync_pull",
+  "clientIdentityId": "owner-device-01",
+  "deviceCertificate": "{...serialized device cert...}",
+  "categories": ["fundamental", "project/workspace"],
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "type": "owner_sync_pull_result",
+  "records": [
+    {
+      "ownerUserRootId": "user-root-1",
+      "category": "fundamental",
+      "revision": 6,
+      "updatedAt": 1704067200123,
+      "writerId": "owner-device-01",
+      "checksum": "sha256:abc123",
+      "ciphertext": "base64-sealed-payload"
+    }
+  ]
+}
+```
+
+#### `owner_sync_lock`
+
+```json
+{
+  "type": "owner_sync_lock",
+  "clientIdentityId": "owner-device-01",
+  "deviceCertificate": "{...serialized device cert...}",
+  "scope": "global",
+  "writerId": "owner-device-01",
+  "ttlMs": 15000,
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "type": "owner_sync_lock_granted",
+  "scope": "global",
+  "lockId": "lock-123",
+  "expiresAt": 1704067215000
+}
+```
+
+#### `owner_sync_push`
+
+```json
+{
+  "type": "owner_sync_push",
+  "clientIdentityId": "owner-device-01",
+  "deviceCertificate": "{...serialized device cert...}",
+  "lockId": "lock-123",
+  "record": {
+    "category": "preferences",
+    "expectedRevision": 4,
+    "updatedAt": 1704067204000,
+    "writerId": "owner-device-01",
+    "checksum": "sha256:def456",
+    "ciphertext": "base64-sealed-payload"
+  },
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "type": "owner_sync_push_result",
+  "category": "preferences",
+  "revision": 5,
+  "updatedAt": 1704067204000
+}
+```
+
+#### `owner_sync_unlock`
+
+```json
+{
+  "type": "owner_sync_unlock",
+  "clientIdentityId": "owner-device-01",
+  "deviceCertificate": "{...serialized device cert...}",
+  "lockId": "lock-123",
+  "signature": {
+    "sig": "base64-ed25519-signature",
+    "pub": "base64-ed25519-public",
+    "ts": 1704067200000
+  }
+}
+```
+
+Response:
+
+```json
+{ "type": "owner_sync_unlock_result", "released": true }
+```
+
+---
+
+### 4.5 Relay -> Machine Notifications
+
+#### `relay_identity`
+
 ```json
 {
   "type": "relay_identity",
@@ -170,18 +427,19 @@ Sent immediately after a machine connects. Includes relay signing key and a chal
   "challenge": "base64-random-32-bytes"
 }
 ```
-The machine must respond by sending `register_machine` with `challengeResponse`.
 
-#### Client Connected
+#### `client_connected`
+
 ```json
 {
   "type": "client_connected",
   "connectionId": "conn-123",
-  "clientIdentityId": "client-xyz"
+  "clientIdentityId": "owner-device-01"
 }
 ```
 
-#### Client Disconnected
+#### `client_disconnected`
+
 ```json
 {
   "type": "client_disconnected",
@@ -190,63 +448,14 @@ The machine must respond by sending `register_machine` with `challengeResponse`.
 }
 ```
 
-#### Data from Client
-```json
-{
-  "type": "data",
-  "connectionId": "conn-123",
-  "data": "base64-encrypted-payload"
-}
-```
-
 ---
 
-### Relay → Client
+## 5) X3DH Handshake
 
-#### Connection Established
-```json
-{
-  "type": "connection_established",
-  "machineId": "abc123",
-  "connectionId": "conn-123"
-}
-```
+After `connection_established`, client and machine exchange handshake messages through relay-routed data.
 
-#### Connection Failed
-```json
-{
-  "type": "error",
-  "code": "OFFLINE",
-  "message": "Machine is offline"
-}
-```
+### `client_hello`
 
-#### Data from Machine
-```json
-{
-  "type": "data",
-  "data": "base64-encrypted-payload"
-}
-```
-
----
-
-## Error Codes
-
-| Code | Meaning |
-|------|---------|
-| `FORBIDDEN` | Role doesn't allow this action |
-| `NOT_FOUND` | Machine/invite/client not found |
-| `INVALID` | Invite expired or exhausted |
-| `OFFLINE` | Machine is not connected |
-
----
-
-## Handshake Protocol (X3DH)
-
-After `connection_established`, client and machine perform X3DH handshake:
-
-### Phase 1: Client Hello
 ```json
 {
   "type": "handshake",
@@ -254,12 +463,13 @@ After `connection_established`, client and machine perform X3DH handshake:
   "data": {
     "clientIdentityKey": "base64-x25519-public",
     "clientEphemeralKey": "base64-x25519-public",
-    "targetMachineId": "abc123"
+    "targetMachineId": "macbook-01"
   }
 }
 ```
 
-### Phase 2: Server Hello
+### `server_hello`
+
 ```json
 {
   "type": "handshake",
@@ -272,210 +482,79 @@ After `connection_established`, client and machine perform X3DH handshake:
 }
 ```
 
-### Phase 3: Client Auth
+### `client_auth`
+
 ```json
 {
   "type": "handshake",
   "phase": "client_auth",
   "data": {
     "signature": "base64-ed25519-signature",
-    "signingKey": "base64-ed25519-public",
-    "authorization": { "type": "access_list" }
+    "signingKey": "base64-ed25519-public"
   }
 }
 ```
 
-### Phase 4: Server Auth
+### `server_auth`
+
 ```json
 {
   "type": "handshake",
   "phase": "server_auth",
   "data": {
     "signature": "base64-ed25519-signature",
-    "permissions": { "read": true, "write": true, "manage": false }
+    "permissions": {
+      "read": true,
+      "write": true,
+      "manage": true
+    }
   }
 }
 ```
 
-After server_auth, both sides derive session keys and switch to encrypted communication.
-
 ---
 
-## Encrypted Frame Format
+## 6) Encrypted Frame Format
 
-After handshake, all data is encrypted frames:
+After handshake, terminal traffic uses encrypted frames:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Encrypted Frame Structure                                    │
-├──────────────────────────────────────────────────────────────┤
-│                                                               │
-│  Bytes 0-3:    Stream ID (4 bytes, big-endian)               │
-│  Bytes 4-15:   Nonce (12 bytes, random)                      │
-│  Bytes 16+:    Ciphertext (AES-256-GCM)                      │
-│               ├── Encrypted payload                          │
-│               └── 16-byte auth tag (appended)                │
-│                                                               │
-│  Minimum frame length: 32 bytes (4 + 12 + 16)                │
-│                                                               │
-└──────────────────────────────────────────────────────────────┘
+Bytes 0-3:   stream ID (uint32 BE)
+Bytes 4-15:  nonce (12 bytes)
+Bytes 16+:   AES-256-GCM ciphertext + 16-byte auth tag
 ```
 
 Stream IDs:
-- `0`: Master stream (full machine access)
-- `1+`: Share streams (session-specific access)
+
+- `0`: master terminal stream
+- `1+`: reserved
 
 ---
 
-## Session Frame Types
+## 7) Error Codes
 
-Within an encrypted session, two frame types are used:
-
-### PTY Frames (Type 0x00)
-```
-┌────────────────────────────────────────────────────────────┐
-│  Frame Type    │  Length (4 bytes BE)  │  Payload          │
-│  0x00          │  N                    │  Raw terminal I/O │
-└────────────────────────────────────────────────────────────┘
-```
-
-### Control Frames (Type 0x01)
-```
-┌────────────────────────────────────────────────────────────┐
-│  Frame Type    │  Length (4 bytes BE)  │  JSON Payload     │
-│  0x01          │  N                    │  Control message  │
-└────────────────────────────────────────────────────────────┘
-```
-
-Control message example (resize):
-```json
-{
-  "type": "resize",
-  "cols": 120,
-  "rows": 40
-}
-```
+| Code | Meaning |
+|---|---|
+| `FORBIDDEN` | Caller is not owner for operation |
+| `NOT_FOUND` | Machine/invite/record not found |
+| `INVALID` | Invite invalid, expired, exhausted, or malformed |
+| `INVALID_SIGNATURE` | Signature verification failed |
+| `OFFLINE` | Machine is not connected |
+| `CONFLICT` | Expected revision mismatch |
+| `LOCKED` | Write denied by lock ownership |
 
 ---
 
-## Connection Lifecycle
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  MACHINE LIFECYCLE                                                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  1. Connect to relay (ws://...?role=machine)                                 │
-│  2. Receive relay_identity with challenge                                    │
-│  3. Send register_machine (challengeResponse + keys)                         │
-│  4. Receive "registered" confirmation                                        │
-│  5. Wait for client_connected notifications                                  │
-│  6. Handle handshakes and route data                                         │
-│  7. On disconnect: relay marks machine offline                               │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  CLIENT LIFECYCLE                                                            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  1. Connect to relay (ws://...?role=client)                                  │
-│  2. Send connect_to_machine (signed)                                         │
-│  3. Receive connection_established (or error)                                │
-│  4. Perform X3DH handshake                                                   │
-│  5. Exchange encrypted terminal data                                         │
-│  6. On disconnect: relay notifies machine                                    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Keepalive
-
-The relay sends periodic WebSocket ping frames. Machines and clients should:
-- Respond to ping frames with pong (handled automatically by most WebSocket libraries)
-- Consider connection dead after 30 seconds without pong response
-- Reconnect automatically on connection loss
-
----
-
-## Routing Rules
-
-The relay routes messages based on:
-
-| Message Type | From | Routed To |
-|--------------|------|-----------|
-| `register_*` | Machine | Handled by relay |
-| `unlock_request` | Machine | Handled by relay |
-| `connect_*` | Client | Handled by relay |
-| `list_machines` | Client | Handled by relay |
-| `unlock_relay` | Client | Handled by relay |
-| `data` | Machine | Target client (by connectionId) |
-| `data` | Client | Connected machine |
-| `handshake` | Client | Connected machine (wrapped in data) |
-| `challenge` | Relay | Target machine |
-| `unlock_grant` | Relay | Target machine |
-
----
-
-## Cryptographic Primitives
+## 8) Cryptographic Primitives
 
 | Purpose | Algorithm | Details |
-|---------|-----------|---------|
-| Identity signing | Ed25519 | 32-byte public key, 64-byte secret key |
+|---|---|---|
+| Identity signing | Ed25519 | 32-byte public, 64-byte secret |
 | Key exchange | X25519 | 32-byte keys |
-| Symmetric encryption | AES-256-GCM | 12-byte nonce, 16-byte auth tag |
-| Key derivation | HKDF-SHA256 | Domain-separated for send/receive keys |
-| Relay challenge signing | Ed25519 | Machine signs relay nonce |
-| Client message signing | Ed25519 | Signed list/connect messages |
+| Symmetric encryption | AES-256-GCM | 12-byte nonce, 16-byte tag |
+| Key derivation | HKDF-SHA256 | domain-separated send/recv keys |
+| Relay challenge signing | Ed25519 | machine signs relay nonce |
 
 ---
 
----
-
-## Inbox & Notification Protocol
-
-The tmux-lite server tracks terminal events and maintains an inbox for notifications.
-
-### Supported OSC Sequences
-
-| Sequence | Source | Description |
-|----------|--------|-------------|
-| `OSC 777;exit:<code>` | Custom | Process exit with code |
-| `OSC 9` | iTerm2/Growl | Notification message |
-| `OSC 99` | Kitty | Notification |
-| `OSC 777;notify` | rxvt | Notification |
-| `OSC 133 D` | Semantic shell | Command done |
-| `BEL` (0x07) | Terminal | Bell (debounced 500ms) |
-
-### Inbox Item Types
-
-```typescript
-type InboxItemType = 'bell' | 'title_change' | 'idle' | 'exit';
-
-interface InboxItem {
-  id: string;
-  sessionId: string;
-  sessionName: string;
-  type: InboxItemType;
-  timestamp: number;
-  read: boolean;
-  context?: string;       // Additional context
-  processTitle?: string;  // Current process title
-  exitCode?: number;      // For 'exit' type
-}
-```
-
-### Control Messages
-
-```json
-{ "type": "get_inbox" }
-{ "type": "clear_inbox" }
-{ "type": "mark_inbox_read", "itemId": "..." }
-```
-
----
-
-*Protocol version: 2*
-*Last updated: 2025-01*
+Last updated: 2026-02

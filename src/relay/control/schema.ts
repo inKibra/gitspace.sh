@@ -171,6 +171,27 @@ const CONTROL_MIGRATIONS: ControlMigration[] = [
       `,
     ],
   },
+  {
+    version: 5,
+    statements: [
+      // ---- Owner sync categories (encrypted envelopes + metadata) ----
+      `
+      CREATE TABLE IF NOT EXISTS vault_sync_categories (
+        category TEXT PRIMARY KEY,
+        encrypted_envelope TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        writer_id TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_vault_sync_categories_updated_at
+      ON vault_sync_categories(updated_at)
+      `,
+    ],
+  },
 ];
 
 function ensureMigrationsTable(db: Database): void {

@@ -1,6 +1,7 @@
 # Gitspace Infrastructure Architecture
 
 > **⚠️ FUTURE VISION DOCUMENT**
+> **Historical Document** - retained for context only; not the active runtime contract.
 >
 > This document describes a **planned future architecture** that is **not yet implemented**.
 > The current implementation uses a simpler model with direct PTY sessions and WebSocket relay.

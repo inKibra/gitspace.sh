@@ -10,7 +10,51 @@
  * - very old per-secret keys: <project>:<key> and <key>
  */
 
+import { notifyOwnerSyncCategoryDirty } from '../core/owner-sync-events.js';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, resolve, sep } from 'node:path';
+
 const SERVICE_NAME = 'com.gitspace';
+const TEST_SECRETS_BACKEND_ENABLED = process.env.GSSH_ENABLE_TEST_SECRETS_BACKEND === '1';
+
+function isTestRuntime(): boolean {
+  return process.env.BUN_TEST === '1'
+    || process.env.BUN_ENV === 'test'
+    || process.env.NODE_ENV === 'test'
+    || process.env.OWNER_SYNC_MACHINE_E2E === '1'
+    || process.env.GSSH_TEST_RUNTIME === '1';
+}
+
+function isPathInside(basePath: string, targetPath: string): boolean {
+  const resolvedBase = resolve(basePath);
+  const resolvedTarget = resolve(targetPath);
+  return resolvedTarget === resolvedBase || resolvedTarget.startsWith(`${resolvedBase}${sep}`);
+}
+
+function resolveTestSecretsFilePath(): string | null {
+  const rawPath = process.env.GSSH_TEST_SECRETS_FILE?.trim() || null;
+  if (!rawPath || !TEST_SECRETS_BACKEND_ENABLED || !isTestRuntime()) {
+    return null;
+  }
+
+  const resolvedPath = resolve(rawPath);
+  const tempRoot = resolve(tmpdir());
+  if (!isPathInside(tempRoot, resolvedPath)) {
+    throw new Error('GSSH_TEST_SECRETS_FILE must be within the system temp directory');
+  }
+
+  return resolvedPath;
+}
+
+const TEST_SECRETS_FILE = resolveTestSecretsFilePath();
 
 // Keychain entry names
 const UNIFIED_SECRETS_KEY = 'secrets';
@@ -28,6 +72,131 @@ interface UnifiedSecretsBlob {
 }
 
 const UNIFIED_SECRETS_SCHEMA_VERSION = 2;
+
+interface TestSecretsStore {
+  entries: Record<string, string>;
+}
+
+function getScopedSecretName(name: string): string {
+  return `${SERVICE_NAME}:${name}`;
+}
+
+function ensureSecureTestSecretsPath(filePath: string): void {
+  const directoryPath = dirname(filePath);
+  mkdirSync(directoryPath, { recursive: true, mode: 0o700 });
+  chmodSync(directoryPath, 0o700);
+
+  if (!existsSync(filePath)) {
+    return;
+  }
+
+  const stat = lstatSync(filePath);
+  if (!stat.isFile()) {
+    throw new Error(`Test secrets path is not a regular file: ${filePath}`);
+  }
+
+  chmodSync(filePath, 0o600);
+}
+
+function readTestSecretsStore(): TestSecretsStore {
+  if (!TEST_SECRETS_FILE || !existsSync(TEST_SECRETS_FILE)) {
+    return { entries: {} };
+  }
+
+  try {
+    ensureSecureTestSecretsPath(TEST_SECRETS_FILE);
+    const parsed = JSON.parse(readFileSync(TEST_SECRETS_FILE, 'utf-8')) as Partial<TestSecretsStore>;
+    if (!parsed || typeof parsed !== 'object' || !parsed.entries || typeof parsed.entries !== 'object') {
+      return { entries: {} };
+    }
+
+    const entries: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed.entries)) {
+      if (typeof value === 'string') {
+        entries[key] = value;
+      }
+    }
+
+    return { entries };
+  } catch {
+    return { entries: {} };
+  }
+}
+
+function writeTestSecretsStore(store: TestSecretsStore): void {
+  if (!TEST_SECRETS_FILE) {
+    return;
+  }
+
+  ensureSecureTestSecretsPath(TEST_SECRETS_FILE);
+  writeFileSync(TEST_SECRETS_FILE, JSON.stringify(store, null, 2), {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  chmodSync(TEST_SECRETS_FILE, 0o600);
+}
+
+async function readSecretValue(name: string): Promise<string | null> {
+  if (!TEST_SECRETS_FILE) {
+    return Bun.secrets.get({
+      service: SERVICE_NAME,
+      name,
+    });
+  }
+
+  const store = readTestSecretsStore();
+  return store.entries[getScopedSecretName(name)] ?? null;
+}
+
+async function writeSecretValue(name: string, value: string): Promise<void> {
+  if (!TEST_SECRETS_FILE) {
+    await Bun.secrets.set({
+      service: SERVICE_NAME,
+      name,
+      value,
+    });
+    return;
+  }
+
+  const store = readTestSecretsStore();
+  store.entries[getScopedSecretName(name)] = value;
+  writeTestSecretsStore(store);
+}
+
+async function removeSecretValue(name: string): Promise<boolean> {
+  if (!TEST_SECRETS_FILE) {
+    return Bun.secrets.delete({
+      service: SERVICE_NAME,
+      name,
+    });
+  }
+
+  const store = readTestSecretsStore();
+  const scopedName = getScopedSecretName(name);
+  if (!(scopedName in store.entries)) {
+    return false;
+  }
+
+  delete store.entries[scopedName];
+  writeTestSecretsStore(store);
+  return true;
+}
+
+const FUNDAMENTAL_SECRET_KEYS = new Set([
+  'USER_ROOT_IDENTITY',
+  'GITSPACE_TOKEN',
+  'relay:signingPrivateKey',
+]);
+
+function notifyGlobalSecretChangeForSync(key: string): void {
+  if (FUNDAMENTAL_SECRET_KEYS.has(key) || key.startsWith('TUNNEL_TOKEN_')) {
+    notifyOwnerSyncCategoryDirty('fundamental');
+  }
+
+  if (key.startsWith('linear-api-key')) {
+    notifyOwnerSyncCategoryDirty('integrations');
+  }
+}
 
 // In-memory cache for unified secrets blob
 let unifiedSecretsCache: UnifiedSecretsBlob | null = null;
@@ -117,10 +286,7 @@ async function loadUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
     return unifiedSecretsCache;
   }
 
-  const raw = await Bun.secrets.get({
-    service: SERVICE_NAME,
-    name: UNIFIED_SECRETS_KEY,
-  });
+  const raw = await readSecretValue(UNIFIED_SECRETS_KEY);
 
   unifiedSecretsCache = parseUnifiedSecretsBlob(raw);
   if (unifiedSecretsCache.metadata.legacyMigrationComplete) {
@@ -141,11 +307,7 @@ async function saveUnifiedSecretsBlob(blob: UnifiedSecretsBlob): Promise<void> {
   };
   unifiedSecretsCache = normalized;
 
-  await Bun.secrets.set({
-    service: SERVICE_NAME,
-    name: UNIFIED_SECRETS_KEY,
-    value: JSON.stringify(normalized),
-  });
+  await writeSecretValue(UNIFIED_SECRETS_KEY, JSON.stringify(normalized));
 }
 
 /**
@@ -175,10 +337,7 @@ async function loadLegacyProjectBlob(projectName: string): Promise<{
   secrets: Record<string, string>;
 }> {
   legacyProjectBlobChecked.add(projectName);
-  const raw = await Bun.secrets.get({
-    service: SERVICE_NAME,
-    name: getProjectSecretsKey(projectName),
-  });
+  const raw = await readSecretValue(getProjectSecretsKey(projectName));
 
   if (!raw) {
     return { hasLegacyEntry: false, secrets: {} };
@@ -197,10 +356,7 @@ async function loadLegacyGlobalBlob(): Promise<{
   secrets: Record<string, string>;
 }> {
   legacyGlobalBlobChecked = true;
-  const raw = await Bun.secrets.get({
-    service: SERVICE_NAME,
-    name: GLOBAL_SECRETS_KEY,
-  });
+  const raw = await readSecretValue(GLOBAL_SECRETS_KEY);
 
   if (!raw) {
     return { hasLegacyEntry: false, secrets: {} };
@@ -257,6 +413,7 @@ export async function setProjectSecret(
   const secrets = await loadProjectSecretsBlob(projectName);
   secrets[key] = value;
   await saveProjectSecretsBlob(projectName, secrets);
+  notifyOwnerSyncCategoryDirty('project/workspace');
 }
 
 /**
@@ -295,10 +452,7 @@ export async function getProjectSecret(
 
   // Try old format: ${projectName}:${key}
   const oldKeychainName = `${projectName}:${key}`;
-  const oldValue = await Bun.secrets.get({
-    service: SERVICE_NAME,
-    name: oldKeychainName,
-  });
+  const oldValue = await readSecretValue(oldKeychainName);
 
   if (oldValue) {
     legacyEntriesDetected = true;
@@ -327,6 +481,7 @@ export async function deleteProjectSecret(
   }
   delete secrets[key];
   await saveProjectSecretsBlob(projectName, secrets);
+  notifyOwnerSyncCategoryDirty('project/workspace');
   return true;
 }
 
@@ -365,10 +520,7 @@ export async function getProjectSecrets(
 
     // Legacy per-secret fallback (very old format)
     const oldKeychainName = `${projectName}:${key}`;
-    const oldValue = await Bun.secrets.get({
-      service: SERVICE_NAME,
-      name: oldKeychainName,
-    });
+    const oldValue = await readSecretValue(oldKeychainName);
 
     if (oldValue) {
       legacyEntriesDetected = true;
@@ -412,6 +564,7 @@ export async function deleteProjectSecrets(
     delete secrets[key];
   }
   await saveProjectSecretsBlob(projectName, secrets);
+  notifyOwnerSyncCategoryDirty('project/workspace');
 }
 
 /**
@@ -422,6 +575,7 @@ export async function deleteAllProjectSecrets(projectName: string): Promise<void
   const blob = await loadUnifiedSecretsBlob();
   delete blob.projects[projectName];
   await saveUnifiedSecretsBlob(blob);
+  notifyOwnerSyncCategoryDirty('project/workspace');
 }
 
 // ============================================================================
@@ -453,6 +607,7 @@ export async function setSecret(key: string, value: string): Promise<void> {
   const secrets = await loadGlobalSecretsBlob();
   secrets[key] = value;
   await saveGlobalSecretsBlob(secrets);
+  notifyGlobalSecretChangeForSync(key);
 }
 
 /**
@@ -487,10 +642,7 @@ export async function getSecret(key: string): Promise<string | null> {
   }
 
   // Try old format: direct key name
-  const oldValue = await Bun.secrets.get({
-    service: SERVICE_NAME,
-    name: key,
-  });
+  const oldValue = await readSecretValue(key);
 
   if (oldValue) {
     legacyEntriesDetected = true;
@@ -513,7 +665,37 @@ export async function deleteSecret(key: string): Promise<boolean> {
   }
   delete secrets[key];
   await saveGlobalSecretsBlob(secrets);
+  notifyGlobalSecretChangeForSync(key);
   return true;
+}
+
+export interface OwnerSyncSecretsSnapshot {
+  global: Record<string, string>;
+  projects: Record<string, Record<string, string>>;
+}
+
+export async function exportSecretsForOwnerSyncSnapshot(): Promise<OwnerSyncSecretsSnapshot> {
+  const blob = await loadUnifiedSecretsBlob();
+  const projects: Record<string, Record<string, string>> = {};
+  for (const [projectName, values] of Object.entries(blob.projects)) {
+    projects[projectName] = { ...values };
+  }
+  return {
+    global: { ...blob.global },
+    projects,
+  };
+}
+
+export async function importSecretsFromOwnerSyncSnapshot(snapshot: OwnerSyncSecretsSnapshot): Promise<void> {
+  const blob = await loadUnifiedSecretsBlob();
+  blob.global = { ...snapshot.global };
+
+  const projects: Record<string, Record<string, string>> = {};
+  for (const [projectName, values] of Object.entries(snapshot.projects)) {
+    projects[projectName] = normalizeRecord(values);
+  }
+  blob.projects = projects;
+  await saveUnifiedSecretsBlob(blob);
 }
 
 export interface PreloadAllSecretsResult {
@@ -573,10 +755,7 @@ export async function preloadAllSecrets(
 
     const oldKeys = [...new Set(projectLegacyKeys[projectName] ?? [])];
     for (const key of oldKeys) {
-      const oldValue = await Bun.secrets.get({
-        service: SERVICE_NAME,
-        name: `${projectName}:${key}`,
-      });
+      const oldValue = await readSecretValue(`${projectName}:${key}`);
 
       if (!oldValue) {
         continue;
@@ -606,10 +785,7 @@ export async function preloadAllSecrets(
   }
 
   for (const key of globalLegacyKeys) {
-    const oldValue = await Bun.secrets.get({
-      service: SERVICE_NAME,
-      name: key,
-    });
+    const oldValue = await readSecretValue(key);
 
     if (!oldValue) {
       continue;
@@ -688,10 +864,7 @@ export async function cleanupLegacySecretEntries(
 
   for (const name of entries) {
     try {
-      const deleted = await Bun.secrets.delete({
-        service: SERVICE_NAME,
-        name,
-      });
+      const deleted = await removeSecretValue(name);
       if (deleted) {
         result.deleted += 1;
       } else {
@@ -724,20 +897,14 @@ export async function cleanupLegacySecretEntries(
  * Old format: global secrets were stored directly as `${key}`
  */
 async function getOldFormatSecret(keychainName: string): Promise<string | null> {
-  return Bun.secrets.get({
-    service: SERVICE_NAME,
-    name: keychainName,
-  });
+  return readSecretValue(keychainName);
 }
 
 /**
  * Delete a secret in the OLD format from keychain
  */
 async function deleteOldFormatSecret(keychainName: string): Promise<boolean> {
-  return Bun.secrets.delete({
-    service: SERVICE_NAME,
-    name: keychainName,
-  });
+  return removeSecretValue(keychainName);
 }
 
 /**

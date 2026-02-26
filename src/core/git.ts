@@ -18,6 +18,36 @@ const BASE_REF_CACHE_MAX_ENTRIES = 256;
 const comparableBaseRefCache = new Map<string, { baseRef: string; cachedAt: number }>();
 const comparableBaseRefInflight = new Map<string, Promise<string>>();
 
+function isOwnerRepoShorthand(repository: string): boolean {
+  return /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repository);
+}
+
+function resolveCloneSource(repository: string): string {
+  if (isOwnerRepoShorthand(repository)) {
+    return `https://github.com/${repository}.git`;
+  }
+  return repository;
+}
+
+/**
+ * Clone a repository from either a remote URL or owner/repo shorthand.
+ */
+export async function cloneRepository(repository: string, destination: string): Promise<void> {
+  const source = resolveCloneSource(repository.trim());
+
+  try {
+    await execAsync(
+      `git clone ${escapeShellArg(source)} ${escapeShellArg(destination)}`
+    );
+  } catch (error) {
+    throw new SpacesError(
+      `Failed to clone repository ${repository}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
 function comparableBaseRefKey(workspacePath: string, baseBranch: string): string {
   return `${workspacePath}::${baseBranch}`;
 }

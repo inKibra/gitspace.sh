@@ -6,6 +6,12 @@
 
 import type { SignatureBlock } from "./signing.js";
 
+export type SyncCategory =
+  | "fundamental"
+  | "integrations"
+  | "project/workspace"
+  | "preferences";
+
 // ============================================================================
 // Protocol Versioning
 // ============================================================================
@@ -124,7 +130,7 @@ export interface ListRootInvitesMessage {
   type: 'list_root_invites';
   clientIdentityId: string;
   deviceCertificate: string;
-  inviteType?: 'relay-user' | 'relay-machine' | 'machine-user';
+  inviteType?: 'relay-machine';
   signature: SignatureBlock;
 }
 
@@ -137,12 +143,58 @@ export interface RevokeRootInviteMessage {
   signature: SignatureBlock;
 }
 
-/** Client accepts an invite targeted to their user root */
-export interface AcceptRootInviteMessage {
-  type: 'accept_root_invite';
+/** Compare local category revisions against relay revisions */
+export interface OwnerSyncCompareMessage {
+  type: 'owner_sync_compare';
   clientIdentityId: string;
   deviceCertificate: string;
-  inviteToken: string;
+  localRevisions?: Partial<Record<SyncCategory, number>>;
+  signature: SignatureBlock;
+}
+
+/** Pull encrypted owner sync categories from relay */
+export interface OwnerSyncPullMessage {
+  type: 'owner_sync_pull';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  categories?: SyncCategory[];
+  signature: SignatureBlock;
+}
+
+/** Acquire V1 global owner sync lock */
+export interface OwnerSyncLockMessage {
+  type: 'owner_sync_lock';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  scope: 'global';
+  writerId: string;
+  ttlMs?: number;
+  signature: SignatureBlock;
+}
+
+/** Push encrypted owner sync category record */
+export interface OwnerSyncPushMessage {
+  type: 'owner_sync_push';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  lockId: string;
+  record: {
+    category: SyncCategory;
+    expectedRevision: number;
+    updatedAt: number;
+    writerId: string;
+    checksum: string;
+    ciphertext: string;
+  };
+  signature: SignatureBlock;
+}
+
+/** Release V1 global owner sync lock */
+export interface OwnerSyncUnlockMessage {
+  type: 'owner_sync_unlock';
+  clientIdentityId: string;
+  deviceCertificate: string;
+  lockId: string;
   signature: SignatureBlock;
 }
 
@@ -249,7 +301,7 @@ export interface MachineListMessage {
     label?: string;
     online: boolean;
     isAuthorized: boolean;
-    accessType?: 'full' | 'view';
+    accessType?: 'full';
     sessionId?: string;
     lastConnectedAt?: number;
   }[];
@@ -280,21 +332,12 @@ export interface RootInviteRevokedMessage {
   inviteId: string;
 }
 
-/** Root invite accepted confirmation */
-export interface RootInviteAcceptedMessage {
-  type: 'root_invite_accepted';
-  inviteId: string;
-  inviteType: 'relay-user' | 'relay-machine' | 'machine-user';
-  granted: 'relay' | 'machine';
-  machineId?: string;
-}
-
 /** Root invite list response */
 export interface RootInviteListMessage {
   type: 'root_invite_list';
   invites: {
     inviteId: string;
-    inviteType: 'relay-user' | 'relay-machine' | 'machine-user';
+    inviteType: 'relay-machine';
     relayUrl: string;
     label?: string;
     maxUses: number | null;
@@ -302,11 +345,56 @@ export interface RootInviteListMessage {
     expiresAt: string;
     createdAt: string;
     revokedAt?: string;
-    targetUserRootId?: string;
     machineId?: string;
     targetMachineSigningKey?: string;
     targetMachineKeyExchangeKey?: string;
   }[];
+}
+
+/** Owner sync compare response */
+export interface OwnerSyncCompareResultMessage {
+  type: 'owner_sync_compare_result';
+  serverRevisions: Record<SyncCategory, number>;
+  changedCategories: SyncCategory[];
+}
+
+/** Owner sync pull response record */
+export interface OwnerSyncRecordMessage {
+  ownerUserRootId: string;
+  category: SyncCategory;
+  revision: number;
+  updatedAt: number;
+  writerId: string;
+  checksum: string;
+  ciphertext: string;
+}
+
+/** Owner sync pull response */
+export interface OwnerSyncPullResultMessage {
+  type: 'owner_sync_pull_result';
+  records: OwnerSyncRecordMessage[];
+}
+
+/** Owner sync lock grant */
+export interface OwnerSyncLockGrantedMessage {
+  type: 'owner_sync_lock_granted';
+  scope: 'global';
+  lockId: string;
+  expiresAt: number;
+}
+
+/** Owner sync push result */
+export interface OwnerSyncPushResultMessage {
+  type: 'owner_sync_push_result';
+  category: SyncCategory;
+  revision: number;
+  updatedAt: number;
+}
+
+/** Owner sync unlock result */
+export interface OwnerSyncUnlockResultMessage {
+  type: 'owner_sync_unlock_result';
+  released: boolean;
 }
 
 /** Data from machine */
@@ -344,7 +432,11 @@ export type ClientToRelayMessage =
   | CreateRootInviteMessage
   | ListRootInvitesMessage
   | RevokeRootInviteMessage
-  | AcceptRootInviteMessage
+  | OwnerSyncCompareMessage
+  | OwnerSyncPullMessage
+  | OwnerSyncLockMessage
+  | OwnerSyncPushMessage
+  | OwnerSyncUnlockMessage
   | ClientDataMessage
   | ClientHandshakeMessage;
 
@@ -367,8 +459,12 @@ export type RelayToClientMessage =
   | ConnectionFailedMessage
   | RootInviteCreatedMessage
   | RootInviteRevokedMessage
-  | RootInviteAcceptedMessage
   | RootInviteListMessage
+  | OwnerSyncCompareResultMessage
+  | OwnerSyncPullResultMessage
+  | OwnerSyncLockGrantedMessage
+  | OwnerSyncPushResultMessage
+  | OwnerSyncUnlockResultMessage
   | DataFromMachineMessage
   | ErrorMessage;
 
@@ -497,6 +593,21 @@ function isValidKeyString(key: unknown): key is string {
   return !/[\x00-\x1f\x7f]/.test(key);
 }
 
+function isSyncCategory(value: unknown): value is SyncCategory {
+  return value === "fundamental"
+    || value === "integrations"
+    || value === "project/workspace"
+    || value === "preferences";
+}
+
+function isValidRevision(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isValidTimestampMs(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 /**
  * Validate specific message types and return properly typed result.
  * Each case returns the specific message type after validation,
@@ -583,12 +694,7 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
     case 'list_root_invites': {
       if (!isValidIdentifier(msg.clientIdentityId)) return null;
       if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
-      if (
-        msg.inviteType !== undefined &&
-        msg.inviteType !== 'relay-user' &&
-        msg.inviteType !== 'relay-machine' &&
-        msg.inviteType !== 'machine-user'
-      ) {
+      if (msg.inviteType !== undefined && msg.inviteType !== 'relay-machine') {
         return null;
       }
       if (!isValidSignatureBlock(msg.signature)) return null;
@@ -615,16 +721,110 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       };
     }
 
-    case 'accept_root_invite': {
+    case 'owner_sync_compare': {
       if (!isValidIdentifier(msg.clientIdentityId)) return null;
       if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
-      if (!isValidKeyString(msg.inviteToken)) return null;
       if (!isValidSignatureBlock(msg.signature)) return null;
+
+      if (msg.localRevisions !== undefined) {
+        if (!msg.localRevisions || typeof msg.localRevisions !== 'object') return null;
+        const localRevisions = msg.localRevisions as Record<string, unknown>;
+        for (const [key, value] of Object.entries(localRevisions)) {
+          if (!isSyncCategory(key)) return null;
+          if (!isValidRevision(value)) return null;
+        }
+      }
+
       return {
-        type: 'accept_root_invite',
+        type: 'owner_sync_compare',
         clientIdentityId: msg.clientIdentityId,
         deviceCertificate: msg.deviceCertificate,
-        inviteToken: msg.inviteToken,
+        localRevisions: msg.localRevisions as Partial<Record<SyncCategory, number>> | undefined,
+        signature: msg.signature,
+      };
+    }
+
+    case 'owner_sync_pull': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+      if (msg.categories !== undefined) {
+        if (!Array.isArray(msg.categories)) return null;
+        for (const category of msg.categories) {
+          if (!isSyncCategory(category)) return null;
+        }
+      }
+
+      return {
+        type: 'owner_sync_pull',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        categories: msg.categories as SyncCategory[] | undefined,
+        signature: msg.signature,
+      };
+    }
+
+    case 'owner_sync_lock': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (msg.scope !== 'global') return null;
+      if (!isValidIdentifier(msg.writerId)) return null;
+      if (msg.ttlMs !== undefined && (!isValidTimestampMs(msg.ttlMs) || msg.ttlMs === 0)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+
+      return {
+        type: 'owner_sync_lock',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        scope: 'global',
+        writerId: msg.writerId,
+        ttlMs: msg.ttlMs,
+        signature: msg.signature,
+      };
+    }
+
+    case 'owner_sync_push': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (!isValidIdentifier(msg.lockId)) return null;
+      if (!msg.record || typeof msg.record !== 'object') return null;
+      const record = msg.record as Record<string, unknown>;
+      if (!isSyncCategory(record.category)) return null;
+      if (!isValidRevision(record.expectedRevision)) return null;
+      if (!isValidTimestampMs(record.updatedAt)) return null;
+      if (!isValidIdentifier(record.writerId)) return null;
+      if (!isValidKeyString(record.checksum)) return null;
+      if (!isValidBase64(record.ciphertext)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+
+      return {
+        type: 'owner_sync_push',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        lockId: msg.lockId,
+        record: {
+          category: record.category,
+          expectedRevision: record.expectedRevision,
+          updatedAt: record.updatedAt,
+          writerId: record.writerId,
+          checksum: record.checksum,
+          ciphertext: record.ciphertext,
+        } as OwnerSyncPushMessage['record'],
+        signature: msg.signature,
+      };
+    }
+
+    case 'owner_sync_unlock': {
+      if (!isValidIdentifier(msg.clientIdentityId)) return null;
+      if (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0) return null;
+      if (!isValidIdentifier(msg.lockId)) return null;
+      if (!isValidSignatureBlock(msg.signature)) return null;
+
+      return {
+        type: 'owner_sync_unlock',
+        clientIdentityId: msg.clientIdentityId,
+        deviceCertificate: msg.deviceCertificate,
+        lockId: msg.lockId,
         signature: msg.signature,
       };
     }
@@ -747,33 +947,80 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       };
     }
 
-    case 'root_invite_accepted': {
-      if (!isValidIdentifier(msg.inviteId)) return null;
-      if (
-        msg.inviteType !== 'relay-user' &&
-        msg.inviteType !== 'relay-machine' &&
-        msg.inviteType !== 'machine-user'
-      ) {
-        return null;
-      }
-      if (msg.granted !== 'relay' && msg.granted !== 'machine') {
-        return null;
-      }
-      if (msg.machineId !== undefined && !isValidIdentifier(msg.machineId)) return null;
-      return {
-        type: 'root_invite_accepted',
-        inviteId: msg.inviteId,
-        inviteType: msg.inviteType,
-        granted: msg.granted,
-        machineId: msg.machineId,
-      };
-    }
-
     case 'root_invite_list': {
       if (!Array.isArray(msg.invites)) return null;
       return {
         type: 'root_invite_list',
         invites: msg.invites as RootInviteListMessage['invites'],
+      };
+    }
+
+    case 'owner_sync_compare_result': {
+      if (!msg.serverRevisions || typeof msg.serverRevisions !== 'object') return null;
+      const revisions = msg.serverRevisions as Record<string, unknown>;
+      for (const [key, value] of Object.entries(revisions)) {
+        if (!isSyncCategory(key)) return null;
+        if (!isValidRevision(value)) return null;
+      }
+      if (!Array.isArray(msg.changedCategories)) return null;
+      for (const category of msg.changedCategories) {
+        if (!isSyncCategory(category)) return null;
+      }
+      return {
+        type: 'owner_sync_compare_result',
+        serverRevisions: revisions as Record<SyncCategory, number>,
+        changedCategories: msg.changedCategories as SyncCategory[],
+      };
+    }
+
+    case 'owner_sync_pull_result': {
+      if (!Array.isArray(msg.records)) return null;
+      for (const record of msg.records) {
+        if (!record || typeof record !== 'object') return null;
+        const row = record as Record<string, unknown>;
+        if (!isValidIdentifier(row.ownerUserRootId)) return null;
+        if (!isSyncCategory(row.category)) return null;
+        if (!isValidRevision(row.revision)) return null;
+        if (!isValidTimestampMs(row.updatedAt)) return null;
+        if (!isValidIdentifier(row.writerId)) return null;
+        if (!isValidKeyString(row.checksum)) return null;
+        if (!isValidBase64(row.ciphertext)) return null;
+      }
+      return {
+        type: 'owner_sync_pull_result',
+        records: msg.records as OwnerSyncRecordMessage[],
+      };
+    }
+
+    case 'owner_sync_lock_granted': {
+      if (msg.scope !== 'global') return null;
+      if (!isValidIdentifier(msg.lockId)) return null;
+      if (!isValidTimestampMs(msg.expiresAt)) return null;
+      return {
+        type: 'owner_sync_lock_granted',
+        scope: 'global',
+        lockId: msg.lockId,
+        expiresAt: msg.expiresAt,
+      };
+    }
+
+    case 'owner_sync_push_result': {
+      if (!isSyncCategory(msg.category)) return null;
+      if (!isValidRevision(msg.revision)) return null;
+      if (!isValidTimestampMs(msg.updatedAt)) return null;
+      return {
+        type: 'owner_sync_push_result',
+        category: msg.category,
+        revision: msg.revision,
+        updatedAt: msg.updatedAt,
+      };
+    }
+
+    case 'owner_sync_unlock_result': {
+      if (typeof msg.released !== 'boolean') return null;
+      return {
+        type: 'owner_sync_unlock_result',
+        released: msg.released,
       };
     }
 

@@ -1,8 +1,16 @@
 # Identity/Auth Clean Cutover Plan (North Star)
 
-Status: locked implementation plan for the clean cutover.
+Status: historical/archival plan (superseded).
 
-This document is the canonical source for implementation decisions during the cutover. If code or behavior conflicts with this document, code must be changed to match this document.
+> **Historical Document** - retained for context only; not the active runtime contract.
+>
+> For current behavior and implementation targets, use:
+> - `docs/OWNER-ONLY-SYNC-CUTOVER-PLAN.md`
+> - `docs/PROTOCOL.md`
+> - `docs/RELAY.md`
+> - `docs/REMOTE-DESIGN.md`
+
+This document is retained as historical design context from the earlier cutover track.
 
 ---
 

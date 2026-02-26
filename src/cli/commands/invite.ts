@@ -4,24 +4,7 @@ import { withErrorHandler } from '../error.js';
 export function registerInviteCommands(parent: Command): void {
   const invite = parent
     .command('invite')
-    .description('Create and manage root-signed invites');
-
-  const relayUser = invite
-    .command('relay-user')
-    .description('Invite a user to relay membership');
-
-  relayUser
-    .command('create')
-    .description('Create relay-user invite')
-    .argument('<user>', 'Target user root key (gssh-user:BASE64_KEY)')
-    .requiredOption('--relay <url>', 'Relay URL')
-    .option('--expires <duration>', 'Invite duration (e.g. 1h, 24h, 7d)', '24h')
-    .option('--max-uses <n>', 'Maximum uses (or "unlimited")', '1')
-    .option('--label <label>', 'Optional invite label')
-    .action(withErrorHandler(async (user, options) => {
-      const { createRelayUserInvite } = await import('../../commands/invite.js');
-      await createRelayUserInvite(user, options);
-    }));
+    .description('Create and manage machine enrollment invites');
 
   const relayMachine = invite
     .command('relay-machine')
@@ -48,42 +31,23 @@ export function registerInviteCommands(parent: Command): void {
       });
     }));
 
-  const machineUser = invite
-    .command('machine-user')
-    .description('Invite a user to a specific machine ACL');
-
-  machineUser
-    .command('create')
-    .description('Create machine-user invite')
-    .argument('<machine-id>', 'Machine ID')
-    .argument('<user>', 'Target user root key (gssh-user:BASE64_KEY)')
-    .requiredOption('--relay <url>', 'Relay URL')
-    .option('--expires <duration>', 'Invite duration (e.g. 1h, 24h, 7d)', '24h')
-    .option('--max-uses <n>', 'Maximum uses (or "unlimited")', '1')
-    .option('--label <label>', 'Optional invite label')
-    .action(withErrorHandler(async (machineId, user, options) => {
-      const { createMachineUserInvite } = await import('../../commands/invite.js');
-      await createMachineUserInvite(machineId, user, options);
-    }));
-
   invite
     .command('list')
-    .description('List root-signed invites you own')
+    .description('List relay-machine invites you own')
     .requiredOption('--relay <url>', 'Relay URL')
-    .option('--type <type>', 'Filter by invite type: relay-user|relay-machine|machine-user')
     .option('--json', 'Output JSON')
     .action(withErrorHandler(async (options) => {
       const { listInvites } = await import('../../commands/invite.js');
       await listInvites({
         relay: options.relay,
-        type: options.type,
+        type: 'relay-machine',
         json: options.json,
       });
     }));
 
   invite
     .command('revoke')
-    .description('Revoke a root-signed invite')
+    .description('Revoke a machine enrollment invite')
     .argument('<invite-id>', 'Invite ID')
     .requiredOption('--relay <url>', 'Relay URL')
     .action(withErrorHandler(async (inviteId, options) => {

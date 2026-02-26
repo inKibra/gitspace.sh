@@ -31,7 +31,7 @@ export function registerClientCommands(parent: Command): void {
   // gssh client connect <machine-id>
   cmd
     .command('connect')
-    .description('Connect to a machine using relay + machine ACL authorization')
+    .description('Connect to a machine as the owner identity')
     .argument('[target]', 'Machine ID')
     .option('--relay <url>', 'Override relay URL')
     .option('--machine <id>', 'Machine ID for direct mode')

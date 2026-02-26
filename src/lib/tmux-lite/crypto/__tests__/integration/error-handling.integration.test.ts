@@ -425,9 +425,6 @@ describe("Error Handling Integration", () => {
         identity: machine,
         handshakeTimeoutMs: 100,
         ownerUserRootId,
-        checkUserRootAccess: async (ownerUserRootIdArg, clientUserRootId) => (
-          ownerUserRootIdArg === ownerUserRootId && clientUserRootId === ownerUserRootId
-        ),
       });
 
       // Complete handshake quickly

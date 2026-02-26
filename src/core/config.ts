@@ -21,6 +21,7 @@ import {
 	createDefaultProjectConfig,
 } from '../types/config.js'
 import { SpacesError } from '../types/errors.js'
+import { notifyOwnerSyncCategoryDirty } from './owner-sync-events.js'
 
 /**
  * Get the global gitspace directory path
@@ -115,9 +116,13 @@ export function readGlobalConfig(): GlobalConfig {
 /**
  * Write global configuration
  */
-export function writeGlobalConfig(config: GlobalConfig): void {
+export function writeGlobalConfig(
+	config: GlobalConfig,
+	options: { notifySync?: boolean } = {}
+): void {
 	const configPath = getGlobalConfigPath()
 	const spacesDir = dirname(configPath)
+	const shouldNotify = options.notifySync !== false
 
 	// Ensure spaces directory exists
 	if (!existsSync(spacesDir)) {
@@ -127,6 +132,11 @@ export function writeGlobalConfig(config: GlobalConfig): void {
 	try {
 		writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
 		chmodSync(configPath, 0o600)
+		if (shouldNotify) {
+			notifyOwnerSyncCategoryDirty('preferences')
+			notifyOwnerSyncCategoryDirty('integrations')
+			notifyOwnerSyncCategoryDirty('project/workspace')
+		}
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to write global config: ${
@@ -179,10 +189,12 @@ export function readProjectConfig(projectName: string): ProjectConfig {
  */
 export function writeProjectConfig(
 	projectName: string,
-	config: ProjectConfig
+	config: ProjectConfig,
+	options: { notifySync?: boolean } = {}
 ): void {
 	const configPath = getProjectConfigPath(projectName)
 	const projectDir = dirname(configPath)
+	const shouldNotify = options.notifySync !== false
 
 	// Ensure project directory exists
 	if (!existsSync(projectDir)) {
@@ -192,6 +204,10 @@ export function writeProjectConfig(
 	try {
 		writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
 		chmodSync(configPath, 0o600)
+		if (shouldNotify) {
+			notifyOwnerSyncCategoryDirty('integrations')
+			notifyOwnerSyncCategoryDirty('project/workspace')
+		}
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to write project config for "${projectName}": ${
@@ -390,5 +406,34 @@ export function getProjectEventsConfig(projectName: string): EventsConfig {
 		return config.events ?? { ...DEFAULT_EVENTS_CONFIG }
 	} catch {
 		return { ...DEFAULT_EVENTS_CONFIG }
+	}
+}
+
+export interface OwnerSyncConfigSnapshot {
+	globalConfig: GlobalConfig
+	projectConfigs: Record<string, ProjectConfig>
+}
+
+export function exportConfigForOwnerSyncSnapshot(): OwnerSyncConfigSnapshot {
+	const globalConfig = readGlobalConfig()
+	const projectConfigs: Record<string, ProjectConfig> = {}
+	for (const projectName of getAllProjectNames()) {
+		try {
+			projectConfigs[projectName] = readProjectConfig(projectName)
+		} catch {
+			// ignore unreadable project config
+		}
+	}
+
+	return {
+		globalConfig,
+		projectConfigs,
+	}
+}
+
+export function importConfigFromOwnerSyncSnapshot(snapshot: OwnerSyncConfigSnapshot): void {
+	writeGlobalConfig(snapshot.globalConfig, { notifySync: false })
+	for (const [projectName, config] of Object.entries(snapshot.projectConfigs)) {
+		writeProjectConfig(projectName, config, { notifySync: false })
 	}
 }

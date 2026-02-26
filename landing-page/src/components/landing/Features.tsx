@@ -91,7 +91,7 @@ export function Features() {
                         </li>
                         <li className="flex items-start">
                             <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />
-                            <span>Grant and revoke access with root-signed invites</span>
+                            <span>Owner-only access across devices recovered from your mnemonic</span>
                         </li>
                         <li className="flex items-start">
                             <ArrowRight className="w-5 h-5 text-blue-500 mr-3 shrink-0 mt-0.5" />

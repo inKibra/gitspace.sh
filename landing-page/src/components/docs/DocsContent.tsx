@@ -438,13 +438,11 @@ gssh invite relay-machine create --relay ws://localhost:4480/ws --machine-signin
           <CodeBlock code={`gssh machine enroll --invite "ws://localhost:4480/ws#<TOKEN>" --label "My Mac"
 gssh machine serve start --relay ws://localhost:4480/ws`} multiLine language="bash" />
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">4. Invite Collaborator</h3>
-          <CodeBlock code="gssh invite machine-user create <machine-id> gssh-user:<BASE64_KEY> --relay ws://localhost:4480/ws" />
-          <p className="text-zinc-500 text-sm mt-2">Output: root-signed invite token for collaborator acceptance</p>
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">4. Connect from Another Owner Device</h3>
+          <CodeBlock code={`# Recover the same owner identity
+gssh user identity recover
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">5. Connect from Client</h3>
-          <CodeBlock code={`gssh user identity init
-gssh user auth invite accept <TOKEN>
+# Connect as owner
 gssh client connect <machine-id>`} multiLine />
         </div>
       );
@@ -474,22 +472,23 @@ gssh user identity show [--fingerprint] [--json]`} multiLine language="bash" />
     case "access-control":
       return (
         <div className="max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <h1 className="text-4xl font-bold mb-6">Access Control</h1>
+          <h1 className="text-4xl font-bold mb-6">Owner Access Model</h1>
 
-          <h3 className="text-xl font-semibold text-white mb-4">Grant Access</h3>
-          <CodeBlock code={`gssh machine access add gssh-user:<signing-key> --label "Brad's Phone"`} />
+          <p className="text-zinc-400 mb-6">
+            Runtime access is owner-only. Clients and machines must present device certificates derived from the same owner user root identity.
+          </p>
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Manage Access</h3>
-          <CodeBlock code={`gssh machine access list [--json]
-gssh machine access remove "Brad's Phone"
-gssh machine access remove <user-id>`} multiLine language="bash" />
+          <h3 className="text-xl font-semibold text-white mb-4">Connect from Another Owner Device</h3>
+          <CodeBlock code={`gssh user identity recover
+gssh client connect --machine <machine-id> --relay ws://relay.example.com/ws`} multiLine language="bash" />
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Connect Without Invite (Pre-Authorized)</h3>
-          <CodeBlock code="gssh client connect --machine <machine-id> --relay ws://relay.example.com/ws" />
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Enroll Machines with Root-Signed Invites</h3>
+          <CodeBlock code={`gssh invite relay-machine create --relay ws://relay.example.com/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB>
+gssh machine enroll --invite "ws://relay.example.com/ws#<TOKEN>" --label "My Machine"`} multiLine language="bash" />
 
-          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Public Key Format</h3>
+          <h3 className="text-xl font-semibold text-white mb-4 mt-8">Identity Format</h3>
           <p className="text-zinc-400 mb-4 text-sm">
-            User root keys use this format:
+            Owner user root keys use this format:
           </p>
           <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 font-mono text-sm text-green-400 break-all">
             gssh-user:&lt;BASE64_SIGNING_PUBLIC_KEY&gt;
@@ -562,7 +561,7 @@ gssh machine access remove <user-id>`} multiLine language="bash" />
               <h4 className="text-white font-bold mb-2">"Failed to unlock identity"</h4>
               <p className="text-zinc-400 text-sm mb-2">You're entering the wrong password. If forgotten, recreate:</p>
               <CodeBlock code="gssh user identity init --force" />
-              <p className="text-zinc-500 text-sm">Warning: This invalidates existing invites and access grants</p>
+              <p className="text-zinc-500 text-sm">Warning: This invalidates existing owner identity bindings and requires re-enrollment/recovery across devices</p>
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
@@ -576,15 +575,15 @@ gssh machine access remove <user-id>`} multiLine language="bash" />
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
               <h4 className="text-white font-bold mb-2">"Client not authorized"</h4>
-              <p className="text-zinc-400 text-sm mb-2">You need owner-granted relay + machine access:</p>
-              <CodeBlock code={`gssh relay access add <gssh-user:...>
-gssh machine access add <gssh-user:...>`} multiLine language="bash" />
+              <p className="text-zinc-400 text-sm mb-2">The client identity does not match the relay/machine owner identity:</p>
+              <CodeBlock code={`gssh user identity show
+gssh user identity recover`} multiLine language="bash" />
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
-              <h4 className="text-white font-bold mb-2">"Invite expired"</h4>
-              <p className="text-zinc-400 text-sm mb-2">Create a new invite with longer expiration:</p>
-              <CodeBlock code="gssh invite machine-user create <machine-id> <gssh-user:...> --relay ws://relay.example.com/ws --expires 7d" />
+              <h4 className="text-white font-bold mb-2">"Enrollment invite expired"</h4>
+              <p className="text-zinc-400 text-sm mb-2">Create a new machine enrollment invite with longer expiration:</p>
+              <CodeBlock code="gssh invite relay-machine create --relay ws://relay.example.com/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --expires 7d" />
             </div>
 
             <div className="p-4 rounded-lg border border-zinc-800 bg-zinc-900/50">
@@ -626,7 +625,7 @@ gssh machine access add <gssh-user:...>`} multiLine language="bash" />
               <h3 className="font-bold text-yellow-500 mb-3">Current Limitations</h3>
               <ul className="list-disc list-inside space-y-3 text-zinc-400 text-sm leading-relaxed">
                 <li>
-                  <strong className="text-white">Client proof-of-possession</strong>: The handshake doesn't fully enforce that the client possesses the private key corresponding to their claimed public key. If an attacker learns an authorized public key, ACL identity spoofing is theoretically possible.
+                  <strong className="text-white">Client proof-of-possession</strong>: The handshake doesn't fully enforce that the client possesses the private key corresponding to their claimed public key. If an attacker learns an allowed public key, identity spoofing is theoretically possible.
                 </li>
                 <li>
                   <strong className="text-white">Permission enforcement</strong>: Permission flags (<code className="text-zinc-300">read</code>/<code className="text-zinc-300">write</code>/<code className="text-zinc-300">manage</code>) are not fully enforced server-side after the handshake completes. "View-only" access should be treated as intended behavior rather than a strict security guarantee.
@@ -673,8 +672,8 @@ gssh machine access add <gssh-user:...>`} multiLine language="bash" />
               <dd className="text-zinc-400 text-sm">Signed token that bootstraps trust and enables first connection</dd>
             </div>
             <div>
-              <dt className="text-white font-bold mb-1">ACL (Access Control List)</dt>
-              <dd className="text-zinc-400 text-sm">Machine-managed list of authorized client identities</dd>
+              <dt className="text-white font-bold mb-1">Owner Identity Binding</dt>
+              <dd className="text-zinc-400 text-sm">Runtime rule requiring client and machine device certificates to derive from the same owner user root identity</dd>
             </div>
             <div>
               <dt className="text-white font-bold mb-1">X3DH</dt>

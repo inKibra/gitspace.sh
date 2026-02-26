@@ -10,7 +10,12 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { ensureControlStore, upsertVaultMachine, isVaultInitialized } from './control/store.js';
+import {
+  ensureControlStore,
+  isVaultInitialized,
+  upsertVaultCategory,
+  upsertVaultMachine,
+} from './control/store.js';
 import {
   initializeVault,
   unlockVault,
@@ -23,9 +28,14 @@ import {
   removeMachineUnlockKey,
   listMachinesWithUnlockKeys,
   openAllMachineUnlockKeys,
+  listVaultSyncCategoryMetadata,
   MACHINE_UNLOCK_KEY_LENGTH,
+  readVaultCategoryText,
+  removeVaultSyncCategory,
   _resetVaultState,
+  writeVaultCategory,
 } from './vault.js';
+import type { VaultSyncCategory } from './control/types.js';
 
 let originalHome: string | undefined;
 let originalControlDirOverride: string | undefined;
@@ -324,6 +334,110 @@ describe('relay vault', () => {
       expect(Buffer.from(recovered!).toString('hex')).toBe(
         Buffer.from(unlockKey).toString('hex')
       );
+    });
+  });
+
+  // ========================================================================
+  // Sync category envelopes
+  // ========================================================================
+
+  describe('sync categories', () => {
+    const categories: VaultSyncCategory[] = [
+      'fundamental',
+      'integrations',
+      'project/workspace',
+      'preferences',
+    ];
+
+    test('write/read roundtrip for all categories', () => {
+      const ownerKey = fakePrivateKey();
+      initializeVault(ownerKey);
+
+      for (const category of categories) {
+        writeVaultCategory({
+          category,
+          payload: `payload-${category}`,
+          writerId: 'writer-a',
+        });
+      }
+
+      for (const category of categories) {
+        expect(readVaultCategoryText(category)).toBe(`payload-${category}`);
+      }
+    });
+
+    test('write increments revision and tracks metadata', () => {
+      const ownerKey = fakePrivateKey();
+      initializeVault(ownerKey);
+
+      const first = writeVaultCategory({
+        category: 'preferences',
+        payload: 'v1',
+        writerId: 'writer-a',
+      });
+      const second = writeVaultCategory({
+        category: 'preferences',
+        payload: 'v2',
+        writerId: 'writer-b',
+        expectedRevision: first.revision,
+      });
+
+      expect(second.revision).toBe(first.revision + 1);
+      expect(second.writerId).toBe('writer-b');
+      expect(second.checksum).not.toBe(first.checksum);
+
+      const all = listVaultSyncCategoryMetadata();
+      expect(all.length).toBe(1);
+      expect(all[0]?.category).toBe('preferences');
+    });
+
+    test('write/read throw when vault is locked', () => {
+      const ownerKey = fakePrivateKey();
+      initializeVault(ownerKey);
+      lockVault();
+
+      expect(() => writeVaultCategory({
+        category: 'fundamental',
+        payload: 'data',
+        writerId: 'writer-a',
+      })).toThrow(/locked/i);
+
+      expect(() => readVaultCategoryText('fundamental')).toThrow(/locked/i);
+    });
+
+    test('remove category metadata', () => {
+      const ownerKey = fakePrivateKey();
+      initializeVault(ownerKey);
+
+      writeVaultCategory({
+        category: 'integrations',
+        payload: 'integration-data',
+        writerId: 'writer-a',
+      });
+
+      expect(removeVaultSyncCategory('integrations')).toBe(true);
+      expect(readVaultCategoryText('integrations')).toBeNull();
+      expect(removeVaultSyncCategory('integrations')).toBe(false);
+    });
+
+    test('checksum mismatch is rejected', () => {
+      const ownerKey = fakePrivateKey();
+      initializeVault(ownerKey);
+
+      const written = writeVaultCategory({
+        category: 'fundamental',
+        payload: 'expected-payload',
+        writerId: 'writer-a',
+      });
+
+      upsertVaultCategory({
+        category: 'fundamental',
+        encryptedEnvelope: written.encryptedEnvelope,
+        writerId: written.writerId,
+        checksum: 'deadbeef',
+      });
+
+      expect(() => readVaultCategoryText('fundamental')).toThrow(/checksum mismatch/i);
     });
   });
 

@@ -3,7 +3,6 @@
  *
  * Handles:
  * - `gssh relay start` - Start the relay server
- * - `gssh relay access ...` - Manage relay-level user-root grants
  * - `gssh relay machines ...` - Manage registered machines
  */
 
@@ -16,17 +15,10 @@ import {
   formatRelayFingerprint,
 } from "../relay/identity.js";
 import { loadUserRootIdentity } from "../core/user-identity.js";
-import { parseUserRootPublicKey } from "../lib/tmux-lite/crypto/user-identity.js";
-import {
-  grantRelayAccess,
-  listRelayAccessList,
-  revokeRelayAccess,
-} from "../relay/auth/store.js";
 import {
   listVaultMachinesForOwner,
   removeVaultMachine,
 } from "../relay/control/store.js";
-import { promptConfirm } from "../utils/prompts.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -108,27 +100,6 @@ export async function startRelay(options: {
   }
 }
 
-function resolveClientUserRootId(user: string): string {
-  const trimmed = user.trim();
-  if (!trimmed) {
-    throw new SpacesError('User key is required', 'USER_ERROR', 1);
-  }
-
-  if (trimmed.startsWith('gssh-user:')) {
-    try {
-      return parseUserRootPublicKey(trimmed).userRootId;
-    } catch (error) {
-      throw new SpacesError(
-        error instanceof Error ? error.message : 'Invalid user root public key.',
-        'USER_ERROR',
-        1,
-      );
-    }
-  }
-
-  return trimmed;
-}
-
 async function requireOwnerUserRootId(): Promise<string> {
   const userRoot = await loadUserRootIdentity();
   if (!userRoot) {
@@ -139,97 +110,6 @@ async function requireOwnerUserRootId(): Promise<string> {
     );
   }
   return userRoot.id;
-}
-
-export async function addRelayAccess(
-  user: string,
-  options: { label?: string }
-): Promise<void> {
-  const ownerUserRootId = await requireOwnerUserRootId();
-  const clientUserRootId = resolveClientUserRootId(user);
-
-  if (clientUserRootId === ownerUserRootId) {
-    throw new SpacesError('Owner does not need a relay access grant.', 'USER_ERROR', 1);
-  }
-
-  const entry = grantRelayAccess({
-    ownerUserRootId,
-    clientUserRootId,
-    label: options.label,
-  });
-
-  logger.success('Relay access granted');
-  logger.log(`  User:  ${chalk.cyan(entry.clientUserRootId)}`);
-  if (entry.label) {
-    logger.log(`  Label: ${chalk.yellow(entry.label)}`);
-  }
-}
-
-export async function listRelayAccess(options: { json?: boolean } = {}): Promise<void> {
-  const ownerUserRootId = await requireOwnerUserRootId();
-  const entries = listRelayAccessList(ownerUserRootId);
-
-  if (options.json) {
-    console.log(JSON.stringify(entries, null, 2));
-    return;
-  }
-
-  if (entries.length === 0) {
-    logger.info('No relay access grants.');
-    return;
-  }
-
-  logger.bold('Relay Access Grants:');
-  logger.log('');
-  const userWidth = 20;
-  const labelWidth = 24;
-  logger.dim('USER ROOT'.padEnd(userWidth) + 'LABEL'.padEnd(labelWidth) + 'GRANTED');
-  logger.dim('─'.repeat(userWidth + labelWidth + 12));
-
-  for (const entry of entries) {
-    const userCol = entry.clientUserRootId.slice(0, userWidth - 1).padEnd(userWidth);
-    const labelCol = (entry.label || '-').slice(0, labelWidth - 1).padEnd(labelWidth);
-    const dateCol = entry.grantedAt.split('T')[0] ?? entry.grantedAt;
-    logger.log(chalk.cyan(userCol) + labelCol + chalk.dim(dateCol));
-  }
-}
-
-export async function removeRelayAccess(
-  userOrLabel: string,
-  options: { force?: boolean } = {},
-): Promise<void> {
-  const ownerUserRootId = await requireOwnerUserRootId();
-  const entries = listRelayAccessList(ownerUserRootId);
-  const query = userOrLabel.trim();
-  const parsedId = resolveClientUserRootId(query);
-
-  const direct = entries.find((entry) => entry.clientUserRootId === parsedId);
-  const prefixMatches = direct ? [] : entries.filter((entry) => entry.clientUserRootId.startsWith(parsedId));
-  const labelMatch = direct || prefixMatches.length === 1
-    ? null
-    : entries.find((entry) => entry.label?.toLowerCase() === query.toLowerCase());
-  const target = direct ?? (prefixMatches.length === 1 ? prefixMatches[0] : labelMatch);
-
-  if (!target) {
-    throw new SpacesError(`No relay access grant found for '${userOrLabel}'.`, 'USER_ERROR', 1);
-  }
-
-  if (!options.force) {
-    const confirmed = await promptConfirm(
-      `Remove relay access for ${target.clientUserRootId}?`
-    );
-    if (!confirmed) {
-      logger.info('Cancelled');
-      return;
-    }
-  }
-
-  const removed = revokeRelayAccess(ownerUserRootId, target.clientUserRootId);
-  if (!removed) {
-    throw new SpacesError('Failed to revoke relay access.', 'SYSTEM_ERROR', 2);
-  }
-
-  logger.success(`Relay access revoked for ${target.clientUserRootId}`);
 }
 
 export async function listRelayMachines(options: { json?: boolean } = {}): Promise<void> {

@@ -38,6 +38,7 @@ import { join } from 'path';
 import { VERSION as GENERATED_VERSION } from './version.generated.js';
 import { logger } from './utils/logger.js';
 import { SpacesError } from './types/errors.js';
+import { initializeOwnerSync } from './core/owner-sync.js';
 
 // ============================================================================
 // Version resolution
@@ -93,6 +94,12 @@ process.on('unhandledRejection', (reason) => {
 // ============================================================================
 
 const args = process.argv.slice(2);
+
+try {
+	await initializeOwnerSync();
+} catch {
+	// owner sync is best-effort; continue on local cache
+}
 
 // Guard: workspace session only allows `space` and help commands
 if (isWorkspaceScopedSession() && !isAllowedWorkspaceSessionCommand(args)) {

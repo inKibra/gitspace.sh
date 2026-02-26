@@ -1,5 +1,17 @@
 import type { RelaySocketAdapter } from './machine-directory-client.js';
 
+export class RelayRequestError extends Error {
+  code: string;
+  relayMessage: string;
+
+  constructor(code: string, relayMessage: string) {
+    super(`[${code}] ${relayMessage}`);
+    this.name = 'RelayRequestError';
+    this.code = code;
+    this.relayMessage = relayMessage;
+  }
+}
+
 export interface RelayRequestClientOptions<TSocket> {
   relayUrl: string;
   socketAdapter: RelaySocketAdapter<TSocket>;
@@ -59,7 +71,7 @@ export class RelayRequestClient<TSocket> {
             if (msg.type === 'error') {
               const code = typeof msg.code === 'string' ? msg.code : 'ERROR';
               const message = typeof msg.message === 'string' ? msg.message : 'Relay request failed';
-              fail(new Error(`[${code}] ${message}`));
+              fail(new RelayRequestError(code, message));
               return;
             }
 

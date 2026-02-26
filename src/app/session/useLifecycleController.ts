@@ -164,79 +164,136 @@ export function useLifecycleController(
   ]);
 
   const openCreateProjectFlow = useCallback(() => {
-    flow.showLoading({
-      title: 'Loading Repositories',
-      message: 'Fetching GitHub repositories...',
-    });
+    const openProjectNamePrompt = (repo: string) => {
+      const defaultName = defaultProjectNameForRepo(repo);
 
-    void (async () => {
-      try {
-        const repos = await listGithubRepos();
-        flow.close();
-
-        if (repos.length === 0) {
-          flow.showMessage({
-            title: 'No Repositories',
-            message: 'No GitHub repositories found for this machine identity.',
-            variant: 'warning',
+      flow.showInput({
+        title: 'Project Name',
+        label: `Project name for ${repo}:`,
+        defaultValue: defaultName,
+        validation: (value) => {
+          if (!value.trim()) {
+            return 'Project name is required';
+          }
+          const sanitized = sanitizeForFileSystem(value.trim());
+          if (!sanitized) {
+            return 'Project name must contain at least one letter or number';
+          }
+          return null;
+        },
+        onSubmit: async (value) => {
+          const projectName = value.trim();
+          flow.showLoading({
+            title: 'Creating Project',
+            message: `Cloning ${repo}...`,
           });
+
+          try {
+            await createProject({ repository: repo, projectName });
+            await refreshAll();
+            flow.showMessage({
+              title: 'Project Created',
+              message: `Created project "${projectName}" from ${repo}.`,
+              variant: 'success',
+            });
+          } catch (error) {
+            flow.showMessage({
+              title: 'Create Project Failed',
+              message: toErrorMessage(error, 'Failed to create project'),
+              variant: 'error',
+            });
+          }
+        },
+      });
+    };
+
+    const openManualRepoPrompt = () => {
+      flow.showInput({
+        title: 'Repository Remote',
+        label: 'Repository remote URL (or owner/repo):',
+        placeholder: 'https://github.com/org/repo.git',
+        validation: (value) => {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return 'Repository is required';
+          }
+
+          const looksLikeOwnerRepo = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(trimmed);
+          const looksLikeRemoteUrl =
+            trimmed.includes('://') ||
+            trimmed.startsWith('git@') ||
+            trimmed.startsWith('ssh://');
+
+          if (!looksLikeOwnerRepo && !looksLikeRemoteUrl) {
+            return 'Enter a git remote URL or owner/repo shorthand';
+          }
+
+          return null;
+        },
+        onSubmit: (repoValue) => {
+          openProjectNamePrompt(repoValue.trim());
+        },
+      });
+    };
+
+    flow.showSelect({
+      title: 'Create Project From',
+      options: [
+        {
+          label: 'Git Remote URL',
+          description: 'Enter a remote URL directly',
+          value: 'manual' as const,
+        },
+        {
+          label: 'GitHub Repository',
+          description: 'Select from GitHub (optional)',
+          value: 'github' as const,
+        },
+      ],
+      onSelect: (source) => {
+        if (source === 'manual') {
+          openManualRepoPrompt();
           return;
         }
 
-        flow.showSelect({
-          title: 'Select Repository',
-          options: repos.map((repo) => ({ label: repo, value: repo })),
-          onSelect: (repo) => {
-            const defaultName = defaultProjectNameForRepo(repo);
-            flow.showInput({
-              title: 'Project Name',
-              label: `Project name for ${repo}:`,
-              defaultValue: defaultName,
-              validation: (value) => {
-                if (!value.trim()) {
-                  return 'Project name is required';
-                }
-                const sanitized = sanitizeForFileSystem(value.trim());
-                if (!sanitized) {
-                  return 'Project name must contain at least one letter or number';
-                }
-                return null;
-              },
-              onSubmit: async (value) => {
-                const projectName = value.trim();
-                flow.showLoading({
-                  title: 'Creating Project',
-                  message: `Cloning ${repo}...`,
-                });
+        flow.showLoading({
+          title: 'Loading Repositories',
+          message: 'Fetching GitHub repositories...',
+        });
 
-                try {
-                  await createProject({ repository: repo, projectName });
-                  await refreshAll();
-                  flow.showMessage({
-                    title: 'Project Created',
-                    message: `Created project "${projectName}" from ${repo}.`,
-                    variant: 'success',
-                  });
-                } catch (error) {
-                  flow.showMessage({
-                    title: 'Create Project Failed',
-                    message: toErrorMessage(error, 'Failed to create project'),
-                    variant: 'error',
-                  });
-                }
+        void (async () => {
+          try {
+            const repos = await listGithubRepos();
+            flow.close();
+
+            if (repos.length === 0) {
+              flow.showMessage({
+                title: 'No Repositories',
+                message: 'No GitHub repositories found for this machine identity.',
+                variant: 'warning',
+              });
+              return;
+            }
+
+            flow.showSelect({
+              title: 'Select Repository',
+              options: repos.map((repo) => ({ label: repo, value: repo })),
+              onSelect: (repo) => {
+                openProjectNamePrompt(repo);
               },
             });
-          },
-        });
-      } catch (error) {
-        flow.close();
-        flow.showMessage({
-          title: 'Repository Fetch Failed',
-          message: toErrorMessage(error, 'Failed to fetch GitHub repositories'),
-          variant: 'error',
-        });
-      }
-    })();
+          } catch (error) {
+            flow.close();
+            flow.showMessage({
+              title: 'GitHub Repositories Unavailable',
+              message: toErrorMessage(error, 'Failed to fetch GitHub repositories'),
+              variant: 'warning',
+            });
+            openManualRepoPrompt();
+          }
+        })();
+      },
+    });
   }, [createProject, flow, listGithubRepos, refreshAll]);
 
   const openManualWorkspaceFlow = useCallback((projectName: string) => {
@@ -496,7 +553,7 @@ export function useLifecycleController(
       title: 'Create',
       options: [
         { label: 'Workspace', description: 'Create a new workspace', value: 'workspace' as const },
-        { label: 'Project', description: 'Clone a GitHub repository', value: 'project' as const },
+        { label: 'Project', description: 'Clone a git repository', value: 'project' as const },
       ],
       onSelect: (value) => {
         if (value === 'workspace') {

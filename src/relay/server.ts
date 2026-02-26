@@ -7,7 +7,7 @@
  *
  * Protocol:
  * - Machines authenticate via Ed25519 challenge-response
- * - Clients connect directly when relay+machine ACL allows
+ * - Owner clients connect directly to owner-owned machines
  * - Data is routed point-to-point using connectionId
  */
 
@@ -153,8 +153,23 @@ import {
   type CreateRootInviteMessage,
   type ListRootInvitesMessage,
   type RevokeRootInviteMessage,
-  type AcceptRootInviteMessage,
+  type OwnerSyncCompareMessage,
+  type OwnerSyncPullMessage,
+  type OwnerSyncLockMessage,
+  type OwnerSyncPushMessage,
+  type OwnerSyncUnlockMessage,
 } from "./protocol";
+import {
+  compareOwnerSync,
+  createOwnerSyncRuntimeState,
+  lockOwnerSync,
+  pullOwnerSync,
+  pushOwnerSync,
+  unlockOwnerSync,
+  type OwnerSyncRuntimeState,
+  type SyncCategory,
+  OwnerSyncRuntimeError,
+} from "./sync/runtime.js";
 import {
   isVaultUnlocked,
   unlockVault,
@@ -173,15 +188,8 @@ import {
   upsertVaultMachine,
 } from "./control/store.js";
 import {
-  grantMachineAccess,
-  grantRelayAccess,
-  getRootInviteByToken,
-  isMachineAccessGranted,
-  isRelayAccessGranted,
   listRootInvites,
   registerRootInvite,
-  revokeMachineAccess,
-  revokeRelayAccess,
   revokeRootInvite,
   consumeRootInviteToken,
 } from "./auth/store.js";
@@ -274,7 +282,11 @@ type SignedClientMessageType =
   | "create_root_invite"
   | "list_root_invites"
   | "revoke_root_invite"
-  | "accept_root_invite";
+  | "owner_sync_compare"
+  | "owner_sync_pull"
+  | "owner_sync_lock"
+  | "owner_sync_push"
+  | "owner_sync_unlock";
 const SIGNED_CLIENT_MESSAGE_TYPES = new Set<SignedClientMessageType>([
   "list_machines",
   "connect_to_machine",
@@ -282,7 +294,11 @@ const SIGNED_CLIENT_MESSAGE_TYPES = new Set<SignedClientMessageType>([
   "create_root_invite",
   "list_root_invites",
   "revoke_root_invite",
-  "accept_root_invite",
+  "owner_sync_compare",
+  "owner_sync_pull",
+  "owner_sync_lock",
+  "owner_sync_push",
+  "owner_sync_unlock",
 ]);
 
 const UNLOCK_KDF_INFO = new TextEncoder().encode("gitspace-unlock-v1");
@@ -408,15 +424,57 @@ function isClientAllowedForMachine(
     return false;
   }
 
-  if (clientUserRootId === ownerUserRootId) {
-    return true;
+  return clientUserRootId === ownerUserRootId;
+}
+
+function authenticateOwnerClient<T extends {
+  clientIdentityId: string;
+  deviceCertificate: string;
+}>(
+  state: RelayServerState,
+  ws: ServerWebSocket<WebSocketData>,
+  message: SignedMessage<T>,
+): { clientIdentityId: string; ownerUserRootId: string } | null {
+  const verified = verifyClientIdentity(message);
+  if (!verified) {
+    ws.send(serializeMessage(createErrorMessage("INVALID_SIGNATURE", "Client message signature invalid")));
+    return null;
   }
 
-  if (!isRelayAccessGranted(ownerUserRootId, clientUserRootId)) {
-    return false;
+  if (ws.data.clientIdentityId && ws.data.clientIdentityId !== verified.clientIdentityId) {
+    ws.send(serializeMessage(createErrorMessage("IDENTITY_MISMATCH", "Client identity does not match connection")));
+    return null;
+  }
+  ws.data.clientIdentityId = verified.clientIdentityId;
+
+  const clientRootResult = deriveClientUserRootIdFromCertificate(
+    verified.deviceCertificate,
+    verified.clientIdentityId,
+  );
+  if (!clientRootResult.success) {
+    ws.send(serializeMessage(createErrorMessage("FORBIDDEN", clientRootResult.error)));
+    return null;
   }
 
-  return isMachineAccessGranted(machineId, ownerUserRootId, clientUserRootId);
+  const configuredOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta("owner_user_root_id") ?? null;
+  if (!configuredOwnerUserRootId) {
+    ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Relay owner user root is not configured")));
+    return null;
+  }
+
+  if (clientRootResult.userRootId !== configuredOwnerUserRootId) {
+    ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "User root is not the relay owner")));
+    return null;
+  }
+
+  if (!state.ownerUserRootId) {
+    state.ownerUserRootId = configuredOwnerUserRootId;
+  }
+
+  return {
+    clientIdentityId: verified.clientIdentityId,
+    ownerUserRootId: configuredOwnerUserRootId,
+  };
 }
 
 interface RelayServerState {
@@ -427,6 +485,7 @@ interface RelayServerState {
   signRelayMessage: <T extends object>(msg: T) => T;
   /** Owner user root ID (set after vault initialization or unlock) */
   ownerUserRootId: string | null;
+  ownerSyncState: OwnerSyncRuntimeState;
 }
 
 /**
@@ -520,6 +579,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     preAuthorizedMachines,
     signRelayMessage,
     ownerUserRootId,
+    ownerSyncState: createOwnerSyncRuntimeState(),
   };
 
   const server = Bun.serve<WebSocketData>({
@@ -1137,12 +1197,12 @@ async function handleProtocolMessage(
         return;
       }
 
-      if (parsedInvite.type === 'machine-user') {
-        const machine = getVaultMachine(parsedInvite.machineId);
-        if (!machine || machine.ownerUserRootId !== parsedInvite.ownerUserRootId) {
-          ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Machine is not owned by invite owner")));
-          return;
-        }
+      if (parsedInvite.type !== 'relay-machine') {
+        ws.send(serializeMessage(createErrorMessage(
+          "INVALID_REQUEST",
+          "Only relay-machine invites are supported"
+        )));
+        return;
       }
 
       let expiresAtIso: string;
@@ -1163,20 +1223,9 @@ async function handleProtocolMessage(
           maxUses: parsedInvite.maxUses,
           expiresAt: expiresAtIso,
           label: parsedInvite.label,
-          targetUserRootId:
-            parsedInvite.type === 'relay-user' || parsedInvite.type === 'machine-user'
-              ? parsedInvite.targetUserRootId
-              : undefined,
-          machineId:
-            parsedInvite.type === 'relay-machine'
-              ? parsedInvite.targetMachineId
-              : parsedInvite.type === 'machine-user'
-                ? parsedInvite.machineId
-                : undefined,
-          targetMachineSigningKey:
-            parsedInvite.type === 'relay-machine' ? parsedInvite.targetMachineSigningKey : undefined,
-          targetMachineKeyExchangeKey:
-            parsedInvite.type === 'relay-machine' ? parsedInvite.targetMachineKeyExchangeKey : undefined,
+          machineId: parsedInvite.targetMachineId,
+          targetMachineSigningKey: parsedInvite.targetMachineSigningKey,
+          targetMachineKeyExchangeKey: parsedInvite.targetMachineKeyExchangeKey,
         });
       } catch (error) {
         ws.send(serializeMessage(createErrorMessage(
@@ -1225,13 +1274,13 @@ async function handleProtocolMessage(
         inviteType: listMsg.inviteType,
         includeRevoked: true,
         includeExpired: true,
-      });
+      }).filter((invite) => invite.inviteType === 'relay-machine');
 
       ws.send(serializeMessage({
         type: 'root_invite_list',
         invites: invites.map((invite) => ({
           inviteId: invite.inviteId,
-          inviteType: invite.inviteType,
+          inviteType: 'relay-machine' as const,
           relayUrl: invite.relayUrl,
           label: invite.label,
           maxUses: invite.maxUses,
@@ -1239,7 +1288,6 @@ async function handleProtocolMessage(
           expiresAt: invite.expiresAt,
           createdAt: invite.createdAt,
           revokedAt: invite.revokedAt,
-          targetUserRootId: invite.targetUserRootId,
           machineId: invite.machineId,
           targetMachineSigningKey: invite.targetMachineSigningKey,
           targetMachineKeyExchangeKey: invite.targetMachineKeyExchangeKey,
@@ -1289,154 +1337,166 @@ async function handleProtocolMessage(
       break;
     }
 
-    case "accept_root_invite": {
+    case "owner_sync_compare": {
       if (role !== "client") {
-        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Only clients can accept invites")));
+        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Only clients can compare owner sync state")));
         return;
       }
 
-      const acceptMsg = msg as AcceptRootInviteMessage;
-      const verified = verifyClientIdentity(acceptMsg);
-      if (!verified) {
-        ws.send(serializeMessage(createErrorMessage("INVALID_SIGNATURE", "Client message signature invalid")));
+      const compareMsg = msg as OwnerSyncCompareMessage;
+      const auth = authenticateOwnerClient(state, ws, compareMsg);
+      if (!auth) {
         return;
       }
 
-      if (ws.data.clientIdentityId && ws.data.clientIdentityId !== verified.clientIdentityId) {
-        ws.send(serializeMessage(createErrorMessage("IDENTITY_MISMATCH", "Client identity does not match connection")));
-        return;
-      }
-      ws.data.clientIdentityId = verified.clientIdentityId;
+      const result = compareOwnerSync(auth.ownerUserRootId, compareMsg.localRevisions);
+      ws.send(serializeMessage({
+        type: "owner_sync_compare_result",
+        serverRevisions: result.serverRevisions,
+        changedCategories: result.changedCategories,
+      }));
+      break;
+    }
 
-      const clientRootResult = deriveClientUserRootIdFromCertificate(
-        acceptMsg.deviceCertificate,
-        verified.clientIdentityId,
-      );
-      if (!clientRootResult.success) {
-        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", clientRootResult.error)));
-        return;
-      }
-
-      const parsedInvite = parseRootInviteToken(acceptMsg.inviteToken);
-      if (!parsedInvite) {
-        ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", "Invalid invite token format or signature")));
+    case "owner_sync_pull": {
+      if (role !== "client") {
+        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Only clients can pull owner sync state")));
         return;
       }
 
-      if (isRootInviteExpired(parsedInvite)) {
-        ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite token expired")));
+      const pullMsg = msg as OwnerSyncPullMessage;
+      const auth = authenticateOwnerClient(state, ws, pullMsg);
+      if (!auth) {
         return;
       }
 
-      if (parsedInvite.type === 'relay-machine') {
-        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "relay-machine invites must be used with machine enroll")));
-        return;
-      }
-
-      if (parsedInvite.targetUserRootId !== clientRootResult.userRootId) {
-        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Invite target does not match authenticated user root")));
-        return;
-      }
-
-      const inviteRecord = getRootInviteByToken(
-        parsedInvite.inviteId,
-        parsedInvite.ownerUserRootId,
-        acceptMsg.inviteToken,
-      );
-      if (!inviteRecord) {
-        ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
-        return;
-      }
-
-      if (
-        parsedInvite.type === 'machine-user' &&
-        parsedInvite.ownerUserRootId !== clientRootResult.userRootId &&
-        !isRelayAccessGranted(parsedInvite.ownerUserRootId, clientRootResult.userRootId)
-      ) {
-        ws.send(serializeMessage(createErrorMessage(
-          "FORBIDDEN",
-          "Relay membership is required before accepting machine invite"
-        )));
-        return;
-      }
-
-      if (parsedInvite.type === 'relay-user') {
-        const hadRelayAccess = isRelayAccessGranted(
-          parsedInvite.ownerUserRootId,
-          clientRootResult.userRootId,
-        );
-
-        grantRelayAccess({
-          ownerUserRootId: parsedInvite.ownerUserRootId,
-          clientUserRootId: clientRootResult.userRootId,
-          label: parsedInvite.label,
-        });
-
-        const consumed = consumeRootInviteToken(
-          parsedInvite.inviteId,
-          parsedInvite.ownerUserRootId,
-          acceptMsg.inviteToken,
-        );
-        if (!consumed) {
-          if (!hadRelayAccess) {
-            revokeRelayAccess(parsedInvite.ownerUserRootId, clientRootResult.userRootId);
-          }
-          ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
+      try {
+        const records = pullOwnerSync(auth.ownerUserRootId, pullMsg.categories);
+        ws.send(serializeMessage({
+          type: "owner_sync_pull_result",
+          records,
+        }));
+      } catch (error) {
+        if (error instanceof OwnerSyncRuntimeError) {
+          ws.send(serializeMessage(createErrorMessage(error.code, error.message)));
           return;
         }
 
-        ws.send(serializeMessage({
-          type: 'root_invite_accepted',
-          inviteId: inviteRecord.inviteId,
-          inviteType: inviteRecord.inviteType,
-          granted: 'relay',
-        }));
+        ws.send(serializeMessage(createErrorMessage(
+          "ERROR",
+          error instanceof Error ? error.message : "Failed to pull owner sync records",
+        )));
+      }
+      break;
+    }
+
+    case "owner_sync_lock": {
+      if (role !== "client") {
+        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Only clients can acquire owner sync locks")));
         return;
       }
 
-      const hadMachineAccess = isMachineAccessGranted(
-        parsedInvite.machineId,
-        parsedInvite.ownerUserRootId,
-        clientRootResult.userRootId,
-      );
+      const lockMsg = msg as OwnerSyncLockMessage;
+      const auth = authenticateOwnerClient(state, ws, lockMsg);
+      if (!auth) {
+        return;
+      }
 
       try {
-        grantMachineAccess({
-          machineId: parsedInvite.machineId,
-          ownerUserRootId: parsedInvite.ownerUserRootId,
-          clientUserRootId: clientRootResult.userRootId,
-          label: parsedInvite.label,
-        });
-      } catch (err) {
-        ws.send(serializeMessage(createErrorMessage("INTERNAL_ERROR", "Failed to grant machine access")));
-        return;
-      }
-
-      const consumed = consumeRootInviteToken(
-        parsedInvite.inviteId,
-        parsedInvite.ownerUserRootId,
-        acceptMsg.inviteToken,
-      );
-      if (!consumed) {
-        if (!hadMachineAccess) {
-          revokeMachineAccess(
-            parsedInvite.machineId,
-            parsedInvite.ownerUserRootId,
-            clientRootResult.userRootId,
-          );
+        const lock = lockOwnerSync(
+          state.ownerSyncState,
+          auth.ownerUserRootId,
+          lockMsg.writerId,
+          lockMsg.ttlMs,
+        );
+        ws.send(serializeMessage({
+          type: "owner_sync_lock_granted",
+          scope: "global",
+          lockId: lock.lockId,
+          expiresAt: lock.expiresAt,
+        }));
+      } catch (error) {
+        if (error instanceof OwnerSyncRuntimeError) {
+          ws.send(serializeMessage(createErrorMessage(error.code, error.message)));
+          return;
         }
-        ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
+
+        ws.send(serializeMessage(createErrorMessage(
+          "ERROR",
+          error instanceof Error ? error.message : "Failed to acquire owner sync lock",
+        )));
+      }
+      break;
+    }
+
+    case "owner_sync_push": {
+      if (role !== "client") {
+        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Only clients can push owner sync records")));
         return;
       }
 
+      const pushMsg = msg as OwnerSyncPushMessage;
+      const auth = authenticateOwnerClient(state, ws, pushMsg);
+      if (!auth) {
+        return;
+      }
+
+      try {
+        const result = pushOwnerSync(
+          state.ownerSyncState,
+          auth.ownerUserRootId,
+          pushMsg.lockId,
+          {
+            category: pushMsg.record.category as SyncCategory,
+            expectedRevision: pushMsg.record.expectedRevision,
+            updatedAt: pushMsg.record.updatedAt,
+            writerId: pushMsg.record.writerId,
+            checksum: pushMsg.record.checksum,
+            ciphertext: pushMsg.record.ciphertext,
+          },
+        );
+        ws.send(serializeMessage({
+          type: "owner_sync_push_result",
+          category: result.category,
+          revision: result.revision,
+          updatedAt: result.updatedAt,
+        }));
+      } catch (error) {
+        if (error instanceof OwnerSyncRuntimeError) {
+          ws.send(serializeMessage(createErrorMessage(error.code, error.message)));
+          return;
+        }
+
+        ws.send(serializeMessage(createErrorMessage(
+          "ERROR",
+          error instanceof Error ? error.message : "Failed to push owner sync record",
+        )));
+      }
+      break;
+    }
+
+    case "owner_sync_unlock": {
+      if (role !== "client") {
+        ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Only clients can release owner sync locks")));
+        return;
+      }
+
+      const unlockMsg = msg as OwnerSyncUnlockMessage;
+      const auth = authenticateOwnerClient(state, ws, unlockMsg);
+      if (!auth) {
+        return;
+      }
+
+      const released = unlockOwnerSync(
+        state.ownerSyncState,
+        auth.ownerUserRootId,
+        unlockMsg.lockId,
+      );
       ws.send(serializeMessage({
-        type: 'root_invite_accepted',
-        inviteId: inviteRecord.inviteId,
-        inviteType: inviteRecord.inviteType,
-        granted: 'machine',
-        machineId: parsedInvite.machineId,
+        type: "owner_sync_unlock_result",
+        released,
       }));
-      return;
+      break;
     }
 
     // ========== Vault Unlock ==========

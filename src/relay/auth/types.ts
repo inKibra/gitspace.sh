@@ -1,5 +1,5 @@
 /**
- * Auth domain types for relay/machine ACL and root invites.
+ * Auth domain types for root invite persistence.
  */
 
 export interface RelayAccessListEntry {
@@ -19,7 +19,7 @@ export interface MachineAccessListEntry {
   grantedAt: string;
 }
 
-export type RootInviteRecordType = 'relay-user' | 'relay-machine' | 'machine-user';
+export type RootInviteRecordType = 'relay-machine';
 
 export interface RootInviteRecord {
   inviteId: string;
@@ -33,7 +33,6 @@ export interface RootInviteRecord {
   expiresAt: string;
   createdAt: string;
   revokedAt?: string;
-  targetUserRootId?: string;
   machineId?: string;
   targetMachineSigningKey?: string;
   targetMachineKeyExchangeKey?: string;

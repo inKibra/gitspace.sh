@@ -473,40 +473,33 @@ gssh user identity init
 gssh user identity show
 ```
 
-### Access Control
+### Owner Access Model
 
-Control who can connect to your machine:
+Remote access is owner-only at runtime.
 
-```bash
-# List authorized clients
-gssh machine access list
-
-# Add a collaborator by user root key
-gssh machine access add gssh-user:BASE64_SIGNING_KEY --label "Work Laptop"
-
-# Remove client access
-gssh machine access remove <user-id-or-label>
-```
+- Clients and machines must present device certificates derived from the same owner user root identity.
+- There is no collaborator ACL grant path for relay or machine access.
 
 ### Creating Invites
 
-Grant relay and machine access with root-signed invite tokens:
+Use root-signed invites for machine enrollment only:
 
 ```bash
-# Invite a user to relay membership
-gssh invite relay-user create gssh-user:BASE64_KEY --relay ws://localhost:4480/ws
+# Create machine enrollment invite token
+gssh invite relay-machine create --relay ws://localhost:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB>
 
-# Invite a user to a specific machine ACL
-gssh invite machine-user create <machine-id> gssh-user:BASE64_KEY --relay ws://localhost:4480/ws
+# List/revoke enrollment invites
+gssh invite list --relay ws://localhost:4480/ws
+gssh invite revoke <invite-id> --relay ws://localhost:4480/ws
 ```
 
 ### Connecting Remotely
 
 ```bash
-# Accept a user-targeted invite token
-gssh user auth invite accept <token>
+# On another owner device: recover the same user root identity
+gssh user identity recover
 
-# Connect directly after ACL grant
+# Connect directly as owner
 gssh client connect <machine-id>
 
 # Browse machines on a relay
@@ -522,20 +515,16 @@ gssh client machines list --relay wss://relay.example.com
 | `gssh user host reserve <name>` | Reserve a subdomain on gitspace.sh |
 | `gssh user host status` | Show hosting status |
 | `gssh user identity init` | Create user root identity |
+| `gssh user identity recover` | Recover identity from mnemonic |
 | `gssh user identity show` | Display identity fingerprint |
-| `gssh machine access add <gssh-user:...>` | Grant machine full access |
-| `gssh machine access list` | List machine collaborators |
-| `gssh machine access remove <user-id\|label>` | Revoke machine full access |
 | `gssh machine serve start --foreground` | Start machine daemon |
 | `gssh machine serve start` | Start serve as background daemon |
 | `gssh machine serve stop` | Stop background serve daemon |
 | `gssh cloud status` | Show cloud control status on current control node |
 | `gssh cloud list` | List cloud workspaces from control store |
-| `gssh invite relay-user create <gssh-user:...> --relay <url>` | Create relay membership invite |
-| `gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url>` | Create machine ACL invite |
+| `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
 | `gssh invite list --relay <url>` | List root-signed invites |
 | `gssh invite revoke <invite-id> --relay <url>` | Revoke root-signed invite |
-| `gssh user auth invite accept <token>` | Accept relay-user or machine-user invite |
 | `gssh client connect <target>` | Connect to remote machine |
 | `gssh client machines list --relay <url>` | List accessible remote machines |
 | `gssh status` | Show all daemon statuses |
@@ -547,8 +536,6 @@ For self-hosted relay servers:
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start relay server |
-| `gssh relay access add <gssh-user:...>` | Grant relay membership |
-| `gssh relay access remove <user-id\|label>` | Revoke relay membership |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
 | `gssh relay machines list` | List registered machines |
 | `gssh relay machines revoke <machine-id>` | Revoke machine registration |

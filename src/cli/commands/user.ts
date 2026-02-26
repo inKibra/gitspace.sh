@@ -126,19 +126,6 @@ function registerAuthCommands(user: Command): void {
       await authStatus();
     }, { skipSetupCheck: true }));
 
-  const invite = auth
-    .command('invite')
-    .description('Accept root-signed invites as this user');
-
-  invite
-    .command('accept')
-    .description('Accept a relay-user or machine-user invite token')
-    .argument('<token>', 'Invite token')
-    .option('--relay <url>', 'Relay URL override')
-    .action(withErrorHandler(async (token, options) => {
-      const { acceptInviteForUser } = await import('../../commands/invite.js');
-      await acceptInviteForUser(token, { relay: options.relay });
-    }));
 }
 
 // ============================================================================

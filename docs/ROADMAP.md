@@ -31,7 +31,7 @@ gssh
 gssh client connect --machine <machine-id> --relay <url>
 gssh client connect --machine brads-macbook --relay ws://localhost:4480/ws
 
-# Connect after invite acceptance / ACL grant
+# Connect from another owner device
 gssh client connect <machine-id>
 ```
 
@@ -394,14 +394,10 @@ gssh client machines list --relay <url>  # List accessible machines on relay
 gssh user identity init          # Create user root identity
 gssh user identity show          # Show fingerprint
 
-# Access control
-gssh machine access add <gssh-user:...>    # Grant machine full access
-gssh machine access list                   # List machine collaborators
-gssh machine access remove <user-id\|label> # Revoke machine full access
-
 # Invites
-gssh invite relay-user create <gssh-user:...> --relay <url>                # Create relay membership invite
-gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url> # Create machine ACL invite
+gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k> # Create machine enrollment invite
+gssh invite list --relay <url>             # List machine enrollment invites
+gssh invite revoke <invite-id> --relay <url> # Revoke machine enrollment invite
 
 # Authentication (gitspace.sh)
 gssh user auth login             # GitHub OAuth
@@ -415,11 +411,11 @@ gssh user host list              # List subdomains
 gssh user host set-primary <n>   # Set primary
 gssh user host status            # Show status
 
-# Remote access
+# Remote access (owner-only)
 gssh machine serve start --foreground                  # Start daemon (foreground)
 gssh machine serve start            # Start daemon (background)
 gssh machine serve stop             # Stop daemon
-gssh user auth invite accept <token>     # Accept user-targeted invite token
+gssh user identity recover                # Recover same owner identity on another device
 gssh client connect <target>             # Connect to target machine
 gssh client machines list --relay <url>  # List accessible machines on relay
 gssh status                 # Show daemon status
@@ -437,8 +433,9 @@ gssh project remove         # Remove project
 
 # Relay (internal)
 gssh relay start            # Start relay server
-gssh relay access add <gssh-user:...> # Grant relay membership
 gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k> # Create machine enrollment invite
+gssh relay machines list    # List registered machines
+gssh relay machines revoke <machine-id> # Revoke machine registration
 ```
 
 ### Planned (Not Implemented)

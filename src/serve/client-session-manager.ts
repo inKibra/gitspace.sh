@@ -57,7 +57,6 @@ export class ClientSessionManager {
       identity: options.identity,
       handshakeTimeoutMs: options.handshakeTimeoutMs,
       ownerUserRootId: options.ownerUserRootId,
-      checkUserRootAccess: options.checkUserRootAccess,
     });
     this.remoteSessionHandler = new RemoteSessionHandler(options.remoteSessionOptions);
   }

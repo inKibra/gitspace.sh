@@ -1,5 +1,5 @@
 /**
- * Tests for vault CRUD operations in the control store (schema v4).
+ * Tests for vault CRUD operations in the control store (schema v5).
  *
  * Uses real SQLite with a temp directory per test for isolation.
  */
@@ -13,6 +13,10 @@ import {
   getVaultMeta,
   setVaultMeta,
   isVaultInitialized,
+  getVaultCategory,
+  listVaultCategories,
+  removeVaultCategory,
+  upsertVaultCategory,
   upsertVaultMachine,
   getVaultMachine,
   getVaultMachineBySigningKey,
@@ -28,12 +32,13 @@ import {
   listVaultAccessList,
   isVaultAccessGranted,
 } from './store.js';
+import type { VaultSyncCategory } from './types.js';
 
 let originalHome: string | undefined;
 let originalControlDirOverride: string | undefined;
 let testHomeDir: string;
 
-describe('vault store (schema v4)', () => {
+describe('vault store (schema v5)', () => {
   beforeEach(() => {
     originalHome = process.env.HOME;
     originalControlDirOverride = process.env.GITSPACE_CONTROL_DIR;
@@ -61,12 +66,12 @@ describe('vault store (schema v4)', () => {
   });
 
   // ========================================================================
-  // Schema v4 migration
+  // Schema v5 migration
   // ========================================================================
 
-  test('schema v4 tables are created on ensureControlStore', () => {
+  test('schema v5 tables are created on ensureControlStore', () => {
     const meta = ensureControlStore();
-    expect(meta.schemaVersion).toBe(4);
+    expect(meta.schemaVersion).toBe(5);
   });
 
   // ========================================================================
@@ -98,6 +103,113 @@ describe('vault store (schema v4)', () => {
       ensureControlStore();
       setVaultMeta('vault_initialized', '1');
       expect(isVaultInitialized()).toBe(true);
+    });
+  });
+
+  // ========================================================================
+  // Vault Sync Categories CRUD
+  // ========================================================================
+
+  describe('vault sync categories', () => {
+    const categories: VaultSyncCategory[] = [
+      'fundamental',
+      'integrations',
+      'project/workspace',
+      'preferences',
+    ];
+
+    test('upsert and get category record', () => {
+      ensureControlStore();
+
+      const record = upsertVaultCategory({
+        category: 'fundamental',
+        encryptedEnvelope: 'enc-1',
+        writerId: 'writer-1',
+        checksum: 'checksum-1',
+      });
+
+      expect(record.category).toBe('fundamental');
+      expect(record.encryptedEnvelope).toBe('enc-1');
+      expect(record.revision).toBe(1);
+      expect(record.writerId).toBe('writer-1');
+      expect(record.checksum).toBe('checksum-1');
+
+      const loaded = getVaultCategory('fundamental');
+      expect(loaded).toBeDefined();
+      expect(loaded?.revision).toBe(1);
+    });
+
+    test('upsert increments revision', () => {
+      ensureControlStore();
+
+      const first = upsertVaultCategory({
+        category: 'preferences',
+        encryptedEnvelope: 'enc-a',
+        writerId: 'writer-a',
+        checksum: 'checksum-a',
+      });
+
+      const second = upsertVaultCategory({
+        category: 'preferences',
+        encryptedEnvelope: 'enc-b',
+        writerId: 'writer-b',
+        checksum: 'checksum-b',
+        expectedRevision: first.revision,
+      });
+
+      expect(second.revision).toBe(first.revision + 1);
+      expect(second.encryptedEnvelope).toBe('enc-b');
+      expect(second.writerId).toBe('writer-b');
+    });
+
+    test('upsert enforces expected revision', () => {
+      ensureControlStore();
+
+      upsertVaultCategory({
+        category: 'integrations',
+        encryptedEnvelope: 'enc-1',
+        writerId: 'writer-1',
+        checksum: 'checksum-1',
+      });
+
+      expect(() => upsertVaultCategory({
+        category: 'integrations',
+        encryptedEnvelope: 'enc-2',
+        writerId: 'writer-2',
+        checksum: 'checksum-2',
+        expectedRevision: 0,
+      })).toThrow(/revision mismatch/i);
+    });
+
+    test('list returns all categories', () => {
+      ensureControlStore();
+
+      for (const category of categories) {
+        upsertVaultCategory({
+          category,
+          encryptedEnvelope: `enc-${category}`,
+          writerId: `writer-${category}`,
+          checksum: `checksum-${category}`,
+        });
+      }
+
+      const all = listVaultCategories();
+      expect(all.length).toBe(4);
+    });
+
+    test('remove category record', () => {
+      ensureControlStore();
+
+      upsertVaultCategory({
+        category: 'project/workspace',
+        encryptedEnvelope: 'enc',
+        writerId: 'writer',
+        checksum: 'checksum',
+      });
+
+      expect(removeVaultCategory('project/workspace')).toBe(true);
+      expect(getVaultCategory('project/workspace')).toBeUndefined();
+      expect(removeVaultCategory('project/workspace')).toBe(false);
     });
   });
 

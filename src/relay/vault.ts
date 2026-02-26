@@ -24,20 +24,24 @@
  *    - Stored in vault_machine_unlock_keys table
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
 import {
+  getVaultCategory,
   getVaultMeta,
   setVaultMeta,
   isVaultInitialized,
+  listVaultCategories,
+  removeVaultCategory,
   setVaultMachineUnlockKey,
   getVaultMachineUnlockKey,
   removeVaultMachineUnlockKey,
   listVaultMachineUnlockKeys,
+  upsertVaultCategory,
 } from './control/store.js';
-import type { VaultLockState } from './control/types.js';
+import type { VaultCategoryRecord, VaultLockState, VaultSyncCategory } from './control/types.js';
 
 // ============================================================================
 // Constants
@@ -108,6 +112,10 @@ function deriveVaultKey(
 ): Uint8Array {
   const info = new TextEncoder().encode(VAULT_KEY_INFO);
   return hkdf(sha256, userRootPrivateKey, salt, info, VAULT_KEY_LENGTH);
+}
+
+function checksumPayload(payload: Uint8Array): string {
+  return createHash('sha256').update(payload).digest('hex');
 }
 
 // ============================================================================
@@ -194,6 +202,94 @@ export function unlockVault(userRootPrivateKey: Uint8Array): boolean {
   // Key verified — hold in memory
   vaultKey = derivedKey;
   return true;
+}
+
+// ============================================================================
+// Owner Sync Categories
+// ============================================================================
+
+export interface WriteVaultCategoryInput {
+  category: VaultSyncCategory;
+  payload: Uint8Array | string;
+  writerId: string;
+  expectedRevision?: number;
+}
+
+export interface OpenedVaultCategoryRecord extends VaultCategoryRecord {
+  payload: Uint8Array;
+}
+
+/**
+ * Encrypt and persist a sync category payload.
+ */
+export function writeVaultCategory(input: WriteVaultCategoryInput): VaultCategoryRecord {
+  if (!vaultKey) {
+    throw new Error('Vault is locked — cannot write sync category');
+  }
+
+  const payload = typeof input.payload === 'string'
+    ? new TextEncoder().encode(input.payload)
+    : input.payload;
+  const checksum = checksumPayload(payload);
+  const sealed = seal(payload, vaultKey);
+  const encryptedEnvelope = Buffer.from(sealed).toString('base64');
+
+  return upsertVaultCategory({
+    category: input.category,
+    encryptedEnvelope,
+    writerId: input.writerId,
+    checksum,
+    expectedRevision: input.expectedRevision,
+  });
+}
+
+/**
+ * Read and decrypt a sync category payload.
+ */
+export function readVaultCategory(category: VaultSyncCategory): OpenedVaultCategoryRecord | null {
+  if (!vaultKey) {
+    throw new Error('Vault is locked — cannot read sync category');
+  }
+
+  const record = getVaultCategory(category);
+  if (!record) {
+    return null;
+  }
+
+  const sealed = Buffer.from(record.encryptedEnvelope, 'base64');
+  const payload = open(sealed, vaultKey);
+  if (!payload) {
+    return null;
+  }
+
+  const checksum = checksumPayload(payload);
+  if (checksum !== record.checksum) {
+    throw new Error(`Vault category checksum mismatch: ${category}`);
+  }
+
+  return {
+    ...record,
+    payload: new Uint8Array(payload),
+  };
+}
+
+/**
+ * Read a sync category payload as UTF-8 text.
+ */
+export function readVaultCategoryText(category: VaultSyncCategory): string | null {
+  const opened = readVaultCategory(category);
+  if (!opened) {
+    return null;
+  }
+  return new TextDecoder().decode(opened.payload);
+}
+
+export function removeVaultSyncCategory(category: VaultSyncCategory): boolean {
+  return removeVaultCategory(category);
+}
+
+export function listVaultSyncCategoryMetadata(): VaultCategoryRecord[] {
+  return listVaultCategories();
 }
 
 // ============================================================================

@@ -29,6 +29,7 @@ export type {
 } from './request-client.js';
 
 export {
+  RelayRequestError,
   RelayRequestClient,
 } from './request-client.js';
 

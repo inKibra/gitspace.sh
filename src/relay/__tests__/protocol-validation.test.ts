@@ -148,6 +148,141 @@ describe("parseMessage", () => {
     });
   });
 
+  describe("owner sync message validation", () => {
+    const validSignature = {
+      sig: "dGVzdC1zaWduYXR1cmU=",
+      pub: "dGVzdC1wdWJsaWMta2V5",
+      ts: Date.now(),
+    };
+
+    const baseSyncMessage = {
+      clientIdentityId: "owner-client-1",
+      deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+      signature: validSignature,
+    };
+
+    test("parses owner_sync_compare with local revisions", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_compare",
+        ...baseSyncMessage,
+        localRevisions: {
+          fundamental: 1,
+          integrations: 2,
+          "project/workspace": 3,
+          preferences: 4,
+        },
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_compare");
+    });
+
+    test("rejects owner_sync_compare with invalid category", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_compare",
+        ...baseSyncMessage,
+        localRevisions: {
+          invalid: 1,
+        },
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_pull with categories", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_pull",
+        ...baseSyncMessage,
+        categories: ["fundamental", "preferences"],
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_pull");
+    });
+
+    test("rejects owner_sync_pull with invalid category", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_pull",
+        ...baseSyncMessage,
+        categories: ["fundamental", "invalid-category"],
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_lock", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_lock",
+        ...baseSyncMessage,
+        scope: "global",
+        writerId: "owner-device-1",
+        ttlMs: 15000,
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_lock");
+    });
+
+    test("rejects owner_sync_lock with unsupported scope", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_lock",
+        ...baseSyncMessage,
+        scope: "workspace",
+        writerId: "owner-device-1",
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_push", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_push",
+        ...baseSyncMessage,
+        lockId: "lock-123",
+        record: {
+          category: "preferences",
+          expectedRevision: 4,
+          updatedAt: Date.now(),
+          writerId: "owner-device-1",
+          checksum: "sha256:abc123",
+          ciphertext: "dGVzdC1jaXBoZXJ0ZXh0",
+        },
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_push");
+    });
+
+    test("rejects owner_sync_push with negative expectedRevision", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_push",
+        ...baseSyncMessage,
+        lockId: "lock-123",
+        record: {
+          category: "preferences",
+          expectedRevision: -1,
+          updatedAt: Date.now(),
+          writerId: "owner-device-1",
+          checksum: "sha256:abc123",
+          ciphertext: "dGVzdC1jaXBoZXJ0ZXh0",
+        },
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_unlock", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_unlock",
+        ...baseSyncMessage,
+        lockId: "lock-123",
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_unlock");
+    });
+  });
+
   describe('unlock_request validation', () => {
     const validUnlock = {
       type: 'unlock_request',

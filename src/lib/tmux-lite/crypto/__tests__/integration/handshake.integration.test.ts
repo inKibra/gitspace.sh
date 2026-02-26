@@ -162,9 +162,6 @@ describe("X3DH Handshake Integration", () => {
       const handler = new HandshakeHandler({
         identity: machine,
         ownerUserRootId,
-        checkUserRootAccess: async (ownerUserRootIdArg, clientUserRootId) => (
-          ownerUserRootIdArg === ownerUserRootId && clientUserRootId === ownerUserRootId
-        ),
       });
 
       // Step 1: Client creates ClientHello

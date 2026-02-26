@@ -79,7 +79,6 @@ import {
   getVaultMeta,
   setVaultMeta,
 } from '../relay/control/store.js';
-import { isMachineAccessGranted } from '../relay/auth/store.js';
 import {
   connectMachineRelay,
   requestUnlockGrantViaRelay,
@@ -108,11 +107,6 @@ const CLOUDFLARED_RESTART_DELAY = 5000;
 
 interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
-  checkUserRootAccess: (
-    ownerUserRootId: string,
-    clientUserRootId: string,
-    machineId?: string,
-  ) => Promise<boolean>;
 }
 
 async function resolveUserRootAuthorizationConfig(): Promise<UserRootAuthorizationConfig> {
@@ -142,20 +136,6 @@ async function resolveUserRootAuthorizationConfig(): Promise<UserRootAuthorizati
 
   return {
     ownerUserRootId: userRoot.id,
-    checkUserRootAccess: async (
-      ownerUserRootId: string,
-      clientUserRootId: string,
-      machineId?: string,
-    ) => {
-      try {
-        if (!machineId) {
-          return false;
-        }
-        return isMachineAccessGranted(machineId, ownerUserRootId, clientUserRootId);
-      } catch {
-        return false;
-      }
-    },
   };
 }
 
@@ -1259,7 +1239,6 @@ export async function serveStart(options: {
     identity,
     remoteSessionOptions,
     ownerUserRootId: userRootAuth.ownerUserRootId,
-    checkUserRootAccess: userRootAuth.checkUserRootAccess,
   });
 
   // Initialize session manager (starts tmux-lite server)
@@ -1312,7 +1291,7 @@ export async function serveStart(options: {
     );
   }
 
-  // Save relay config for machine access commands
+  // Save relay config for reconnect/bootstrap flows
   writeRelayConfig({
     relayUrl: effectiveRelayUrl,
     machineId,

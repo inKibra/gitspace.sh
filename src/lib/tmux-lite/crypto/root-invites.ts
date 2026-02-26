@@ -4,7 +4,7 @@ import type { UserRootIdentity } from '../../../types/identity.js';
 
 export const ROOT_INVITE_TOKEN_PREFIX = 'gssh-invite';
 
-export type RootInviteType = 'relay-user' | 'relay-machine' | 'machine-user';
+export type RootInviteType = 'relay-machine';
 
 interface RootInviteBase {
   version: 1;
@@ -19,13 +19,6 @@ interface RootInviteBase {
   label?: string;
 }
 
-export interface RelayUserInviteToken extends RootInviteBase {
-  type: 'relay-user';
-  targetUserRootId: string;
-  targetUserRootSigningKey: string;
-  signature: string;
-}
-
 export interface RelayMachineInviteToken extends RootInviteBase {
   type: 'relay-machine';
   targetMachineId: string;
@@ -34,60 +27,21 @@ export interface RelayMachineInviteToken extends RootInviteBase {
   signature: string;
 }
 
-export interface MachineUserInviteToken extends RootInviteBase {
-  type: 'machine-user';
-  machineId: string;
-  targetUserRootId: string;
-  targetUserRootSigningKey: string;
-  signature: string;
-}
+export type RootInviteToken = RelayMachineInviteToken;
 
-export type RootInviteToken =
-  | RelayUserInviteToken
-  | RelayMachineInviteToken
-  | MachineUserInviteToken;
+type UnsignedRootInvite = Omit<RelayMachineInviteToken, 'signature'>;
 
-type UnsignedRelayUserInvite = Omit<RelayUserInviteToken, 'signature'>;
-type UnsignedRelayMachineInvite = Omit<RelayMachineInviteToken, 'signature'>;
-type UnsignedMachineUserInvite = Omit<MachineUserInviteToken, 'signature'>;
-type UnsignedRootInvite =
-  | UnsignedRelayUserInvite
-  | UnsignedRelayMachineInvite
-  | UnsignedMachineUserInvite;
-
-export type CreateRootInviteInput =
-  | {
-      type: 'relay-user';
-      owner: UserRootIdentity;
-      relayUrl: string;
-      targetUserRootSigningKey: string;
-      expiresAt: number;
-      maxUses: number | null;
-      label?: string;
-      inviteId?: string;
-    }
-  | {
-      type: 'relay-machine';
-      owner: UserRootIdentity;
-      relayUrl: string;
-      targetMachineSigningKey: string;
-      targetMachineKeyExchangeKey: string;
-      expiresAt: number;
-      maxUses: number | null;
-      label?: string;
-      inviteId?: string;
-    }
-  | {
-      type: 'machine-user';
-      owner: UserRootIdentity;
-      relayUrl: string;
-      machineId: string;
-      targetUserRootSigningKey: string;
-      expiresAt: number;
-      maxUses: number | null;
-      label?: string;
-      inviteId?: string;
-    };
+export type CreateRootInviteInput = {
+  type: 'relay-machine';
+  owner: UserRootIdentity;
+  relayUrl: string;
+  targetMachineSigningKey: string;
+  targetMachineKeyExchangeKey: string;
+  expiresAt: number;
+  maxUses: number | null;
+  label?: string;
+  inviteId?: string;
+};
 
 function sortValue(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -117,13 +71,11 @@ function decodeToken(encoded: string): string | null {
     return null;
   }
 
-  // Require the canonical prefix — bare base64url strings are rejected to
-  // prevent accidentally treating arbitrary data as invite tokens.
   if (!trimmed.startsWith(`${ROOT_INVITE_TOKEN_PREFIX}:`)) {
     return null;
   }
-  const value = trimmed.slice(ROOT_INVITE_TOKEN_PREFIX.length + 1);
 
+  const value = trimmed.slice(ROOT_INVITE_TOKEN_PREFIX.length + 1);
   if (!value) {
     return null;
   }
@@ -189,8 +141,19 @@ export function createRootInviteToken(input: CreateRootInviteInput): string {
   const inviteId = input.inviteId ?? randomUUID();
   const ownerSigningKey = Buffer.from(input.owner.signing.publicKey).toString('base64');
 
-  const base: Omit<RootInviteBase, 'type'> = {
+  const targetMachineId = deriveIdFromBase64SigningKey(input.targetMachineSigningKey);
+  if (!targetMachineId) {
+    throw new Error('Invalid target machine signing key');
+  }
+
+  const keyExchangeKey = decodeBase64Key(input.targetMachineKeyExchangeKey);
+  if (!keyExchangeKey) {
+    throw new Error('Invalid target machine key exchange key');
+  }
+
+  const unsigned: UnsignedRootInvite = {
     version: 1,
+    type: 'relay-machine',
     inviteId,
     ownerUserRootId: input.owner.id,
     ownerUserRootSigningKey: ownerSigningKey,
@@ -199,57 +162,11 @@ export function createRootInviteToken(input: CreateRootInviteInput): string {
     expiresAt: input.expiresAt,
     maxUses: input.maxUses,
     label: input.label,
+    targetMachineId,
+    targetMachineSigningKey: input.targetMachineSigningKey,
+    targetMachineKeyExchangeKey: input.targetMachineKeyExchangeKey,
   };
 
-  if (input.type === 'relay-user') {
-    const targetUserRootId = deriveIdFromBase64SigningKey(input.targetUserRootSigningKey);
-    if (!targetUserRootId) {
-      throw new Error('Invalid target user root signing key');
-    }
-
-    const unsigned: UnsignedRelayUserInvite = {
-      ...base,
-      type: 'relay-user',
-      targetUserRootId,
-      targetUserRootSigningKey: input.targetUserRootSigningKey,
-    };
-    const signature = signUnsignedInvite(unsigned, input.owner);
-    return encodeToken({ ...unsigned, signature });
-  }
-
-  if (input.type === 'relay-machine') {
-    const targetMachineId = deriveIdFromBase64SigningKey(input.targetMachineSigningKey);
-    if (!targetMachineId) {
-      throw new Error('Invalid target machine signing key');
-    }
-    const keyExchangeKey = decodeBase64Key(input.targetMachineKeyExchangeKey);
-    if (!keyExchangeKey) {
-      throw new Error('Invalid target machine key exchange key');
-    }
-
-    const unsigned: UnsignedRelayMachineInvite = {
-      ...base,
-      type: 'relay-machine',
-      targetMachineId,
-      targetMachineSigningKey: input.targetMachineSigningKey,
-      targetMachineKeyExchangeKey: input.targetMachineKeyExchangeKey,
-    };
-    const signature = signUnsignedInvite(unsigned, input.owner);
-    return encodeToken({ ...unsigned, signature });
-  }
-
-  const targetUserRootId = deriveIdFromBase64SigningKey(input.targetUserRootSigningKey);
-  if (!targetUserRootId) {
-    throw new Error('Invalid target user root signing key');
-  }
-
-  const unsigned: UnsignedMachineUserInvite = {
-    ...base,
-    type: 'machine-user',
-    machineId: input.machineId,
-    targetUserRootId,
-    targetUserRootSigningKey: input.targetUserRootSigningKey,
-  };
   const signature = signUnsignedInvite(unsigned, input.owner);
   return encodeToken({ ...unsigned, signature });
 }
@@ -257,7 +174,7 @@ export function createRootInviteToken(input: CreateRootInviteInput): string {
 function hasBaseInviteShape(value: Record<string, unknown>): boolean {
   return (
     value.version === 1 &&
-    typeof value.type === 'string' &&
+    value.type === 'relay-machine' &&
     typeof value.inviteId === 'string' &&
     typeof value.ownerUserRootId === 'string' &&
     typeof value.ownerUserRootSigningKey === 'string' &&
@@ -266,6 +183,9 @@ function hasBaseInviteShape(value: Record<string, unknown>): boolean {
     typeof value.expiresAt === 'number' &&
     (value.maxUses === null || typeof value.maxUses === 'number') &&
     (value.label === undefined || typeof value.label === 'string') &&
+    typeof value.targetMachineId === 'string' &&
+    typeof value.targetMachineSigningKey === 'string' &&
+    typeof value.targetMachineKeyExchangeKey === 'string' &&
     typeof value.signature === 'string'
   );
 }
@@ -275,8 +195,9 @@ function parseInviteObject(obj: Record<string, unknown>): RootInviteToken | null
     return null;
   }
 
-  const base = {
-    version: 1 as const,
+  return {
+    version: 1,
+    type: 'relay-machine',
     inviteId: obj.inviteId as string,
     ownerUserRootId: obj.ownerUserRootId as string,
     ownerUserRootSigningKey: obj.ownerUserRootSigningKey as string,
@@ -285,56 +206,11 @@ function parseInviteObject(obj: Record<string, unknown>): RootInviteToken | null
     expiresAt: obj.expiresAt as number,
     maxUses: obj.maxUses as number | null,
     label: obj.label as string | undefined,
+    targetMachineId: obj.targetMachineId as string,
+    targetMachineSigningKey: obj.targetMachineSigningKey as string,
+    targetMachineKeyExchangeKey: obj.targetMachineKeyExchangeKey as string,
     signature: obj.signature as string,
   };
-
-  if (obj.type === 'relay-user') {
-    if (typeof obj.targetUserRootId !== 'string' || typeof obj.targetUserRootSigningKey !== 'string') {
-      return null;
-    }
-    return {
-      ...base,
-      type: 'relay-user',
-      targetUserRootId: obj.targetUserRootId,
-      targetUserRootSigningKey: obj.targetUserRootSigningKey,
-    };
-  }
-
-  if (obj.type === 'relay-machine') {
-    if (
-      typeof obj.targetMachineId !== 'string' ||
-      typeof obj.targetMachineSigningKey !== 'string' ||
-      typeof obj.targetMachineKeyExchangeKey !== 'string'
-    ) {
-      return null;
-    }
-    return {
-      ...base,
-      type: 'relay-machine',
-      targetMachineId: obj.targetMachineId,
-      targetMachineSigningKey: obj.targetMachineSigningKey,
-      targetMachineKeyExchangeKey: obj.targetMachineKeyExchangeKey,
-    };
-  }
-
-  if (obj.type === 'machine-user') {
-    if (
-      typeof obj.machineId !== 'string' ||
-      typeof obj.targetUserRootId !== 'string' ||
-      typeof obj.targetUserRootSigningKey !== 'string'
-    ) {
-      return null;
-    }
-    return {
-      ...base,
-      type: 'machine-user',
-      machineId: obj.machineId,
-      targetUserRootId: obj.targetUserRootId,
-      targetUserRootSigningKey: obj.targetUserRootSigningKey,
-    };
-  }
-
-  return null;
 }
 
 function validateInviteClaims(token: RootInviteToken): boolean {
@@ -343,22 +219,14 @@ function validateInviteClaims(token: RootInviteToken): boolean {
     return false;
   }
 
-  if (token.type === 'relay-user' || token.type === 'machine-user') {
-    const derivedTargetUserRootId = deriveIdFromBase64SigningKey(token.targetUserRootSigningKey);
-    if (!derivedTargetUserRootId || derivedTargetUserRootId !== token.targetUserRootId) {
-      return false;
-    }
+  const derivedMachineId = deriveIdFromBase64SigningKey(token.targetMachineSigningKey);
+  if (!derivedMachineId || derivedMachineId !== token.targetMachineId) {
+    return false;
   }
 
-  if (token.type === 'relay-machine') {
-    const derivedMachineId = deriveIdFromBase64SigningKey(token.targetMachineSigningKey);
-    if (!derivedMachineId || derivedMachineId !== token.targetMachineId) {
-      return false;
-    }
-    const machineKex = decodeBase64Key(token.targetMachineKeyExchangeKey);
-    if (!machineKex) {
-      return false;
-    }
+  const machineKex = decodeBase64Key(token.targetMachineKeyExchangeKey);
+  if (!machineKex) {
+    return false;
   }
 
   return true;

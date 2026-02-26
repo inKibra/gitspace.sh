@@ -6,7 +6,6 @@
 
 import type { PTYSession } from "./pty-session.js";
 import type { Identity, SessionKeys, AccessType } from "../types/identity.js";
-import type { UserRootAccessCheck } from "../lib/tmux-lite/handshake-handler.js";
 import type { RemoteSessionHandlerOptions } from "../lib/remote-session/index.js";
 import { FrameType } from "../lib/tmux-lite/protocol.js";
 
@@ -70,10 +69,8 @@ export interface ServeOptions {
   env?: Record<string, string>;
   /** Handshake timeout in milliseconds (default: 30000) */
   handshakeTimeoutMs?: number;
-  /** Owner user root ID for strict access_list authorization */
+  /** Owner user root ID for strict owner-only authorization */
   ownerUserRootId?: string;
-  /** Callback for user-root ACL checks */
-  checkUserRootAccess?: UserRootAccessCheck;
 }
 
 // ============================================================================

@@ -1,5 +1,5 @@
 /**
- * gssh relay start|access|machines
+ * gssh relay start|machines
  */
 
 import type { Command } from 'commander';
@@ -22,7 +22,7 @@ function parseRelayPort(rawPort: string): number {
 export function registerRelayCommands(parent: Command): void {
   const cmd = parent
     .command('relay')
-    .description('Manage relay server and relay-level access');
+    .description('Manage relay server and registered machines');
 
   cmd
     .command('start')
@@ -39,39 +39,6 @@ export function registerRelayCommands(parent: Command): void {
         hostname: options.hostname,
         label: options.label,
       });
-    }, { skipSetupCheck: true }));
-
-  const access = cmd
-    .command('access')
-    .description('Manage relay-level user access');
-
-  access
-    .command('add')
-    .description('Grant relay access to a user root')
-    .argument('<user>', 'User root key (gssh-user:BASE64_KEY) or user-root-id')
-    .option('--label <label>', 'Optional label for this grant')
-    .action(withErrorHandler(async (user, options) => {
-      const { addRelayAccess } = await import('../../commands/relay.js');
-      await addRelayAccess(user, options);
-    }, { skipSetupCheck: true }));
-
-  access
-    .command('list')
-    .description('List relay-level user grants')
-    .option('--json', 'Output in JSON format')
-    .action(withErrorHandler(async (options) => {
-      const { listRelayAccess } = await import('../../commands/relay.js');
-      await listRelayAccess(options);
-    }, { skipSetupCheck: true }));
-
-  access
-    .command('remove')
-    .description('Revoke relay-level user access')
-    .argument('<user|label>', 'User root key, user-root-id prefix, or label')
-    .option('--force', 'Skip confirmation prompt')
-    .action(withErrorHandler(async (userOrLabel, options) => {
-      const { removeRelayAccess } = await import('../../commands/relay.js');
-      await removeRelayAccess(userOrLabel, options);
     }, { skipSetupCheck: true }));
 
   const machines = cmd

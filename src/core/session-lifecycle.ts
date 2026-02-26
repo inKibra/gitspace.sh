@@ -10,8 +10,8 @@ import {
   readProjectConfig,
   setCurrentProject,
 } from './config.js';
-import { checkRemoteBranch, createWorktree, getDefaultBranch, listRemoteBranches } from './git.js';
-import { cloneRepository, listAllRepos } from './github.js';
+import { cloneRepository, checkRemoteBranch, createWorktree, getDefaultBranch, listRemoteBranches } from './git.js';
+import { listAllRepos } from './github.js';
 import { fetchUnstartedIssues, getLinearConfig } from './linear.js';
 import { deleteProjectCore } from './workspace.js';
 import { syncBundleWorkspaceState } from './bundle-refresh.js';
@@ -66,12 +66,21 @@ function sanitizeProjectName(input: string): string {
 function validateRepository(repository: string): string {
   const trimmed = repository.trim();
   if (!trimmed) {
-    throw new SpacesError('Repository is required (owner/repo).', 'USER_ERROR', 1);
+    throw new SpacesError('Repository is required.', 'USER_ERROR', 1);
   }
 
-  const parts = trimmed.split('/');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new SpacesError('Repository must be in owner/repo format.', 'USER_ERROR', 1);
+  const looksLikeOwnerRepo = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(trimmed);
+  const looksLikeRemoteUrl =
+    trimmed.includes('://') ||
+    trimmed.startsWith('git@') ||
+    trimmed.startsWith('ssh://');
+
+  if (!looksLikeOwnerRepo && !looksLikeRemoteUrl) {
+    throw new SpacesError(
+      'Repository must be a git remote URL or owner/repo shorthand.',
+      'USER_ERROR',
+      1
+    );
   }
 
   return trimmed;

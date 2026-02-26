@@ -5,12 +5,12 @@
  *
  *   gssh project list|add|remove
  *   gssh workspace list|add|remove|context|review|session|process|events|bundle
- *   gssh machine serve|enroll|access|tmux
- *   gssh invite relay-user|relay-machine|machine-user|list|revoke
+ *   gssh machine serve|enroll|tmux
+ *   gssh invite relay-machine|list|revoke
  *   gssh client machines|connect
  *   gssh user identity|auth|host|config|notifications|migrate
  *   gssh cloud setup|status|list|launch|stop|resume|destroy
- *   gssh relay start|access|machines
+ *   gssh relay start|machines
  *   gssh status
  *   gssh space [context|review|process|events|bundle]  (hidden)
  *
@@ -40,7 +40,7 @@ export function createProgram(version: string): Command {
 
   program
     .name('gssh')
-    .description('GitSpace CLI - Manage GitHub workspaces with secure remote terminal access')
+    .description('GitSpace CLI - Manage workspaces with secure remote terminal access')
     .version(version);
 
   // Register command groups

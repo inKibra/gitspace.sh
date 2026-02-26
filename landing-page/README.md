@@ -1,11 +1,25 @@
 
-  # Landing Page Design
+# GitSpace Landing Page
 
-  This is a code bundle for Landing Page Design. The original project is available at https://www.figma.com/design/X1VjullY3NR4Kh5s63m6JS/Landing-Page-Design.
+This directory contains the marketing landing page for `gitspace.sh`.
 
-  ## Running the code
+## Development
 
-  Run `npm i` to install the dependencies.
+```bash
+cd landing-page
+bun install
+bun run dev
+```
 
-  Run `npm run dev` to start the development server.
-  
+## Build
+
+```bash
+cd landing-page
+bun run build
+```
+
+## Notes
+
+- Assets are in `landing-page/public`.
+- UI and copy live in `landing-page/src`.
+- Design process references are in `landing-page/guidelines`.

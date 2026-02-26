@@ -80,7 +80,6 @@ export default function App() {
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
-  const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
@@ -445,17 +444,6 @@ export default function App() {
       setShowScriptTerminal(false);
     }
   }, [flow, terminal.commandError, terminal.scriptState?.isRunning]);
-
-  // Copy access command to clipboard
-  const copyAccessCommand = async () => {
-    const command = [
-      'gssh relay access add gssh-user:...',
-      'gssh machine access add gssh-user:... --machine <machine-id>',
-    ].join('\n');
-    await navigator.clipboard.writeText(command);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   // Handle machine selection - go directly to terminal/workspaces view
   const handleMachineConnect = async (machine: MachineInfo) => {
@@ -1454,19 +1442,11 @@ export default function App() {
                   {relay.publicKey}
                 </code>
                 <p className="text-xs text-[#6e7681] mb-2">
-                  To get full access, the machine owner must run both commands with your `gssh-user` key:
+                  Owner-only access is enabled. This browser key must match the machine owner identity:
                 </p>
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 text-xs text-[#e6edf3] bg-[#161b22] px-2 py-2 rounded font-mono overflow-x-auto border border-[#30363d]">
-                    {'gssh relay access add gssh-user:...\ngssh machine access add gssh-user:... --machine MACHINE_ID'}
-                  </code>
-                  <button
-                    onClick={copyAccessCommand}
-                    className="text-xs text-[#22c55e] hover:text-[#3fb950] bg-[#161b22] border border-[#30363d] px-3 py-2 rounded whitespace-nowrap hover:border-[#22c55e] transition-colors"
-                  >
-                    {copied ? "Copied!" : "Copy Command"}
-                  </button>
-                </div>
+                <p className="text-xs text-[#8b949e]">
+                  If this key does not match your machine owner identity, switch to the owner identity and reconnect.
+                </p>
               </div>
             )}
           </div>

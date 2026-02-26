@@ -379,7 +379,6 @@ function mapRootInviteRow(row: RootInviteRow): RootInviteRecord {
     expiresAt: row.expires_at,
     createdAt: row.created_at,
     revokedAt: row.revoked_at ?? undefined,
-    targetUserRootId: row.target_user_root_id ?? undefined,
     machineId: row.machine_id ?? undefined,
     targetMachineSigningKey: row.target_machine_signing_key ?? undefined,
     targetMachineKeyExchangeKey: row.target_machine_key_exchange_key ?? undefined,
@@ -399,7 +398,6 @@ export interface RegisterRootInviteInput {
   maxUses: number | null;
   expiresAt: string;
   label?: string;
-  targetUserRootId?: string;
   machineId?: string;
   targetMachineSigningKey?: string;
   targetMachineKeyExchangeKey?: string;
@@ -422,30 +420,11 @@ function validateRootInviteInput(input: RegisterRootInviteInput): void {
     throw new SpacesError('maxUses must be a positive integer or null', 'USER_ERROR', 1);
   }
 
-  if (input.inviteType === 'relay-user') {
-    if (!input.targetUserRootId?.trim()) {
-      throw new SpacesError('targetUserRootId is required for relay-user invites', 'USER_ERROR', 1);
-    }
-    return;
+  if (!input.machineId?.trim()) {
+    throw new SpacesError('machineId is required for relay-machine invites', 'USER_ERROR', 1);
   }
-
-  if (input.inviteType === 'relay-machine') {
-    if (!input.machineId?.trim()) {
-      throw new SpacesError('machineId is required for relay-machine invites', 'USER_ERROR', 1);
-    }
-    if (!input.targetMachineSigningKey?.trim() || !input.targetMachineKeyExchangeKey?.trim()) {
-      throw new SpacesError('Machine signing and key exchange keys are required for relay-machine invites', 'USER_ERROR', 1);
-    }
-    return;
-  }
-
-  if (input.inviteType === 'machine-user') {
-    if (!input.machineId?.trim()) {
-      throw new SpacesError('machineId is required for machine-user invites', 'USER_ERROR', 1);
-    }
-    if (!input.targetUserRootId?.trim()) {
-      throw new SpacesError('targetUserRootId is required for machine-user invites', 'USER_ERROR', 1);
-    }
+  if (!input.targetMachineSigningKey?.trim() || !input.targetMachineKeyExchangeKey?.trim()) {
+    throw new SpacesError('Machine signing and key exchange keys are required for relay-machine invites', 'USER_ERROR', 1);
   }
 }
 
@@ -485,7 +464,7 @@ export function registerRootInvite(input: RegisterRootInviteInput): RootInviteRe
       input.maxUses,
       input.expiresAt,
       now,
-      input.targetUserRootId ?? null,
+      null,
       input.machineId ?? null,
       input.targetMachineSigningKey ?? null,
       input.targetMachineKeyExchangeKey ?? null,

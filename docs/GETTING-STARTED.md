@@ -45,16 +45,14 @@ The relay server connects machines and clients but **cannot read your terminal c
 └──────────────┘          └──────────────┘          └──────────────┘
 ```
 
-### Trust Through Invites
+### Trust Through Identity + Enrollment
 
-Access is granted through **signed invite tokens**. When you create an invite:
+Runtime access is owner-only and based on the owner user root identity:
 
-1. Your machine signs the invite with its private key
-2. The invite contains your machine's public keys and the relay URL
-3. Anyone with the invite can request access
-4. Your machine validates the invite signature and grants permissions
-
-This is a "trust on first use" model - the invite bootstraps the initial connection, then your machine maintains an access list of authorized clients.
+1. The relay is bound to one owner user root identity
+2. Clients and machines present device certificates tied to that owner identity
+3. Relay-machine invites are used only to enroll machines onto a relay
+4. Client connection authorization succeeds only when the owner identity matches
 
 ### End-to-End Encryption
 
@@ -153,34 +151,23 @@ gssh cloud status
 
 Then open `https://<yourname>.gitspace.sh`.
 
-### Step 7: Create and accept an invite
-
-To let someone connect, create a root-signed invite and have them accept it:
-
-```bash
-# On owner machine: invite user to relay + machine access
-gssh invite relay-user create gssh-user:BASE64_KEY --relay wss://relay.example.com/ws
-gssh invite machine-user create <machine-id> gssh-user:BASE64_KEY --relay wss://relay.example.com/ws
-
-# On collaborator machine: accept invite token(s)
-gssh user auth invite accept <token>
-```
-
-### Step 8: Connect from another device
+### Step 7: Prepare another owner device
 
 On the remote device:
 
 ```bash
-# Create a client identity (first time only)
-gssh user identity init
+# Recover the same owner identity from your mnemonic
+gssh user identity recover
 
-# Connect after ACL grants are accepted
+# Connect as owner
 gssh client connect <machine-id>
 ```
 
+### Step 8: Connect from another device
+
 The connection flow:
 1. Client connects to relay and signs `connect_to_machine`
-2. Relay verifies owner + ACL authorization
+2. Relay verifies owner identity from the device certificate
 3. Relay routes client to your machine
 4. X3DH handshake establishes encryption
 5. PTY session starts
@@ -207,36 +194,17 @@ gssh machine serve start --relay ws://<relay-host>:4480/ws
 
 ## Access Management
 
-### Viewing Authorized Clients
-
-Machine ACL entries are persistent `full` grants:
+Runtime access is owner-only. To bring a machine online, use machine enrollment invites:
 
 ```bash
-# List all authorized clients
-gssh machine access list
+# Create machine enrollment invite
+gssh invite relay-machine create --relay ws://<relay-host>:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB>
 
-# Output:
-# ID                      Label           Access Type    Added
-# gssh_pk_abc123...       Work Laptop     full           2024-01-15
-# gssh_pk_def456...       Phone           full           2024-01-10
-```
+# Inspect enrolled machines
+gssh relay machines list
 
-### Adding Access Directly
-
-You can add a client's public key directly without an invite flow:
-
-```bash
-# Add a collaborator by user root key
-gssh machine access add gssh-user:BASE64_SIGNING_KEY --label "Brad's Phone"
-```
-
-### Revoking Access
-
-Remove a client from your access list:
-
-```bash
-# Remove by user id or label
-gssh machine access remove <user-id-or-label>
+# Revoke a machine from relay registry
+gssh relay machines revoke <machine-id>
 ```
 
 ---
@@ -291,7 +259,7 @@ gssh machine access remove <user-id-or-label>
 
 ## Connection Flow Details
 
-### Initial Connection (ACL-authorized)
+### Initial Connection (Owner-authorized)
 
 ```
 Client                     Relay                      Machine
@@ -311,9 +279,9 @@ Client                     Relay                      Machine
    │          [Encrypted terminal I/O begins]            │
 ```
 
-### Direct Connection (Pre-authorized)
+### Direct Connection (Same owner identity)
 
-Once a collaborator is in your machine ACL, they connect directly:
+Any device recovered with the same owner mnemonic can connect directly:
 
 ```
 Client                     Relay                      Machine
@@ -390,9 +358,9 @@ gssh client machines list --relay wss://relay.example.com/ws
 
 ### "Client not authorized"
 
-The collaborator is not authorized by relay and machine ACL. Either:
-- Use an invite to connect first
-- Have the owner grant relay and machine access: `gssh relay access add <gssh-user:...>` and `gssh machine access add <gssh-user:...>`
+The connecting client identity does not match the owner user root identity for this relay/machine. Either:
+- Recover the same owner identity on the client device: `gssh user identity recover`
+- Verify the client is using the expected local identity: `gssh user identity show`
 
 ### "Machine offline"
 
@@ -428,16 +396,14 @@ Your cryptographic identity is generated and stored locally. No central authorit
 
 ### 3. Explicit Authorization
 
-Access is never implicit. Every client must either:
-- Present a valid invite signed by the machine
-- Be explicitly added to the access list
+Access is never implicit. Every client must present a device certificate derived from the owner user root identity.
 
 ### 4. Minimal Metadata
 
 The relay learns only what it needs for routing:
 - Which machine IDs exist
-- Which invites are registered
-- Which clients are authorized
+- Which machine enrollment invites are registered
+- Which owner identity a relay is bound to
 
 It never learns the content of your sessions.
 

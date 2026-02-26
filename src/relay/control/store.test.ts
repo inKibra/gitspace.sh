@@ -17,6 +17,7 @@ import {
 } from '../auth/store.js';
 import { createRootInviteToken, parseRootInviteToken } from '../../lib/tmux-lite/crypto/root-invites.js';
 import { generateMnemonic, mnemonicToUserIdentity } from '../../lib/tmux-lite/crypto/user-identity.js';
+import { createTestIdentity } from '../../lib/tmux-lite/crypto/__tests__/helpers/test-identities.js';
 
 let originalHome: string | undefined;
 let originalControlDirOverride: string | undefined;
@@ -53,7 +54,7 @@ describe('control store', () => {
     const meta = ensureControlStore();
 
     expect(existsSync(getControlDbPath())).toBe(true);
-    expect(meta.schemaVersion).toBe(4);
+    expect(meta.schemaVersion).toBe(5);
     expect(meta.createdAt.length).toBeGreaterThan(0);
     expect(meta.updatedAt.length).toBeGreaterThan(0);
     expect(meta.ownerIdentityId).toBeUndefined();
@@ -79,12 +80,13 @@ describe('control store', () => {
   test('registers and lists root invites', () => {
     ensureControlStore();
     const owner = mnemonicToUserIdentity(generateMnemonic());
-    const target = mnemonicToUserIdentity(generateMnemonic());
+    const targetMachine = createTestIdentity('invite-machine-a');
     const token = createRootInviteToken({
-      type: 'relay-user',
+      type: 'relay-machine',
       owner,
       relayUrl: 'wss://relay.example.test/ws',
-      targetUserRootSigningKey: Buffer.from(target.signing.publicKey).toString('base64'),
+      targetMachineSigningKey: Buffer.from(targetMachine.signing.publicKey).toString('base64'),
+      targetMachineKeyExchangeKey: Buffer.from(targetMachine.keyExchange.publicKey).toString('base64'),
       expiresAt: Date.now() + 60_000,
       maxUses: 2,
       label: 'test invite',
@@ -101,7 +103,9 @@ describe('control store', () => {
       maxUses: parsed!.maxUses,
       expiresAt: new Date(parsed!.expiresAt).toISOString(),
       label: parsed!.label,
-      targetUserRootId: parsed!.type === 'relay-user' ? parsed!.targetUserRootId : undefined,
+      machineId: parsed!.targetMachineId,
+      targetMachineSigningKey: parsed!.targetMachineSigningKey,
+      targetMachineKeyExchangeKey: parsed!.targetMachineKeyExchangeKey,
     });
 
     expect(created.ownerUserRootId).toBe(owner.id);
@@ -115,12 +119,13 @@ describe('control store', () => {
   test('looks up and consumes root invites', () => {
     ensureControlStore();
     const owner = mnemonicToUserIdentity(generateMnemonic());
-    const target = mnemonicToUserIdentity(generateMnemonic());
+    const targetMachine = createTestIdentity('invite-machine-b');
     const token = createRootInviteToken({
-      type: 'relay-user',
+      type: 'relay-machine',
       owner,
       relayUrl: 'wss://relay.example.test/ws',
-      targetUserRootSigningKey: Buffer.from(target.signing.publicKey).toString('base64'),
+      targetMachineSigningKey: Buffer.from(targetMachine.signing.publicKey).toString('base64'),
+      targetMachineKeyExchangeKey: Buffer.from(targetMachine.keyExchange.publicKey).toString('base64'),
       expiresAt: Date.now() + 60_000,
       maxUses: 1,
     });
@@ -135,7 +140,9 @@ describe('control store', () => {
       token,
       maxUses: parsed!.maxUses,
       expiresAt: new Date(parsed!.expiresAt).toISOString(),
-      targetUserRootId: parsed!.type === 'relay-user' ? parsed!.targetUserRootId : undefined,
+      machineId: parsed!.targetMachineId,
+      targetMachineSigningKey: parsed!.targetMachineSigningKey,
+      targetMachineKeyExchangeKey: parsed!.targetMachineKeyExchangeKey,
     });
 
     const valid = getRootInviteByToken(parsed!.inviteId, parsed!.ownerUserRootId, token);
@@ -152,12 +159,13 @@ describe('control store', () => {
   test('revoked root invite cannot be looked up by token', () => {
     ensureControlStore();
     const owner = mnemonicToUserIdentity(generateMnemonic());
-    const target = mnemonicToUserIdentity(generateMnemonic());
+    const targetMachine = createTestIdentity('invite-machine-c');
     const token = createRootInviteToken({
-      type: 'relay-user',
+      type: 'relay-machine',
       owner,
       relayUrl: 'wss://relay.example.test/ws',
-      targetUserRootSigningKey: Buffer.from(target.signing.publicKey).toString('base64'),
+      targetMachineSigningKey: Buffer.from(targetMachine.signing.publicKey).toString('base64'),
+      targetMachineKeyExchangeKey: Buffer.from(targetMachine.keyExchange.publicKey).toString('base64'),
       expiresAt: Date.now() + 60_000,
       maxUses: null,
     });
@@ -172,7 +180,9 @@ describe('control store', () => {
       token,
       maxUses: parsed!.maxUses,
       expiresAt: new Date(parsed!.expiresAt).toISOString(),
-      targetUserRootId: parsed!.type === 'relay-user' ? parsed!.targetUserRootId : undefined,
+      machineId: parsed!.targetMachineId,
+      targetMachineSigningKey: parsed!.targetMachineSigningKey,
+      targetMachineKeyExchangeKey: parsed!.targetMachineKeyExchangeKey,
     });
 
     const revoked = revokeRootInvite(owner.id, created.inviteId);

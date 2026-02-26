@@ -1,5 +1,5 @@
 /**
- * gssh machine serve|enroll|access|tmux
+ * gssh machine serve|enroll|tmux
  *
  * Machine-side commands for daemon management, remote access, and terminal sessions.
  *
@@ -31,11 +31,6 @@ export function registerMachineCommands(parent: Command): void {
       const { enrollMachine } = await import('../../commands/machine-enroll.js');
       await enrollMachine(options);
     }));
-
-  // --------------------------------------------------------------------------
-  // gssh machine access [add|list|remove]
-  // --------------------------------------------------------------------------
-  registerMachineAccessCommands(cmd);
 
   // --------------------------------------------------------------------------
   // gssh machine tmux [start|stop|status|list|new|attach|kill]
@@ -88,51 +83,6 @@ function registerMachineServeCommands(machine: Command): void {
       await serveStatus();
     }, { skipSetupCheck: true }));
 
-}
-
-// ============================================================================
-// Access
-// ============================================================================
-
-function registerMachineAccessCommands(machine: Command): void {
-  const access = machine
-    .command('access')
-    .description('Manage access control for remote connections');
-
-  // gssh machine access add <user>
-  access
-    .command('add')
-    .description('Grant full machine access to a user root')
-    .argument('<user>', 'User root key (gssh-user:BASE64_KEY) or user-root-id')
-    .option('--label <name>', 'Human-readable label for this key')
-    .option('--machine <id>', 'Machine ID (defaults to local machine)')
-    .action(withErrorHandler(async (user, options) => {
-      const { addAccessKey } = await import('../../commands/machine-access.js');
-      await addAccessKey(user, options);
-    }));
-
-  // gssh machine access list
-  access
-    .command('list')
-    .description('List machine access grants')
-    .option('--json', 'Output in JSON format')
-    .option('--machine <id>', 'Machine ID (defaults to local machine)')
-    .action(withErrorHandler(async (options) => {
-      const { listAccessKeys } = await import('../../commands/machine-access.js');
-      await listAccessKeys(options);
-    }));
-
-  // gssh machine access remove <user|label>
-  access
-    .command('remove')
-    .description('Remove a machine access grant')
-    .argument('<user|label>', 'User root key, user-root-id prefix, or label')
-    .option('--force', 'Skip confirmation prompt')
-    .option('--machine <id>', 'Machine ID (defaults to local machine)')
-    .action(withErrorHandler(async (userOrLabel, options) => {
-      const { removeAccessKey } = await import('../../commands/machine-access.js');
-      await removeAccessKey(userOrLabel, options);
-    }));
 }
 
 // ============================================================================

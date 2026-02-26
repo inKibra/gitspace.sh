@@ -630,9 +630,6 @@ describe("Web Terminal E2E", () => {
       identity: machineIdentity,
       handshakeTimeoutMs: 30000,
       ownerUserRootId: testOwnerUserRootId,
-      checkUserRootAccess: async (ownerUserRootId, clientUserRootId) => (
-        ownerUserRootId === testOwnerUserRootId && clientUserRootId === testOwnerUserRootId
-      ),
     });
 
     return { ws, handshakeHandler };

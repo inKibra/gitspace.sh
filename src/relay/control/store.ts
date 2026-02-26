@@ -11,12 +11,14 @@ import type {
   CloudWorkspaceRecord,
   ControlMeta,
   VaultAccessListEntry,
+  VaultCategoryRecord,
   VaultMachineRecord,
   VaultMachineUnlockKeyRecord,
   VaultMetaKey,
+  VaultSyncCategory,
 } from './types.js';
 
-const CONTROL_SCHEMA_VERSION = 4;
+const CONTROL_SCHEMA_VERSION = 5;
 const CONTROL_DIR_OVERRIDE_ENV = 'GITSPACE_CONTROL_DIR';
 
 const META_KEY_SCHEMA_VERSION = 'schema_version';
@@ -27,12 +29,25 @@ const META_KEY_RELAY_IDENTITY_ID = 'relay_identity_id';
 const META_KEY_RELAY_SIGNING_PUBLIC_KEY = 'relay_signing_public_key';
 const META_KEY_RELAY_FINGERPRINT = 'relay_fingerprint';
 
+const VAULT_SYNC_CATEGORIES: ReadonlyArray<VaultSyncCategory> = [
+  'fundamental',
+  'integrations',
+  'project/workspace',
+  'preferences',
+] as const;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function assertVaultSyncCategory(category: string): asserts category is VaultSyncCategory {
+  if (!VAULT_SYNC_CATEGORIES.includes(category as VaultSyncCategory)) {
+    throw new SpacesError(`Unsupported vault category: ${category}`, 'USER_ERROR', 1);
+  }
 }
 
 export function getControlDirPath(): string {
@@ -1433,6 +1448,133 @@ export function setVaultMeta(key: VaultMetaKey, value: string): void {
 
 export function isVaultInitialized(): boolean {
   return getVaultMeta('vault_initialized') === '1';
+}
+
+// ============================================================================
+// Vault Sync Categories CRUD
+// ============================================================================
+
+export interface UpsertVaultCategoryInput {
+  category: VaultSyncCategory;
+  encryptedEnvelope: string;
+  writerId: string;
+  checksum: string;
+  /** Optional optimistic-concurrency guard (0 means record must not exist). */
+  expectedRevision?: number;
+}
+
+interface VaultCategoryRow {
+  category: string;
+  encrypted_envelope: string;
+  revision: number;
+  writer_id: string;
+  checksum: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapVaultCategoryRow(row: VaultCategoryRow): VaultCategoryRecord {
+  assertVaultSyncCategory(row.category);
+  return {
+    category: row.category,
+    encryptedEnvelope: row.encrypted_envelope,
+    revision: row.revision,
+    writerId: row.writer_id,
+    checksum: row.checksum,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getVaultCategory(category: VaultSyncCategory): VaultCategoryRecord | undefined {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT * FROM vault_sync_categories WHERE category = ?'
+    ).get(category) as VaultCategoryRow | null;
+    return row ? mapVaultCategoryRow(row) : undefined;
+  });
+}
+
+export function listVaultCategories(): VaultCategoryRecord[] {
+  return withControlDb((db) => {
+    const rows = db.query(
+      'SELECT * FROM vault_sync_categories ORDER BY updated_at DESC'
+    ).all() as VaultCategoryRow[];
+    return rows.map(mapVaultCategoryRow);
+  });
+}
+
+export function removeVaultCategory(category: VaultSyncCategory): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM vault_sync_categories WHERE category = ?'
+    ).run(category);
+    return result.changes > 0;
+  });
+}
+
+export function upsertVaultCategory(input: UpsertVaultCategoryInput): VaultCategoryRecord {
+  return withControlDb((db) => {
+    const now = nowIso();
+    const existing = db.query(
+      'SELECT revision, created_at FROM vault_sync_categories WHERE category = ?'
+    ).get(input.category) as { revision: number; created_at: string } | null;
+
+    if (input.expectedRevision !== undefined) {
+      if (!existing && input.expectedRevision !== 0) {
+        throw new SpacesError(
+          `Revision mismatch for ${input.category}: expected ${input.expectedRevision}, current 0`,
+          'USER_ERROR',
+          1
+        );
+      }
+
+      if (existing && existing.revision !== input.expectedRevision) {
+        throw new SpacesError(
+          `Revision mismatch for ${input.category}: expected ${input.expectedRevision}, current ${existing.revision}`,
+          'USER_ERROR',
+          1
+        );
+      }
+    }
+
+    const revision = existing ? existing.revision + 1 : 1;
+    const createdAt = existing?.created_at ?? now;
+
+    db.query(
+      `
+      INSERT INTO vault_sync_categories (
+        category,
+        encrypted_envelope,
+        revision,
+        writer_id,
+        checksum,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(category) DO UPDATE
+      SET encrypted_envelope = excluded.encrypted_envelope,
+          revision = excluded.revision,
+          writer_id = excluded.writer_id,
+          checksum = excluded.checksum,
+          updated_at = excluded.updated_at
+      `
+    ).run(
+      input.category,
+      input.encryptedEnvelope,
+      revision,
+      input.writerId,
+      input.checksum,
+      createdAt,
+      now,
+    );
+
+    const row = db.query(
+      'SELECT * FROM vault_sync_categories WHERE category = ?'
+    ).get(input.category) as VaultCategoryRow;
+
+    return mapVaultCategoryRow(row);
+  });
 }
 
 // ============================================================================

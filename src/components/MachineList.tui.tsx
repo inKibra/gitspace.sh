@@ -107,10 +107,10 @@ export function MachineListTUI(props: MachineListTUIProps) {
           </box>
         )}
         <text fg={COLORS.textDim} paddingTop={2}>
-          Run: gssh relay access add gssh-user:...
+          Owner-only access is enabled.
         </text>
         <text fg={COLORS.textDim}>
-          Then: gssh machine access add gssh-user:... --machine MACHINE_ID
+          Use the owner identity on both client and machine.
         </text>
       </box>
     );

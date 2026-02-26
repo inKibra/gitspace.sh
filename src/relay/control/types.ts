@@ -128,3 +128,25 @@ export type VaultMetaKey =
   | 'vault_key_check'
   | 'vault_initialized'
   | 'owner_user_root_id';
+
+/** Relay owner sync categories persisted in the vault. */
+export type VaultSyncCategory =
+  | 'fundamental'
+  | 'integrations'
+  | 'project/workspace'
+  | 'preferences';
+
+/**
+ * Encrypted sync category envelope metadata.
+ *
+ * The payload is encrypted at rest in `encryptedEnvelope`.
+ */
+export interface VaultCategoryRecord {
+  category: VaultSyncCategory;
+  encryptedEnvelope: string;
+  revision: number;
+  updatedAt: string;
+  writerId: string;
+  checksum: string;
+  createdAt: string;
+}

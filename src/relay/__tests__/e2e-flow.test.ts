@@ -202,9 +202,6 @@ async function createMachineConnection(
     identity: machineIdentity,
     handshakeTimeoutMs: 30000,
     ownerUserRootId: testOwnerUserRootId,
-    checkUserRootAccess: async (ownerUserRootId, clientUserRootId) => (
-      ownerUserRootId === testOwnerUserRootId && clientUserRootId === testOwnerUserRootId
-    ),
   });
 
   return {
@@ -672,9 +669,6 @@ describe("E2E: PTY Session Flow", () => {
       identity: testFixtures.machine,
       shell: "/bin/sh", // Use sh for portability
       ownerUserRootId: testOwnerUserRootId,
-      checkUserRootAccess: async (ownerUserRootId, clientUserRootId) => (
-        ownerUserRootId === testOwnerUserRootId && clientUserRootId === testOwnerUserRootId
-      ),
     });
 
     // Track session events
@@ -888,9 +882,6 @@ describe("E2E: PTY Session Flow", () => {
       identity: testFixtures.machine,
       shell: "/bin/sh",
       ownerUserRootId: testOwnerUserRootId,
-      checkUserRootAccess: async (ownerUserRootId, clientUserRootId) => (
-        ownerUserRootId === testOwnerUserRootId && clientUserRootId === testOwnerUserRootId
-      ),
     });
 
     const authenticatedClients: string[] = [];

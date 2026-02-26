@@ -1,6 +1,7 @@
 # Gateway Worker Specification
 
 > **Status: SPECIFICATION ONLY - NOT YET IMPLEMENTED**
+> **Historical Document** - retained for context only; not the active runtime contract.
 >
 > This document describes the planned Gateway Worker for subdomain routing and
 > authentication. The current implementation only includes the API Worker
@@ -19,13 +20,13 @@ A Cloudflare Worker that sits in front of all user subdomains (`*.{user}.gitspac
 Cloudflare Access:
 - Uses its own identity providers (separate OAuth flows)
 - Policies configured per-app in dashboard, not programmatically
-- Can't query our D1 database for ACL/invites
+- Can't query our D1 database for owner identity and enrollment state
 - Can't validate our signed tokens
 
 We need:
 - Single identity across all gitspace.sh subdomains
 - Programmatic access control via our API
-- Custom authorization logic (invites, ACL, port sharing)
+- Custom authorization logic (owner identity, machine enrollment, port sharing)
 - Portable session (one login works everywhere)
 
 ## Architecture
@@ -234,11 +235,8 @@ export default {
 ## CLI Commands
 
 ```bash
-# Create a relay-user invite token
-gssh invite relay-user create <gssh-user:...> --relay <url>
-
-# Create a machine-user invite token
-gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url>
+# Create a machine enrollment invite token
+gssh invite relay-machine create --relay <url> --machine-signing-key <base64> --machine-key-exchange-key <base64>
 
 # List active root-signed invites
 gssh invite list --relay <url>

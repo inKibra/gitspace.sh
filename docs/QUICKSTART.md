@@ -103,11 +103,10 @@ gssh machine serve start --relay ws://localhost:4480/ws
 ### Connect from Another Device
 
 ```bash
-# First time: create identity
-gssh user identity init
+# Recover the same owner identity
+gssh user identity recover
 
-# Accept invite(s) and connect
-gssh user auth invite accept <token>
+# Connect as owner
 gssh client connect <machine-id>
 ```
 
