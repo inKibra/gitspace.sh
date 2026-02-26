@@ -342,7 +342,7 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(applySubmissionCalls[0]?.secretValues).toEqual({ PULUMI_ACCESS_TOKEN: 'token-value' })
   })
 
-  it('offers attach-anyway retry after setup/select script failure', async () => {
+  it('shows script failure message and leaves retry to caller', async () => {
     const attachParamsSeen: Array<{ scriptPolicy?: 'auto' | 'skip' }> = []
     const attachSession = mock(async (params: { scriptPolicy?: 'auto' | 'skip' }) => {
       attachParamsSeen.push({ scriptPolicy: params.scriptPolicy })
@@ -353,16 +353,16 @@ describe('useBundleRefreshAttachFlow', () => {
       }
     })
 
-    const confirmCalls: Array<any> = []
+    const messageCalls: Array<any> = []
 
     const { result } = renderHook(() =>
       useBundleRefreshAttachFlow({
         flow: {
           showLoading: () => {},
-          showMessage: () => {},
-          showConfirm: (opts) => {
-            confirmCalls.push(opts)
+          showMessage: (opts) => {
+            messageCalls.push(opts)
           },
+          showConfirm: () => {},
           showWizard: () => {},
           close: () => {},
         },
@@ -371,20 +371,19 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const promise = result.current.attachSessionWithBundleRefresh({
+    const attached = await result.current.attachSessionWithBundleRefresh({
       workspaceId: 'test-project:test-workspace',
       scriptPolicy: 'auto',
     })
 
-    await Promise.resolve()
-    expect(confirmCalls.length).toBe(1)
-    confirmCalls[0].onConfirm?.()
-
-    const attached = await promise
-    expect(attached).toBe(true)
-    expect(attachParamsSeen.length).toBe(2)
+    expect(attached).toBe(false)
+    expect(attachParamsSeen.length).toBe(1)
     expect(attachParamsSeen[0]?.scriptPolicy).toBe('auto')
-    expect(attachParamsSeen[1]?.scriptPolicy).toBe('skip')
+    expect(messageCalls.length).toBe(1)
+    expect(messageCalls[0]).toMatchObject({
+      title: 'Workspace Script Failed',
+      variant: 'error',
+    })
   })
 
   it('does not replay stale script errors on a later attach attempt', async () => {
@@ -392,7 +391,7 @@ describe('useBundleRefreshAttachFlow', () => {
       code: 'SETUP_SCRIPT_FAILED',
       message: 'old script failure',
     }
-    const confirmCalls: Array<any> = []
+    const messageCalls: Array<any> = []
     const attachSession = mock(async () => {})
 
     const { result, rerender } = renderHook(
@@ -400,10 +399,10 @@ describe('useBundleRefreshAttachFlow', () => {
         useBundleRefreshAttachFlow({
           flow: {
             showLoading: () => {},
-            showMessage: () => {},
-            showConfirm: (opts) => {
-              confirmCalls.push(opts)
+            showMessage: (opts) => {
+              messageCalls.push(opts)
             },
+            showConfirm: () => {},
             showWizard: () => {},
             close: () => {},
           },
@@ -425,7 +424,7 @@ describe('useBundleRefreshAttachFlow', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(confirmCalls.length).toBe(0)
+    expect(messageCalls.length).toBe(0)
     expect(attachSession).toHaveBeenCalledTimes(1)
   })
 })

@@ -4,6 +4,9 @@ import type {
   BackendKey,
   SessionBackend,
   AttachSessionParams,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
   DeleteWorkspaceParams,
 } from './backend.js';
 import type {
@@ -13,6 +16,7 @@ import type {
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { ScriptPhase } from '../types/script-phase.js';
 import type { WideEventFilter } from '../types/events.js';
+import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
 import { BackendManager } from './backend-manager.js';
 import {
   createInitialSessionEngineState,
@@ -211,12 +215,88 @@ export function useSessionEngine() {
     await withBackend(backendKey, (backend) => backend.listProjects());
   }, [withBackend]);
 
+  const listGithubRepos = useCallback(async (backendKey: BackendKey, org?: string): Promise<string[]> => {
+    let repos: string[] | null = null;
+    await withBackend(backendKey, async (backend) => {
+      repos = await backend.listGithubRepos(org);
+    });
+
+    if (!repos) {
+      throw new SpacesError('GitHub repository list was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+
+    return repos;
+  }, [withBackend]);
+
+  const listRemoteBranches = useCallback(async (
+    backendKey: BackendKey,
+    projectName: string
+  ): Promise<string[]> => {
+    let branches: string[] | null = null;
+    await withBackend(backendKey, async (backend) => {
+      branches = await backend.listRemoteBranches(projectName);
+    });
+
+    if (!branches) {
+      throw new SpacesError('Remote branch list was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+
+    return branches;
+  }, [withBackend]);
+
+  const listLinearIssues = useCallback(async (
+    backendKey: BackendKey,
+    projectName: string
+  ): Promise<SessionLinearIssueSummary[]> => {
+    let issues: SessionLinearIssueSummary[] | null = null;
+    await withBackend(backendKey, async (backend) => {
+      issues = await backend.listLinearIssues(projectName);
+    });
+
+    if (!issues) {
+      throw new SpacesError('Linear issue list was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+
+    return issues;
+  }, [withBackend]);
+
   const listWorkspaces = useCallback(async (backendKey: BackendKey) => {
     await withBackend(backendKey, (backend) => backend.listWorkspaces());
   }, [withBackend]);
 
   const listSessions = useCallback(async (backendKey: BackendKey, workspaceId?: string) => {
     await withBackend(backendKey, (backend) => backend.listSessions(workspaceId));
+  }, [withBackend]);
+
+  const createProject = useCallback(async (backendKey: BackendKey, params: CreateProjectParams) => {
+    dispatch({
+      type: 'SET_COMMAND_ERROR',
+      backendKey,
+      commandError: null,
+    });
+    await withBackend(backendKey, (backend) => backend.createProject(params));
+  }, [withBackend]);
+
+  const createWorkspace = useCallback(async (backendKey: BackendKey, params: CreateWorkspaceParams) => {
+    dispatch({
+      type: 'SET_COMMAND_ERROR',
+      backendKey,
+      commandError: null,
+    });
+    await withBackend(backendKey, (backend) => backend.createWorkspace(params));
+  }, [withBackend]);
+
+  const deleteProject = useCallback(async (
+    backendKey: BackendKey,
+    projectName: string,
+    params?: DeleteProjectParams
+  ) => {
+    dispatch({
+      type: 'SET_COMMAND_ERROR',
+      backendKey,
+      commandError: null,
+    });
+    await withBackend(backendKey, (backend) => backend.deleteProject(projectName, params));
   }, [withBackend]);
 
   const attachSession = useCallback(async (backendKey: BackendKey, params: AttachSessionParams) => {
@@ -235,6 +315,15 @@ export function useSessionEngine() {
 
   const detachSession = useCallback(async (backendKey: BackendKey) => {
     await withBackend(backendKey, (backend) => backend.detachSession());
+  }, [withBackend]);
+
+  const cancelPendingScripts = useCallback(async (backendKey: BackendKey) => {
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.cancelPendingScripts) {
+        return;
+      }
+      await backend.cancelPendingScripts();
+    });
   }, [withBackend]);
 
   const killSession = useCallback(async (backendKey: BackendKey, sessionId: string) => {
@@ -384,10 +473,17 @@ export function useSessionEngine() {
     disconnectBackend,
 
     listProjects,
+    listGithubRepos,
+    listRemoteBranches,
+    listLinearIssues,
     listWorkspaces,
     listSessions,
+    createProject,
+    createWorkspace,
+    deleteProject,
     attachSession,
     detachSession,
+    cancelPendingScripts,
     killSession,
     deleteWorkspace,
     getBundleRefreshPlan,
@@ -411,10 +507,17 @@ export function useSessionEngine() {
     connectBackend,
     disconnectBackend,
     listProjects,
+    listGithubRepos,
+    listRemoteBranches,
+    listLinearIssues,
     listWorkspaces,
     listSessions,
+    createProject,
+    createWorkspace,
+    deleteProject,
     attachSession,
     detachSession,
+    cancelPendingScripts,
     killSession,
     deleteWorkspace,
     getBundleRefreshPlan,

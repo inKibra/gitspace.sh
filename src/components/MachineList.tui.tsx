@@ -107,7 +107,10 @@ export function MachineListTUI(props: MachineListTUIProps) {
           </box>
         )}
         <text fg={COLORS.textDim} paddingTop={2}>
-          Run: gssh access add "YOUR_KEY"
+          Owner-only access is enabled.
+        </text>
+        <text fg={COLORS.textDim}>
+          Use the owner identity on both client and machine.
         </text>
       </box>
     );

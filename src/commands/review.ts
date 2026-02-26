@@ -1,29 +1,29 @@
 /**
  * Review command — open or interact with the diff review system
  *
- * Primary entry point: `gssh review`
+ * Primary entry point: `gssh workspace review ...`
  *   Opens the browser-based review UI at http://localhost:<port>?view=review&workspace=<current>
  *
  * Sub-commands:
- *   gssh review notes [--workspace <name>] [--project <name>]
+ *   gssh workspace review notes --project <name> --workspace <name>
  *     Print saved review threads as structured JSON (LLM-friendly).
  *
- *   gssh review import [--pr <number>] [--workspace <name>] [--project <name>]
+ *   gssh workspace review import --project <name> --workspace <name> [--pr <number>]
  *     Import GitHub PR review comments as local threads.
  *
- *   gssh review push [--pr <number>] [--workspace <name>] [--project <name>]
+ *   gssh workspace review push --project <name> --workspace <name> [--pr <number>]
  *     Push local review decisions to GitHub as a formal PR review.
  *
- *   gssh review hunks <file>
+ *   gssh workspace review hunks --project <name> --workspace <name> <file>
  *     List hunks in a changed file with stable index and header.
  *
- *   gssh review add-hunk <file> --index <n> [--approve|--reject|--pending] [--body <text>]
+ *   gssh workspace review add-hunk --project <name> --workspace <name> <file> --index <n> [--approve|--reject|--pending] [--body <text>]
  *     Add or update a hunk-level review decision/comment.
  *
- *   gssh review add-file <file> --body <text>
+ *   gssh workspace review add-file --project <name> --workspace <name> <file> --body <text>
  *     Add a file-level review thread.
  *
- *   gssh review add-line <file> --start <n> [--end <n>] [--side LEFT|RIGHT] --body <text>
+ *   gssh workspace review add-line --project <name> --workspace <name> <file> --start <n> [--end <n>] [--side LEFT|RIGHT] --body <text>
  *     Add a line-range review thread.
  */
 
@@ -34,9 +34,13 @@ import { logger } from '../utils/logger.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
 import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
 import type { HunkDecision, ReviewChangedFile, ReviewThread } from '../types/review.js';
+import { SpacesError } from '../types/errors.js';
 
-// Match the port used by `gssh serve` local relay (overridable via RELAY_PORT env)
-const DEFAULT_PORT = parseInt(process.env.RELAY_PORT ?? '4480', 10);
+// Match the port used by `gssh machine serve start` local relay (overridable via RELAY_PORT env)
+const DEFAULT_PORT = (() => {
+  const parsed = Number.parseInt(process.env.RELAY_PORT ?? '4480', 10);
+  return Number.isNaN(parsed) ? 4480 : parsed;
+})();
 
 // ============================================================================
 // Helpers
@@ -196,7 +200,7 @@ function parseDecisionFlags(options: {
   ].filter((value): value is HunkDecision => value !== null);
 
   if (selected.length > 1) {
-    throw new Error('Choose only one decision flag: --approve, --reject, or --pending.');
+    throw new SpacesError('Choose only one decision flag: --approve, --reject, or --pending.', 'USER_ERROR', 1);
   }
 
   return selected[0];
@@ -220,7 +224,7 @@ async function getChangedFilesForContext(ctx: {
   });
 
   if (result.op !== 'changed_files') {
-    throw new Error(`Unexpected response from get_changed_files: ${result.op}`);
+    throw new SpacesError(`Unexpected response from get_changed_files: ${result.op}`, 'SYSTEM_ERROR', 2);
   }
 
   return result.files;
@@ -247,14 +251,18 @@ function resolveChangedFile(
 
   if (suffixMatches.length > 1) {
     const choices = suffixMatches.slice(0, 8).map((file) => `- ${file.filePath}`).join('\n');
-    throw new Error(
-      `File path is ambiguous: ${inputFile}\nMatches:\n${choices}\nPlease provide a full path.`
+    throw new SpacesError(
+      `File path is ambiguous: ${inputFile}\nMatches:\n${choices}\nPlease provide a full path.`,
+      'USER_ERROR',
+      1,
     );
   }
 
   const sample = changedFiles.slice(0, 12).map((file) => `- ${file.filePath}`).join('\n');
-  throw new Error(
-    `File is not changed in this workspace: ${inputFile}\nChanged files:\n${sample}`
+  throw new SpacesError(
+    `File is not changed in this workspace: ${inputFile}\nChanged files:\n${sample}`,
+    'USER_ERROR',
+    1,
   );
 }
 
@@ -290,12 +298,12 @@ export async function openReview(options: ReviewOptions = {}): Promise<void> {
   }
 
   logger.log(`Opening review UI: ${url}`);
-  logger.log('(Requires `gssh serve start` to be running)');
+  logger.log('(Requires `gssh machine serve start` to be running)');
   await openBrowser(url);
 }
 
 // ============================================================================
-// gssh review notes
+// gssh workspace review notes
 // ============================================================================
 
 export interface ReviewNotesOptions {
@@ -361,7 +369,7 @@ export async function showReviewNotes(options: ReviewNotesOptions = {}): Promise
 }
 
 // ============================================================================
-// gssh review hunks
+// gssh workspace review hunks
 // ============================================================================
 
 export interface ReviewHunksOptions {
@@ -425,7 +433,7 @@ export async function listReviewHunks(file: string, options: ReviewHunksOptions 
 }
 
 // ============================================================================
-// gssh review add-hunk
+// gssh workspace review add-hunk
 // ============================================================================
 
 export interface ReviewAddHunkOptions {
@@ -570,7 +578,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
 }
 
 // ============================================================================
-// gssh review add-file
+// gssh workspace review add-file
 // ============================================================================
 
 export interface ReviewAddFileOptions {
@@ -629,7 +637,7 @@ export async function addFileReview(file: string, options: ReviewAddFileOptions)
 }
 
 // ============================================================================
-// gssh review add-line
+// gssh workspace review add-line
 // ============================================================================
 
 export interface ReviewAddLineOptions {
@@ -719,7 +727,7 @@ export async function addLineReview(file: string, options: ReviewAddLineOptions)
 }
 
 // ============================================================================
-// gssh review import
+// gssh workspace review import
 // ============================================================================
 
 export interface ReviewImportOptions {
@@ -753,7 +761,7 @@ export async function importReview(options: ReviewImportOptions = {}): Promise<v
 }
 
 // ============================================================================
-// gssh review push
+// gssh workspace review push
 // ============================================================================
 
 export interface ReviewPushOptions {

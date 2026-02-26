@@ -57,7 +57,6 @@ import {
   setCurrentProject,
   readProjectConfig,
   getProjectBaseDir,
-  getProjectWorkspacesDir,
   createProject,
   projectExists,
 } from './core/config.js';
@@ -65,19 +64,11 @@ import { localPreferencesService } from './core/preferences-service.js';
 import type { NotificationConfig, NotificationTypeConfig } from './types/config.js';
 
 // Git and workspace operations
-import { listRemoteBranches, createWorktree, getDefaultBranch } from './core/git.js';
-import { deleteProjectCore } from './core/workspace.js';
-import { fetchUnstartedIssues, getLinearConfig } from './core/linear.js';
-import { generateMarkdown } from './utils/markdown.js';
-import { sanitizeForFileSystem, generateWorkspaceName, isValidBranchName, extractRepoName } from './utils/sanitize.js';
+import { getDefaultBranch } from './core/git.js';
+import { extractRepoName } from './utils/sanitize.js';
 import { logger } from './utils/logger.js';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
 
 // Script execution
-import type { LinearIssue } from './types/workspace.js';
-
-// Project creation
 import { listAllRepos, cloneRepository } from './core/github.js';
 import { detectBundleInRepo, loadBundleFromPath } from './core/bundle.js';
 import { applyProjectBundleState } from './core/project-lifecycle.js';
@@ -92,6 +83,7 @@ import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { loadProcessesConfigWithDiagnostics } from './lib/processes/config.js';
 import {
@@ -116,20 +108,6 @@ import type { InboxItem } from './lib/tmux-lite/cli.js';
 // ============================================================================
 // Workspace Flow Types (Custom State Machine)
 // ============================================================================
-
-/** Available workspace creation sources */
-type WorkspaceSource = 'branch' | 'linear' | 'manual';
-
-/** Workspace flow states - explicit state machine */
-type WorkspaceFlowState =
-  | { type: 'closed' }
-  | { type: 'source-select'; selectedIndex: number; options: Array<{ label: string; description: string; value: WorkspaceSource }> }
-  | { type: 'loading'; title: string; message: string }
-  | { type: 'branch-select'; branches: string[]; selectedIndex: number }
-  | { type: 'linear-select'; issues: LinearIssue[]; selectedIndex: number }
-  | { type: 'manual-name-input'; inputValue: string; error: string | null }
-  | { type: 'manual-branch-input'; workspaceName: string; inputValue: string; error: string | null }
-  | { type: 'creating'; workspaceName: string; message?: string };
 
 /** Project flow states - explicit state machine for project creation */
 type ProjectFlowState =
@@ -249,14 +227,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
 export interface AppProps {
   relayConfig?: RelayConfig;
   onQuit?: () => void;
+  keyboardMode: 'kitty' | 'vt';
 }
 
 // ============================================================================
 // Main App Component
 // ============================================================================
 
-function App({ relayConfig, onQuit }: AppProps) {
+function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   const isRemoteMode = !!relayConfig;
+  const keyboardModeHint = `kbd: ${keyboardMode}`;
 
   // Force re-render counter for resize
   const [, forceUpdate] = useState(0);
@@ -286,6 +266,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   // Track when we're switching sessions (to prevent detach handler from navigating away)
   const sessionSwitchingRef = useRef(false);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
+  const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const renderer = useRenderer();
 
   // Shared Flow hook (for non-workspace flows)
@@ -293,8 +274,6 @@ function App({ relayConfig, onQuit }: AppProps) {
     onError: (error) => dispatch({ type: 'SET_ERROR', error: error.message }),
   });
 
-  // Workspace creation flow (custom state machine)
-  const [workspaceFlow, setWorkspaceFlow] = useState<WorkspaceFlowState>({ type: 'closed' });
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState<string>('workspace');
 
   // Project creation flow (custom state machine)
@@ -326,13 +305,20 @@ function App({ relayConfig, onQuit }: AppProps) {
     status: localSessionStatus,
     mode: localSessionMode,
     requestProjects: requestLocalProjects,
+    listGithubRepos: listLocalGithubRepos,
+    listRemoteBranches: listLocalRemoteBranches,
+    listLinearIssues: listLocalLinearIssues,
     requestWorkspaces: requestLocalWorkspaces,
     requestSessions: requestLocalSessions,
+    createProject: createLocalProject,
+    createWorkspace: createLocalWorkspace,
+    deleteProject: deleteLocalProject,
     requestInbox: requestLocalInbox,
     clearInbox: clearLocalInbox,
     markInboxRead: markLocalInboxRead,
     attachSession: attachLocalSession,
     detachSession: detachLocalSession,
+    cancelPendingScripts: cancelLocalPendingScripts,
     killSession: killLocalSession,
     deleteWorkspace: deleteLocalWorkspace,
     send: sendLocalPty,
@@ -438,6 +424,7 @@ function App({ relayConfig, onQuit }: AppProps) {
       sessionSwitchingRef.current = true;
 
       if (target === 'workspace' && params.workspaceId && !params.command) {
+        lastScriptWorkspaceIdRef.current = params.workspaceId;
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         dispatch({ type: 'SET_VIEW', view: 'scripts' });
       }
@@ -445,7 +432,10 @@ function App({ relayConfig, onQuit }: AppProps) {
     onAttachSuccess: () => {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
-    onAttachCancelled: () => {
+    onAttachCancelled: ({ target }) => {
+      if (target === 'workspace' && state.view === 'scripts') {
+        return;
+      }
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onAttachError: ({ target, message }) => {
@@ -531,6 +521,34 @@ function App({ relayConfig, onQuit }: AppProps) {
     await requestLocalInbox();
   }, [isLocalMachineContext, requestLocalInbox]);
 
+  const lifecycleController = useLifecycleController({
+    flow,
+    listGithubRepos: listLocalGithubRepos,
+    listRemoteBranches: listLocalRemoteBranches,
+    listLinearIssues: listLocalLinearIssues,
+    createProject: createLocalProject,
+    createWorkspace: createLocalWorkspace,
+    deleteProject: deleteLocalProject,
+    getProjectNames: () => localProjects.map((project) => project.name),
+    refreshProjects,
+    refreshWorkspaces,
+    refreshSessions: requestLocalSessions,
+    onWorkspaceCreated: async ({ workspaceId, workspaceName }) => {
+      setScriptWorkspaceName(workspaceName);
+      dispatch({ type: 'SET_VIEW', view: 'scripts' });
+
+      const attached = await attachLocal({
+        workspaceId,
+        sessionName: String(Date.now()),
+      });
+
+      if (!attached) {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      }
+    },
+    showCreateWorkspaceSuccessMessage: false,
+  });
+
   // Initial load
   useEffect(() => {
     const load = async () => {
@@ -578,50 +596,10 @@ function App({ relayConfig, onQuit }: AppProps) {
     dispatch({ type: 'SET_PANEL_FOCUS', focus: 'workspaces' });
   }, [requestLocalProjects, requestLocalSessions, requestLocalWorkspaces]);
 
-  // Delete project - show typed confirmation
+  // Delete project
   const handleDeleteProject = useCallback((project: ProjectInfo) => {
-    flow.showConfirmTyped({
-      title: 'Delete Project',
-      message: `Are you sure you want to delete project "${project.name}"?`,
-      confirmText: project.name,
-      warning: 'This will delete all workspaces in this project!',
-      onConfirm: async () => {
-        flow.showLoading({ title: 'Deleting', message: 'Preparing...' });
-
-        try {
-          const result = await deleteProjectCore(project.name, {
-            nonInteractive: true, // TUI is non-interactive for scripts
-            onProgress: (message) => {
-              flow.showLoading({ title: 'Deleting', message });
-            },
-          });
-
-          if (!result.success && result.errors.length > 0) {
-            console.error('[tui] Project deletion errors:', result.errors);
-            flow.close();
-            flow.showMessage({
-              title: 'Delete Failed',
-              message: `Failed to delete project "${project.name}". Check logs for details.`,
-              variant: 'error',
-            });
-            return;
-          }
-        } catch (error) {
-          console.error('[tui] Failed to delete project:', error);
-          flow.close();
-          flow.showMessage({
-            title: 'Delete Failed',
-            message: `An unexpected error occurred while deleting project "${project.name}".`,
-            variant: 'error',
-          });
-          return;
-        }
-
-        flow.close();
-        await refreshProjects();
-      },
-    });
-  }, [flow, refreshProjects]);
+    lifecycleController.openDeleteProjectFlow(project.name);
+  }, [lifecycleController]);
 
   // Attach to session using embedded terminal
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
@@ -744,223 +722,10 @@ function App({ relayConfig, onQuit }: AppProps) {
     });
   }, [flow, killLocalSession]);
 
-  // ========== Workspace Creation (Custom State Machine) ==========
-
-  // Core function to create workspace and open session
-  const createWorkspaceAndOpenSession = useCallback(async (
-    workspaceName: string,
-    branchName: string,
-    existsRemotely: boolean,
-    linearIssue?: LinearIssue
-  ) => {
-    const projectName = currentProject;
-    if (!projectName) return;
-
-    try {
-      const baseDir = getProjectBaseDir(projectName);
-      const workspacesDir = getProjectWorkspacesDir(projectName);
-      const workspacePath = join(workspacesDir, workspaceName);
-      const config = readProjectConfig(projectName);
-
-      // Check if workspace already exists
-      if (existsSync(workspacePath)) {
-        setWorkspaceFlow({ type: 'closed' });
-        dispatch({ type: 'SET_ERROR', error: `Workspace "${workspaceName}" already exists` });
-        return;
-      }
-
-      setWorkspaceFlow({ type: 'creating', workspaceName });
-
-      // Create worktree
-      await createWorktree(baseDir, workspacePath, branchName, config.baseBranch, {
-        existsRemotely,
-        onProgress: (message) => {
-          setWorkspaceFlow({ type: 'creating', workspaceName, message });
-        },
-      });
-
-      // Save Linear issue if present
-      if (linearIssue) {
-        const linearConfig = await getLinearConfig(projectName);
-        if (linearConfig.apiKey) {
-          const promptDir = join(workspacePath, '.prompt');
-          mkdirSync(promptDir, { recursive: true });
-          const markdown = await generateMarkdown(linearIssue, promptDir, linearConfig.apiKey);
-          writeFileSync(join(promptDir, 'issue.md'), markdown, 'utf-8');
-        }
-      }
-
-      setWorkspaceFlow({ type: 'closed' });
-      await refreshWorkspaces();
-
-      // Attach through local backend (runs pre/setup/select scripts + creates session).
-      const workspaceId = `${projectName}:${workspaceName}`;
-      const attached = await attachLocal({
-        workspaceId,
-        sessionName: String(Date.now()),
-      });
-
-      if (!attached) {
-        return;
-      }
-    } catch (err) {
-      setWorkspaceFlow({ type: 'closed' });
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
-      if (!(err instanceof Error) || !err.message.startsWith('Workspace scripts failed during')) {
-        flow.showMessage({
-          title: 'Workspace Failed',
-          message: err instanceof Error ? err.message : 'Failed to create workspace',
-          variant: 'error',
-        });
-      }
-    }
-  }, [attachLocal, currentProject, flow, refreshWorkspaces]);
-
-  // Handle selecting a source (branch/linear/manual)
-  const handleSourceSelect = useCallback(async (source: WorkspaceSource) => {
-    if (!currentProject) return;
-
-    if (source === 'branch') {
-      setWorkspaceFlow({ type: 'loading', title: 'Loading', message: 'Fetching remote branches...' });
-
-      try {
-        const baseDir = getProjectBaseDir(currentProject);
-        const config = readProjectConfig(currentProject);
-        const allBranches = await listRemoteBranches(baseDir);
-        const branches = allBranches.filter(b => b !== config.baseBranch);
-
-        if (branches.length === 0) {
-          flow.showMessage({
-            title: 'No Branches',
-            message: `No remote branches found (excluding base branch ${config.baseBranch})`,
-            variant: 'warning',
-          });
-          setWorkspaceFlow({ type: 'closed' });
-          return;
-        }
-
-        setWorkspaceFlow({ type: 'branch-select', branches, selectedIndex: 0 });
-      } catch (err) {
-        flow.showMessage({
-          title: 'Error',
-          message: err instanceof Error ? err.message : 'Failed to fetch branches',
-          variant: 'error',
-        });
-        setWorkspaceFlow({ type: 'closed' });
-      }
-    } else if (source === 'linear') {
-      const linearConfig = await getLinearConfig(currentProject);
-      if (!linearConfig.apiKey || linearConfig.teamKeys.length === 0) {
-        flow.showMessage({
-          title: 'Not Configured',
-          message: "Linear is not configured. Run 'gssh linear setup' to configure.",
-          variant: 'warning',
-        });
-        setWorkspaceFlow({ type: 'closed' });
-        return;
-      }
-
-      setWorkspaceFlow({ type: 'loading', title: 'Loading', message: 'Fetching Linear issues...' });
-
-      try {
-        // Fetch issues from first configured team
-        // Note: teamKeys[0] is guaranteed to exist due to the length check above
-        const teamKey = linearConfig.teamKeys[0];
-        if (!teamKey) {
-          // Defensive check - should never happen due to earlier length check
-          throw new Error('No team key available');
-        }
-        const issues = await fetchUnstartedIssues(linearConfig.apiKey, teamKey);
-
-        if (issues.length === 0) {
-          flow.showMessage({
-            title: 'No Issues',
-            message: 'No unstarted Linear issues found',
-            variant: 'warning',
-          });
-          setWorkspaceFlow({ type: 'closed' });
-          return;
-        }
-
-        setWorkspaceFlow({ type: 'linear-select', issues, selectedIndex: 0 });
-      } catch (err) {
-        flow.showMessage({
-          title: 'Error',
-          message: err instanceof Error ? err.message : 'Failed to fetch Linear issues',
-          variant: 'error',
-        });
-        setWorkspaceFlow({ type: 'closed' });
-      }
-    } else if (source === 'manual') {
-      setWorkspaceFlow({ type: 'manual-name-input', inputValue: '', error: null });
-    }
-  }, [currentProject, flow]);
-
-  // Handle branch selection
-  const handleBranchSelect = useCallback(async (branch: string) => {
-    const workspaceName = sanitizeForFileSystem(branch);
-    await createWorkspaceAndOpenSession(workspaceName, branch, true);
-  }, [createWorkspaceAndOpenSession]);
-
-  // Handle Linear issue selection
-  const handleLinearSelect = useCallback(async (issue: LinearIssue) => {
-    const workspaceName = generateWorkspaceName(issue.identifier, issue.title);
-    await createWorkspaceAndOpenSession(workspaceName, workspaceName, false, issue);
-  }, [createWorkspaceAndOpenSession]);
-
-  // Handle manual workspace name submission (advances to branch input)
-  // Accepts branch-like names (e.g., fix/bla-bla-blah) and sanitizes them for workspace name
-  const handleManualNameSubmit = useCallback((name: string) => {
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Workspace name is required' } : prev);
-      return;
-    }
-    // Sanitize the input to create a valid workspace name (converts slashes to hyphens, etc.)
-    const sanitizedName = sanitizeForFileSystem(trimmedName);
-    if (!sanitizedName) {
-      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Name must contain at least one letter or number' } : prev);
-      return;
-    }
-    // Validate it can be used as a branch name (no spaces, special chars, etc.)
-    if (!isValidBranchName(trimmedName)) {
-      setWorkspaceFlow(prev => prev.type === 'manual-name-input' ? { ...prev, error: 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)' } : prev);
-      return;
-    }
-    // Advance to branch input step, pre-fill with original input (allows branch names with slashes)
-    setWorkspaceFlow({
-      type: 'manual-branch-input',
-      workspaceName: sanitizedName,
-      inputValue: trimmedName,
-      error: null,
-    });
-  }, []);
-
-  // Handle manual branch name submission (creates the workspace)
-  const handleManualBranchSubmit = useCallback(async (workspaceName: string, branchName: string) => {
-    const finalBranch = branchName.trim() || workspaceName;
-    if (!isValidBranchName(finalBranch)) {
-      setWorkspaceFlow(prev => prev.type === 'manual-branch-input' ? { ...prev, error: 'Invalid branch name (no spaces, .., or special chars like : ? * [ \\ ~)' } : prev);
-      return;
-    }
-    await createWorkspaceAndOpenSession(workspaceName, finalBranch, false);
-  }, [createWorkspaceAndOpenSession]);
-
-  // Main handler to start new workspace flow
-  const handleNewWorkspaceFlow = useCallback(async () => {
-    if (!currentProject) return;
-
-    const linearConfig = await getLinearConfig(currentProject);
-    const hasLinear = linearConfig.apiKey !== null && linearConfig.teamKeys.length > 0;
-
-    const options: Array<{ label: string; description: string; value: WorkspaceSource }> = [
-      { label: 'GitHub Branch', description: 'Create from existing remote branch', value: 'branch' },
-      ...(hasLinear ? [{ label: 'Linear Issue', description: 'Create from Linear ticket', value: 'linear' as const }] : []),
-      { label: 'Manual Name', description: 'Enter a custom workspace name', value: 'manual' },
-    ];
-
-    setWorkspaceFlow({ type: 'source-select', selectedIndex: 0, options });
-  }, [currentProject]);
+  // ========== Workspace Creation ==========
+  const handleNewWorkspaceFlow = useCallback(() => {
+    lifecycleController.openCreateWorkspaceFlow(currentProject);
+  }, [currentProject, lifecycleController]);
 
   // ========== Project Creation (Custom State Machine) ==========
 
@@ -1172,7 +937,7 @@ function App({ relayConfig, onQuit }: AppProps) {
       if (repos.length === 0) {
         flow.showMessage({
           title: 'No Repositories',
-          message: 'No GitHub repositories found. Make sure you are logged in with `gh auth login`.',
+          message: 'No GitHub repositories found. You can still create projects by entering a git remote URL.',
           variant: 'warning',
         });
         setProjectFlow({ type: 'closed' });
@@ -1230,7 +995,7 @@ function App({ relayConfig, onQuit }: AppProps) {
   const projectListProps = useProjectList({
     projects: projectInfos,
     onSelect: handleSelectProject,
-    onCreateNew: handleNewProjectFlow,
+    onCreateNew: lifecycleController.openCreateProjectFlow,
     onDelete: handleDeleteProject,
     onRefresh: refreshProjects,
   });
@@ -1516,26 +1281,6 @@ function App({ relayConfig, onQuit }: AppProps) {
         }
       }
 
-      if (workspaceFlow.type === 'manual-name-input') {
-        setWorkspaceFlow({
-          ...workspaceFlow,
-          inputValue: workspaceFlow.inputValue + text,
-          error: null,
-        });
-        event.preventDefault();
-        return;
-      }
-
-      if (workspaceFlow.type === 'manual-branch-input') {
-        setWorkspaceFlow({
-          ...workspaceFlow,
-          inputValue: workspaceFlow.inputValue + text,
-          error: null,
-        });
-        event.preventDefault();
-        return;
-      }
-
       if (settingsFlow.type === 'edit-duration' || settingsFlow.type === 'edit-hold-duration') {
         const digits = getNumericInputChunk(text);
         if (!digits) {
@@ -1553,7 +1298,7 @@ function App({ relayConfig, onQuit }: AppProps) {
     return () => {
       renderer.keyInput.off('paste', handlePaste);
     };
-  }, [flow, projectFlow, renderer, settingsFlow, workspaceFlow]);
+  }, [flow, projectFlow, renderer, settingsFlow]);
 
   // ========== Keyboard Handlers ==========
 
@@ -1648,6 +1393,29 @@ function App({ relayConfig, onQuit }: AppProps) {
 
     // Read-only script terminal view.
     if (state.view === 'scripts') {
+      if (localScriptState?.isRunning && (key.raw === 'c' || key.name === 'c')) {
+        await cancelLocalPendingScripts();
+        return;
+      }
+
+      if (
+        !localScriptState?.isRunning &&
+        (key.raw === 'a' || key.name === 'a') &&
+        !!localScriptState?.error &&
+        !!lastScriptWorkspaceIdRef.current
+      ) {
+        const workspaceId = lastScriptWorkspaceIdRef.current;
+        if (!workspaceId) {
+          return;
+        }
+
+        await attachLocal({
+          workspaceId,
+          scriptPolicy: 'skip',
+        });
+        return;
+      }
+
       if (
         !localScriptState?.isRunning &&
         (
@@ -1656,6 +1424,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           key.raw === 'n'
         )
       ) {
+        lastScriptWorkspaceIdRef.current = null;
         dispatch({ type: 'SET_VIEW', view: 'projects' });
       }
       return;
@@ -1736,123 +1505,6 @@ function App({ relayConfig, onQuit }: AppProps) {
       }
 
       // For loading/cloning/creating states, just wait (escape to cancel handled above)
-      return;
-    }
-
-    // Handle workspace creation flow (custom state machine)
-    if (workspaceFlow.type !== 'closed') {
-      if (key.name === 'escape') {
-        setWorkspaceFlow({ type: 'closed' });
-        return;
-      }
-
-      if (workspaceFlow.type === 'source-select') {
-        if (key.name === 'up' || key.raw === 'k') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            selectedIndex: Math.max(0, workspaceFlow.selectedIndex - 1),
-          });
-        } else if (key.name === 'down' || key.raw === 'j') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            selectedIndex: Math.min(workspaceFlow.options.length - 1, workspaceFlow.selectedIndex + 1),
-          });
-        } else if (key.name === 'return') {
-          const selected = workspaceFlow.options[workspaceFlow.selectedIndex];
-          if (selected) {
-            await handleSourceSelect(selected.value);
-          }
-        }
-        return;
-      }
-
-      if (workspaceFlow.type === 'branch-select') {
-        if (key.name === 'up' || key.raw === 'k') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            selectedIndex: Math.max(0, workspaceFlow.selectedIndex - 1),
-          });
-        } else if (key.name === 'down' || key.raw === 'j') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            selectedIndex: Math.min(workspaceFlow.branches.length - 1, workspaceFlow.selectedIndex + 1),
-          });
-        } else if (key.name === 'return') {
-          const branch = workspaceFlow.branches[workspaceFlow.selectedIndex];
-          if (branch) {
-            await handleBranchSelect(branch);
-          }
-        }
-        return;
-      }
-
-      if (workspaceFlow.type === 'linear-select') {
-        if (key.name === 'up' || key.raw === 'k') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            selectedIndex: Math.max(0, workspaceFlow.selectedIndex - 1),
-          });
-        } else if (key.name === 'down' || key.raw === 'j') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            selectedIndex: Math.min(workspaceFlow.issues.length - 1, workspaceFlow.selectedIndex + 1),
-          });
-        } else if (key.name === 'return') {
-          const issue = workspaceFlow.issues[workspaceFlow.selectedIndex];
-          if (issue) {
-            await handleLinearSelect(issue);
-          }
-        }
-        return;
-      }
-
-      if (workspaceFlow.type === 'manual-name-input') {
-        if (key.name === 'return') {
-          handleManualNameSubmit(workspaceFlow.inputValue);
-        } else if (key.name === 'backspace') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            inputValue: workspaceFlow.inputValue.slice(0, -1),
-            error: null,
-          });
-        } else {
-          const chunk = getKeyboardInputChunk(key);
-          if (!chunk) {
-            return;
-          }
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            inputValue: workspaceFlow.inputValue + chunk,
-            error: null,
-          });
-        }
-        return;
-      }
-
-      if (workspaceFlow.type === 'manual-branch-input') {
-        if (key.name === 'return') {
-          await handleManualBranchSubmit(workspaceFlow.workspaceName, workspaceFlow.inputValue);
-        } else if (key.name === 'backspace') {
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            inputValue: workspaceFlow.inputValue.slice(0, -1),
-            error: null,
-          });
-        } else {
-          const chunk = getKeyboardInputChunk(key);
-          if (!chunk) {
-            return;
-          }
-          setWorkspaceFlow({
-            ...workspaceFlow,
-            inputValue: workspaceFlow.inputValue + chunk,
-            error: null,
-          });
-        }
-        return;
-      }
-
-      // For loading/creating states, just wait (escape to cancel handled above)
       return;
     }
 
@@ -2098,7 +1750,7 @@ function App({ relayConfig, onQuit }: AppProps) {
           projectListProps.selectProject();
         } else if (key.raw === 'n') {
           // In projects panel, 'n' creates new project
-          await handleNewProjectFlow();
+          lifecycleController.openCreateProjectFlow();
         } else if (key.raw === 'd') {
           projectListProps.deleteSelected();
         } else if (key.raw === 'r') {
@@ -2141,7 +1793,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         } else if (command === 'new') {
           // In workspaces panel, 'n' always creates new workspace
           // Sessions are created via expand (Enter) → "+ New session" (Enter)
-          handleNewWorkspaceFlow();
+          lifecycleController.openCreateWorkspaceFlow(currentProject);
         } else if (command === 'delete') {
           // Delete workspace
           const selected = spacesBrowserProps.selectedItem;
@@ -2267,7 +1919,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         <Toaster position="top-right" />
         <box flexDirection="column" flexGrow={1}>
           <MachineListTUI {...machineListProps} focused={true} />
-          <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" />
+          <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" rightHint={keyboardModeHint} />
           <FlowTUI flow={flow} />
         </box>
       </Fragment>
@@ -2316,7 +1968,7 @@ function App({ relayConfig, onQuit }: AppProps) {
         <Toaster position="top-right" />
         <EventsTui {...eventsProps} />
         <FlowTUI flow={flow} />
-        <StatusBar hint="[Esc/q] Back  [j/k] Navigate" />
+        <StatusBar hint="[Esc/q] Back  [j/k] Navigate" rightHint={keyboardModeHint} />
       </Fragment>
     );
   }
@@ -2336,9 +1988,17 @@ function App({ relayConfig, onQuit }: AppProps) {
           isRunning={isRunning}
           error={localScriptState?.error}
           exitCode={localScriptState?.exitCode}
+          modalOpen={flow.isOpen}
         />
         {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar hint={isRunning ? '[Running scripts...]' : '[Esc/n] Back to workspaces'} />
+        <StatusBar
+          hint={isRunning
+            ? '[Running scripts... c: cancel + attach anyway]'
+            : localScriptState?.error
+              ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
+              : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back'}
+          rightHint={keyboardModeHint}
+        />
       </Fragment>
     );
   }
@@ -2446,13 +2106,11 @@ function App({ relayConfig, onQuit }: AppProps) {
           ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
           : getWorkspacesPanelHint(spacesBrowserProps.selectedItem)
         }
+        rightHint={keyboardModeHint}
       />
 
       {/* Flow modal overlay */}
       <FlowTUI flow={flow} />
-
-      {/* Workspace creation flow modal */}
-      <WorkspaceFlowModal flow={workspaceFlow} />
 
       {/* Project creation flow modal */}
       <ProjectFlowModal flow={projectFlow} />
@@ -2461,164 +2119,6 @@ function App({ relayConfig, onQuit }: AppProps) {
       <SettingsFlowModal flow={settingsFlow} />
       </box>
     </Fragment>
-  );
-}
-
-// ============================================================================
-// Workspace Flow Modal Component
-// ============================================================================
-
-function WorkspaceFlowModal({ flow }: { flow: WorkspaceFlowState }) {
-  if (flow.type === 'closed') {
-    return null;
-  }
-
-  const modalWidth = 60;
-  // Calculate modal height based on content:
-  // - source-select: title + spacer + (options * 2 lines each) + (spacers between) + spacer + hint + border/padding
-  // - branch/linear-select: title + items (scrollable) + hint + border/padding
-  // - manual-name-input: title + label + input box + error? + hint + border/padding
-  // - manual-branch-input: title + label + input box + workspace display + error? + hint + border/padding
-  const modalHeight = flow.type === 'manual-name-input' ? 10 :
-                      flow.type === 'manual-branch-input' ? 13 :
-                      flow.type === 'loading' || flow.type === 'creating' ? 6 :
-                      flow.type === 'source-select' ? 6 + flow.options.length * 3 :
-                      flow.type === 'branch-select' ? Math.min(16, 6 + flow.branches.length) :
-                      flow.type === 'linear-select' ? Math.min(16, 6 + flow.issues.length) : 10;
-
-  return (
-    <box
-      position="absolute"
-      width="100%"
-      height="100%"
-      justifyContent="center"
-      alignItems="center"
-    >
-      <box
-        flexDirection="column"
-        width={modalWidth}
-        height={modalHeight}
-        borderStyle="rounded"
-        borderColor={COLORS.borderFocused}
-        backgroundColor="#1a1a2e"
-        padding={1}
-      >
-        {/* Loading state */}
-        {flow.type === 'loading' && (
-          <>
-            <text fg={COLORS.title} height={1}>{flow.title}</text>
-            <text fg={COLORS.loading} height={1} marginTop={1}>{flow.message}</text>
-          </>
-        )}
-
-        {/* Creating state */}
-        {flow.type === 'creating' && (
-          <>
-            <text fg={COLORS.title} height={1}>Creating Workspace</text>
-            <text fg={COLORS.loading} height={1} marginTop={1}>{flow.message ?? `Creating ${flow.workspaceName}...`}</text>
-          </>
-        )}
-
-        {/* Source selection */}
-        {flow.type === 'source-select' && (
-          <>
-            <text fg={COLORS.title} height={1}>Create Workspace From</text>
-            <box height={1} />
-            {flow.options.flatMap((opt, i) => [
-              <text key={`${opt.value}-label`} fg={i === flow.selectedIndex ? COLORS.selected : COLORS.text} height={1}>
-                {i === flow.selectedIndex ? '▸ ' : '  '}{opt.label}
-              </text>,
-              <text key={`${opt.value}-desc`} fg={COLORS.textDim} height={1} paddingLeft={4}>{opt.description}</text>,
-              i < flow.options.length - 1 ? <box key={`${opt.value}-spacer`} height={1} /> : null,
-            ].filter(Boolean))}
-            <box height={1} />
-            <text fg={COLORS.textDim} height={1}>[↑↓] Navigate  [Enter] Select  [Esc] Cancel</text>
-          </>
-        )}
-
-        {/* Branch selection */}
-        {flow.type === 'branch-select' && (
-          <>
-            <text fg={COLORS.title} height={1}>Select Branch</text>
-            <box flexDirection="column" marginTop={1} flexGrow={1} overflow="hidden">
-              {flow.branches.slice(
-                Math.max(0, flow.selectedIndex - 5),
-                Math.max(0, flow.selectedIndex - 5) + 10
-              ).map((branch, i) => {
-                const actualIndex = Math.max(0, flow.selectedIndex - 5) + i;
-                return (
-                  <text key={branch} height={1} fg={actualIndex === flow.selectedIndex ? COLORS.selected : COLORS.text}>
-                    {actualIndex === flow.selectedIndex ? '▸ ' : '  '}{branch}
-                  </text>
-                );
-              })}
-            </box>
-            <text fg={COLORS.textDim} height={1}>[↑↓] Navigate  [Enter] Select  [Esc] Cancel</text>
-          </>
-        )}
-
-        {/* Linear issue selection */}
-        {flow.type === 'linear-select' && (
-          <>
-            <text fg={COLORS.title} height={1}>Select Linear Issue</text>
-            <box flexDirection="column" marginTop={1} flexGrow={1} overflow="hidden">
-              {flow.issues.slice(
-                Math.max(0, flow.selectedIndex - 5),
-                Math.max(0, flow.selectedIndex - 5) + 10
-              ).map((issue, i) => {
-                const actualIndex = Math.max(0, flow.selectedIndex - 5) + i;
-                const label = `${issue.identifier} - ${issue.title.slice(0, 40)}${issue.title.length > 40 ? '...' : ''}`;
-                return (
-                  <text key={issue.id} height={1} fg={actualIndex === flow.selectedIndex ? COLORS.selected : COLORS.text}>
-                    {actualIndex === flow.selectedIndex ? '▸ ' : '  '}{label}
-                  </text>
-                );
-              })}
-            </box>
-            <text fg={COLORS.textDim} height={1}>[↑↓] Navigate  [Enter] Select  [Esc] Cancel</text>
-          </>
-        )}
-
-        {/* Manual workspace name input */}
-        {flow.type === 'manual-name-input' && (
-          <>
-            <text fg={COLORS.title} height={1}>New Workspace (1/2)</text>
-            <text fg={COLORS.text} height={1} marginTop={1}>Enter workspace name:</text>
-            <box
-              marginTop={1}
-              borderStyle="rounded"
-              borderColor={COLORS.border}
-              padding={0}
-              width="100%"
-            >
-              <text fg={COLORS.text} height={1}>{flow.inputValue || ' '}_</text>
-            </box>
-            {flow.error && <text fg={COLORS.error} height={1} marginTop={1}>{flow.error}</text>}
-            <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Next  [Esc] Cancel</text>
-          </>
-        )}
-
-        {/* Manual branch name input */}
-        {flow.type === 'manual-branch-input' && (
-          <>
-            <text fg={COLORS.title} height={1}>New Workspace (2/2)</text>
-            <text fg={COLORS.text} height={1} marginTop={1}>Enter branch name (slashes allowed):</text>
-            <box
-              marginTop={1}
-              borderStyle="rounded"
-              borderColor={COLORS.border}
-              padding={0}
-              width="100%"
-            >
-              <text fg={COLORS.text} height={1}>{flow.inputValue || ' '}_</text>
-            </box>
-            <text fg={COLORS.textDim} height={1} marginTop={1}>Workspace: {flow.workspaceName}</text>
-            {flow.error && <text fg={COLORS.error} height={1} marginTop={1}>{flow.error}</text>}
-            <text fg={COLORS.textDim} height={1} marginTop={1}>[Enter] Create  [Esc] Cancel</text>
-          </>
-        )}
-      </box>
-    </box>
   );
 }
 
@@ -2871,10 +2371,118 @@ function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): stri
 // Status Bar Component
 // ============================================================================
 
-function StatusBar({ hint }: { hint: string }) {
+function StatusBar({ hint, rightHint }: { hint: string; rightHint?: string }) {
   return (
-    <box width="100%" height={1} backgroundColor={COLORS.statusBar}>
-      <text fg={COLORS.textDim} paddingLeft={1}>{hint}</text>
+    <box width="100%" height={1} backgroundColor={COLORS.statusBar} flexDirection="row" paddingLeft={1} paddingRight={1}>
+      <box flexGrow={1}>
+        <text fg={COLORS.textDim}>{hint}</text>
+      </box>
+      {!!rightHint && <text fg={COLORS.textDim}>{rightHint}</text>}
+    </box>
+  );
+}
+
+type RequestedKeyboardMode = 'auto' | 'kitty' | 'vt';
+type ResolvedKeyboardMode = 'kitty' | 'vt';
+
+const TUI_KEYBOARD_MODE_ENV = 'GSSH_TUI_KEYBOARD_MODE';
+
+function resolveRequestedKeyboardMode(): RequestedKeyboardMode {
+  const raw = process.env[TUI_KEYBOARD_MODE_ENV]?.trim().toLowerCase();
+  if (!raw) {
+    return 'auto';
+  }
+
+  if (raw === 'auto' || raw === 'kitty' || raw === 'vt') {
+    return raw;
+  }
+
+  logger.warning(
+    `Ignoring invalid ${TUI_KEYBOARD_MODE_ENV}=${JSON.stringify(raw)} (expected auto|kitty|vt)`
+  );
+  return 'auto';
+}
+
+function looksLikeKittyEnterLeak(buffer: string): boolean {
+  return (
+    /\x1b\[(?:13|127)(?::\d+)*(?:;\d+(?::\d+)*)?u$/.test(buffer) ||
+    /;(?:\d+(?::\d+)*)u$/.test(buffer)
+  );
+}
+
+function createRendererForKeyboardMode(mode: ResolvedKeyboardMode) {
+  return createCliRenderer({
+    exitOnCtrlC: false,
+    targetFps: 30,
+    useMouse: true,
+    useKittyKeyboard: mode === 'vt' ? null : undefined,
+  });
+}
+
+function KeyboardWelcomeGate({
+  requestedMode,
+  onResolve,
+}: {
+  requestedMode: RequestedKeyboardMode;
+  onResolve: (mode: ResolvedKeyboardMode) => void;
+}) {
+  const resolvedRef = useRef(false);
+  const observedBufferRef = useRef('');
+  const preferredMode: ResolvedKeyboardMode = requestedMode === 'vt' ? 'vt' : 'kitty';
+
+  const resolveOnce = useCallback((mode: ResolvedKeyboardMode) => {
+    if (resolvedRef.current) {
+      return;
+    }
+
+    resolvedRef.current = true;
+    onResolve(mode);
+  }, [onResolve]);
+
+  useKeyboard((key) => {
+    if (resolvedRef.current) {
+      return;
+    }
+
+    if (key.name === 'return' || key.name === 'enter' || key.name === 'linefeed') {
+      key.preventDefault?.();
+      resolveOnce(preferredMode);
+      return;
+    }
+
+    if (requestedMode !== 'auto') {
+      return;
+    }
+
+    const chunk = key.raw || key.sequence || '';
+    if (!chunk) {
+      return;
+    }
+
+    observedBufferRef.current = (observedBufferRef.current + chunk).slice(-128);
+    if (looksLikeKittyEnterLeak(observedBufferRef.current)) {
+      key.preventDefault?.();
+      resolveOnce('vt');
+    }
+  });
+
+  const modeText =
+    requestedMode === 'auto'
+      ? 'auto (trying kitty first)'
+      : requestedMode === 'kitty'
+        ? 'kitty (forced)'
+        : 'vt compatibility (forced)';
+
+  return (
+    <box width="100%" height="100%" justifyContent="center" alignItems="center">
+      <box flexDirection="column" alignItems="center" gap={1} borderStyle="rounded" borderColor={COLORS.border} paddingLeft={3} paddingRight={3} paddingTop={1} paddingBottom={1}>
+        <text fg={COLORS.title}>Welcome to GitSpace</text>
+        <text fg={COLORS.text}>Press Enter to start</text>
+        <text fg={COLORS.textDim}>Keyboard mode: {modeText}</text>
+        {requestedMode === 'auto' && (
+          <text fg={COLORS.textDim}>If Enter decoding looks broken, we auto-switch to VT mode.</text>
+        )}
+      </box>
     </box>
   );
 }
@@ -2894,16 +2502,16 @@ export async function launchTUI(
     ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
   });
 
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    targetFps: 30,
-    useMouse: true,
-  });
-  const root = createRoot(renderer);
+  const requestedKeyboardMode = resolveRequestedKeyboardMode();
+  const initialKeyboardMode: ResolvedKeyboardMode = requestedKeyboardMode === 'vt' ? 'vt' : 'kitty';
+
+  let renderer = await createRendererForKeyboardMode(initialKeyboardMode);
+  let root = createRoot(renderer);
+  let activeRenderer = renderer;
 
   // Clean exit handler
   const handleQuit = () => {
-    renderer.destroy();
+    activeRenderer.destroy();
 
     const legacyReminder = consumeLegacyCleanupReminderForTui();
     if (legacyReminder) {
@@ -2924,6 +2532,29 @@ export async function launchTUI(
     process.stdout.write('\x1b[0m'); // Reset colors
   });
 
-  root.render(<App relayConfig={relayConfig} onQuit={handleQuit} />);
-  renderer.start();
+  const resolvedKeyboardMode = await new Promise<ResolvedKeyboardMode>((resolve) => {
+    root.render(
+      <KeyboardWelcomeGate
+        requestedMode={requestedKeyboardMode}
+        onResolve={(mode) => resolve(mode)}
+      />
+    );
+    activeRenderer.start();
+  });
+
+  if (
+    requestedKeyboardMode === 'auto' &&
+    resolvedKeyboardMode === 'vt' &&
+    initialKeyboardMode !== 'vt'
+  ) {
+    activeRenderer.destroy();
+    renderer = await createRendererForKeyboardMode('vt');
+    activeRenderer = renderer;
+    root = createRoot(renderer);
+    root.render(<App relayConfig={relayConfig} onQuit={handleQuit} keyboardMode={resolvedKeyboardMode} />);
+    renderer.start();
+    return;
+  }
+
+  root.render(<App relayConfig={relayConfig} onQuit={handleQuit} keyboardMode={resolvedKeyboardMode} />);
 }

@@ -27,7 +27,9 @@ import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
+import { useLifecycleController } from '../app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from '../lib/processes/editor.js';
+import { createLocalDeviceCertificate } from '../core/user-identity.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -55,6 +57,7 @@ export interface RemoteMachineScreenProps {
 export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: RemoteMachineScreenProps) {
   const remote = useRemoteTerminal();
   const renderer = useRenderer();
+  const [deviceCertificate, setDeviceCertificate] = useState<string | null>(null);
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
@@ -63,12 +66,40 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
   const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
+  const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const flow = useFlow({
     onError: (error) => {
       remote.disconnect();
       console.error(`[tui] Remote machine flow error: ${error.message}`);
     },
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    setDeviceCertificate(null);
+
+    void createLocalDeviceCertificate(identity)
+      .then((cert) => {
+        if (!cancelled) {
+          setDeviceCertificate(cert);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        flow.showMessage({
+          title: 'Identity Error',
+          message,
+          variant: 'error',
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [flow, identity]);
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: remote.commandError ?? null,
@@ -97,12 +128,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
     onBeforeAttach: ({ target, params }) => {
       if (target === 'workspace' && params.workspaceId && !params.command) {
+        lastScriptWorkspaceIdRef.current = params.workspaceId;
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
       }
     },
     onAttachCancelled: ({ target }) => {
+      if (target === 'workspace' && showScriptTerminal) {
+        return;
+      }
       if (target === 'workspace') {
         setShowScriptTerminal(false);
       }
@@ -146,6 +181,20 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
   });
 
+  const lifecycleController = useLifecycleController({
+    flow,
+    listGithubRepos: remote.listGithubRepos,
+    listRemoteBranches: remote.listRemoteBranches,
+    listLinearIssues: remote.listLinearIssues,
+    createProject: remote.createProject,
+    createWorkspace: remote.createWorkspace,
+    deleteProject: remote.deleteProject,
+    getProjectNames: () => remote.projects.map((project) => project.name),
+    refreshProjects: () => remote.requestProjects(),
+    refreshWorkspaces: () => remote.requestWorkspaces(),
+    refreshSessions: () => remote.requestSessions(),
+  });
+
   useEffect(() => {
     if (!showScriptTerminal || remote.mode !== 'browsing') {
       return;
@@ -161,17 +210,22 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   }, [remote.mode, remote.setWriteCallback, showScriptTerminal]);
 
   useEffect(() => {
+    if (!deviceCertificate) {
+      return;
+    }
+
     void remote.connect({
       relayUrl,
       identity,
       machineId: machine.machineId,
       machineLabel: machine.label,
+      deviceCertificate,
     });
 
     return () => {
       remote.disconnect();
     };
-  }, [identity, machine.label, machine.machineId, relayUrl]);
+  }, [deviceCertificate, identity, machine.label, machine.machineId, relayUrl]);
 
   useEffect(() => {
     if (remote.status !== 'established' || remote.mode !== 'browsing') {
@@ -371,6 +425,24 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     machineName: machine.label || machine.machineId,
   });
 
+  const selectedProjectName = useMemo(() => {
+    const selected = spacesBrowserProps.selectedItem;
+    if (!selected) {
+      return null;
+    }
+    if (selected.type === 'project') {
+      return selected.name;
+    }
+    if (selected.type === 'workspace') {
+      return selected.workspace.projectName;
+    }
+    if ('workspaceId' in selected && typeof selected.workspaceId === 'string') {
+      const separator = selected.workspaceId.indexOf(':');
+      return separator > 0 ? selected.workspaceId.slice(0, separator) : null;
+    }
+    return null;
+  }, [spacesBrowserProps.selectedItem]);
+
   const inboxProps = useInbox({
     items: remote.inbox,
     unreadCount: remote.inboxUnreadCount,
@@ -481,10 +553,34 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
 
     if (showScriptTerminal) {
+      if (remote.scriptState?.isRunning && (key.raw === 'c' || key.name === 'c')) {
+        remote.cancelPendingScripts();
+        return;
+      }
+
+      if (
+        !remote.scriptState?.isRunning &&
+        !!remote.scriptState?.error &&
+        (key.raw === 'a' || key.name === 'a') &&
+        !!lastScriptWorkspaceIdRef.current
+      ) {
+        const workspaceId = lastScriptWorkspaceIdRef.current;
+        if (!workspaceId) {
+          return;
+        }
+
+        await attachController.attach({
+          workspaceId,
+          scriptPolicy: 'skip',
+        });
+        return;
+      }
+
       if (
         !remote.scriptState?.isRunning &&
         (key.name === 'escape' || key.name === 'n' || key.raw === 'n')
       ) {
+        lastScriptWorkspaceIdRef.current = null;
         setShowScriptTerminal(false);
       }
       return;
@@ -554,7 +650,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     } else if (browseCommand === 'activate') {
       spacesBrowserProps.activateSelected();
     } else if (browseCommand === 'new') {
-      spacesBrowserProps.createNewSession();
+      lifecycleController.openCreateMenu(selectedProjectName);
     } else if (browseCommand === 'refresh') {
       spacesBrowserProps.refresh();
     } else if (browseCommand === 'open-inbox') {
@@ -588,7 +684,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       }
     } else if (browseCommand === 'delete') {
       const selected = spacesBrowserProps.selectedItem;
-      if (selected?.type === 'workspace') {
+      if (selected?.type === 'project') {
+        lifecycleController.openDeleteProjectFlow(selected.name);
+      } else if (selected?.type === 'workspace') {
         flow.showConfirmTyped({
           title: 'Delete Workspace',
           message: `Delete workspace "${selected.workspace.name}"?`,
@@ -649,9 +747,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           isRunning={isRunning}
           error={remote.scriptState?.error}
           exitCode={remote.scriptState?.exitCode}
+          modalOpen={flow.isOpen}
         />
         {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar hint={isRunning ? '[Running scripts...]' : '[Esc/n] Back to workspaces'} />
+        <StatusBar
+          hint={isRunning
+            ? '[Running scripts... c: cancel + attach anyway]'
+            : remote.scriptState?.error
+              ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
+              : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back'}
+        />
       </Fragment>
     );
   }
@@ -684,7 +789,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       </box>
       <SpacesBrowserTUI {...spacesBrowserProps} focused={true} />
       <FlowTUI flow={flow} />
-      <StatusBar hint="[↑↓] Navigate  [Enter] Open/Join  [n] New Session  [x] Kill  [d] Delete  [i] Inbox  [Esc] Back" />
+      <StatusBar hint="[↑↓] Navigate  [Enter] Open/Join  [n] Create  [x] Kill  [d] Delete  [i] Inbox  [Esc] Back" />
     </box>
   );
 }

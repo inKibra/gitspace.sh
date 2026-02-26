@@ -6,7 +6,12 @@
  */
 
 import { join } from 'path';
-import { discoverScripts, runScriptsInTerminal, type RunScriptsOptions } from './run-scripts';
+import {
+  discoverScripts,
+  runScriptsInTerminal,
+  type RunScriptsOptions,
+  isScriptExecutionCancelledError,
+} from './run-scripts';
 import {
   buildBundleStepFingerprints,
   buildSetupState,
@@ -46,11 +51,13 @@ export interface RunWorkspaceScriptsOptions {
   onPhaseStart?: (phase: ScriptPhase) => void;
   /** Script execution policy for session attach attempts. */
   scriptPolicy?: 'auto' | 'skip';
+  /** Optional cancellation signal for script execution. */
+  signal?: AbortSignal;
 }
 
 export type RunWorkspaceScriptsResult =
   | { success: true }
-  | { success: false; phase: ScriptPhase; error: string };
+  | { success: false; phase: ScriptPhase; error: string; cancelled?: boolean };
 
 /**
  * Run workspace scripts based on setup state.
@@ -73,6 +80,7 @@ export async function runWorkspaceScripts(
     onOutput,
     onPhaseStart,
     scriptPolicy = 'auto',
+    signal,
   } = options;
 
   const changes = detectBundleChanges(projectName, workspacePath);
@@ -107,6 +115,7 @@ export async function runWorkspaceScripts(
     bundleSecrets,
     nonInteractive: !interactive,
     onOutput,
+    signal,
   };
 
   const existingLock = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
@@ -170,6 +179,7 @@ export async function runWorkspaceScripts(
     } catch (error) {
       const phase: ScriptPhase = preScriptsSucceeded ? 'setup' : 'pre';
       const message = error instanceof Error ? error.message : String(error);
+      const cancelled = isScriptExecutionCancelledError(error);
       lockState = {
         ...lockState,
         bundle: bundleHash
@@ -186,7 +196,7 @@ export async function runWorkspaceScripts(
         },
       };
       writeWorkspaceLockState(workspacePath, lockState);
-      return { success: false, phase, error: message };
+      return { success: false, phase, error: message, cancelled };
     }
   }
 
@@ -210,6 +220,7 @@ export async function runWorkspaceScripts(
     return { success: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const cancelled = isScriptExecutionCancelledError(error);
     lockState = {
       ...lockState,
       select: {
@@ -219,7 +230,7 @@ export async function runWorkspaceScripts(
       },
     };
     writeWorkspaceLockState(workspacePath, lockState);
-    return { success: false, phase: 'select', error: message };
+    return { success: false, phase: 'select', error: message, cancelled };
   }
 }
 

@@ -328,7 +328,7 @@ export function deleteComment(
 // ============================================================================
 
 const GITIGNORE_ENTRY = '.gitspace/review/';
-const GITIGNORE_MARKER = '# gssh review — workspace review notes';
+const GITIGNORE_MARKER = '# gssh workspace review — workspace review notes';
 
 /**
  * Ensure that .gitspace/review/ is handled appropriately in .gitignore.

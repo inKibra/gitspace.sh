@@ -65,13 +65,13 @@ export interface X3DHAuthMessage {
    * Signs: clientEphemeral || serverEphemeral || clientNonce || serverNonce
    */
   identitySignature: string;
-  authorization:
-    | { type: "invite"; inviteToken: string }
-    | { type: "access_list" };
+  authorization: { type: "access_list" };
+  /** JSON-serialized device certificate (required for all authorization modes) */
+  deviceCertificate: string;
 }
 
 /** Access type for a client */
-export type AccessType = 'full' | 'session-invite';
+export type AccessType = 'full' | 'view';
 
 export interface X3DHResultMessage {
   version: number;
@@ -132,8 +132,8 @@ export function isX3DHResultMessage(data: unknown): data is X3DHResultMessage {
   }
   const result = d.result as Record<string, unknown>;
   if (result.type === 'accepted') {
-    // accessType must be 'full' or 'session-invite'
-    return result.accessType === 'full' || result.accessType === 'session-invite';
+    // accessType must be 'full' or 'view'
+    return result.accessType === 'full' || result.accessType === 'view';
   } else if (result.type === 'rejected') {
     return typeof result.reason === 'string';
   }
@@ -257,7 +257,8 @@ export function processServerHello(
 export function createClientAuth(
   state: X3DHClientState,
   identity: Identity,
-  authorization: X3DHAuthMessage["authorization"]
+  authorization: X3DHAuthMessage["authorization"],
+  deviceCertificate: string
 ): {
   state: X3DHClientState;
   message: X3DHAuthMessage;
@@ -317,6 +318,10 @@ export function createClientAuth(
   // Sign the transcript with the client's identity signing key
   const identitySignature = sign(signatureTranscript, identity.signing.secretKey);
 
+  if (!deviceCertificate) {
+    throw new Error("Device certificate required for handshake authorization (owner identity binding)");
+  }
+
   const message: X3DHAuthMessage = {
     version: PROTOCOL_VERSION,
     identityKey: toBase64(identity.signing.publicKey),
@@ -324,6 +329,7 @@ export function createClientAuth(
     identityProof: toBase64(identityProof),
     identitySignature: toBase64(identitySignature),
     authorization,
+    deviceCertificate,
   };
 
   const newState: X3DHClientState = {

@@ -42,24 +42,24 @@ describe("AccessControlList", () => {
     });
 
     it("should add a new entry with custom access type", () => {
-      const entry = acl.addEntry(publicIdentity1, 'session-invite');
+      const entry = acl.addEntry(publicIdentity1, 'view');
 
-      expect(entry.accessType).toBe('session-invite');
+      expect(entry.accessType).toBe('view');
     });
 
-    it("should add a new entry with session ID for session-invite", () => {
-      const entry = acl.addEntry(publicIdentity1, 'session-invite', 'session-123');
+    it("should add a new entry with session ID for view", () => {
+      const entry = acl.addEntry(publicIdentity1, 'view', 'session-123');
 
-      expect(entry.accessType).toBe('session-invite');
+      expect(entry.accessType).toBe('view');
       expect(entry.sessionId).toBe('session-123');
     });
 
     it("should replace existing entry", () => {
       const entry1 = acl.addEntry(publicIdentity1, 'full');
-      const entry2 = acl.addEntry(publicIdentity1, 'session-invite');
+      const entry2 = acl.addEntry(publicIdentity1, 'view');
 
       expect(acl.size).toBe(1);
-      expect(entry2.accessType).toBe('session-invite');
+      expect(entry2.accessType).toBe('view');
       expect(entry2.grantedAt).toBeGreaterThanOrEqual(entry1.grantedAt);
     });
 
@@ -134,8 +134,8 @@ describe("AccessControlList", () => {
       expect(acl.hasFullAccess(publicIdentity1.id)).toBe(true);
     });
 
-    it("should return false for session-invite entry", () => {
-      acl.addEntry(publicIdentity1, 'session-invite');
+    it("should return false for view entry", () => {
+      acl.addEntry(publicIdentity1, 'view');
 
       expect(acl.hasFullAccess(publicIdentity1.id)).toBe(false);
     });
@@ -155,13 +155,13 @@ describe("AccessControlList", () => {
 
   describe("hasSessionAccess", () => {
     it("should return true for matching session", () => {
-      acl.addEntry(publicIdentity1, 'session-invite', 'session-123');
+      acl.addEntry(publicIdentity1, 'view', 'session-123');
 
       expect(acl.hasSessionAccess(publicIdentity1.id, 'session-123')).toBe(true);
     });
 
     it("should return false for non-matching session", () => {
-      acl.addEntry(publicIdentity1, 'session-invite', 'session-123');
+      acl.addEntry(publicIdentity1, 'view', 'session-123');
 
       expect(acl.hasSessionAccess(publicIdentity1.id, 'session-456')).toBe(false);
     });
@@ -232,11 +232,11 @@ describe("AccessControlList", () => {
     it("should update access type for existing entry", () => {
       acl.addEntry(publicIdentity1, 'full');
 
-      const updated = acl.updateAccessType(publicIdentity1.id, 'session-invite', 'session-123');
+      const updated = acl.updateAccessType(publicIdentity1.id, 'view', 'session-123');
 
       expect(updated).toBe(true);
       const entry = acl.getEntry(publicIdentity1.id);
-      expect(entry?.accessType).toBe('session-invite');
+      expect(entry?.accessType).toBe('view');
       expect(entry?.sessionId).toBe('session-123');
     });
 

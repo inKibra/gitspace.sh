@@ -11,6 +11,7 @@ import {
 export interface MachineDirectoryClientConfig<TIdentity, TContext = undefined> {
   relayUrl: string;
   clientIdentityId: string;
+  deviceCertificate: string;
   signer?: RelaySigner;
   identity: TIdentity;
   context?: TContext;
@@ -106,6 +107,7 @@ export function useMachineDirectory<TSocket, TIdentity, TContext = undefined>(
       const client = new RelayMachineDirectoryClient<TSocket>({
         relayUrl: config.relayUrl,
         clientIdentityId: config.clientIdentityId,
+        deviceCertificate: config.deviceCertificate,
         socketAdapter: socketAdapterRef.current,
         signer: config.signer,
         onStatusChange: (nextStatus) => {

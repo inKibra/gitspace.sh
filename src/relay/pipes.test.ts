@@ -14,10 +14,10 @@ import {
 import type { WebSocketData } from "./types";
 
 // Mock WebSocket for testing
-function createMockWs(data: Omit<WebSocketData, 'accountId'> & { accountId?: string }): any {
+function createMockWs(data: Omit<WebSocketData, 'ownerUserRootId'> & { ownerUserRootId?: string }): any {
   const messages: any[] = [];
   return {
-    data: { ...data, accountId: data.accountId ?? 'test-account' },
+    data: { ...data, ownerUserRootId: data.ownerUserRootId ?? 'test-owner' },
     send: mock((msg: any) => messages.push(msg)),
     close: mock(() => {}),
     _messages: messages,

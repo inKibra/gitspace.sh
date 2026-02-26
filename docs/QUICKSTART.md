@@ -47,7 +47,7 @@ Use arrow keys to navigate, `Enter` to select, `?` for help, `q` to quit.
 ### Add a Project (CLI)
 
 ```bash
-gssh add project
+gssh project add
 # Select a GitHub repo from the list
 ```
 
@@ -55,14 +55,15 @@ gssh add project
 
 ```bash
 # In a project directory
-gssh add my-feature
+gssh workspace add my-feature --project my-project
 ```
 
 ### Switch Workspaces
 
 ```bash
-gssh switch my-feature
-# Or just: gssh switch (interactive)
+gssh workspace context --project my-project --workspace my-feature
+# Or list available workspaces first:
+# gssh workspace list --project <project-name>
 ```
 
 ---
@@ -73,13 +74,13 @@ gssh switch my-feature
 
 ```bash
 # 1. Sign in with GitHub
-gssh auth login
+gssh user auth login
 
 # 2. Reserve your subdomain
-gssh host reserve yourname
+gssh user host reserve yourname
 
 # 3. Start serving
-gssh serve
+gssh machine serve start --foreground
 
 # 4. Open https://yourname.gitspace.sh in browser
 ```
@@ -90,23 +91,23 @@ gssh serve
 # Terminal 1: Start relay
 gssh relay start --port 4480
 
-# Terminal 2: Setup identity and serve
-gssh identity init --label "My Mac"
-gssh serve --relay ws://localhost:4480/ws
+# Terminal 2: Create relay-machine invite token on relay host
+gssh invite relay-machine create --relay ws://localhost:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --label "My Mac"
 
-# Terminal 3: Create invite
-gssh share create
-# Share the URL with collaborators
+# Terminal 3: Setup identity, enroll, and serve
+gssh user identity init
+gssh machine enroll --invite "ws://localhost:4480/ws#<TOKEN>" --label "My Mac"
+gssh machine serve start --relay ws://localhost:4480/ws
 ```
 
 ### Connect from Another Device
 
 ```bash
-# First time: create identity
-gssh identity init --label "Laptop"
+# Recover the same owner identity
+gssh user identity recover
 
-# Connect using invite
-gssh connect <invite-token>
+# Connect as owner
+gssh client connect <machine-id>
 ```
 
 ---
@@ -116,11 +117,11 @@ gssh connect <invite-token>
 | Command | Description |
 |---------|-------------|
 | `gssh` | Launch TUI |
-| `gssh add project` | Add GitHub project |
-| `gssh add <name>` | Create workspace |
-| `gssh switch` | Switch workspace |
-| `gssh list` | List workspaces |
-| `gssh serve` | Enable remote access |
+| `gssh project add` | Add GitHub project |
+| `gssh workspace add <name> --project <project-name>` | Create workspace |
+| `gssh workspace context --project <project-name> --workspace <name>` | Show workspace context |
+| `gssh workspace list --project <project-name>` | List workspaces |
+| `gssh machine serve start --foreground` | Enable remote access |
 | `gssh status` | Check daemon status |
 
 ---
@@ -171,12 +172,12 @@ gh auth login
 ### "No identity found"
 
 ```bash
-gssh identity init --label "My Device"
+gssh user identity init
 ```
 
 ### "Machine offline"
 
-Ensure `gssh serve` is running on the target machine.
+Ensure `gssh machine serve start --foreground` is running on the target machine.
 
 ---
 

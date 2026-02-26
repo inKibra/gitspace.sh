@@ -148,15 +148,25 @@ export function isValidBranchName(name: string): boolean {
 }
 
 /**
- * Extract repository name from owner/repo format
+ * Extract repository name from owner/repo or remote URL
  *
- * @param repository Repository in "owner/repo" format
+ * @param repository Repository in "owner/repo" format or remote URL
  * @returns Repository name
  *
  * @example
  * extractRepoName("myorg/my-app") // "my-app"
  */
 export function extractRepoName(repository: string): string {
-  const parts = repository.split('/');
-  return parts[parts.length - 1];
+  const trimmed = repository.trim().replace(/\/$/, '');
+
+  if (!trimmed) {
+    return '';
+  }
+
+  const sshMatch = trimmed.match(/^[^@]+@[^:]+:(.+)$/);
+  const pathPart = sshMatch ? sshMatch[1] : trimmed;
+
+  const parts = pathPart.split('/');
+  const rawName = parts[parts.length - 1] || '';
+  return rawName.endsWith('.git') ? rawName.slice(0, -4) : rawName;
 }

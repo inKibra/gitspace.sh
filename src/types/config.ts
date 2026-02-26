@@ -232,12 +232,12 @@ export interface ProjectConfig {
   events?: EventsConfig;
   /**
    * @deprecated Use user-level Linear config instead.
-   * Kept for backwards compatibility - will be migrated on first access.
+   * Deprecated project-level field; values are lifted to user-level config on read.
    */
   linearApiKey?: string;
   /**
    * @deprecated Use linearTeams instead.
-   * Kept for backwards compatibility - will be migrated on first access.
+   * Deprecated project-level field; values are lifted to user-level config on read.
    */
   linearTeamKey?: string;
   /** Linear teams this project uses (subset of user's teams) */

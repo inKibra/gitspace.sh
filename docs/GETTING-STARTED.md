@@ -45,16 +45,14 @@ The relay server connects machines and clients but **cannot read your terminal c
 └──────────────┘          └──────────────┘          └──────────────┘
 ```
 
-### Trust Through Invites
+### Trust Through Identity + Enrollment
 
-Access is granted through **signed invite tokens**. When you create an invite:
+Runtime access is owner-only and based on the owner user root identity:
 
-1. Your machine signs the invite with its private key
-2. The invite contains your machine's public keys and the relay URL
-3. Anyone with the invite can request access
-4. Your machine validates the invite signature and grants permissions
-
-This is a "trust on first use" model - the invite bootstraps the initial connection, then your machine maintains an access list of authorized clients.
+1. The relay is bound to one owner user root identity
+2. Clients and machines present device certificates tied to that owner identity
+3. Relay-machine invites are used only to enroll machines onto a relay
+4. Client connection authorization succeeds only when the owner identity matches
 
 ### End-to-End Encryption
 
@@ -76,8 +74,8 @@ All terminal data is encrypted using keys derived from an X3DH (Extended Triple 
 │                                                                              │
 │  YOUR MACHINE                    RELAY SERVER              REMOTE CLIENT    │
 │  ┌─────────────────────┐        ┌─────────────────┐       ┌─────────────┐  │
-│  │ gssh serve          │        │ gssh relay      │       │ gssh        │  │
-│  │                     │        │                 │       │ connect     │  │
+│  │ gssh machine serve start --foreground          │        │ gssh relay start │      │ gssh client connect │  │
+│  │                     │        │                 │       │             │  │
 │  │ ┌─────────────────┐ │        │ ┌─────────────┐ │       │             │  │
 │  │ │ Identity        │ │        │ │ Machine     │ │       │ ┌─────────┐ │  │
 │  │ │ (Ed25519+X25519)│ │        │ │ Registry    │ │       │ │Identity │ │  │
@@ -102,130 +100,111 @@ All terminal data is encrypted using keys derived from an X3DH (Extended Triple 
 
 ## Quick Start
 
-### Step 1: Start the Relay Server
+### Owner model
 
-The relay is the meeting point for machines and clients. You can run your own or use a hosted relay.
+For hosted setup, the owner is the machine/operator that configures GitSpace and runs `gssh machine serve start`.
+That host is your control node for identity, access, and relay-connected machines.
 
-```bash
-# Start the relay
-gssh relay start --port 8080
-```
-
-The relay will listen on `ws://localhost:8080/ws`.
-
-### Step 2: Set Up Your Machine Identity
-
-Before serving, create a persistent identity for your machine:
+### Step 1: Install GitSpace CLI
 
 ```bash
-# Create a new identity (stored in ~/gitspace/.identity/)
-gssh identity init --label "My MacBook"
-
-# View your identity
-gssh identity show
+npm install -g gitspace
+gssh --version
 ```
 
-### Step 3: Authorize Your Machine with the Relay
-
-Authorize the machine's public identity on the relay host:
+### Step 2: Authenticate GitHub CLI (recommended)
 
 ```bash
-# On the relay host
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "My MacBook"
+gh auth login
 ```
 
-You can copy the `gssh-pub:...` value from `gssh identity show`.
-
-### Step 4: Start Serving
-
-Connect your machine to the relay:
+### Step 3: Set up machine identity
 
 ```bash
-# Start the serve daemon
-gssh serve --relay ws://localhost:8080/ws
+gssh user identity init
+gssh user identity show
 ```
 
-Your machine is now:
-- Connected to the relay
-- Registered with its identity
-- Ready to accept client connections
+`gssh machine serve start --foreground` requires an existing identity.
 
-### Step 5: Create an Invite
-
-To let someone connect, create a signed invite:
+### Step 4: Authenticate with gitspace.sh
 
 ```bash
-# Create an invite (expires in 24 hours by default)
-gssh share create
-
-# Create an invite with custom expiration
-gssh share create --expires 7d
-
-# Output: Invite token that can be shared
+gssh user auth login
 ```
 
-The invite is a self-contained, signed token that includes:
-- Your machine's public identity
-- The relay URL
-- Access type (full or session-invite)
-- Expiration time
+### Step 5: Reserve your subdomain
 
-**Note:** When you create an invite, it's automatically registered with the relay server. This allows clients to connect via the invite ID without needing to present the full token to the relay.
+```bash
+gssh user host reserve <yourname>
+gssh user host status
+```
 
-### Step 6: Connect from Another Device
+### Step 6: Start serving
+
+```bash
+gssh machine serve start
+gssh machine serve status
+gssh status
+gssh cloud status
+```
+
+Then open `https://<yourname>.gitspace.sh`.
+
+### Step 7: Prepare another owner device
 
 On the remote device:
 
 ```bash
-# Create a client identity (first time only)
-gssh identity init --label "Work Laptop"
+# Recover the same owner identity from your mnemonic
+gssh user identity recover
 
-# Connect using the invite
-gssh connect <invite-url-or-token>
+# Connect as owner
+gssh client connect <machine-id>
 ```
 
+### Step 8: Connect from another device
+
 The connection flow:
-1. Client connects to relay and signs connect_with_invite
-2. Client presents invite ID to relay
+1. Client connects to relay and signs `connect_to_machine`
+2. Relay verifies owner identity from the device certificate
 3. Relay routes client to your machine
 4. X3DH handshake establishes encryption
 5. PTY session starts
 6. You're in!
 
+### Self-hosted relay alternative
+
+If you are not using gitspace.sh hosting, run your own relay and point serve at it:
+
+```bash
+# Relay host
+gssh relay start --port 4480
+
+# Create relay-machine invite token
+gssh invite relay-machine create --relay ws://<relay-host>:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB> --label "My Machine"
+
+# Machine host
+gssh user identity init
+gssh machine enroll --invite "ws://<relay-host>:4480/ws#<TOKEN>" --label "My Machine"
+gssh machine serve start --relay ws://<relay-host>:4480/ws
+```
+
 ---
 
 ## Access Management
 
-### Viewing Authorized Clients
-
-After a client connects via invite, they're added to your access list:
+Runtime access is owner-only. To bring a machine online, use machine enrollment invites:
 
 ```bash
-# List all authorized clients
-gssh access list
+# Create machine enrollment invite
+gssh invite relay-machine create --relay ws://<relay-host>:4480/ws --machine-signing-key <BASE64_ED25519_PUB> --machine-key-exchange-key <BASE64_X25519_PUB>
 
-# Output:
-# ID                      Label           Access Type    Added
-# gssh_pk_abc123...       Work Laptop     full           2024-01-15
-# gssh_pk_def456...       Phone           full           2024-01-10
-```
+# Inspect enrolled machines
+gssh relay machines list
 
-### Adding Access Directly
-
-You can add a client's public key directly without an invite:
-
-```bash
-# Add a client by their public key
-gssh access add gssh_pk_abc123... --label "Brad's Phone"
-```
-
-### Revoking Access
-
-Remove a client from your access list:
-
-```bash
-# Remove by public key
-gssh access remove gssh_pk_abc123...
+# Revoke a machine from relay registry
+gssh relay machines revoke <machine-id>
 ```
 
 ---
@@ -280,12 +259,12 @@ gssh access remove gssh_pk_abc123...
 
 ## Connection Flow Details
 
-### Initial Connection (via Invite)
+### Initial Connection (Owner-authorized)
 
 ```
 Client                     Relay                      Machine
    │                         │                           │
-   │──connect_with_invite───▶│                           │
+   │──connect_to_machine─────▶│                           │
    │                         │──client_connected────────▶│
    │◀──connection_established│                           │
    │                         │                           │
@@ -300,9 +279,9 @@ Client                     Relay                      Machine
    │          [Encrypted terminal I/O begins]            │
 ```
 
-### Direct Connection (Pre-authorized)
+### Direct Connection (Same owner identity)
 
-Once a client is in your access list, they can connect directly:
+Any device recovered with the same owner mnemonic can connect directly:
 
 ```
 Client                     Relay                      Machine
@@ -334,25 +313,32 @@ Each machine needs its own identity:
 
 ```bash
 # On machine 1
-gssh identity init --label "Desktop"
-gssh serve --relay wss://relay.example.com/ws
+gssh user identity init
+gssh machine serve start --relay wss://relay.example.com/ws
 
 # On machine 2
-gssh identity init --label "Server"
-gssh serve --relay wss://relay.example.com/ws
+gssh user identity init
+gssh machine serve start --relay wss://relay.example.com/ws
 ```
 
-Authorize each machine on the relay host:
+Create relay-machine enrollment invites for each machine:
 
 ```bash
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "Desktop"
-gssh relay authorize gssh-pub:SIGNING_KEY:KEYEXCHANGE_KEY --label "Server"
+gssh invite relay-machine create --relay wss://relay.example.com/ws --machine-signing-key <DESKTOP_SIGNING_KEY> --machine-key-exchange-key <DESKTOP_X25519_KEY> --label "Desktop"
+gssh invite relay-machine create --relay wss://relay.example.com/ws --machine-signing-key <SERVER_SIGNING_KEY> --machine-key-exchange-key <SERVER_X25519_KEY> --label "Server"
 ```
 
-Clients can list machines they're authorized for:
+Then enroll each machine with the token returned by the relay:
 
 ```bash
-gssh connect --list
+gssh machine enroll --invite "wss://relay.example.com/ws#<token>" --label "Desktop"
+gssh machine enroll --invite "wss://relay.example.com/ws#<token>" --label "Server"
+```
+
+Clients can list machines they can access:
+
+```bash
+gssh client machines list --relay wss://relay.example.com/ws
 # Output:
 # Machine ID        Label      Status
 # abc123...         Desktop    online
@@ -372,14 +358,14 @@ gssh connect --list
 
 ### "Client not authorized"
 
-The client's identity is not in the machine's access list. Either:
-- Use an invite to connect first
-- Have the machine owner add your public key: `gssh access add <public-key> --label "Name"`
+The connecting client identity does not match the owner user root identity for this relay/machine. Either:
+- Recover the same owner identity on the client device: `gssh user identity recover`
+- Verify the client is using the expected local identity: `gssh user identity show`
 
 ### "Machine offline"
 
 The machine isn't connected to the relay. Ensure:
-- `gssh serve` is running on the machine
+- `gssh machine serve start --foreground` is running on the machine
 - The machine can reach the relay URL
 
 ### "Invite not found"
@@ -387,7 +373,7 @@ The machine isn't connected to the relay. Ensure:
 The invite may have:
 - Expired (check `--expires` when creating)
 - Been revoked by the machine owner
-- Not been registered with the relay (ensure `gssh serve` was running when invite was created)
+- Not been registered with the relay (ensure `gssh machine serve start --foreground` was running when invite was created)
 
 ### "Handshake timeout"
 
@@ -410,16 +396,14 @@ Your cryptographic identity is generated and stored locally. No central authorit
 
 ### 3. Explicit Authorization
 
-Access is never implicit. Every client must either:
-- Present a valid invite signed by the machine
-- Be explicitly added to the access list
+Access is never implicit. Every client must present a device certificate derived from the owner user root identity.
 
 ### 4. Minimal Metadata
 
 The relay learns only what it needs for routing:
 - Which machine IDs exist
-- Which invites are registered
-- Which clients are authorized
+- Which machine enrollment invites are registered
+- Which owner identity a relay is bound to
 
 It never learns the content of your sessions.
 

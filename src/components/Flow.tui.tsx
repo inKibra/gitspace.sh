@@ -4,6 +4,11 @@
  * OpenTUI components for rendering modals/dialogs.
  */
 
+import { useMemo, useRef } from 'react';
+import { useKeyboard } from '@opentui/react';
+import type { ScrollBoxRenderable } from '@opentui/core';
+import { toast } from '@opentui-ui/toast';
+import { copyToClipboard } from '../utils/clipboard.js';
 import type { UseFlowReturn, FlowState } from './Flow.js';
 
 // ============================================================================
@@ -77,16 +82,20 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
       return null;
 
     case 'message':
+      {
+        const lineCount = getLineCount(state.message);
+        const modalHeight = Math.min(getModalMaxHeight(), Math.max(8, lineCount + 7));
       return (
-        <Modal title={state.title} width={50}>
-          <text fg={getVariantColor(state.variant)} marginBottom={1}>
-            {state.message}
-          </text>
-          <text fg={COLORS.textDim} height={1}>
-            Press Enter to close
-          </text>
+        <Modal title={state.title} width={60} height={modalHeight}>
+          <ScrollableMessageBody
+            active={true}
+            message={state.message}
+            color={getVariantColor(state.variant)}
+            hint="[Enter] Close  [c] Copy  [↑/↓] Scroll"
+          />
         </Modal>
       );
+      }
 
     case 'loading':
       return (
@@ -115,17 +124,24 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
       );
 
     case 'confirm':
+      {
+        const lineCount = getLineCount(state.message);
+        const modalHeight = Math.min(getModalMaxHeight(), Math.max(10, lineCount + 9));
       return (
-        <Modal title={state.title} width={50}>
-          <text fg={getVariantColor(state.variant)} marginBottom={1}>
-            {state.message}
-          </text>
+        <Modal title={state.title} width={60} height={modalHeight}>
+          <ScrollableMessageBody
+            active={true}
+            message={state.message}
+            color={getVariantColor(state.variant)}
+            hint="[y] Confirm  [n] Cancel  [c] Copy  [↑/↓] Scroll"
+          />
           <box flexDirection="row" gap={2} marginTop={1}>
             <text fg={COLORS.success}>[y] {state.confirmLabel || 'Yes'}</text>
             <text fg={COLORS.error}>[n] {state.cancelLabel || 'No'}</text>
           </box>
         </Modal>
       );
+      }
 
     case 'confirm-typed':
       return (
@@ -304,6 +320,84 @@ interface ModalProps {
   height?: number;
 }
 
+interface ScrollableMessageBodyProps {
+  active: boolean;
+  message: string;
+  color: string;
+  hint: string;
+}
+
+function ScrollableMessageBody({ active, message, color, hint }: ScrollableMessageBodyProps) {
+  const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null);
+  const lines = useMemo(() => {
+    const parts = message.split(/\r?\n/);
+    return parts.length > 0 ? parts : [''];
+  }, [message]);
+
+  useKeyboard(async (key) => {
+    if (!active) {
+      return;
+    }
+
+    const scrollBox = scrollBoxRef.current;
+    if (!scrollBox) {
+      return;
+    }
+
+    if (key.name === 'up' || key.raw === 'k') {
+      scrollBox.scrollBy(-1);
+      return;
+    }
+
+    if (key.name === 'down' || key.raw === 'j') {
+      scrollBox.scrollBy(1);
+      return;
+    }
+
+    if (key.name === 'pageup') {
+      scrollBox.scrollBy(-1, 'viewport');
+      return;
+    }
+
+    if (key.name === 'pagedown') {
+      scrollBox.scrollBy(1, 'viewport');
+      return;
+    }
+
+    if (key.name === 'c' || key.raw === 'c') {
+      try {
+        await copyToClipboard(message);
+        toast.success('Copied to clipboard');
+      } catch {
+        toast.error('Failed to copy to clipboard');
+      }
+    }
+  });
+
+  return (
+    <>
+      <scrollbox
+        ref={(el: ScrollBoxRenderable | null) => {
+          scrollBoxRef.current = el;
+        }}
+        flexGrow={1}
+        overflow="scroll"
+      >
+        <box flexDirection="column" paddingRight={1}>
+          {lines.map((line, idx) => (
+            <text key={idx} fg={color}>
+              {line.length > 0 ? line : ' '}
+            </text>
+          ))}
+        </box>
+      </scrollbox>
+      <text fg={COLORS.textDim} height={1} marginTop={1}>
+        {hint}
+      </text>
+    </>
+  );
+}
+
 function Modal({ title, children, width = 50, height }: ModalProps) {
   return (
     <box
@@ -340,4 +434,25 @@ function getVariantColor(variant?: 'info' | 'success' | 'warning' | 'error' | 'd
     case 'info':
     default: return COLORS.text;
   }
+}
+
+function getLineCount(text: string): number {
+  if (!text) {
+    return 1;
+  }
+
+  return text.split(/\r?\n/).length;
+}
+
+function getModalMaxHeight(): number {
+  let rows = process.stdout.rows || 0;
+  if (rows <= 0) {
+    const size = (process.stdout as { getWindowSize?: () => number[] }).getWindowSize?.();
+    if (Array.isArray(size) && size.length >= 2) {
+      rows = size[1];
+    }
+  }
+
+  const terminalRows = rows > 0 ? rows : 24;
+  return Math.max(8, terminalRows - 4);
 }

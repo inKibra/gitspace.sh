@@ -1,6 +1,7 @@
 # Gitspace Infrastructure Architecture
 
 > **⚠️ FUTURE VISION DOCUMENT**
+> **Historical Document** - retained for context only; not the active runtime contract.
 >
 > This document describes a **planned future architecture** that is **not yet implemented**.
 > The current implementation uses a simpler model with direct PTY sessions and WebSocket relay.
@@ -54,7 +55,7 @@ Gitspaces are lightweight, isolated environments that can be used for:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              USER LAYER                                      │
 │                                                                              │
-│   spaces CLI ─────► Terminal access (E2E encrypted)                         │
+│   gssh CLI ───────► Terminal access (E2E encrypted)                         │
 │   Browser ─────────► Preview URLs (https://pr-123.preview.gitspace.sh)      │
 │   GitHub ──────────► Webhooks (push, PR events)                             │
 └──────────────────────────────────────────────┬──────────────────────────────┘

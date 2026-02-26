@@ -3,6 +3,9 @@ import { BackendManager } from '../backend-manager';
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
   DeleteWorkspaceParams,
   SessionBackend,
 } from '../backend';
@@ -38,8 +41,20 @@ class FakeBackend implements SessionBackend {
     this.disconnectCalls += 1;
   }
   async listProjects(): Promise<void> {}
+  async listGithubRepos(_org?: string): Promise<string[]> {
+    return [];
+  }
+  async listRemoteBranches(_projectName: string): Promise<string[]> {
+    return [];
+  }
+  async listLinearIssues(_projectName: string): Promise<never[]> {
+    return [];
+  }
   async listWorkspaces(): Promise<void> {}
   async listSessions(_workspaceId?: string): Promise<void> {}
+  async createProject(_params: CreateProjectParams): Promise<void> {}
+  async createWorkspace(_params: CreateWorkspaceParams): Promise<void> {}
+  async deleteProject(_projectName: string, _params?: DeleteProjectParams): Promise<void> {}
   async attachSession(_params: AttachSessionParams): Promise<void> {}
   async detachSession(): Promise<void> {}
   async killSession(_sessionId: string): Promise<void> {}

@@ -13,94 +13,104 @@ import {
 } from "../protocol";
 
 describe("parseMessage", () => {
-  describe("authorize_client validation", () => {
-    const validAuthorizeClient = {
-      type: "authorize_client",
-      machineId: "R0lENwJ57_naVQ3h",
-      clientIdentityId: "vyPe20Hv1pnlKo89",
-      signingKey: "vyPe20Hv1pnlKo89BOvn5XuJzPXarq5/hjim96fZ/dM=",
-      keyExchangeKey: "/NOCKBrpy+5hST69/NF2rXutunFakeKey123456789=",
-      accessType: "full",
+  describe("direct auth message validation", () => {
+    const validSignature = {
+      sig: "dGVzdC1zaWduYXR1cmU=",
+      pub: "dGVzdC1wdWJsaWMta2V5",
+      ts: Date.now(),
     };
 
-    test("parses valid authorize_client message", () => {
-      const result = parseMessage(JSON.stringify(validAuthorizeClient));
+    test("parses valid list_machines message", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).not.toBeNull();
-      expect(result?.type).toBe("authorize_client");
+      expect(result?.type).toBe("list_machines");
     });
 
-    test("rejects message with undefined accessType", () => {
-      const msg = { ...validAuthorizeClient };
-      delete (msg as any).accessType;
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects list_machines without deviceCertificate", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with null accessType", () => {
-      const msg = { ...validAuthorizeClient, accessType: null };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects list_machines with empty deviceCertificate", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with invalid accessType string", () => {
-      const msg = { ...validAuthorizeClient, accessType: "admin" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects list_machines without signature", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "list_machines",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+      }));
       expect(result).toBeNull();
     });
 
-    test("accepts accessType 'full'", () => {
-      const msg = { ...validAuthorizeClient, accessType: "full" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("parses valid connect_to_machine message", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).not.toBeNull();
+      expect(result?.type).toBe("connect_to_machine");
     });
 
-    test("accepts accessType 'session-invite'", () => {
-      const msg = { ...validAuthorizeClient, accessType: "session-invite" };
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).not.toBeNull();
-    });
-
-    test("rejects message with empty signingKey", () => {
-      const msg = { ...validAuthorizeClient, signingKey: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects connect_to_machine without signature", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with empty keyExchangeKey", () => {
-      const msg = { ...validAuthorizeClient, keyExchangeKey: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects connect_to_machine without deviceCertificate", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with empty clientIdentityId", () => {
-      const msg = { ...validAuthorizeClient, clientIdentityId: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects connect_to_machine with empty clientIdentityId", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_to_machine",
+        machineId: "R0lENwJ57_naVQ3h",
+        clientIdentityId: "",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
     });
 
-    test("rejects message with empty machineId", () => {
-      const msg = { ...validAuthorizeClient, machineId: "" };
-      const result = parseMessage(JSON.stringify(msg));
+    test("rejects legacy connect_with_invite messages", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "connect_with_invite",
+        inviteId: "invite1234abcd567",
+        clientIdentityId: "vyPe20Hv1pnlKo89",
+        deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+        signature: validSignature,
+      }));
       expect(result).toBeNull();
-    });
-
-    test("accepts message with valid sessionId", () => {
-      const msg = { ...validAuthorizeClient, sessionId: "session-123" };
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).not.toBeNull();
-    });
-
-    test("rejects message with invalid sessionId characters", () => {
-      const msg = { ...validAuthorizeClient, sessionId: "session with spaces" };
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).toBeNull();
-    });
-
-    test("accepts message without sessionId (undefined)", () => {
-      const msg = { ...validAuthorizeClient };
-      delete (msg as any).sessionId;
-      const result = parseMessage(JSON.stringify(msg));
-      expect(result).not.toBeNull();
     });
   });
 
@@ -133,6 +143,209 @@ describe("parseMessage", () => {
     test("rejects message with missing machineId", () => {
       const msg = { ...validRegisterMachine };
       delete (msg as any).machineId;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("owner sync message validation", () => {
+    const validSignature = {
+      sig: "dGVzdC1zaWduYXR1cmU=",
+      pub: "dGVzdC1wdWJsaWMta2V5",
+      ts: Date.now(),
+    };
+
+    const baseSyncMessage = {
+      clientIdentityId: "owner-client-1",
+      deviceCertificate: "{\"deviceSigningPublicKey\":\"abc\"}",
+      signature: validSignature,
+    };
+
+    test("parses owner_sync_compare with local revisions", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_compare",
+        ...baseSyncMessage,
+        localRevisions: {
+          fundamental: 1,
+          integrations: 2,
+          "project/workspace": 3,
+          preferences: 4,
+        },
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_compare");
+    });
+
+    test("rejects owner_sync_compare with invalid category", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_compare",
+        ...baseSyncMessage,
+        localRevisions: {
+          invalid: 1,
+        },
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_pull with categories", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_pull",
+        ...baseSyncMessage,
+        categories: ["fundamental", "preferences"],
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_pull");
+    });
+
+    test("rejects owner_sync_pull with invalid category", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_pull",
+        ...baseSyncMessage,
+        categories: ["fundamental", "invalid-category"],
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_lock", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_lock",
+        ...baseSyncMessage,
+        scope: "global",
+        writerId: "owner-device-1",
+        ttlMs: 15000,
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_lock");
+    });
+
+    test("rejects owner_sync_lock with unsupported scope", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_lock",
+        ...baseSyncMessage,
+        scope: "workspace",
+        writerId: "owner-device-1",
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_push", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_push",
+        ...baseSyncMessage,
+        lockId: "lock-123",
+        record: {
+          category: "preferences",
+          expectedRevision: 4,
+          updatedAt: Date.now(),
+          writerId: "owner-device-1",
+          checksum: "sha256:abc123",
+          ciphertext: "dGVzdC1jaXBoZXJ0ZXh0",
+        },
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_push");
+    });
+
+    test("rejects owner_sync_push with negative expectedRevision", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_push",
+        ...baseSyncMessage,
+        lockId: "lock-123",
+        record: {
+          category: "preferences",
+          expectedRevision: -1,
+          updatedAt: Date.now(),
+          writerId: "owner-device-1",
+          checksum: "sha256:abc123",
+          ciphertext: "dGVzdC1jaXBoZXJ0ZXh0",
+        },
+      }));
+
+      expect(result).toBeNull();
+    });
+
+    test("parses owner_sync_unlock", () => {
+      const result = parseMessage(JSON.stringify({
+        type: "owner_sync_unlock",
+        ...baseSyncMessage,
+        lockId: "lock-123",
+      }));
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe("owner_sync_unlock");
+    });
+  });
+
+  describe('unlock_request validation', () => {
+    const validUnlock = {
+      type: 'unlock_request',
+      workspaceId: 'ws-abc123',
+      unlockToken: 'tok_abc123',
+      ephemeralKey: '3QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+    };
+
+    test('parses valid unlock_request message', () => {
+      const result = parseMessage(JSON.stringify(validUnlock));
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe('unlock_request');
+    });
+
+    test('rejects unlock_request with missing workspaceId', () => {
+      const msg = { ...validUnlock } as any;
+      delete msg.workspaceId;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+
+    test('rejects unlock_request with empty token', () => {
+      const msg = { ...validUnlock, unlockToken: '' };
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+
+    test('rejects unlock_request with missing ephemeralKey', () => {
+      const msg = { ...validUnlock } as any;
+      delete msg.ephemeralKey;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('unlock_grant validation', () => {
+    const validGrant = {
+      type: 'unlock_grant',
+      workspaceId: 'ws-abc123',
+      tokenId: 'tok-id-123',
+      registerPermit: 'permit-123',
+      ciphertext: '3QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+      relayEphemeralKey: '4QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+      salt: '5QKQ3Fjwq5iPk9qk2x6R2A6f7vG8hQ1r3sYkN0Lz9mU=',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+
+    test('parses valid unlock_grant message', () => {
+      const result = parseMessage(JSON.stringify(validGrant));
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe('unlock_grant');
+    });
+
+    test('rejects unlock_grant missing ciphertext', () => {
+      const msg = { ...validGrant } as any;
+      delete msg.ciphertext;
+      const result = parseMessage(JSON.stringify(msg));
+      expect(result).toBeNull();
+    });
+
+    test('rejects unlock_grant missing registerPermit', () => {
+      const msg = { ...validGrant } as any;
+      delete msg.registerPermit;
       const result = parseMessage(JSON.stringify(msg));
       expect(result).toBeNull();
     });

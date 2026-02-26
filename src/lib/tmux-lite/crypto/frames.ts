@@ -107,7 +107,11 @@ export function createFrame(
   data: Uint8Array | Buffer,
   key: Uint8Array | Buffer
 ): Buffer {
-  const { nonce, ciphertext } = encrypt(data, key);
+  const encResult = encrypt(data, key);
+  if (!encResult) {
+    throw new Error('createFrame: invalid key length (expected 32 bytes)');
+  }
+  const { nonce, ciphertext } = encResult;
 
   return encodeFrame({
     streamId,

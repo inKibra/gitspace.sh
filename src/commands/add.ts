@@ -1,25 +1,25 @@
 /**
  * Add command implementation
- * Handles both 'gssh add project' and 'gssh add [workspace-name]'
+ * Handles project/workspace creation for the namespaced CLI.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   readProjectConfig,
   createProject,
   setCurrentProject,
   getProjectBaseDir,
   getProjectWorkspacesDir,
-  getCurrentProject,
   getAllProjectNames,
   projectExists,
 } from '../core/config.js';
-import { checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
+import { checkCommandExists, checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
-import { listAllRepos, cloneRepository } from '../core/github.js';
+import { listAllRepos } from '../core/github.js';
 import {
+  cloneRepository,
   getDefaultBranch,
   createWorktree,
   checkRemoteBranch,
@@ -67,26 +67,63 @@ export async function addProject(options: {
 }): Promise<void> {
   // Check dependencies
   await ensureDependencies();
-  await checkGitHubAuth();
+  const canUseGitHubPicker = await checkCommandExists('gh');
+  let selectedRepo: string;
 
-  // List all GitHub repositories
-  logger.info('Fetching repositories...');
-  const repos = await listAllRepos(options.org);
+  if (canUseGitHubPicker) {
+    const source = await selectItem([
+      'Enter git remote URL',
+      'Choose GitHub repository',
+    ], 'How would you like to add a project?');
 
-  if (repos.length === 0) {
-    throw new SpacesError(
-      'No repositories found',
-      'USER_ERROR',
-      1
-    );
-  }
+    if (!source) {
+      logger.info('Cancelled');
+      return;
+    }
 
-  // Select repository
-  const selectedRepo = await selectItem(repos, 'Select a repository:');
+    if (source === 'Choose GitHub repository') {
+      await checkGitHubAuth();
+      logger.info('Fetching repositories...');
+      const repos = await listAllRepos(options.org);
 
-  if (!selectedRepo) {
-    logger.info('Cancelled');
-    return;
+      if (repos.length === 0) {
+        throw new SpacesError(
+          'No repositories found',
+          'USER_ERROR',
+          1
+        );
+      }
+
+      const pickedRepo = await selectItem(repos, 'Select a repository:');
+      if (!pickedRepo) {
+        logger.info('Cancelled');
+        return;
+      }
+      selectedRepo = pickedRepo;
+    } else {
+      const manualRepo = await promptInput('Enter git remote URL (or owner/repo):', {
+        validate: (input) => input.trim().length > 0 || 'Repository is required',
+      });
+
+      if (!manualRepo) {
+        logger.info('Cancelled');
+        return;
+      }
+
+      selectedRepo = manualRepo.trim();
+    }
+  } else {
+    logger.info('GitHub CLI not found. Using direct git remote flow.');
+    const manualRepo = await promptInput('Enter git remote URL (or owner/repo):', {
+      validate: (input) => input.trim().length > 0 || 'Repository is required',
+    });
+
+    if (!manualRepo) {
+      logger.info('Cancelled');
+      return;
+    }
+
+    selectedRepo = manualRepo.trim();
   }
 
   logger.success(`Selected: ${selectedRepo}`);
@@ -108,7 +145,7 @@ export async function addProject(options: {
     const existingConfig = readProjectConfig(existingProject);
     if (existingConfig.repository === selectedRepo) {
       throw new SpacesError(
-        `Repository ${selectedRepo} is already tracked by project "${existingProject}"\n\nTo use that project:\n  gssh switch project ${existingProject}`,
+        `Repository ${selectedRepo} is already tracked by project "${existingProject}"\n\nUse that project with:\n  gssh workspace list --project ${existingProject}`,
         'USER_ERROR',
         1
       );
@@ -119,6 +156,7 @@ export async function addProject(options: {
   const baseDir = getProjectBaseDir(projectName);
 
   if (!options.noClone) {
+    mkdirSync(dirname(baseDir), { recursive: true });
     logger.info(`Cloning to ${baseDir}...`);
     await cloneRepository(selectedRepo, baseDir);
     logger.success(`Cloned to ${baseDir}`);
@@ -220,11 +258,10 @@ export async function addProject(options: {
  * Add a new workspace
  */
 export async function addWorkspace(
-  workspaceNameArg?: string,
-  options: Partial<CreateWorkspaceOptions> = {}
+  workspaceNameArg: string | undefined,
+  options: (Partial<CreateWorkspaceOptions> & { project: string })
 ): Promise<void> {
-  // Get current project
-  const currentProject = getCurrentProject();
+  const currentProject = options.project;
   if (!currentProject) {
     throw new NoProjectError();
   }

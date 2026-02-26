@@ -80,7 +80,7 @@ export class GitHubAuthError extends SpacesError {
 export class ProjectExistsError extends SpacesError {
   constructor(projectName: string, projectPath: string) {
     super(
-      `✗ Error: Project "${projectName}" already exists\n\nThe directory ${projectPath} already contains a project.\n\nTo use this project:\n  gssh switch project ${projectName}\n\nTo remove and recreate:\n  gssh remove project ${projectName}\n  gssh add project`,
+      `✗ Error: Project "${projectName}" already exists\n\nThe directory ${projectPath} already contains a project.\n\nTo use this project:\n  gssh workspace list --project ${projectName}\n\nTo remove and recreate:\n  gssh project remove ${projectName}\n  gssh project add`,
       'USER_ERROR',
       1
     );
@@ -94,7 +94,7 @@ export class ProjectExistsError extends SpacesError {
 export class WorkspaceExistsError extends SpacesError {
   constructor(workspaceName: string) {
     super(
-      `✗ Error: Workspace "${workspaceName}" already exists\n\nTo switch to this workspace:\n  gssh switch ${workspaceName}`,
+      `✗ Error: Workspace "${workspaceName}" already exists\n\nUse it with workspace commands:\n  gssh workspace context --project <project-name> --workspace ${workspaceName}`,
       'USER_ERROR',
       1
     );
@@ -108,7 +108,7 @@ export class WorkspaceExistsError extends SpacesError {
 export class NoProjectError extends SpacesError {
   constructor() {
     super(
-      '✗ Error: No project selected\n\nPlease add a project first:\n  gssh add project\n\nOr switch to an existing project:\n  gssh switch project',
+      '✗ Error: No project selected\n\nCreate a project first:\n  gssh project add\n\nThen pass --project on workspace commands, for example:\n  gssh workspace list --project <project-name>',
       'USER_ERROR',
       1
     );
@@ -126,7 +126,7 @@ export class NoProjectError extends SpacesError {
 export class NoIdentityError extends SpacesError {
   constructor() {
     super(
-      '✗ Error: No identity found\n\nInitialize your identity first:\n  gssh identity init',
+      '✗ Error: No identity found\n\nInitialize your identity first:\n  gssh user identity init',
       'USER_ERROR',
       1
     );
@@ -195,7 +195,7 @@ export class HandshakeFailedError extends SpacesError {
 export class IdentityExistsError extends SpacesError {
   constructor() {
     super(
-      '✗ Error: Identity already exists\n\nTo overwrite, use:\n  gssh identity init --force',
+      '✗ Error: Identity already exists\n\nTo overwrite, use:\n  gssh user identity init --force',
       'USER_ERROR',
       1
     );

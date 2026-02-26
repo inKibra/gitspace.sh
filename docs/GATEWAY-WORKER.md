@@ -1,6 +1,7 @@
 # Gateway Worker Specification
 
 > **Status: SPECIFICATION ONLY - NOT YET IMPLEMENTED**
+> **Historical Document** - retained for context only; not the active runtime contract.
 >
 > This document describes the planned Gateway Worker for subdomain routing and
 > authentication. The current implementation only includes the API Worker
@@ -19,13 +20,13 @@ A Cloudflare Worker that sits in front of all user subdomains (`*.{user}.gitspac
 Cloudflare Access:
 - Uses its own identity providers (separate OAuth flows)
 - Policies configured per-app in dashboard, not programmatically
-- Can't query our D1 database for ACL/invites
+- Can't query our D1 database for owner identity and enrollment state
 - Can't validate our signed tokens
 
 We need:
 - Single identity across all gitspace.sh subdomains
 - Programmatic access control via our API
-- Custom authorization logic (invites, ACL, port sharing)
+- Custom authorization logic (owner identity, machine enrollment, port sharing)
 - Portable session (one login works everywhere)
 
 ## Architecture
@@ -136,11 +137,11 @@ SameSite=Lax
 4. Query D1: does this user have access?
 5. Forward to tunnel
 
-**Invite link (no login required):**
-1. User visits `app.username.gitspace.sh?invite=xxx`
-2. Gateway Worker: validate invite signature (Ed25519)
-3. Valid → forward to tunnel
-4. Optionally prompt to "claim" by logging in
+**First access (requires login + grant):**
+1. User visits `app.username.gitspace.sh`
+2. Gateway Worker redirects to login if no valid session
+3. After login, Gateway Worker checks access grants
+4. Authorized users are forwarded to tunnel
 
 ## Authorization Logic
 
@@ -148,15 +149,9 @@ SameSite=Lax
 async function checkAccess(
   user: SessionUser | null,
   service: Service,
-  inviteToken: string | null
 ): Promise<boolean> {
   // Public services: anyone
   if (service.visibility === 'public') {
-    return true;
-  }
-
-  // Valid invite token: allow
-  if (inviteToken && await validateInvite(inviteToken, service)) {
     return true;
   }
 
@@ -214,11 +209,8 @@ export default {
     const sessionToken = getSessionCookie(request);
     const user = sessionToken ? await validateSession(sessionToken, env) : null;
 
-    // Get invite from query param
-    const inviteToken = url.searchParams.get('invite');
-
     // Check authorization
-    const hasAccess = await checkAccess(user, service, inviteToken);
+    const hasAccess = await checkAccess(user, service);
 
     if (!hasAccess) {
       // No session? Redirect to login
@@ -243,31 +235,14 @@ export default {
 ## CLI Commands
 
 ```bash
-# Share a port as a service
-gssh share port 3000 --as app
-# Creates: app.username.gitspace.sh → localhost:3000
+# Create a machine enrollment invite token
+gssh invite relay-machine create --relay <url> --machine-signing-key <base64> --machine-key-exchange-key <base64>
 
-# Share with specific user
-gssh share port 3000 --as app --with alice
-# Adds alice to service_access
+# List active root-signed invites
+gssh invite list --relay <url>
 
-# Make public (no auth required)
-gssh share port 3000 --as app --public
-
-# List shared services
-gssh share list
-# app.username.gitspace.sh → :3000 (owner-only)
-# api.username.gitspace.sh → :8080 (shared: alice, bob)
-# preview.username.gitspace.sh → :5173 (public)
-
-# Stop sharing
-gssh share remove app
-
-# Grant access to existing service
-gssh share grant app --to bob
-
-# Revoke access
-gssh share revoke app --from bob
+# Revoke an invite
+gssh invite revoke <invite-id> --relay <url>
 ```
 
 ## Tunnel Configuration

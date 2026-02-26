@@ -5,6 +5,9 @@ import type { NotificationConfig } from '../../notifications/types.js'
 import type {
   AttachSessionParams,
   BackendDescriptor,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
   DeleteWorkspaceParams,
 } from '../backend.js'
 import type { BackendEvent } from '../events.js'
@@ -99,6 +102,18 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     this.listProjectsCalls += 1
   }
 
+  async listGithubRepos(_org?: string): Promise<string[]> {
+    return []
+  }
+
+  async listRemoteBranches(_projectName: string): Promise<string[]> {
+    return []
+  }
+
+  async listLinearIssues(_projectName: string): Promise<never[]> {
+    return []
+  }
+
   async listWorkspaces(): Promise<void> {
     this.listWorkspacesCalls += 1
   }
@@ -106,6 +121,12 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   async listSessions(workspaceId?: string): Promise<void> {
     this.listSessionsCalls.push(workspaceId)
   }
+
+  async createProject(_params: CreateProjectParams): Promise<void> {}
+
+  async createWorkspace(_params: CreateWorkspaceParams): Promise<void> {}
+
+  async deleteProject(_projectName: string, _params?: DeleteProjectParams): Promise<void> {}
 
   async attachSession(params: AttachSessionParams): Promise<void> {
     this.attachCalls.push(params)

@@ -42,10 +42,3 @@ export {
   deserializeIdentity,
   getPublicIdentity,
 } from "./identity";
-
-export {
-  createInviteToken,
-  parseInviteToken,
-  getPublicIdentityFromInvite,
-  isInviteExpired,
-} from "./invites";

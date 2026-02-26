@@ -161,6 +161,75 @@ const INTERACTION_TIMEOUT_MS = 30000; // 30 seconds
 const ATTACH_GRACE_MS = 5000; // 5 seconds after attach
 const DETACH_GRACE_MS = 5000; // 5 seconds after detach
 
+type CtrlCMode = "auto" | "signal" | "byte";
+
+const CTRL_C_MODE_ENV = "TMUX_LITE_CTRL_C_MODE";
+const CTRL_C_MODE_VALUES = new Set<CtrlCMode>(["auto", "signal", "byte"]);
+const ISIG_FLAG_BY_PLATFORM: Partial<Record<NodeJS.Platform, number>> = {
+  darwin: 0x80,
+  linux: 0x01,
+  freebsd: 0x80,
+  netbsd: 0x80,
+  openbsd: 0x80,
+};
+const ETX_BYTE = 0x03;
+
+function resolveCtrlCModeFromEnv(): CtrlCMode {
+  const raw = process.env[CTRL_C_MODE_ENV]?.trim().toLowerCase();
+  if (!raw) {
+    return "auto";
+  }
+
+  if (CTRL_C_MODE_VALUES.has(raw as CtrlCMode)) {
+    return raw as CtrlCMode;
+  }
+
+  console.warn(
+    `[tmux-lite] Ignoring invalid ${CTRL_C_MODE_ENV}=${JSON.stringify(raw)} (expected auto|signal|byte)`
+  );
+  return "auto";
+}
+
+const ctrlCMode = resolveCtrlCModeFromEnv();
+
+function terminalSignalsEnabled(ptyTerminal: Bun.Terminal): boolean {
+  if (ctrlCMode === "signal") {
+    return true;
+  }
+
+  if (ctrlCMode === "byte") {
+    return false;
+  }
+
+  const isigFlag = ISIG_FLAG_BY_PLATFORM[process.platform];
+  if (typeof isigFlag !== "number") {
+    // Unknown platform: keep signal behavior so Ctrl+C still interrupts by default.
+    return true;
+  }
+
+  // Closed terminals report 0; default to signal behavior in that edge case.
+  const flags = ptyTerminal.localFlags;
+  if (typeof flags !== "number" || flags === 0) {
+    return true;
+  }
+
+  return (flags & isigFlag) !== 0;
+}
+
+function sendInterruptSignal(proc: Bun.Subprocess): boolean {
+  try {
+    process.kill(-proc.pid, 'SIGINT');
+    return true;
+  } catch {}
+
+  try {
+    process.kill(proc.pid, 'SIGINT');
+    return true;
+  } catch {}
+
+  return false;
+}
+
 // ============================================================================
 // OSC Pattern Registry
 // ============================================================================
@@ -977,8 +1046,23 @@ function createSessionSocketHandlers(
             console.log(`[${sessionName}] detached`);
           }
         } else if (frame.type === FrameType.PTY) {
-          // Raw PTY input - write to terminal
-          session.ptyTerminal.write(frame.payload);
+          // Workaround for Bun PTY Ctrl+C line-discipline behavior.
+          // Auto mode respects raw-mode apps (ISIG off => pass ETX through).
+          // Override with TMUX_LITE_CTRL_C_MODE=signal|byte.
+          if (frame.payload.length === 1 && frame.payload[0] === ETX_BYTE) {
+            const shouldSignal = terminalSignalsEnabled(session.ptyTerminal);
+            if (shouldSignal) {
+              const signaled = sendInterruptSignal(proc);
+              if (!signaled) {
+                session.ptyTerminal.write(frame.payload);
+              }
+            } else {
+              session.ptyTerminal.write(frame.payload);
+            }
+          } else {
+            // Raw PTY input - write to terminal
+            session.ptyTerminal.write(frame.payload);
+          }
           // Track last interaction time
           session.lastInteraction = Date.now();
         }

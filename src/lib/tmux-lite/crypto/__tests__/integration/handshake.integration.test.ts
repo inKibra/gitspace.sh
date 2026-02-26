@@ -16,7 +16,8 @@ import {
   type HandshakeMessage,
 } from "../../../handshake-handler.js";
 import { AccessControlList } from "../../access-control.js";
-import { createInviteToken } from "../../invites.js";
+import { createDeviceCertificate } from "../../device-cert.js";
+import { generateMnemonic, mnemonicToUserIdentity } from "../../user-identity.js";
 import {
   createTestIdentityPair,
   toPublicIdentity,
@@ -31,6 +32,18 @@ import type {
   X3DHResponseMessage,
   X3DHResultMessage,
 } from "../../../../../types/identity.js";
+
+function buildDeviceCertificateFor(
+  identity: import("../../../../../types/identity.js").Identity,
+  userRoot: ReturnType<typeof mnemonicToUserIdentity>,
+): string {
+  const cert = createDeviceCertificate(
+    userRoot,
+    identity.signing.publicKey,
+    identity.keyExchange.publicKey,
+  );
+  return JSON.stringify(cert);
+}
 
 describe("X3DH Handshake Integration", () => {
   describe("complete 4-message exchange", () => {
@@ -52,26 +65,6 @@ describe("X3DH Handshake Integration", () => {
       expect(result.clientKeys).toBeDefined();
       expect(result.machineSession).toBeDefined();
       expect(result.messageCount).toBe(4);
-    });
-
-    it("should complete handshake with invite token authorization", async () => {
-      const { client, machine } = createTestIdentityPair();
-      const accessList = new AccessControlList();
-
-      // Note: Client is NOT in access list - using invite instead
-      const result = await runCompleteHandshake(
-        client,
-        machine,
-        accessList,
-        {
-          type: "invite",
-          accessType: 'full',
-        }
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.clientKeys).toBeDefined();
-      expect(result.machineSession).toBeDefined();
     });
 
     it("should derive matching session keys for both parties", async () => {
@@ -127,7 +120,6 @@ describe("X3DH Handshake Integration", () => {
       const accessList = new AccessControlList();
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Client creates ClientHello
@@ -164,10 +156,12 @@ describe("X3DH Handshake Integration", () => {
       const { client, machine } = createTestIdentityPair();
       const accessList = new AccessControlList();
       accessList.addEntry(toPublicIdentity(client));
+      const ownerRoot = mnemonicToUserIdentity(generateMnemonic());
+      const ownerUserRootId = ownerRoot.id;
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
+        ownerUserRootId,
       });
 
       // Step 1: Client creates ClientHello
@@ -193,7 +187,8 @@ describe("X3DH Handshake Integration", () => {
       const { message: clientAuth, sessionKeys: clientSessionKeys } = createClientAuth(
         clientState2!,
         client,
-        { type: "access_list" }
+        { type: "access_list" },
+        buildDeviceCertificateFor(client, ownerRoot),
       );
 
       // Step 5: Machine processes ClientAuth
@@ -236,34 +231,16 @@ describe("X3DH Handshake Integration", () => {
       expect(result.machineSession?.peerIdentityId).toBe(client.id);
     });
 
-    it("should include correct access type from access list", async () => {
+    it("should include full access type for access_list authorization", async () => {
       const { client, machine } = createTestIdentityPair();
       const accessList = new AccessControlList();
-      accessList.addEntry(toPublicIdentity(client), 'session-invite', 'test-session');
+      accessList.addEntry(toPublicIdentity(client), 'view', 'test-session');
 
       const result = await runCompleteHandshake(
         client,
         machine,
         accessList,
         { type: "access_list" }
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.machineSession?.accessType).toBe('session-invite');
-    });
-
-    it("should include correct access type from invite token", async () => {
-      const { client, machine } = createTestIdentityPair();
-      const accessList = new AccessControlList();
-
-      const result = await runCompleteHandshake(
-        client,
-        machine,
-        accessList,
-        {
-          type: "invite",
-          accessType: 'full',
-        }
       );
 
       expect(result.success).toBe(true);
@@ -335,7 +312,6 @@ describe("X3DH Handshake Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Start two handshakes

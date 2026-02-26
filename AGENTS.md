@@ -38,9 +38,9 @@ This document provides comprehensive information for AI assistants working on th
    - X25519 for key exchange (establishing encryption)
    - Stored in `~/gitspace/.identity/` directory:
      - `keypair.json` - Encrypted identity keypair
-   - Access list: `~/gitspace/.access.json` - Authorized client public keys
-   - Machine info: `~/gitspace/.machine.json` - Machine registration info
-   - Relay config: `~/gitspace/.relay.json` - Relay configuration cache
+   - Relay auth store: `~/gitspace/.relay/control/control.db` - Relay/machine ACL + invites
+   - Machine info: `~/gitspace/.identity/machine.json` - Machine registration info
+   - Relay config: `~/gitspace/.identity/relay.json` - Relay configuration cache
 
 5. **Relay**: WebSocket server for routing encrypted traffic
    - Connects machines to clients through NAT/firewalls
@@ -61,11 +61,11 @@ src/
 │   ├── identity.ts             # Identity management (init/show)
 │   ├── linear.ts               # Linear integration (setup/show/clear)
 │   ├── list.ts                 # List projects/workspaces
-│   ├── machine.ts              # Remote machine management (invite/list)
+│   ├── machine.ts              # Remote machine management (enroll/list)
 │   ├── relay.ts                # Relay server (start/token)
 │   ├── remove.ts               # Remove projects/workspaces
 │   ├── serve.ts                # Machine daemon for remote access
-│   ├── share.ts                # Create invite tokens
+│   ├── invite.ts               # Root-signed invite management
 │   ├── status.ts               # Unified daemon status display
 │   ├── switch.ts               # Switch projects/workspaces
 │   └── tmux.ts                 # tmux-lite CLI commands
@@ -91,7 +91,7 @@ src/
 │   │       ├── secretbox.ts    # AES-256-GCM encryption
 │   │       ├── frames.ts       # Encrypted frame format
 │   │       ├── handshake.ts    # X3DH protocol steps
-│   │       ├── invites.ts      # Signed invite tokens
+│   │       ├── root-invites.ts # Signed root invite tokens
 │   │       └── access-control.ts # ACL checking
 │   └── remote-session/         # Remote session handling
 │       ├── session-handler.ts  # Handle remote client commands
@@ -183,100 +183,97 @@ src/
 | Command | Description |
 |---------|-------------|
 | `gssh` | Launch TUI (no args) |
-| `gssh add project` | Add a new project from GitHub |
-| `gssh add <name>` | Create workspace in current project |
-| `gssh switch project [name]` | Switch to a project |
-| `gssh switch [name]` | Switch to a workspace |
-| `gssh list projects` | List all projects |
-| `gssh list workspaces` | List workspaces in current project |
-| `gssh remove workspace [name]` | Remove a workspace |
-| `gssh remove project [name]` | Remove a project |
-| `gssh directory` | Print current project directory |
+| `gssh project add` | Add a new project from GitHub |
+| `gssh workspace add <name> --project <project-name>` | Create workspace in current project |
+| `gssh workspace context --project <project-name> --workspace <name>` | Show resolved workspace context |
+| `gssh project list` | List all projects |
+| `gssh workspace list --project <project-name>` | List workspaces in a project |
+| `gssh workspace remove [name] --project <project-name>` | Remove a workspace |
+| `gssh project remove [name]` | Remove a project |
 
 ### Identity & Access
 | Command | Description |
 |---------|-------------|
-| `gssh identity init` | Create machine identity keypair |
-| `gssh identity show` | Display identity fingerprint |
-| `gssh access add <pubkey>` | Add authorized client |
-| `gssh access list` | List authorized clients |
-| `gssh access remove <key>` | Remove client access |
-| `gssh share create` | Create invite token |
+| `gssh user identity init` | Create user root identity |
+| `gssh user identity show` | Display identity fingerprint |
+| `gssh machine access add <gssh-user:...>` | Grant machine full access |
+| `gssh machine access list` | List machine collaborators |
+| `gssh machine access remove <user-id\|label>` | Remove machine full access |
+| `gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url>` | Create machine ACL invite |
 
 ### Remote Access
 | Command | Description |
 |---------|-------------|
-| `gssh serve` | Start machine daemon (foreground) |
-| `gssh serve start` | Start machine daemon (background) |
-| `gssh serve stop` | Stop machine daemon |
-| `gssh connect <token>` | Connect to remote machine |
+| `gssh machine serve start --foreground` | Start machine daemon (foreground) |
+| `gssh machine serve start` | Start machine daemon (background) |
+| `gssh machine serve stop` | Stop machine daemon |
+| `gssh client connect <target>` | Connect to remote machine |
+| `gssh client machines list --relay <url>` | List accessible remote machines |
 | `gssh status` | Show status of all daemons |
 
 ### Relay Server
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start relay server |
-| `gssh relay authorize <pubkey>` | Authorize a machine on relay |
-| `gssh relay revoke <id>` | Revoke machine authorization |
-| `gssh relay machines` | List authorized machines |
-| `gssh relay trusted` | List trusted relays |
-| `gssh relay untrust <url>` | Remove relay from trusted list |
+| `gssh relay access add <gssh-user:...>` | Grant relay membership |
+| `gssh relay access remove <user-id\|label>` | Revoke relay membership |
+| `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite token |
+| `gssh relay machines list` | List authorized machines |
+| `gssh relay machines revoke <machine-id>` | Revoke machine authorization |
 
 ### tmux-lite Daemon
 | Command | Description |
 |---------|-------------|
-| `gssh tmux start` | Start tmux-lite server daemon |
-| `gssh tmux stop` | Stop tmux-lite daemon |
-| `gssh tmux status` | Show tmux-lite daemon status |
-| `gssh tmux list` | List active terminal sessions |
+| `gssh machine tmux start` | Start tmux-lite server daemon |
+| `gssh machine tmux stop` | Stop tmux-lite daemon |
+| `gssh machine tmux status` | Show tmux-lite daemon status |
+| `gssh machine tmux list` | List active terminal sessions |
 
-### Machine Management
+### Machine Enrollment
 | Command | Description |
 |---------|-------------|
-| `gssh machine invite` | Create invite for remote machine to join relay |
-| `gssh machine list` | List machines on relay (stub) |
-| `gssh machine remove <id>` | Remove machine from relay (stub) |
+| `gssh machine enroll --invite <token>` | Enroll this machine with a relay-machine invite |
 
 ### Authentication (gitspace.sh)
 | Command | Description |
 |---------|-------------|
-| `gssh auth login` | Login via GitHub OAuth device flow |
-| `gssh auth logout` | Clear local credentials |
-| `gssh auth status` | Show authentication status |
+| `gssh user auth login` | Login via GitHub OAuth device flow |
+| `gssh user auth logout` | Clear local credentials |
+| `gssh user auth status` | Show authentication status |
 
 ### Hosting (gitspace.sh)
 | Command | Description |
 |---------|-------------|
-| `gssh host reserve <name>` | Reserve subdomain on gitspace.sh |
-| `gssh host release [name]` | Release a subdomain |
-| `gssh host list` | List your subdomains |
-| `gssh host set-primary <name>` | Set primary subdomain |
-| `gssh host status` | Show hosting status |
+| `gssh user host reserve <name>` | Reserve subdomain on gitspace.sh |
+| `gssh user host release [name]` | Release a subdomain |
+| `gssh user host list` | List your subdomains |
+| `gssh user host set-primary <name>` | Set primary subdomain |
+| `gssh user host status` | Show hosting status |
 
 ### Linear Integration
 | Command | Description |
 |---------|-------------|
-| `gssh linear setup` | Configure Linear integration (API key + teams) |
-| `gssh linear setup --project <name>` | Configure Linear for a specific project |
-| `gssh linear show` | Show user-level Linear configuration |
-| `gssh linear show --project <name>` | Show project-specific Linear configuration |
-| `gssh linear clear` | Clear user-level Linear configuration |
-| `gssh linear clear --project <name>` | Clear project-specific Linear configuration |
+| `gssh user config linear setup` | Configure Linear integration (API key + teams) |
+| `gssh user config linear setup --project <name>` | Configure Linear for a specific project |
+| `gssh user config linear show` | Show user-level Linear configuration |
+| `gssh user config linear show --project <name>` | Show project-specific Linear configuration |
+| `gssh user config linear clear` | Clear user-level Linear configuration |
+| `gssh user config linear clear --project <name>` | Clear project-specific Linear configuration |
 
 ### Bundle Management
 | Command | Description |
 |---------|-------------|
-| `gssh bundle status` | Show bundle status for current project |
-| `gssh bundle refresh` | Re-run bundle onboarding (keeps previous values as defaults) |
-| `gssh bundle refresh --force` | Force refresh even if no changes detected |
+| `gssh workspace bundle status --project <name> --workspace <name>` | Show bundle status for a workspace |
+| `gssh workspace bundle refresh --project <name> --workspace <name>` | Re-run bundle onboarding (keeps previous values as defaults) |
+| `gssh workspace bundle refresh --project <name> --workspace <name> --force` | Force refresh even if no changes detected |
 
 ## Remote Access Architecture
 
-```
+```text
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
 │  Your Machine   │       │  Relay Server   │       │  Remote Client  │
 │                 │       │                 │       │                 │
-│  gssh serve     │◀═════▶│  Routing only   │◀═════▶│  gssh connect   │
+│  gssh machine serve start --foreground     │◀═════▶│  Routing only   │◀═════▶│ gssh client connect │
 │  (PTY sessions) │ WebSocket │ E2E encrypted │ WebSocket │ or browser    │
 │                 │       │  (can't decrypt)│       │                 │
 └─────────────────┘       └─────────────────┘       └─────────────────┘
@@ -284,19 +281,19 @@ src/
 
 ### Connection Flow (gitspace.sh Hosting)
 
-1. User logs in: `gssh auth login` (GitHub OAuth)
-2. User reserves subdomain: `gssh host reserve <name>`
-3. Machine runs `gssh serve start` (auto-starts local relay + cloudflared tunnel)
+1. User logs in: `gssh user auth login` (GitHub OAuth)
+2. User reserves subdomain: `gssh user host reserve <name>`
+3. Machine runs `gssh machine serve start` (auto-starts local relay + cloudflared tunnel)
 4. Client connects via web: `https://<name>.gitspace.sh`
 5. X3DH handshake establishes session keys
 6. All terminal I/O is E2E encrypted
 
 ### Connection Flow (Self-Hosted Relay)
 
-1. Machine runs `gssh serve start --relay ws://relay:4480/ws`
+1. Machine runs `gssh machine serve start --relay ws://relay:4480/ws`
 2. Machine registers with relay (Ed25519 challenge-response auth)
-3. Machine creates invite: `gssh share create`
-4. Client connects with invite: `gssh connect <token>`
+3. Owner creates relay/machine invites and collaborator accepts them (`gssh invite ...`, `gssh user auth invite accept <token>`)
+4. Client connects directly: `gssh client connect <machine-id>`
 5. X3DH handshake establishes session keys
 6. All terminal I/O is E2E encrypted
 
@@ -354,10 +351,10 @@ bun src/index.ts
 bun src/index.ts relay start
 
 # Run serve with gitspace.sh hosting (requires auth login + host reserve)
-bun src/index.ts serve start
+bun src/index.ts machine serve start
 
 # Run serve with self-hosted relay
-bun src/index.ts serve start --relay ws://localhost:4480/ws
+bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 ```
 
 ### Code Style
@@ -375,7 +372,7 @@ bun src/index.ts serve start --relay ws://localhost:4480/ws
 | Entry point | `src/index.ts` |
 | Config management | `src/core/config.ts` |
 | Identity/crypto | `src/core/identity.ts`, `src/lib/tmux-lite/crypto/` |
-| Access control | `src/core/access.ts` |
+| Access control | `src/relay/auth/store.ts`, `src/commands/machine-access.ts` |
 | Relay server | `src/relay/server.ts` |
 | Relay protocol | `src/relay/protocol.ts` |
 | Relay registries | `src/relay/registries.ts` |
@@ -424,7 +421,6 @@ bun src/index.ts serve start --relay ws://localhost:4480/ws
 | `docs/GATEWAY-WORKER.md` | Cloudflare Worker gateway spec |
 | `docs/ROADMAP.md` | Feature roadmap and vision |
 | `docs/INFRASTRUCTURE.md` | Future VM infrastructure (not implemented) |
-| `docs/STACK-DESIGN.md` | Future stacked PR feature (not implemented) |
 
 ---
 
@@ -437,9 +433,9 @@ bun src/index.ts serve start --relay ws://localhost:4480/ws
 | Global config | `~/gitspace/.config.json` | Current project, defaults |
 | Project config | `~/gitspace/{project}/.config.json` | Project-specific settings |
 | Identity | `~/gitspace/.identity/` | Keypairs |
-| Access list | `~/gitspace/.access.json` | Authorized client public keys |
-| Machine info | `~/gitspace/.machine.json` | Machine registration |
-| Relay config | `~/gitspace/.relay.json` | Relay configuration cache |
+| Relay auth store | `~/gitspace/.relay/control/control.db` | ACL + invite state |
+| Machine info | `~/gitspace/.identity/machine.json` | Machine registration |
+| Relay config | `~/gitspace/.identity/relay.json` | Relay configuration cache |
 | Host config | `~/gitspace/host.json` | gitspace.sh subdomain config |
 | Daemon state | `~/gitspace/.serve/` | PID files, status sockets |
 | tmux-lite state | `/tmp/` | Session data (configurable via `TMUX_LITE_SESSION_DIR`) |

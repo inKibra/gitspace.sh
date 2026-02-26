@@ -45,6 +45,8 @@ export interface PrepareWorkspaceForSessionOptions {
   onPhaseStart?: (phase: ScriptPhase) => void;
   /** Script execution policy for attach attempts. */
   scriptPolicy?: 'auto' | 'skip';
+  /** Optional cancellation signal for in-flight script execution. */
+  signal?: AbortSignal;
 }
 
 export type PrepareWorkspaceForSessionResult =
@@ -57,7 +59,7 @@ export type PrepareWorkspaceForSessionResult =
     };
 
 const BUNDLE_REFRESH_REQUIRED_MESSAGE =
-  'Run "gssh bundle refresh" and retry.';
+  'Run "gssh workspace bundle refresh --project <name> --workspace <name>" and retry.';
 
 /**
  * Prepare a workspace for session use.
@@ -79,6 +81,7 @@ export async function prepareWorkspaceForSession(
     onOutput,
     onPhaseStart,
     scriptPolicy = 'auto',
+    signal,
   } = options;
 
   const projectConfig = readProjectConfig(projectName);
@@ -133,6 +136,7 @@ export async function prepareWorkspaceForSession(
     onOutput,
     onPhaseStart,
     scriptPolicy,
+    signal,
   });
 }
 

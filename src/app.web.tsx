@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { SessionTerminal, type SessionTerminalHandle } from "./components/SessionTerminal.web";
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
 import {
@@ -11,7 +11,6 @@ import { FloatingControls } from "./components/FloatingControls.web";
 import { useTerminal } from "./hooks/useTerminal.web";
 import { useRelayConnection } from "./hooks/useRelayConnection.web";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
-import { parseInviteFromHash } from "./lib/invite.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
 import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/device.web";
@@ -20,6 +19,7 @@ import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow
 import { useAttachController } from './app/session/useAttachController.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
+import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 
@@ -65,13 +65,21 @@ const DELETE_ERROR_CODES = new Set([
   'NOT_FOUND',
 ]);
 
+const SCRIPT_ERROR_CODES = new Set([
+  'SCRIPT_CANCELLED',
+  'SCRIPT_FAILED',
+  'PRE_SCRIPT_FAILED',
+  'SETUP_SCRIPT_FAILED',
+  'SELECT_SCRIPT_FAILED',
+  'REMOVE_SCRIPT_FAILED',
+]);
+
 export default function App() {
   const [view, setView] = useState<View>("machines");
   const [selectedMachine, setSelectedMachine] = useState<MachineInfo | null>(null);
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
-  const [copied, setCopied] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
@@ -97,14 +105,8 @@ export default function App() {
   const terminalRef = useRef<SessionTerminalHandle>(null);
   const lastScriptErrorRef = useRef<string | null>(null);
   const lastCommandErrorRef = useRef<string | null>(null);
+  const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const suppressDeleteScriptFailureModalRef = useRef(false);
-
-  // Invite params from URL
-  const [inviteParams, setInviteParams] = useState<{
-    machineId?: string;
-    inviteId?: string;
-    inviteToken?: string;
-  } | null>(null);
 
   // Review workspace/project state
   const [reviewWorkspace, setReviewWorkspace] = useState<{
@@ -182,12 +184,16 @@ export default function App() {
       }
 
       if (params.workspaceId && !params.command) {
+        lastScriptWorkspaceIdRef.current = params.workspaceId;
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
       }
     },
     onAttachCancelled: ({ target }) => {
+      if (target === 'workspace' && showScriptTerminal) {
+        return;
+      }
       if (target === 'workspace') {
         setShowScriptTerminal(false);
       }
@@ -238,6 +244,20 @@ export default function App() {
     },
   });
 
+  const lifecycleController = useLifecycleController({
+    flow,
+    listGithubRepos: terminal.listGithubRepos,
+    listRemoteBranches: terminal.listRemoteBranches,
+    listLinearIssues: terminal.listLinearIssues,
+    createProject: terminal.createProject,
+    createWorkspace: terminal.createWorkspace,
+    deleteProject: terminal.deleteProject,
+    getProjectNames: () => terminal.projects.map((project) => project.name),
+    refreshProjects: () => terminal.requestProjects(),
+    refreshWorkspaces: () => terminal.requestWorkspaces(),
+    refreshSessions: () => terminal.requestSessions(),
+  });
+
   useEffect(() => {
     let mounted = true;
     void browserPreferencesService.getNotificationConfig().then((config) => {
@@ -259,21 +279,8 @@ export default function App() {
     setLocalNotificationConfig(terminal.notificationConfig);
   }, [terminal.notificationConfig]);
 
-  // Parse invite from URL hash on load, and review params from query string
+  // Parse review params from query string on load
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash.startsWith("#invite=")) {
-      parseInviteFromHash(hash).then((invite) => {
-        if (invite) {
-          setInviteParams({
-            machineId: invite.machineId,
-            inviteId: invite.inviteId,
-            inviteToken: invite.inviteToken,
-          });
-        }
-      });
-    }
-
     const params = new URLSearchParams(window.location.search);
     if (params.get('view') === 'review') {
       const ws = params.get('workspace');
@@ -370,6 +377,11 @@ export default function App() {
       return;
     }
 
+    if (terminal.commandError?.code && SCRIPT_ERROR_CODES.has(terminal.commandError.code)) {
+      lastScriptErrorRef.current = scriptError;
+      return;
+    }
+
     if (lastScriptErrorRef.current === scriptError) {
       return;
     }
@@ -380,7 +392,7 @@ export default function App() {
       message: scriptError,
       variant: 'error',
     });
-  }, [flow, terminal.scriptState?.error]);
+  }, [flow, terminal.commandError?.code, terminal.scriptState?.error]);
 
   useEffect(() => {
     if (!terminal.commandError) {
@@ -402,12 +414,9 @@ export default function App() {
       return;
     }
 
-    const isScriptFailure =
-      terminal.commandError.code === 'SCRIPT_FAILED' ||
-      terminal.commandError.code === 'PRE_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SETUP_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'SELECT_SCRIPT_FAILED' ||
-      terminal.commandError.code === 'REMOVE_SCRIPT_FAILED';
+    const isScriptFailure = terminal.commandError.code
+      ? SCRIPT_ERROR_CODES.has(terminal.commandError.code)
+      : false;
 
     if (isScriptFailure) {
       if (!terminal.scriptState) {
@@ -436,16 +445,6 @@ export default function App() {
     }
   }, [flow, terminal.commandError, terminal.scriptState?.isRunning]);
 
-  // Copy access command to clipboard
-  const copyAccessCommand = async () => {
-    if (relay.publicKey) {
-      const command = `gssh access add "${relay.publicKey}"`;
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
   // Handle machine selection - go directly to terminal/workspaces view
   const handleMachineConnect = async (machine: MachineInfo) => {
     if (!machine.online) return;
@@ -453,8 +452,9 @@ export default function App() {
     // Get WebSocket and identity from relay connection
     const ws = relay.getWebSocket();
     const identity = relay.identity;
-    if (!ws || !identity) {
-      console.error("No WebSocket or identity available");
+    const deviceCertificate = relay.deviceCertificate;
+    if (!ws || !identity || !deviceCertificate) {
+      console.error("No WebSocket, identity, or device certificate available");
       return;
     }
 
@@ -468,8 +468,7 @@ export default function App() {
       ws,
       identity,
       machineId: machine.machineId,
-      inviteId: inviteParams?.inviteId,
-      inviteToken: inviteParams?.inviteToken,
+      deviceCertificate,
     });
   };
 
@@ -600,6 +599,24 @@ export default function App() {
     onBack: handleBackToMachines,
     machineName: selectedMachine?.label || selectedMachine?.machineId,
   });
+
+  const selectedProjectName = useMemo(() => {
+    const selected = spacesBrowserProps.selectedItem;
+    if (!selected) {
+      return null;
+    }
+    if (selected.type === 'project') {
+      return selected.name;
+    }
+    if (selected.type === 'workspace') {
+      return selected.workspace.projectName;
+    }
+    if ('workspaceId' in selected && typeof selected.workspaceId === 'string') {
+      const separator = selected.workspaceId.indexOf(':');
+      return separator > 0 ? selected.workspaceId.slice(0, separator) : null;
+    }
+    return null;
+  }, [spacesBrowserProps.selectedItem]);
 
   // Inbox hook
   const inboxProps = useInbox({
@@ -887,7 +904,7 @@ export default function App() {
       } else if (command === 'activate') {
         spacesBrowserProps.activateSelected();
       } else if (command === 'new') {
-        spacesBrowserProps.createNewSession();
+        lifecycleController.openCreateMenu(selectedProjectName);
       } else if (command === 'refresh') {
         spacesBrowserProps.refresh();
       } else if (command === 'back') {
@@ -922,7 +939,9 @@ export default function App() {
         }
       } else if (command === 'delete') {
         const selected = spacesBrowserProps.selectedItem;
-        if (selected?.type === 'workspace') {
+        if (selected?.type === 'project') {
+          lifecycleController.openDeleteProjectFlow(selected.name);
+        } else if (selected?.type === 'workspace') {
           const sessionCount = selected.workspace.sessionCount || 0;
           flow.showConfirmTyped({
             title: 'Delete Workspace',
@@ -954,7 +973,9 @@ export default function App() {
     showScriptTerminal,
     showEvents,
     spacesBrowserProps,
+    selectedProjectName,
     flow,
+    lifecycleController,
     deleteWorkspaceWithPrompt,
   ]);
 
@@ -989,6 +1010,9 @@ export default function App() {
       if ((e.key === 'Escape' || e.key === 'q') && !terminal.scriptState?.isRunning) {
         e.preventDefault();
         setShowScriptTerminal(false);
+      } else if ((e.key === 'c' || e.key === 'C') && terminal.scriptState?.isRunning) {
+        e.preventDefault();
+        terminal.cancelPendingScripts();
       }
     };
 
@@ -1093,7 +1117,25 @@ export default function App() {
           error={terminal.scriptState?.error}
           exitCode={terminal.scriptState?.exitCode}
           setWriteCallback={terminal.setWriteCallback}
-          onBack={() => setShowScriptTerminal(false)}
+          canAttachAnyway={Boolean(!isRunning && terminal.scriptState?.error && lastScriptWorkspaceIdRef.current)}
+          onAttachAnyway={async () => {
+            const workspaceId = lastScriptWorkspaceIdRef.current;
+            if (!workspaceId) {
+              return;
+            }
+
+            await attachController.attach({
+              workspaceId,
+              scriptPolicy: 'skip',
+            });
+          }}
+          onBack={() => {
+            lastScriptWorkspaceIdRef.current = null;
+            setShowScriptTerminal(false);
+          }}
+          onCancel={() => {
+            terminal.cancelPendingScripts();
+          }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
         <Toaster theme="dark" position="top-right" richColors />
@@ -1400,19 +1442,11 @@ export default function App() {
                   {relay.publicKey}
                 </code>
                 <p className="text-xs text-[#6e7681] mb-2">
-                  To get access, have the machine owner run:
+                  Owner-only access is enabled. This browser key must match the machine owner identity:
                 </p>
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 text-xs text-[#e6edf3] bg-[#161b22] px-2 py-2 rounded font-mono overflow-x-auto border border-[#30363d]">
-                    gssh access add "{relay.publicKey.slice(0, 20)}..."
-                  </code>
-                  <button
-                    onClick={copyAccessCommand}
-                    className="text-xs text-[#22c55e] hover:text-[#3fb950] bg-[#161b22] border border-[#30363d] px-3 py-2 rounded whitespace-nowrap hover:border-[#22c55e] transition-colors"
-                  >
-                    {copied ? "Copied!" : "Copy Command"}
-                  </button>
-                </div>
+                <p className="text-xs text-[#8b949e]">
+                  If this key does not match your machine owner identity, switch to the owner identity and reconnect.
+                </p>
               </div>
             )}
           </div>
@@ -1430,7 +1464,7 @@ export default function App() {
                 <div className="text-[#8b949e] mb-2">No machines available</div>
                 <p className="text-sm text-[#6e7681]">
                   {relay.status === "connected"
-                    ? "The machine may not be online. Check if 'gssh serve' is running."
+                    ? "The machine may not be online. Check if 'gssh machine serve start' is running."
                     : "Unable to connect to relay."}
                 </p>
               </div>

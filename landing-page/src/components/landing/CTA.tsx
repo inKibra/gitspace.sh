@@ -41,11 +41,11 @@ export function CTA() {
                         <div className="text-zinc-500 text-xs py-1">...</div>
                         <div className="flex">
                             <span className="text-green-500 mr-2">$</span>
-                            <span className="text-white">gssh add project</span>
+                            <span className="text-white">gssh project add</span>
                         </div>
                         <div className="flex">
                             <span className="text-green-500 mr-2">$</span>
-                            <span className="text-white">gssh add feature-x</span>
+                            <span className="text-white">gssh workspace add feature-x --project my-project</span>
                         </div>
                         <br />
                         <div className="text-green-400 font-bold"># You're ready.</div>

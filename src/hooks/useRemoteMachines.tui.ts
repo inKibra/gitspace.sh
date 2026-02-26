@@ -5,6 +5,7 @@
 import { useCallback, useMemo } from 'react';
 import type { Identity } from '../types/identity.js';
 import { keypairExists, loadKeypair } from '../core/identity.js';
+import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import { signMessage } from '../relay/signing.js';
 import type { MachineInfo } from '../components/index.js';
 import {
@@ -104,9 +105,19 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
         );
       }
 
+      let deviceCertificate: string;
+      try {
+        deviceCertificate = await createLocalDeviceCertificate(identity);
+      } catch {
+        throw new Error(
+          'Remote relay requires a user root identity certificate. Run `gssh user identity init` first.'
+        );
+      }
+
       return {
         relayUrl: relayConfig.url,
         clientIdentityId: identity.id,
+        deviceCertificate,
         identity,
         signer: <T extends object>(message: T): T => {
           const privateKey = identity.signing.secretKey.slice(0, 32);

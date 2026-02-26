@@ -6,7 +6,6 @@
  * Receives all state and actions from useMachineList hook.
  */
 
-import { useState } from 'react';
 import type { UseMachineListReturn } from './MachineList.js';
 import { getStatusColor, getMachineLabel } from './MachineList.js';
 
@@ -26,8 +25,6 @@ export function MachineListWeb(props: UseMachineListReturn) {
     connectSelected,
     refresh,
   } = props;
-
-  const [commandCopied, setCommandCopied] = useState(false);
 
   // Loading state
   if (isLoading) {
@@ -55,41 +52,20 @@ export function MachineListWeb(props: UseMachineListReturn) {
 
   // Empty state
   if (isEmpty) {
-    const accessCommand = `gssh access add "${publicKey || '...'}"`;
-
-    const copyCommand = () => {
-      if (publicKey) {
-        navigator.clipboard.writeText(accessCommand);
-        setCommandCopied(true);
-        setTimeout(() => setCommandCopied(false), 2000);
-      }
-    };
-
     return (
       <div className="flex flex-col items-center justify-center h-full py-8 sm:py-12 gap-6 px-4">
         <div className="text-[#8b949e] text-lg text-center">No machines available</div>
 
         <div className="text-center w-full max-w-xl">
           <p className="text-[#6e7681] text-sm mb-3">
-            To connect, run this command on your machine:
+            Owner-only access is enabled. Use the same owner identity on this client and your machine.
           </p>
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
-            <code className="flex-1 text-[#d29922] px-2 py-2 font-mono text-xs sm:text-sm break-all text-left">
-              {accessCommand}
-            </code>
-            <button
-              onClick={copyCommand}
-              className="px-4 py-3 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg whitespace-nowrap min-h-[48px] text-[#e6edf3]"
-            >
-              {commandCopied ? 'Copied!' : 'Copy'}
-            </button>
-          </div>
         </div>
 
         {publicKey && (
           <details className="text-center w-full max-w-xl">
             <summary className="text-[#6e7681] text-xs cursor-pointer hover:text-[#8b949e] py-2">
-              Show public key
+              Show browser user-root key
             </summary>
             <code className="text-[#3fb950] bg-[#0d1117] border border-[#30363d] px-3 py-2 rounded font-mono text-xs break-all block mt-2">
               {publicKey}

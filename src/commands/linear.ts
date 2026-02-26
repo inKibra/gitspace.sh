@@ -243,7 +243,7 @@ async function setupUserLinear(): Promise<void> {
 	const teamList = result.selectedTeams.map((t) => t.key).join(', ')
 	logger.success(`\nLinear configured (teams: ${teamList}, default: ${result.defaultTeam})`)
 	logger.log('\nProjects will inherit this config unless overridden.')
-	logger.log("Run 'gssh linear setup --project <name>' to customize per-project.")
+	logger.log("Run 'gssh user config linear setup --project <name>' to customize per-project.")
 }
 
 /**
@@ -399,7 +399,7 @@ async function setupProjectLinear(projectName: string): Promise<void> {
 
 			if (userTeams.length === 0) {
 				logger.warning('No teams configured at user level.')
-				logger.log("Run 'gssh linear setup' to configure teams first.")
+				logger.log("Run 'gssh user config linear setup' to configure teams first.")
 				return
 			}
 
@@ -572,7 +572,7 @@ async function showUserConfig(): Promise<void> {
 
 	if (!apiKey) {
 		logger.log('  Status: Not configured')
-		logger.log("\n  Run 'gssh linear setup' to configure")
+		logger.log("\n  Run 'gssh user config linear setup' to configure")
 	} else {
 		logger.log(`  API key: ${maskApiKey(apiKey)}`)
 
@@ -605,7 +605,7 @@ async function showProjectConfig(projectName: string): Promise<void> {
 
 	if (!config.apiKey) {
 		logger.log('  Status: Not configured')
-		logger.log("\n  Run 'gssh linear setup' to configure")
+		logger.log("\n  Run 'gssh user config linear setup' to configure")
 		logger.log('')
 		return
 	}
@@ -626,7 +626,7 @@ async function showProjectConfig(projectName: string): Promise<void> {
 	if (projectConfig.linearApiKey) {
 		logger.log('')
 		logger.warning('  Legacy config detected (linearApiKey in project config)')
-		logger.log("  Run 'gssh linear setup --project' to migrate")
+		logger.log("  Run 'gssh user config linear setup --project' to migrate")
 	}
 
 	logger.log('')

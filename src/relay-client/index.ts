@@ -25,6 +25,27 @@ export {
 } from './adapters/browser.js';
 
 export type {
+  RelayRequestClientOptions,
+} from './request-client.js';
+
+export {
+  RelayRequestError,
+  RelayRequestClient,
+} from './request-client.js';
+
+export type {
+  RelayTrustResult,
+  PublicIdentity,
+  MachineSessionBridge,
+  UnlockGrantResponse,
+} from './machine-relay-client.js';
+
+export {
+  requestUnlockGrantViaRelay,
+  connectMachineRelay,
+} from './machine-relay-client.js';
+
+export type {
   MachineDirectoryClientConfig,
   UseMachineDirectoryOptions,
   UseMachineDirectoryReturn,

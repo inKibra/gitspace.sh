@@ -146,4 +146,12 @@ describe('extractRepoName', () => {
   it('should handle simple repo name', () => {
     expect(extractRepoName('my-app')).toBe('my-app');
   });
+
+  it('should extract repo name from HTTPS remotes', () => {
+    expect(extractRepoName('https://github.com/myorg/my-app.git')).toBe('my-app');
+  });
+
+  it('should extract repo name from SSH remotes', () => {
+    expect(extractRepoName('git@github.com:myorg/my-app.git')).toBe('my-app');
+  });
 });

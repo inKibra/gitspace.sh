@@ -1,15 +1,13 @@
 /**
- * Identity file operations for managing keypairs, access lists, and machine identity
+ * Identity file operations for managing keypairs, machine identity, and relay config.
  *
- * This module handles persistent storage of cryptographic identities and access control:
+ * This module handles persistent storage of cryptographic identities:
  * - Encrypted keypair storage (password-protected)
- * - Access list management (authorized public keys)
  * - Machine identity configuration
  *
  * Directory structure:
  *   ~/gitspace/.identity/
  *   ├── keypair.json      # Encrypted identity keypair
- *   ├── access-list.json  # Allowed public keys
  *   └── machine.json      # Machine registration info
  *
  * @module identity
@@ -25,8 +23,6 @@ import { join } from 'node:path';
 import type {
 	Identity,
 	PublicIdentity,
-	AccessEntry,
-	AccessType,
 	MachineIdentity,
 } from '../types/identity.js';
 import {
@@ -35,7 +31,6 @@ import {
 	deserializeIdentity,
 	getPublicIdentity,
 } from '../lib/tmux-lite/crypto/identity.js';
-import { DEFAULT_ACCESS_TYPE } from '../lib/tmux-lite/crypto/access-control.js';
 import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
 import { deriveKey, generateSalt } from '../lib/tmux-lite/crypto/keys.js';
 import { getSpacesDir } from './config.js';
@@ -94,15 +89,6 @@ export function getIdentityDir(): string {
  */
 export function getKeypairPath(): string {
 	return join(getIdentityDir(), 'keypair.json');
-}
-
-/**
- * Get the access list file path
- *
- * @returns Path to access-list.json
- */
-export function getAccessListPath(): string {
-	return join(getIdentityDir(), 'access-list.json');
 }
 
 /**
@@ -317,159 +303,6 @@ export function getPublicKeyWithoutPassword(): PublicIdentity | null {
 }
 
 // ============================================================================
-// Access List Management
-// ============================================================================
-
-/**
- * Read the access list from disk
- *
- * Returns an empty array if the file doesn't exist.
- *
- * @returns Array of access entries
- */
-export function readAccessList(): AccessEntry[] {
-	const accessListPath = getAccessListPath();
-
-	if (!existsSync(accessListPath)) {
-		return [];
-	}
-
-	try {
-		const content = readFileSync(accessListPath, 'utf-8');
-		return JSON.parse(content) as AccessEntry[];
-	} catch (error) {
-		throw new SpacesError(
-			`Failed to read access list: ${
-				error instanceof Error ? error.message : 'Unknown error'
-			}`,
-			'SYSTEM_ERROR',
-			2
-		);
-	}
-}
-
-/**
- * Write the access list to disk
- *
- * Creates the identity directory if it doesn't exist.
- *
- * @param entries - Array of access entries to write
- */
-export function writeAccessList(entries: AccessEntry[]): void {
-	ensureIdentityDir();
-
-	try {
-		writeFileSync(
-			getAccessListPath(),
-			JSON.stringify(entries, null, 2),
-			{
-				encoding: 'utf-8',
-				mode: 0o600, // Owner read/write only
-			}
-		);
-	} catch (error) {
-		throw new SpacesError(
-			`Failed to write access list: ${
-				error instanceof Error ? error.message : 'Unknown error'
-			}`,
-			'SYSTEM_ERROR',
-			2
-		);
-	}
-}
-
-/**
- * Add a new identity to the access list
- *
- * Creates a new access entry with the given access type.
- * If the identity already exists, it will be replaced.
- *
- * @param publicIdentity - Public identity to add
- * @param label - Optional label override (uses identity.label if not provided)
- * @param accessType - Access type to grant (defaults to 'full')
- * @param sessionId - Optional session ID for session-invite access
- * @returns The created access entry
- */
-export function addAccess(
-	publicIdentity: PublicIdentity,
-	label?: string,
-	accessType: AccessType = DEFAULT_ACCESS_TYPE,
-	sessionId?: string
-): AccessEntry {
-	const entries = readAccessList();
-
-	// Create new entry
-	const newEntry: AccessEntry = {
-		identityId: publicIdentity.id,
-		signingPublicKey: publicIdentity.signingPublicKey,
-		keyExchangePublicKey: publicIdentity.keyExchangePublicKey,
-		label: label || publicIdentity.label,
-		grantedAt: Date.now(),
-		accessType,
-		sessionId,
-	};
-
-	// Remove existing entry with same ID (if any)
-	const filteredEntries = entries.filter(
-		(e) => e.identityId !== publicIdentity.id
-	);
-
-	// Add new entry
-	filteredEntries.push(newEntry);
-
-	// Write back to disk
-	writeAccessList(filteredEntries);
-
-	return newEntry;
-}
-
-/**
- * Remove an identity from the access list
- *
- * Searches by identity ID or label (case-insensitive).
- *
- * @param identityIdOrLabel - Identity ID or label to remove
- * @returns True if an entry was removed, false if not found
- */
-export function removeAccess(identityIdOrLabel: string): boolean {
-	const entries = readAccessList();
-	const searchLower = identityIdOrLabel.toLowerCase();
-
-	const filteredEntries = entries.filter((e) => {
-		const matchesId = e.identityId.toLowerCase() === searchLower;
-		const matchesLabel = e.label?.toLowerCase() === searchLower;
-		return !matchesId && !matchesLabel;
-	});
-
-	// Check if anything was removed
-	if (filteredEntries.length === entries.length) {
-		return false;
-	}
-
-	writeAccessList(filteredEntries);
-	return true;
-}
-
-/**
- * Get an access entry by identity ID or label
- *
- * Searches by identity ID or label (case-insensitive).
- *
- * @param identityIdOrLabel - Identity ID or label to search for
- * @returns Access entry if found, undefined otherwise
- */
-export function getAccessEntry(identityIdOrLabel: string): AccessEntry | undefined {
-	const entries = readAccessList();
-	const searchLower = identityIdOrLabel.toLowerCase();
-
-	return entries.find((e) => {
-		const matchesId = e.identityId.toLowerCase() === searchLower;
-		const matchesLabel = e.label?.toLowerCase() === searchLower;
-		return matchesId || matchesLabel;
-	});
-}
-
-// ============================================================================
 // Machine Identity Management
 // ============================================================================
 
@@ -534,7 +367,7 @@ export function writeMachineIdentity(identity: MachineIdentity): void {
 // ============================================================================
 
 /**
- * Relay configuration for coordination between serve/share/access commands
+ * Relay configuration for coordination between serve/access/enroll commands
  *
  * Note: Authentication is now done via challenge-response (no JWT tokens)
  */

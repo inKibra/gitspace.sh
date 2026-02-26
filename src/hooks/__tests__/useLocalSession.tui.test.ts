@@ -4,6 +4,9 @@ import { Window } from 'happy-dom'
 import type {
   AttachSessionParams,
   BackendEvent,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
   DeleteWorkspaceParams,
   SessionBackend,
 } from '../../session/index.js'
@@ -78,9 +81,27 @@ class FakeLocalBackend implements SessionBackend {
 
   async listProjects(): Promise<void> {}
 
+  async listGithubRepos(_org?: string): Promise<string[]> {
+    return []
+  }
+
+  async listRemoteBranches(_projectName: string): Promise<string[]> {
+    return []
+  }
+
+  async listLinearIssues(_projectName: string): Promise<never[]> {
+    return []
+  }
+
   async listWorkspaces(): Promise<void> {}
 
   async listSessions(_workspaceId?: string): Promise<void> {}
+
+  async createProject(_params: CreateProjectParams): Promise<void> {}
+
+  async createWorkspace(_params: CreateWorkspaceParams): Promise<void> {}
+
+  async deleteProject(_projectName: string, _params?: DeleteProjectParams): Promise<void> {}
 
   async attachSession(_params: AttachSessionParams): Promise<void> {}
 
@@ -169,8 +190,14 @@ function createEngineStub(
     connectBackend: mock(async () => {}),
     disconnectBackend: mock(async () => {}),
     listProjects: mock(async () => {}),
+    listGithubRepos: mock(async () => []),
+    listRemoteBranches: mock(async () => []),
+    listLinearIssues: mock(async () => []),
     listWorkspaces: mock(async () => {}),
     listSessions: mock(async () => {}),
+    createProject: mock(async () => {}),
+    createWorkspace: mock(async () => {}),
+    deleteProject: mock(async () => {}),
     attachSession: mock(async () => {}),
     detachSession: mock(async () => {}),
     killSession: mock(async () => {}),

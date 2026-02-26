@@ -2,8 +2,9 @@
  * Machine-side X3DH handshake handler
  *
  * This class manages X3DH handshakes for multiple concurrent client connections.
- * It processes incoming handshake messages, validates clients via access lists
- * or invite tokens, and returns established sessions on success.
+ * It processes incoming handshake messages, validates clients via user-root
+ * certificate authorization, and returns established sessions
+ * on success.
  *
  * The relay server forwards raw bytes between clients and machines - the handshake
  * is peer-to-peer between the CLIENT and MACHINE.
@@ -24,8 +25,6 @@ import {
   createServerAuth,
   type X3DHServerState,
 } from "./crypto/handshake.js";
-import { AccessControlList } from "./crypto/access-control.js";
-import { parseInviteToken, isInviteExpired } from "./crypto/invites.js";
 import type {
   Identity,
   SessionKeys,
@@ -42,15 +41,13 @@ import type {
 export interface HandshakeHandlerConfig {
   /** Machine's identity for authentication */
   identity: Identity;
-  /** Access control list for authorized clients */
-  accessList: AccessControlList;
-  /**
-   * Optional custom invite validator
-   * Returns access type if valid, null if rejected
-   */
-  validateInvite?: (token: string) => Promise<{ accessType: AccessType; sessionId?: string } | null>;
   /** Handshake timeout in milliseconds (default: 30000) */
   handshakeTimeoutMs?: number;
+  /**
+   * Machine owner's user root ID.
+   * If the client's device cert maps to the same user root, they are accepted.
+   */
+  ownerUserRootId?: string;
 }
 
 /** Per-connection handshake state */
@@ -84,7 +81,7 @@ export interface EstablishedSession {
   peerIdentityId: string;
   /** Granted access type */
   accessType: AccessType;
-  /** Session ID for session-invite access */
+  /** Optional session ID for scoped access */
   sessionId?: string;
   /** Derived session keys for encryption */
   sessionKeys: SessionKeys;
@@ -103,7 +100,6 @@ export interface EstablishedSession {
  * ```typescript
  * const handler = new HandshakeHandler({
  *   identity: machineIdentity,
- *   accessList: acl,
  * });
  *
  * // On receiving a handshake message from client
@@ -263,12 +259,10 @@ export class HandshakeHandler {
       };
     }
 
-    // Check authorization
+    // Check authorization (owner-only user-root policy)
     const authCheck = await this.checkAuthorization(
-      authResult.peerIdentityId,
       authResult.authorization,
-      authResult.clientIdentityKey,
-      authResult.clientKeyExchangeKey
+      authResult.userRootId
     );
 
     // Create ServerAuth response
@@ -317,104 +311,39 @@ export class HandshakeHandler {
     };
   }
 
-  /**
-   * Check client authorization via access list or invite token
-   */
+  /** Check client authorization via owner-only user-root policy. */
   private async checkAuthorization(
-    peerIdentityId: string,
     authorization: X3DHAuthMessage["authorization"],
-    clientIdentityKey: Uint8Array,
-    clientKeyExchangeKey: Uint8Array
+    userRootId?: string
   ): Promise<
     | { type: "accepted"; accessType: AccessType; sessionId?: string }
     | { type: "rejected"; reason: string }
   > {
-    if (authorization.type === "access_list") {
-      // Check access list
-      const entry = this.config.accessList.getEntry(peerIdentityId);
-      if (!entry) {
-        return {
-          type: "rejected",
-          reason: "Not in access list",
-        };
-      }
-
+    if (!userRootId) {
       return {
-        type: "accepted",
-        accessType: entry.accessType,
-        sessionId: entry.sessionId,
+        type: "rejected",
+        reason: "Device certificate required",
       };
     }
 
-    if (authorization.type === "invite") {
-      // Validate invite token
-      const token = parseInviteToken(authorization.inviteToken);
+    if (!this.config.ownerUserRootId) {
+      return {
+        type: "rejected",
+        reason: "Machine owner user root is not configured",
+      };
+    }
 
-      if (!token) {
-        return {
-          type: "rejected",
-          reason: "Invalid invite token",
-        };
-      }
-
-      if (isInviteExpired(token)) {
-        return {
-          type: "rejected",
-          reason: "Invite token expired",
-        };
-      }
-
-      // Verify token was issued by this machine
-      if (token.machineId !== this.config.identity.id) {
-        return {
-          type: "rejected",
-          reason: "Invite token not issued by this machine",
-        };
-      }
-
-      // Check custom validator if provided
-      if (this.config.validateInvite) {
-        const customResult = await this.config.validateInvite(
-          authorization.inviteToken
-        );
-        if (!customResult) {
-          return {
-            type: "rejected",
-            reason: "Invite rejected by custom validator",
-          };
-        }
-        return {
-          type: "accepted",
-          accessType: customResult.accessType,
-          sessionId: customResult.sessionId,
-        };
-      }
-
-      // Use access type from token
-      // Security: Only add to permanent access list if NOT a single-use invite
-      // Single-use invites grant access for this session only
-      if (!token.singleUse) {
-        this.config.accessList.addEntry(
-          {
-            id: peerIdentityId,
-            signingPublicKey: Buffer.from(clientIdentityKey).toString("base64"),
-            keyExchangePublicKey: Buffer.from(clientKeyExchangeKey).toString("base64"),
-          },
-          token.accessType,
-          token.sessionId
-        );
-      }
-
+    // Auto-accept owner (same user root as machine)
+    if (userRootId === this.config.ownerUserRootId) {
       return {
         type: "accepted",
-        accessType: token.accessType,
-        sessionId: token.sessionId,
+        accessType: "full",
       };
     }
 
     return {
       type: "rejected",
-      reason: "Unknown authorization type",
+      reason: "Only the owner user root is authorized",
     };
   }
 

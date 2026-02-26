@@ -37,7 +37,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
         <div className="flex-1 flex flex-col items-center justify-center text-[#8b949e] px-4">
           <div className="text-lg mb-2 text-center">No workspaces found</div>
           <div className="text-sm text-[#6e7681] text-center">
-            Create workspaces with <code className="text-[#3fb950]">gssh add</code>
+            Create workspaces with <code className="text-[#3fb950]">gssh workspace add --project &lt;name&gt;</code>
           </div>
         </div>
         <Footer />

@@ -55,7 +55,7 @@ async function getReposForOwner(
 ): Promise<string[]> {
 	try {
 		const { stdout } = await execAsync(
-			`gh repo list "${owner}" --limit ${limit} --json 'name,owner' | jq -r '.[] | "\\(.owner.login)/\\(.name)"'`
+			`gh repo list "${owner}" --limit ${limit} --json nameWithOwner --jq '.[].nameWithOwner'`
 		)
 
 		const repos = stdout

@@ -13,6 +13,73 @@ import { decodeControl, type SessionCtrl } from "../lib/tmux-lite/protocol.js";
 import type { SessionKeys } from "../types/identity.js";
 import { STREAM_ID } from "./types.js";
 
+type CtrlCMode = "auto" | "signal" | "byte";
+
+const CTRL_C_MODE_ENV = "TMUX_LITE_CTRL_C_MODE";
+const CTRL_C_MODE_VALUES = new Set<CtrlCMode>(["auto", "signal", "byte"]);
+const ISIG_FLAG_BY_PLATFORM: Partial<Record<NodeJS.Platform, number>> = {
+  darwin: 0x80,
+  linux: 0x01,
+  freebsd: 0x80,
+  netbsd: 0x80,
+  openbsd: 0x80,
+};
+const ETX_BYTE = 0x03;
+
+function resolveCtrlCModeFromEnv(): CtrlCMode {
+  const raw = process.env[CTRL_C_MODE_ENV]?.trim().toLowerCase();
+  if (!raw) {
+    return "auto";
+  }
+
+  if (CTRL_C_MODE_VALUES.has(raw as CtrlCMode)) {
+    return raw as CtrlCMode;
+  }
+
+  console.warn(
+    `[pty-session] Ignoring invalid ${CTRL_C_MODE_ENV}=${JSON.stringify(raw)} (expected auto|signal|byte)`
+  );
+  return "auto";
+}
+
+const ctrlCMode = resolveCtrlCModeFromEnv();
+
+function terminalSignalsEnabled(terminal: Bun.Terminal): boolean {
+  if (ctrlCMode === "signal") {
+    return true;
+  }
+
+  if (ctrlCMode === "byte") {
+    return false;
+  }
+
+  const isigFlag = ISIG_FLAG_BY_PLATFORM[process.platform];
+  if (typeof isigFlag !== "number") {
+    return true;
+  }
+
+  const flags = terminal.localFlags;
+  if (typeof flags !== "number" || flags === 0) {
+    return true;
+  }
+
+  return (flags & isigFlag) !== 0;
+}
+
+function sendInterruptSignal(proc: ReturnType<typeof Bun.spawn>): boolean {
+  try {
+    process.kill(-proc.pid, "SIGINT");
+    return true;
+  } catch {
+    try {
+      process.kill(proc.pid, "SIGINT");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -142,7 +209,7 @@ export class PTYSession {
    * @returns True if write succeeded, false on decryption failure
    */
   write(encryptedFrame: Buffer | Uint8Array): boolean {
-    if (this.closed || !this.terminal) return false;
+    if (this.closed || !this.terminal || !this.proc) return false;
 
     const result = openFrame(Buffer.from(encryptedFrame), this.receiveKey);
     if (!result) {
@@ -154,6 +221,18 @@ export class PTYSession {
     if (result.streamId === STREAM_ID.CONTROL) {
       // Handle control message
       this.handleControlMessage(result.data);
+      return true;
+    }
+
+    if (result.data.length === 1 && result.data[0] === ETX_BYTE) {
+      if (terminalSignalsEnabled(this.terminal)) {
+        const signaled = sendInterruptSignal(this.proc);
+        if (!signaled) {
+          this.terminal.write(result.data);
+        }
+      } else {
+        this.terminal.write(result.data);
+      }
       return true;
     }
 

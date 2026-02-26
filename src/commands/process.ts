@@ -100,5 +100,5 @@ export async function attachProcess(options: ProcessCommandOptions): Promise<voi
     throw new SpacesError(`Session not found for process ${options.name}`, 'SYSTEM_ERROR');
   }
 
-  logger.info(`Attach with: gssh tmux attach ${session.id}`);
+  logger.info(`Attach with: gssh machine tmux attach ${session.id}`);
 }

@@ -16,6 +16,18 @@ const execFileAsync = promisify(execFile);
  */
 export const REQUIRED_DEPS: Dependency[] = [
   {
+    name: 'Git',
+    command: 'git',
+    checkArgs: ['--version'],
+    installUrl: 'https://git-scm.com/',
+  },
+];
+
+/**
+ * Optional dependencies used for GitHub repo discovery.
+ */
+export const GITHUB_DEPS: Dependency[] = [
+  {
     name: 'GitHub CLI',
     command: 'gh',
     checkArgs: ['--version'],
@@ -28,18 +40,6 @@ export const REQUIRED_DEPS: Dependency[] = [
         return false;
       }
     },
-  },
-  {
-    name: 'Git',
-    command: 'git',
-    checkArgs: ['--version'],
-    installUrl: 'https://git-scm.com/',
-  },
-  {
-    name: 'jq',
-    command: 'jq',
-    checkArgs: ['--version'],
-    installUrl: 'https://stedolan.github.io/jq/',
   },
 ];
 
@@ -98,7 +98,7 @@ export async function checkDependencies(deps: Dependency[] = REQUIRED_DEPS): Pro
  * Check GitHub CLI authentication
  */
 export async function checkGitHubAuth(): Promise<void> {
-  const ghDep = REQUIRED_DEPS.find((d) => d.command === 'gh');
+  const ghDep = GITHUB_DEPS.find((d) => d.command === 'gh');
   if (!ghDep?.authCheck) {
     return;
   }

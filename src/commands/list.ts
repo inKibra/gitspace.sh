@@ -1,12 +1,11 @@
 /**
  * List command implementation
- * Handles 'gssh list' (workspaces), 'gssh list projects', and 'gssh list workspaces'
+ * Handles project/workspace listing for the namespaced CLI.
  */
 
 import { existsSync, readdirSync } from 'fs'
 import { join } from 'path'
 import {
-	getCurrentProject,
 	getProjectWorkspacesDir,
 	readGlobalConfig,
 } from '../core/config.js'
@@ -32,7 +31,7 @@ export async function listProjects(
 
 	if (projects.length === 0) {
 		logger.info('No projects found')
-		logger.log('\nCreate a project:\n  gssh add project')
+		logger.log('\nCreate a project:\n  gssh project add')
 		return
 	}
 
@@ -73,15 +72,16 @@ function daysSinceCommit(date: Date): number {
 }
 
 /**
- * List workspaces in the current project
+ * List workspaces in a project
  */
 export async function listWorkspaces(
 	options: {
+		project: string
 		json?: boolean
 		verbose?: boolean
-	} = {}
+	}
 ): Promise<void> {
-	const currentProject = getCurrentProject()
+	const currentProject = options.project
 	if (!currentProject) {
 		throw new NoProjectError()
 	}
@@ -90,7 +90,7 @@ export async function listWorkspaces(
 
 	if (!existsSync(workspacesDir)) {
 		logger.info(`No workspaces found in project "${currentProject}"`)
-		logger.log('\nCreate a workspace:\n  gssh add')
+		logger.log(`\nCreate a workspace:\n  gssh workspace add --project ${currentProject}`)
 		return
 	}
 
@@ -101,7 +101,7 @@ export async function listWorkspaces(
 
 	if (workspaceNames.length === 0) {
 		logger.info(`No workspaces found in project "${currentProject}"`)
-		logger.log('\nCreate a workspace:\n  gssh add')
+		logger.log(`\nCreate a workspace:\n  gssh workspace add --project ${currentProject}`)
 		return
 	}
 

@@ -1,12 +1,13 @@
 # gitspace.sh Platform Specification
 
 > **Complete specification for the gitspace.sh hosting platform**
+> **Historical Document** - retained for context only; not the active runtime contract.
 
 ---
 
 ## Overview
 
-gitspace.sh is a lightweight platform that gives developers instant hosting via Cloudflare Tunnels. Users reserve a subdomain, get a tunnel token, and `gssh serve` handles the rest.
+gitspace.sh is a lightweight platform that gives developers instant hosting via Cloudflare Tunnels. Users reserve a subdomain, get a tunnel token, and `gssh machine serve start --foreground` handles the rest.
 
 **Core Principles**:
 - **Zero infrastructure for us** - Users run their own tunnels
@@ -56,7 +57,7 @@ gitspace.sh is a lightweight platform that gives developers instant hosting via 
 │                                                                              │
 │   Brad's MacBook (PRIMARY - has subdomain)                                  │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │  gssh serve                                                          │   │
+│   │  gssh machine serve start --foreground                                                          │   │
 │   │  ├── cloudflared (tunnel: brad.gitspace.sh)                         │   │
 │   │  ├── Local HTTP server (:8080)                                      │   │
 │   │  │   ├── HTTP routes → services/Lima VMs                            │   │
@@ -70,7 +71,7 @@ gitspace.sh is a lightweight platform that gives developers instant hosting via 
 │   Brad's Work Desktop        Brad's Home Server                             │
 │   (SECONDARY - no subdomain) (SECONDARY - no subdomain)                     │
 │   ┌───────────────────┐      ┌───────────────────┐                          │
-│   │ gssh serve        │      │ gssh serve        │                          │
+│   │ gssh machine serve start --foreground        │      │ gssh machine serve start --foreground        │                          │
 │   │ --relay brad.     │      │ --relay brad.     │                          │
 │   │   gitspace.sh     │      │   gitspace.sh     │                          │
 │   └───────────────────┘      └───────────────────┘                          │
@@ -96,7 +97,7 @@ Both methods create/access the **same account** (keyed by GitHub user ID).
 │   PORTAL (Browser)                        CLI (Terminal)                    │
 │   ────────────────                        ──────────────                    │
 │                                                                              │
-│   gitspace.sh                             $ gssh auth login                 │
+│   gitspace.sh                             $ gssh user auth login                 │
 │   ┌─────────────────────┐                                                   │
 │   │ Sign in with GitHub │                 ! Code: ABCD-1234                 │
 │   └──────────┬──────────┘                 Open github.com/login/device      │
@@ -176,7 +177,7 @@ Both methods create/access the **same account** (keyed by GitHub user ID).
 │  Terminal                                                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  $ gssh auth login                                                          │
+│  $ gssh user auth login                                                          │
 │                                                                              │
 │  ! First, copy your one-time code: ABCD-1234                                │
 │  Press Enter to open github.com in your browser...                          │
@@ -291,7 +292,7 @@ Both methods create/access the **same account** (keyed by GitHub user ID).
 │  Terminal                                                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  $ gssh host reserve brad                                                   │
+│  $ gssh user host reserve brad                                                   │
 │                                                                              │
 │  Checking availability... ✓                                                 │
 │  Creating tunnel... ✓                                                       │
@@ -304,7 +305,7 @@ Both methods create/access the **same account** (keyed by GitHub user ID).
 │    • brad.gitspace.sh                                                       │
 │    • *.brad.gitspace.sh (dev.brad.gitspace.sh, api.brad.gitspace.sh, etc.) │
 │                                                                              │
-│  Run 'gssh serve' to start hosting.                                         │
+│  Run 'gssh machine serve start --foreground' to start hosting.                                         │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -557,7 +558,7 @@ POST /subdomains
 POST /subdomains/{subdomain}/set-primary
   Auth: Bearer token
   → Sets this subdomain as primary, unsets others
-  → Primary subdomain is used by default in `gssh serve`
+  → Primary subdomain is used by default in `gssh machine serve start --foreground`
 
 GET /subdomains/{subdomain}/token
   Auth: Bearer token
@@ -931,20 +932,20 @@ export async function handleGitHubDeviceAuth(
 
 ```bash
 # Authentication
-gssh auth login              # Device auth flow
-gssh auth logout             # Clear local token
-gssh auth status             # Show current user
+gssh user auth login              # Device auth flow
+gssh user auth logout             # Clear local token
+gssh user auth status             # Show current user
 
 # Hosting (supports multiple subdomains: free=3, paid=10)
-gssh host reserve <name>     # Reserve subdomain
-gssh host release [name]     # Release subdomain
-gssh host list               # List your subdomains
-gssh host set-primary <name> # Set primary subdomain for `gssh serve`
-gssh host status             # Show current hosting status
+gssh user host reserve <name>     # Reserve subdomain
+gssh user host release [name]     # Release subdomain
+gssh user host list               # List your subdomains
+gssh user host set-primary <name> # Set primary subdomain for `gssh machine serve start --foreground`
+gssh user host status             # Show current hosting status
 
 # Main entry (starts everything)
-spaces                         # TUI + tunnel + relay
-gssh --remote <subdomain>    # Connect to remote machine
+gssh                          # TUI + tunnel + relay
+gssh client connect <target>  # Connect to remote machine
 ```
 
 ### Dependencies
@@ -1139,7 +1140,7 @@ export async function authStatus(): Promise<void> {
   const token = await getSecret('GITSPACE_TOKEN');
 
   if (!token) {
-    console.log('Not logged in. Run: gssh auth login');
+    console.log('Not logged in. Run: gssh user auth login');
     return;
   }
 
@@ -1148,7 +1149,7 @@ export async function authStatus(): Promise<void> {
   });
 
   if (!res.ok) {
-    console.log('Session expired. Run: gssh auth login');
+    console.log('Session expired. Run: gssh user auth login');
     return;
   }
 
@@ -1162,7 +1163,7 @@ export async function authStatus(): Promise<void> {
 export async function hostReserve(subdomain: string): Promise<void> {
   const token = await getSecret('GITSPACE_TOKEN');
   if (!token) {
-    console.log('Not logged in. Run: gssh auth login');
+    console.log('Not logged in. Run: gssh user auth login');
     return;
   }
 
@@ -1215,13 +1216,13 @@ export async function hostReserve(subdomain: string): Promise<void> {
   await setSecret(`TUNNEL_TOKEN_${subdomain}`, tunnelToken);
 
   console.log('\nRun `gssh` to start hosting.');
-  console.log(`Or `gssh host list` to see all your subdomains.`);
+  console.log(`Or `gssh user host list` to see all your subdomains.`);
 }
 
 export async function hostList(): Promise<void> {
   const token = await getSecret('GITSPACE_TOKEN');
   if (!token) {
-    console.log('Not logged in. Run: gssh auth login');
+    console.log('Not logged in. Run: gssh user auth login');
     return;
   }
 
@@ -1232,7 +1233,7 @@ export async function hostList(): Promise<void> {
   const subdomains = await res.json();
 
   if (subdomains.length === 0) {
-    console.log('No subdomains reserved. Run: gssh host reserve <name>');
+    console.log('No subdomains reserved. Run: gssh user host reserve <name>');
     return;
   }
 
@@ -1250,7 +1251,7 @@ export async function hostList(): Promise<void> {
 export async function hostSetPrimary(subdomain: string): Promise<void> {
   const token = await getSecret('GITSPACE_TOKEN');
   if (!token) {
-    console.log('Not logged in. Run: gssh auth login');
+    console.log('Not logged in. Run: gssh user auth login');
     return;
   }
 
@@ -1269,7 +1270,7 @@ export async function hostSetPrimary(subdomain: string): Promise<void> {
 }
 ```
 
-### gssh serve Integration
+### gssh machine serve start --foreground Integration
 
 ```typescript
 // src/commands/serve.ts - cloudflared integration
@@ -1285,11 +1286,11 @@ async function startCloudflared(subdomain: string): Promise<void> {
   // SECURITY: Read tunnel token from keychain (not from config file)
   const tunnelToken = await getSecret(`TUNNEL_TOKEN_${subdomain}`);
   if (!tunnelToken) {
-    throw new Error(`No tunnel token found for ${subdomain}. Run: gssh host reserve ${subdomain}`);
+    throw new Error(`No tunnel token found for ${subdomain}. Run: gssh user host reserve ${subdomain}`);
   }
 
-  // Write cloudflared config for spaces (separate from user's own config)
-  const configDir = join(os.homedir(), '.spaces');
+  // Write cloudflared config for gitspace (separate from user's own config)
+  const configDir = join(os.homedir(), '.gitspace');
   const configPath = join(configDir, 'cloudflared.yml');
 
   await writeFile(configPath, yaml.stringify({
@@ -1723,7 +1724,6 @@ export async function getProjectSecret(
 ~/gitspace/
 ├── .identity/
 │   ├── keypair.json        # Password-encrypted Ed25519/X25519 keys
-│   ├── access-list.json    # Authorized public keys (not sensitive)
 │   ├── machine.json        # Machine ID, label (not sensitive)
 │   └── relay.json          # Relay URL, machine ID (not sensitive)
 │                           # NOTE: No secrets in relay.json anymore!
@@ -1804,9 +1804,9 @@ Users run tunnels on their own machines, use their own bandwidth.
   □ Deploy to gitspace.sh via Pages
 
 □ CLI Updates
-  □ gssh auth login/logout/status
-  □ gssh host reserve/release/list
-  □ cloudflared integration in gssh serve
+  □ gssh user auth login/logout/status
+  □ gssh user host reserve/release/list
+  □ cloudflared integration in gssh machine serve start --foreground
   □ Test full flow
 
 □ Documentation

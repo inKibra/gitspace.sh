@@ -34,6 +34,14 @@ import { listProjectSummaries } from "../../core/project-catalog";
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
 import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
+import {
+  createProjectForSession,
+  createWorkspaceForSession,
+  deleteProjectForSession,
+  listGithubReposForSession,
+  listLinearIssuesForSession,
+  listRemoteBranchesForSession,
+} from '../../core/session-lifecycle.js';
 
 // Import review operations
 import { executeLocalReviewOperation } from "../../core/review-executor.js";
@@ -77,7 +85,7 @@ export interface RemoteClientSession {
   sessionKeys: SessionKeys;
   /** Access type granted to this client */
   accessType?: AccessType;
-  /** For session-invite: the specific session ID access was granted to */
+  /** For view: the specific session ID access was granted to */
   grantedSessionId?: string;
   /** Attached tmux-lite session ID (set after attach_session) */
   attachedSessionId?: string;
@@ -107,7 +115,7 @@ function canAttachSession(
   targetSessionId: string
 ): boolean {
   if (accessType === 'full') return true;
-  if (accessType === 'session-invite') {
+  if (accessType === 'view') {
     return grantedSessionId === targetSessionId;
   }
   return false;
@@ -146,6 +154,7 @@ export interface RemoteSessionHandlerOptions {
 export class RemoteSessionHandler {
   private tmuxLiteAvailable = false;
   private processSchedulers = new Map<string, NodeJS.Timer>();
+  private pendingAttachRuns = new Map<string, AbortController>();
   private processHostDomain?: string;
   private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
 
@@ -231,12 +240,98 @@ export class RemoteSessionHandler {
         await this.handleAttachSession(session, msg, sendResponse);
         break;
 
+      case 'cancel_pending_attach':
+        await this.handleCancelPendingAttach(session, sendResponse);
+        break;
+
       // Note: resize, detach, and pty_input are handled in attached mode
       // via client-session-manager using tmux-lite's SessionCtrl protocol,
       // not through this JSON-RPC handler.
 
       case "list_projects":
         await this.handleListProjects(session, sendResponse);
+        break;
+
+      case 'list_github_repos':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to list repositories'
+          );
+          return;
+        }
+        await this.handleListGithubRepos(session, msg.org, sendResponse);
+        break;
+
+      case 'list_remote_branches':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to list remote branches',
+            { projectName: msg.projectName }
+          );
+          return;
+        }
+        await this.handleListRemoteBranches(session, msg.projectName, sendResponse);
+        break;
+
+      case 'list_linear_issues':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to list Linear issues',
+            { projectName: msg.projectName }
+          );
+          return;
+        }
+        await this.handleListLinearIssues(session, msg.projectName, sendResponse);
+        break;
+
+      case 'create_project':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to create projects'
+          );
+          return;
+        }
+        await this.handleCreateProject(session, msg, sendResponse);
+        break;
+
+      case 'create_workspace':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to create workspaces',
+            { projectName: msg.projectName }
+          );
+          return;
+        }
+        await this.handleCreateWorkspace(session, msg, sendResponse);
+        break;
+
+      case 'delete_project':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to delete projects',
+            { projectName: msg.projectName }
+          );
+          return;
+        }
+        await this.handleDeleteProject(session, msg.projectName, sendResponse);
         break;
 
       case "kill_session":
@@ -486,6 +581,28 @@ export class RemoteSessionHandler {
     });
   }
 
+  private async handleCancelPendingAttach(
+    session: RemoteClientSession,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    if (!canManage(session.accessType)) {
+      await this.sendError(
+        session,
+        sendResponse,
+        'PERMISSION_DENIED',
+        'Requires full access to cancel pending attach runs'
+      );
+      return;
+    }
+
+    const pending = this.pendingAttachRuns.get(session.connectionId);
+    if (!pending) {
+      return;
+    }
+
+    pending.abort();
+  }
+
   /**
    * Handle attach_session request
    */
@@ -513,6 +630,12 @@ export class RemoteSessionHandler {
     }
 
     try {
+      const existingAttachRun = this.pendingAttachRuns.get(session.connectionId);
+      if (existingAttachRun) {
+        existingAttachRun.abort();
+        this.pendingAttachRuns.delete(session.connectionId);
+      }
+
       let targetSession: Session | null = null;
 
       // If no session ID, create new session in workspace
@@ -556,6 +679,8 @@ export class RemoteSessionHandler {
 
           // Track current phase for script_output messages
           let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+          const attachAbortController = new AbortController();
+          this.pendingAttachRuns.set(session.connectionId, attachAbortController);
 
           const scriptResult = await prepareWorkspaceForSession({
             projectName: workspace.projectName,
@@ -564,6 +689,7 @@ export class RemoteSessionHandler {
             interactiveScripts: false,
             bundleMode: 'error-if-changed',
             scriptPolicy: msg.scriptPolicy ?? 'auto',
+            signal: attachAbortController.signal,
             onOutput: (data) => {
               void this.sendMessage(session, sendResponse, {
                 type: 'script_output',
@@ -576,6 +702,11 @@ export class RemoteSessionHandler {
             onPhaseStart: (phase) => {
               currentPhase = phase;
             },
+          }).finally(() => {
+            const pending = this.pendingAttachRuns.get(session.connectionId);
+            if (pending === attachAbortController) {
+              this.pendingAttachRuns.delete(session.connectionId);
+            }
           });
 
           if (!scriptResult.success) {
@@ -590,6 +721,8 @@ export class RemoteSessionHandler {
             const code =
               'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh
                 ? 'BUNDLE_REFRESH_REQUIRED'
+                : 'cancelled' in scriptResult && scriptResult.cancelled
+                  ? 'SCRIPT_CANCELLED'
                 : scriptResult.phase === 'setup'
                   ? 'SETUP_SCRIPT_FAILED'
                   : scriptResult.phase === 'select'
@@ -675,6 +808,151 @@ export class RemoteSessionHandler {
     } catch (e) {
       console.error("[remote-session] Failed to list projects:", e);
       await this.sendError(session, sendResponse, "LIST_FAILED", "Failed to list projects");
+    }
+  }
+
+  private async handleListGithubRepos(
+    session: RemoteClientSession,
+    org: string | undefined,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const repos = await listGithubReposForSession(org);
+      await this.sendMessage(session, sendResponse, {
+        type: 'github_repo_list',
+        repos,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to list GitHub repositories';
+      await this.sendError(session, sendResponse, 'LIST_REPOS_FAILED', message);
+    }
+  }
+
+  private async handleListRemoteBranches(
+    session: RemoteClientSession,
+    projectName: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const branches = await listRemoteBranchesForSession(projectName);
+      await this.sendMessage(session, sendResponse, {
+        type: 'remote_branch_list',
+        projectName,
+        branches,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to list remote branches';
+      await this.sendError(session, sendResponse, 'LIST_REMOTE_BRANCHES_FAILED', message, {
+        projectName,
+      });
+    }
+  }
+
+  private async handleListLinearIssues(
+    session: RemoteClientSession,
+    projectName: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const issues = await listLinearIssuesForSession(projectName);
+      await this.sendMessage(session, sendResponse, {
+        type: 'linear_issue_list',
+        projectName,
+        issues,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to list Linear issues';
+      await this.sendError(session, sendResponse, 'LIST_LINEAR_ISSUES_FAILED', message, {
+        projectName,
+      });
+    }
+  }
+
+  private async handleCreateProject(
+    session: RemoteClientSession,
+    request: {
+      repository: string;
+      projectName?: string;
+      baseBranch?: string;
+      setCurrent?: boolean;
+    },
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const result = await createProjectForSession({
+        repository: request.repository,
+        projectName: request.projectName,
+        baseBranch: request.baseBranch,
+        setCurrent: request.setCurrent,
+      });
+
+      await this.sendMessage(session, sendResponse, {
+        type: 'project_created',
+        projectName: result.projectName,
+        repository: result.repository,
+        baseBranch: result.baseBranch,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create project';
+      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
+        projectName: request.projectName,
+      });
+    }
+  }
+
+  private async handleCreateWorkspace(
+    session: RemoteClientSession,
+    request: {
+      projectName: string;
+      workspaceName: string;
+      branchName?: string;
+      baseBranch?: string;
+      workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource;
+      linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
+    },
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const result = await createWorkspaceForSession({
+        projectName: request.projectName,
+        workspaceName: request.workspaceName,
+        branchName: request.branchName,
+        baseBranch: request.baseBranch,
+        workspaceSource: request.workspaceSource,
+        linearIssue: request.linearIssue,
+      });
+
+      await this.sendMessage(session, sendResponse, {
+        type: 'workspace_created',
+        projectName: result.projectName,
+        workspaceId: result.workspaceId,
+        workspaceName: result.workspaceName,
+        branchName: result.branchName,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create workspace';
+      await this.sendError(session, sendResponse, 'CREATE_WORKSPACE_FAILED', message, {
+        projectName: request.projectName,
+      });
+    }
+  }
+
+  private async handleDeleteProject(
+    session: RemoteClientSession,
+    projectName: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      await deleteProjectForSession({ projectName });
+      await this.sendMessage(session, sendResponse, {
+        type: 'project_deleted',
+        projectName,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete project';
+      await this.sendError(session, sendResponse, 'DELETE_PROJECT_FAILED', message, {
+        projectName,
+      });
     }
   }
 
@@ -1051,13 +1329,14 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void,
     code: string,
     message: string,
-    options?: { workspaceId?: string }
+    options?: { workspaceId?: string; projectName?: string }
   ): Promise<void> {
     await this.sendMessage(session, sendResponse, {
       type: "error",
       code,
       message,
       workspaceId: options?.workspaceId,
+      projectName: options?.projectName,
     });
   }
 

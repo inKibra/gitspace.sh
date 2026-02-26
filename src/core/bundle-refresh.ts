@@ -78,6 +78,12 @@ export interface BundleRefreshOptions {
   force?: boolean;
   /** Run in non-interactive mode (skip prompting when changes are detected) */
   nonInteractive?: boolean;
+  /** Allow workspace scope to fall back to base repo bundle.json */
+  allowBaseFallback?: boolean;
+}
+
+export interface BundleResolutionOptions {
+  allowBaseFallback?: boolean;
 }
 
 /**
@@ -333,8 +339,11 @@ function loadBundle(bundleDir: string): LoadBundleResult {
 
 function resolveBundleLocation(
   projectName: string,
-  workspacePath?: string
+  workspacePath?: string,
+  options: BundleResolutionOptions = {},
 ): { bundleDir: string; bundleSource: 'workspace' | 'base' } | null {
+  const allowBaseFallback = options.allowBaseFallback ?? true;
+
   if (workspacePath) {
     const workspaceBundleDir = join(workspacePath, '.gitspace');
     if (existsSync(join(workspaceBundleDir, BUNDLE_FILENAME))) {
@@ -342,6 +351,10 @@ function resolveBundleLocation(
         bundleDir: workspaceBundleDir,
         bundleSource: 'workspace',
       };
+    }
+
+    if (!allowBaseFallback) {
+      return null;
     }
   }
 
@@ -492,13 +505,17 @@ export function syncBundleWorkspaceState(projectName: string, workspacePath?: st
 /**
  * Detect if bundle has changed for the current workspace scope.
  */
-export function detectBundleChanges(projectName: string, workspacePath?: string): BundleChangeResult {
+export function detectBundleChanges(
+  projectName: string,
+  workspacePath?: string,
+  options: BundleResolutionOptions = {},
+): BundleChangeResult {
   const result: BundleChangeResult = {
     hasBundle: false,
     hasChanged: false,
   };
 
-  const bundleLocation = resolveBundleLocation(projectName, workspacePath);
+  const bundleLocation = resolveBundleLocation(projectName, workspacePath, options);
   if (!bundleLocation) {
     return result;
   }
@@ -882,7 +899,9 @@ export async function refreshBundle(
     completed: false,
   };
 
-  const changes = detectBundleChanges(projectName, workspacePath);
+  const changes = detectBundleChanges(projectName, workspacePath, {
+    allowBaseFallback: options.allowBaseFallback,
+  });
   if (!changes.hasBundle) {
     result.error = changes.parseError || 'No bundle found';
     return result;

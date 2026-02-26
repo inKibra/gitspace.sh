@@ -21,9 +21,9 @@ export interface WebSocketData {
   role: "machine" | "client";
   /** Connection ID (for routing) */
   connectionId: string;
-  /** Account ID derived from machine authorization (machines only) */
-  accountId?: string;
-  /** Client identity ID (for clients, set during connect_with_invite/connect_to_machine) */
+  /** Owner user-root ID for registered machine connections */
+  ownerUserRootId?: string;
+  /** Client identity ID (for clients, set during connect_to_machine) */
   clientIdentityId?: string;
   /** Permissions (for clients) */
   permissions?: ("read" | "write")[];
@@ -62,7 +62,7 @@ export interface RelayConfig {
   identity: RelayIdentity;
   /**
    * Pre-authorized machine signing keys (base64 Ed25519 public keys).
-   * These machines can connect without being in the on-disk authorized list.
+   * These machines can connect without an enrollment token for this process.
    * Used for ephemeral local relays where the creating process knows which machine will connect.
    */
   preAuthorizedMachines?: string[] | Set<string>;

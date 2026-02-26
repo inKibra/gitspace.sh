@@ -28,11 +28,11 @@ gssh
 # → Shows local workspaces
 
 # Connect to remote machine
-gssh --remote <machine-id>
-gssh --remote brads-macbook
+gssh client connect --machine <machine-id> --relay <url>
+gssh client connect --machine brads-macbook --relay ws://localhost:4480/ws
 
-# Connect via invite token
-gssh --connect <invite-token>
+# Connect from another owner device
+gssh client connect <machine-id>
 ```
 
 ### Startup Flow
@@ -43,7 +43,7 @@ gssh --connect <invite-token>
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │   1. Check: Is relay daemon running?                                    │
-│      └── No → Start `gssh serve` in background                          │
+│      └── No → Start `gssh machine serve start --foreground` in background                          │
 │                                                                          │
 │   2. Check: --remote flag?                                              │
 │      └── Yes → Connect TUI to remote machine                            │
@@ -66,14 +66,14 @@ Instant hosting on `*.gitspace.sh` subdomains.
 
 **Implemented Commands:**
 ```bash
-gssh auth login             # GitHub OAuth authentication
-gssh auth logout            # Clear credentials
-gssh auth status            # Show auth status
-gssh host reserve <name>    # Reserve myapp.gitspace.sh
-gssh host release [name]    # Release subdomain
-gssh host list              # List your subdomains
-gssh host set-primary <n>   # Set primary subdomain
-gssh host status            # Show tunnel status
+gssh user auth login             # GitHub OAuth authentication
+gssh user auth logout            # Clear credentials
+gssh user auth status            # Show auth status
+gssh user host reserve <name>    # Reserve myapp.gitspace.sh
+gssh user host release [name]    # Release subdomain
+gssh user host list              # List your subdomains
+gssh user host set-primary <n>   # Set primary subdomain
+gssh user host status            # Show tunnel status
 ```
 
 **Not Yet Implemented:**
@@ -86,7 +86,7 @@ gssh host status            # Show tunnel status
 Developer Mac                    Cloudflare                    Users
 ─────────────                    ──────────                    ─────
 
-gssh serve ────────────────────► Tunnel  ◄─────────────────── Browser
+gssh machine serve start --foreground ────────────────────► Tunnel  ◄─────────────────── Browser
      │           (cloudflared)
      │
      ▼
@@ -120,7 +120,7 @@ VM-per-workspace isolation using Lima. Works on all Apple Silicon (M1/M2/M3+).
 │   gssh (TUI)                                                            │
 │       │                                                                  │
 │       ▼                                                                  │
-│   gssh serve (daemon)                                                   │
+│   gssh machine serve start --foreground (daemon)                                                   │
 │       │                                                                  │
 │       ├── LimaManager (VM lifecycle)                                    │
 │       │       │                                                          │
@@ -140,7 +140,7 @@ VM-per-workspace isolation using Lima. Works on all Apple Silicon (M1/M2/M3+).
 **Key Design Decisions:**
 - **VM per workspace**, not per service
 - **Invisible to relay** - Mac appears as one machine with multiple workspaces
-- **Session routing** - `gssh serve` routes sessions to correct Lima VM
+- **Session routing** - `gssh machine serve start --foreground` routes sessions to correct Lima VM
 - **Dockerfile → rootfs** - Define VM environment via familiar Dockerfile
 
 **Config:**
@@ -314,21 +314,6 @@ User: "why is checkout slow?"
 
 ---
 
-### 5. Stack Splitting (Status: Not Implemented)
-
-AI-assisted splitting of WIP commits into clean PRs. See `docs/STACK-DESIGN.md` for full design.
-
-**Commands:**
-```bash
-gssh stack                  # Analyze and propose split
-gssh stack --base develop   # Specify base branch
-gssh stack --dry-run        # Just analyze, don't execute
-gssh stack sync             # Rebase after PR merges
-gssh stack list             # List active stacks
-```
-
----
-
 ## Config Schema (Full)
 
 ```json
@@ -403,56 +388,54 @@ gssh stack list             # List active stacks
 ```bash
 # Entry point
 gssh                        # Start TUI
-gssh --relay <url>          # TUI with remote machine access
+gssh client machines list --relay <url>  # List accessible machines on relay
 
 # Identity
-gssh identity init          # Create machine keypair
-gssh identity show          # Show fingerprint
+gssh user identity init          # Create user root identity
+gssh user identity show          # Show fingerprint
 
-# Access control
-gssh access add <pubkey>    # Authorize client
-gssh access list            # List authorized
-gssh access remove <key>    # Revoke access
-
-# Sharing
-gssh share create           # Create invite token
+# Invites
+gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k> # Create machine enrollment invite
+gssh invite list --relay <url>             # List machine enrollment invites
+gssh invite revoke <invite-id> --relay <url> # Revoke machine enrollment invite
 
 # Authentication (gitspace.sh)
-gssh auth login             # GitHub OAuth
-gssh auth logout            # Clear credentials
-gssh auth status            # Show auth status
+gssh user auth login             # GitHub OAuth
+gssh user auth logout            # Clear credentials
+gssh user auth status            # Show auth status
 
 # Hosting (gitspace.sh)
-gssh host reserve <name>    # Reserve subdomain
-gssh host release [name]    # Release subdomain
-gssh host list              # List subdomains
-gssh host set-primary <n>   # Set primary
-gssh host status            # Show status
+gssh user host reserve <name>    # Reserve subdomain
+gssh user host release [name]    # Release subdomain
+gssh user host list              # List subdomains
+gssh user host set-primary <n>   # Set primary
+gssh user host status            # Show status
 
-# Remote access
-gssh serve                  # Start daemon (foreground)
-gssh serve start            # Start daemon (background)
-gssh serve stop             # Stop daemon
-gssh connect <token>        # Connect via invite token
+# Remote access (owner-only)
+gssh machine serve start --foreground                  # Start daemon (foreground)
+gssh machine serve start            # Start daemon (background)
+gssh machine serve stop             # Stop daemon
+gssh user identity recover                # Recover same owner identity on another device
+gssh client connect <target>             # Connect to target machine
+gssh client machines list --relay <url>  # List accessible machines on relay
 gssh status                 # Show daemon status
 
 # Machine management
-gssh machine invite         # Create machine invite
-gssh machine list           # List machines (stub)
-gssh machine remove <id>    # Remove machine (stub)
+gssh machine enroll --invite <token>  # Enroll machine with relay-machine invite token
 
 # Projects/workspaces
-gssh add project            # Add project from GitHub
-gssh add <name>             # Create workspace
-gssh list projects          # List projects
-gssh list workspaces        # List workspaces
-gssh remove workspace       # Remove workspace
-gssh remove project         # Remove project
-gssh directory              # Print project directory
+gssh project add            # Add project from GitHub
+gssh workspace add <name> --project <project-name>  # Create workspace
+gssh project list          # List projects
+gssh workspace list --project <project-name>        # List workspaces
+gssh workspace remove <name> --project <project-name>       # Remove workspace
+gssh project remove         # Remove project
 
 # Relay (internal)
 gssh relay start            # Start relay server
-gssh relay authorize <pubkey>  # Authorize machine
+gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k> # Create machine enrollment invite
+gssh relay machines list    # List registered machines
+gssh relay machines revoke <machine-id> # Revoke machine registration
 ```
 
 ### Planned (Not Implemented)
@@ -471,10 +454,6 @@ gssh events query "..."     # AI-powered query
 
 # Code intelligence
 gssh query "..."            # Ask about code + runtime
-
-# Stack splitting
-gssh stack                  # AI-assisted PR splitting
-gssh stack sync             # Sync after merges
 ```
 
 ---
@@ -484,7 +463,7 @@ gssh stack sync             # Sync after merges
 ```
 src/
 ├── commands/
-│   ├── host.ts               # gssh host *
+│   ├── host.ts               # gssh user host *
 │   ├── run.ts                # gssh run
 │   ├── events.ts             # gssh events
 │   └── query.ts              # gssh query
@@ -551,7 +530,6 @@ src/
 | Process Runner | Not Started | Depends on Lima |
 | Event Collection | Not Started | Depends on Process Runner |
 | Code Intelligence | Not Started | ast-grep + AI |
-| Stack Splitting | Not Started | AI-assisted PR splitting |
 
 ### Next Steps
 

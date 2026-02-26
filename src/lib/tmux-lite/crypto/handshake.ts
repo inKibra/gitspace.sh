@@ -10,7 +10,7 @@
  * The handshake provides:
  * - Perfect forward secrecy (ephemeral keys)
  * - Mutual authentication (both parties prove identity)
- * - Authorization (invite tokens or access lists)
+ * - Authorization (access lists)
  * - Protection against replay attacks (nonces, timestamps)
  * - Protection against man-in-the-middle (signed pre-keys)
  *
@@ -31,8 +31,14 @@ import {
   deriveSessionKeysFromMultiple,
   validateX25519PublicKey,
 } from "./keyexchange.js";
+import {
+  verifyDeviceCertificate,
+  isDeviceCertExpired,
+  getUserRootIdFromCert,
+} from "./device-cert.js";
 import type {
   Identity,
+  DeviceCertificate,
   KeyExchangeKeypair,
   SessionKeys,
   X3DHInitMessage,
@@ -265,7 +271,7 @@ export function processServerHello(
  *
  * @param state - Current client state (must be in awaiting_server_auth phase)
  * @param identity - Client's identity for authentication
- * @param authorization - Authorization method (access list or invite token)
+ * @param authorization - Authorization method (access list)
  * @returns Updated state, ClientAuth message, and derived session keys
  * @throws {Error} If state is invalid or key derivation fails
  *
@@ -274,7 +280,7 @@ export function processServerHello(
  * const { state: newState, message, sessionKeys } = createClientAuth(
  *   state,
  *   myIdentity,
- *   { type: "invite", inviteToken: "token123" }
+ *   { type: "access_list" }
  * );
  * await relay.send(message);
  * // Store sessionKeys for later use
@@ -283,7 +289,8 @@ export function processServerHello(
 export function createClientAuth(
   state: X3DHClientState,
   identity: Identity,
-  authorization: X3DHAuthMessage["authorization"]
+  authorization: X3DHAuthMessage["authorization"],
+  deviceCertificate: string
 ): {
   state: X3DHClientState;
   message: X3DHAuthMessage;
@@ -368,6 +375,10 @@ export function createClientAuth(
   const identitySignature = sign(signatureTranscript, identity.signing.secretKey);
 
   // Create message
+  if (!deviceCertificate) {
+    throw new Error('Device certificate required for handshake authorization (owner identity binding)');
+  }
+
   const message: X3DHAuthMessage = {
     version: PROTOCOL_VERSION,
     identityKey: Buffer.from(identity.signing.publicKey).toString("base64"),
@@ -377,6 +388,7 @@ export function createClientAuth(
     identityProof: Buffer.from(identityProof).toString("base64"),
     identitySignature: Buffer.from(identitySignature).toString("base64"),
     authorization,
+    deviceCertificate,
   };
 
   const newState: X3DHClientState = {
@@ -654,7 +666,7 @@ export function createServerHello(
  *   // Send rejection
  *   return;
  * }
- * // Check authorization (access list or invite token)
+ * // Check authorization (access list)
  * const permissions = await checkAuthorization(result);
  * ```
  */
@@ -667,6 +679,8 @@ export function processClientAuth(
   authorization: X3DHAuthMessage["authorization"];
   clientIdentityKey: Uint8Array;
   clientKeyExchangeKey: Uint8Array;
+  /** User root identity ID extracted from a verified device certificate, if present */
+  userRootId?: string;
 } | null {
   // Validate protocol version
   if (message.version !== PROTOCOL_VERSION) {
@@ -774,11 +788,45 @@ export function processClientAuth(
     // Derive peer identity ID
     const peerIdentityId = deriveIdentityId(clientIdentityKey);
 
+    // A valid device certificate is mandatory for all authorization modes.
+    if (!message.deviceCertificate) {
+      return null;
+    }
+
+    // Verify device certificate
+    let userRootId: string | undefined;
+    try {
+      const cert: DeviceCertificate = JSON.parse(message.deviceCertificate);
+
+      // Verify the certificate signature
+      if (!verifyDeviceCertificate(cert)) {
+        return null; // Invalid certificate signature — reject handshake
+      }
+
+      // Check certificate expiry
+      if (isDeviceCertExpired(cert)) {
+        return null; // Expired certificate — reject handshake
+      }
+
+      // Verify the certificate's device signing key matches the client's identity key
+      const certDeviceSigningKey = new Uint8Array(Buffer.from(cert.deviceSigningPublicKey, 'base64'));
+      if (!arraysEqual(certDeviceSigningKey, clientIdentityKey)) {
+        return null; // Certificate doesn't match client identity — reject handshake
+      }
+
+      // Certificate is valid and matches — extract user root ID
+      userRootId = getUserRootIdFromCert(cert);
+    } catch {
+      // Malformed certificate JSON — reject handshake
+      return null;
+    }
+
     return {
       peerIdentityId,
       authorization: message.authorization,
       clientIdentityKey,
       clientKeyExchangeKey,
+      userRootId,
     };
   } catch {
     return null;

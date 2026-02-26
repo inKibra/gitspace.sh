@@ -2,10 +2,10 @@
  * Notifications command - manage shell integration hooks
  *
  * Commands:
- *   gssh notifications install   - Install shell hooks for notification integration
- *   gssh notifications uninstall - Remove shell hooks
- *   gssh notifications hook      - Print shell hook snippet
- *   gssh notifications status    - Show current notification config
+ *   gssh user notifications install   - Install shell hooks for notification integration
+ *   gssh user notifications uninstall - Remove shell hooks
+ *   gssh user notifications hook      - Print shell hook snippet
+ *   gssh user notifications status    - Show current notification config
  */
 
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'fs';
@@ -301,7 +301,7 @@ export async function notificationsHook(shell?: string): Promise<void> {
 
   if (!shell) {
     logger.log('Available shells: bash, zsh, fish');
-    logger.log('Usage: gssh notifications hook --shell <shell>\n');
+    logger.log('Usage: gssh user notifications hook --shell <shell>\n');
     return;
   }
 

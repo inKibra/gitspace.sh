@@ -10,7 +10,7 @@ export function UseCases() {
       stars: 5
     },
     {
-      quote: "We share view-only links in Slack. Everyone can watch the agent work without stepping on each other. Game changer for debugging.",
+      quote: "We recover the same owner identity on phone and laptop. I can check long-running agents from anywhere without breaking encryption boundaries. Game changer for debugging.",
       author: "Tech lead",
       role: "8-person startup",
       stars: 5

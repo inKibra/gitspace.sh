@@ -16,7 +16,8 @@ import {
   type HandshakeMessage,
 } from "../../../handshake-handler.js";
 import { AccessControlList } from "../../access-control.js";
-import { createInviteToken } from "../../invites.js";
+import { createDeviceCertificate } from "../../device-cert.js";
+import { generateMnemonic, mnemonicToUserIdentity } from "../../user-identity.js";
 import {
   createTestIdentityPair,
   createTestIdentity,
@@ -34,6 +35,18 @@ import {
   getErrorReason,
 } from "../../../../../__tests__/test-utils.js";
 
+function buildDeviceCertificateFor(
+  identity: import("../../../../../types/identity.js").Identity,
+  userRoot: ReturnType<typeof mnemonicToUserIdentity> = mnemonicToUserIdentity(generateMnemonic()),
+): string {
+  const cert = createDeviceCertificate(
+    userRoot,
+    identity.signing.publicKey,
+    identity.keyExchange.publicKey,
+  );
+  return JSON.stringify(cert);
+}
+
 describe("Error Handling Integration", () => {
   describe("stale timestamps", () => {
     it("should reject ClientHello with stale timestamp", async () => {
@@ -43,7 +56,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Create ClientHello with stale timestamp
@@ -69,7 +81,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Create ClientHello with future timestamp
@@ -96,7 +107,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       const { message: clientHello } = createClientHello();
@@ -144,7 +154,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Start handshake
@@ -180,7 +189,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Complete ClientHello -> ServerHello
@@ -199,7 +207,7 @@ describe("Error Handling Integration", () => {
       // Create ClientAuth and tamper with identity proof
       const { message: clientAuth } = createClientAuth(state2!, client, {
         type: "access_list",
-      });
+      }, buildDeviceCertificateFor(client));
 
       const tamperedClientAuth = {
         ...clientAuth,
@@ -226,7 +234,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       const { message: clientHello } = createClientHello();
@@ -250,7 +257,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       const { message: clientHello } = createClientHello();
@@ -280,7 +286,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Start handshake
@@ -299,7 +304,7 @@ describe("Error Handling Integration", () => {
       // Imposter tries to use client's handshake state with their own identity
       const { message: imposterAuth } = createClientAuth(state2!, imposter, {
         type: "access_list",
-      });
+      }, buildDeviceCertificateFor(imposter));
 
       const result2 = await handler.processMessage("conn-1", {
         type: "handshake",
@@ -324,7 +329,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Try to send ClientAuth without first sending ClientHello
@@ -357,7 +361,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Send first ClientHello
@@ -391,7 +394,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
         handshakeTimeoutMs: 100, // 100ms timeout
       });
 
@@ -416,11 +418,13 @@ describe("Error Handling Integration", () => {
       const { client, machine } = createTestIdentityPair();
       const accessList = new AccessControlList();
       accessList.addEntry(toPublicIdentity(client));
+      const ownerRoot = mnemonicToUserIdentity(generateMnemonic());
+      const ownerUserRootId = ownerRoot.id;
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
         handshakeTimeoutMs: 100,
+        ownerUserRootId,
       });
 
       // Complete handshake quickly
@@ -437,7 +441,7 @@ describe("Error Handling Integration", () => {
 
       const { message: clientAuth } = createClientAuth(state2!, client, {
         type: "access_list",
-      });
+      }, buildDeviceCertificateFor(client, ownerRoot));
 
       const result2 = await handler.processMessage("conn-1", {
         type: "handshake",
@@ -462,7 +466,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Note: We use type assertion here because we're deliberately testing
@@ -483,7 +486,6 @@ describe("Error Handling Integration", () => {
 
       const handler = new HandshakeHandler({
         identity: machine,
-        accessList,
       });
 
       // Client shouldn't send server_hello

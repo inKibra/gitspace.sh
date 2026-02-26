@@ -53,6 +53,7 @@ describe('RelayMachineDirectoryClient', () => {
     const client = new RelayMachineDirectoryClient<FakeSocket>({
       relayUrl: 'ws://localhost:4480/ws',
       clientIdentityId: 'client-1',
+      deviceCertificate: 'test-device-cert',
       socketAdapter: createFakeAdapter(holder),
       signer: (msg) => ({ ...msg, signature: { sig: 'x', pub: 'y', ts: 123 } }),
       onStatusChange: (status) => statuses.push(status),
@@ -107,6 +108,7 @@ describe('RelayMachineDirectoryClient', () => {
     const client = new RelayMachineDirectoryClient<FakeSocket>({
       relayUrl: 'ws://localhost:4480/ws',
       clientIdentityId: 'client-2',
+      deviceCertificate: 'test-device-cert',
       socketAdapter: createFakeAdapter(holder),
     });
 
@@ -131,6 +133,7 @@ describe('RelayMachineDirectoryClient', () => {
     const client = new RelayMachineDirectoryClient<FakeSocket>({
       relayUrl: 'ws://localhost:4480/ws',
       clientIdentityId: 'client-3',
+      deviceCertificate: 'test-device-cert',
       socketAdapter: createFakeAdapter(holder),
       onStatusChange: (status) => statuses.push(status),
       onMachineList: (machines) => machineLists.push(machines),

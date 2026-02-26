@@ -2,19 +2,28 @@
  * Serve daemon management
  *
  * Handles daemonization, PID/socket management, and status queries
- * for the gssh serve command.
+ * for the `gssh machine serve` command group.
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { getSpacesDir } from '../core/config.js';
+import { assertControlOwner, listCloudWorkspaces, readControlMeta } from '../relay/control/store.js';
+import type { CloudWorkspaceRecord } from '../relay/control/types.js';
 
 // ============================================================================
 // File paths
 // ============================================================================
 
 /** Get serve daemon directory */
+const SERVE_DAEMON_DIR_OVERRIDE_ENV = 'GITSPACE_SERVE_DAEMON_DIR';
+
 export function getServeDaemonDir(): string {
+  const override = process.env[SERVE_DAEMON_DIR_OVERRIDE_ENV]?.trim();
+  if (override) {
+    return override;
+  }
+
   return join(getSpacesDir(), '.serve');
 }
 
@@ -141,12 +150,23 @@ export interface StatusResponse {
 export type ControlMessage =
   | { type: 'status' }
   | { type: 'shutdown' }
-  | { type: 'add_access'; clientIdentityId: string; signingKey: string; keyExchangeKey: string; label?: string; accessType: 'full' | 'session-invite'; sessionId?: string }
-  | { type: 'remove_access'; clientIdentityId: string };
+  | { type: 'control_meta' }
+  | { type: 'assert_owner'; identityId: string }
+  | { type: 'list_cloud_workspaces'; identityId: string };
 
 /** Control response */
 export type ControlResponse =
   | StatusResponse
+  | {
+      type: 'control_meta';
+      ownerIdentityId?: string;
+      relayIdentityId?: string;
+      relaySigningPublicKey?: string;
+      relayFingerprint?: string;
+      schemaVersion: number;
+      updatedAt: string;
+    }
+  | { type: 'cloud_workspaces'; workspaces: CloudWorkspaceRecord[] }
   | { type: 'ok' }
   | { type: 'error'; message: string };
 
@@ -187,30 +207,6 @@ export function updateDaemonState(updates: Partial<DaemonState>): void {
 }
 
 // ============================================================================
-// Access Command Handler
-// ============================================================================
-
-/** Handler for access control commands from CLI */
-export interface AccessCommandHandler {
-  addAccess(entry: {
-    clientIdentityId: string;
-    signingKey: string;
-    keyExchangeKey: string;
-    label?: string;
-    accessType: 'full' | 'session-invite';
-    sessionId?: string;
-  }): Promise<{ success: boolean; error?: string }>;
-
-  removeAccess(clientIdentityId: string): Promise<{ success: boolean; error?: string }>;
-}
-
-let accessHandler: AccessCommandHandler | null = null;
-
-export function setAccessCommandHandler(handler: AccessCommandHandler): void {
-  accessHandler = handler;
-}
-
-// ============================================================================
 // Status Socket Server
 // ============================================================================
 
@@ -220,6 +216,7 @@ let statusServer: ReturnType<typeof Bun.listen> | null = null;
  * Start the status socket server
  */
 export function startStatusServer(): void {
+  ensureServeDaemonDir();
   const socketPath = getServeSocketPath();
 
   // Clean up old socket
@@ -253,34 +250,40 @@ export function startStatusServer(): void {
             socket.end();
             // Trigger graceful shutdown
             process.emit('SIGTERM');
-          } else if (msg.type === 'add_access') {
-            if (!accessHandler) {
-              socket.write(JSON.stringify({ type: 'error', message: 'Access handler not registered' }));
-            } else {
-              const result = await accessHandler.addAccess({
-                clientIdentityId: msg.clientIdentityId,
-                signingKey: msg.signingKey,
-                keyExchangeKey: msg.keyExchangeKey,
-                label: msg.label,
-                accessType: msg.accessType,
-                sessionId: msg.sessionId,
-              });
-              if (result.success) {
-                socket.write(JSON.stringify({ type: 'ok' }));
-              } else {
-                socket.write(JSON.stringify({ type: 'error', message: result.error || 'Failed to add access' }));
-              }
+          } else if (msg.type === 'control_meta') {
+            const meta = readControlMeta();
+            socket.write(JSON.stringify({
+              type: 'control_meta',
+              ownerIdentityId: meta.ownerIdentityId,
+              relayIdentityId: meta.relayIdentityId,
+              relaySigningPublicKey: meta.relaySigningPublicKey,
+              relayFingerprint: meta.relayFingerprint,
+              schemaVersion: meta.schemaVersion,
+              updatedAt: meta.updatedAt,
+            }));
+          } else if (msg.type === 'assert_owner') {
+            try {
+              assertControlOwner(msg.identityId);
+              socket.write(JSON.stringify({ type: 'ok' }));
+            } catch (error) {
+              socket.write(JSON.stringify({
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Owner assertion failed',
+              }));
             }
-          } else if (msg.type === 'remove_access') {
-            if (!accessHandler) {
-              socket.write(JSON.stringify({ type: 'error', message: 'Access handler not registered' }));
-            } else {
-              const result = await accessHandler.removeAccess(msg.clientIdentityId);
-              if (result.success) {
-                socket.write(JSON.stringify({ type: 'ok' }));
-              } else {
-                socket.write(JSON.stringify({ type: 'error', message: result.error || 'Failed to remove access' }));
-              }
+          } else if (msg.type === 'list_cloud_workspaces') {
+            try {
+              assertControlOwner(msg.identityId);
+              const workspaces = listCloudWorkspaces();
+              socket.write(JSON.stringify({
+                type: 'cloud_workspaces',
+                workspaces,
+              }));
+            } catch (error) {
+              socket.write(JSON.stringify({
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Failed to list cloud workspaces',
+              }));
             }
           } else {
             socket.write(JSON.stringify({ type: 'error', message: 'Unknown command' }));
@@ -396,16 +399,64 @@ export async function sendShutdownCommand(): Promise<boolean> {
 }
 
 /**
- * Send add_access command to running daemon
+ * Query control relay metadata from running daemon
  */
-export async function sendAddAccessCommand(entry: {
-  clientIdentityId: string;
-  signingKey: string;
-  keyExchangeKey: string;
-  label?: string;
-  accessType: 'full' | 'session-invite';
-  sessionId?: string;
-}): Promise<{ success: boolean; error?: string }> {
+export async function queryControlMeta(): Promise<{
+  ownerIdentityId?: string;
+  relayIdentityId?: string;
+  relaySigningPublicKey?: string;
+  relayFingerprint?: string;
+  schemaVersion: number;
+  updatedAt: string;
+} | null> {
+  const socketPath = getServeSocketPath();
+  if (!existsSync(socketPath)) return null;
+
+  return new Promise((resolve) => {
+    Bun.connect({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          try {
+            const response = JSON.parse(data.toString()) as ControlResponse;
+            if (response.type === 'control_meta') {
+              resolve({
+                ownerIdentityId: response.ownerIdentityId,
+                relayIdentityId: response.relayIdentityId,
+                relaySigningPublicKey: response.relaySigningPublicKey,
+                relayFingerprint: response.relayFingerprint,
+                schemaVersion: response.schemaVersion,
+                updatedAt: response.updatedAt,
+              });
+            } else {
+              resolve(null);
+            }
+          } catch {
+            resolve(null);
+          }
+        },
+        error() {
+          resolve(null);
+        },
+        open(socket) {
+          socket.write(JSON.stringify({ type: 'control_meta' }));
+        },
+        connectError() {
+          resolve(null);
+        },
+      },
+    }).catch(() => {
+      resolve(null);
+    });
+
+    setTimeout(() => resolve(null), 2000);
+  });
+}
+
+/**
+ * Assert caller identity is the control relay owner
+ */
+export async function sendAssertOwnerCommand(identityId: string): Promise<{ success: boolean; error?: string }> {
   const socketPath = getServeSocketPath();
   if (!existsSync(socketPath)) return { success: false, error: 'Daemon not running' };
 
@@ -415,7 +466,7 @@ export async function sendAddAccessCommand(entry: {
       socket: {
         data(socket, data) {
           try {
-            const response = JSON.parse(data.toString());
+            const response = JSON.parse(data.toString()) as ControlResponse;
             if (response.type === 'ok') {
               resolve({ success: true });
             } else if (response.type === 'error') {
@@ -431,10 +482,7 @@ export async function sendAddAccessCommand(entry: {
           resolve({ success: false, error: 'Connection error' });
         },
         open(socket) {
-          socket.write(JSON.stringify({
-            type: 'add_access',
-            ...entry,
-          }));
+          socket.write(JSON.stringify({ type: 'assert_owner', identityId }));
         },
         connectError() {
           resolve({ success: false, error: 'Could not connect to daemon' });
@@ -444,15 +492,18 @@ export async function sendAddAccessCommand(entry: {
       resolve({ success: false, error: 'Connection failed' });
     });
 
-    // Timeout after 5 seconds
     setTimeout(() => resolve({ success: false, error: 'Timeout' }), 5000);
   });
 }
 
 /**
- * Send remove_access command to running daemon
+ * List cloud workspaces from control relay store
  */
-export async function sendRemoveAccessCommand(clientIdentityId: string): Promise<{ success: boolean; error?: string }> {
+export async function sendListCloudWorkspacesCommand(identityId: string): Promise<{
+  success: boolean;
+  workspaces?: CloudWorkspaceRecord[];
+  error?: string;
+}> {
   const socketPath = getServeSocketPath();
   if (!existsSync(socketPath)) return { success: false, error: 'Daemon not running' };
 
@@ -462,9 +513,9 @@ export async function sendRemoveAccessCommand(clientIdentityId: string): Promise
       socket: {
         data(socket, data) {
           try {
-            const response = JSON.parse(data.toString());
-            if (response.type === 'ok') {
-              resolve({ success: true });
+            const response = JSON.parse(data.toString()) as ControlResponse;
+            if (response.type === 'cloud_workspaces') {
+              resolve({ success: true, workspaces: response.workspaces });
             } else if (response.type === 'error') {
               resolve({ success: false, error: response.message });
             } else {
@@ -478,10 +529,7 @@ export async function sendRemoveAccessCommand(clientIdentityId: string): Promise
           resolve({ success: false, error: 'Connection error' });
         },
         open(socket) {
-          socket.write(JSON.stringify({
-            type: 'remove_access',
-            clientIdentityId,
-          }));
+          socket.write(JSON.stringify({ type: 'list_cloud_workspaces', identityId }));
         },
         connectError() {
           resolve({ success: false, error: 'Could not connect to daemon' });
@@ -491,7 +539,6 @@ export async function sendRemoveAccessCommand(clientIdentityId: string): Promise
       resolve({ success: false, error: 'Connection failed' });
     });
 
-    // Timeout after 5 seconds
     setTimeout(() => resolve({ success: false, error: 'Timeout' }), 5000);
   });
 }

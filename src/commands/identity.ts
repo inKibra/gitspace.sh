@@ -1,184 +1,305 @@
 /**
- * Identity command implementation
- * Handles 'gssh identity init' and 'gssh identity show'
+ * Identity command handlers
+ *
+ * Implements user root identity management:
+ *   gssh user identity init     — generate mnemonic, derive keys, store in keychain
+ *   gssh user identity show     — display identity info
+ *   gssh user identity recover  — recover from 24-word mnemonic
+ *   gssh user identity export   — output public key in gssh-user: format
+ *   gssh user identity remove   — remove from keychain
+ *
+ * @module commands/identity
  */
 
-import { createHash } from 'crypto';
 import { logger } from '../utils/logger.js';
-import { promptPassword, promptInput, promptConfirm } from '../utils/prompts.js';
+import { promptConfirm, promptInput } from '../utils/prompts.js';
 import {
-  generateAndSaveKeypair,
-  loadKeypair,
-  keypairExists,
-  getPublicKeyWithoutPassword,
-} from '../core/identity.js';
-import {
-  NoIdentityError,
-  IdentityExistsError,
-  SpacesError,
-} from '../types/errors.js';
+  generateNewMnemonic,
+  initFromMnemonic,
+  loadUserRootIdentity,
+  getUserRootPublicInfo,
+  userRootIdentityExists,
+  removeUserRootIdentity,
+  verifyMnemonicMatchesStored,
+  formatFingerprint,
+} from '../core/user-identity.js';
+import { formatUserRootPublicKey } from '../lib/tmux-lite/crypto/user-identity.js';
+import { SpacesError } from '../types/errors.js';
+
+// ============================================================================
+// gssh user identity init
+// ============================================================================
 
 /**
- * Initialize a new identity keypair
+ * Initialize a new user root identity.
+ *
+ * Generates a 24-word BIP39 mnemonic, stores the mnemonic in the OS keychain,
+ * derives keys on demand, and displays the mnemonic
+ * ONCE to the user.
  */
 export async function initIdentity(options: { force?: boolean } = {}): Promise<void> {
-  // Check if keypair already exists
-  if (keypairExists() && !options.force) {
-    throw new IdentityExistsError();
+  // Check for existing identity
+  const exists = await userRootIdentityExists();
+
+  if (exists && !options.force) {
+    throw new SpacesError(
+      'Identity already exists. Use --force to overwrite (you will need your mnemonic to recover the old one).',
+      'USER_ERROR',
+      1,
+    );
   }
 
-  // If force flag is set and keypair exists, confirm
-  if (options.force && keypairExists()) {
+  if (exists && options.force) {
     const confirmed = await promptConfirm(
-      'This will overwrite your existing identity. Are you sure?',
-      false
+      'This will overwrite your existing identity. You will need your 24-word mnemonic to recover it. Continue?',
+      false,
     );
-
     if (!confirmed) {
       logger.info('Cancelled');
       return;
     }
   }
 
-  // Prompt for password (twice for confirmation)
-  const password = await promptPassword('Enter password to encrypt your identity:');
+  // Generate mnemonic
+  const mnemonic = generateNewMnemonic();
 
-  if (!password) {
-    logger.info('Cancelled');
-    return;
+  // Derive and store
+  logger.info('Generating identity from new mnemonic...');
+  const identity = await initFromMnemonic(mnemonic, options.force ?? false);
+
+  const publicKeyString = formatUserRootPublicKey(identity);
+  const fingerprint = formatFingerprint(identity.signing.publicKey);
+
+  // Display mnemonic (one-time only)
+  logger.log('');
+  logger.bold('=== YOUR 24-WORD RECOVERY PHRASE ===');
+  logger.log('');
+
+  const words = mnemonic.split(' ');
+  // Display in 4 columns of 6 words
+  for (let row = 0; row < 6; row++) {
+    const cols = [0, 6, 12, 18].map((base) => {
+      const idx = base + row;
+      const num = String(idx + 1).padStart(2, ' ');
+      return `${num}. ${words[idx].padEnd(10)}`;
+    });
+    logger.log(`  ${cols.join('  ')}`);
   }
 
-  if (password.length < 8) {
-    throw new SpacesError(
-      'Password must be at least 8 characters long',
-      'USER_ERROR',
-      1
-    );
-  }
+  logger.log('');
+  logger.bold('=== WRITE THIS DOWN AND STORE IT SAFELY ===');
+  logger.log('');
+  logger.dim('This phrase is the ONLY way to recover your identity on a new device.');
+  logger.dim('It will NOT be shown again after this step.');
+  logger.dim('The mnemonic is stored in your OS keychain on this machine.');
+  logger.log('');
 
-  const confirmPassword = await promptPassword('Confirm password:');
-
-  if (!confirmPassword) {
-    logger.info('Cancelled');
-    return;
-  }
-
-  if (password !== confirmPassword) {
-    throw new SpacesError(
-      'Passwords do not match',
-      'USER_ERROR',
-      1
-    );
-  }
-
-  // Prompt for optional label
-  const label = await promptInput('Enter an optional label for this identity (e.g., "My Laptop"):', {
-    default: '',
-  });
-
-  // Generate and save keypair
-  logger.info('Generating keypair...');
-  const identity = await generateAndSaveKeypair(
-    password,
-    label || undefined,
-    options.force || false
-  );
-
-  logger.success('Identity created successfully');
-
-  // Display public key info (identity is PublicIdentity, keys are base64 strings)
-  const signingKeyBytes = Buffer.from(identity.signingPublicKey, 'base64');
-  const keyExchangeKeyBytes = Buffer.from(identity.keyExchangePublicKey, 'base64');
-  const fingerprint = formatFingerprint(signingKeyBytes);
-  const publicKeyString = formatPublicKey(signingKeyBytes, keyExchangeKeyBytes);
-
+  // Display identity info
+  logger.success('Identity created and stored in keychain');
   logger.log('');
   logger.bold('Identity Information:');
   logger.log(`  ID:          ${identity.id}`);
   logger.log(`  Fingerprint: ${fingerprint}`);
-  if (identity.label) {
-    logger.log(`  Label:       ${identity.label}`);
-  }
   logger.log('');
   logger.bold('Public Key:');
   logger.log(`  ${publicKeyString}`);
-  logger.log('');
-  logger.dim('Keep your password safe. You will need it to use this identity.');
 }
 
+// ============================================================================
+// gssh user identity show
+// ============================================================================
+
 /**
- * Show identity information
+ * Show identity information.
+ * Reads from keychain (no mnemonic needed).
  */
 export async function showIdentity(
-  options: { fingerprint?: boolean; json?: boolean } = {}
+  options: { fingerprint?: boolean; json?: boolean } = {},
 ): Promise<void> {
-  // Check if keypair exists
-  if (!keypairExists()) {
-    throw new NoIdentityError();
+  const info = await getUserRootPublicInfo();
+
+  if (!info) {
+    throw new SpacesError(
+      'No identity found. Run `gssh user identity init` to create one.',
+      'USER_ERROR',
+      1,
+    );
   }
 
-  // Read public key (no password needed)
-  const publicIdentity = getPublicKeyWithoutPassword();
-
-  if (!publicIdentity) {
-    throw new NoIdentityError();
-  }
-
-  // JSON output
   if (options.json) {
-    console.log(JSON.stringify(publicIdentity, null, 2));
+    console.log(JSON.stringify({
+      id: info.id,
+      signingPublicKey: info.signingPublicKey,
+      keyExchangePublicKey: info.keyExchangePublicKey,
+      publicKey: info.publicKeyString,
+      fingerprint: info.fingerprint,
+      createdAt: info.createdAt,
+    }, null, 2));
     return;
   }
 
-  // Fingerprint output
   if (options.fingerprint) {
-    const signingPublicKeyBytes = Buffer.from(publicIdentity.signingPublicKey, 'base64');
-    const fingerprint = formatFingerprint(signingPublicKeyBytes);
-    logger.log(fingerprint);
+    logger.log(info.fingerprint);
     return;
   }
-
-  // Default output: full public key
-  const publicKeyString = formatPublicKey(
-    Buffer.from(publicIdentity.signingPublicKey, 'base64'),
-    Buffer.from(publicIdentity.keyExchangePublicKey, 'base64')
-  );
 
   logger.bold('Identity Information:');
-  logger.log(`  ID:          ${publicIdentity.id}`);
-  if (publicIdentity.label) {
-    logger.log(`  Label:       ${publicIdentity.label}`);
+  logger.log(`  ID:          ${info.id}`);
+  logger.log(`  Fingerprint: ${info.fingerprint}`);
+  logger.log(`  Created:     ${new Date(info.createdAt).toISOString()}`);
+  logger.log('');
+  logger.bold('Public Key:');
+  logger.log(`  ${info.publicKeyString}`);
+}
+
+// ============================================================================
+// gssh user identity recover
+// ============================================================================
+
+/**
+ * Recover identity from a 24-word mnemonic.
+ * Prompts the user to enter their mnemonic, derives keys, stores in keychain.
+ */
+export async function recoverIdentity(options: { force?: boolean } = {}): Promise<void> {
+  const exists = await userRootIdentityExists();
+
+  if (exists && !options.force) {
+    throw new SpacesError(
+      'Identity already exists. Use --force to overwrite.',
+      'USER_ERROR',
+      1,
+    );
   }
+
+  if (exists && options.force) {
+    const confirmed = await promptConfirm(
+      'This will replace your current identity. Continue?',
+      false,
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
+  }
+
+  // Prompt for mnemonic
+  logger.log('Enter your 24-word recovery phrase (space-separated):');
+  const mnemonic = await promptInput('Mnemonic:', {
+    default: '',
+  });
+
+  if (!mnemonic || !mnemonic.trim()) {
+    logger.info('Cancelled');
+    return;
+  }
+
+  // Normalize: trim, lowercase, collapse whitespace
+  const normalized = mnemonic.trim().toLowerCase().replace(/\s+/g, ' ');
+
+  // Derive and store
+  logger.info('Deriving identity from mnemonic...');
+  const identity = await initFromMnemonic(normalized, options.force ?? exists ?? false);
+
+  const publicKeyString = formatUserRootPublicKey(identity);
+  const fingerprint = formatFingerprint(identity.signing.publicKey);
+
+  logger.success('Identity recovered and stored in keychain');
+  logger.log('');
+  logger.bold('Identity Information:');
+  logger.log(`  ID:          ${identity.id}`);
+  logger.log(`  Fingerprint: ${fingerprint}`);
   logger.log('');
   logger.bold('Public Key:');
   logger.log(`  ${publicKeyString}`);
-  logger.log('');
-  logger.bold('Fingerprint:');
-  logger.log(`  ${formatFingerprint(Buffer.from(publicIdentity.signingPublicKey, 'base64'))}`);
 }
 
-/**
- * Format fingerprint as first 16 hex chars of SHA-256 hash with colons
- */
-function formatFingerprint(signingPublicKey: Uint8Array): string {
-  const hash = createHash('sha256').update(signingPublicKey).digest('hex');
-  const first16 = hash.substring(0, 16);
+// ============================================================================
+// gssh user identity export
+// ============================================================================
 
-  // Add colons every 2 characters
-  const parts: string[] = [];
-  for (let i = 0; i < first16.length; i += 2) {
-    parts.push(first16.substring(i, i + 2));
+/**
+ * Export the public key in gssh-user: format.
+ * Outputs just the key string (suitable for piping).
+ */
+export async function exportIdentity(): Promise<void> {
+  const info = await getUserRootPublicInfo();
+
+  if (!info) {
+    throw new SpacesError(
+      'No identity found. Run `gssh user identity init` to create one.',
+      'USER_ERROR',
+      1,
+    );
   }
 
-  return parts.join(':');
+  // Output just the key (no decoration) for piping
+  console.log(info.publicKeyString);
 }
 
-/**
- * Format public key as gssh-pub:BASE64_SIGNING:BASE64_KEYEXCHANGE
- */
-function formatPublicKey(signingPublicKey: Uint8Array, keyExchangePublicKey: Uint8Array): string {
-  const signingB64 = Buffer.from(signingPublicKey).toString('base64');
-  const keyExchangeB64 = Buffer.from(keyExchangePublicKey).toString('base64');
+// ============================================================================
+// gssh user identity import
+// ============================================================================
 
-  return `gssh-pub:${signingB64}:${keyExchangeB64}`;
+/**
+ * Import a public key.
+ *
+ * NOTE: This imports a PEER's public key for reference/trust purposes.
+ * It does NOT replace the local identity. That distinction will matter
+ * when we build the user-root-keyed ACL (Phase 4).
+ *
+ * For now, this is a stub that validates the key format.
+ */
+export async function importIdentity(key: string): Promise<void> {
+  const { parseUserRootPublicKey } = await import('../lib/tmux-lite/crypto/user-identity.js');
+
+  try {
+    const parsed = parseUserRootPublicKey(key);
+    logger.success('Valid user root public key');
+    logger.log(`  User Root ID: ${parsed.userRootId}`);
+    logger.dim('Peer key import for ACL is not yet implemented (Phase 4).');
+  } catch (error) {
+    throw new SpacesError(
+      `Invalid key format: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'USER_ERROR',
+      1,
+    );
+  }
+}
+
+// ============================================================================
+// gssh user identity remove
+// ============================================================================
+
+/**
+ * Remove the user root identity from keychain.
+ * Requires confirmation since the identity can only be recovered with the mnemonic.
+ */
+export async function removeIdentity(options: { force?: boolean } = {}): Promise<void> {
+  const exists = await userRootIdentityExists();
+
+  if (!exists) {
+    logger.info('No identity to remove.');
+    return;
+  }
+
+  if (!options.force) {
+    logger.bold('WARNING: Removing your identity is irreversible without your 24-word mnemonic.');
+    logger.log('');
+    const confirmed = await promptConfirm(
+      'Are you sure you want to remove your identity?',
+      false,
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
+  }
+
+  const deleted = await removeUserRootIdentity();
+  if (deleted) {
+    logger.success('Identity removed from keychain.');
+    logger.dim('Use `gssh user identity recover` with your mnemonic to restore it.');
+  } else {
+    logger.info('No identity found in keychain.');
+  }
 }
