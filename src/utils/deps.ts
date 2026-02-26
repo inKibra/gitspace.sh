@@ -65,7 +65,8 @@ export async function checkCommandExists(command: string): Promise<boolean> {
   }
 
   try {
-    await execFileAsync('which', [command]);
+    const lookupCommand = process.platform === 'win32' ? 'where' : 'which';
+    await execFileAsync(lookupCommand, [command]);
     return true;
   } catch {
     return false;

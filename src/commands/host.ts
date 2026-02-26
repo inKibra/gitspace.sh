@@ -55,8 +55,16 @@ interface SubdomainCreateResponse {
   isPrimary: boolean;
 }
 
+function normalizeSubdomain(subdomain: string): string {
+  return subdomain.toLowerCase().trim();
+}
+
+export function getTunnelTokenKey(subdomain: string): string {
+  return `TUNNEL_TOKEN_${normalizeSubdomain(subdomain)}`;
+}
+
 export function getServeTokenKey(subdomain: string): string {
-  return `TUNNEL_TOKEN_${subdomain}_serve`;
+  return `${getTunnelTokenKey(subdomain)}_serve`;
 }
 
 // ============================================================================
@@ -163,7 +171,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<void
       });
 
       // Sync tunnel token if not present (e.g., new machine with existing account)
-      const existingToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+      const existingToken = await getSecret(getTunnelTokenKey(primary.subdomain));
       if (!existingToken) {
         if (interactive) {
           logger.dim(`Fetching tunnel credentials for ${primary.subdomain}.gitspace.sh...`);
@@ -172,7 +180,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<void
           const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
           if (tokenRes.ok) {
             const { tunnelToken } = await tokenRes.json();
-            await setSecret(`TUNNEL_TOKEN_${primary.subdomain}`, tunnelToken);
+            await setSecret(getTunnelTokenKey(primary.subdomain), tunnelToken);
             if (interactive) {
               logger.success('Tunnel credentials saved');
             }
@@ -272,34 +280,50 @@ export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
  */
 export async function resolveRelaySubdomains(hostConfig: HostConfig | null = readHostConfig()): Promise<string[]> {
   let subdomains: string[] = [];
+  let apiPrimarySubdomain: string | null = null;
 
   try {
-    subdomains = (await listAccountSubdomains()).map((entry) => entry.subdomain);
+    const accountSubdomains = (await listAccountSubdomains())
+      .filter((entry) => !entry.subdomain.endsWith('.serve'));
+    apiPrimarySubdomain = accountSubdomains.find((entry) => entry.isPrimary)?.subdomain ?? null;
+    subdomains = accountSubdomains.map((entry) => entry.subdomain);
   } catch {
     // Account discovery is best-effort; fallback to cached host config.
   }
 
   if (subdomains.length === 0) {
     if (hostConfig?.subdomains?.length) {
-      subdomains = [...hostConfig.subdomains];
-    } else if (hostConfig?.subdomain) {
+      subdomains = hostConfig.subdomains.filter((subdomain) => !subdomain.endsWith('.serve'));
+    } else if (hostConfig?.subdomain && !hostConfig.subdomain.endsWith('.serve')) {
       subdomains = [hostConfig.subdomain];
     }
   }
 
+  const preferredPrimarySubdomain = hostConfig?.subdomain ?? apiPrimarySubdomain;
+
   return [...new Set(subdomains)].sort((a, b) => {
-    if (hostConfig?.subdomain === a) return -1;
-    if (hostConfig?.subdomain === b) return 1;
+    if (preferredPrimarySubdomain === a) return -1;
+    if (preferredPrimarySubdomain === b) return 1;
     return a.localeCompare(b);
   });
 }
 
 export async function ensureSubdomainTunnelToken(subdomain: string): Promise<string> {
-  const normalizedSubdomain = subdomain.toLowerCase().trim();
-  const secretKey = `TUNNEL_TOKEN_${normalizedSubdomain}`;
+  const normalizedSubdomain = normalizeSubdomain(subdomain);
+  const secretKey = getTunnelTokenKey(normalizedSubdomain);
   const existingToken = await getSecret(secretKey);
   if (existingToken) {
     return existingToken;
+  }
+
+  const legacyKey = `TUNNEL_TOKEN_${subdomain}`;
+  if (legacyKey !== secretKey) {
+    const legacyToken = await getSecret(legacyKey);
+    if (legacyToken) {
+      await setSecret(secretKey, legacyToken);
+      await deleteSecret(legacyKey);
+      return legacyToken;
+    }
   }
 
   const headers = await getAuthHeaders();
@@ -337,7 +361,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
   const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
 
   // Normalize subdomain
-  subdomain = subdomain.toLowerCase().trim();
+  subdomain = normalizeSubdomain(subdomain);
 
   // Check availability
   logger.info('Checking availability...');
@@ -425,7 +449,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
     throw new SpacesError('Failed to get serve tunnel token', 'SYSTEM_ERROR');
   }
 
-  await setSecret(`TUNNEL_TOKEN_${subdomain}`, tunnelToken);
+  await setSecret(getTunnelTokenKey(subdomain), tunnelToken);
   await setSecret(getServeTokenKey(subdomain), serveTunnelToken);
 
   // Update local host config
@@ -464,7 +488,7 @@ export async function hostRelease(subdomain?: string): Promise<void> {
     return;
   }
 
-  subdomain = subdomain.toLowerCase().trim();
+  subdomain = normalizeSubdomain(subdomain);
 
   const res = await fetch(`${API_BASE}/subdomains/${subdomain}`, {
     method: 'DELETE',
@@ -477,7 +501,7 @@ export async function hostRelease(subdomain?: string): Promise<void> {
   }
 
   // Clear local tunnel token
-  await deleteSecret(`TUNNEL_TOKEN_${subdomain}`);
+  await deleteSecret(getTunnelTokenKey(subdomain));
   if (!subdomain.endsWith('.serve')) {
     await deleteSecret(getServeTokenKey(subdomain));
   }
@@ -537,7 +561,7 @@ export async function hostList(): Promise<void> {
  */
 export async function hostSetPrimary(subdomain: string): Promise<void> {
   const headers = await getAuthHeaders();
-  subdomain = subdomain.toLowerCase().trim();
+  subdomain = normalizeSubdomain(subdomain);
 
   const res = await fetch(`${API_BASE}/subdomains/${subdomain}/set-primary`, {
     method: 'POST',
@@ -598,7 +622,7 @@ export async function hostStatus(): Promise<void> {
     logger.log(`Serve: ${serveSubdomain}.gitspace.sh`);
 
     // Check if tunnel token exists locally
-    let tunnelToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+    let tunnelToken = await getSecret(getTunnelTokenKey(primary.subdomain));
     let serveTunnelToken = await getSecret(getServeTokenKey(primary.subdomain));
 
     // Auto-fetch token if missing
@@ -608,7 +632,7 @@ export async function hostStatus(): Promise<void> {
         const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
         if (tokenRes.ok) {
           const { tunnelToken: newToken } = await tokenRes.json();
-          await setSecret(`TUNNEL_TOKEN_${primary.subdomain}`, newToken);
+          await setSecret(getTunnelTokenKey(primary.subdomain), newToken);
           tunnelToken = newToken;
           logger.success('Tunnel credentials synced');
         }

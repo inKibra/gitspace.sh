@@ -41,6 +41,7 @@ import {
   SpacesError,
 } from '../types/errors.js';
 import {
+  getTunnelTokenKey,
   getServeTokenKey,
   readHostConfig,
   resolveRelaySubdomains,
@@ -89,6 +90,7 @@ import {
 } from '../relay-client/machine-relay-client.js';
 import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
+import { isCloudflaredInstalled } from '../utils/cloudflared.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -418,19 +420,6 @@ async function fetchIdentityViaUnlockToken(
 // ============================================================================
 
 /**
- * Check if cloudflared is installed
- */
-async function isCloudflaredInstalled(): Promise<boolean> {
-  try {
-    const proc = spawn(['which', 'cloudflared'], { stdout: 'pipe', stderr: 'pipe' });
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Start cloudflared tunnel for a subdomain
  *
  * @param subdomain - The subdomain to tunnel (e.g., 'brad' for brad.gitspace.sh)
@@ -438,7 +427,7 @@ async function isCloudflaredInstalled(): Promise<boolean> {
  */
 async function startCloudflared(subdomain: string): Promise<boolean> {
   // Get tunnel token from keychain
-  const tunnelToken = await getSecret(`TUNNEL_TOKEN_${subdomain}`);
+  const tunnelToken = await getSecret(getTunnelTokenKey(subdomain));
   if (!tunnelToken) {
     logger.warning(`No tunnel token found for ${subdomain}.gitspace.sh`);
     logger.dim('Run: gssh user host reserve ' + subdomain + ' (to get token)');
@@ -907,6 +896,25 @@ function stopServeProcessHosting(
   manager?.stop();
 }
 
+async function cleanupServeStartupFailure(
+  sessionManager: ClientSessionManager | null,
+  processHostManager: ServeProcessHostManager | null,
+  processHostRefreshTimer: ReturnType<typeof setInterval> | null,
+): Promise<void> {
+  stopServeProcessHosting(processHostManager, processHostRefreshTimer);
+  stopStatusServer();
+
+  if (sessionManager) {
+    try {
+      sessionManager.cleanup();
+    } catch {
+      // Best-effort cleanup.
+    }
+  }
+
+  cleanupServeFiles();
+}
+
 // ============================================================================
 // Relay Connection
 // ============================================================================
@@ -1273,11 +1281,15 @@ export async function serveStart(options: {
 
   // Check for gitspace.sh hosting
   const hostConfig = readHostConfig();
+  let processHostManager: ServeProcessHostManager | null = null;
+  let processHostRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let sessionManager: ClientSessionManager | null = null;
+
   let effectiveRelayUrl: string;
   try {
     effectiveRelayUrl = await resolveRelayUrlForServe(options.relay, hostConfig);
   } catch (error) {
-    cleanupServeFiles();
+    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
     throw error;
   }
 
@@ -1296,15 +1308,21 @@ export async function serveStart(options: {
     } : undefined,
   });
 
-  let processHostManager: ServeProcessHostManager | null = null;
-  let processHostRefreshTimer: ReturnType<typeof setInterval> | null = null;
-
   if (hostConfig?.subdomain) {
-    processHostManager = await startServeProcessHosting(hostConfig);
-    if (processHostManager) {
-      processHostRefreshTimer = setInterval(() => {
-        void processHostManager?.refresh();
-      }, SERVE_REFRESH_INTERVAL_MS);
+    try {
+      processHostManager = await startServeProcessHosting(hostConfig);
+      if (processHostManager) {
+        processHostRefreshTimer = setInterval(() => {
+          void processHostManager?.refresh();
+        }, SERVE_REFRESH_INTERVAL_MS);
+      }
+    } catch (error) {
+      await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+      throw new SpacesError(
+        `Failed to initialize serve process hosting: ${error instanceof Error ? error.message : String(error)}`,
+        'SYSTEM_ERROR',
+        2,
+      );
     }
   }
 
@@ -1316,7 +1334,7 @@ export async function serveStart(options: {
     : undefined;
 
   // Create session manager
-  const sessionManager = new ClientSessionManager({
+  sessionManager = new ClientSessionManager({
     relay: effectiveRelayUrl,
     identity,
     remoteSessionOptions,
@@ -1327,8 +1345,7 @@ export async function serveStart(options: {
   try {
     await sessionManager.initialize();
   } catch (error) {
-    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
-    cleanupServeFiles();
+    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
     throw error;
   }
 
@@ -1369,8 +1386,7 @@ export async function serveStart(options: {
     );
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
-    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
-    cleanupServeFiles();
+    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
     throw new SpacesError(
       `Failed to connect to relay: ${error instanceof Error ? error.message : String(error)}`,
       'SYSTEM_ERROR',
@@ -1386,8 +1402,7 @@ export async function serveStart(options: {
       savedAt: Date.now(),
     });
   } catch (error) {
-    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
-    cleanupServeFiles();
+    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
     throw new SpacesError(
       `Failed to persist relay config: ${error instanceof Error ? error.message : String(error)}`,
       'SYSTEM_ERROR',

@@ -28,6 +28,7 @@ import {
   resolveRelaySubdomains,
 } from "./host.js";
 import { selectOne } from "../utils/prompts.js";
+import { isCloudflaredInstalled } from "../utils/cloudflared.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -112,13 +113,91 @@ function clearRelayState(): void {
   rmSync(statePath, { force: true });
 }
 
-async function isCloudflaredInstalled(): Promise<boolean> {
-  const lookupCommand = process.platform === "win32" ? "where" : "which";
-  const proc = Bun.spawn([lookupCommand, "cloudflared"], {
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  return (await proc.exited) === 0;
+type RelayProcessKind = "relay" | "tunnel";
+
+function getProcessCommand(pid: number): string | null {
+  if (process.platform === "win32") {
+    return null;
+  }
+
+  try {
+    const proc = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+
+    if (proc.exitCode !== 0 || !proc.stdout) {
+      return null;
+    }
+
+    const command = Buffer.from(proc.stdout).toString("utf-8").trim();
+    return command.length > 0 ? command : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
+  const command = getProcessCommand(pid);
+  if (!command) {
+    return true;
+  }
+
+  const normalizedCommand = command.toLowerCase();
+
+  if (kind === "tunnel") {
+    return normalizedCommand.includes("cloudflared")
+      && normalizedCommand.includes("tunnel")
+      && normalizedCommand.includes("run");
+  }
+
+  return normalizedCommand.includes("relay start");
+}
+
+async function stopTrackedProcess(pid: number | undefined, kind: RelayProcessKind): Promise<"not-running" | "stopped" | "not-owned"> {
+  if (!pid || !isProcessRunning(pid)) {
+    return "not-running";
+  }
+
+  if (!isOwnedProcess(pid, kind)) {
+    return "not-owned";
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return "not-running";
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!isProcessRunning(pid)) {
+      return "stopped";
+    }
+    await Bun.sleep(100);
+  }
+
+  if (isProcessRunning(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      return "stopped";
+    }
+  }
+
+  return "stopped";
+}
+
+async function cleanupStaleRelayState(state: RelayRuntimeState): Promise<void> {
+  if (state.tunnelPid && isProcessRunning(state.tunnelPid)) {
+    const tunnelStopResult = await stopTrackedProcess(state.tunnelPid, "tunnel");
+    if (tunnelStopResult === "not-owned") {
+      logger.warning(
+        `Found stale tunnel PID ${state.tunnelPid} that does not look like a managed cloudflared process; leaving it untouched.`,
+      );
+    }
+  }
+
+  clearRelayState();
 }
 
 function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
@@ -254,11 +333,20 @@ export async function startRelay(options: {
 }): Promise<void> {
   const existingState = readRelayState();
   if (existingState?.pid && isProcessRunning(existingState.pid)) {
-    throw new SpacesError(
-      `Relay is already running (pid ${existingState.pid}). Stop it first with \`gssh relay stop\`.`,
-      "USER_ERROR",
-      1,
+    if (isOwnedProcess(existingState.pid, "relay")) {
+      throw new SpacesError(
+        `Relay is already running (pid ${existingState.pid}). Stop it first with \`gssh relay stop\`.`,
+        "USER_ERROR",
+        1,
+      );
+    }
+
+    logger.warning(
+      `Found stale relay runtime state pointing to PID ${existingState.pid}; cleaning stale state and continuing.`,
     );
+    await cleanupStaleRelayState(existingState);
+  } else if (existingState) {
+    await cleanupStaleRelayState(existingState);
   }
 
   const port = options.port ?? parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
@@ -386,36 +474,27 @@ export async function stopRelay(): Promise<void> {
     return;
   }
 
-  const stopPid = async (pid: number | undefined): Promise<void> => {
-    if (!pid || !isProcessRunning(pid)) {
-      return;
-    }
+  const tunnelStopResult = await stopTrackedProcess(state.tunnelPid, "tunnel");
+  const relayStopResult = await stopTrackedProcess(state.pid, "relay");
 
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      return;
-    }
+  if (tunnelStopResult === "not-owned") {
+    logger.warning(
+      `Refusing to kill PID ${state.tunnelPid} because it does not look like a managed cloudflared tunnel process.`,
+    );
+  }
 
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (!isProcessRunning(pid)) {
-        return;
-      }
-      await Bun.sleep(100);
-    }
+  if (relayStopResult === "not-owned") {
+    logger.warning(
+      `Refusing to kill PID ${state.pid} because it does not look like a managed relay process.`,
+    );
+  }
 
-    if (isProcessRunning(pid)) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Ignore kill errors.
-      }
-    }
-  };
-
-  await stopPid(state.tunnelPid);
-  await stopPid(state.pid);
   clearRelayState();
+  if (relayStopResult === "not-running" && tunnelStopResult === "not-running") {
+    logger.info("relay not running (stale state cleaned)");
+    return;
+  }
+
   logger.success("relay stopped");
 }
 
