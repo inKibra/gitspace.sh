@@ -127,15 +127,22 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   docker build -f "$REPO_ROOT/scripts/e2e/container/Dockerfile" -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
+secret_env_file="$(mktemp "${TMPDIR:-/tmp}/gssh-e2e-secrets.XXXXXX")"
+chmod 600 "$secret_env_file"
+cat >"$secret_env_file" <<EOF
+GITSPACE_TOKEN_INPUT=$GITSPACE_TOKEN_VALUE
+SPRITES_TOKEN_INPUT=$SPRITES_TOKEN_VALUE
+EOF
+trap 'rm -f "$secret_env_file"' EXIT
+
 container_suffix="$(date +%s)-$(bun -e 'process.stdout.write(Math.random().toString(36).slice(2, 8));')"
 container_name="gssh-e2e-${container_suffix}"
 
 docker_args=(
   run
   --name "$container_name"
+  --env-file "$secret_env_file"
   -e "E2E_SUBDOMAIN=$SUBDOMAIN"
-  -e "GITSPACE_TOKEN_INPUT=$GITSPACE_TOKEN_VALUE"
-  -e "SPRITES_TOKEN_INPUT=$SPRITES_TOKEN_VALUE"
   -e "KEEP_ON_FAIL=$KEEP_ON_FAIL"
   -e "E2E_DEVICE_FINGERPRINT=$DEVICE_FINGERPRINT_VALUE"
 )

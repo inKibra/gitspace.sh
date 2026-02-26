@@ -18,6 +18,7 @@ require_command() {
 require_command bash
 require_command bun
 require_command curl
+require_command jq
 
 if [[ -f "$RELAY_STATE_FILE" ]]; then
   bash "$SCRIPT_DIR/stop-test-relay.sh" >/dev/null 2>&1 || true
@@ -64,7 +65,7 @@ create_sprite() {
   local name="$1"
   local body http_code
   local payload
-  payload="{\"name\":\"$name\"}"
+  payload="$(jq -cn --arg name "$name" '{name:$name}')"
 
   body="$(curl -sS -w "\n%{http_code}" -X POST "$SPRITES_API_BASE/sprites" \
     -H "Authorization: Bearer $SPRITES_TOKEN_VALUE" \

@@ -1743,6 +1743,15 @@ export function removeVaultMachine(machineId: string): boolean {
   });
 }
 
+export function removeVaultMachineForOwner(ownerUserRootId: string, machineId: string): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM vault_machines WHERE owner_user_root_id = ? AND machine_id = ?'
+    ).run(ownerUserRootId, machineId);
+    return result.changes > 0;
+  });
+}
+
 export function listVaultMachinesForOwner(ownerUserRootId: string): VaultMachineRecord[] {
   return listVaultMachines(ownerUserRootId);
 }

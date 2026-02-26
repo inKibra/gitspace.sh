@@ -80,6 +80,10 @@ cleanup_on_error() {
   if [[ -n "${RELAY_PID:-}" ]] && kill -0 "$RELAY_PID" >/dev/null 2>&1; then
     kill "$RELAY_PID" >/dev/null 2>&1 || true
   fi
+
+  [[ -n "${STATE_FILE:-}" ]] && rm -f "$STATE_FILE" >/dev/null 2>&1 || true
+  [[ -n "${RELAY_LOG:-}" ]] && rm -f "$RELAY_LOG" >/dev/null 2>&1 || true
+  [[ -n "${CLOUDFLARED_LOG:-}" ]] && rm -f "$CLOUDFLARED_LOG" >/dev/null 2>&1 || true
 }
 
 while [[ $# -gt 0 ]]; do

@@ -240,10 +240,13 @@ export async function createRelayMachineInvite(options: {
     throw new SpacesError('Failed to build relay-machine invite token', 'SYSTEM_ERROR', 2);
   }
 
-  await createInviteViaRelay(relayUrl, inviteToken);
+  const created = await createInviteViaRelay(relayUrl, inviteToken);
+  if (created.inviteId !== parsedInvite.inviteId) {
+    throw new SpacesError('Relay returned an invite ID that does not match the signed token.', 'SYSTEM_ERROR', 2);
+  }
 
   logger.success('Relay-machine invite created');
-  logger.log(`  Invite ID: ${chalk.cyan(parsedInvite.inviteId)}`);
+  logger.log(`  Invite ID: ${chalk.cyan(created.inviteId)}`);
   logger.log(`  Machine:   ${chalk.cyan(parsedInvite.targetMachineId)}`);
   logger.log(`  Expires:   ${formatDate(parsedInvite.expiresAt)} (${duration.humanReadable})`);
   logger.log(`  Max uses:  ${parsedInvite.maxUses === null ? 'unlimited' : parsedInvite.maxUses}`);

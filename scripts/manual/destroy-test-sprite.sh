@@ -4,13 +4,47 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SPRITE_STATE_FILE="${SPRITE_TEST_STATE_FILE:-/tmp/gssh-test-sprite.state}"
+DEFAULT_SPRITE_STATE_FILE="${HOME:-/tmp}/.cache/gssh/test-sprite.state"
+LEGACY_SPRITE_STATE_FILE="/tmp/gssh-test-sprite.state"
+SPRITE_STATE_FILE="${SPRITE_TEST_STATE_FILE:-$DEFAULT_SPRITE_STATE_FILE}"
 SPRITES_API_BASE="${SPRITES_API_BASE:-https://api.sprites.dev/v1}"
 
+read_sprite_name_from_state() {
+  local state_file="$1"
+  if [[ ! -f "$state_file" || -L "$state_file" || ! -O "$state_file" ]]; then
+    return 1
+  fi
+
+  local line value
+  line="$(grep -E '^(export[[:space:]]+)?SPRITE_NAME=' "$state_file" | tail -n1 || true)"
+  if [[ -z "$line" ]]; then
+    return 1
+  fi
+
+  value="${line#*=}"
+  value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+
+  if [[ -z "$value" ]]; then
+    return 1
+  fi
+
+  printf '%s' "$value"
+}
+
 SPRITE_NAME="${1:-}"
-if [[ -z "$SPRITE_NAME" && -f "$SPRITE_STATE_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$SPRITE_STATE_FILE"
+if [[ -z "$SPRITE_NAME" ]]; then
+  if [[ ! -f "$SPRITE_STATE_FILE" && -f "$LEGACY_SPRITE_STATE_FILE" ]]; then
+    SPRITE_STATE_FILE="$LEGACY_SPRITE_STATE_FILE"
+  fi
+
+  if [[ -f "$SPRITE_STATE_FILE" ]]; then
+    SPRITE_NAME="$(read_sprite_name_from_state "$SPRITE_STATE_FILE" || true)"
+  fi
 fi
 
 if [[ -z "$SPRITE_NAME" ]]; then

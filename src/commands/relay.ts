@@ -17,7 +17,7 @@ import {
 import { loadUserRootIdentity } from "../core/user-identity.js";
 import {
   listVaultMachinesForOwner,
-  removeVaultMachine,
+  removeVaultMachineForOwner,
 } from "../relay/control/store.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
@@ -117,7 +117,7 @@ export async function listRelayMachines(options: { json?: boolean } = {}): Promi
   const machines = listVaultMachinesForOwner(ownerUserRootId);
 
   if (options.json) {
-    console.log(JSON.stringify(machines, null, 2));
+    logger.log(JSON.stringify(machines, null, 2));
     return;
   }
 
@@ -149,7 +149,7 @@ export async function revokeRelayMachine(machineId: string): Promise<void> {
     throw new SpacesError(`Machine '${machineId}' not found for this owner.`, 'USER_ERROR', 1);
   }
 
-  const removed = removeVaultMachine(machineId);
+  const removed = removeVaultMachineForOwner(ownerUserRootId, machineId);
   if (!removed) {
     throw new SpacesError(`Failed to remove machine '${machineId}'.`, 'SYSTEM_ERROR', 2);
   }

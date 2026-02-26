@@ -1,15 +1,36 @@
 import { serveStart } from '../commands/serve.js';
+import { SpacesError } from '../types/errors.js';
+import { logger } from '../utils/logger.js';
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
-    throw new Error(`${name} is required`);
+    throw new SpacesError(`${name} is required`, 'USER_ERROR', 1);
   }
   return value;
 }
 
 function isRetryableServeError(message: string): boolean {
   const normalized = message.toLowerCase();
+  const nonRetryableIndicators = [
+    ' is required',
+    'invalid relay-machine invite token',
+    'relay-machine invite token expired',
+    'invite machine id does not match this machine',
+    'invite signing key does not match this machine',
+    'invite key exchange key does not match this machine',
+    'invite owner does not match relay owner',
+    'unlock mode enrollment token is invalid',
+    'relay owner user root is not configured',
+    'signature verification failed',
+    'unauthorized',
+    'forbidden',
+  ];
+
+  if (nonRetryableIndicators.some((indicator) => normalized.includes(indicator))) {
+    return false;
+  }
+
   return normalized.includes('failed to connect to relay for unlock request')
     || normalized.includes('relay closed unlock connection before unlock grant was received')
     || normalized.includes('failed to connect to relay')
@@ -58,8 +79,8 @@ async function runServeStartWithRetry(options: {
       }
 
       const waitMs = Math.min(30_000, initialDelayMs * attempt);
-      process.stderr.write(
-        `Bootstrap serve connect failed (attempt ${attempt}/${attempts}): ${message}. Retrying in ${waitMs}ms...\n`
+      logger.warning(
+        `Bootstrap serve connect failed (attempt ${attempt}/${attempts}): ${message}. Retrying in ${waitMs}ms...`
       );
       await Bun.sleep(waitMs);
     }
@@ -84,6 +105,6 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exit(1);
+  logger.error(message);
+  process.exit(error instanceof SpacesError ? error.exitCode : 2);
 });

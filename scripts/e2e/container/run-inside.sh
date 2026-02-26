@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="/workspace"
 SPRITE_STATE_FILE="/tmp/gssh-test-sprite.state"
-GITSPACE_API_BASE="${GITSPACE_API_URL:-https://api.gitspace.sh}"
+export GITSPACE_API_BASE="${GITSPACE_API_URL:-https://api.gitspace.sh}"
 
 required_env() {
   local key="$1"

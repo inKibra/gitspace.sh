@@ -1140,7 +1140,7 @@ export async function serveStart(options: {
       const userRootAuth = await resolveUserRootAuthorizationConfig();
       ownerUserRootId = userRootAuth.ownerUserRootId;
       ensureControlStore();
-      bindControlOwner(identity.id);
+      bindControlOwner(ownerUserRootId);
     } catch (error) {
       stopStatusServer();
       cleanupServeFiles();

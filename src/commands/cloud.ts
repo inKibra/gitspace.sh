@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { promptInput } from '../utils/prompts.js';
-import { getPublicKeyWithoutPassword, keypairExists, readRelayConfig } from '../core/identity.js';
+import { readRelayConfig } from '../core/identity.js';
 import { loadUserRootIdentity } from '../core/user-identity.js';
 import {
   queryControlMeta,
@@ -38,25 +38,17 @@ import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';
 
-function requireLocalIdentityId(): string {
-  if (!keypairExists()) {
+async function requireLocalIdentityId(): Promise<string> {
+  const userRoot = await loadUserRootIdentity();
+  if (!userRoot) {
     throw new SpacesError(
-      'No local identity found. Initialize identity first:\n  gssh user identity init',
+      'No local user root identity found. Initialize identity first:\n  gssh user identity init',
       'USER_ERROR',
       1
     );
   }
 
-  const localIdentity = getPublicKeyWithoutPassword();
-  if (!localIdentity) {
-    throw new SpacesError(
-      'Failed to read local identity.',
-      'SYSTEM_ERROR',
-      2
-    );
-  }
-
-  return localIdentity.id;
+  return userRoot.id;
 }
 
 interface CloudBootstrapRelayInfo {
@@ -260,13 +252,11 @@ export async function cloudStatus(): Promise<void> {
   logger.log(`  Relay FP:      ${controlMeta.relayFingerprint ?? '(unbound)'}`);
   logger.log(`  Updated:       ${controlMeta.updatedAt}`);
 
-  if (keypairExists()) {
-    const localIdentity = getPublicKeyWithoutPassword();
-    if (localIdentity) {
-      const ownerAssertion = await sendAssertOwnerCommand(localIdentity.id);
-      logger.log(`  Local identity: ${localIdentity.id}`);
-      logger.log(`  Owner access:  ${ownerAssertion.success ? 'yes' : `no (${ownerAssertion.error ?? 'not owner'})`}`);
-    }
+  const localUserRoot = await loadUserRootIdentity();
+  if (localUserRoot) {
+    const ownerAssertion = await sendAssertOwnerCommand(localUserRoot.id);
+    logger.log(`  Local owner root: ${localUserRoot.id}`);
+    logger.log(`  Owner access:    ${ownerAssertion.success ? 'yes' : `no (${ownerAssertion.error ?? 'not owner'})`}`);
   }
 
   logger.log('');
@@ -366,7 +356,7 @@ export async function cloudLaunch(
   const { repo, branch = 'main', image } = options;
 
   // 1. Require identity
-  const identityId = dependencies.identityId ?? requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? await requireLocalIdentityId();
 
   // 2. Assert owner (reads control store directly — no daemon required for launch)
   assertControlOwner(identityId);
@@ -640,7 +630,7 @@ function buildLegacySpriteServeStartCommand(): string[] {
     '    if [ -n "$NPM_BIN" ]; then',
     '      export PATH="$NPM_BIN:$PATH"',
     '    fi',
-  '  fi',
+    '  fi',
     'fi',
     'if ! command -v gssh >/dev/null 2>&1; then',
     '  echo "gssh CLI not found in sprite image and auto-install failed" >&2',
@@ -789,7 +779,7 @@ export async function cloudStop(
   injectedProvider?: CloudLifecycleProvider,
   dependencies: CloudLifecycleDependencies = {}
 ): Promise<void> {
-  const identityId = dependencies.identityId ?? requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? await requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
 
@@ -823,7 +813,7 @@ export async function cloudResume(
   injectedProvider?: CloudLifecycleProvider,
   dependencies: CloudLifecycleDependencies = {}
 ): Promise<void> {
-  const identityId = dependencies.identityId ?? requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? await requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
   const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
@@ -907,7 +897,7 @@ export async function cloudDestroy(
   injectedProvider?: CloudLifecycleProvider,
   dependencies: CloudLifecycleDependencies = {}
 ): Promise<void> {
-  const identityId = dependencies.identityId ?? requireLocalIdentityId();
+  const identityId = dependencies.identityId ?? await requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
 
@@ -944,7 +934,7 @@ export async function cloudList(): Promise<void> {
     );
   }
 
-  const identityId = requireLocalIdentityId();
+  const identityId = await requireLocalIdentityId();
   const workspacesResult = await sendListCloudWorkspacesCommand(identityId);
 
   if (!workspacesResult.success) {

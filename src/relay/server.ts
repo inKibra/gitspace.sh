@@ -1016,6 +1016,13 @@ async function handleProtocolMessage(
           return;
         }
 
+        const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
+        if (relayOwnerUserRootId && relayOwnerUserRootId !== parsedInvite.ownerUserRootId) {
+          ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Invite owner does not match relay owner")));
+          ws.close();
+          return;
+        }
+
         const consumedInvite = consumeRootInviteToken(
           parsedInvite.inviteId,
           parsedInvite.ownerUserRootId,
@@ -1023,12 +1030,6 @@ async function handleProtocolMessage(
         );
         if (!consumedInvite) {
           ws.send(serializeMessage(createErrorMessage("UNAUTHORIZED", "Invite not found, revoked, expired, or exhausted")));
-          ws.close();
-          return;
-        }
-
-        if (state.ownerUserRootId && state.ownerUserRootId !== parsedInvite.ownerUserRootId) {
-          ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Invite owner does not match relay owner")));
           ws.close();
           return;
         }

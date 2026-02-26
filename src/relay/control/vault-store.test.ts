@@ -23,6 +23,7 @@ import {
   listVaultMachines,
   updateVaultMachineLastConnected,
   removeVaultMachine,
+  removeVaultMachineForOwner,
   setVaultMachineUnlockKey,
   getVaultMachineUnlockKey,
   removeVaultMachineUnlockKey,
@@ -362,6 +363,29 @@ describe('vault store (schema v5)', () => {
     test('remove nonexistent machine returns false', () => {
       ensureControlStore();
       expect(removeVaultMachine('nonexistent')).toBe(false);
+    });
+
+    test('remove machine for owner only removes matching owner row', () => {
+      ensureControlStore();
+      upsertVaultMachine(machine1);
+      upsertVaultMachine({
+        machineId: 'machine-2',
+        ownerUserRootId: 'other-owner',
+        signingKey: 'signing-key-2-base64',
+        keyExchangeKey: 'kex-key-2-base64',
+      });
+
+      expect(removeVaultMachineForOwner('owner-root-abc', 'machine-1')).toBe(true);
+      expect(getVaultMachine('machine-1')).toBeUndefined();
+      expect(getVaultMachine('machine-2')).toBeDefined();
+    });
+
+    test('remove machine for owner returns false on owner mismatch', () => {
+      ensureControlStore();
+      upsertVaultMachine(machine1);
+
+      expect(removeVaultMachineForOwner('different-owner', 'machine-1')).toBe(false);
+      expect(getVaultMachine('machine-1')).toBeDefined();
     });
   });
 

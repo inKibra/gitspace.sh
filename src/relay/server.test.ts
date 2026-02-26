@@ -21,6 +21,7 @@ import {
 import { createDeviceCertificate } from '../lib/tmux-lite/crypto/device-cert';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites';
 import { ensureControlStore, removeVaultCategory, setVaultMeta } from './control/store';
+import { getRootInviteByToken, registerRootInvite } from './auth/store';
 import { generateMnemonic, mnemonicToUserIdentity } from '../lib/tmux-lite/crypto/user-identity';
 import type { Identity, UserRootIdentity } from '../types/identity';
 
@@ -29,6 +30,7 @@ const TEST_HOST = '127.0.0.1';
 const relayIdentity = generateRelayIdentity('test-relay');
 const ownerMachine = createTestIdentity('Owner Machine');
 const inviteMachine = createTestIdentity('Invite Machine');
+const mismatchOwnerMachine = createTestIdentity('Mismatch Owner Machine');
 const unauthorizedMachine = createTestIdentity('Unauthorized Machine');
 const ownerClientIdentity = createTestIdentity('Owner Client');
 const outsiderClientIdentity = createTestIdentity('Outsider Client');
@@ -208,6 +210,42 @@ describe('machine registration', () => {
 
     machineWs.close();
     ownerWs.close();
+  });
+
+  test('does not consume enrollment token when invite owner mismatches relay owner', async () => {
+    const enrollmentToken = createRootInviteToken({
+      type: 'relay-machine',
+      owner: outsiderUserRoot,
+      relayUrl,
+      targetMachineSigningKey: Buffer.from(mismatchOwnerMachine.signing.publicKey).toString('base64'),
+      targetMachineKeyExchangeKey: Buffer.from(mismatchOwnerMachine.keyExchange.publicKey).toString('base64'),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+      label: 'mismatch-owner-test',
+    });
+    const parsed = parseRootInviteToken(enrollmentToken);
+    expect(parsed).not.toBeNull();
+
+    registerRootInvite({
+      inviteId: parsed!.inviteId,
+      ownerUserRootId: parsed!.ownerUserRootId,
+      inviteType: 'relay-machine',
+      relayUrl: parsed!.relayUrl,
+      token: enrollmentToken,
+      label: parsed!.label,
+      maxUses: parsed!.maxUses,
+      expiresAt: new Date(parsed!.expiresAt).toISOString(),
+      machineId: parsed!.targetMachineId,
+      targetMachineSigningKey: parsed!.targetMachineSigningKey,
+      targetMachineKeyExchangeKey: parsed!.targetMachineKeyExchangeKey,
+    });
+
+    await expect(connectAndRegisterMachine(mismatchOwnerMachine, {
+      enrollmentToken,
+    })).rejects.toThrow(/invite owner does not match relay owner/i);
+
+    const stillUsable = getRootInviteByToken(parsed!.inviteId, parsed!.ownerUserRootId, enrollmentToken);
+    expect(stillUsable).not.toBeNull();
   });
 });
 

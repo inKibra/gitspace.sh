@@ -22,15 +22,19 @@ if [[ -n "${RELAY_PID:-}" ]] && kill -0 "$RELAY_PID" >/dev/null 2>&1; then
 fi
 
 if [[ -n "${RELAY_PORT:-}" ]]; then
-  relay_pids="$(lsof -nP -iTCP:"$RELAY_PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
-  if [[ -n "$relay_pids" ]]; then
-    for pid in $relay_pids; do
-      cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-      if [[ "$cmdline" == *"src/relay/index.ts"* ]]; then
-        kill "$pid" >/dev/null 2>&1 || true
-        printf "Stopped relay listener PID %s on port %s\n" "$pid" "$RELAY_PORT"
-      fi
-    done
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf "Note: lsof not available, skipping port-based relay cleanup.\n"
+  else
+    relay_pids="$(lsof -nP -iTCP:"$RELAY_PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
+    if [[ -n "$relay_pids" ]]; then
+      for pid in $relay_pids; do
+        cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+        if [[ "$cmdline" == *"src/relay/index.ts"* ]]; then
+          kill "$pid" >/dev/null 2>&1 || true
+          printf "Stopped relay listener PID %s on port %s\n" "$pid" "$RELAY_PORT"
+        fi
+      done
+    fi
   fi
 fi
 
