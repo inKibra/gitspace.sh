@@ -114,6 +114,7 @@ function clearRelayState(): void {
 }
 
 type RelayProcessKind = "relay" | "tunnel";
+type StaleRelayCleanupResult = "cleaned" | "preserved";
 
 function getProcessCommand(pid: number): string | null {
   if (process.platform === "win32") {
@@ -137,12 +138,7 @@ function getProcessCommand(pid: number): string | null {
   }
 }
 
-function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
-  const command = getProcessCommand(pid);
-  if (!command) {
-    return true;
-  }
-
+function isOwnedProcessCommand(command: string, kind: RelayProcessKind): boolean {
   const normalizedCommand = command.toLowerCase();
 
   if (kind === "tunnel") {
@@ -152,6 +148,16 @@ function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
   }
 
   return normalizedCommand.includes("relay start");
+}
+
+function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
+  const command = getProcessCommand(pid);
+  if (!command) {
+    logger.warning(`Unable to verify ownership for PID ${pid}; refusing to signal it.`);
+    return false;
+  }
+
+  return isOwnedProcessCommand(command, kind);
 }
 
 async function stopTrackedProcess(pid: number | undefined, kind: RelayProcessKind): Promise<"not-running" | "stopped" | "not-owned"> {
@@ -187,17 +193,25 @@ async function stopTrackedProcess(pid: number | undefined, kind: RelayProcessKin
   return "stopped";
 }
 
-async function cleanupStaleRelayState(state: RelayRuntimeState): Promise<void> {
+async function cleanupStaleRelayState(state: RelayRuntimeState): Promise<StaleRelayCleanupResult> {
+  let preserveState = false;
+
   if (state.tunnelPid && isProcessRunning(state.tunnelPid)) {
     const tunnelStopResult = await stopTrackedProcess(state.tunnelPid, "tunnel");
     if (tunnelStopResult === "not-owned") {
       logger.warning(
         `Found stale tunnel PID ${state.tunnelPid} that does not look like a managed cloudflared process; leaving it untouched.`,
       );
+      preserveState = true;
     }
   }
 
+  if (preserveState) {
+    return "preserved";
+  }
+
   clearRelayState();
+  return "cleaned";
 }
 
 function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
@@ -333,7 +347,16 @@ export async function startRelay(options: {
 }): Promise<void> {
   const existingState = readRelayState();
   if (existingState?.pid && isProcessRunning(existingState.pid)) {
-    if (isOwnedProcess(existingState.pid, "relay")) {
+    const existingCommand = getProcessCommand(existingState.pid);
+    if (!existingCommand) {
+      throw new SpacesError(
+        `Relay runtime state points to running PID ${existingState.pid}, but ownership could not be verified. Run \`gssh relay stop\` and retry.`,
+        "USER_ERROR",
+        1,
+      );
+    }
+
+    if (isOwnedProcessCommand(existingCommand, "relay")) {
       throw new SpacesError(
         `Relay is already running (pid ${existingState.pid}). Stop it first with \`gssh relay stop\`.`,
         "USER_ERROR",
@@ -344,9 +367,23 @@ export async function startRelay(options: {
     logger.warning(
       `Found stale relay runtime state pointing to PID ${existingState.pid}; cleaning stale state and continuing.`,
     );
-    await cleanupStaleRelayState(existingState);
+    const staleCleanup = await cleanupStaleRelayState(existingState);
+    if (staleCleanup === "preserved") {
+      throw new SpacesError(
+        "Found a live unmanaged tunnel process tied to stale relay state. Stop it with `gssh relay stop` before starting a new relay.",
+        "USER_ERROR",
+        1,
+      );
+    }
   } else if (existingState) {
-    await cleanupStaleRelayState(existingState);
+    const staleCleanup = await cleanupStaleRelayState(existingState);
+    if (staleCleanup === "preserved") {
+      throw new SpacesError(
+        "Found a live unmanaged tunnel process tied to stale relay state. Stop it with `gssh relay stop` before starting a new relay.",
+        "USER_ERROR",
+        1,
+      );
+    }
   }
 
   const port = options.port ?? parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
@@ -489,6 +526,11 @@ export async function stopRelay(): Promise<void> {
     );
   }
 
+  if (relayStopResult === "not-owned" || tunnelStopResult === "not-owned") {
+    logger.warning("relay stop did not clear runtime state because one or more running PIDs could not be verified as owned");
+    return;
+  }
+
   clearRelayState();
   if (relayStopResult === "not-running" && tunnelStopResult === "not-running") {
     logger.info("relay not running (stale state cleaned)");
@@ -551,6 +593,12 @@ export async function relayStatus(options: { json?: boolean } = {}): Promise<voi
 
   if (!snapshot.running) {
     if (snapshot.staleState) {
+      if (snapshot.tunnelRunning && snapshot.tunnelPid !== null) {
+        logger.warning(
+          `relay not running, but tunnel PID ${snapshot.tunnelPid} is still active; keeping runtime state so \`gssh relay stop\` can clean it up`,
+        );
+        return;
+      }
       clearRelayState();
       logger.warning("relay not running (stale runtime state cleaned)");
     } else {

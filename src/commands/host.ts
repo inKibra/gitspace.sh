@@ -35,6 +35,7 @@ interface SubdomainInfo {
   subdomain: string;
   status: string;
   is_primary: number;
+  relay?: boolean | number | null;
   created_at: number;
   updated_at: number;
 }
@@ -57,6 +58,12 @@ interface SubdomainCreateResponse {
 
 function normalizeSubdomain(subdomain: string): string {
   return subdomain.toLowerCase().trim();
+}
+
+async function logApiFailure(context: string, response: Response): Promise<void> {
+  const body = (await response.text().catch(() => '')).trim();
+  const bodyPreview = body ? ` body=${JSON.stringify(body.slice(0, 500))}` : '';
+  logger.error(`${context}: ${response.status} ${response.statusText}${bodyPreview}`);
 }
 
 export function getTunnelTokenKey(subdomain: string): string {
@@ -254,12 +261,21 @@ export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
   const res = await fetch(`${API_BASE}/subdomains`, { headers });
 
   if (!res.ok) {
+    await logApiFailure('Failed to list subdomains', res);
     throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
   }
 
   const subdomains: SubdomainInfo[] = await res.json();
   return subdomains
-    .filter((subdomain) => subdomain.status === 'active')
+    .filter((subdomain) => {
+      if (subdomain.status !== 'active') {
+        return false;
+      }
+
+      // Some API versions include a relay capability flag. Respect it when
+      // present while remaining compatible with older payloads.
+      return subdomain.relay == null || Boolean(subdomain.relay);
+    })
     .map((subdomain) => ({
       subdomain: subdomain.subdomain,
       isPrimary: Boolean(subdomain.is_primary),
@@ -329,6 +345,7 @@ export async function ensureSubdomainTunnelToken(subdomain: string): Promise<str
   const headers = await getAuthHeaders();
   const tokenRes = await fetch(`${API_BASE}/subdomains/${normalizedSubdomain}/token`, { headers });
   if (!tokenRes.ok) {
+    await logApiFailure(`Failed to fetch tunnel token for ${normalizedSubdomain}.gitspace.sh`, tokenRes);
     throw new SpacesError(
       `Failed to fetch tunnel token for ${normalizedSubdomain}.gitspace.sh`,
       'SYSTEM_ERROR',

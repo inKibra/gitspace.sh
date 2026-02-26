@@ -1095,6 +1095,11 @@ export async function serveStart(options: {
       }
     }
 
+    if (!options.relay) {
+      const daemonHostConfig = readHostConfig();
+      options.relay = await resolveRelayUrlForServe(undefined, daemonHostConfig);
+    }
+
     logger.log('Starting serve daemon...');
 
     // Build args for background process
