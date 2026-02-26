@@ -541,6 +541,7 @@ For self-hosted relay servers:
 |---------|-------------|
 | `gssh relay start` | Start relay server |
 | `gssh relay stop` | Stop relay server |
+| `gssh relay status` | Show relay server status |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
 | `gssh relay machines list` | List registered machines |
 | `gssh relay machines revoke <machine-id>` | Revoke machine registration |

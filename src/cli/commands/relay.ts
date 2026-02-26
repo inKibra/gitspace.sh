@@ -49,6 +49,15 @@ export function registerRelayCommands(parent: Command): void {
       await stopRelay();
     }, { skipSetupCheck: true }));
 
+  cmd
+    .command('status')
+    .description('Show relay server status')
+    .option('--json', 'Output in JSON format')
+    .action(withErrorHandler(async (options) => {
+      const { relayStatus } = await import('../../commands/relay.js');
+      await relayStatus(options);
+    }, { skipSetupCheck: true }));
+
   const machines = cmd
     .command('machines')
     .description('Manage machines registered to this relay');

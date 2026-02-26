@@ -44,6 +44,21 @@ interface RelayRuntimeState {
   tunnelSubdomain?: string;
 }
 
+interface RelayStatusSnapshot {
+  running: boolean;
+  staleState: boolean;
+  pid: number | null;
+  tunnelPid: number | null;
+  tunnelRunning: boolean;
+  bind: string | null;
+  port: number | null;
+  hostname: string | null;
+  tunnelSubdomain: string | null;
+  relayUrl: string | null;
+  publicRelayUrl: string | null;
+  startedAt: number | null;
+}
+
 function getRelayRuntimeDir(): string {
   return join(getSpacesDir(), RELAY_RUNTIME_DIR);
 }
@@ -406,6 +421,91 @@ export async function stopRelay(): Promise<void> {
   await stopPid(state.pid);
   clearRelayState();
   logger.success("relay stopped");
+}
+
+function getRelayStatusSnapshot(): RelayStatusSnapshot {
+  const state = readRelayState();
+  if (!state) {
+    return {
+      running: false,
+      staleState: false,
+      pid: null,
+      tunnelPid: null,
+      tunnelRunning: false,
+      bind: null,
+      port: null,
+      hostname: null,
+      tunnelSubdomain: null,
+      relayUrl: null,
+      publicRelayUrl: null,
+      startedAt: null,
+    };
+  }
+
+  const running = isProcessRunning(state.pid);
+  const tunnelRunning = typeof state.tunnelPid === "number" && isProcessRunning(state.tunnelPid);
+
+  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}`;
+  const publicRelayUrl = state.tunnelSubdomain
+    ? `wss://${state.tunnelSubdomain}.gitspace.sh/ws`
+    : null;
+
+  return {
+    running,
+    staleState: !running,
+    pid: state.pid,
+    tunnelPid: state.tunnelPid ?? null,
+    tunnelRunning,
+    bind: state.bind,
+    port: state.port,
+    hostname: state.hostname ?? null,
+    tunnelSubdomain: state.tunnelSubdomain ?? null,
+    relayUrl,
+    publicRelayUrl,
+    startedAt: state.startedAt,
+  };
+}
+
+export async function relayStatus(options: { json?: boolean } = {}): Promise<void> {
+  const snapshot = getRelayStatusSnapshot();
+
+  if (options.json) {
+    logger.log(JSON.stringify(snapshot, null, 2));
+    return;
+  }
+
+  if (!snapshot.running) {
+    if (snapshot.staleState) {
+      clearRelayState();
+      logger.warning("relay not running (stale runtime state cleaned)");
+    } else {
+      logger.info("relay not running");
+    }
+    return;
+  }
+
+  logger.bold("Relay Status");
+  logger.log("");
+  logger.log(`  State:      ${chalk.green("running")}`);
+  logger.log(`  PID:        ${snapshot.pid}`);
+  logger.log(`  Relay URL:  ${snapshot.relayUrl ?? "-"}`);
+  logger.log(`  Bind:       ${snapshot.bind ?? "-"}`);
+  logger.log(`  Port:       ${snapshot.port ?? "-"}`);
+  if (snapshot.hostname) {
+    logger.log(`  Hostname:   ${snapshot.hostname}`);
+  }
+
+  if (snapshot.startedAt) {
+    logger.log(`  Started:    ${new Date(snapshot.startedAt).toISOString()}`);
+  }
+
+  if (snapshot.tunnelSubdomain) {
+    const tunnelState = snapshot.tunnelRunning
+      ? chalk.green("running")
+      : chalk.yellow("not running");
+    logger.log(`  Tunnel:     ${snapshot.tunnelSubdomain}.gitspace.sh (${tunnelState})`);
+    logger.log(`  Public URL: ${snapshot.publicRelayUrl ?? "-"}`);
+  }
 }
 
 async function requireOwnerUserRootId(): Promise<string> {
