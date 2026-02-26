@@ -28,7 +28,7 @@ import {
   resolveRelaySubdomains,
 } from "./host.js";
 import { selectOne } from "../utils/prompts.js";
-import { isCloudflaredInstalled } from "../utils/cloudflared.js";
+import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -115,9 +115,14 @@ function clearRelayState(): void {
 
 type RelayProcessKind = "relay" | "tunnel";
 type StaleRelayCleanupResult = "cleaned" | "preserved";
+let warnedWindowsOwnershipUnsupported = false;
 
 function getProcessCommand(pid: number): string | null {
   if (process.platform === "win32") {
+    if (!warnedWindowsOwnershipUnsupported) {
+      logger.warning("relay process ownership checks are not supported on Windows; refusing to signal managed PIDs on this platform");
+      warnedWindowsOwnershipUnsupported = true;
+    }
     return null;
   }
 
@@ -153,7 +158,9 @@ function isOwnedProcessCommand(command: string, kind: RelayProcessKind): boolean
 function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
   const command = getProcessCommand(pid);
   if (!command) {
-    logger.warning(`Unable to verify ownership for PID ${pid}; refusing to signal it.`);
+    if (process.platform !== "win32") {
+      logger.warning(`Unable to verify ownership for PID ${pid}; refusing to signal it.`);
+    }
     return false;
   }
 
@@ -212,51 +219,6 @@ async function cleanupStaleRelayState(state: RelayRuntimeState): Promise<StaleRe
 
   clearRelayState();
   return "cleaned";
-}
-
-function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
-  return typeof value === "object" && value !== null && "getReader" in value;
-}
-
-function trackCloudflaredOutput(proc: ReturnType<typeof Bun.spawn>): void {
-  const streamReader = async (
-    stream: unknown,
-    prefix: "warning" | "dim",
-  ) => {
-    if (!isReadableStream(stream)) {
-      return;
-    }
-
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        const text = decoder.decode(value, { stream: true }).trim();
-        if (!text) {
-          continue;
-        }
-
-        if (prefix === "warning") {
-          logger.warning(`[cloudflared] ${text}`);
-        } else {
-          logger.dim(`[cloudflared] ${text}`);
-        }
-      }
-    } catch {
-      // Ignore reader errors when process exits.
-    } finally {
-      reader.releaseLock();
-    }
-  };
-
-  void streamReader(proc.stdout, "dim");
-  void streamReader(proc.stderr, "warning");
 }
 
 async function startCloudflaredTunnel(token: string): Promise<ReturnType<typeof Bun.spawn>> {

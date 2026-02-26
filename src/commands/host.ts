@@ -355,6 +355,9 @@ export async function ensureSubdomainTunnelToken(subdomain: string): Promise<str
 
   const tokenPayload = await tokenRes.json() as { tunnelToken?: string };
   if (!tokenPayload.tunnelToken) {
+    logger.error(
+      `No tunnel token returned for ${normalizedSubdomain}.gitspace.sh payload=${JSON.stringify(tokenPayload).slice(0, 500)}`,
+    );
     throw new SpacesError(
       `No tunnel token returned for ${normalizedSubdomain}.gitspace.sh`,
       'SYSTEM_ERROR',

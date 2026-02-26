@@ -46,8 +46,6 @@ import {
   resolveRelaySubdomains,
   type HostConfig,
 } from './host.js';
-import { createRelayServer } from '../relay/server.js';
-import { formatRelayFingerprint, loadOrCreateRelayIdentity } from '../relay/identity.js';
 import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
 import { generateEphemeralKeypair, validateX25519PublicKey, x25519SharedSecret } from '../lib/tmux-lite/crypto/keyexchange.js';
 import { open } from '../lib/tmux-lite/crypto/secretbox.js';
@@ -77,7 +75,6 @@ import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js'
 import type { ProcessPortConfig } from '../types/processes.js';
 import {
   bindControlOwner,
-  bindControlRelayIdentity,
   ensureControlStore,
   getVaultMeta,
   setVaultMeta,
@@ -89,7 +86,7 @@ import {
 } from '../relay-client/machine-relay-client.js';
 import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
-import { isCloudflaredInstalled } from '../utils/cloudflared.js';
+import { isCloudflaredInstalled, trackCloudflaredOutput } from '../utils/cloudflared.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -413,44 +410,6 @@ async function fetchIdentityViaUnlockToken(
 // Process Hosting (Serve Tunnel)
 // ============================================================================
 
-function handleCloudflaredOutput(proc: Subprocess): void {
-  const streamReader = async (stream: ReadableStream<Uint8Array> | number | undefined, level: 'warning' | 'dim') => {
-    if (!stream || typeof stream === 'number') {
-      return;
-    }
-
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        const text = decoder.decode(value).trim();
-        if (!text) {
-          continue;
-        }
-
-        if (text.includes('ERR') || text.includes('error') || text.includes('failed')) {
-          if (level === 'warning') {
-            logger.warning(`[cloudflared] ${text}`);
-          } else {
-            logger.dim(`[cloudflared] ${text}`);
-          }
-        }
-      }
-    } catch {
-      // Stream closed while process exits.
-    }
-  };
-
-  void streamReader(proc.stdout, 'dim');
-  void streamReader(proc.stderr, 'warning');
-}
-
 export interface ProcessHostEntry {
   hostname: string;
   service: string;
@@ -687,7 +646,9 @@ class ServeProcessHostManager {
       stderr: 'pipe',
     });
 
-    handleCloudflaredOutput(proc);
+    trackCloudflaredOutput(proc, {
+      includeLine: (line) => line.includes('ERR') || line.includes('error') || line.includes('failed'),
+    });
 
     proc.exited.then((exitCode) => {
       if (exitCode !== 0 && this.process === proc) {
