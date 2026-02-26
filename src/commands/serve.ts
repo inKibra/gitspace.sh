@@ -40,7 +40,12 @@ import {
   NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
-import { getServeTokenKey, listAccountSubdomains, readHostConfig, type HostConfig } from './host.js';
+import {
+  getServeTokenKey,
+  readHostConfig,
+  resolveRelaySubdomains,
+  type HostConfig,
+} from './host.js';
 import { createRelayServer } from '../relay/server.js';
 import { formatRelayFingerprint, loadOrCreateRelayIdentity } from '../relay/identity.js';
 import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
@@ -191,26 +196,7 @@ async function discoverRelayCandidates(hostConfig: HostConfig | null): Promise<R
     });
   }
 
-  let accountSubdomains: string[] = [];
-  try {
-    accountSubdomains = (await listAccountSubdomains()).map((entry) => entry.subdomain);
-  } catch {
-    // Account discovery is best-effort; fallback to cached host config below.
-  }
-
-  if (accountSubdomains.length === 0) {
-    if (hostConfig?.subdomains?.length) {
-      accountSubdomains = [...hostConfig.subdomains];
-    } else if (hostConfig?.subdomain) {
-      accountSubdomains = [hostConfig.subdomain];
-    }
-  }
-
-  const deduped = [...new Set(accountSubdomains)].sort((a, b) => {
-    if (hostConfig?.subdomain === a) return -1;
-    if (hostConfig?.subdomain === b) return 1;
-    return a.localeCompare(b);
-  });
+  const deduped = await resolveRelaySubdomains(hostConfig);
 
   for (const subdomain of deduped) {
     candidates.push({
@@ -1310,16 +1296,41 @@ export async function serveStart(options: {
     } : undefined,
   });
 
+  let processHostManager: ServeProcessHostManager | null = null;
+  let processHostRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+  if (hostConfig?.subdomain) {
+    processHostManager = await startServeProcessHosting(hostConfig);
+    if (processHostManager) {
+      processHostRefreshTimer = setInterval(() => {
+        void processHostManager?.refresh();
+      }, SERVE_REFRESH_INTERVAL_MS);
+    }
+  }
+
+  const remoteSessionOptions = processHostManager
+    ? {
+        processHostDomain: processHostManager.domain,
+        onProcessesChanged: () => processHostManager?.refresh(),
+      }
+    : undefined;
+
   // Create session manager
   const sessionManager = new ClientSessionManager({
     relay: effectiveRelayUrl,
     identity,
-    remoteSessionOptions: undefined,
+    remoteSessionOptions,
     ownerUserRootId,
   });
 
   // Initialize session manager (starts tmux-lite server)
-  await sessionManager.initialize();
+  try {
+    await sessionManager.initialize();
+  } catch (error) {
+    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
+    cleanupServeFiles();
+    throw error;
+  }
 
   // Event handler - update daemon state
   const eventHandler: ServeEventHandler = (event) => {
@@ -1358,6 +1369,7 @@ export async function serveStart(options: {
     );
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
+    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
     cleanupServeFiles();
     throw new SpacesError(
       `Failed to connect to relay: ${error instanceof Error ? error.message : String(error)}`,
@@ -1367,14 +1379,24 @@ export async function serveStart(options: {
   }
 
   // Save relay config for reconnect/bootstrap flows
-  writeRelayConfig({
-    relayUrl: effectiveRelayUrl,
-    machineId,
-    savedAt: Date.now(),
-  });
+  try {
+    writeRelayConfig({
+      relayUrl: effectiveRelayUrl,
+      machineId,
+      savedAt: Date.now(),
+    });
+  } catch (error) {
+    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
+    cleanupServeFiles();
+    throw new SpacesError(
+      `Failed to persist relay config: ${error instanceof Error ? error.message : String(error)}`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
 
   // Set up shutdown handlers with daemon cleanup
-  setupShutdownHandlers(sessionManager, true);
+  setupShutdownHandlers(sessionManager, true, () => stopServeProcessHosting(processHostManager, processHostRefreshTimer));
 
   // Keep process alive
   await new Promise(() => {});

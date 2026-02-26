@@ -259,6 +259,41 @@ export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
     }));
 }
 
+/**
+ * Resolve relay-capable subdomains in stable priority order.
+ *
+ * Priority:
+ * 1. Active account subdomains from API (if available)
+ * 2. Cached host config fallback
+ *
+ * Ordering:
+ * - Primary subdomain first (from host config)
+ * - Remaining subdomains alphabetically
+ */
+export async function resolveRelaySubdomains(hostConfig: HostConfig | null = readHostConfig()): Promise<string[]> {
+  let subdomains: string[] = [];
+
+  try {
+    subdomains = (await listAccountSubdomains()).map((entry) => entry.subdomain);
+  } catch {
+    // Account discovery is best-effort; fallback to cached host config.
+  }
+
+  if (subdomains.length === 0) {
+    if (hostConfig?.subdomains?.length) {
+      subdomains = [...hostConfig.subdomains];
+    } else if (hostConfig?.subdomain) {
+      subdomains = [hostConfig.subdomain];
+    }
+  }
+
+  return [...new Set(subdomains)].sort((a, b) => {
+    if (hostConfig?.subdomain === a) return -1;
+    if (hostConfig?.subdomain === b) return 1;
+    return a.localeCompare(b);
+  });
+}
+
 export async function ensureSubdomainTunnelToken(subdomain: string): Promise<string> {
   const normalizedSubdomain = subdomain.toLowerCase().trim();
   const secretKey = `TUNNEL_TOKEN_${normalizedSubdomain}`;

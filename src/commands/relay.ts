@@ -24,8 +24,8 @@ import {
 } from "../relay/control/store.js";
 import {
   ensureSubdomainTunnelToken,
-  listAccountSubdomains,
   readHostConfig,
+  resolveRelaySubdomains,
 } from "./host.js";
 import { selectOne } from "../utils/prompts.js";
 
@@ -33,6 +33,8 @@ import { selectOne } from "../utils/prompts.js";
 const DEFAULT_PORT = 4480;
 const RELAY_RUNTIME_DIR = ".relay/runtime";
 const RELAY_STATE_FILE = "relay-state.json";
+const CLOUDFLARED_STARTUP_DELAY_MS = 1200;
+const CLOUDFLARED_EARLY_EXIT_RACE_MS = 100;
 
 interface RelayRuntimeState {
   pid: number;
@@ -111,7 +113,8 @@ function clearRelayState(): void {
 }
 
 async function isCloudflaredInstalled(): Promise<boolean> {
-  const proc = Bun.spawn(["which", "cloudflared"], {
+  const lookupCommand = process.platform === "win32" ? "where" : "which";
+  const proc = Bun.spawn([lookupCommand, "cloudflared"], {
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -183,11 +186,13 @@ async function startCloudflaredTunnel(token: string): Promise<ReturnType<typeof 
   });
 
   trackCloudflaredOutput(cloudflared);
-  await Bun.sleep(1200);
+  // Give cloudflared a short window to initialize and surface immediate failures.
+  await Bun.sleep(CLOUDFLARED_STARTUP_DELAY_MS);
 
   const exitCode = await Promise.race([
     cloudflared.exited,
-    Bun.sleep(100).then(() => null),
+    // Keep this race short so successful startup does not block relay start.
+    Bun.sleep(CLOUDFLARED_EARLY_EXIT_RACE_MS).then(() => null),
   ]);
 
   if (typeof exitCode === "number") {
@@ -200,35 +205,13 @@ async function startCloudflaredTunnel(token: string): Promise<ReturnType<typeof 
 async function resolveAccountRelayTarget(): Promise<{
   hostname: string;
   subdomain: string;
-  tunnelToken: string;
 } | null> {
-  let subdomains: string[] = [];
-  try {
-    const accountSubdomains = await listAccountSubdomains();
-    subdomains = accountSubdomains.map((entry) => entry.subdomain);
-  } catch {
-    // Not logged in or API unavailable; account relay auto-bind is optional.
-  }
-
-  if (subdomains.length === 0) {
-    const localHostConfig = readHostConfig();
-    subdomains = localHostConfig?.subdomains?.length
-      ? [...localHostConfig.subdomains]
-      : localHostConfig?.subdomain
-        ? [localHostConfig.subdomain]
-        : [];
-  }
+  const hostConfig = readHostConfig();
+  const subdomains = await resolveRelaySubdomains(hostConfig);
 
   if (subdomains.length === 0) {
     return null;
   }
-
-  const hostConfig = readHostConfig();
-  subdomains = [...new Set(subdomains)].sort((a, b) => {
-    if (hostConfig?.subdomain === a) return -1;
-    if (hostConfig?.subdomain === b) return 1;
-    return a.localeCompare(b);
-  });
 
   let selectedSubdomain = subdomains[0];
   if (subdomains.length > 1 && process.stdout.isTTY && process.stdin.isTTY) {
@@ -245,13 +228,16 @@ async function resolveAccountRelayTarget(): Promise<{
       throw new SpacesError("Cancelled", "USER_ERROR", 1);
     }
     selectedSubdomain = picked;
+  } else if (subdomains.length > 1) {
+    logger.warning(
+      `Multiple account hosts available; auto-selecting ${selectedSubdomain}.gitspace.sh in non-interactive mode. `
+      + "Run interactively to choose a different host.",
+    );
   }
 
-  const tunnelToken = await ensureSubdomainTunnelToken(selectedSubdomain);
   return {
     hostname: `${selectedSubdomain}.gitspace.sh`,
     subdomain: selectedSubdomain,
-    tunnelToken,
   };
 }
 
@@ -284,10 +270,18 @@ export async function startRelay(options: {
   if (!hostname) {
     const accountTarget = await resolveAccountRelayTarget();
     if (accountTarget) {
-      hostname = accountTarget.hostname;
-      tunnelSubdomain = accountTarget.subdomain;
-      tunnelToken = accountTarget.tunnelToken;
-      logger.info(`Using account host ${hostname} for relay tunnel`);
+      try {
+        tunnelToken = await ensureSubdomainTunnelToken(accountTarget.subdomain);
+        hostname = accountTarget.hostname;
+        tunnelSubdomain = accountTarget.subdomain;
+        logger.info(`Using account host ${hostname} for relay tunnel`);
+      } catch (error) {
+        logger.warning(
+          `Could not load tunnel token for ${accountTarget.subdomain}.gitspace.sh. `
+          + "Falling back to local relay start without tunnel.",
+        );
+        logger.dim(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 
@@ -320,9 +314,10 @@ export async function startRelay(options: {
   logger.log("");
 
   let tunnelProcess: ReturnType<typeof Bun.spawn> | null = null;
+  let server: ReturnType<typeof createRelayServer> | null = null;
 
   try {
-    const server = await createRelayServer({
+    server = await createRelayServer({
       port,
       bind,
       hostname,
@@ -358,7 +353,7 @@ export async function startRelay(options: {
       if (tunnelProcess) {
         tunnelProcess.kill();
       }
-      server.stop();
+      server?.stop();
       clearRelayState();
       process.exit(0);
     };
@@ -374,6 +369,7 @@ export async function startRelay(options: {
     if (tunnelProcess) {
       tunnelProcess.kill();
     }
+    server?.stop();
     clearRelayState();
     throw new SpacesError(
       `Failed to start relay: ${error instanceof Error ? error.message : String(error)}`,
