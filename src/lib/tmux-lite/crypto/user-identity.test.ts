@@ -48,15 +48,10 @@ describe("User Identity - Mnemonic Generation", () => {
     expect(validateMnemonic("foo bar baz qux")).toBe(false);
   });
 
-  test("validateMnemonic rejects wrong word count", () => {
-    // 12-word mnemonic is valid BIP39 but we want 24
-    // validateMnemonic checks wordlist + checksum, not word count
-    // A valid 12-word mnemonic will pass validation (it's still valid BIP39)
-    // The word count enforcement is in generateMnemonic (256 bits → 24 words)
+  test("validateMnemonic rejects invalid word count", () => {
     const mnemonic = generateMnemonic();
     const words = mnemonic.split(" ");
-    // Truncating a 24-word mnemonic to 12 words breaks the checksum
-    const truncated = words.slice(0, 12).join(" ");
+    const truncated = words.slice(0, 11).join(" ");
     expect(validateMnemonic(truncated)).toBe(false);
   });
 

@@ -49,7 +49,7 @@ describe("Authorization Integration", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("not authorized");
+      expect(result.error).toContain("owner user root");
     });
 
     it("should always grant full access for access_list authorization", async () => {
@@ -103,7 +103,7 @@ describe("Authorization Integration", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("not authorized");
+      expect(result.error).toContain("owner user root");
     });
   });
 

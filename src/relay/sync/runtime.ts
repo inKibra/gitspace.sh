@@ -305,6 +305,14 @@ export interface TimestampedCategoryEntry {
 
 export type TimestampedCategoryPayload = Record<string, TimestampedCategoryEntry>;
 
+function compareStringsDeterministic(a: string, b: string): number {
+  if (a === b) {
+    return 0;
+  }
+
+  return a < b ? -1 : 1;
+}
+
 function stableSerialize(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
@@ -315,7 +323,7 @@ function stableSerialize(value: unknown): string {
   }
 
   const objectValue = value as Record<string, unknown>;
-  const keys = Object.keys(objectValue).sort((a, b) => a.localeCompare(b));
+  const keys = Object.keys(objectValue).sort(compareStringsDeterministic);
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableSerialize(objectValue[key])}`).join(",")}}`;
 }
 
@@ -331,7 +339,7 @@ export function mergeCategoryPayloadByTimestamp(
   incoming: TimestampedCategoryPayload,
 ): TimestampedCategoryPayload {
   const merged: TimestampedCategoryPayload = { ...base };
-  const keys = Object.keys(incoming).sort((a, b) => a.localeCompare(b));
+  const keys = Object.keys(incoming).sort(compareStringsDeterministic);
 
   for (const key of keys) {
     const candidate = incoming[key];
@@ -356,7 +364,7 @@ export function mergeCategoryPayloadByTimestamp(
 
     const candidateSerialized = stableSerialize(candidate.value);
     const currentSerialized = stableSerialize(current.value);
-    if (candidateSerialized.localeCompare(currentSerialized) > 0) {
+    if (compareStringsDeterministic(candidateSerialized, currentSerialized) > 0) {
       merged[key] = candidate;
     }
   }

@@ -376,7 +376,7 @@ export function createClientAuth(
 
   // Create message
   if (!deviceCertificate) {
-    throw new Error('Device certificate required for handshake authorization');
+    throw new Error('Device certificate required for handshake authorization (owner identity binding)');
   }
 
   const message: X3DHAuthMessage = {

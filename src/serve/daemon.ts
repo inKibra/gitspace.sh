@@ -16,7 +16,14 @@ import type { CloudWorkspaceRecord } from '../relay/control/types.js';
 // ============================================================================
 
 /** Get serve daemon directory */
+const SERVE_DAEMON_DIR_OVERRIDE_ENV = 'GITSPACE_SERVE_DAEMON_DIR';
+
 export function getServeDaemonDir(): string {
+  const override = process.env[SERVE_DAEMON_DIR_OVERRIDE_ENV]?.trim();
+  if (override) {
+    return override;
+  }
+
   return join(getSpacesDir(), '.serve');
 }
 
@@ -209,6 +216,7 @@ let statusServer: ReturnType<typeof Bun.listen> | null = null;
  * Start the status socket server
  */
 export function startStatusServer(): void {
+  ensureServeDaemonDir();
   const socketPath = getServeSocketPath();
 
   // Clean up old socket

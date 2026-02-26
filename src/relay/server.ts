@@ -21,8 +21,6 @@ import { PROTOCOL_VERSION } from "./protocol.js";
 import { formatRelayFingerprint, type RelayIdentity } from "./identity.js";
 import { deriveIdentityId } from "../lib/tmux-lite/crypto/identity.js";
 import { x25519 } from "@noble/curves/ed25519.js";
-import { hkdf } from "@noble/hashes/hkdf.js";
-import { sha256 } from "@noble/hashes/sha2.js";
 import { seal } from "../lib/tmux-lite/crypto/secretbox.js";
 import {
   validateX25519PublicKey,
@@ -36,6 +34,7 @@ import {
   markCloudBootstrapReady,
 } from "./control/store.js";
 import { getWorkspaceIdentity } from "./control/workspace-identity.js";
+import { deriveUnlockKey } from "./unlock-kdf.js";
 
 /**
  * Candidate paths to web terminal dist files (built by Vite).
@@ -301,13 +300,6 @@ const SIGNED_CLIENT_MESSAGE_TYPES = new Set<SignedClientMessageType>([
   "owner_sync_unlock",
 ]);
 
-const UNLOCK_KDF_INFO = new TextEncoder().encode("gitspace-unlock-v1");
-const UNLOCK_KDF_KEY_LENGTH = 32;
-
-function deriveUnlockKey(sharedSecret: Uint8Array, salt: Uint8Array): Uint8Array {
-  return hkdf(sha256, sharedSecret, salt, UNLOCK_KDF_INFO, UNLOCK_KDF_KEY_LENGTH);
-}
-
 function createSealedUnlockPayload(
   machineEphemeralPublicKeyBase64: string,
   payload: string
@@ -319,18 +311,28 @@ function createSealedUnlockPayload(
     throw new Error("Invalid machine ephemeral key");
   }
 
-  const relayEphemeralPrivateKey = randomBytes(32);
-  const relayEphemeralPublicKey = x25519.getPublicKey(relayEphemeralPrivateKey);
-  const sharedSecret = x25519SharedSecret(relayEphemeralPrivateKey, machineEphemeralPublicKey);
-  const salt = randomBytes(32);
-  const key = deriveUnlockKey(sharedSecret, salt);
+  let relayEphemeralPrivateKey: Uint8Array | null = null;
+  let sharedSecret: Uint8Array | null = null;
+  let key: Uint8Array | null = null;
 
-  const sealed = seal(Buffer.from(payload, "utf-8"), key);
-  return {
-    ciphertext: sealed.toString("base64"),
-    relayEphemeralKey: Buffer.from(relayEphemeralPublicKey).toString("base64"),
-    salt: Buffer.from(salt).toString("base64"),
-  };
+  try {
+    relayEphemeralPrivateKey = randomBytes(32);
+    const relayEphemeralPublicKey = x25519.getPublicKey(relayEphemeralPrivateKey);
+    sharedSecret = x25519SharedSecret(relayEphemeralPrivateKey, machineEphemeralPublicKey);
+    const salt = randomBytes(32);
+    key = deriveUnlockKey(sharedSecret, salt);
+
+    const sealed = seal(Buffer.from(payload, "utf-8"), key);
+    return {
+      ciphertext: sealed.toString("base64"),
+      relayEphemeralKey: Buffer.from(relayEphemeralPublicKey).toString("base64"),
+      salt: Buffer.from(salt).toString("base64"),
+    };
+  } finally {
+    relayEphemeralPrivateKey?.fill(0);
+    sharedSecret?.fill(0);
+    key?.fill(0);
+  }
 }
 
 function isSignedClientMessageType(type: unknown): type is SignedClientMessageType {
@@ -1509,14 +1511,19 @@ async function handleProtocolMessage(
 
       const unlockMsg = msg as UnlockRelayMessage;
 
-      // Verify the client's signature (unlock_relay has no clientIdentityId, verify signature directly)
-      if (!verifySignedMessage(unlockMsg)) {
+      const userRootPubBytes = new Uint8Array(Buffer.from(unlockMsg.userRootPublicKey, "base64"));
+      if (userRootPubBytes.length !== 32) {
+        ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", "Invalid user root public key")));
+        return;
+      }
+
+      // Verify signature and bind signer to claimed userRootPublicKey.
+      if (!verifySignedMessage(unlockMsg, userRootPubBytes)) {
         ws.send(serializeMessage(createErrorMessage("INVALID_SIGNATURE", "Signature verification failed")));
         return;
       }
 
       // Derive user root ID from the provided public key
-      const userRootPubBytes = new Uint8Array(Buffer.from(unlockMsg.userRootPublicKey, "base64"));
       let userRootId: string;
       try {
         userRootId = deriveIdentityId(userRootPubBytes);

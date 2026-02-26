@@ -319,7 +319,7 @@ export function createClientAuth(
   const identitySignature = sign(signatureTranscript, identity.signing.secretKey);
 
   if (!deviceCertificate) {
-    throw new Error("Device certificate required for handshake authorization");
+    throw new Error("Device certificate required for handshake authorization (owner identity binding)");
   }
 
   const message: X3DHAuthMessage = {

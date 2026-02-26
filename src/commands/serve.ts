@@ -46,8 +46,6 @@ import { formatRelayFingerprint, loadOrCreateRelayIdentity } from '../relay/iden
 import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
 import { generateEphemeralKeypair, validateX25519PublicKey, x25519SharedSecret } from '../lib/tmux-lite/crypto/keyexchange.js';
 import { open } from '../lib/tmux-lite/crypto/secretbox.js';
-import { hkdf } from '@noble/hashes/hkdf.js';
-import { sha256 } from '@noble/hashes/sha2.js';
 import {
   isServeRunning,
   getServePid,
@@ -84,6 +82,8 @@ import {
   requestUnlockGrantViaRelay,
   type PublicIdentity,
 } from '../relay-client/machine-relay-client.js';
+import { deriveUnlockKey } from '../relay/unlock-kdf.js';
+import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -107,6 +107,19 @@ const CLOUDFLARED_RESTART_DELAY = 5000;
 
 interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
+}
+
+function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | undefined): string {
+  if (!enrollmentToken) {
+    throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
+  }
+
+  const parsed = parseRootInviteToken(enrollmentToken);
+  if (!parsed || parsed.type !== 'relay-machine' || !parsed.ownerUserRootId) {
+    throw new SpacesError('Unlock mode enrollment token is invalid', 'USER_ERROR', 1);
+  }
+
+  return parsed.ownerUserRootId;
 }
 
 async function resolveUserRootAuthorizationConfig(): Promise<UserRootAuthorizationConfig> {
@@ -220,13 +233,6 @@ async function verifyRelayTrust(
   }
 
   return { trusted: true };
-}
-
-const UNLOCK_KDF_INFO = new TextEncoder().encode('gitspace-unlock-v1');
-const UNLOCK_KDF_KEY_LENGTH = 32;
-
-function deriveUnlockKey(sharedSecret: Uint8Array, salt: Uint8Array): Uint8Array {
-  return hkdf(sha256, sharedSecret, salt, UNLOCK_KDF_INFO, UNLOCK_KDF_KEY_LENGTH);
 }
 
 function decryptUnlockGrant(
@@ -1120,13 +1126,26 @@ export async function serveStart(options: {
     throw error;
   }
 
-  let userRootAuth: UserRootAuthorizationConfig;
-  try {
-    userRootAuth = await resolveUserRootAuthorizationConfig();
-  } catch (error) {
-    stopStatusServer();
-    cleanupServeFiles();
-    throw error;
+  let ownerUserRootId: string;
+  if (usingUnlockMode) {
+    try {
+      ownerUserRootId = resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken);
+    } catch (error) {
+      stopStatusServer();
+      cleanupServeFiles();
+      throw error;
+    }
+  } else {
+    try {
+      const userRootAuth = await resolveUserRootAuthorizationConfig();
+      ownerUserRootId = userRootAuth.ownerUserRootId;
+      ensureControlStore();
+      bindControlOwner(identity.id);
+    } catch (error) {
+      stopStatusServer();
+      cleanupServeFiles();
+      throw error;
+    }
   }
 
   if (!signingPrivateKey || !publicIdentity) {
@@ -1180,7 +1199,6 @@ export async function serveStart(options: {
 
   if (hostConfig?.subdomain) {
     ensureControlStore();
-    bindControlOwner(identity.id);
 
     // Load or create persistent relay identity for control mode
     localRelayIdentity = await loadOrCreateRelayIdentity('control-relay');
@@ -1238,7 +1256,7 @@ export async function serveStart(options: {
     relay: effectiveRelayUrl,
     identity,
     remoteSessionOptions,
-    ownerUserRootId: userRootAuth.ownerUserRootId,
+    ownerUserRootId,
   });
 
   // Initialize session manager (starts tmux-lite server)

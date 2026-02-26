@@ -359,6 +359,23 @@ describe('owner-only authorization', () => {
   });
 });
 
+describe('relay unlock authorization', () => {
+  test('rejects unlock_relay when signer does not match claimed owner key', async () => {
+    const clientWs = await connectClient(relayUrl);
+
+    const message = signClientMessage({
+      type: 'unlock_relay',
+      userRootPublicKey: Buffer.from(ownerUserRoot.signing.publicKey).toString('base64'),
+      proof: Buffer.from('invalid-proof').toString('base64'),
+    }, outsiderClientIdentity);
+
+    const error = await sendAndWait<any>(clientWs, message, 'error');
+    expect(error.code).toBe('INVALID_SIGNATURE');
+
+    clientWs.close();
+  });
+});
+
 describe('owner sync protocol', () => {
   test('owner compare/lock/push/pull/unlock flow works', async () => {
     const ownerWs = await connectClient(relayUrl);

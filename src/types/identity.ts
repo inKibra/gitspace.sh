@@ -163,11 +163,8 @@ export interface X3DHAuthMessage {
   /** Authorization type and data */
   authorization: { type: "access_list" };
   /**
-   * Optional device certificate proving this client device is endorsed
+   * Required device certificate proving this client device is endorsed
    * by a user root identity (JSON-serialized DeviceCertificate).
-   *
-   * When present, the machine can extract the user root ID and check
-   * access via user-root-keyed ACLs instead of device-keyed ACLs.
    */
   deviceCertificate: string;
 }
