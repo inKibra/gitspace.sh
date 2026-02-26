@@ -50,7 +50,7 @@ function registerMachineServeCommands(machine: Command): void {
   // gssh machine serve start
   serve
     .command('start')
-    .description('Start the serve daemon')
+    .description('Start the serve daemon (auto-select relay when omitted)')
     .option('--relay <url>', 'Override default relay URL')
     .option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
     .option('--bootstrap-token <token>', 'One-time bootstrap token for cloud machine registration')

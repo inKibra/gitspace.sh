@@ -26,7 +26,7 @@ export function registerRelayCommands(parent: Command): void {
 
   cmd
     .command('start')
-    .description('Start the relay server')
+    .description('Start relay server (auto-binds account host tunnel when available)')
     .option('--port <port>', 'Port to listen on', '4480')
     .option('--bind <address>', 'Address to bind to', '0.0.0.0')
     .option('--hostname <host>', 'Only serve requests for this domain (optional)')
@@ -39,6 +39,23 @@ export function registerRelayCommands(parent: Command): void {
         hostname: options.hostname,
         label: options.label,
       });
+    }, { skipSetupCheck: true }));
+
+  cmd
+    .command('stop')
+    .description('Stop the relay server')
+    .action(withErrorHandler(async () => {
+      const { stopRelay } = await import('../../commands/relay.js');
+      await stopRelay();
+    }, { skipSetupCheck: true }));
+
+  cmd
+    .command('status')
+    .description('Show relay server status')
+    .option('--json', 'Output in JSON format')
+    .action(withErrorHandler(async (options) => {
+      const { relayStatus } = await import('../../commands/relay.js');
+      await relayStatus(options);
     }, { skipSetupCheck: true }));
 
   const machines = cmd

@@ -458,8 +458,12 @@ gssh invite relay-machine create --relay ws://localhost:4480/ws --machine-signin
 # Terminal 3: Initialize identity, enroll, and start serving
 gssh user identity init
 gssh machine enroll --invite "ws://localhost:4480/ws#<TOKEN>" --label "My MacBook"
-gssh machine serve start --relay ws://localhost:4480/ws
+gssh machine serve start
 ```
+
+When `--relay` is omitted, `gssh machine serve start` lets you choose from:
+- local relay (`ws://127.0.0.1:4480/ws`) if running
+- account relays (`*.gitspace.sh`) discovered from your host config/account
 
 ### Identity Management
 
@@ -536,6 +540,8 @@ For self-hosted relay servers:
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start relay server |
+| `gssh relay stop` | Stop relay server |
+| `gssh relay status` | Show relay server status |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
 | `gssh relay machines list` | List registered machines |
 | `gssh relay machines revoke <machine-id>` | Revoke machine registration |

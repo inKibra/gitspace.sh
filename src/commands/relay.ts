@@ -10,18 +10,291 @@ import { logger } from "../utils/logger.js";
 import { createRelayServer } from "../relay/server.js";
 import { SpacesError } from "../types/errors.js";
 import chalk from "chalk";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   loadOrCreateRelayIdentity,
   formatRelayFingerprint,
 } from "../relay/identity.js";
 import { loadUserRootIdentity } from "../core/user-identity.js";
+import { getSpacesDir } from "../core/config.js";
 import {
   listVaultMachinesForOwner,
   removeVaultMachineForOwner,
 } from "../relay/control/store.js";
+import {
+  ensureSubdomainTunnelToken,
+  readHostConfig,
+  resolveRelaySubdomains,
+} from "./host.js";
+import { selectOne } from "../utils/prompts.js";
+import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
+const RELAY_RUNTIME_DIR = ".relay/runtime";
+const RELAY_STATE_FILE = "relay-state.json";
+const CLOUDFLARED_STARTUP_DELAY_MS = 1200;
+const CLOUDFLARED_EARLY_EXIT_RACE_MS = 100;
+
+interface RelayRuntimeState {
+  pid: number;
+  startedAt: number;
+  port: number;
+  bind: string;
+  hostname?: string;
+  tunnelPid?: number;
+  tunnelSubdomain?: string;
+}
+
+interface RelayStatusSnapshot {
+  running: boolean;
+  staleState: boolean;
+  pid: number | null;
+  tunnelPid: number | null;
+  tunnelRunning: boolean;
+  bind: string | null;
+  port: number | null;
+  hostname: string | null;
+  tunnelSubdomain: string | null;
+  relayUrl: string | null;
+  publicRelayUrl: string | null;
+  startedAt: number | null;
+}
+
+function getRelayRuntimeDir(): string {
+  return join(getSpacesDir(), RELAY_RUNTIME_DIR);
+}
+
+function getRelayStatePath(): string {
+  return join(getRelayRuntimeDir(), RELAY_STATE_FILE);
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readRelayState(): RelayRuntimeState | null {
+  const statePath = getRelayStatePath();
+  if (!existsSync(statePath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(readFileSync(statePath, "utf-8")) as RelayRuntimeState;
+  } catch {
+    return null;
+  }
+}
+
+function writeRelayState(state: RelayRuntimeState): void {
+  const runtimeDir = getRelayRuntimeDir();
+  if (!existsSync(runtimeDir)) {
+    mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  }
+
+  writeFileSync(getRelayStatePath(), JSON.stringify(state, null, 2), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+}
+
+function clearRelayState(): void {
+  const statePath = getRelayStatePath();
+  if (!existsSync(statePath)) {
+    return;
+  }
+
+  rmSync(statePath, { force: true });
+}
+
+type RelayProcessKind = "relay" | "tunnel";
+type StaleRelayCleanupResult = "cleaned" | "preserved";
+let warnedWindowsOwnershipUnsupported = false;
+
+function getProcessCommand(pid: number): string | null {
+  if (process.platform === "win32") {
+    if (!warnedWindowsOwnershipUnsupported) {
+      logger.warning("relay process ownership checks are not supported on Windows; refusing to signal managed PIDs on this platform");
+      warnedWindowsOwnershipUnsupported = true;
+    }
+    return null;
+  }
+
+  try {
+    const proc = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+
+    if (proc.exitCode !== 0 || !proc.stdout) {
+      return null;
+    }
+
+    const command = Buffer.from(proc.stdout).toString("utf-8").trim();
+    return command.length > 0 ? command : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOwnedProcessCommand(command: string, kind: RelayProcessKind): boolean {
+  const normalizedCommand = command.toLowerCase();
+
+  if (kind === "tunnel") {
+    return normalizedCommand.includes("cloudflared")
+      && normalizedCommand.includes("tunnel")
+      && normalizedCommand.includes("run");
+  }
+
+  return normalizedCommand.includes("relay start");
+}
+
+function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
+  const command = getProcessCommand(pid);
+  if (!command) {
+    if (process.platform !== "win32") {
+      logger.warning(`Unable to verify ownership for PID ${pid}; refusing to signal it.`);
+    }
+    return false;
+  }
+
+  return isOwnedProcessCommand(command, kind);
+}
+
+async function stopTrackedProcess(pid: number | undefined, kind: RelayProcessKind): Promise<"not-running" | "stopped" | "not-owned"> {
+  if (!pid || !isProcessRunning(pid)) {
+    return "not-running";
+  }
+
+  if (!isOwnedProcess(pid, kind)) {
+    return "not-owned";
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return "not-running";
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!isProcessRunning(pid)) {
+      return "stopped";
+    }
+    await Bun.sleep(100);
+  }
+
+  if (isProcessRunning(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      return "stopped";
+    }
+  }
+
+  return "stopped";
+}
+
+async function cleanupStaleRelayState(state: RelayRuntimeState): Promise<StaleRelayCleanupResult> {
+  let preserveState = false;
+
+  if (state.tunnelPid && isProcessRunning(state.tunnelPid)) {
+    const tunnelStopResult = await stopTrackedProcess(state.tunnelPid, "tunnel");
+    if (tunnelStopResult === "not-owned") {
+      logger.warning(
+        `Found stale tunnel PID ${state.tunnelPid} that does not look like a managed cloudflared process; leaving it untouched.`,
+      );
+      preserveState = true;
+    }
+  }
+
+  if (preserveState) {
+    return "preserved";
+  }
+
+  clearRelayState();
+  return "cleaned";
+}
+
+async function startCloudflaredTunnel(token: string): Promise<ReturnType<typeof Bun.spawn>> {
+  if (!(await isCloudflaredInstalled())) {
+    throw new SpacesError(
+      "cloudflared is not installed. Install it first (brew install cloudflared).",
+      "USER_ERROR",
+      1,
+    );
+  }
+
+  const cloudflared = Bun.spawn(["cloudflared", "tunnel", "run"], {
+    env: {
+      ...process.env,
+      TUNNEL_TOKEN: token,
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  trackCloudflaredOutput(cloudflared);
+  // Give cloudflared a short window to initialize and surface immediate failures.
+  await Bun.sleep(CLOUDFLARED_STARTUP_DELAY_MS);
+
+  const exitCode = await Promise.race([
+    cloudflared.exited,
+    // Keep this race short so successful startup does not block relay start.
+    Bun.sleep(CLOUDFLARED_EARLY_EXIT_RACE_MS).then(() => null),
+  ]);
+
+  if (typeof exitCode === "number") {
+    throw new SpacesError(`cloudflared exited immediately with code ${exitCode}`, "SYSTEM_ERROR", 2);
+  }
+
+  return cloudflared;
+}
+
+async function resolveAccountRelayTarget(): Promise<{
+  hostname: string;
+  subdomain: string;
+} | null> {
+  const hostConfig = readHostConfig();
+  const subdomains = await resolveRelaySubdomains(hostConfig);
+
+  if (subdomains.length === 0) {
+    return null;
+  }
+
+  let selectedSubdomain = subdomains[0];
+  if (subdomains.length > 1 && process.stdout.isTTY && process.stdin.isTTY) {
+    const picked = await selectOne(
+      subdomains.map((subdomain) => ({
+        label: `${subdomain}.gitspace.sh`,
+        value: subdomain,
+        description: hostConfig?.subdomain === subdomain ? "Primary subdomain" : undefined,
+      })),
+      "Select account host for relay tunnel",
+    );
+
+    if (!picked) {
+      throw new SpacesError("Cancelled", "USER_ERROR", 1);
+    }
+    selectedSubdomain = picked;
+  } else if (subdomains.length > 1) {
+    logger.warning(
+      `Multiple account hosts available; auto-selecting ${selectedSubdomain}.gitspace.sh in non-interactive mode. `
+      + "Run interactively to choose a different host.",
+    );
+  }
+
+  return {
+    hostname: `${selectedSubdomain}.gitspace.sh`,
+    subdomain: selectedSubdomain,
+  };
+}
 
 /**
  * Start the relay server
@@ -34,9 +307,70 @@ export async function startRelay(options: {
   bind?: string;
   label?: string;
 }): Promise<void> {
+  const existingState = readRelayState();
+  if (existingState?.pid && isProcessRunning(existingState.pid)) {
+    const existingCommand = getProcessCommand(existingState.pid);
+    if (!existingCommand) {
+      throw new SpacesError(
+        `Relay runtime state points to running PID ${existingState.pid}, but ownership could not be verified. Run \`gssh relay stop\` and retry.`,
+        "USER_ERROR",
+        1,
+      );
+    }
+
+    if (isOwnedProcessCommand(existingCommand, "relay")) {
+      throw new SpacesError(
+        `Relay is already running (pid ${existingState.pid}). Stop it first with \`gssh relay stop\`.`,
+        "USER_ERROR",
+        1,
+      );
+    }
+
+    logger.warning(
+      `Found stale relay runtime state pointing to PID ${existingState.pid}; cleaning stale state and continuing.`,
+    );
+    const staleCleanup = await cleanupStaleRelayState(existingState);
+    if (staleCleanup === "preserved") {
+      throw new SpacesError(
+        "Found a live unmanaged tunnel process tied to stale relay state. Stop it with `gssh relay stop` before starting a new relay.",
+        "USER_ERROR",
+        1,
+      );
+    }
+  } else if (existingState) {
+    const staleCleanup = await cleanupStaleRelayState(existingState);
+    if (staleCleanup === "preserved") {
+      throw new SpacesError(
+        "Found a live unmanaged tunnel process tied to stale relay state. Stop it with `gssh relay stop` before starting a new relay.",
+        "USER_ERROR",
+        1,
+      );
+    }
+  }
+
   const port = options.port ?? parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
   const bind = options.bind ?? process.env.RELAY_BIND ?? "0.0.0.0";
-  const hostname = options.hostname ?? process.env.RELAY_HOST;
+  let hostname = options.hostname ?? process.env.RELAY_HOST;
+  let tunnelSubdomain: string | undefined;
+  let tunnelToken: string | undefined;
+
+  if (!hostname) {
+    const accountTarget = await resolveAccountRelayTarget();
+    if (accountTarget) {
+      try {
+        tunnelToken = await ensureSubdomainTunnelToken(accountTarget.subdomain);
+        hostname = accountTarget.hostname;
+        tunnelSubdomain = accountTarget.subdomain;
+        logger.info(`Using account host ${hostname} for relay tunnel`);
+      } catch (error) {
+        logger.warning(
+          `Could not load tunnel token for ${accountTarget.subdomain}.gitspace.sh. `
+          + "Falling back to local relay start without tunnel.",
+        );
+        logger.dim(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
 
   // Load or create relay identity
   const identity = await loadOrCreateRelayIdentity(options.label);
@@ -61,17 +395,40 @@ export async function startRelay(options: {
   if (hostname) {
     logger.log(`  Hostname: ${hostname} (only serving this domain)`);
   }
+  if (tunnelSubdomain) {
+    logger.log(`  Tunnel:   ${tunnelSubdomain}.gitspace.sh`);
+  }
   logger.log("");
 
+  let tunnelProcess: ReturnType<typeof Bun.spawn> | null = null;
+  let server: ReturnType<typeof createRelayServer> | null = null;
+
   try {
-    const server = await createRelayServer({
+    server = await createRelayServer({
       port,
       bind,
       hostname,
       identity,
     });
 
+    if (tunnelToken) {
+      tunnelProcess = await startCloudflaredTunnel(tunnelToken);
+    }
+
+    writeRelayState({
+      pid: process.pid,
+      startedAt: Date.now(),
+      port,
+      bind,
+      hostname,
+      tunnelPid: tunnelProcess?.pid,
+      tunnelSubdomain,
+    });
+
     logger.success(`Relay listening on ws://${hostname || bind}:${port}`);
+    if (tunnelSubdomain) {
+      logger.success(`Public relay URL: wss://${tunnelSubdomain}.gitspace.sh/ws`);
+    }
     logger.log("");
     logger.dim("Press Ctrl+C to stop");
     logger.log("");
@@ -80,7 +437,11 @@ export async function startRelay(options: {
     const shutdown = () => {
       logger.log("");
       logger.info("Shutting down relay...");
-      server.stop();
+      if (tunnelProcess) {
+        tunnelProcess.kill();
+      }
+      server?.stop();
+      clearRelayState();
       process.exit(0);
     };
 
@@ -92,11 +453,143 @@ export async function startRelay(options: {
       // Never resolves
     });
   } catch (error) {
+    if (tunnelProcess) {
+      tunnelProcess.kill();
+    }
+    server?.stop();
+    clearRelayState();
     throw new SpacesError(
       `Failed to start relay: ${error instanceof Error ? error.message : String(error)}`,
       "SYSTEM_ERROR",
       2
     );
+  }
+}
+
+export async function stopRelay(): Promise<void> {
+  const state = readRelayState();
+  if (!state) {
+    logger.info("relay not running");
+    return;
+  }
+
+  const tunnelStopResult = await stopTrackedProcess(state.tunnelPid, "tunnel");
+  const relayStopResult = await stopTrackedProcess(state.pid, "relay");
+
+  if (tunnelStopResult === "not-owned") {
+    logger.warning(
+      `Refusing to kill PID ${state.tunnelPid} because it does not look like a managed cloudflared tunnel process.`,
+    );
+  }
+
+  if (relayStopResult === "not-owned") {
+    logger.warning(
+      `Refusing to kill PID ${state.pid} because it does not look like a managed relay process.`,
+    );
+  }
+
+  if (relayStopResult === "not-owned" || tunnelStopResult === "not-owned") {
+    logger.warning("relay stop did not clear runtime state because one or more running PIDs could not be verified as owned");
+    return;
+  }
+
+  clearRelayState();
+  if (relayStopResult === "not-running" && tunnelStopResult === "not-running") {
+    logger.info("relay not running (stale state cleaned)");
+    return;
+  }
+
+  logger.success("relay stopped");
+}
+
+function getRelayStatusSnapshot(): RelayStatusSnapshot {
+  const state = readRelayState();
+  if (!state) {
+    return {
+      running: false,
+      staleState: false,
+      pid: null,
+      tunnelPid: null,
+      tunnelRunning: false,
+      bind: null,
+      port: null,
+      hostname: null,
+      tunnelSubdomain: null,
+      relayUrl: null,
+      publicRelayUrl: null,
+      startedAt: null,
+    };
+  }
+
+  const running = isProcessRunning(state.pid);
+  const tunnelRunning = typeof state.tunnelPid === "number" && isProcessRunning(state.tunnelPid);
+
+  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}`;
+  const publicRelayUrl = state.tunnelSubdomain
+    ? `wss://${state.tunnelSubdomain}.gitspace.sh/ws`
+    : null;
+
+  return {
+    running,
+    staleState: !running,
+    pid: state.pid,
+    tunnelPid: state.tunnelPid ?? null,
+    tunnelRunning,
+    bind: state.bind,
+    port: state.port,
+    hostname: state.hostname ?? null,
+    tunnelSubdomain: state.tunnelSubdomain ?? null,
+    relayUrl,
+    publicRelayUrl,
+    startedAt: state.startedAt,
+  };
+}
+
+export async function relayStatus(options: { json?: boolean } = {}): Promise<void> {
+  const snapshot = getRelayStatusSnapshot();
+
+  if (options.json) {
+    logger.log(JSON.stringify(snapshot, null, 2));
+    return;
+  }
+
+  if (!snapshot.running) {
+    if (snapshot.staleState) {
+      if (snapshot.tunnelRunning && snapshot.tunnelPid !== null) {
+        logger.warning(
+          `relay not running, but tunnel PID ${snapshot.tunnelPid} is still active; keeping runtime state so \`gssh relay stop\` can clean it up`,
+        );
+        return;
+      }
+      clearRelayState();
+      logger.warning("relay not running (stale runtime state cleaned)");
+    } else {
+      logger.info("relay not running");
+    }
+    return;
+  }
+
+  logger.bold("Relay Status");
+  logger.log("");
+  logger.log(`  State:      ${chalk.green("running")}`);
+  logger.log(`  PID:        ${snapshot.pid}`);
+  logger.log(`  Relay URL:  ${snapshot.relayUrl ?? "-"}`);
+  logger.log(`  Bind:       ${snapshot.bind ?? "-"}`);
+  logger.log(`  Port:       ${snapshot.port ?? "-"}`);
+  if (snapshot.hostname) {
+    logger.log(`  Hostname:   ${snapshot.hostname}`);
+  }
+
+  if (snapshot.startedAt) {
+    logger.log(`  Started:    ${new Date(snapshot.startedAt).toISOString()}`);
+  }
+
+  if (snapshot.tunnelSubdomain) {
+    const tunnelState = snapshot.tunnelRunning
+      ? chalk.green("running")
+      : chalk.yellow("not running");
+    logger.log(`  Tunnel:     ${snapshot.tunnelSubdomain}.gitspace.sh (${tunnelState})`);
+    logger.log(`  Public URL: ${snapshot.publicRelayUrl ?? "-"}`);
   }
 }
 

@@ -35,8 +35,15 @@ interface SubdomainInfo {
   subdomain: string;
   status: string;
   is_primary: number;
+  relay?: boolean | number | null;
   created_at: number;
   updated_at: number;
+}
+
+export interface AccountSubdomain {
+  subdomain: string;
+  isPrimary: boolean;
+  status: string;
 }
 
 interface SubdomainCreateResponse {
@@ -49,8 +56,22 @@ interface SubdomainCreateResponse {
   isPrimary: boolean;
 }
 
+function normalizeSubdomain(subdomain: string): string {
+  return subdomain.toLowerCase().trim();
+}
+
+async function logApiFailure(context: string, response: Response): Promise<void> {
+  const body = (await response.text().catch(() => '')).trim();
+  const bodyPreview = body ? ` body=${JSON.stringify(body.slice(0, 500))}` : '';
+  logger.error(`${context}: ${response.status} ${response.statusText}${bodyPreview}`);
+}
+
+export function getTunnelTokenKey(subdomain: string): string {
+  return `TUNNEL_TOKEN_${normalizeSubdomain(subdomain)}`;
+}
+
 export function getServeTokenKey(subdomain: string): string {
-  return `TUNNEL_TOKEN_${subdomain}_serve`;
+  return `${getTunnelTokenKey(subdomain)}_serve`;
 }
 
 // ============================================================================
@@ -157,7 +178,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<void
       });
 
       // Sync tunnel token if not present (e.g., new machine with existing account)
-      const existingToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+      const existingToken = await getSecret(getTunnelTokenKey(primary.subdomain));
       if (!existingToken) {
         if (interactive) {
           logger.dim(`Fetching tunnel credentials for ${primary.subdomain}.gitspace.sh...`);
@@ -166,7 +187,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<void
           const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
           if (tokenRes.ok) {
             const { tunnelToken } = await tokenRes.json();
-            await setSecret(`TUNNEL_TOKEN_${primary.subdomain}`, tunnelToken);
+            await setSecret(getTunnelTokenKey(primary.subdomain), tunnelToken);
             if (interactive) {
               logger.success('Tunnel credentials saved');
             }
@@ -235,6 +256,119 @@ async function getAuthHeaders(
   };
 }
 
+export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/subdomains`, { headers });
+
+  if (!res.ok) {
+    await logApiFailure('Failed to list subdomains', res);
+    throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
+  }
+
+  const subdomains: SubdomainInfo[] = await res.json();
+  return subdomains
+    .filter((subdomain) => {
+      if (subdomain.status !== 'active') {
+        return false;
+      }
+
+      // Some API versions include a relay capability flag. Respect it when
+      // present while remaining compatible with older payloads.
+      return subdomain.relay == null || Boolean(subdomain.relay);
+    })
+    .map((subdomain) => ({
+      subdomain: subdomain.subdomain,
+      isPrimary: Boolean(subdomain.is_primary),
+      status: subdomain.status,
+    }));
+}
+
+/**
+ * Resolve relay-capable subdomains in stable priority order.
+ *
+ * Priority:
+ * 1. Active account subdomains from API (if available)
+ * 2. Cached host config fallback
+ *
+ * Ordering:
+ * - Primary subdomain first (from host config)
+ * - Remaining subdomains alphabetically
+ */
+export async function resolveRelaySubdomains(hostConfig: HostConfig | null = readHostConfig()): Promise<string[]> {
+  let subdomains: string[] = [];
+  let apiPrimarySubdomain: string | null = null;
+
+  try {
+    const accountSubdomains = (await listAccountSubdomains())
+      .filter((entry) => !entry.subdomain.endsWith('.serve'));
+    apiPrimarySubdomain = accountSubdomains.find((entry) => entry.isPrimary)?.subdomain ?? null;
+    subdomains = accountSubdomains.map((entry) => entry.subdomain);
+  } catch {
+    // Account discovery is best-effort; fallback to cached host config.
+  }
+
+  if (subdomains.length === 0) {
+    if (hostConfig?.subdomains?.length) {
+      subdomains = hostConfig.subdomains.filter((subdomain) => !subdomain.endsWith('.serve'));
+    } else if (hostConfig?.subdomain && !hostConfig.subdomain.endsWith('.serve')) {
+      subdomains = [hostConfig.subdomain];
+    }
+  }
+
+  const preferredPrimarySubdomain = hostConfig?.subdomain ?? apiPrimarySubdomain;
+
+  return [...new Set(subdomains)].sort((a, b) => {
+    if (preferredPrimarySubdomain === a) return -1;
+    if (preferredPrimarySubdomain === b) return 1;
+    return a.localeCompare(b);
+  });
+}
+
+export async function ensureSubdomainTunnelToken(subdomain: string): Promise<string> {
+  const normalizedSubdomain = normalizeSubdomain(subdomain);
+  const secretKey = getTunnelTokenKey(normalizedSubdomain);
+  const existingToken = await getSecret(secretKey);
+  if (existingToken) {
+    return existingToken;
+  }
+
+  const legacyKey = `TUNNEL_TOKEN_${subdomain}`;
+  if (legacyKey !== secretKey) {
+    const legacyToken = await getSecret(legacyKey);
+    if (legacyToken) {
+      await setSecret(secretKey, legacyToken);
+      await deleteSecret(legacyKey);
+      return legacyToken;
+    }
+  }
+
+  const headers = await getAuthHeaders();
+  const tokenRes = await fetch(`${API_BASE}/subdomains/${normalizedSubdomain}/token`, { headers });
+  if (!tokenRes.ok) {
+    await logApiFailure(`Failed to fetch tunnel token for ${normalizedSubdomain}.gitspace.sh`, tokenRes);
+    throw new SpacesError(
+      `Failed to fetch tunnel token for ${normalizedSubdomain}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  const tokenPayload = await tokenRes.json() as { tunnelToken?: string };
+  if (!tokenPayload.tunnelToken) {
+    logger.error(
+      `No tunnel token returned for ${normalizedSubdomain}.gitspace.sh payload=${JSON.stringify(tokenPayload).slice(0, 500)}`,
+    );
+    throw new SpacesError(
+      `No tunnel token returned for ${normalizedSubdomain}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  await setSecret(secretKey, tokenPayload.tunnelToken);
+  return tokenPayload.tunnelToken;
+}
+
 // ============================================================================
 // Reserve Subdomain
 // ============================================================================
@@ -247,7 +381,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
   const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
 
   // Normalize subdomain
-  subdomain = subdomain.toLowerCase().trim();
+  subdomain = normalizeSubdomain(subdomain);
 
   // Check availability
   logger.info('Checking availability...');
@@ -335,7 +469,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
     throw new SpacesError('Failed to get serve tunnel token', 'SYSTEM_ERROR');
   }
 
-  await setSecret(`TUNNEL_TOKEN_${subdomain}`, tunnelToken);
+  await setSecret(getTunnelTokenKey(subdomain), tunnelToken);
   await setSecret(getServeTokenKey(subdomain), serveTunnelToken);
 
   // Update local host config
@@ -374,7 +508,7 @@ export async function hostRelease(subdomain?: string): Promise<void> {
     return;
   }
 
-  subdomain = subdomain.toLowerCase().trim();
+  subdomain = normalizeSubdomain(subdomain);
 
   const res = await fetch(`${API_BASE}/subdomains/${subdomain}`, {
     method: 'DELETE',
@@ -387,7 +521,7 @@ export async function hostRelease(subdomain?: string): Promise<void> {
   }
 
   // Clear local tunnel token
-  await deleteSecret(`TUNNEL_TOKEN_${subdomain}`);
+  await deleteSecret(getTunnelTokenKey(subdomain));
   if (!subdomain.endsWith('.serve')) {
     await deleteSecret(getServeTokenKey(subdomain));
   }
@@ -447,7 +581,7 @@ export async function hostList(): Promise<void> {
  */
 export async function hostSetPrimary(subdomain: string): Promise<void> {
   const headers = await getAuthHeaders();
-  subdomain = subdomain.toLowerCase().trim();
+  subdomain = normalizeSubdomain(subdomain);
 
   const res = await fetch(`${API_BASE}/subdomains/${subdomain}/set-primary`, {
     method: 'POST',
@@ -508,7 +642,7 @@ export async function hostStatus(): Promise<void> {
     logger.log(`Serve: ${serveSubdomain}.gitspace.sh`);
 
     // Check if tunnel token exists locally
-    let tunnelToken = await getSecret(`TUNNEL_TOKEN_${primary.subdomain}`);
+    let tunnelToken = await getSecret(getTunnelTokenKey(primary.subdomain));
     let serveTunnelToken = await getSecret(getServeTokenKey(primary.subdomain));
 
     // Auto-fetch token if missing
@@ -518,7 +652,7 @@ export async function hostStatus(): Promise<void> {
         const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
         if (tokenRes.ok) {
           const { tunnelToken: newToken } = await tokenRes.json();
-          await setSecret(`TUNNEL_TOKEN_${primary.subdomain}`, newToken);
+          await setSecret(getTunnelTokenKey(primary.subdomain), newToken);
           tunnelToken = newToken;
           logger.success('Tunnel credentials synced');
         }
