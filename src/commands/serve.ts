@@ -14,7 +14,7 @@ import { join } from 'path';
 import { createHash } from 'crypto';
 import { spawn, type Subprocess } from 'bun';
 import { logger } from '../utils/logger.js';
-import { promptPassword, promptConfirm } from '../utils/prompts.js';
+import { promptPassword, promptConfirm, selectOne } from '../utils/prompts.js';
 import { getSecret } from '../utils/secrets.js';
 import {
   isRelayTrusted,
@@ -40,7 +40,7 @@ import {
   NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
-import { getServeTokenKey, readHostConfig, type HostConfig } from './host.js';
+import { getServeTokenKey, listAccountSubdomains, readHostConfig, type HostConfig } from './host.js';
 import { createRelayServer } from '../relay/server.js';
 import { formatRelayFingerprint, loadOrCreateRelayIdentity } from '../relay/identity.js';
 import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
@@ -109,6 +109,13 @@ interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
 }
 
+interface RelayCandidate {
+  url: string;
+  label: string;
+  source: 'local' | 'account';
+  description?: string;
+}
+
 function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | undefined): string {
   if (!enrollmentToken) {
     throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
@@ -150,6 +157,126 @@ async function resolveUserRootAuthorizationConfig(): Promise<UserRootAuthorizati
   return {
     ownerUserRootId: userRoot.id,
   };
+}
+
+async function isRelayHealthy(relayUrl: string): Promise<boolean> {
+  try {
+    const relay = new URL(relayUrl);
+    const protocol = relay.protocol === 'wss:' ? 'https:' : 'http:';
+    const healthUrl = `${protocol}//${relay.host}/health`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1200);
+    try {
+      const response = await fetch(healthUrl, { signal: controller.signal });
+      return response.ok;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function discoverRelayCandidates(hostConfig: HostConfig | null): Promise<RelayCandidate[]> {
+  const candidates: RelayCandidate[] = [];
+
+  const localRelayUrl = `ws://127.0.0.1:${LOCAL_RELAY_PORT}/ws`;
+  if (await isRelayHealthy(localRelayUrl)) {
+    candidates.push({
+      url: localRelayUrl,
+      label: `Local relay (${localRelayUrl})`,
+      source: 'local',
+      description: 'Detected running on this machine',
+    });
+  }
+
+  let accountSubdomains: string[] = [];
+  try {
+    accountSubdomains = (await listAccountSubdomains()).map((entry) => entry.subdomain);
+  } catch {
+    // Account discovery is best-effort; fallback to cached host config below.
+  }
+
+  if (accountSubdomains.length === 0) {
+    if (hostConfig?.subdomains?.length) {
+      accountSubdomains = [...hostConfig.subdomains];
+    } else if (hostConfig?.subdomain) {
+      accountSubdomains = [hostConfig.subdomain];
+    }
+  }
+
+  const deduped = [...new Set(accountSubdomains)].sort((a, b) => {
+    if (hostConfig?.subdomain === a) return -1;
+    if (hostConfig?.subdomain === b) return 1;
+    return a.localeCompare(b);
+  });
+
+  for (const subdomain of deduped) {
+    candidates.push({
+      url: `wss://${subdomain}.gitspace.sh/ws`,
+      label: `${subdomain}.gitspace.sh`,
+      source: 'account',
+      description: hostConfig?.subdomain === subdomain ? 'Primary account relay' : 'Account relay',
+    });
+  }
+
+  return candidates;
+}
+
+async function resolveRelayUrlForServe(
+  explicitRelayUrl: string | undefined,
+  hostConfig: HostConfig | null,
+): Promise<string> {
+  if (explicitRelayUrl) {
+    return explicitRelayUrl;
+  }
+
+  const candidates = await discoverRelayCandidates(hostConfig);
+  if (candidates.length === 0) {
+    throw new SpacesError(
+      'No relay found.\n\n'
+      + 'Start a local relay:\n'
+      + '  gssh relay start\n\n'
+      + 'Or configure account hosting:\n'
+      + '  gssh user auth login\n'
+      + '  gssh user host reserve <subdomain>\n\n'
+      + 'Or pass one explicitly:\n'
+      + '  gssh machine serve start --relay ws://localhost:4480/ws',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (candidates.length === 1) {
+    logger.info(`Using relay ${candidates[0].url}`);
+    return candidates[0].url;
+  }
+
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    const optionsList = candidates.map((candidate) => `  - ${candidate.url}`).join('\n');
+    throw new SpacesError(
+      'Multiple relays available; choose one with --relay.\n\n'
+      + `Available relays:\n${optionsList}`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const selectedRelay = await selectOne(
+    candidates.map((candidate) => ({
+      label: candidate.label,
+      value: candidate.url,
+      description: candidate.description,
+    })),
+    'Select relay for machine serve',
+  );
+
+  if (!selectedRelay) {
+    throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+  }
+
+  return selectedRelay;
 }
 
 /**
@@ -1160,27 +1287,13 @@ export async function serveStart(options: {
 
   // Check for gitspace.sh hosting
   const hostConfig = readHostConfig();
-  const relayUrl = options.relay; // No default - must use hosting or explicit --relay
-
-  // If no hosting config and no explicit relay, error out
-  if (!hostConfig?.subdomain && !relayUrl) {
+  let effectiveRelayUrl: string;
+  try {
+    effectiveRelayUrl = await resolveRelayUrlForServe(options.relay, hostConfig);
+  } catch (error) {
     cleanupServeFiles();
-    throw new SpacesError(
-      'No relay configured.\n\n' +
-      'Either set up gitspace.sh hosting:\n' +
-      '  gssh user auth login\n' +
-      '  gssh user host reserve <subdomain>\n\n' +
-      'Or specify a relay explicitly:\n' +
-      '  gssh machine serve start --relay ws://localhost:4480/ws',
-      'USER_ERROR'
-    );
+    throw error;
   }
-
-  let localRelayServer: ReturnType<typeof createRelayServer> | null = null;
-  let localRelayIdentity: Awaited<ReturnType<typeof loadOrCreateRelayIdentity>> | null = null;
-  let effectiveRelayUrl = relayUrl || '';
-  let processHostManager: ServeProcessHostManager | null = null;
-  let processHostRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
   // Initialize daemon state
   setDaemonState({
@@ -1197,65 +1310,11 @@ export async function serveStart(options: {
     } : undefined,
   });
 
-  if (hostConfig?.subdomain) {
-    ensureControlStore();
-
-    // Load or create persistent relay identity for control mode
-    localRelayIdentity = await loadOrCreateRelayIdentity('control-relay');
-    bindControlRelayIdentity({
-      relayIdentityId: localRelayIdentity.id,
-      relaySigningPublicKey: localRelayIdentity.signingPublicKey,
-      relayFingerprint: formatRelayFingerprint(localRelayIdentity.signingPublicKey),
-    });
-
-    // Start local relay server with this machine pre-authorized
-    try {
-      localRelayServer = createRelayServer({
-        port: LOCAL_RELAY_PORT,
-        bind: '127.0.0.1',
-        identity: localRelayIdentity,
-        preAuthorizedMachines: [publicIdentity.signingPublicKey],
-      });
-      logger.success(`Local relay started on port ${LOCAL_RELAY_PORT}`);
-    } catch (error) {
-      cleanupServeFiles();
-      throw new SpacesError('Failed to start local relay server', 'SYSTEM_ERROR', 2);
-    }
-
-    // Start cloudflared tunnel
-    const tunnelStarted = await startCloudflared(hostConfig.subdomain);
-    if (tunnelStarted) {
-      updateDaemonState({
-        hosting: {
-          subdomain: hostConfig.subdomain,
-          tunnelActive: true,
-        },
-      });
-    }
-
-    processHostManager = await startServeProcessHosting(hostConfig);
-    if (processHostManager) {
-      processHostRefreshTimer = setInterval(() => {
-        void processHostManager?.refresh();
-      }, SERVE_REFRESH_INTERVAL_MS);
-    }
-
-    // Use local relay (machine will authenticate via challenge-response)
-    effectiveRelayUrl = `ws://127.0.0.1:${LOCAL_RELAY_PORT}/ws`;
-  }
-
-  const remoteSessionOptions = processHostManager
-    ? {
-        processHostDomain: processHostManager.domain,
-        onProcessesChanged: () => processHostManager?.refresh(),
-      }
-    : undefined;
-
   // Create session manager
   const sessionManager = new ClientSessionManager({
     relay: effectiveRelayUrl,
     identity,
-    remoteSessionOptions,
+    remoteSessionOptions: undefined,
     ownerUserRootId,
   });
 
@@ -1299,8 +1358,6 @@ export async function serveStart(options: {
     );
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
-    localRelayServer?.stop();
-    stopCloudflared();
     cleanupServeFiles();
     throw new SpacesError(
       `Failed to connect to relay: ${error instanceof Error ? error.message : String(error)}`,
@@ -1317,7 +1374,7 @@ export async function serveStart(options: {
   });
 
   // Set up shutdown handlers with daemon cleanup
-  setupShutdownHandlers(sessionManager, true, () => stopServeProcessHosting(processHostManager, processHostRefreshTimer));
+  setupShutdownHandlers(sessionManager, true);
 
   // Keep process alive
   await new Promise(() => {});

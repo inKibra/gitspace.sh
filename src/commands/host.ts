@@ -39,6 +39,12 @@ interface SubdomainInfo {
   updated_at: number;
 }
 
+export interface AccountSubdomain {
+  subdomain: string;
+  isPrimary: boolean;
+  status: string;
+}
+
 interface SubdomainCreateResponse {
   id: string;
   subdomain: string;
@@ -233,6 +239,55 @@ async function getAuthHeaders(
     'X-Device-Fingerprint': identity.signingPublicKey,
     ...extra,
   };
+}
+
+export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/subdomains`, { headers });
+
+  if (!res.ok) {
+    throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
+  }
+
+  const subdomains: SubdomainInfo[] = await res.json();
+  return subdomains
+    .filter((subdomain) => subdomain.status === 'active')
+    .map((subdomain) => ({
+      subdomain: subdomain.subdomain,
+      isPrimary: Boolean(subdomain.is_primary),
+      status: subdomain.status,
+    }));
+}
+
+export async function ensureSubdomainTunnelToken(subdomain: string): Promise<string> {
+  const normalizedSubdomain = subdomain.toLowerCase().trim();
+  const secretKey = `TUNNEL_TOKEN_${normalizedSubdomain}`;
+  const existingToken = await getSecret(secretKey);
+  if (existingToken) {
+    return existingToken;
+  }
+
+  const headers = await getAuthHeaders();
+  const tokenRes = await fetch(`${API_BASE}/subdomains/${normalizedSubdomain}/token`, { headers });
+  if (!tokenRes.ok) {
+    throw new SpacesError(
+      `Failed to fetch tunnel token for ${normalizedSubdomain}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  const tokenPayload = await tokenRes.json() as { tunnelToken?: string };
+  if (!tokenPayload.tunnelToken) {
+    throw new SpacesError(
+      `No tunnel token returned for ${normalizedSubdomain}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  await setSecret(secretKey, tokenPayload.tunnelToken);
+  return tokenPayload.tunnelToken;
 }
 
 // ============================================================================
