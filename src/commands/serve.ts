@@ -41,7 +41,6 @@ import {
   SpacesError,
 } from '../types/errors.js';
 import {
-  getTunnelTokenKey,
   getServeTokenKey,
   readHostConfig,
   resolveRelaySubdomains,
@@ -100,11 +99,6 @@ const PACKAGE_VERSION = '1.0.0';
 
 /** Local relay port for gitspace.sh hosting */
 const LOCAL_RELAY_PORT = 4480;
-
-/** Cloudflared process reference */
-let cloudflaredProcess: Subprocess | null = null;
-let cloudflaredSubdomain: string | null = null;
-let cloudflaredRestartAttempts = 0;
 const MAX_CLOUDFLARED_RESTARTS = 5;
 const CLOUDFLARED_RESTART_DELAY = 5000;
 
@@ -416,150 +410,46 @@ async function fetchIdentityViaUnlockToken(
 }
 
 // ============================================================================
-// Cloudflared Management
-// ============================================================================
-
-/**
- * Start cloudflared tunnel for a subdomain
- *
- * @param subdomain - The subdomain to tunnel (e.g., 'brad' for brad.gitspace.sh)
- * @returns true if started successfully
- */
-async function startCloudflared(subdomain: string): Promise<boolean> {
-  // Get tunnel token from keychain
-  const tunnelToken = await getSecret(getTunnelTokenKey(subdomain));
-  if (!tunnelToken) {
-    logger.warning(`No tunnel token found for ${subdomain}.gitspace.sh`);
-    logger.dim('Run: gssh user host reserve ' + subdomain + ' (to get token)');
-    return false;
-  }
-
-  // Check if cloudflared is installed
-  if (!await isCloudflaredInstalled()) {
-    logger.warning('cloudflared is not installed');
-    logger.dim('Install: brew install cloudflared (macOS) or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/');
-    return false;
-  }
-
-  cloudflaredSubdomain = subdomain;
-
-  // Start cloudflared with tunnel token via TUNNEL_TOKEN env var to avoid argv exposure
-  logger.info(`Starting tunnel for ${subdomain}.gitspace.sh...`);
-
-  try {
-    cloudflaredProcess = spawn(['cloudflared', 'tunnel', 'run'], {
-      env: { ...process.env, TUNNEL_TOKEN: tunnelToken },
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-
-    // Handle cloudflared output
-    handleCloudflaredOutput(cloudflaredProcess);
-
-    // Monitor process exit
-    cloudflaredProcess.exited.then((exitCode) => {
-      if (exitCode !== 0 && cloudflaredSubdomain) {
-        logger.warning(`cloudflared exited with code ${exitCode}`);
-        handleCloudflaredCrash();
-      }
-    });
-
-    logger.success(`Tunnel active: https://${subdomain}.gitspace.sh`);
-    logger.dim(`  Wildcard: https://*.${subdomain}.gitspace.sh`);
-    return true;
-  } catch (error) {
-    logger.error(`Failed to start cloudflared: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-/**
- * Handle cloudflared stdout/stderr
- */
-function handleCloudflaredOutput(proc: Subprocess): void {
-  // Read stdout
-  const stdout = proc.stdout;
-  if (stdout && typeof stdout !== 'number') {
-    (async () => {
-      const reader = stdout.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const text = new TextDecoder().decode(value);
-          // Only log important messages, skip routine output
-          if (text.includes('ERR') || text.includes('error') || text.includes('failed')) {
-            logger.dim(`[cloudflared] ${text.trim()}`);
-          }
-        }
-      } catch {
-        // Stream closed
-      }
-    })();
-  }
-
-  // Read stderr
-  const stderr = proc.stderr;
-  if (stderr && typeof stderr !== 'number') {
-    (async () => {
-      const reader = stderr.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const text = new TextDecoder().decode(value);
-          // cloudflared logs most output to stderr
-          if (text.includes('ERR') || text.includes('error') || text.includes('failed')) {
-            logger.warning(`[cloudflared] ${text.trim()}`);
-          }
-        }
-      } catch {
-        // Stream closed
-      }
-    })();
-  }
-}
-
-/**
- * Handle cloudflared crash and restart
- */
-function handleCloudflaredCrash(): void {
-  if (!cloudflaredSubdomain) return;
-
-  cloudflaredRestartAttempts++;
-
-  if (cloudflaredRestartAttempts > MAX_CLOUDFLARED_RESTARTS) {
-    logger.error(`cloudflared crashed ${MAX_CLOUDFLARED_RESTARTS} times, giving up`);
-    logger.dim('Check your tunnel token or network connection');
-    cloudflaredSubdomain = null;
-    return;
-  }
-
-  logger.info(`Restarting cloudflared (attempt ${cloudflaredRestartAttempts}/${MAX_CLOUDFLARED_RESTARTS})...`);
-
-  setTimeout(async () => {
-    if (cloudflaredSubdomain) {
-      await startCloudflared(cloudflaredSubdomain);
-    }
-  }, CLOUDFLARED_RESTART_DELAY);
-}
-
-/**
- * Stop cloudflared process
- */
-function stopCloudflared(): void {
-  if (cloudflaredProcess) {
-    logger.dim('Stopping cloudflared...');
-    cloudflaredProcess.kill();
-    cloudflaredProcess = null;
-    cloudflaredSubdomain = null;
-  }
-}
-
-// ============================================================================
 // Process Hosting (Serve Tunnel)
 // ============================================================================
+
+function handleCloudflaredOutput(proc: Subprocess): void {
+  const streamReader = async (stream: ReadableStream<Uint8Array> | number | undefined, level: 'warning' | 'dim') => {
+    if (!stream || typeof stream === 'number') {
+      return;
+    }
+
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        const text = decoder.decode(value).trim();
+        if (!text) {
+          continue;
+        }
+
+        if (text.includes('ERR') || text.includes('error') || text.includes('failed')) {
+          if (level === 'warning') {
+            logger.warning(`[cloudflared] ${text}`);
+          } else {
+            logger.dim(`[cloudflared] ${text}`);
+          }
+        }
+      }
+    } catch {
+      // Stream closed while process exits.
+    }
+  };
+
+  void streamReader(proc.stdout, 'dim');
+  void streamReader(proc.stderr, 'warning');
+}
 
 export interface ProcessHostEntry {
   hostname: string;
@@ -961,8 +851,6 @@ function setupShutdownHandlers(
     logger.log('');
     logger.info('Shutting down...');
 
-    // Stop cloudflared if running
-    stopCloudflared();
     cleanup?.();
 
     clearRelayConfig();
