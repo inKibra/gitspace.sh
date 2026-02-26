@@ -88,7 +88,7 @@ export default function TerminalView() {
                 <span className="flex items-center gap-2">
                    <LockIcon className="w-3 h-3" /> End-to-end encrypted
                 </span>
-                <span>Ctrl+Esc: exit</span>
+                <span>Shift+Esc: exit</span>
              </div>
           </div>
        </main>

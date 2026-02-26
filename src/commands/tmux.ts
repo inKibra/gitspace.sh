@@ -215,7 +215,7 @@ export async function newTmux(name?: string, cwdOverride?: string): Promise<void
   // Check for nested session
   if (isNested()) {
     logger.error("Already inside a tmux-lite session");
-    logger.dim("Detach first with Ctrl+Esc");
+    logger.dim("Detach first with Shift+Esc");
     return;
   }
 
@@ -232,7 +232,7 @@ export async function newTmux(name?: string, cwdOverride?: string): Promise<void
   const session = await createSession(name || "session", cwd);
 
   logger.log(`Created session: ${session.name} (id: ${session.id})`);
-  logger.dim("Ctrl+Esc to detach\n");
+  logger.dim("Shift+Esc to detach\n");
 
   const result = await attach(session, true);
 
@@ -251,7 +251,7 @@ export async function attachTmux(id: string, options: { force?: boolean } = {}):
   // Check for nested session
   if (isNested()) {
     logger.error("Already inside a tmux-lite session");
-    logger.dim("Detach first with Ctrl+Esc");
+    logger.dim("Detach first with Shift+Esc");
     return;
   }
 
@@ -280,7 +280,7 @@ export async function attachTmux(id: string, options: { force?: boolean } = {}):
   }
 
   logger.log(`Attaching to: ${session.name} (id: ${session.id})`);
-  logger.dim("Ctrl+Esc to detach\n");
+  logger.dim("Shift+Esc to detach\n");
 
   const result = await attach(session, true);
 

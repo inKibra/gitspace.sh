@@ -13,7 +13,6 @@ import { BracketedPasteModeTracker, wrapPaste } from './terminal-bracketed-paste
 import { toast } from '@opentui-ui/toast';
 import { copyToClipboard } from '../utils/clipboard.js';
 import {
-  getPageNavigationEscapeSequence,
   shouldBypassScrollboxKeyHandling,
   shouldConsumePageNavigationInScrollbox,
 } from './session-terminal-page-navigation.js';
@@ -28,6 +27,16 @@ const COLORS = {
 };
 
 const SCROLLBACK_LIMIT = 2_000;
+const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
+const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
+
+function isShiftEscapeSequence(sequence: string): boolean {
+  return SHIFT_ESCAPE_SEQUENCES.has(sequence);
+}
+
+function isShiftTabSequence(sequence: string): boolean {
+  return SHIFT_TAB_SEQUENCES.has(sequence);
+}
 
 function getTerminalSize() {
   let cols = process.stdout.columns || 0;
@@ -81,7 +90,9 @@ export function SessionTerminal({
   const ptyUtf8BufferRef = useRef<Buffer>(Buffer.alloc(0));
   const followScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bracketedPasteRef = useRef(new BracketedPasteModeTracker());
+  const textEncoderRef = useRef(new TextEncoder());
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [uiModeEnabled, setUiModeEnabled] = useState(false);
 
   const scrollToCursorIfFollowing = useCallback(() => {
     const scrollBox = scrollBoxRef.current;
@@ -237,8 +248,46 @@ export function SessionTerminal({
   }, [onResize]);
 
   useEffect(() => {
+    const rawInputHandler = (sequence: string): boolean => {
+      if (modalOpen) {
+        return false;
+      }
+
+      if (isShiftEscapeSequence(sequence)) {
+        setUiModeEnabled((prev) => !prev);
+        return true;
+      }
+
+      if (uiModeEnabled || readOnly) {
+        return false;
+      }
+
+      if (interceptShiftTab && isShiftTabSequence(sequence)) {
+        return false;
+      }
+
+      onActivity?.();
+      onData(textEncoderRef.current.encode(sequence));
+      return true;
+    };
+
+    renderer.prependInputHandler(rawInputHandler);
+    return () => {
+      renderer.removeInputHandler(rawInputHandler);
+    };
+  }, [interceptShiftTab, modalOpen, onActivity, onData, readOnly, renderer, uiModeEnabled]);
+
+  useEffect(() => {
+    if (!modalOpen) {
+      return;
+    }
+
+    setUiModeEnabled(false);
+  }, [modalOpen]);
+
+  useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
-      if (modalOpen || readOnly) {
+      if (modalOpen || readOnly || uiModeEnabled) {
         return;
       }
       const text = event.text ?? '';
@@ -256,10 +305,10 @@ export function SessionTerminal({
     return () => {
       renderer.keyInput.off('paste', handlePaste);
     };
-  }, [modalOpen, onActivity, onData, readOnly, renderer]);
+  }, [modalOpen, onActivity, onData, readOnly, renderer, uiModeEnabled]);
 
   useKeyboard((key) => {
-    if (modalOpen) {
+    if (modalOpen || !uiModeEnabled) {
       return;
     }
 
@@ -267,7 +316,12 @@ export function SessionTerminal({
       key.preventDefault();
     }
 
-    if (key.name === 'escape' && key.ctrl) {
+    if (key.shift && key.name === 'escape') {
+      setUiModeEnabled(false);
+      return;
+    }
+
+    if (key.raw === 'q' || key.name === 'q') {
       onDetach();
       return;
     }
@@ -287,9 +341,7 @@ export function SessionTerminal({
         return;
       }
 
-      if (readOnly) {
-        return;
-      }
+      return;
     }
 
     if (key.name === 'pagedown') {
@@ -307,62 +359,13 @@ export function SessionTerminal({
         return;
       }
 
-      if (readOnly) {
-        return;
-      }
-    }
-
-    if (readOnly) {
       return;
     }
-
-    let data: string | undefined;
-    const modifier = 1 + (key.shift ? 1 : 0) + (key.meta ? 2 : 0) + (key.ctrl ? 4 : 0);
-    const hasModifier = modifier > 1;
-
-    const specialKeys: Record<string, string> = {
-      up: 'A', down: 'B', right: 'C', left: 'D',
-      end: 'F', home: 'H',
-      insert: '2~', delete: '3~', pageup: '5~', pagedown: '6~',
-      f1: 'P', f2: 'Q', f3: 'R', f4: 'S',
-      f5: '15~', f6: '17~', f7: '18~', f8: '19~',
-      f9: '20~', f10: '21~', f11: '23~', f12: '24~',
-    };
-
-    if (key.name === 'return' || key.name === 'enter') {
-      data = '\r';
-    } else if (key.ctrl && key.name && key.name.length === 1 && /[a-z]/i.test(key.name)) {
-      const charCode = key.name.toLowerCase().charCodeAt(0) - 96;
-      data = String.fromCharCode(charCode);
-    } else if (key.shift && key.name === 'tab') {
-      if (interceptShiftTab) {
-        return;
-      }
-      data = '\x1b[Z';
-    } else if (hasModifier && key.name && specialKeys[key.name]) {
-      const code = specialKeys[key.name];
-      if (code.endsWith('~')) {
-        data = `\x1b[${code.slice(0, -1)};${modifier}~`;
-      } else if (code.length === 1) {
-        data = `\x1b[1;${modifier}${code}`;
-      }
-    } else if (key.name === 'pageup') {
-      data = getPageNavigationEscapeSequence('up');
-    } else if (key.name === 'pagedown') {
-      data = getPageNavigationEscapeSequence('down');
-    } else if (key.sequence) {
-      data = key.sequence === '\n' ? '\r' : key.sequence;
-    } else if (key.raw) {
-      data = key.raw;
-    }
-
-    if (!data) {
-      return;
-    }
-
-    onActivity?.();
-    onData(new TextEncoder().encode(data));
   });
+
+  const modeHint = uiModeEnabled
+    ? `[UI mode] [q] ${readOnly ? 'Back' : 'Detach'}  [Shift+Esc] Shell`
+    : '[Shift+Esc] UI';
 
   return (
     <box flexDirection="column" flexGrow={1}>
@@ -379,7 +382,7 @@ export function SessionTerminal({
           <text fg={COLORS.textDim}> ({endpointLabel})</text>
           {readOnly && <text fg={COLORS.textDim}> [view only]</text>}
         </box>
-        <text fg={COLORS.detachHint}>[Ctrl+Esc] {readOnly ? 'Back' : 'Detach'}</text>
+        <text fg={COLORS.detachHint}>{modeHint}</text>
       </box>
 
       <scrollbox

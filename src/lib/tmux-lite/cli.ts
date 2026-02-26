@@ -93,7 +93,7 @@ export function isNested(): boolean {
 function checkNested(): boolean {
   if (isNested()) {
     console.error("Error: Already inside tmux-lite session " + process.env.TMUX_LITE);
-    console.error("Nested sessions are not supported. Detach first with Ctrl+Esc.");
+    console.error("Nested sessions are not supported. Detach first with Shift+Esc.");
     return true;
   }
   return false;
@@ -369,9 +369,9 @@ function formatSession(s: Session): string {
   return `${status} ${s.id}: ${s.name} (${ageStr})${title} ${s.cwd}`;
 }
 
-// Ctrl+Esc sequences (different terminals send different formats)
-const CTRL_ESC_CSI_U = Buffer.from([0x1b, 0x5b, 0x32, 0x37, 0x3b, 0x35, 0x75]); // ESC [ 27;5u
-const CTRL_ESC_XTERM = Buffer.from([0x1b, 0x5b, 0x32, 0x37, 0x3b, 0x35, 0x3b, 0x32, 0x37, 0x7e]); // ESC [ 27;5;27 ~
+// Shift+Esc sequences (different terminals send different formats)
+const SHIFT_ESC_CSI_U = Buffer.from([0x1b, 0x5b, 0x32, 0x37, 0x3b, 0x32, 0x75]); // ESC [ 27;2u
+const SHIFT_ESC_XTERM = Buffer.from([0x1b, 0x5b, 0x32, 0x37, 0x3b, 0x32, 0x3b, 0x32, 0x37, 0x7e]); // ESC [ 27;2;27 ~
 const BRACKETED_PASTE_START = Buffer.from([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e]); // ESC [ 200 ~
 const BRACKETED_PASTE_END = Buffer.from([0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e]); // ESC [ 201 ~
 
@@ -390,7 +390,7 @@ export type AttachResult =
 export async function attach(session: Session, quiet: boolean = false): Promise<AttachResult> {
   if (!quiet) {
     console.log(`Attaching to ${session.name}...`);
-    console.log("Ctrl+Esc to detach\n");
+    console.log("Shift+Esc to detach\n");
   }
 
   return new Promise(async (resolve) => {
@@ -534,7 +534,7 @@ export async function attach(session: Session, quiet: boolean = false): Promise<
     process.stdin.setRawMode(true);
     process.stdin.resume();
 
-    // Forward stdin with Ctrl+Esc detection
+    // Forward stdin with Shift+Esc detection
     stdinListener = (chunk: Buffer) => {
       const combined = pendingSeq.length > 0 ? Buffer.concat([pendingSeq, chunk]) : chunk;
       pendingSeq = Buffer.alloc(0);
@@ -553,7 +553,7 @@ export async function attach(session: Session, quiet: boolean = false): Promise<
       const getSequences = () => (
         inBracketedPaste
           ? [BRACKETED_PASTE_START, BRACKETED_PASTE_END]
-          : [BRACKETED_PASTE_START, BRACKETED_PASTE_END, CTRL_ESC_CSI_U, CTRL_ESC_XTERM]
+          : [BRACKETED_PASTE_START, BRACKETED_PASTE_END, SHIFT_ESC_CSI_U, SHIFT_ESC_XTERM]
       );
 
       while (offset < combined.length) {
@@ -580,7 +580,7 @@ export async function attach(session: Session, quiet: boolean = false): Promise<
         }
 
         if (matched) {
-          if (matched === CTRL_ESC_CSI_U || matched === CTRL_ESC_XTERM) {
+          if (matched === SHIFT_ESC_CSI_U || matched === SHIFT_ESC_XTERM) {
             flushOut();
             if (socket) {
               const frame = encodeControl({ type: "detach" });
@@ -828,7 +828,7 @@ Commands:
   tl inbox-clear    Clear inbox
 
 In session:
-  Ctrl+Esc          Detach
+  Shift+Esc         Detach
 `);
   }
 }
