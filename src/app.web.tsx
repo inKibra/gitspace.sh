@@ -979,15 +979,15 @@ export default function App() {
     deleteWorkspaceWithPrompt,
   ]);
 
-  // Attached terminal mode keyboard handler (Ctrl+Esc to detach)
+  // Attached terminal mode keyboard handler (Shift+Esc to detach)
   useEffect(() => {
     if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "attached") {
       return;
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+Esc to detach from session
-      if (e.ctrlKey && e.key === "Escape") {
+      // Shift+Esc to detach from session
+      if (e.shiftKey && e.key === "Escape") {
         e.preventDefault();
         terminal.detachSession();
       }
@@ -1324,7 +1324,7 @@ export default function App() {
                   Input
                 </button>
               )}
-              <span className="text-xs text-[#6e7681] hidden sm:inline">Ctrl+Esc</span>
+              <span className="text-xs text-[#6e7681] hidden sm:inline">Shift+Esc</span>
               <button
                 onClick={terminal.detachSession}
                 className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"

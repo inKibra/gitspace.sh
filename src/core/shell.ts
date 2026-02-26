@@ -54,7 +54,7 @@ export async function openWorkspaceShell(
 	}
 
 	printToTerminal('')
-	printToTerminal('💡 Press Ctrl+Esc to detach and return to GitSpace TUI')
+	printToTerminal('💡 Press Shift+Esc to detach and return to GitSpace TUI')
 	printToTerminal('')
 
 	// Create or attach to tmux-lite session
@@ -81,7 +81,7 @@ async function openTmuxLiteSession(
 ): Promise<void> {
 	// Check if we're already in a tmux-lite session
 	if (isNested()) {
-		logger.error('Already inside a tmux-lite session. Detach first with Ctrl+Esc.')
+		logger.error('Already inside a tmux-lite session. Detach first with Shift+Esc.')
 		return
 	}
 
