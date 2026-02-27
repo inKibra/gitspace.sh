@@ -101,6 +101,10 @@ import {
   getNumericInputChunk,
   normalizeInputText,
 } from './tui/input-text.js';
+import {
+  VT_KITTY_KEYBOARD_CONFIG,
+  forceDisableKittyKeyboard,
+} from './tui/kitty-keyboard.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -2410,13 +2414,19 @@ function looksLikeKittyEnterLeak(buffer: string): boolean {
   );
 }
 
-function createRendererForKeyboardMode(mode: ResolvedKeyboardMode) {
-  return createCliRenderer({
+async function createRendererForKeyboardMode(mode: ResolvedKeyboardMode) {
+  const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 30,
     useMouse: true,
-    useKittyKeyboard: mode === 'vt' ? null : undefined,
+    useKittyKeyboard: mode === 'vt' ? VT_KITTY_KEYBOARD_CONFIG : undefined,
   });
+
+  if (mode === 'vt') {
+    forceDisableKittyKeyboard(renderer);
+  }
+
+  return renderer;
 }
 
 function KeyboardWelcomeGate({
