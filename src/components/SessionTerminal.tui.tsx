@@ -27,11 +27,12 @@ const COLORS = {
 };
 
 const SCROLLBACK_LIMIT = 2_000;
+const CTRL_BACKSLASH_SEQUENCE = '\x1c';
 const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
 const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
 
-function isShiftEscapeSequence(sequence: string): boolean {
-  return SHIFT_ESCAPE_SEQUENCES.has(sequence);
+function isUiModeToggleSequence(sequence: string): boolean {
+  return sequence === CTRL_BACKSLASH_SEQUENCE || SHIFT_ESCAPE_SEQUENCES.has(sequence);
 }
 
 function isShiftTabSequence(sequence: string): boolean {
@@ -93,6 +94,15 @@ export function SessionTerminal({
   const textEncoderRef = useRef(new TextEncoder());
   const [terminalMounted, setTerminalMounted] = useState(false);
   const [uiModeEnabled, setUiModeEnabled] = useState(false);
+
+  useEffect(() => {
+    const previousKittyMode = renderer.useKittyKeyboard;
+    renderer.useKittyKeyboard = false;
+
+    return () => {
+      renderer.useKittyKeyboard = previousKittyMode;
+    };
+  }, [renderer]);
 
   const scrollToCursorIfFollowing = useCallback(() => {
     const scrollBox = scrollBoxRef.current;
@@ -253,7 +263,7 @@ export function SessionTerminal({
         return false;
       }
 
-      if (isShiftEscapeSequence(sequence)) {
+      if (isUiModeToggleSequence(sequence)) {
         setUiModeEnabled((prev) => !prev);
         return true;
       }
@@ -364,8 +374,8 @@ export function SessionTerminal({
   });
 
   const modeHint = uiModeEnabled
-    ? `[UI mode] [q] ${readOnly ? 'Back' : 'Detach'}  [Shift+Esc] Shell`
-    : '[Shift+Esc] UI';
+    ? `[UI mode] [q] ${readOnly ? 'Back' : 'Detach'}  [Shift+Esc/Ctrl+\\] Shell`
+    : '[Shift+Esc/Ctrl+\\] UI';
 
   return (
     <box flexDirection="column" flexGrow={1}>
