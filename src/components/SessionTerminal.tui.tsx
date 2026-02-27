@@ -27,12 +27,11 @@ const COLORS = {
 };
 
 const SCROLLBACK_LIMIT = 2_000;
-const CTRL_BACKSLASH_SEQUENCE = '\x1c';
 const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
 const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
 
 function isUiModeToggleSequence(sequence: string): boolean {
-  return sequence === CTRL_BACKSLASH_SEQUENCE || SHIFT_ESCAPE_SEQUENCES.has(sequence);
+  return SHIFT_ESCAPE_SEQUENCES.has(sequence);
 }
 
 function isShiftTabSequence(sequence: string): boolean {
@@ -374,8 +373,8 @@ export function SessionTerminal({
   });
 
   const modeHint = uiModeEnabled
-    ? `[UI mode] [q] ${readOnly ? 'Back' : 'Detach'}  [Shift+Esc/Ctrl+\\] Shell`
-    : '[Shift+Esc/Ctrl+\\] UI';
+    ? `[UI mode] [q] ${readOnly ? 'Back' : 'Detach'}  [Shift+Esc] Shell`
+    : '[Shift+Esc] UI';
 
   return (
     <box flexDirection="column" flexGrow={1}>
