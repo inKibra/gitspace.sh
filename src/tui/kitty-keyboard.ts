@@ -6,6 +6,9 @@ export const VT_KITTY_KEYBOARD_CONFIG = {
   reportText: false,
 } as const;
 
+// These are xterm modifyOtherKeys sequences (XTMODKEYS), not kitty CSI-u
+// push/pop sequences. They match what OpenTUI's native Zig renderer sends
+// via enableKittyKeyboard()/disableKittyKeyboard() FFI calls.
 export const KITTY_KEYBOARD_DISABLE_SEQUENCE = '\x1b[>4;0m';
 export const KITTY_KEYBOARD_ENABLE_SEQUENCE = '\x1b[>4;1m';
 
