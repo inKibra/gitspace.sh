@@ -16,6 +16,10 @@ import {
   shouldBypassScrollboxKeyHandling,
   shouldConsumePageNavigationInScrollbox,
 } from './session-terminal-page-navigation.js';
+import {
+  forceDisableKittyKeyboard,
+  restoreKittyKeyboard,
+} from '../tui/kitty-keyboard.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
 
@@ -93,15 +97,33 @@ export function SessionTerminal({
   const textEncoderRef = useRef(new TextEncoder());
   const [terminalMounted, setTerminalMounted] = useState(false);
   const [uiModeEnabled, setUiModeEnabled] = useState(false);
+  const uiModeEnabledRef = useRef(false);
+
+  const forceDisableKeyboard = useCallback(() => {
+    forceDisableKittyKeyboard(renderer);
+  }, [renderer]);
+
+  useEffect(() => {
+    uiModeEnabledRef.current = uiModeEnabled;
+  }, [uiModeEnabled]);
 
   useEffect(() => {
     const previousKittyMode = renderer.useKittyKeyboard;
-    renderer.useKittyKeyboard = false;
+    forceDisableKeyboard();
+
+    const handleFocus = () => {
+      if (!uiModeEnabledRef.current) {
+        forceDisableKeyboard();
+      }
+    };
+
+    renderer.on('focus', handleFocus);
 
     return () => {
-      renderer.useKittyKeyboard = previousKittyMode;
+      renderer.off('focus', handleFocus);
+      restoreKittyKeyboard(renderer, previousKittyMode);
     };
-  }, [renderer]);
+  }, [forceDisableKeyboard, renderer]);
 
   const scrollToCursorIfFollowing = useCallback(() => {
     const scrollBox = scrollBoxRef.current;
@@ -263,6 +285,9 @@ export function SessionTerminal({
       }
 
       if (isUiModeToggleSequence(sequence)) {
+        if (uiModeEnabledRef.current) {
+          forceDisableKeyboard();
+        }
         setUiModeEnabled((prev) => !prev);
         return true;
       }
@@ -284,15 +309,16 @@ export function SessionTerminal({
     return () => {
       renderer.removeInputHandler(rawInputHandler);
     };
-  }, [interceptShiftTab, modalOpen, onActivity, onData, readOnly, renderer, uiModeEnabled]);
+  }, [forceDisableKeyboard, interceptShiftTab, modalOpen, onActivity, onData, readOnly, renderer, uiModeEnabled]);
 
   useEffect(() => {
     if (!modalOpen) {
       return;
     }
 
+    forceDisableKeyboard();
     setUiModeEnabled(false);
-  }, [modalOpen]);
+  }, [forceDisableKeyboard, modalOpen]);
 
   useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
@@ -326,6 +352,7 @@ export function SessionTerminal({
     }
 
     if (key.shift && key.name === 'escape') {
+      forceDisableKeyboard();
       setUiModeEnabled(false);
       return;
     }
