@@ -22,6 +22,7 @@ afterAll(() => {
 type SelectCall<T> = {
   title: string
   onSelect: (value: T) => void | Promise<void>
+  searchable?: boolean
 }
 
 type InputCall = {
@@ -55,6 +56,7 @@ describe('useLifecycleController project flow', () => {
             showSelectCalls.push({
               title: opts.title,
               onSelect: opts.onSelect as (value: 'manual' | 'github') => void | Promise<void>,
+              searchable: opts.searchable,
             })
           },
           showInput: (opts) => {
@@ -118,6 +120,7 @@ describe('useLifecycleController project flow', () => {
             showSelectCalls.push({
               title: opts.title,
               onSelect: opts.onSelect as (value: string) => void | Promise<void>,
+              searchable: opts.searchable,
             })
           },
           showInput: (opts) => {
@@ -175,6 +178,7 @@ describe('useLifecycleController project flow', () => {
             showSelectCalls.push({
               title: opts.title,
               onSelect: opts.onSelect as (value: string) => void | Promise<void>,
+              searchable: opts.searchable,
             })
           },
           showInput: (opts) => {
@@ -203,5 +207,114 @@ describe('useLifecycleController project flow', () => {
     expect(showMessage).toHaveBeenCalledTimes(1)
     expect(showInputCalls.length).toBe(1)
     expect(showInputCalls[0]?.title).toBe('Repository Remote')
+  })
+})
+
+describe('useLifecycleController workspace source flow', () => {
+  function makeIssue(id: string, identifier: string, title: string) {
+    return {
+      id,
+      identifier,
+      title,
+      description: null,
+      url: `https://linear.app/acme/issue/${identifier}`,
+      assigneeName: null,
+      stateName: 'Backlog',
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      attachments: [],
+    }
+  }
+
+  it('opens searchable branch picker for workspace creation', async () => {
+    const showSelectCalls: Array<SelectCall<string>> = []
+    const showLoading = mock(() => {})
+    const close = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading,
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              onSelect: opts.onSelect as (value: string) => void | Promise<void>,
+              searchable: opts.searchable,
+            })
+          },
+          showInput: () => {},
+          showConfirmTyped: () => {},
+          showMessage: () => {},
+          close,
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => ['feature/search-modal', 'fix/dialog-overflow'],
+        listLinearIssues: async () => [makeIssue('1', 'ACME-1', 'Issue one')],
+        createProject: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        getProjectNames: () => ['acme'],
+        refreshProjects: async () => {},
+        refreshWorkspaces: async () => {},
+      })
+    )
+
+    result.current.openCreateWorkspaceFlow('acme')
+    expect(showSelectCalls[0]?.title).toBe('Create Workspace From')
+
+    await showSelectCalls[0]!.onSelect('branch')
+    await flushMicrotasks()
+
+    const branchPicker = showSelectCalls.find((call) => call.title === 'Select Branch')
+    expect(branchPicker).toBeDefined()
+    expect(branchPicker?.searchable).toBe(true)
+    expect(showLoading).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens searchable linear picker for workspace creation', async () => {
+    const showSelectCalls: Array<SelectCall<string>> = []
+    const showLoading = mock(() => {})
+    const close = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading,
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              onSelect: opts.onSelect as (value: string) => void | Promise<void>,
+              searchable: opts.searchable,
+            })
+          },
+          showInput: () => {},
+          showConfirmTyped: () => {},
+          showMessage: () => {},
+          close,
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => ['main'],
+        listLinearIssues: async () => [makeIssue('2', 'ACME-2', 'Search and overflow fix')],
+        createProject: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        getProjectNames: () => ['acme'],
+        refreshProjects: async () => {},
+        refreshWorkspaces: async () => {},
+      })
+    )
+
+    result.current.openCreateWorkspaceFlow('acme')
+    expect(showSelectCalls[0]?.title).toBe('Create Workspace From')
+
+    await showSelectCalls[0]!.onSelect('linear')
+    await flushMicrotasks()
+
+    const linearPicker = showSelectCalls.find((call) => call.title === 'Select Linear Issue')
+    expect(linearPicker).toBeDefined()
+    expect(linearPicker?.searchable).toBe(true)
+    expect(showLoading).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
   })
 })

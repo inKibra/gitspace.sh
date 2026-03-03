@@ -80,6 +80,8 @@ export interface FlowSelect<T = unknown> {
   title: string;
   options: Array<{ label: string; description?: string; value: T }>;
   selectedIndex: number;
+  searchable?: boolean;
+  searchQuery?: string;
   onSelect: (value: T, index: number) => void | Promise<void>;
   onCancel?: () => void;
 }
@@ -159,6 +161,7 @@ export interface UseFlowReturn {
   handleCancel: () => void;
   handleInput: (value: string) => void;
   handleSelect: (index: number) => void;
+  updateSelectQuery: (value: string) => void;
   moveUp: () => void;
   moveDown: () => void;
   nextStep: () => void;
@@ -216,7 +219,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
 
   // Show select
   const showSelect = useCallback(<T,>(opts: Omit<FlowSelect<T>, 'type' | 'selectedIndex'>) => {
-    setFlow({ type: 'select', ...opts, selectedIndex: 0 } as FlowSelect);
+    setFlow({ type: 'select', ...opts, selectedIndex: 0, searchQuery: '' } as FlowSelect);
   }, []);
 
   // Show wizard
@@ -255,9 +258,10 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         await flow.onSubmit(flow.inputValue);
         closeIfUnchanged();
       } else if (flow.type === 'select') {
-        const option = flow.options[flow.selectedIndex];
-        if (option) {
-          await flow.onSelect(option.value, flow.selectedIndex);
+        const visibleOptions = getVisibleSelectOptions(flow);
+        const entry = visibleOptions[flow.selectedIndex];
+        if (entry) {
+          await flow.onSelect(entry.option.value, entry.index);
           closeIfUnchanged();
         }
       } else if (flow.type === 'wizard') {
@@ -327,14 +331,33 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   // Handle selection change
   const handleSelect = useCallback((index: number) => {
     if (flow.type === 'select') {
-      const clampedIndex = Math.max(0, Math.min(index, flow.options.length - 1));
+      const visibleCount = getVisibleSelectOptions(flow).length;
+      const clampedIndex = visibleCount === 0
+        ? 0
+        : Math.max(0, Math.min(index, visibleCount - 1));
       setFlow({ ...flow, selectedIndex: clampedIndex });
     }
+  }, [flow]);
+
+  const updateSelectQuery = useCallback((value: string) => {
+    if (flow.type !== 'select' || !flow.searchable) {
+      return;
+    }
+
+    setFlow({
+      ...flow,
+      searchQuery: value,
+      selectedIndex: 0,
+    });
   }, [flow]);
 
   // Move selection up
   const moveUp = useCallback(() => {
     if (flow.type === 'select') {
+      const visibleCount = getVisibleSelectOptions(flow).length;
+      if (visibleCount === 0) {
+        return;
+      }
       setFlow({ ...flow, selectedIndex: Math.max(0, flow.selectedIndex - 1) });
     }
   }, [flow]);
@@ -342,7 +365,11 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   // Move selection down
   const moveDown = useCallback(() => {
     if (flow.type === 'select') {
-      setFlow({ ...flow, selectedIndex: Math.min(flow.options.length - 1, flow.selectedIndex + 1) });
+      const visibleCount = getVisibleSelectOptions(flow).length;
+      if (visibleCount === 0) {
+        return;
+      }
+      setFlow({ ...flow, selectedIndex: Math.min(visibleCount - 1, flow.selectedIndex + 1) });
     }
   }, [flow]);
 
@@ -397,6 +424,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
     handleCancel,
     handleInput,
     handleSelect,
+    updateSelectQuery,
     moveUp,
     moveDown,
     nextStep,
@@ -435,6 +463,23 @@ export function isFlowWizard(flow: FlowState): flow is FlowWizard {
  */
 export function hasInputValue(flow: FlowState): flow is FlowInput | FlowConfirmTyped | FlowWizard {
   return flow.type === 'input' || flow.type === 'confirm-typed' || flow.type === 'wizard';
+}
+
+function getVisibleSelectOptions(
+  flow: FlowSelect
+): Array<{ option: FlowSelect['options'][number]; index: number }> {
+  const entries = flow.options.map((option, index) => ({ option, index }));
+  const query = flow.searchable ? flow.searchQuery?.trim().toLowerCase() : '';
+
+  if (!query) {
+    return entries;
+  }
+
+  return entries.filter(({ option }) => {
+    const label = option.label.toLowerCase();
+    const description = option.description?.toLowerCase() ?? '';
+    return label.includes(query) || description.includes(query);
+  });
 }
 
 // ============================================================================

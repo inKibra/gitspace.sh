@@ -1271,6 +1271,13 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
           event.preventDefault();
           return;
         }
+
+        if (flow.flow.type === 'select' && flow.flow.searchable) {
+          const currentQuery = flow.flow.searchQuery ?? '';
+          flow.updateSelectQuery(currentQuery + text);
+          event.preventDefault();
+          return;
+        }
       }
 
       if (projectFlow.type === 'onboarding') {
@@ -1347,6 +1354,30 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
           }
           const current = 'inputValue' in flow.flow ? flow.flow.inputValue || '' : '';
           flow.handleInput(current + chunk);
+        }
+        return;
+      }
+
+      // Handle other modals (select, message, etc.)
+      if (flow.flow.type === 'select' && flow.flow.searchable) {
+        if (key.name === 'escape') {
+          flow.handleCancel();
+        } else if (key.name === 'return') {
+          await flow.handleConfirm();
+        } else if (key.name === 'up') {
+          flow.moveUp();
+        } else if (key.name === 'down') {
+          flow.moveDown();
+        } else if (key.name === 'backspace') {
+          const current = flow.flow.searchQuery ?? '';
+          flow.updateSelectQuery(current.slice(0, -1));
+        } else {
+          const chunk = getKeyboardInputChunk(key);
+          if (!chunk) {
+            return;
+          }
+          const current = flow.flow.searchQuery ?? '';
+          flow.updateSelectQuery(current + chunk);
         }
         return;
       }
