@@ -451,7 +451,10 @@ export function useBundleRefreshAttachFlow(
       const currentOptions = optionsRef.current;
       currentOptions.flow.showMessage({
         title: 'Workspace Script Failed',
-        message,
+        message:
+          `${message}\n\n` +
+          'Press Enter/Esc to close this dialog and inspect script output.\n' +
+          'Press a to retry attach anyway (skip scripts).',
         variant: 'error',
       });
       lastHandledAttemptRef.current = pending.attemptId;

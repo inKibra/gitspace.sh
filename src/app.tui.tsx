@@ -437,7 +437,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
     onAttachCancelled: ({ target }) => {
-      if (target === 'workspace' && state.view === 'scripts') {
+      if (target === 'workspace') {
         return;
       }
       dispatch({ type: 'SET_VIEW', view: 'projects' });
@@ -1358,6 +1358,26 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
         return;
       }
 
+      if (
+        state.view === 'scripts' &&
+        !localScriptState?.isRunning &&
+        !!localScriptState?.error &&
+        flow.flow.type === 'message' &&
+        (key.raw === 'a' || key.name === 'a')
+      ) {
+        const workspaceId = lastScriptWorkspaceIdRef.current;
+        if (!workspaceId) {
+          return;
+        }
+
+        flow.close();
+        await attachLocal({
+          workspaceId,
+          scriptPolicy: 'skip',
+        });
+        return;
+      }
+
       // Handle other modals (select, message, etc.)
       if (flow.flow.type === 'select' && flow.flow.searchable) {
         if (key.name === 'escape') {
@@ -1384,6 +1404,8 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
 
       // Handle other modals (select, message, etc.)
       if (key.name === 'escape') {
+        flow.handleCancel();
+      } else if (key.raw === 'n') {
         flow.handleCancel();
       } else if (key.name === 'return') {
         await flow.handleConfirm();
@@ -2012,28 +2034,28 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   if (state.view === 'scripts') {
     const phase = localScriptState?.phase ?? 'pre';
     const isRunning = localScriptState?.isRunning ?? true;
+    const scriptHint = isRunning
+      ? '[Running scripts... c: cancel + attach anyway]'
+      : localScriptState?.error
+        ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
+        : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back';
 
     return (
       <Fragment>
         <Toaster position="top-right" />
-        <ScriptTerminal
-          ref={scriptTerminalRef}
-          phase={phase}
-          workspaceName={scriptWorkspaceName}
-          isRunning={isRunning}
-          error={localScriptState?.error}
-          exitCode={localScriptState?.exitCode}
-          modalOpen={flow.isOpen}
-        />
-        {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar
-          hint={isRunning
-            ? '[Running scripts... c: cancel + attach anyway]'
-            : localScriptState?.error
-              ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
-              : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back'}
-          rightHint={keyboardModeHint}
-        />
+        <box flexDirection="column" flexGrow={1} width="100%" height="100%">
+          <ScriptTerminal
+            ref={scriptTerminalRef}
+            phase={phase}
+            workspaceName={scriptWorkspaceName}
+            isRunning={isRunning}
+            error={localScriptState?.error}
+            exitCode={localScriptState?.exitCode}
+            modalOpen={flow.isOpen}
+          />
+          <StatusBar hint={scriptHint} rightHint={keyboardModeHint} />
+          {!isRunning && <FlowTUI flow={flow} />}
+        </box>
       </Fragment>
     );
   }
