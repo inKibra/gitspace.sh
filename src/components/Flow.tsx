@@ -465,7 +465,7 @@ export function hasInputValue(flow: FlowState): flow is FlowInput | FlowConfirmT
   return flow.type === 'input' || flow.type === 'confirm-typed' || flow.type === 'wizard';
 }
 
-function getVisibleSelectOptions(
+export function getVisibleSelectOptions(
   flow: FlowSelect
 ): Array<{ option: FlowSelect['options'][number]; index: number }> {
   const entries = flow.options.map((option, index) => ({ option, index }));

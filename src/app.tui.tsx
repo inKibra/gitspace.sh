@@ -1405,8 +1405,6 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       // Handle other modals (select, message, etc.)
       if (key.name === 'escape') {
         flow.handleCancel();
-      } else if (key.raw === 'n') {
-        flow.handleCancel();
       } else if (key.name === 'return') {
         await flow.handleConfirm();
       } else if (key.name === 'up' || key.raw === 'k') {
@@ -1429,7 +1427,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
 
     // Shift+Tab attach hotkey - check FIRST, even in terminal view
     // This allows attaching to a different session while in a terminal
-    if (key.shift && key.name === 'tab' && notifications.activeToast) {
+    if (key.shift && key.name === 'tab' && notifications.activeToast && state.view !== 'scripts') {
       // Show confirmation before switching sessions
       const sessionLabel = getSessionLabel(notifications.activeToast.sessionName);
       flow.showConfirm({

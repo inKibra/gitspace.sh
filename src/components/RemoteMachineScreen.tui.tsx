@@ -486,6 +486,13 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         const current = 'inputValue' in flow.flow ? flow.flow.inputValue || '' : '';
         flow.handleInput(current + text);
         event.preventDefault();
+        return;
+      }
+
+      if (flow.flow.type === 'select' && flow.flow.searchable) {
+        const currentQuery = flow.flow.searchQuery ?? '';
+        flow.updateSelectQuery(currentQuery + text);
+        event.preventDefault();
       }
     };
 
@@ -532,6 +539,29 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           }
           const current = 'inputValue' in flow.flow ? flow.flow.inputValue || '' : '';
           flow.handleInput(current + chunk);
+        }
+        return;
+      }
+
+      if (flow.flow.type === 'select' && flow.flow.searchable) {
+        if (key.name === 'escape') {
+          flow.handleCancel();
+        } else if (key.name === 'return') {
+          await flow.handleConfirm();
+        } else if (key.name === 'up' || key.raw === 'k') {
+          flow.moveUp();
+        } else if (key.name === 'down' || key.raw === 'j') {
+          flow.moveDown();
+        } else if (key.name === 'backspace') {
+          const current = flow.flow.searchQuery ?? '';
+          flow.updateSelectQuery(current.slice(0, -1));
+        } else {
+          const chunk = getKeyboardInputChunk(key);
+          if (!chunk) {
+            return;
+          }
+          const current = flow.flow.searchQuery ?? '';
+          flow.updateSelectQuery(current + chunk);
         }
         return;
       }

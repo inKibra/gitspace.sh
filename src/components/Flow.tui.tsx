@@ -9,7 +9,11 @@ import { useKeyboard } from '@opentui/react';
 import type { ScrollBoxRenderable } from '@opentui/core';
 import { toast } from '@opentui-ui/toast';
 import { copyToClipboard } from '../utils/clipboard.js';
-import type { UseFlowReturn, FlowSelect, FlowState } from './Flow.js';
+import {
+  getVisibleSelectOptions,
+  type UseFlowReturn,
+  type FlowState,
+} from './Flow.js';
 
 // ============================================================================
 // Colors
@@ -203,7 +207,9 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
       {
         const maxWidth = getModalMaxWidth();
         const preferredWidth = state.searchable ? 96 : 72;
-        const modalWidth = Math.max(56, Math.min(maxWidth, preferredWidth));
+        const desiredMinWidth = state.searchable ? 56 : 48;
+        const safeMinWidth = Math.min(desiredMinWidth, maxWidth);
+        const modalWidth = Math.max(safeMinWidth, Math.min(maxWidth, preferredWidth));
         const filteredOptions = getVisibleSelectOptions(state);
         const selectedIndex = filteredOptions.length === 0
           ? 0
@@ -521,24 +527,7 @@ function getModalMaxWidth(): number {
   }
 
   const terminalColumns = columns > 0 ? columns : 80;
-  return Math.max(56, terminalColumns - 4);
-}
-
-function getVisibleSelectOptions(
-  state: FlowSelect
-): Array<{ option: FlowSelect['options'][number]; index: number }> {
-  const entries = state.options.map((option, index) => ({ option, index }));
-  const query = state.searchable ? state.searchQuery?.trim().toLowerCase() : '';
-
-  if (!query) {
-    return entries;
-  }
-
-  return entries.filter(({ option }) => {
-    const label = option.label.toLowerCase();
-    const description = option.description?.toLowerCase() ?? '';
-    return label.includes(query) || description.includes(query);
-  });
+  return Math.max(1, terminalColumns - 4);
 }
 
 function getOptionWindowStart(
