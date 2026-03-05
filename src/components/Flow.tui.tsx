@@ -260,10 +260,18 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
                 visibleOptions.map((entry, offset) => {
                   const visibleIndex = windowStart + offset;
                   const isSelected = visibleIndex === selectedIndex;
-                  const labelPrefix = isSelected ? '▶ ' : '  ';
-                  const label = truncateLine(entry.option.label, maxLabelWidth - labelPrefix.length);
+                  const baseLabelPrefix = isSelected ? '▶ ' : '  ';
+                  const labelPrefix = baseLabelPrefix.slice(0, Math.max(0, maxLabelWidth));
+                  const label = truncateLine(
+                    entry.option.label,
+                    Math.max(0, maxLabelWidth - labelPrefix.length)
+                  );
+                  const descriptionIndent = '    '.slice(0, Math.max(0, maxDescriptionWidth));
                   const description = entry.option.description
-                    ? truncateLine(entry.option.description, maxDescriptionWidth)
+                    ? truncateLine(
+                        entry.option.description,
+                        Math.max(0, maxDescriptionWidth - descriptionIndent.length)
+                      )
                     : null;
 
                   return (
@@ -272,7 +280,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
                         {labelPrefix}{label}
                       </text>
                       <text fg={COLORS.textDim} height={1}>
-                        {description ? `    ${description}` : ' '}
+                        {description ? `${descriptionIndent}${description}` : ' '}
                       </text>
                       <text fg={COLORS.textDim} height={1}> </text>
                     </box>

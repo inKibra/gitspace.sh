@@ -1383,7 +1383,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
         return;
       }
 
-      // Handle other modals (select, message, etc.)
+      // Handle searchable select modal input/navigation.
       if (await handleSearchableSelectKey(flow, key)) {
         return;
       }
