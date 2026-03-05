@@ -23,6 +23,10 @@ export type {
   BundleRefreshSubmission,
 } from "../../types/bundle-refresh.js";
 export type {
+  BundleConfigState,
+  BundleConfigSubmission,
+} from '../../types/bundle-config.js';
+export type {
   SessionLinearIssueSummary,
   WorkspaceSource,
 } from "../../types/lifecycle.js";
@@ -196,6 +200,21 @@ export interface ApplyBundleRefreshRequest {
   projectName: string;
   workspaceId: string;
   submission: import("../../types/bundle-refresh.js").BundleRefreshSubmission;
+}
+
+/** Request ad hoc bundle configuration state for a workspace */
+export interface GetBundleConfigStateRequest {
+  type: 'get_bundle_config_state';
+  projectName: string;
+  workspaceId: string;
+}
+
+/** Apply ad hoc bundle configuration updates for a workspace */
+export interface ApplyBundleConfigUpdateRequest {
+  type: 'apply_bundle_config_update';
+  projectName: string;
+  workspaceId: string;
+  submission: import('../../types/bundle-config.js').BundleConfigSubmission;
 }
 
 /**
@@ -412,6 +431,19 @@ export interface BundleRefreshAppliedResponse {
   workspaceId: string;
 }
 
+/** Bundle configuration state response */
+export interface BundleConfigStateResponse {
+  type: 'bundle_config_state';
+  state: import('../../types/bundle-config.js').BundleConfigState;
+}
+
+/** Bundle configuration update applied successfully */
+export interface BundleConfigUpdatedResponse {
+  type: 'bundle_config_updated';
+  projectName: string;
+  workspaceId: string;
+}
+
 /** Review operation response — carries either a result or an error */
 export interface ReviewResponse {
   type: "review_response";
@@ -475,6 +507,8 @@ export type ClientToMachineMessage =
   | UpdateNotificationConfigRequest
   | GetBundleRefreshPlanRequest
   | ApplyBundleRefreshRequest
+  | GetBundleConfigStateRequest
+  | ApplyBundleConfigUpdateRequest
   | ReviewRequest
   | GetEventsRequest
   | StartProcessRequest
@@ -505,6 +539,8 @@ export type MachineToClientMessage =
   | ScriptOutputResponse
   | BundleRefreshPlanResponse
   | BundleRefreshAppliedResponse
+  | BundleConfigStateResponse
+  | BundleConfigUpdatedResponse
   | ReviewResponse
   | EventsListResponse
   | ProcessStartedResponse
@@ -555,6 +591,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | CreateProjectRequest
   | CreateWorkspaceRequest
   | DeleteProjectRequest
+  | GetBundleConfigStateRequest
+  | ApplyBundleConfigUpdateRequest
   | GetEventsRequest {
   return [
     "list_workspaces",
@@ -567,6 +605,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     "create_project",
     "create_workspace",
     "delete_project",
+    'get_bundle_config_state',
+    'apply_bundle_config_update',
     "get_events",
   ].includes(msg.type);
 }

@@ -17,6 +17,7 @@ import {
 import { FlowTUI } from './Flow.tui.js';
 import { useRemoteTerminal } from '../hooks/useRemoteTerminal.tui.js';
 import { useBundleRefreshAttachFlow } from '../session/index.js';
+import { useBundleConfigFlow } from '../session/index.js';
 import { useAttachController } from '../app/session/useAttachController.js';
 import { useProcessActions } from '../app/session/useProcessActions.js';
 import {
@@ -24,7 +25,7 @@ import {
   resolveSessionBrowserCommand,
 } from '../app/input/sessionCommands.js';
 import { SessionTerminal } from './SessionTerminal.tui.js';
-import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
+import { ScriptTerminal } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import {
   applySearchableSelectPaste,
@@ -69,7 +70,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
-  const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const flow = useFlow({
     onError: (error) => {
@@ -116,6 +116,23 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         return workspaceId.slice(0, separator);
       }
       return remote.selectedProjectName;
+    },
+  });
+
+  const bundleConfigFlow = useBundleConfigFlow({
+    flow,
+    getBundleConfigState: remote.getBundleConfigState,
+    applyBundleConfigUpdate: remote.applyBundleConfigUpdate,
+    resolveProjectName: (workspaceId) => {
+      const separator = workspaceId.indexOf(':');
+      if (separator > 0) {
+        return workspaceId.slice(0, separator);
+      }
+      return remote.selectedProjectName;
+    },
+    onApplied: async () => {
+      remote.requestWorkspaces();
+      remote.requestSessions();
     },
   });
 
@@ -198,20 +215,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     refreshWorkspaces: () => remote.requestWorkspaces(),
     refreshSessions: () => remote.requestSessions(),
   });
-
-  useEffect(() => {
-    if (!showScriptTerminal || remote.mode !== 'browsing') {
-      return;
-    }
-
-    remote.setWriteCallback((data) => {
-      scriptTerminalRef.current?.feed(data);
-    });
-
-    return () => {
-      remote.setWriteCallback(null);
-    };
-  }, [remote.mode, remote.setWriteCallback, showScriptTerminal]);
 
   useEffect(() => {
     if (!deviceCertificate) {
@@ -412,12 +415,19 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     });
   }, [attachController, remote.workspaces]);
 
+  const handleManageBundleConfig = useCallback(async ({ workspaceId }: { workspaceId: string }) => {
+    const workspace = remote.workspaces.find((item) => item.id === workspaceId);
+    const projectName = workspace?.projectName ?? remote.selectedProjectName;
+    await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
+  }, [bundleConfigFlow, remote.selectedProjectName, remote.workspaces]);
+
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
     onRequestSessions: () => remote.requestSessions(),
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
+    onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
@@ -668,6 +678,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       spacesBrowserProps.activateSelected();
     } else if (browseCommand === 'new') {
       lifecycleController.openCreateMenu(selectedProjectName);
+    } else if (browseCommand === 'bundle') {
+      const selected = spacesBrowserProps.selectedItem;
+      const workspaceId = selected?.type === 'workspace'
+        ? selected.workspace.id
+        : selected && 'workspaceId' in selected
+          ? selected.workspaceId
+          : null;
+      if (workspaceId) {
+        await handleManageBundleConfig({ workspaceId });
+      }
     } else if (browseCommand === 'refresh') {
       spacesBrowserProps.refresh();
     } else if (browseCommand === 'open-inbox') {
@@ -755,25 +775,27 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
   if (showScriptTerminal && remote.status === 'established' && remote.mode === 'browsing') {
     const isRunning = remote.scriptState?.isRunning ?? true;
+    const scriptHint = isRunning
+      ? '[Running scripts... c: cancel + attach anyway]'
+      : remote.scriptState?.error
+        ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
+        : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back';
+
     return (
       <Fragment>
-        <ScriptTerminal
-          ref={scriptTerminalRef}
-          phase={remote.scriptState?.phase ?? 'remove'}
-          workspaceName={scriptWorkspaceName}
-          isRunning={isRunning}
-          error={remote.scriptState?.error}
-          exitCode={remote.scriptState?.exitCode}
-          modalOpen={flow.isOpen}
-        />
-        {!isRunning && <FlowTUI flow={flow} />}
-        <StatusBar
-          hint={isRunning
-            ? '[Running scripts... c: cancel + attach anyway]'
-            : remote.scriptState?.error
-              ? '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [Esc/n] Back'
-              : '[←/→ or [/] Phase  [↑/↓ PgUp/PgDn] Scroll  [Esc/n] Back'}
-        />
+        <box flexDirection="column" flexGrow={1} width="100%" height="100%">
+          <ScriptTerminal
+            phase={remote.scriptState?.phase ?? 'remove'}
+            workspaceName={scriptWorkspaceName}
+            isRunning={isRunning}
+            error={remote.scriptState?.error}
+            exitCode={remote.scriptState?.exitCode}
+            modalOpen={flow.isOpen}
+            setWriteCallback={remote.setWriteCallback}
+          />
+          <StatusBar hint={scriptHint} />
+          {!isRunning && <FlowTUI flow={flow} />}
+        </box>
       </Fragment>
     );
   }
@@ -806,7 +828,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       </box>
       <SpacesBrowserTUI {...spacesBrowserProps} focused={true} />
       <FlowTUI flow={flow} />
-      <StatusBar hint="[↑↓] Navigate  [Enter] Open/Join  [n] Create  [x] Kill  [d] Delete  [i] Inbox  [Esc] Back" />
+      <StatusBar hint="[↑↓] Navigate  [Enter] Open/Join  [n] Create  [b] Bundle  [x] Kill  [d] Delete  [i] Inbox  [Esc] Back" />
     </box>
   );
 }

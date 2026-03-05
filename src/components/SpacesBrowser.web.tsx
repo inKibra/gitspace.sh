@@ -229,6 +229,24 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'bundle-config') {
+            return (
+              <div
+                key={`bundle-config-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#58a6ff]">◇ Edit Bundle Config</span>
+              </div>
+            );
+          }
+
           if (item.type === 'events') {
             return (
               <div
@@ -319,6 +337,7 @@ function Footer() {
         <span>Enter Select</span>
         <span>n New</span>
         <span>x Kill</span>
+        <span>b Bundle</span>
         <span>d Delete</span>
         <span>r Refresh</span>
         <span>Esc Back</span>

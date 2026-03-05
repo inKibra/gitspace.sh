@@ -14,6 +14,7 @@ import {
 import type { NotificationConfig } from '../notifications/types.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
+import type { BundleConfigState, BundleConfigSubmission } from '../types/bundle-config.js';
 import { createBunLocalSessionBackend } from '../app/session/createSessionBackend.bun.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
@@ -372,6 +373,34 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     }, { strict: true });
   }, [backendKey, runWithBackend]);
 
+  const getBundleConfigState = useCallback(async (
+    projectName: string,
+    workspaceId: string
+  ): Promise<BundleConfigState> => {
+    let stateResult: BundleConfigState | null = null;
+    await runWithBackend(async (sessionEngine) => {
+      stateResult = await sessionEngine.getBundleConfigState(backendKey, projectName, workspaceId);
+    }, { strict: true });
+
+    if (!stateResult) {
+      throw new SpacesError('Bundle config state unavailable', 'SYSTEM_ERROR', 2);
+    }
+
+    return stateResult;
+  }, [backendKey, runWithBackend]);
+
+  const applyBundleConfigUpdate = useCallback(async (
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
+  ) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.applyBundleConfigUpdate(backendKey, projectName, workspaceId, submission);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey, workspaceId);
+    }, { strict: true });
+  }, [backendKey, runWithBackend]);
+
   const send = useCallback((data: Uint8Array) => {
     const backend = backendRef.current;
     if (!enabled || !backend?.writePtyData) {
@@ -469,6 +498,8 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
+    getBundleConfigState,
+    applyBundleConfigUpdate,
     startProcess,
     stopProcess,
     requestEvents,

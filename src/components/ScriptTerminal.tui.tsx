@@ -7,8 +7,6 @@ import {
   useRef,
   useCallback,
   useEffect,
-  useImperativeHandle,
-  forwardRef,
 } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
 import type { ScrollBoxRenderable } from '@opentui/core';
@@ -41,10 +39,7 @@ export interface ScriptTerminalProps {
   error?: string;
   exitCode?: number;
   modalOpen?: boolean;
-}
-
-export interface ScriptTerminalHandle {
-  feed: (data: Uint8Array) => void;
+  setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
 }
 
 const COLORS = {
@@ -119,8 +114,15 @@ function getPhaseMarker(status: PhaseStatus): string {
   }
 }
 
-export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalProps>(
-  function ScriptTerminal({ phase, workspaceName, isRunning, error, exitCode, modalOpen = false }, ref) {
+export function ScriptTerminal({
+  phase,
+  workspaceName,
+  isRunning,
+  error,
+  exitCode,
+  modalOpen = false,
+  setWriteCallback,
+}: ScriptTerminalProps) {
     const renderer = useRenderer();
 
     const [phaseEntries, setPhaseEntries] = useState<PhaseTerminalState[]>(() => [
@@ -133,9 +135,10 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
 
     const activeEntry = phaseEntries[activePhaseIndex] ?? phaseEntries[phaseEntries.length - 1];
     const activeError = activeEntry?.status === 'failed' ? activeEntry.error : undefined;
+    const showWaitingOutput = isRunning && !!activeEntry && activeEntry.outputChunks.length === 0;
 
     const showErrorBanner = !!activeError && !isRunning;
-    const reservedRows = 3 + (showErrorBanner ? 1 : 0);
+    const reservedRows = 3 + (showErrorBanner ? 1 : 0) + (showWaitingOutput ? 1 : 0);
     const [termSize, setTermSize] = useState(() => getTerminalSize(reservedRows));
 
     useEffect(() => {
@@ -311,7 +314,12 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
       el.feed(Buffer.concat(current.outputChunks));
     }, [activePhaseIndex]);
 
-    useImperativeHandle(ref, () => ({ feed }), [feed]);
+    useEffect(() => {
+      setWriteCallback(feed);
+      return () => {
+        setWriteCallback(null);
+      };
+    }, [feed, setWriteCallback]);
 
     const statusText = isRunning
       ? 'Running...'
@@ -324,6 +332,7 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
       : error
         ? COLORS.error
         : COLORS.success;
+    const waitingPhaseName = activeEntry ? PHASE_NAMES[activeEntry.phase] : 'script';
 
     const stickyToBottom = isRunning && activePhaseIndex === phaseEntries.length - 1;
     const phaseHint = isRunning
@@ -331,7 +340,6 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
       : activeError
         ? '[[/]] Phase  [↑/↓ PgUp/PgDn] Scroll  [a] Attach anyway  [mouse] Select+copy'
         : '[[/]] Phase  [↑/↓ PgUp/PgDn] Scroll  [mouse] Select+copy';
-
     return (
       <box flexDirection="column" flexGrow={1}>
         <box
@@ -361,6 +369,12 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
           <text fg={COLORS.textDim}>{phaseHint}</text>
         </box>
 
+        {showWaitingOutput && (
+          <box height={1} width="100%" backgroundColor="#1a1a1a" paddingLeft={1}>
+            <text fg={COLORS.textDim}>Waiting for {waitingPhaseName} script output...</text>
+          </box>
+        )}
+
         <scrollbox
           ref={(el: ScrollBoxRenderable | null) => {
             scrollBoxRef.current = el;
@@ -388,5 +402,4 @@ export const ScriptTerminal = forwardRef<ScriptTerminalHandle, ScriptTerminalPro
         )}
       </box>
     );
-  }
-);
+}

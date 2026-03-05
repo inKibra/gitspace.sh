@@ -13,6 +13,10 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type {
+  BundleConfigState,
+  BundleConfigSubmission,
+} from '../types/bundle-config.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { ScriptPhase } from '../types/script-phase.js';
 import type { WideEventFilter } from '../types/events.js';
@@ -395,6 +399,34 @@ export function useSessionEngine() {
     );
   }, [withBackend]);
 
+  const getBundleConfigState = useCallback(async (
+    backendKey: BackendKey,
+    projectName: string,
+    workspaceId: string
+  ): Promise<BundleConfigState> => {
+    let stateResult: BundleConfigState | null = null;
+    await withBackend(backendKey, async (backend) => {
+      stateResult = await backend.getBundleConfigState(projectName, workspaceId);
+    });
+
+    if (!stateResult) {
+      throw new SpacesError('Bundle config state was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+
+    return stateResult;
+  }, [withBackend]);
+
+  const applyBundleConfigUpdate = useCallback(async (
+    backendKey: BackendKey,
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
+  ) => {
+    await withBackend(backendKey, (backend) =>
+      backend.applyBundleConfigUpdate(projectName, workspaceId, submission)
+    );
+  }, [withBackend]);
+
   const requestInbox = useCallback(async (backendKey: BackendKey) => {
     await withBackend(backendKey, (backend) => backend.requestInbox());
   }, [withBackend]);
@@ -488,6 +520,8 @@ export function useSessionEngine() {
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
+    getBundleConfigState,
+    applyBundleConfigUpdate,
 
     requestInbox,
     clearInbox,
@@ -522,6 +556,8 @@ export function useSessionEngine() {
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
+    getBundleConfigState,
+    applyBundleConfigUpdate,
     requestInbox,
     clearInbox,
     markInboxRead,

@@ -18,6 +18,7 @@ export type SessionUiCommand =
   | 'attach'
   | 'kill'
   | 'open-inbox'
+  | 'bundle'
   | 'copy'
 
 function normalizeCommandKey(input: SessionCommandKeyInput): string | null {
@@ -90,5 +91,6 @@ export function resolveSessionBrowserCommand(input: SessionCommandKeyInput): Ses
   if (key === 'x') return 'kill'
   if (key === 'd') return 'delete'
   if (key === 'i') return 'open-inbox'
+  if (key === 'b') return 'bundle'
   return null
 }

@@ -20,6 +20,10 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type {
+  BundleConfigState,
+  BundleConfigSubmission,
+} from '../types/bundle-config.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import { SpacesError } from '../types/errors.js';
 import type { WideEvent, SavedEventFilter, WideEventFilter } from '../types/events.js';
@@ -87,6 +91,12 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
     projectName: string,
     workspaceId: string,
     submission: BundleRefreshSubmission
+  ) => Promise<void>;
+  getBundleConfigState: (projectName: string, workspaceId: string) => Promise<BundleConfigState>;
+  applyBundleConfigUpdate: (
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
   ) => Promise<void>;
 
   send: (data: Uint8Array) => void;
@@ -344,6 +354,34 @@ export function useRemoteSessionClient<ConnectParams>(
     [engine]
   );
 
+  const getBundleConfigState = useCallback(
+    async (projectName: string, workspaceId: string): Promise<BundleConfigState> => {
+      const backendKey = activeBackendKeyRef.current;
+      if (!backendKey) {
+        throw new Error('No active backend connection');
+      }
+
+      return engine.getBundleConfigState(backendKey, projectName, workspaceId);
+    },
+    [engine]
+  );
+
+  const applyBundleConfigUpdate = useCallback(
+    async (
+      projectName: string,
+      workspaceId: string,
+      submission: BundleConfigSubmission
+    ): Promise<void> => {
+      const backendKey = activeBackendKeyRef.current;
+      if (!backendKey) {
+        throw new Error('No active backend connection');
+      }
+
+      await engine.applyBundleConfigUpdate(backendKey, projectName, workspaceId, submission);
+    },
+    [engine]
+  );
+
   const send = useCallback((data: Uint8Array) => {
     const backend = backendRef.current;
     if (!backend || !backend.writePtyData) {
@@ -472,6 +510,8 @@ export function useRemoteSessionClient<ConnectParams>(
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
+    getBundleConfigState,
+    applyBundleConfigUpdate,
 
     send,
     resize,

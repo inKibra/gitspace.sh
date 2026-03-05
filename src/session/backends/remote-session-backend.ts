@@ -1,5 +1,6 @@
 import type { Identity, SessionKeys } from '../../types/identity.js';
 import {
+  type ApplyBundleConfigUpdateRequest,
   parseRemoteMessage,
   type ApplyBundleRefreshRequest,
   type AttachSessionRequest,
@@ -7,6 +8,8 @@ import {
   type CreateWorkspaceRequest,
   type DeleteProjectRequest,
   type BundleRefreshAppliedResponse,
+  type BundleConfigUpdatedResponse,
+  type BundleConfigStateResponse,
   type BundleRefreshPlanResponse,
   type CancelPendingAttachRequest,
   type ClearInboxRequest,
@@ -17,6 +20,7 @@ import {
   type GetEventsRequest,
   type GetInboxRequest,
   type GetBundleRefreshPlanRequest,
+  type GetBundleConfigStateRequest,
   type GetNotificationConfigRequest,
   type KillSessionRequest,
   type ListLinearIssuesRequest,
@@ -41,6 +45,7 @@ import {
   type WorkspaceCreatedResponse,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
+import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEvent, WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
@@ -200,6 +205,8 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'script_output',
   'bundle_refresh_plan',
   'bundle_refresh_applied',
+  'bundle_config_state',
+  'bundle_config_updated',
   'review_response',
   'events_list',
   'process_started',
@@ -344,6 +351,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
     | null = null;
   private pendingBundleRefreshApply:
+    | {
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingBundleConfigState:
+    | {
+        resolve: (state: BundleConfigState) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingBundleConfigUpdate:
     | {
         resolve: () => void;
         reject: (error: Error) => void;
@@ -911,6 +932,77 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+  async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
+    if (this.pendingBundleConfigState) {
+      throw new Error('Bundle config state request already in progress');
+    }
+
+    const command: GetBundleConfigStateRequest = {
+      type: 'get_bundle_config_state',
+      projectName,
+      workspaceId,
+    };
+
+    return new Promise<BundleConfigState>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingBundleConfigState) {
+          return;
+        }
+        this.pendingBundleConfigState = null;
+        reject(new Error('Timed out waiting for bundle config state'));
+      }, 15000);
+
+      this.pendingBundleConfigState = { resolve, reject, timeout };
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingBundleConfigState;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingBundleConfigState = null;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async applyBundleConfigUpdate(
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
+  ): Promise<void> {
+    if (this.pendingBundleConfigUpdate) {
+      throw new Error('Bundle config update request already in progress');
+    }
+
+    const command: ApplyBundleConfigUpdateRequest = {
+      type: 'apply_bundle_config_update',
+      projectName,
+      workspaceId,
+      submission,
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingBundleConfigUpdate) {
+          return;
+        }
+        this.pendingBundleConfigUpdate = null;
+        reject(new Error('Timed out applying bundle config update'));
+      }, 15000);
+
+      this.pendingBundleConfigUpdate = { resolve, reject, timeout };
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingBundleConfigUpdate;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingBundleConfigUpdate = null;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
   async requestInbox(): Promise<void> {
     const command: GetInboxRequest = { type: 'get_inbox' };
     await this.sendCommand(command);
@@ -1372,6 +1464,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.resolveBundleRefreshApply(message);
         return;
       }
+      case 'bundle_config_state': {
+        this.resolveBundleConfigState(message);
+        return;
+      }
+      case 'bundle_config_updated': {
+        this.resolveBundleConfigUpdate(message);
+        return;
+      }
       case 'review_response': {
         this.resolveReviewRequest(message);
         return;
@@ -1736,6 +1836,28 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.resolve();
   }
 
+  private resolveBundleConfigState(message: BundleConfigStateResponse): void {
+    const pending = this.pendingBundleConfigState;
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingBundleConfigState = null;
+    pending.resolve(message.state);
+  }
+
+  private resolveBundleConfigUpdate(_message: BundleConfigUpdatedResponse): void {
+    const pending = this.pendingBundleConfigUpdate;
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingBundleConfigUpdate = null;
+    pending.resolve();
+  }
+
   private rejectPendingBundleRefreshRequests(message: string): void {
     const error = new Error(message);
 
@@ -1749,6 +1871,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       clearTimeout(this.pendingBundleRefreshApply.timeout);
       this.pendingBundleRefreshApply.reject(error);
       this.pendingBundleRefreshApply = null;
+    }
+
+    if (this.pendingBundleConfigState) {
+      clearTimeout(this.pendingBundleConfigState.timeout);
+      this.pendingBundleConfigState.reject(error);
+      this.pendingBundleConfigState = null;
+    }
+
+    if (this.pendingBundleConfigUpdate) {
+      clearTimeout(this.pendingBundleConfigUpdate.timeout);
+      this.pendingBundleConfigUpdate.reject(error);
+      this.pendingBundleConfigUpdate = null;
     }
   }
 

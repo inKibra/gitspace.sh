@@ -12,6 +12,7 @@ import type {
 } from '../../session/index.js'
 import type { NotificationConfig } from '../../notifications/types.js'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
+import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js'
 import { SpacesError } from '../../types/errors.js'
 import {
   useLocalSession,
@@ -136,6 +137,27 @@ class FakeLocalBackend implements SessionBackend {
     _projectName: string,
     _workspaceId: string,
     _submission: BundleRefreshSubmission
+  ): Promise<void> {}
+
+  async getBundleConfigState(
+    _projectName: string,
+    workspaceId: string
+  ): Promise<BundleConfigState> {
+    return {
+      projectName: 'project',
+      workspaceId,
+      workspaceName: workspaceId,
+      workspacePath: `/tmp/${workspaceId}`,
+      hasBundle: true,
+      details: 'bundle state',
+      steps: [],
+    }
+  }
+
+  async applyBundleConfigUpdate(
+    _projectName: string,
+    _workspaceId: string,
+    _submission: BundleConfigSubmission
   ): Promise<void> {}
 
   async requestInbox(): Promise<void> {}

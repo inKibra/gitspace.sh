@@ -189,6 +189,15 @@ describe('LocalSessionBackend', () => {
       viewOnly: false,
     });
 
+    const scriptStreamChunks = events
+      .filter((event): event is Extract<BackendEvent, { type: 'script_output' }> =>
+        event.type === 'script_output' && !event.done && event.data.length > 0
+      )
+      .map((event) => new TextDecoder().decode(event.data));
+
+    expect(scriptStreamChunks.some((chunk) => chunk.includes('==> pre scripts...'))).toBe(true);
+    expect(scriptStreamChunks.some((chunk) => chunk.includes('==> setup scripts...'))).toBe(true);
+
     expect(events).toContainEqual({
       type: 'script_output',
       phase: 'setup',

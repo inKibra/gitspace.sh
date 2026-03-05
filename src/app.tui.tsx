@@ -17,7 +17,7 @@ import { Toaster } from '@opentui-ui/toast/react';
 // Terminal components
 import { SessionTerminal } from './components/SessionTerminal.tui.js';
 import { RemoteMachineScreen } from './components/RemoteMachineScreen.tui.js';
-import { ScriptTerminal, type ScriptTerminalHandle } from './components/ScriptTerminal.tui.js';
+import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
 
 // Shared components and hooks
@@ -80,6 +80,7 @@ import { useRemoteMachines, type RelayConfig } from './hooks/useRemoteMachines.t
 import { useLocalSession } from './hooks/useLocalSession.tui.js';
 import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
+import { useBundleConfigFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
@@ -273,7 +274,6 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
 
   // Track when we're switching sessions (to prevent detach handler from navigating away)
   const sessionSwitchingRef = useRef(false);
-  const scriptTerminalRef = useRef<ScriptTerminalHandle | null>(null);
   const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const renderer = useRenderer();
 
@@ -343,6 +343,8 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     commandError: localCommandError,
     getBundleRefreshPlan: getLocalBundleRefreshPlan,
     applyBundleRefresh: applyLocalBundleRefresh,
+    getBundleConfigState: getLocalBundleConfigState,
+    applyBundleConfigUpdate: applyLocalBundleConfigUpdate,
     startProcess: startLocalProcess,
     stopProcess: stopLocalProcess,
     requestEvents: requestLocalEvents,
@@ -521,6 +523,22 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     ]);
   }, [isLocalMachineContext, requestLocalSessions, requestLocalWorkspaces]);
 
+  const bundleConfigFlow = useBundleConfigFlow({
+    flow,
+    getBundleConfigState: getLocalBundleConfigState,
+    applyBundleConfigUpdate: applyLocalBundleConfigUpdate,
+    resolveProjectName: (workspaceId) => {
+      const separator = workspaceId.indexOf(':');
+      if (separator > 0) {
+        return workspaceId.slice(0, separator);
+      }
+      return currentProject;
+    },
+    onApplied: async () => {
+      await refreshWorkspaces();
+    },
+  });
+
   // Load inbox
   const refreshInbox = useCallback(async () => {
     if (!isLocalMachineContext) {
@@ -632,6 +650,12 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       }
     });
   }, [attachLocal, localWorkspaces]);
+
+  const handleManageBundleConfig = useCallback(async ({ workspaceId }: { workspaceId: string }) => {
+    const workspace = localWorkspaces.find((item) => item.id === workspaceId);
+    const projectName = workspace?.projectName ?? currentProject;
+    await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
+  }, [bundleConfigFlow, currentProject, localWorkspaces]);
 
   useEffect(() => {
     if (!pendingProcessEditWorkspaceId) {
@@ -1080,6 +1104,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     onRequestSessions: () => {}, // Sessions already loaded
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
+    onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
@@ -1239,20 +1264,6 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     isUserActive,
     currentSessionId: localAttachedSessionId ?? undefined,
   });
-
-  useEffect(() => {
-    if (state.view !== 'scripts') {
-      return;
-    }
-
-    setLocalWriteCallback((data) => {
-      scriptTerminalRef.current?.feed(data);
-    });
-
-    return () => {
-      setLocalWriteCallback(null);
-    };
-  }, [setLocalWriteCallback, state.view]);
 
   useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
@@ -1835,6 +1846,16 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
           // In workspaces panel, 'n' always creates new workspace
           // Sessions are created via expand (Enter) → "+ New session" (Enter)
           lifecycleController.openCreateWorkspaceFlow(currentProject);
+        } else if (command === 'bundle') {
+          const selected = spacesBrowserProps.selectedItem;
+          const workspaceId = selected?.type === 'workspace'
+            ? selected.workspace.id
+            : selected && 'workspaceId' in selected
+              ? selected.workspaceId
+              : null;
+          if (workspaceId) {
+            await handleManageBundleConfig({ workspaceId });
+          }
         } else if (command === 'delete') {
           // Delete workspace
           const selected = spacesBrowserProps.selectedItem;
@@ -2029,13 +2050,13 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
         <Toaster position="top-right" />
         <box flexDirection="column" flexGrow={1} width="100%" height="100%">
           <ScriptTerminal
-            ref={scriptTerminalRef}
             phase={phase}
             workspaceName={scriptWorkspaceName}
             isRunning={isRunning}
             error={localScriptState?.error}
             exitCode={localScriptState?.exitCode}
             modalOpen={flow.isOpen}
+            setWriteCallback={setLocalWriteCallback}
           />
           <StatusBar hint={scriptHint} rightHint={keyboardModeHint} />
           {!isRunning && <FlowTUI flow={flow} />}
@@ -2379,16 +2400,16 @@ function SettingsFlowModal({ flow }: { flow: SettingsFlowState }) {
 
 function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): string {
   if (selectedItem?.type === 'session') {
-    return '[Tab] Switch  [Enter] Attach  [x] Kill  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] Attach  [x] Kill  [b] Bundle  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'process') {
     if (selectedItem.status === 'running') {
       return '[Tab] Switch  [Enter] View  [x] Stop  [,] Settings  [?] Help  [q] Quit';
     }
-    return '[Tab] Switch  [Enter] Start  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] Start  [b] Bundle  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'workspace') {
-    return '[Tab] Switch  [Enter] Expand  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] Expand  [b] Bundle  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'process-disabled') {
     return '[Tab] Switch  [Enter] Disabled  [,] Settings  [?] Help  [q] Quit';
@@ -2397,15 +2418,18 @@ function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): stri
     return '[Tab] Switch  [Enter] Fix Process Config  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'edit-processes') {
-    return '[Tab] Switch  [Enter] Edit Processes Config  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] Edit Processes Config  [b] Bundle  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'bundle-config') {
+    return '[Tab] Switch  [Enter] Edit Bundle Config  [b] Bundle  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'events') {
-    return '[Tab] Switch  [Enter] Open Events  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] Open Events  [b] Bundle  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'new-session') {
-    return '[Tab] Switch  [Enter] New Session  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] New Session  [b] Bundle  [,] Settings  [?] Help  [q] Quit';
   }
-  return '[Tab] Switch  [Enter] Open  [n] New Workspace  [,] Settings  [?] Help  [q] Quit';
+  return '[Tab] Switch  [Enter] Open  [b] Bundle  [n] New Workspace  [,] Settings  [?] Help  [q] Quit';
 }
 
 // ============================================================================

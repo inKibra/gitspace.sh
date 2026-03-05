@@ -241,14 +241,16 @@ describe('ClientToMachineMessage type coverage', () => {
     { type: 'update_notification_config', config: { enabled: true, minCommandDurationMs: 10000, types: { exit: true, idle: true, bell: true, title: true, osc: true }, toast: { enabled: true, holdWhenIdleMs: 15000 } } },
     { type: 'get_bundle_refresh_plan', projectName: 'p1', workspaceId: 'w1' },
     { type: 'apply_bundle_refresh', projectName: 'p1', workspaceId: 'w1', submission: { inputValues: {}, secretValues: {}, confirmResults: {} } },
+    { type: 'get_bundle_config_state', projectName: 'p1', workspaceId: 'w1' },
+    { type: 'apply_bundle_config_update', projectName: 'p1', workspaceId: 'w1', submission: { inputValues: {}, secretValues: {}, confirmResults: {} } },
     { type: 'get_events', workspacePath: '/tmp' },
     { type: 'start_process', workspaceId: 'w1', processName: 'web' },
     { type: 'stop_process', workspaceId: 'w1', processName: 'web' },
   ];
 
-  it('should include all 22 client message types', () => {
+  it('should include all 24 client message types', () => {
     const types = new Set(clientMessages.map(m => m.type));
-    expect(types.size).toBe(22);
+    expect(types.size).toBe(24);
   });
 
   it('should all parse successfully via round-trip', () => {
@@ -290,14 +292,16 @@ describe('MachineToClientMessage type coverage', () => {
     { type: 'script_output', phase: 'setup', data: '' },
     { type: 'bundle_refresh_plan', plan: { projectName: 'p1', workspaceId: 'w1', workspaceName: 'w1', workspacePath: '/tmp', hasBundle: false, hasChanged: false, details: '', steps: [], autoConfirmResults: {} } },
     { type: 'bundle_refresh_applied', projectName: 'p1', workspaceId: 'w1' },
+    { type: 'bundle_config_state', state: { projectName: 'p1', workspaceId: 'w1', workspaceName: 'w1', workspacePath: '/tmp', hasBundle: false, details: '', steps: [] } },
+    { type: 'bundle_config_updated', projectName: 'p1', workspaceId: 'w1' },
     { type: 'events_list', workspaceId: 'w1', events: [], liveEventIds: [] },
     { type: 'process_started', workspaceId: 'w1', processName: 'web' },
     { type: 'process_stopped', workspaceId: 'w1', processName: 'web' },
   ];
 
-  it('should include all 26 machine message types', () => {
+  it('should include all 28 machine message types', () => {
     const types = new Set(machineMessages.map(m => m.type));
-    expect(types.size).toBe(26);
+    expect(types.size).toBe(28);
   });
 
   it('should all parse successfully via round-trip', () => {

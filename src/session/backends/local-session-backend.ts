@@ -41,6 +41,8 @@ import {
 import {
   getBundleRefreshPlan as getBundleRefreshPlanCore,
   applyBundleRefreshSubmission,
+  getBundleConfigState as getBundleConfigStateCore,
+  applyBundleConfigSubmission,
 } from '../../core/bundle-refresh.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
@@ -63,6 +65,7 @@ import type {
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
+import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
 import type { WideEventFilter } from '../../types/events.js';
@@ -109,6 +112,8 @@ export interface LocalSessionBackendDependencies {
   prepareWorkspaceForSession: typeof prepareWorkspaceForSession;
   getBundleRefreshPlanCore: typeof getBundleRefreshPlanCore;
   applyBundleRefreshSubmission: typeof applyBundleRefreshSubmission;
+  getBundleConfigStateCore: typeof getBundleConfigStateCore;
+  applyBundleConfigSubmission: typeof applyBundleConfigSubmission;
   connectSessionSocket: (
     socketPath: string,
     handlers: LocalSessionSocketHandlers
@@ -357,6 +362,8 @@ function buildDeps(
     prepareWorkspaceForSession,
     getBundleRefreshPlanCore,
     applyBundleRefreshSubmission,
+    getBundleConfigStateCore,
+    applyBundleConfigSubmission,
     connectSessionSocket,
     ...overrides,
   };
@@ -624,6 +631,13 @@ export class LocalSessionBackend implements SessionBackend {
           },
           onPhaseStart: (phase) => {
             currentPhase = phase;
+            const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
+            this.emitPtyData(banner);
+            this.emit({
+              type: 'script_output',
+              phase,
+              data: banner,
+            });
           },
         }).finally(() => {
           if (this.pendingAttachAbortController === attachAbortController) {
@@ -825,6 +839,20 @@ export class LocalSessionBackend implements SessionBackend {
   ): Promise<void> {
     const workspace = await this.resolveWorkspace(projectName, workspaceId);
     await this.deps.applyBundleRefreshSubmission(projectName, workspace.path, submission);
+  }
+
+  async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
+    const workspace = await this.resolveWorkspace(projectName, workspaceId);
+    return this.deps.getBundleConfigStateCore(projectName, workspace.path, workspace.id);
+  }
+
+  async applyBundleConfigUpdate(
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
+  ): Promise<void> {
+    const workspace = await this.resolveWorkspace(projectName, workspaceId);
+    await this.deps.applyBundleConfigSubmission(projectName, workspace.path, submission);
   }
 
   async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {

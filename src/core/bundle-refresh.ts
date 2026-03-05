@@ -16,7 +16,7 @@ import {
   updateProjectConfig,
 } from './config.js';
 import { runOnboarding, KEEP_EXISTING_SECRET, type OnboardingOptions } from '../utils/onboarding.js';
-import { getProjectSecret, getProjectSecrets, setProjectSecret } from '../utils/secrets.js';
+import { deleteProjectSecret, getProjectSecret, getProjectSecrets, setProjectSecret } from '../utils/secrets.js';
 import { checkCommandExists } from '../utils/deps.js';
 import { SpacesError } from '../types/errors.js';
 import type {
@@ -36,6 +36,11 @@ import type {
   BundleRefreshStep,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type {
+  BundleConfigState,
+  BundleConfigStep,
+  BundleConfigSubmission,
+} from '../types/bundle-config.js';
 
 const BUNDLE_FILENAME = 'bundle.json';
 const BASE_SCOPE = '__base__';
@@ -649,6 +654,37 @@ function buildPendingRequirementsSummary(steps: BundleRefreshStep[]): string[] {
   return lines;
 }
 
+async function resolveConfirmResult(
+  step: ConfirmStep,
+  confirmHistory: Record<string, BundleConfirmHistoryEntry>
+): Promise<{ result?: ConfirmStepResult; checkedAt?: string }> {
+  const fingerprint = getConfirmStepFingerprint(step);
+  const history = confirmHistory[fingerprint];
+  if (history) {
+    return {
+      result: {
+        status: history.status,
+        checkCommand: history.checkCommand,
+      },
+      checkedAt: history.checkedAt,
+    };
+  }
+
+  if (step.checkCommand) {
+    const exists = await checkCommandExists(step.checkCommand);
+    if (exists) {
+      return {
+        result: {
+          status: 'passed',
+          checkCommand: step.checkCommand,
+        },
+      };
+    }
+  }
+
+  return {};
+}
+
 export async function getBundleRefreshPlan(
   projectName: string,
   workspacePath: string,
@@ -859,6 +895,186 @@ export async function applyBundleRefreshSubmission(
     }
 
     const result = allConfirmResults[step.id];
+    if (!result) {
+      continue;
+    }
+
+    const fingerprint = getConfirmStepFingerprint(step);
+    historyNext[fingerprint] = {
+      fingerprint,
+      stepId: step.id,
+      checkCommand: step.checkCommand,
+      status: result.status,
+      scope,
+      bundleHash,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  updateProjectConfig(projectName, {
+    bundleValues: Object.keys(newValues).length > 0 ? newValues : undefined,
+    bundleSecretKeys: secretKeys.size > 0 ? uniqueSorted([...secretKeys]) : undefined,
+    bundleWorkspaceState: stateApplied.bundleWorkspaceState,
+    bundleConfirmHistory: Object.keys(historyNext).length > 0 ? historyNext : undefined,
+  });
+}
+
+export async function getBundleConfigState(
+  projectName: string,
+  workspacePath: string,
+  workspaceId?: string
+): Promise<BundleConfigState> {
+  const workspaceName = resolveWorkspaceNameFromPath(workspacePath);
+  const resolvedWorkspaceId = workspaceId ?? `${projectName}:${workspaceName}`;
+  const changes = detectBundleChanges(projectName, workspacePath);
+  const details = formatBundleChangeDetails(changes);
+
+  const emptyState: BundleConfigState = {
+    projectName,
+    workspaceId: resolvedWorkspaceId,
+    workspaceName,
+    workspacePath: resolve(workspacePath),
+    hasBundle: false,
+    scope: changes.scope,
+    bundleSource: changes.bundleSource,
+    currentHash: changes.currentHash,
+    details,
+    steps: [],
+  };
+
+  if (!changes.hasBundle || !changes.currentBundle) {
+    return emptyState;
+  }
+
+  const config = readProjectConfig(projectName);
+  const inputValues = config.bundleValues || {};
+  const confirmHistory = config.bundleConfirmHistory || {};
+  const secretStepKeys = (changes.currentBundle.onboarding || [])
+    .filter((step): step is SecretStep => step.type === 'secret')
+    .map((step) => step.configKey);
+  const existingSecrets = await getProjectSecrets(projectName, secretStepKeys);
+  const steps: BundleConfigStep[] = [];
+
+  for (const step of changes.currentBundle.onboarding || []) {
+    if (step.type === 'input') {
+      steps.push({
+        id: step.id,
+        type: step.type,
+        title: step.title,
+        description: step.description,
+        required: step.required,
+        configKey: step.configKey,
+        defaultValue: step.defaultValue,
+        validationPattern: step.validationPattern,
+        validationMessage: step.validationMessage,
+        value: inputValues[step.configKey],
+      });
+      continue;
+    }
+
+    if (step.type === 'secret') {
+      steps.push({
+        id: step.id,
+        type: step.type,
+        title: step.title,
+        description: step.description,
+        required: step.required,
+        configKey: step.configKey,
+        validationPattern: step.validationPattern,
+        validationMessage: step.validationMessage,
+        hasSecret: Object.prototype.hasOwnProperty.call(existingSecrets, step.configKey),
+      });
+      continue;
+    }
+
+    if (step.type === 'confirm') {
+      const resolved = await resolveConfirmResult(step, confirmHistory);
+      steps.push({
+        id: step.id,
+        type: step.type,
+        title: step.title,
+        description: step.description,
+        required: step.required,
+        checkCommand: step.checkCommand,
+        installUrl: step.installUrl,
+        confirmPrompt: step.confirmPrompt,
+        confirmResult: resolved.result,
+        confirmCheckedAt: resolved.checkedAt,
+      });
+      continue;
+    }
+
+    steps.push({
+      id: step.id,
+      type: step.type,
+      title: step.title,
+      description: step.description,
+      required: step.required,
+    });
+  }
+
+  return {
+    ...emptyState,
+    hasBundle: true,
+    bundleName: changes.currentBundle.name,
+    bundleVersion: changes.currentBundle.version,
+    steps,
+  };
+}
+
+export async function applyBundleConfigSubmission(
+  projectName: string,
+  workspacePath: string,
+  submission: BundleConfigSubmission
+): Promise<void> {
+  const changes = detectBundleChanges(projectName, workspacePath);
+  if (!changes.hasBundle || !changes.currentBundle || !changes.currentHash) {
+    throw new SpacesError(changes.parseError || 'No bundle found for workspace', 'USER_ERROR', 1);
+  }
+
+  const scope = changes.scope || BASE_SCOPE;
+  const bundle = changes.currentBundle;
+  const bundleHash = changes.currentHash;
+  const config = readProjectConfig(projectName);
+  const confirmHistory = config.bundleConfirmHistory || {};
+  const stateApplied = applyWorkspaceState(config, scope, bundleHash, bundle);
+
+  const inputValues = submission.inputValues || {};
+  const secretValues = submission.secretValues || {};
+  const confirmResults = submission.confirmResults || {};
+
+  const newValues: Record<string, string> = {
+    ...(config.bundleValues || {}),
+    ...inputValues,
+  };
+
+  const secretKeys = new Set<string>(stateApplied.mergedSecretKeys);
+
+  for (const [key, value] of Object.entries(secretValues)) {
+    if (value === '') {
+      await deleteProjectSecret(projectName, key);
+      secretKeys.delete(key);
+      continue;
+    }
+
+    if (!value || value === KEEP_EXISTING_SECRET) {
+      continue;
+    }
+
+    await setProjectSecret(projectName, key, value);
+    secretKeys.add(key);
+  }
+
+  const historyNext: Record<string, BundleConfirmHistoryEntry> = {
+    ...confirmHistory,
+  };
+
+  for (const step of bundle.onboarding || []) {
+    if (step.type !== 'confirm') {
+      continue;
+    }
+
+    const result = confirmResults[step.id];
     if (!result) {
       continue;
     }

@@ -50,6 +50,8 @@ import { getNotificationConfig, updateNotificationConfig } from "../../core/conf
 import {
   getBundleRefreshPlan,
   applyBundleRefreshSubmission,
+  getBundleConfigState,
+  applyBundleConfigSubmission,
 } from '../../core/bundle-refresh.js';
 import { buildSessionName } from '../../session/session-name.js';
 import { buildWorkspaceSessionHooks } from '../../session/workspace-shell-hooks.js';
@@ -424,6 +426,43 @@ export class RemoteSessionHandler {
         );
         break;
 
+      case 'get_bundle_config_state':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to inspect bundle configuration'
+          );
+          return;
+        }
+        await this.handleGetBundleConfigState(
+          session,
+          msg.projectName,
+          msg.workspaceId,
+          sendResponse
+        );
+        break;
+
+      case 'apply_bundle_config_update':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to update bundle configuration'
+          );
+          return;
+        }
+        await this.handleApplyBundleConfigUpdate(
+          session,
+          msg.projectName,
+          msg.workspaceId,
+          msg.submission,
+          sendResponse
+        );
+        break;
+
       case 'review_request':
         await this.handleReviewRequest(
           session,
@@ -701,6 +740,14 @@ export class RemoteSessionHandler {
             },
             onPhaseStart: (phase) => {
               currentPhase = phase;
+              const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
+              void this.sendMessage(session, sendResponse, {
+                type: 'script_output',
+                phase,
+                data: banner.toString('base64'),
+              }).catch((error) => {
+                logger.debug(`[remote-session] Failed to send script phase banner: ${error instanceof Error ? error.message : String(error)}`);
+              });
             },
           }).finally(() => {
             const pending = this.pendingAttachRuns.get(session.connectionId);
@@ -1229,6 +1276,46 @@ export class RemoteSessionHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to apply bundle refresh';
       await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_APPLY_FAILED', message);
+    }
+  }
+
+  private async handleGetBundleConfigState(
+    session: RemoteClientSession,
+    projectName: string,
+    workspaceId: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspace = await this.resolveWorkspace(projectName, workspaceId);
+      const state = await getBundleConfigState(projectName, workspace.path, `${projectName}:${workspace.id}`);
+      await this.sendMessage(session, sendResponse, {
+        type: 'bundle_config_state',
+        state,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load bundle configuration state';
+      await this.sendError(session, sendResponse, 'BUNDLE_CONFIG_STATE_FAILED', message);
+    }
+  }
+
+  private async handleApplyBundleConfigUpdate(
+    session: RemoteClientSession,
+    projectName: string,
+    workspaceId: string,
+    submission: import('../../types/bundle-config.js').BundleConfigSubmission,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const workspace = await this.resolveWorkspace(projectName, workspaceId);
+      await applyBundleConfigSubmission(projectName, workspace.path, submission);
+      await this.sendMessage(session, sendResponse, {
+        type: 'bundle_config_updated',
+        projectName,
+        workspaceId: `${projectName}:${workspace.id}`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to apply bundle configuration update';
+      await this.sendError(session, sendResponse, 'BUNDLE_CONFIG_UPDATE_FAILED', message);
     }
   }
 

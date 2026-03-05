@@ -494,6 +494,7 @@ export function getDefaultShortcuts(): FlowHelp['shortcuts'] {
     { key: '↑/↓ or j/k', description: 'Navigate list' },
     { key: 'Tab', description: 'Switch panel' },
     { key: 'n', description: 'New project/workspace' },
+    { key: 'b', description: 'Edit bundle config' },
     { key: 'd', description: 'Delete selected' },
     { key: 'i', description: 'Open inbox' },
     { key: 'r', description: 'Refresh' },

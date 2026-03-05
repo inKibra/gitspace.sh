@@ -11,6 +11,7 @@ import type {
 } from '../backend';
 import type { BackendEvent } from '../events';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh';
+import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config';
 
 class FakeBackend implements SessionBackend {
   readonly descriptor: BackendDescriptor;
@@ -70,6 +71,14 @@ class FakeBackend implements SessionBackend {
     _projectName: string,
     _workspaceId: string,
     _submission: BundleRefreshSubmission
+  ): Promise<void> {}
+  async getBundleConfigState(_projectName: string, _workspaceId: string): Promise<BundleConfigState> {
+    throw new Error('not implemented');
+  }
+  async applyBundleConfigUpdate(
+    _projectName: string,
+    _workspaceId: string,
+    _submission: BundleConfigSubmission
   ): Promise<void> {}
   async requestInbox(): Promise<void> {}
   async clearInbox(_id?: string): Promise<void> {}

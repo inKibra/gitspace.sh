@@ -114,6 +114,7 @@ describe('useSpacesBrowser tree building', () => {
     expect(types).toContain('workspace');
     expect(types).toContain('session');
     expect(types).toContain('events');
+    expect(types).toContain('bundle-config');
     expect(types).toContain('new-session');
   });
 
@@ -327,6 +328,23 @@ describe('useSpacesBrowser activateSelected', () => {
     await act(async () => { await result.current.activateSelected(); });
 
     expect(onEditProcesses).toHaveBeenCalledWith({ workspaceId: 'ws-1' });
+  });
+
+  it('calls onManageBundleConfig when bundle-config item is activated', async () => {
+    const ws = makeWorkspace();
+    const onManageBundleConfig = mock(() => {});
+    const props = makeProps({ workspaces: [ws], onManageBundleConfig });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    const manageIndex = result.current.items.findIndex((item) => item.type === 'bundle-config');
+    expect(manageIndex).toBeGreaterThanOrEqual(0);
+    act(() => { result.current.selectIndex(manageIndex); });
+
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onManageBundleConfig).toHaveBeenCalledWith({ workspaceId: 'ws-1' });
   });
 
   it('edit-processes item appears before events item in expanded workspace', () => {

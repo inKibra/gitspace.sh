@@ -38,6 +38,7 @@ function makeTuiProps(overrides: Partial<UseSpacesBrowserReturn> = {}): UseSpace
     refresh: mock(async () => {}),
     openEvents: mock(() => {}),
     editProcesses: mock(() => {}),
+    manageBundleConfig: mock(() => {}),
     back: mock(() => {}),
     ...overrides,
   };

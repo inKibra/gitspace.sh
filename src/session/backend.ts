@@ -4,6 +4,10 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type {
+  BundleConfigState,
+  BundleConfigSubmission,
+} from '../types/bundle-config.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
@@ -105,6 +109,12 @@ export interface SessionBackend {
     projectName: string,
     workspaceId: string,
     submission: BundleRefreshSubmission
+  ): Promise<void>;
+  getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState>;
+  applyBundleConfigUpdate(
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
   ): Promise<void>;
 
   requestInbox(): Promise<void>;

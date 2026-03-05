@@ -257,4 +257,48 @@ function registerSpaceBundleCommands(space: Command): void {
         workspace: ctx.workspace,
       });
     }));
+
+  bundle
+    .command('show')
+    .description('Show current bundle values, secret set-status, and confirm status')
+    .action(withErrorHandler(async () => {
+      const ctx = requireSessionContext();
+      const { bundleShow } = await import('../../commands/bundle.js');
+      await bundleShow({
+        project: ctx.project,
+        workspace: ctx.workspace,
+      });
+    }));
+
+  bundle
+    .command('edit')
+    .description('Update bundle inputs, secrets, and confirm states')
+    .option('--input <key=value>', 'Set a non-secret input value (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .option('--secret <key>', 'Prompt for a secret key value (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .option('--secret-unset <key>', 'Unset a secret key value (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .option('--confirm <id=status>', 'Set confirm status to passed|skipped (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { bundleEdit } = await import('../../commands/bundle.js');
+      await bundleEdit({
+        project: ctx.project,
+        workspace: ctx.workspace,
+        input: options.input,
+        secret: options.secret,
+        secretUnset: options.secretUnset,
+        confirm: options.confirm,
+      });
+    }));
 }
