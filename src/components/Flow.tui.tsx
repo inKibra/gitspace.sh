@@ -249,8 +249,12 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
             <box flexDirection="column" flexGrow={1} overflow="hidden">
               {filteredOptions.length === 0 ? (
                 <>
-                  <text fg={COLORS.warning}>No matches for "{fitInputText(searchQuery, maxLabelWidth - 2)}"</text>
-                  <text fg={COLORS.textDim} marginTop={1}>Try a different search query.</text>
+                  <text fg={COLORS.warning}>
+                    {truncateLine(`No matches for "${searchQuery}"`, maxContentWidth) || 'No matches'}
+                  </text>
+                  <text fg={COLORS.textDim} marginTop={1}>
+                    {truncateLine('Try a different search query.', maxContentWidth) || 'Try another query.'}
+                  </text>
                 </>
               ) : (
                 visibleOptions.map((entry, offset) => {
