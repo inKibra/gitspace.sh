@@ -548,9 +548,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           flow.handleCancel();
         } else if (key.name === 'return') {
           await flow.handleConfirm();
-        } else if (key.name === 'up' || key.raw === 'k') {
+        } else if (key.name === 'up') {
           flow.moveUp();
-        } else if (key.name === 'down' || key.raw === 'j') {
+        } else if (key.name === 'down') {
           flow.moveDown();
         } else if (key.name === 'backspace') {
           const current = flow.flow.searchQuery ?? '';
