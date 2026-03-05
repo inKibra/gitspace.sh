@@ -26,6 +26,10 @@ import {
 import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal, type ScriptTerminalHandle } from './ScriptTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
+import {
+  applySearchableSelectPaste,
+  handleSearchableSelectKey,
+} from '../tui/flow-select-input.js';
 import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js';
 import { useLifecycleController } from '../app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from '../lib/processes/editor.js';
@@ -466,11 +470,18 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
   useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
+      const rawText = event.text ?? '';
+
+      if (flow.isOpen && applySearchableSelectPaste(flow, rawText)) {
+        event.preventDefault();
+        return;
+      }
+
       if (!flow.isOpen) {
         return;
       }
 
-      const text = normalizeInputText(event.text ?? '');
+      const text = normalizeInputText(rawText);
       if (!text) {
         return;
       }
@@ -489,11 +500,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         return;
       }
 
-      if (flow.flow.type === 'select' && flow.flow.searchable) {
-        const currentQuery = flow.flow.searchQuery ?? '';
-        flow.updateSelectQuery(currentQuery + text);
-        event.preventDefault();
-      }
     };
 
     renderer.keyInput.on('paste', handlePaste);
@@ -543,26 +549,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         return;
       }
 
-      if (flow.flow.type === 'select' && flow.flow.searchable) {
-        if (key.name === 'escape') {
-          flow.handleCancel();
-        } else if (key.name === 'return') {
-          await flow.handleConfirm();
-        } else if (key.name === 'up') {
-          flow.moveUp();
-        } else if (key.name === 'down') {
-          flow.moveDown();
-        } else if (key.name === 'backspace') {
-          const current = flow.flow.searchQuery ?? '';
-          flow.updateSelectQuery(current.slice(0, -1));
-        } else {
-          const chunk = getKeyboardInputChunk(key);
-          if (!chunk) {
-            return;
-          }
-          const current = flow.flow.searchQuery ?? '';
-          flow.updateSelectQuery(current + chunk);
-        }
+      if (await handleSearchableSelectKey(flow, key)) {
         return;
       }
 

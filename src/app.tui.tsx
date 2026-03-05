@@ -102,6 +102,10 @@ import {
   normalizeInputText,
 } from './tui/input-text.js';
 import {
+  applySearchableSelectPaste,
+  handleSearchableSelectKey,
+} from './tui/flow-select-input.js';
+import {
   VT_KITTY_KEYBOARD_CONFIG,
   forceDisableKittyKeyboard,
 } from './tui/kitty-keyboard.js';
@@ -1252,7 +1256,14 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
 
   useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
-      const text = normalizeInputText(event.text ?? '');
+      const rawText = event.text ?? '';
+
+      if (flow.isOpen && applySearchableSelectPaste(flow, rawText)) {
+        event.preventDefault();
+        return;
+      }
+
+      const text = normalizeInputText(rawText);
       if (!text) {
         return;
       }
@@ -1272,12 +1283,6 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
           return;
         }
 
-        if (flow.flow.type === 'select' && flow.flow.searchable) {
-          const currentQuery = flow.flow.searchQuery ?? '';
-          flow.updateSelectQuery(currentQuery + text);
-          event.preventDefault();
-          return;
-        }
       }
 
       if (projectFlow.type === 'onboarding') {
@@ -1379,26 +1384,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       }
 
       // Handle other modals (select, message, etc.)
-      if (flow.flow.type === 'select' && flow.flow.searchable) {
-        if (key.name === 'escape') {
-          flow.handleCancel();
-        } else if (key.name === 'return') {
-          await flow.handleConfirm();
-        } else if (key.name === 'up') {
-          flow.moveUp();
-        } else if (key.name === 'down') {
-          flow.moveDown();
-        } else if (key.name === 'backspace') {
-          const current = flow.flow.searchQuery ?? '';
-          flow.updateSelectQuery(current.slice(0, -1));
-        } else {
-          const chunk = getKeyboardInputChunk(key);
-          if (!chunk) {
-            return;
-          }
-          const current = flow.flow.searchQuery ?? '';
-          flow.updateSelectQuery(current + chunk);
-        }
+      if (await handleSearchableSelectKey(flow, key)) {
         return;
       }
 

@@ -1,4 +1,5 @@
-interface KeyboardLikeInput {
+export interface KeyboardLikeInput {
+  name?: string | null;
   raw?: string;
   ctrl?: boolean;
   meta?: boolean;
