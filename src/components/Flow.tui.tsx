@@ -221,9 +221,10 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
         const modalHeight = Math.min(maxHeight, chromeHeight + (visibleCount * 3));
         const windowStart = getOptionWindowStart(selectedIndex, visibleCount, filteredOptions.length);
         const visibleOptions = filteredOptions.slice(windowStart, windowStart + visibleCount);
-        const maxLabelWidth = Math.max(10, modalWidth - 8);
-        const maxDescriptionWidth = Math.max(8, modalWidth - 10);
-        const searchLineWidth = Math.max(8, modalWidth - 6);
+        const maxContentWidth = Math.max(1, modalWidth - 6);
+        const maxLabelWidth = Math.max(1, Math.min(maxContentWidth, modalWidth - 8));
+        const maxDescriptionWidth = Math.max(1, Math.min(maxContentWidth, modalWidth - 10));
+        const searchLineWidth = maxContentWidth;
         const searchQuery = state.searchQuery ?? '';
         const searchDisplay = fitInputText(searchQuery, searchLineWidth);
 
