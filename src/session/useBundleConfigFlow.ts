@@ -213,16 +213,24 @@ export interface UseBundleConfigFlowResult {
 export function useBundleConfigFlow(
   options: UseBundleConfigFlowOptions
 ): UseBundleConfigFlowResult {
+  const {
+    flow,
+    getBundleConfigState,
+    applyBundleConfigUpdate,
+    resolveProjectName,
+    onApplied,
+  } = options;
+
   const openBundleConfig = useCallback(async (
     params: { workspaceId: string; projectName?: string | null }
   ): Promise<boolean> => {
     const projectName =
       params.projectName ??
-      options.resolveProjectName?.(params.workspaceId) ??
+      resolveProjectName?.(params.workspaceId) ??
       parseProjectNameFromWorkspaceId(params.workspaceId);
 
     if (!projectName) {
-      options.flow.showMessage({
+      flow.showMessage({
         title: 'Bundle Config Unavailable',
         message: `Could not resolve project for workspace ${params.workspaceId}.`,
         variant: 'error',
@@ -231,15 +239,15 @@ export function useBundleConfigFlow(
     }
 
     try {
-      options.flow.showLoading({
+      flow.showLoading({
         title: 'Bundle Config',
         message: 'Loading current bundle configuration...',
       });
 
-      const state = await options.getBundleConfigState(projectName, params.workspaceId);
+      const state = await getBundleConfigState(projectName, params.workspaceId);
 
       if (!state.hasBundle) {
-        options.flow.showMessage({
+        flow.showMessage({
           title: 'No Bundle',
           message: 'No bundle is configured for this workspace.',
           variant: 'info',
@@ -248,7 +256,7 @@ export function useBundleConfigFlow(
       }
 
       if (state.steps.length === 0) {
-        options.flow.showMessage({
+        flow.showMessage({
           title: 'Bundle Config',
           message: 'This bundle has no editable onboarding steps.',
           variant: 'info',
@@ -256,9 +264,9 @@ export function useBundleConfigFlow(
         return false;
       }
 
-      const values = await runWizard(options.flow, state);
+      const values = await runWizard(flow, state);
       if (!values) {
-        options.flow.showMessage({
+        flow.showMessage({
           title: 'Bundle Config Cancelled',
           message: 'No changes were applied.',
           variant: 'warning',
@@ -266,33 +274,33 @@ export function useBundleConfigFlow(
         return false;
       }
 
-      options.flow.showLoading({
+      flow.showLoading({
         title: 'Bundle Config',
         message: 'Applying bundle configuration updates...',
       });
 
-      await options.applyBundleConfigUpdate(
+      await applyBundleConfigUpdate(
         projectName,
         params.workspaceId,
         buildSubmission(state, values)
       );
 
-      await options.onApplied?.();
-      options.flow.showMessage({
+      await onApplied?.();
+      flow.showMessage({
         title: 'Bundle Config Updated',
         message: `Saved bundle configuration for ${state.workspaceName}.`,
         variant: 'success',
       });
       return true;
     } catch (error) {
-      options.flow.showMessage({
+      flow.showMessage({
         title: 'Bundle Config Failed',
         message: toErrorMessage(error, 'Failed to update bundle configuration.'),
         variant: 'error',
       });
       return false;
     }
-  }, [options]);
+  }, [applyBundleConfigUpdate, flow, getBundleConfigState, onApplied, resolveProjectName]);
 
   return { openBundleConfig };
 }
