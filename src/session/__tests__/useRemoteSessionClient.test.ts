@@ -15,6 +15,7 @@ import { buildRemoteBackendKey } from '../backend-key.js'
 import type { RemoteSessionPtyBackend } from '../useRemoteSessionClient.js'
 import { useRemoteSessionClient } from '../useRemoteSessionClient.js'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
+import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js'
 
 const domWindow = new Window()
 const originalWindow = globalThis.window
@@ -54,6 +55,8 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   updateNotificationConfigCalls: NotificationConfig[] = []
   bundlePlanCalls: Array<{ projectName: string; workspaceId: string }> = []
   bundleApplyCalls: Array<{ projectName: string; workspaceId: string; submission: BundleRefreshSubmission }> = []
+  bundleConfigStateCalls: Array<{ projectName: string; workspaceId: string }> = []
+  bundleConfigUpdateCalls: Array<{ projectName: string; workspaceId: string; submission: BundleConfigSubmission }> = []
   ptyWrites: Uint8Array[] = []
   ptyResizes: Array<{ cols: number; rows: number }> = []
 
@@ -173,6 +176,27 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     submission: BundleRefreshSubmission
   ): Promise<void> {
     this.bundleApplyCalls.push({ projectName, workspaceId, submission })
+  }
+
+  async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
+    this.bundleConfigStateCalls.push({ projectName, workspaceId })
+    return {
+      projectName,
+      workspaceId,
+      workspaceName: workspaceId,
+      workspacePath: `/tmp/${workspaceId}`,
+      hasBundle: true,
+      details: 'bundle state',
+      steps: [],
+    }
+  }
+
+  async applyBundleConfigUpdate(
+    projectName: string,
+    workspaceId: string,
+    submission: BundleConfigSubmission
+  ): Promise<void> {
+    this.bundleConfigUpdateCalls.push({ projectName, workspaceId, submission })
   }
 
   async clearInbox(id?: string): Promise<void> {

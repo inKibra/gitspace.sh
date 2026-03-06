@@ -62,13 +62,16 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
   if (selectedItem?.type === 'edit-processes') {
     return '[↑↓] Navigate  [Enter] Edit Processes Config  [r] Refresh  [q] Back';
   }
+  if (selectedItem?.type === 'bundle-config') {
+    return '[↑↓] Navigate  [Enter] Edit Bundle Config  [b] Bundle  [r] Refresh  [q] Back';
+  }
   if (selectedItem?.type === 'events') {
     return '[↑↓] Navigate  [Enter] Open Events  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'new-session') {
     return '[↑↓] Navigate  [Enter] New Session  [r] Refresh  [q] Back';
   }
-  return '[↑↓] Navigate  [Enter] Select  [n] New  [r] Refresh  [q] Back';
+  return '[↑↓] Navigate  [Enter] Select  [n] New  [b] Bundle  [r] Refresh  [q] Back';
 }
 
 // ============================================================================
@@ -212,6 +215,16 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             return (
               <text key={`edit-processes-${item.workspaceId}`} fg={textColor} height={1}>
                 {prefix}   ⚙ Edit Processes Config
+              </text>
+            );
+          }
+
+          if (item.type === 'bundle-config') {
+            const textColor = isSelected ? COLORS.selected : '#58A6FF';
+            const prefix = isSelected ? '>' : ' ';
+            return (
+              <text key={`bundle-config-${item.workspaceId}`} fg={textColor} height={1}>
+                {prefix}   ◇ Edit Bundle Config
               </text>
             );
           }

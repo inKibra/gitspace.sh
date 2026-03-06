@@ -81,6 +81,15 @@ export {
 } from './useBundleRefreshAttachFlow.js';
 
 export type {
+  UseBundleConfigFlowOptions,
+  UseBundleConfigFlowResult,
+} from './useBundleConfigFlow.js';
+
+export {
+  useBundleConfigFlow,
+} from './useBundleConfigFlow.js';
+
+export type {
   RemoteSessionSocketHandlers,
   RemoteSessionSocketAdapter,
   RemoteSessionCryptoAdapter,

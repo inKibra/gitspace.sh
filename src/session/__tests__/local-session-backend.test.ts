@@ -73,6 +73,8 @@ describe('LocalSessionBackend', () => {
         options.onOutput?.(Buffer.from('pre-output'));
         options.onPhaseStart?.('setup');
         options.onOutput?.(Buffer.from('setup-output'));
+        options.onPhaseStart?.('select');
+        options.onOutput?.(Buffer.from('select-output'));
         return { success: true };
       },
       getInbox: async () => [
@@ -189,9 +191,24 @@ describe('LocalSessionBackend', () => {
       viewOnly: false,
     });
 
+    const scriptStreamChunks = events
+      .filter((event): event is Extract<BackendEvent, { type: 'script_output' }> =>
+        event.type === 'script_output' && !event.done && event.data.length > 0
+      )
+      .map((event) => new TextDecoder().decode(event.data));
+
+    expect(scriptStreamChunks).toEqual([
+      '\r\n==> pre scripts...\r\n',
+      'pre-output',
+      '\r\n==> setup scripts...\r\n',
+      'setup-output',
+      '\r\n==> select scripts...\r\n',
+      'select-output',
+    ]);
+
     expect(events).toContainEqual({
       type: 'script_output',
-      phase: 'setup',
+      phase: 'select',
       data: new Uint8Array(0),
       done: true,
     });

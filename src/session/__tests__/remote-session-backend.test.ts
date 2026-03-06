@@ -339,6 +339,102 @@ describe('RemoteSessionBackend', () => {
     expect(output).toEqual(['snapshot-before-handler', 'live-after-handler']);
   });
 
+  it('preserves script phase banner and output ordering during running scripts', async () => {
+    const socket = createFakeSocket();
+    const events: BackendEvent[] = [];
+    const ptyChunks: string[] = [];
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    backend.onEvent((event) => events.push(event));
+    backend.setPtyOutputHandler((data) => {
+      ptyChunks.push(new TextDecoder().decode(data));
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'script_output',
+        phase: 'pre',
+        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('==> pre scripts...\n')),
+      })
+    );
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'script_output',
+        phase: 'setup',
+        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('==> setup scripts...\n')),
+      })
+    );
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'script_output',
+        phase: 'setup',
+        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('installing deps\n')),
+      })
+    );
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'script_output',
+        phase: 'select',
+        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('==> select scripts...\n')),
+      })
+    );
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'script_output',
+        phase: 'select',
+        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('opening shell\n')),
+      })
+    );
+    await Bun.sleep(0);
+
+    expect(ptyChunks).toEqual([
+      '==> pre scripts...\n',
+      '==> setup scripts...\n',
+      'installing deps\n',
+      '==> select scripts...\n',
+      'opening shell\n',
+    ]);
+
+    const scriptEvents = events.filter(
+      (event): event is Extract<BackendEvent, { type: 'script_output' }> => event.type === 'script_output'
+    );
+    const chunks = scriptEvents.map((event) => ({
+      phase: event.phase,
+      text: new TextDecoder().decode(event.data),
+    }));
+
+    expect(chunks).toEqual([
+      { phase: 'pre', text: '==> pre scripts...\n' },
+      { phase: 'setup', text: '==> setup scripts...\n' },
+      { phase: 'setup', text: 'installing deps\n' },
+      { phase: 'select', text: '==> select scripts...\n' },
+      { phase: 'select', text: 'opening shell\n' },
+    ]);
+  });
+
   it('re-buffers PTY output after callback is cleared and flushes on re-register', async () => {
     const socket = createFakeSocket();
     const callbackOneOutput: string[] = [];

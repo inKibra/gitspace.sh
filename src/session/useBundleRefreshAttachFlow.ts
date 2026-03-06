@@ -451,7 +451,7 @@ export function useBundleRefreshAttachFlow(
       const currentOptions = optionsRef.current;
       currentOptions.flow.showMessage({
         title: 'Workspace Script Failed',
-        message,
+        message: `${message}\n\nClose this dialog to inspect script output.`,
         variant: 'error',
       });
       lastHandledAttemptRef.current = pending.attemptId;

@@ -193,6 +193,42 @@ describe('runWorkspaceScripts', () => {
       expect(hasSetupBeenRun(workspacePath)).toBe(true);
     });
 
+    it('reports pre, setup, and select phases in order on first run', async () => {
+      const phases: string[] = [];
+      const chunks: string[] = [];
+
+      const preScript = join(preScriptsDir, '01-pre.sh');
+      writeFileSync(preScript, '#!/bin/bash\necho "pre-phase"');
+      chmodSync(preScript, 0o755);
+
+      const setupScript = join(setupScriptsDir, '01-setup.sh');
+      writeFileSync(setupScript, '#!/bin/bash\necho "setup-phase"');
+      chmodSync(setupScript, 0o755);
+
+      const selectScript = join(selectScriptsDir, '01-select.sh');
+      writeFileSync(selectScript, '#!/bin/bash\necho "select-phase"');
+      chmodSync(selectScript, 0o755);
+
+      const result = await runWorkspaceScripts({
+        projectName: 'test-project',
+        workspacePath,
+        workspaceName: 'test-workspace',
+        repository: 'owner/repo',
+        onPhaseStart: (phase) => {
+          phases.push(phase);
+        },
+        onOutput: (data) => {
+          chunks.push(data.toString());
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(phases).toEqual(['pre', 'setup', 'select']);
+      expect(chunks.join('')).toContain('pre-phase');
+      expect(chunks.join('')).toContain('setup-phase');
+      expect(chunks.join('')).toContain('select-phase');
+    });
+
     it('should return pre phase error when pre script fails', async () => {
       // Create failing pre script
       const preScript = join(preScriptsDir, '01-fail.sh');
@@ -327,6 +363,27 @@ describe('runWorkspaceScripts', () => {
       expect(output.trim()).toBe('select');
     });
 
+    it('reports only the select phase for an existing workspace', async () => {
+      const phases: string[] = [];
+
+      const selectScript = join(selectScriptsDir, '01-select.sh');
+      writeFileSync(selectScript, '#!/bin/bash\necho "select-only"');
+      chmodSync(selectScript, 0o755);
+
+      const result = await runWorkspaceScripts({
+        projectName: 'test-project',
+        workspacePath,
+        workspaceName: 'test-workspace',
+        repository: 'owner/repo',
+        onPhaseStart: (phase) => {
+          phases.push(phase);
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(phases).toEqual(['select']);
+    });
+
     it('should return select phase error when select script fails', async () => {
       // Create failing select script
       const selectScript = join(selectScriptsDir, '01-fail.sh');
@@ -401,6 +458,32 @@ describe('runWorkspaceScripts', () => {
 
       expect(result.success).toBe(true);
       expect(existsSync(outputFile)).toBe(false);
+    });
+
+    it('does not report any phases when scriptPolicy is skip', async () => {
+      const phases: string[] = [];
+
+      const setupScript = join(setupScriptsDir, '01-setup.sh');
+      writeFileSync(setupScript, '#!/bin/bash\necho "setup"');
+      chmodSync(setupScript, 0o755);
+
+      const selectScript = join(selectScriptsDir, '01-select.sh');
+      writeFileSync(selectScript, '#!/bin/bash\necho "select"');
+      chmodSync(selectScript, 0o755);
+
+      const result = await runWorkspaceScripts({
+        projectName: 'test-project',
+        workspacePath,
+        workspaceName: 'test-workspace',
+        repository: 'owner/repo',
+        scriptPolicy: 'skip',
+        onPhaseStart: (phase) => {
+          phases.push(phase);
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(phases).toEqual([]);
     });
   });
 });

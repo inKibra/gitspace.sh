@@ -57,6 +57,13 @@ describe('bundle-refresh', () => {
       setProjectSecret: async (_projectName: string, key: string, value: string) => {
         savedSecrets[key] = value;
       },
+      deleteProjectSecret: async (_projectName: string, key: string) => {
+        if (!(key in savedSecrets)) {
+          return false;
+        }
+        delete savedSecrets[key];
+        return true;
+      },
       getProjectSecret: async (_projectName: string, key: string) => {
         return savedSecrets[key] ?? null;
       },
@@ -562,6 +569,39 @@ describe('bundle-refresh', () => {
       expect(plan.hasChanged).toBe(false);
       expect(plan.steps.map((step) => step.id)).toContain('pulumi-token');
       expect(plan.details).toContain('Missing required secrets: PULUMI_ACCESS_TOKEN.');
+    });
+
+    it('allows clearing persisted bundle secret values via empty submission value', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const bundle = {
+        version: '1.0' as const,
+        name: 'Unset Secret Bundle',
+        onboarding: [
+          {
+            id: 'token',
+            type: 'secret' as const,
+            title: 'API token',
+            description: 'Secret token',
+            configKey: 'API_TOKEN',
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(bundle));
+
+      const workspacePath = join(testDir, 'workspaces', 'feature-unset-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      savedSecrets.API_TOKEN = 'existing-secret';
+      mockProjectConfig.bundleSecretKeys = ['API_TOKEN'];
+
+      const { applyBundleConfigSubmission } = await import('../bundle-refresh');
+      await applyBundleConfigSubmission('test-project', workspacePath, {
+        secretValues: { API_TOKEN: '' },
+      });
+
+      expect(savedSecrets.API_TOKEN).toBeUndefined();
+      expect(mockProjectConfig.bundleSecretKeys ?? []).not.toContain('API_TOKEN');
     });
   });
 });

@@ -61,6 +61,7 @@ export type TreeItem =
   | { type: 'process-disabled'; processName: string; workspaceId: string; ports?: WorkspaceProcessPort[] }
   | { type: 'process-config-error'; workspaceId: string; error: string }
   | { type: 'edit-processes'; workspaceId: string }
+  | { type: 'bundle-config'; workspaceId: string }
   | { type: 'events'; workspaceId: string }
   | { type: 'new-session'; workspaceId: string };
 
@@ -82,6 +83,7 @@ export interface UseSpacesBrowserProps {
   onProcessDisabled?: (params: { workspaceId: string; processName: string }) => void;
   onOpenEvents: (workspaceId: string) => void;
   onEditProcesses?: (params: { workspaceId: string }) => void;
+  onManageBundleConfig?: (params: { workspaceId: string }) => void;
   onRefresh: () => void | Promise<void>;
   /** Called to refresh sessions after workspace refresh (full refresh by default). */
   onRefreshSessions?: () => void | Promise<void>;
@@ -122,6 +124,7 @@ export interface UseSpacesBrowserReturn {
   refresh: () => Promise<void>;
   openEvents: (workspaceId: string) => void;
   editProcesses: (params: { workspaceId: string }) => void;
+  manageBundleConfig: (params: { workspaceId: string }) => void;
   back: () => void;
 }
 
@@ -283,6 +286,12 @@ function buildTree(
           workspaceId: ws.id,
         });
 
+        // Manage bundle config action
+        items.push({
+          type: 'bundle-config',
+          workspaceId: ws.id,
+        });
+
         // Events action
         items.push({
           type: 'events',
@@ -325,6 +334,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     onProcessDisabled,
     onOpenEvents,
     onEditProcesses,
+    onManageBundleConfig,
     onRefresh,
     onRefreshSessions,
     onBack,
@@ -445,12 +455,14 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       onEditProcesses?.({ workspaceId: item.workspaceId });
     } else if (item.type === 'edit-processes') {
       onEditProcesses?.({ workspaceId: item.workspaceId });
+    } else if (item.type === 'bundle-config') {
+      onManageBundleConfig?.({ workspaceId: item.workspaceId });
     } else if (item.type === 'events') {
       onOpenEvents(item.workspaceId);
     } else if (item.type === 'new-session') {
       await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onOpenEvents]);
+  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenEvents]);
 
   const activateSelected = useCallback(async () => {
     await activateItem(selectedItem);
@@ -522,6 +534,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     refresh,
     openEvents: (workspaceId) => onOpenEvents(workspaceId),
     editProcesses: (params) => onEditProcesses?.(params),
+    manageBundleConfig: (params) => onManageBundleConfig?.(params),
     back,
   };
 }

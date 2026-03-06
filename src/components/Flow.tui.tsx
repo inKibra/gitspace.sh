@@ -9,7 +9,11 @@ import { useKeyboard } from '@opentui/react';
 import type { ScrollBoxRenderable } from '@opentui/core';
 import { toast } from '@opentui-ui/toast';
 import { copyToClipboard } from '../utils/clipboard.js';
-import type { UseFlowReturn, FlowState } from './Flow.js';
+import {
+  getVisibleSelectOptions,
+  type UseFlowReturn,
+  type FlowState,
+} from './Flow.js';
 
 // ============================================================================
 // Colors
@@ -200,30 +204,99 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
       );
 
     case 'select':
-      return (
-        <Modal title={state.title} width={60} height={state.options.length + 8}>
-          <box flexDirection="column" flexGrow={1} overflow="scroll">
-            {state.options.map((option, idx) => {
-              const isSelected = idx === state.selectedIndex;
-              return (
-                <box key={idx} flexDirection="column" marginBottom={1}>
-                  <text fg={isSelected ? COLORS.selected : COLORS.text} height={1}>
-                    {isSelected ? '▶ ' : '  '}{option.label}
-                  </text>
-                  {option.description && (
-                    <text fg={COLORS.textDim} height={1} paddingLeft={4}>
-                      {option.description}
-                    </text>
-                  )}
+      {
+        const maxWidth = getModalMaxWidth();
+        const preferredWidth = state.searchable ? 96 : 72;
+        const desiredMinWidth = state.searchable ? 56 : 48;
+        const safeMinWidth = Math.min(desiredMinWidth, maxWidth);
+        const modalWidth = Math.max(safeMinWidth, Math.min(maxWidth, preferredWidth));
+        const filteredOptions = getVisibleSelectOptions(state);
+        const selectedIndex = filteredOptions.length === 0
+          ? 0
+          : Math.max(0, Math.min(state.selectedIndex, filteredOptions.length - 1));
+        const maxHeight = getModalMaxHeight();
+        const chromeHeight = state.searchable ? 11 : 8;
+        const maxVisibleOptions = Math.max(1, Math.floor((maxHeight - chromeHeight) / 3));
+        const visibleCount = Math.max(1, Math.min(filteredOptions.length || 1, maxVisibleOptions));
+        const modalHeight = Math.min(maxHeight, chromeHeight + (visibleCount * 3));
+        const windowStart = getOptionWindowStart(selectedIndex, visibleCount, filteredOptions.length);
+        const visibleOptions = filteredOptions.slice(windowStart, windowStart + visibleCount);
+        const maxContentWidth = Math.max(1, modalWidth - 6);
+        const maxLabelWidth = Math.max(1, Math.min(maxContentWidth, modalWidth - 8));
+        const maxDescriptionWidth = Math.max(1, Math.min(maxContentWidth, modalWidth - 10));
+        const searchLineWidth = maxContentWidth;
+        const searchQuery = state.searchQuery ?? '';
+        const searchDisplay = fitInputText(searchQuery, searchLineWidth);
+
+        return (
+          <Modal title={state.title} width={modalWidth} height={modalHeight}>
+            {state.searchable && (
+              <>
+                <text fg={COLORS.textDim} marginBottom={1}>Search</text>
+                <box
+                  border
+                  borderStyle="single"
+                  borderColor={COLORS.inputBorder}
+                  paddingLeft={1}
+                  paddingRight={1}
+                  marginBottom={1}
+                >
+                  <text fg={COLORS.text}>{searchDisplay || ' '}</text>
                 </box>
-              );
-            })}
-          </box>
-          <text fg={COLORS.textDim} height={1} marginTop={1}>
-            [↑↓] Navigate  [Enter] Select  [Esc] Cancel
-          </text>
-        </Modal>
-      );
+              </>
+            )}
+
+            <box flexDirection="column" flexGrow={1} overflow="hidden">
+              {filteredOptions.length === 0 ? (
+                <>
+                  <text fg={COLORS.warning}>
+                    {truncateLine(`No matches for "${searchQuery}"`, maxContentWidth) || 'No matches'}
+                  </text>
+                  <text fg={COLORS.textDim} marginTop={1}>
+                    {truncateLine('Try a different search query.', maxContentWidth) || 'Try another query.'}
+                  </text>
+                </>
+              ) : (
+                visibleOptions.map((entry, offset) => {
+                  const visibleIndex = windowStart + offset;
+                  const isSelected = visibleIndex === selectedIndex;
+                  const baseLabelPrefix = isSelected ? '▶ ' : '  ';
+                  const labelPrefix = baseLabelPrefix.slice(0, Math.max(0, maxLabelWidth));
+                  const label = truncateLine(
+                    entry.option.label,
+                    Math.max(0, maxLabelWidth - labelPrefix.length)
+                  );
+                  const descriptionIndent = '    '.slice(0, Math.max(0, maxDescriptionWidth));
+                  const description = entry.option.description
+                    ? truncateLine(
+                        entry.option.description,
+                        Math.max(0, maxDescriptionWidth - descriptionIndent.length)
+                      )
+                    : null;
+
+                  return (
+                    <box key={entry.index} flexDirection="column">
+                      <text fg={isSelected ? COLORS.selected : COLORS.text} height={1}>
+                        {labelPrefix}{label}
+                      </text>
+                      <text fg={COLORS.textDim} height={1}>
+                        {description ? `${descriptionIndent}${description}` : ' '}
+                      </text>
+                      <text fg={COLORS.textDim} height={1}> </text>
+                    </box>
+                  );
+                })
+              )}
+            </box>
+
+            <text fg={COLORS.textDim} height={1} marginTop={1}>
+              {state.searchable
+                ? '[Type] Search  [Backspace] Delete  [↑/↓] Navigate  [Enter] Select  [Esc] Cancel'
+                : '[↑/↓ or j/k] Navigate  [Enter] Select  [Esc] Cancel'}
+            </text>
+          </Modal>
+        );
+      }
 
     case 'wizard':
       const step = state.steps[state.currentStep];
@@ -455,4 +528,64 @@ function getModalMaxHeight(): number {
 
   const terminalRows = rows > 0 ? rows : 24;
   return Math.max(8, terminalRows - 4);
+}
+
+function getModalMaxWidth(): number {
+  let columns = process.stdout.columns || 0;
+  if (columns <= 0) {
+    const size = (process.stdout as { getWindowSize?: () => number[] }).getWindowSize?.();
+    if (Array.isArray(size) && size.length >= 1) {
+      columns = size[0];
+    }
+  }
+
+  const terminalColumns = columns > 0 ? columns : 80;
+  return Math.max(1, terminalColumns - 4);
+}
+
+function getOptionWindowStart(
+  selectedIndex: number,
+  visibleCount: number,
+  totalCount: number
+): number {
+  if (totalCount <= visibleCount) {
+    return 0;
+  }
+
+  const maxStart = Math.max(0, totalCount - visibleCount);
+  const centeredStart = selectedIndex - Math.floor(visibleCount / 2);
+  return Math.max(0, Math.min(centeredStart, maxStart));
+}
+
+function truncateLine(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (maxLength <= 0) {
+    return '';
+  }
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  if (maxLength <= 3) {
+    return normalized.slice(0, maxLength);
+  }
+
+  return `${normalized.slice(0, maxLength - 3)}...`;
+}
+
+function fitInputText(text: string, maxLength: number): string {
+  if (maxLength <= 0) {
+    return '';
+  }
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  if (maxLength <= 3) {
+    return text.slice(-maxLength);
+  }
+
+  return `...${text.slice(-(maxLength - 3))}`;
 }

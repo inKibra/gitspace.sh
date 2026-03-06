@@ -377,6 +377,7 @@ export function useLifecycleController(
 
         flow.showSelect({
           title: 'Select Branch',
+          searchable: true,
           options: branches.map((branch) => ({ label: branch, value: branch })),
           onSelect: async (branch) => {
             const workspaceName = sanitizeForFileSystem(branch);
@@ -433,6 +434,7 @@ export function useLifecycleController(
 
         flow.showSelect({
           title: 'Select Linear Issue',
+          searchable: true,
           options: issues.map((issue) => ({
             label: buildLinearIssueLabel(issue),
             value: issue,

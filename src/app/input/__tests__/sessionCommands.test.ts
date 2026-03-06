@@ -36,5 +36,6 @@ describe('sessionCommands', () => {
     expect(resolveSessionBrowserCommand({ key: 'x' })).toBe('kill')
     expect(resolveSessionBrowserCommand({ key: 'd' })).toBe('delete')
     expect(resolveSessionBrowserCommand({ key: 'i' })).toBe('open-inbox')
+    expect(resolveSessionBrowserCommand({ key: 'b' })).toBe('bundle')
   })
 })

@@ -16,6 +16,7 @@ import { Toaster, toast } from "./lib/sonner.web";
 import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/device.web";
 import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
+import { useBundleConfigFlow } from './session/useBundleConfigFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
@@ -146,18 +147,31 @@ export default function App() {
     onError: (error) => console.error('Flow error:', error),
   });
 
+  const resolveWebWorkspaceProjectName = useCallback((workspaceId: string) => {
+    const index = workspaceId.indexOf(':');
+    if (index > 0) {
+      return workspaceId.slice(0, index);
+    }
+    return terminal.selectedProjectName;
+  }, [terminal.selectedProjectName]);
+
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: terminal.commandError,
     attachSession: (params) => terminal.attachSession(params),
     getBundleRefreshPlan: terminal.getBundleRefreshPlan,
     applyBundleRefresh: terminal.applyBundleRefresh,
-    resolveProjectName: (workspaceId) => {
-      const index = workspaceId.indexOf(':');
-      if (index > 0) {
-        return workspaceId.slice(0, index);
-      }
-      return terminal.selectedProjectName;
+    resolveProjectName: resolveWebWorkspaceProjectName,
+  });
+
+  const bundleConfigFlow = useBundleConfigFlow({
+    flow,
+    getBundleConfigState: terminal.getBundleConfigState,
+    applyBundleConfigUpdate: terminal.applyBundleConfigUpdate,
+    resolveProjectName: resolveWebWorkspaceProjectName,
+    onApplied: async () => {
+      terminal.requestWorkspaces();
+      terminal.requestSessions();
     },
   });
 
@@ -170,13 +184,7 @@ export default function App() {
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
     defaultProjectName: terminal.selectedProjectName,
     getAttachSize: getWebAttachSize,
-    resolveProjectName: (workspaceId) => {
-      const index = workspaceId.indexOf(':');
-      if (index > 0) {
-        return workspaceId.slice(0, index);
-      }
-      return terminal.selectedProjectName;
-    },
+    resolveProjectName: resolveWebWorkspaceProjectName,
     onBeforeAttach: ({ target, params }) => {
       if (target === 'session') {
         setShowScriptTerminal(false);
@@ -574,6 +582,12 @@ export default function App() {
     toast.error(`Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`);
   }, [terminal.workspaces]);
 
+  const handleManageBundleConfig = useCallback(async ({ workspaceId }: { workspaceId: string }) => {
+    const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
+    const projectName = workspace?.projectName ?? terminal.selectedProjectName;
+    await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
+  }, [bundleConfigFlow, terminal.selectedProjectName, terminal.workspaces]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: terminal.workspaces,
@@ -581,6 +595,7 @@ export default function App() {
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
+    onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: (params) => processActions.handleStartProcess(params),
     onStartProcessAttach: (params) => processActions.handleStartProcessAttach(params),
     onStopProcess: (params) => processActions.handleStopProcess(params),
@@ -905,6 +920,16 @@ export default function App() {
         spacesBrowserProps.activateSelected();
       } else if (command === 'new') {
         lifecycleController.openCreateMenu(selectedProjectName);
+      } else if (command === 'bundle') {
+        const selected = spacesBrowserProps.selectedItem;
+        const workspaceId = selected?.type === 'workspace'
+          ? selected.workspace.id
+          : selected && 'workspaceId' in selected
+            ? selected.workspaceId
+            : null;
+        if (workspaceId) {
+          void handleManageBundleConfig({ workspaceId });
+        }
       } else if (command === 'refresh') {
         spacesBrowserProps.refresh();
       } else if (command === 'back') {
@@ -976,6 +1001,7 @@ export default function App() {
     selectedProjectName,
     flow,
     lifecycleController,
+    handleManageBundleConfig,
     deleteWorkspaceWithPrompt,
   ]);
 

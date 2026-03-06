@@ -136,7 +136,7 @@ export function registerWorkspaceCommands(parent: Command): void {
   registerWorkspaceEventsCommands(cmd);
 
   // --------------------------------------------------------------------------
-  // Bundle subcommands: gssh workspace bundle [refresh|status]
+  // Bundle subcommands: gssh workspace bundle [refresh|status|show|edit]
   // --------------------------------------------------------------------------
   registerWorkspaceBundleCommands(cmd);
 }
@@ -461,6 +461,62 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
       await bundleStatus({
         project: ctx.project,
         workspace: ctx.workspace,
+      });
+    }));
+
+  // gssh workspace bundle show --project <p> --workspace <w>
+  requireProjectAndWorkspace(
+    bundle
+      .command('show')
+      .description('Show current bundle values, secret set-status, and confirm status')
+  )
+    .action(withErrorHandler(async (options) => {
+      const ctx = useExplicitContext(options);
+      const { bundleShow } = await import('../../commands/bundle.js');
+      if (!ctx.workspace) {
+        throw new SpacesError('--workspace is required for bundle show', 'USER_ERROR', 1);
+      }
+      await bundleShow({
+        project: ctx.project,
+        workspace: ctx.workspace,
+      });
+    }));
+
+  // gssh workspace bundle edit --project <p> --workspace <w>
+  requireProjectAndWorkspace(
+    bundle
+      .command('edit')
+      .description('Update bundle inputs, secrets, and confirm states')
+  )
+    .option('--input <key=value>', 'Set a non-secret input value (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .option('--secret <key>', 'Prompt for a secret key value (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .option('--secret-unset <key>', 'Unset a secret key value (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .option('--confirm <id=status>', 'Set confirm status to passed|skipped (repeatable)', (value: string, previous: string[] = []) => {
+      previous.push(value);
+      return previous;
+    })
+    .action(withErrorHandler(async (options) => {
+      const ctx = useExplicitContext(options);
+      const { bundleEdit } = await import('../../commands/bundle.js');
+      if (!ctx.workspace) {
+        throw new SpacesError('--workspace is required for bundle edit', 'USER_ERROR', 1);
+      }
+      await bundleEdit({
+        project: ctx.project,
+        workspace: ctx.workspace,
+        input: options.input,
+        secret: options.secret,
+        secretUnset: options.secretUnset,
+        confirm: options.confirm,
       });
     }));
 }
