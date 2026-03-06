@@ -115,21 +115,24 @@ function getPhaseMarker(status: PhaseStatus): string {
 }
 
 const PHASE_BANNER_REGEX = /==>\s*(pre|setup|select|remove)\s+scripts\.\.\./gi;
-const PHASE_BANNER_SCAN_LIMIT = 256;
 
-function findLatestPhaseBanner(text: string): ScriptPhase | null {
-  let latest: ScriptPhase | null = null;
+function findPhaseBannerMatches(chunk: Buffer): Array<{ phase: ScriptPhase; byteIndex: number }> {
+  const text = chunk.toString('utf8');
+  const matches: Array<{ phase: ScriptPhase; byteIndex: number }> = [];
   PHASE_BANNER_REGEX.lastIndex = 0;
 
   let match: RegExpExecArray | null;
   while ((match = PHASE_BANNER_REGEX.exec(text)) !== null) {
     const phase = match[1];
     if (phase === 'pre' || phase === 'setup' || phase === 'select' || phase === 'remove') {
-      latest = phase;
+      matches.push({
+        phase,
+        byteIndex: Buffer.byteLength(text.slice(0, match.index), 'utf8'),
+      });
     }
   }
 
-  return latest;
+  return matches;
 }
 
 export function ScriptTerminal({
@@ -147,7 +150,6 @@ export function ScriptTerminal({
     createPhaseEntry(phase, isRunning, error, exitCode),
   ]);
   const phaseEntriesRef = useRef<PhaseTerminalState[]>(phaseEntries);
-  const phaseBannerCarryRef = useRef('');
   const previousPhaseRef = useRef<ScriptPhase>(phase);
   const previousRunningRef = useRef<boolean>(isRunning);
   const [activePhaseIndex, setActivePhaseIndex] = useState(0);
@@ -327,39 +329,62 @@ export function ScriptTerminal({
     }
 
     const chunk = Buffer.from(data);
-    const scanWindow = `${phaseBannerCarryRef.current}${chunk.toString('utf-8')}`;
-    phaseBannerCarryRef.current = scanWindow.slice(-PHASE_BANNER_SCAN_LIMIT);
+    const appendToCurrentPhase = (output: Buffer) => {
+      if (output.length === 0) {
+        return;
+      }
 
-    const streamPhase = findLatestPhaseBanner(scanWindow);
-    if (streamPhase) {
+      const current = phaseEntriesRef.current[phaseEntriesRef.current.length - 1];
+      if (!current) {
+        return;
+      }
+
+      current.outputChunks.push(output);
+      current.target?.feed(output);
+    };
+
+    const switchToPhase = (streamPhase: ScriptPhase) => {
       const currentEntries = phaseEntriesRef.current;
       const lastEntry = currentEntries[currentEntries.length - 1];
 
-      if (!lastEntry || lastEntry.phase !== streamPhase) {
-        const nextEntries = [...currentEntries];
-        const currentLast = nextEntries[nextEntries.length - 1];
-        if (currentLast?.status === 'running') {
-          nextEntries[nextEntries.length - 1] = {
-            ...currentLast,
-            status: 'complete',
-          };
-        }
-
-        const createdEntry = createPhaseEntry(streamPhase, true);
-        nextEntries.push(createdEntry);
-        phaseEntriesRef.current = nextEntries;
-        setPhaseEntries(nextEntries);
-        setActivePhaseIndex(nextEntries.length - 1);
+      if (lastEntry?.phase === streamPhase) {
+        return;
       }
-    }
 
-    const current = phaseEntriesRef.current[phaseEntriesRef.current.length - 1];
-    if (!current) {
+      const nextEntries = [...currentEntries];
+      const currentLast = nextEntries[nextEntries.length - 1];
+      if (currentLast?.status === 'running') {
+        nextEntries[nextEntries.length - 1] = {
+          ...currentLast,
+          status: 'complete',
+        };
+      }
+
+      const createdEntry = createPhaseEntry(streamPhase, true);
+      nextEntries.push(createdEntry);
+      phaseEntriesRef.current = nextEntries;
+      setPhaseEntries(nextEntries);
+      setActivePhaseIndex(nextEntries.length - 1);
+    };
+
+    const bannerMatches = findPhaseBannerMatches(chunk);
+    if (bannerMatches.length === 0) {
+      appendToCurrentPhase(chunk);
       return;
     }
 
-    current.outputChunks.push(chunk);
-    current.target?.feed(chunk);
+    let cursor = 0;
+    for (const match of bannerMatches) {
+      if (match.byteIndex > cursor) {
+        appendToCurrentPhase(chunk.subarray(cursor, match.byteIndex));
+      }
+      switchToPhase(match.phase);
+      cursor = match.byteIndex;
+    }
+
+    if (cursor < chunk.length) {
+      appendToCurrentPhase(chunk.subarray(cursor));
+    }
   }, []);
 
   const setActiveTerminalRef = useCallback((el: GhosttyTerminalRenderable | null) => {

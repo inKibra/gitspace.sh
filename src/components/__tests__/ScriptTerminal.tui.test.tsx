@@ -197,4 +197,41 @@ describe('ScriptTerminal TUI', () => {
     await renderAndFlush(renderOnce);
     expect(captureCharFrame()).toContain('setup-only');
   });
+
+  it('keeps pre-banner text in the previous phase when mixed in one chunk', async () => {
+    const { Component, controls } = createHarness({
+      phase: 'pre',
+      isRunning: true,
+    });
+
+    const { renderer, renderOnce, captureCharFrame, mockInput } = await testRender(<Component />, {
+      width: 90,
+      height: 24,
+    });
+    destroyRenderer = () => renderer.destroy();
+
+    await renderAndFlush(renderOnce);
+
+    await act(async () => {
+      controls.feedText('pre-before-banner\r\n==> setup scripts...\r\nsetup-after-banner\n');
+    });
+    await renderAndFlush(renderOnce);
+
+    expect(captureCharFrame()).toContain('[Setup ...]');
+    expect(captureCharFrame()).toContain('setup-after-banner');
+    expect(captureCharFrame()).not.toContain('pre-before-banner');
+
+    await act(async () => {
+      controls.update({ phase: 'setup', isRunning: false });
+    });
+    await renderAndFlush(renderOnce);
+
+    await act(async () => {
+      mockInput.pressArrow('left');
+    });
+    await renderAndFlush(renderOnce);
+    const preFrame = captureCharFrame();
+    expect(preFrame).toContain('pre-before-banner');
+    expect(preFrame).not.toContain('setup-after-banner');
+  });
 });
