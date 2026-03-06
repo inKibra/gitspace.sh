@@ -19,6 +19,9 @@ import {
 import { loadUserRootIdentity } from "../core/user-identity.js";
 import { getSpacesDir } from "../core/config.js";
 import {
+  ensureControlStore,
+  setVaultMeta,
+  getVaultMeta,
   listVaultMachinesForOwner,
   removeVaultMachineForOwner,
 } from "../relay/control/store.js";
@@ -29,6 +32,7 @@ import {
 } from "./host.js";
 import { selectOne } from "../utils/prompts.js";
 import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
+import { ensureUserRootIdentityWithRecovery } from "./identity-recovery.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -61,6 +65,8 @@ interface RelayStatusSnapshot {
   publicRelayUrl: string | null;
   startedAt: number | null;
 }
+
+type RelayStartMode = "auto" | "hosted" | "local";
 
 function getRelayRuntimeDir(): string {
   return join(getSpacesDir(), RELAY_RUNTIME_DIR);
@@ -305,7 +311,9 @@ export async function startRelay(options: {
   port?: number;
   hostname?: string;
   bind?: string;
+  mode?: RelayStartMode;
   label?: string;
+  yes?: boolean;
 }): Promise<void> {
   const existingState = readRelayState();
   if (existingState?.pid && isProcessRunning(existingState.pid)) {
@@ -348,33 +356,107 @@ export async function startRelay(options: {
     }
   }
 
+  const mode: RelayStartMode = options.mode ?? "auto";
   const port = options.port ?? parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
   const bind = options.bind ?? process.env.RELAY_BIND ?? "0.0.0.0";
   let hostname = options.hostname ?? process.env.RELAY_HOST;
   let tunnelSubdomain: string | undefined;
   let tunnelToken: string | undefined;
 
-  if (!hostname) {
+  if (mode === "hosted" && hostname) {
+    throw new SpacesError(
+      "Hosted mode does not support explicit --hostname. Remove --hostname and use your account host.",
+      "USER_ERROR",
+      1,
+    );
+  }
+
+  if (mode !== "local") {
     const accountTarget = await resolveAccountRelayTarget();
-    if (accountTarget) {
+    if (!accountTarget) {
+      if (mode === "hosted") {
+        throw new SpacesError(
+          "Hosted relay startup requires an active gitspace.sh host.\n\nRun:\n  gssh user host reserve <name>\n  gssh user host status",
+          "USER_ERROR",
+          1,
+        );
+      }
+    } else {
       try {
         tunnelToken = await ensureSubdomainTunnelToken(accountTarget.subdomain);
         hostname = accountTarget.hostname;
         tunnelSubdomain = accountTarget.subdomain;
         logger.info(`Using account host ${hostname} for relay tunnel`);
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (mode === "hosted") {
+          throw new SpacesError(
+            `Hosted relay startup failed while loading tunnel credentials for ${accountTarget.subdomain}.gitspace.sh.\n\n${detail}\n\nRun:\n  gssh user host status`,
+            "USER_ERROR",
+            1,
+          );
+        }
+
         logger.warning(
           `Could not load tunnel token for ${accountTarget.subdomain}.gitspace.sh. `
           + "Falling back to local relay start without tunnel.",
         );
-        logger.dim(error instanceof Error ? error.message : String(error));
+        logger.dim(detail);
       }
     }
+  }
+
+  if (mode === "hosted" && !tunnelToken) {
+    throw new SpacesError(
+      "Hosted relay mode requires an active tunnel but none was configured.\n\nRun:\n  gssh user host status",
+      "USER_ERROR",
+      1,
+    );
   }
 
   // Load or create relay identity
   const identity = await loadOrCreateRelayIdentity(options.label);
   const fingerprint = formatRelayFingerprint(identity.signingPublicKey);
+
+  // ── Bind owner identity to relay ──────────────────────────────────────
+  // Read the user root identity (from mnemonic in keychain) so the relay
+  // knows who its owner is. This enables owner-based authorization for
+  // machines and clients without requiring enrollment tokens.
+  let ownerUserRootId: string | null = null;
+  try {
+    const userRoot = await loadUserRootIdentity()
+      ?? await ensureUserRootIdentityWithRecovery({
+        yes: options.yes,
+        context: 'relay startup owner binding',
+        allowSkip: true,
+      });
+    if (userRoot) {
+      ownerUserRootId = userRoot.id;
+      ensureControlStore();
+      const existingOwner = getVaultMeta("owner_user_root_id");
+      if (existingOwner && existingOwner !== ownerUserRootId) {
+        throw new SpacesError(
+          `Relay is already owned by a different user root identity.\n` +
+          `  Existing owner: ${existingOwner.slice(0, 8)}...\n` +
+          `  Current user:   ${ownerUserRootId.slice(0, 8)}...`,
+          "USER_ERROR",
+          1,
+        );
+      }
+      setVaultMeta("vault_initialized", "1");
+      setVaultMeta("owner_user_root_id", ownerUserRootId);
+      logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
+    } else {
+      // User root identity not initialized - relay starts without an owner.
+      // Machines will need enrollment tokens to register.
+      logger.dim("  No user root identity found - machines will need enrollment tokens");
+    }
+  } catch (error) {
+    if (error instanceof SpacesError) throw error;
+    // User root identity not initialized - relay starts without an owner.
+    // Machines will need enrollment tokens to register.
+    logger.dim("  No user root identity found - machines will need enrollment tokens");
+  }
 
   // Display relay identity prominently
   logger.log("");
@@ -392,11 +474,15 @@ export async function startRelay(options: {
 
   logger.log(`  Port:     ${port}`);
   logger.log(`  Bind:     ${bind}`);
+  logger.log(`  Mode:     ${mode}`);
   if (hostname) {
     logger.log(`  Hostname: ${hostname} (only serving this domain)`);
   }
   if (tunnelSubdomain) {
     logger.log(`  Tunnel:   ${tunnelSubdomain}.gitspace.sh`);
+  }
+  if (ownerUserRootId) {
+    logger.log(`  Owner:    ${ownerUserRootId.slice(0, 16)}...`);
   }
   logger.log("");
 
@@ -425,7 +511,7 @@ export async function startRelay(options: {
       tunnelSubdomain,
     });
 
-    logger.success(`Relay listening on ws://${hostname || bind}:${port}`);
+    logger.success(`Relay listening on ws://${hostname || bind}:${port}/ws`);
     if (tunnelSubdomain) {
       logger.success(`Public relay URL: wss://${tunnelSubdomain}.gitspace.sh/ws`);
     }
@@ -524,7 +610,7 @@ function getRelayStatusSnapshot(): RelayStatusSnapshot {
   const running = isProcessRunning(state.pid);
   const tunnelRunning = typeof state.tunnelPid === "number" && isProcessRunning(state.tunnelPid);
 
-  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}`;
+  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}/ws`;
   const publicRelayUrl = state.tunnelSubdomain
     ? `wss://${state.tunnelSubdomain}.gitspace.sh/ws`
     : null;

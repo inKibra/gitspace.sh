@@ -591,26 +591,28 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     async fetch(req, server) {
       const url = new URL(req.url);
 
-      // Check Host header if hostname is specified
-      if (hostname) {
-        const hostHeader = req.headers.get("host");
-        const host = hostHeader?.split(":")[0]; // Remove port
-        console.log(`[relay] Request: ${url.pathname} Host: ${hostHeader} -> ${host} (expected: ${hostname})`);
-        if (host !== hostname) {
-          console.log(`[relay] Rejecting request - hostname mismatch`);
-          return new Response("Not found", { status: 404 });
-        }
-      }
-
-      // Health check
+      // Health check - always allowed regardless of hostname filter
+      // (must be reachable from localhost for local relay discovery)
       if (url.pathname === "/health") {
         const stats = getRegistryStats();
         const clientCount = clientConnections.size;
         return Response.json({
           status: "ok",
+          relayPublicKey: relayIdentity.signingPublicKey,
+          relayFingerprint: formatRelayFingerprint(relayIdentity.signingPublicKey),
+          relayLabel: relayIdentity.label ?? null,
           ...stats,
           connectedClients: clientCount,
         });
+      }
+
+      // Check Host header if hostname is specified (after health check which is always allowed)
+      if (hostname) {
+        const hostHeader = req.headers.get("host");
+        const host = hostHeader?.split(":")[0]; // Remove port
+        if (host !== hostname) {
+          return new Response("Not found", { status: 404 });
+        }
       }
 
       // WebSocket upgrade
@@ -909,11 +911,12 @@ async function handleProtocolMessage(
       state.pendingChallenges.delete(connectionId);
 
       // Check if machine is authorized to connect to this relay.
-      // Sources of authorization:
+      // Sources of authorization (checked in order):
       // 1) pre-authorized key set (ephemeral local relay startup)
       // 2) persisted machine registration (vault_machines)
-      // 3) valid one-time register permit (legacy cloud unlock flow)
-      // 4) valid root-signed relay-machine invite token
+      // 3) device certificate signed by relay owner's user root identity
+      // 4) valid one-time register permit (cloud unlock flow)
+      // 5) valid root-signed relay-machine invite token
       const persistedMachine = getVaultMachine(regMsg.machineId);
       if (persistedMachine && persistedMachine.signingKey !== regMsg.signingKey) {
         ws.send(serializeMessage(createErrorMessage(
@@ -947,6 +950,66 @@ async function handleProtocolMessage(
         : isPersistedMachine
           ? 'persisted-machine'
           : null;
+
+      // ── Auth path 3: Device certificate signed by relay owner ─────────
+      // If the machine presents a valid device certificate signed by the
+      // relay's owner, auto-authorize it. This enables same-machine and
+      // remote-same-owner pairing without enrollment tokens.
+      if (!isAuthorizedMachine && regMsg.deviceCertificate) {
+        try {
+          const cert: DeviceCertificate = JSON.parse(regMsg.deviceCertificate);
+
+          // Verify cert signature is cryptographically valid
+          if (!verifyDeviceCertificate(cert)) {
+            console.warn(`[relay] Device certificate signature verification failed for ${regMsg.machineId}`);
+            ws.send(serializeMessage(createErrorMessage("INVALID_SIGNATURE", "Device certificate signature invalid")));
+            ws.close();
+            return;
+          }
+
+          // Verify cert is not expired
+          if (isDeviceCertExpired(cert)) {
+            console.warn(`[relay] Device certificate expired for ${regMsg.machineId}`);
+            ws.send(serializeMessage(createErrorMessage("EXPIRED", "Device certificate has expired")));
+            ws.close();
+            return;
+          }
+
+          // Verify the cert's device keys match the registration message keys
+          if (cert.deviceSigningPublicKey !== regMsg.signingKey) {
+            console.warn(`[relay] Device cert signing key mismatch for ${regMsg.machineId}`);
+            ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Device certificate signing key does not match registration")));
+            ws.close();
+            return;
+          }
+          if (cert.deviceKeyExchangePublicKey !== regMsg.keyExchangeKey) {
+            console.warn(`[relay] Device cert key exchange key mismatch for ${regMsg.machineId}`);
+            ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Device certificate key exchange key does not match registration")));
+            ws.close();
+            return;
+          }
+
+          // Extract user root ID from the certificate and check against relay owner
+          const certUserRootId = getUserRootIdFromCert(cert);
+          const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
+
+          if (relayOwnerUserRootId && certUserRootId === relayOwnerUserRootId) {
+            // Certificate is signed by the relay's owner — auto-authorize
+            isAuthorizedMachine = true;
+            enrollmentOwnerUserRootId = certUserRootId;
+            authorizationSource = 'owner-device-cert';
+            console.log(`[relay] Machine ${regMsg.machineId.slice(0, 8)}... authorized via owner device certificate`);
+          } else if (!relayOwnerUserRootId) {
+            console.warn(`[relay] Device cert presented but relay has no owner set — cannot verify ownership`);
+          } else {
+            console.warn(`[relay] Device cert user root ${certUserRootId.slice(0, 8)}... does not match relay owner ${relayOwnerUserRootId.slice(0, 8)}...`);
+          }
+        } catch (err) {
+          console.warn(`[relay] Failed to parse device certificate: ${err instanceof Error ? err.message : String(err)}`);
+          // Don't reject — fall through to other auth paths
+        }
+      }
+
       const cloudWorkspaceForKey = getCloudWorkspaceByMachinePublicKey(regMsg.signingKey);
 
       // Owner-gated wake flow for cloud workspaces:

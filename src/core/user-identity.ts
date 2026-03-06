@@ -192,6 +192,53 @@ export async function loadUserRootIdentity(): Promise<UserRootIdentity | null> {
 }
 
 /**
+ * Load only the stored mnemonic from keychain.
+ *
+ * Use this sparingly and only for local cryptographic operations
+ * (for example, creating an encrypted cloud backup).
+ */
+export async function loadUserRootMnemonic(): Promise<string | null> {
+  const raw = await getSecret(KEYCHAIN_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { version?: unknown };
+
+    if (parsed.version === 1) {
+      throw new SpacesError(
+        'Legacy identity format detected. Recover your identity with `gssh user identity recover` using your 24-word mnemonic.',
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    if (parsed.version !== 2) {
+      throw new SpacesError(
+        `Unsupported user root identity version: ${String(parsed.version)}`,
+        'SYSTEM_ERROR',
+        2,
+      );
+    }
+
+    const stored = parsed as StoredUserRootIdentity;
+    if (typeof stored.mnemonic !== 'string') {
+      throw new SpacesError('Invalid user root identity payload in keychain', 'SYSTEM_ERROR', 2);
+    }
+
+    return stored.mnemonic;
+  } catch (error) {
+    if (error instanceof SpacesError) throw error;
+    throw new SpacesError(
+      `Failed to parse user root identity from keychain: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+}
+
+/**
  * Check if a user root identity exists in keychain.
  *
  * @returns true if identity is stored

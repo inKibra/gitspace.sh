@@ -7,12 +7,17 @@
 import open from 'open';
 import os from 'os';
 import { getSecret, setSecret, deleteSecret } from '../utils/secrets.js';
-import { loadKeypair, keypairExists, getPublicKeyWithoutPassword } from '../core/identity.js';
+import {
+  loadKeypair,
+  keypairExists,
+  getPublicKeyWithoutPassword,
+  generateAndSaveKeypair,
+} from '../core/identity.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
-import { promptPassword } from '../utils/prompts.js';
+import { promptConfirm, promptPassword } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
 import { NoIdentityError, SpacesError } from '../types/errors.js';
-import { syncHostConfig } from './host.js';
+import { printHostSyncReport, syncHostConfig } from './host.js';
 
 // API Configuration
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
@@ -70,23 +75,55 @@ interface GitspaceAuthResponse {
 /**
  * Login to gitspace.sh using GitHub Device Flow
  */
-export async function authLogin(): Promise<void> {
-  // Check if identity exists
+export async function authLogin(
+  options: {
+    yes?: boolean;
+    interactiveHostSync?: boolean;
+    showHostSyncSummary?: boolean;
+  } = {},
+): Promise<void> {
+  let passwordForIdentity: string | null = null;
+
   if (!keypairExists()) {
-    throw new NoIdentityError();
+    const shouldCreate = options.yes || await promptConfirm(
+      'No local device identity found. Create one now?',
+      true,
+    );
+
+    if (!shouldCreate) {
+      throw new NoIdentityError();
+    }
+
+    const createPassword = await promptPassword('Create password for local device identity:');
+    if (!createPassword) {
+      logger.info('Cancelled');
+      return;
+    }
+
+    const confirmPassword = await promptPassword('Confirm local identity password:');
+    if (createPassword !== confirmPassword) {
+      throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+    }
+
+    await generateAndSaveKeypair(createPassword, os.hostname());
+    passwordForIdentity = createPassword;
+    logger.success('Created local device identity');
   }
 
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  const password = await promptPassword('Enter identity password:');
-  if (!password) {
-    logger.info('Cancelled');
-    return;
+  if (!passwordForIdentity) {
+    const password = await promptPassword('Enter identity password:');
+    if (!password) {
+      logger.info('Cancelled');
+      return;
+    }
+    passwordForIdentity = password;
   }
 
   let identity;
   try {
-    identity = await loadKeypair(password);
+    identity = await loadKeypair(passwordForIdentity);
   } catch (error) {
     if (error instanceof SpacesError) {
       throw error;
@@ -198,7 +235,11 @@ export async function authLogin(): Promise<void> {
 
   // Step 6: Sync host config (fetches existing subdomains from API)
   // Interactive mode will prompt user to select primary or reserve a subdomain
-  await syncHostConfig(true);
+  const hostSyncReport = await syncHostConfig(options.interactiveHostSync ?? true);
+  if (options.showHostSyncSummary ?? true) {
+    logger.log('');
+    printHostSyncReport(hostSyncReport, 'Hosted relay readiness');
+  }
 }
 
 // ============================================================================
