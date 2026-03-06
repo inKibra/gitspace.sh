@@ -17,8 +17,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CloudLifecycleDependencies, CloudLifecycleProvider } from '../cloud.js';
 import { cloudDestroy, cloudResume, cloudStop } from '../cloud.js';
+import { writeRelayConfig } from '../../core/identity.js';
 import {
   bindControlOwner,
+  bindControlRelayIdentity,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
@@ -83,6 +85,21 @@ function setup() {
   process.env.GITSPACE_CONTROL_DIR = join(testDir, '.relay', 'control');
   ensureControlStore();
   bindControlOwner(OWNER_ID);
+}
+
+function seedSavedRelayConfig(args: { relayUrl: string; cloudRelayUrl?: string }) {
+  bindControlRelayIdentity({
+    relayIdentityId: 'relay-cloud-lifecycle-test',
+    relaySigningPublicKey: TEST_RELAY_INFO.relaySigningPublicKey,
+    relayFingerprint: TEST_RELAY_INFO.relayFingerprint,
+  });
+
+  writeRelayConfig({
+    relayUrl: args.relayUrl,
+    cloudRelayUrl: args.cloudRelayUrl,
+    machineId: 'machine-cloud-lifecycle',
+    savedAt: Date.now(),
+  });
 }
 
 function teardown() {
@@ -223,6 +240,29 @@ describe('cloudResume', () => {
     expect(execCalls[0].options.env?.GSSH_WORKSPACE_ID).toBe('ws-r1');
     expect(execCalls[0].options.env?.GSSH_RELAY_URL).toContain('wss://');
     expect(execCalls[0].options.env?.GSSH_RELAY_PUBKEY?.length).toBeGreaterThan(5);
+  });
+
+  test('prefers saved cloud relay URL during resume bootstrap', async () => {
+    const execCalls: Array<{ id: string; options: { command: string[]; env?: Record<string, string>; dir?: string } }> = [];
+    const provider = makeMockProvider({
+      exec: async (id, options) => {
+        execCalls.push({ id, options });
+        return { exitCode: 0, stdout: 'started', stderr: '' };
+      },
+    });
+
+    seedSavedRelayConfig({
+      relayUrl: 'ws://127.0.0.1:4480/ws',
+      cloudRelayUrl: 'wss://relay.public.test/ws',
+    });
+
+    await seedWorkspaceWithIdentity('ws-r-cloud', 'hibernated');
+    await cloudResume('ws-r-cloud', provider, {
+      ...lifecycleDeps,
+      relayInfo: undefined,
+    });
+
+    expect(execCalls[0]?.options.env?.GSSH_RELAY_URL).toBe('wss://relay.public.test/ws');
   });
 
   test('logs resume_exec_succeeded after bootstrap exec success', async () => {

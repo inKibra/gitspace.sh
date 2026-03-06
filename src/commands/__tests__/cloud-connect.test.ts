@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cloudConnect } from '../cloud.js';
+import { writeRelayConfig } from '../../core/identity.js';
 import { ensureControlStore, upsertCloudWorkspace } from '../../relay/control/store.js';
 
 let originalHome: string | undefined;
@@ -49,6 +50,15 @@ function seedWorkspace(status: 'ready' | 'hibernated' | 'bootstrapping' | 'error
   });
 }
 
+function seedRelayConfig(args: { relayUrl: string; cloudRelayUrl?: string }) {
+  writeRelayConfig({
+    relayUrl: args.relayUrl,
+    cloudRelayUrl: args.cloudRelayUrl,
+    machineId: 'machine-configured',
+    savedAt: Date.now(),
+  });
+}
+
 describe('cloudConnect', () => {
   beforeEach(setupEnv);
   afterEach(teardownEnv);
@@ -77,16 +87,59 @@ describe('cloudConnect', () => {
     ).rejects.toThrow(/currently 'bootstrapping'/i);
   });
 
-  test('throws when relay is missing and no local config exists', async () => {
+  test('throws when relay is missing and no cloud-reachable config exists', async () => {
     seedWorkspace('ready', 'machine-ready');
 
     await expect(
-      cloudConnect('ws-test', {}, {
-        resolveRelayUrl: () => {
-          throw new Error('Relay URL is required. Pass --relay <url> or start machine serve once to save relay config.');
+      cloudConnect('ws-test')
+    ).rejects.toThrow(/No cloud-reachable relay URL is saved/i);
+  });
+
+  test('prefers saved cloud relay URL over local relay URL', async () => {
+    seedWorkspace('ready', 'machine-ready');
+    seedRelayConfig({
+      relayUrl: 'ws://127.0.0.1:4480/ws',
+      cloudRelayUrl: 'wss://relay.public.test/ws',
+    });
+
+    let calledOptions: { relay?: string; yes?: boolean } | undefined;
+    await cloudConnect(
+      'ws-test',
+      { yes: true },
+      {
+        connectToRemote: async (_target, options) => {
+          calledOptions = { relay: options?.relay, yes: options?.yes };
         },
-      })
-    ).rejects.toThrow(/Relay URL is required/i);
+      },
+    );
+
+    expect(calledOptions).toEqual({
+      relay: 'wss://relay.public.test/ws',
+      yes: true,
+    });
+  });
+
+  test('falls back to legacy saved relay URL when it is cloud reachable', async () => {
+    seedWorkspace('ready', 'machine-ready');
+    seedRelayConfig({
+      relayUrl: 'wss://relay.legacy.test/ws',
+    });
+
+    let calledOptions: { relay?: string; yes?: boolean } | undefined;
+    await cloudConnect(
+      'ws-test',
+      { yes: true },
+      {
+        connectToRemote: async (_target, options) => {
+          calledOptions = { relay: options?.relay, yes: options?.yes };
+        },
+      },
+    );
+
+    expect(calledOptions).toEqual({
+      relay: 'wss://relay.legacy.test/ws',
+      yes: true,
+    });
   });
 
   test('delegates to connectToRemote when workspace is ready', async () => {

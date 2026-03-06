@@ -443,7 +443,6 @@ export async function startRelay(options: {
           1,
         );
       }
-      setVaultMeta("vault_initialized", "1");
       setVaultMeta("owner_user_root_id", ownerUserRootId);
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
     } else {

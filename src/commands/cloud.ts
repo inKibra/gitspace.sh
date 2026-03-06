@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { promptInput } from '../utils/prompts.js';
 import { readRelayConfig } from '../core/identity.js';
+import { isCloudReachableRelayUrl } from '../core/trusted-relays.js';
 import { loadUserRootIdentity } from '../core/user-identity.js';
 import {
   queryControlMeta,
@@ -12,7 +13,6 @@ import {
   sendAssertOwnerCommand,
   sendListCloudWorkspacesCommand,
 } from '../serve/daemon.js';
-import { readHostConfig } from './host.js';
 import {
   clearSpritesToken,
   getSpritesToken,
@@ -20,7 +20,6 @@ import {
 } from '../relay/control/provider-config.js';
 import {
   assertControlOwner,
-  bindControlRelayIdentity,
   createCloudBootstrapToken,
   createCloudUnlockToken,
   getCloudWorkspace,
@@ -31,12 +30,28 @@ import {
   updateCloudWorkspaceStatus,
   upsertCloudWorkspace,
 } from '../relay/control/store.js';
-import { formatRelayFingerprint, getRelayPublicIdentity } from '../relay/identity.js';
 import { SpritesProvider } from '../relay/control/sprites-provider.js';
 import { getCloudBootstrapBundleSource, CLOUD_BOOTSTRAP_BUNDLE_FILENAME } from '../cloud/bootstrap-bundle.generated.js';
 import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/workspace-identity.js';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';
+
+function getSavedCloudRelayUrl(): string | null {
+  const relayConfig = readRelayConfig();
+  if (!relayConfig) {
+    return null;
+  }
+
+  if (relayConfig.cloudRelayUrl?.trim()) {
+    return relayConfig.cloudRelayUrl.trim();
+  }
+
+  if (isCloudReachableRelayUrl(relayConfig.relayUrl)) {
+    return relayConfig.relayUrl;
+  }
+
+  return null;
+}
 
 async function requireLocalIdentityId(): Promise<string> {
   const userRoot = await loadUserRootIdentity();
@@ -64,17 +79,11 @@ interface CloudEnrollmentInvite {
 }
 
 function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
-  const hostConfig = readHostConfig();
-  const relayConfig = readRelayConfig();
-
-  // Prefer the last relay URL actually used by serve; fallback to hosted account
-  // subdomain only when no explicit relay config is available.
-  const relayUrl = relayConfig?.relayUrl
-    ?? (hostConfig?.subdomain ? `wss://${hostConfig.subdomain}.gitspace.sh/ws` : undefined);
+  const relayUrl = getSavedCloudRelayUrl();
 
   if (!relayUrl) {
     throw new SpacesError(
-      'No relay URL found for cloud bootstrap. Start `gssh machine serve start` once (or configure hosting) before launching cloud workspaces.',
+      'No cloud-reachable relay URL found for cloud bootstrap. Start `gssh machine serve start` once against your target hosted or external relay before launching cloud workspaces.',
       'USER_ERROR',
       1
     );
@@ -93,30 +102,14 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
     };
   }
 
-  const relayPublicIdentity = getRelayPublicIdentity();
-  if (!relayPublicIdentity) {
-    throw new SpacesError(
-      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before launching cloud workspaces.',
-      'USER_ERROR',
-      1
-    );
-  }
-
-  const relayFingerprint = formatRelayFingerprint(relayPublicIdentity.signingPublicKey);
-  bindControlRelayIdentity({
-    relayIdentityId: relayPublicIdentity.id,
-    relaySigningPublicKey: relayPublicIdentity.signingPublicKey,
-    relayFingerprint,
-  });
-
-  // Keep owner assertion strict whenever we bind relay metadata from launch path.
+  // Keep owner assertion strict whenever we bootstrap cloud flows from control metadata.
   assertControlOwner(ownerIdentityId);
 
-  return {
-    relayUrl,
-    relaySigningPublicKey: relayPublicIdentity.signingPublicKey,
-    relayFingerprint,
-  };
+  throw new SpacesError(
+    'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before launching cloud workspaces.',
+    'USER_ERROR',
+    1
+  );
 }
 
 async function createCloudEnrollmentInvite(
@@ -601,18 +594,13 @@ function resolveRelayUrlForCloudConnect(explicitRelay?: string): string {
     return explicitRelay.trim();
   }
 
-  const relayConfig = readRelayConfig();
-  if (relayConfig?.relayUrl) {
-    return relayConfig.relayUrl;
-  }
-
-  const hostConfig = readHostConfig();
-  if (hostConfig?.subdomain) {
-    return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
+  const relayUrl = getSavedCloudRelayUrl();
+  if (relayUrl) {
+    return relayUrl;
   }
 
   throw new SpacesError(
-    'Relay URL is required. Pass --relay <url> or start machine serve once to save relay config.',
+    'No cloud-reachable relay URL is saved. Pass --relay <url> or start `gssh machine serve start` once against your target hosted or external relay.',
     'USER_ERROR',
     1,
   );

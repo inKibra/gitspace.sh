@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CloudLaunchDependencies, CloudLaunchProvider } from '../cloud.js';
 import { cloudLaunch } from '../cloud.js';
+import { writeRelayConfig } from '../../core/identity.js';
 import {
+  bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
   getCloudWorkspace,
@@ -80,6 +82,21 @@ function setup() {
   mockCreateWorkspaceImpl = async () => ({ providerWorkspaceId: 'sprite-123', rawState: 'running' });
   mockExecImpl = async () => ({ exitCode: 0, stdout: 'started', stderr: '' });
   mockWriteImpl = async (_id, opts) => ({ path: String(opts.path ?? '/tmp/bootstrap.mjs'), size: 1, mode: '0644' });
+}
+
+function seedSavedRelayConfig(args: { relayUrl: string; cloudRelayUrl?: string }) {
+  bindControlRelayIdentity({
+    relayIdentityId: 'relay-cloud-launch-test',
+    relaySigningPublicKey: TEST_RELAY_INFO.relaySigningPublicKey,
+    relayFingerprint: TEST_RELAY_INFO.relayFingerprint,
+  });
+
+  writeRelayConfig({
+    relayUrl: args.relayUrl,
+    cloudRelayUrl: args.cloudRelayUrl,
+    machineId: 'machine-saved-relay',
+    savedAt: Date.now(),
+  });
 }
 
 function teardown() {
@@ -173,6 +190,60 @@ describe('cloudLaunch', () => {
     await expect(
       cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps({ token: '' }))
     ).rejects.toThrow(/sprites token/i);
+  });
+
+  test('prefers saved cloud relay URL over local relay URL', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    seedSavedRelayConfig({
+      relayUrl: 'ws://127.0.0.1:4480/ws',
+      cloudRelayUrl: 'wss://relay.public.test/ws',
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.public.test/ws');
+  });
+
+  test('falls back to legacy saved relay URL when it is already cloud reachable', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    seedSavedRelayConfig({
+      relayUrl: 'wss://relay.legacy.test/ws',
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.legacy.test/ws');
+  });
+
+  test('fails when only a local relay URL is saved', async () => {
+    seedSavedRelayConfig({
+      relayUrl: 'ws://127.0.0.1:4480/ws',
+    });
+
+    await expect(
+      cloudLaunch(
+        { repo: 'owner/repo', branch: 'main' },
+        makeDeps({ relayInfo: undefined }),
+      ),
+    ).rejects.toThrow(/No cloud-reachable relay URL found/i);
   });
 
   test('leaves workspace in error state when VM creation fails', async () => {

@@ -76,6 +76,14 @@ export function getVaultLockState(): VaultLockState {
   return vaultKey !== null ? 'unlocked' : 'locked';
 }
 
+export function isVaultMetadataComplete(): boolean {
+  return Boolean(getVaultMeta('vault_salt') && getVaultMeta('vault_key_check'));
+}
+
+function hasVaultEncryptedState(): boolean {
+  return listVaultCategories().length > 0 || listVaultMachineUnlockKeys().length > 0;
+}
+
 /**
  * Check if vault is currently unlocked (key held in memory).
  */
@@ -132,9 +140,18 @@ function checksumPayload(payload: Uint8Array): string {
  * @returns true if initialized, false if already initialized
  * @throws {Error} If initialization fails
  */
-export function initializeVault(userRootPrivateKey: Uint8Array): boolean {
+export function initializeVault(
+  userRootPrivateKey: Uint8Array,
+  options: { allowRepair?: boolean } = {},
+): boolean {
   if (isVaultInitialized()) {
-    return false;
+    if (!options.allowRepair || isVaultMetadataComplete()) {
+      return false;
+    }
+
+    if (hasVaultEncryptedState()) {
+      throw new Error('Vault metadata is incomplete but encrypted data already exists');
+    }
   }
 
   // Generate random salt

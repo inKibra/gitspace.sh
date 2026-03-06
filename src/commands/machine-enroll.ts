@@ -13,6 +13,7 @@ import {
   addTrustedRelay,
   getTrustedRelay,
   getTrustedRelays,
+  isCloudReachableRelayUrl,
   isLocalhost,
   isRelayTrusted,
 } from '../core/trusted-relays.js';
@@ -346,6 +347,7 @@ export async function enrollMachine(options: {
 
   writeRelayConfig({
     relayUrl: result.relayUrl,
+    cloudRelayUrl: isCloudReachableRelayUrl(result.relayUrl) ? result.relayUrl : undefined,
     machineId: result.machineId,
     savedAt: Date.now(),
   });
