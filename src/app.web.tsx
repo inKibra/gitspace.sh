@@ -147,32 +147,28 @@ export default function App() {
     onError: (error) => console.error('Flow error:', error),
   });
 
+  const resolveWebWorkspaceProjectName = useCallback((workspaceId: string) => {
+    const index = workspaceId.indexOf(':');
+    if (index > 0) {
+      return workspaceId.slice(0, index);
+    }
+    return terminal.selectedProjectName;
+  }, [terminal.selectedProjectName]);
+
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: terminal.commandError,
     attachSession: (params) => terminal.attachSession(params),
     getBundleRefreshPlan: terminal.getBundleRefreshPlan,
     applyBundleRefresh: terminal.applyBundleRefresh,
-    resolveProjectName: (workspaceId) => {
-      const index = workspaceId.indexOf(':');
-      if (index > 0) {
-        return workspaceId.slice(0, index);
-      }
-      return terminal.selectedProjectName;
-    },
+    resolveProjectName: resolveWebWorkspaceProjectName,
   });
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
     getBundleConfigState: terminal.getBundleConfigState,
     applyBundleConfigUpdate: terminal.applyBundleConfigUpdate,
-    resolveProjectName: (workspaceId) => {
-      const index = workspaceId.indexOf(':');
-      if (index > 0) {
-        return workspaceId.slice(0, index);
-      }
-      return terminal.selectedProjectName;
-    },
+    resolveProjectName: resolveWebWorkspaceProjectName,
     onApplied: async () => {
       terminal.requestWorkspaces();
       terminal.requestSessions();
@@ -188,13 +184,7 @@ export default function App() {
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
     defaultProjectName: terminal.selectedProjectName,
     getAttachSize: getWebAttachSize,
-    resolveProjectName: (workspaceId) => {
-      const index = workspaceId.indexOf(':');
-      if (index > 0) {
-        return workspaceId.slice(0, index);
-      }
-      return terminal.selectedProjectName;
-    },
+    resolveProjectName: resolveWebWorkspaceProjectName,
     onBeforeAttach: ({ target, params }) => {
       if (target === 'session') {
         setShowScriptTerminal(false);

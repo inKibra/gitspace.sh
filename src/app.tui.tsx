@@ -373,19 +373,21 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     };
   }, []);
 
+  const resolveLocalWorkspaceProjectName = useCallback((workspaceId: string) => {
+    const separator = workspaceId.indexOf(':');
+    if (separator > 0) {
+      return workspaceId.slice(0, separator);
+    }
+    return currentProject;
+  }, [currentProject]);
+
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: localCommandError,
     attachSession: (params) => attachLocalSession(params),
     getBundleRefreshPlan: getLocalBundleRefreshPlan,
     applyBundleRefresh: applyLocalBundleRefresh,
-    resolveProjectName: (workspaceId) => {
-      const separator = workspaceId.indexOf(':');
-      if (separator > 0) {
-        return workspaceId.slice(0, separator);
-      }
-      return currentProject;
-    },
+    resolveProjectName: resolveLocalWorkspaceProjectName,
   });
 
   const {
@@ -396,13 +398,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
     defaultProjectName: currentProject,
     getAttachSize: getLocalAttachSize,
-    resolveProjectName: (workspaceId) => {
-      const separator = workspaceId.indexOf(':');
-      if (separator > 0) {
-        return workspaceId.slice(0, separator);
-      }
-      return currentProject;
-    },
+    resolveProjectName: resolveLocalWorkspaceProjectName,
     preflightSessionAttach: async (sessionId) => {
       const sessionInfo = localSessions.find((session) => session.id === sessionId);
       if (!sessionInfo) {
@@ -527,13 +523,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     flow,
     getBundleConfigState: getLocalBundleConfigState,
     applyBundleConfigUpdate: applyLocalBundleConfigUpdate,
-    resolveProjectName: (workspaceId) => {
-      const separator = workspaceId.indexOf(':');
-      if (separator > 0) {
-        return workspaceId.slice(0, separator);
-      }
-      return currentProject;
-    },
+    resolveProjectName: resolveLocalWorkspaceProjectName,
     onApplied: async () => {
       await refreshWorkspaces();
     },

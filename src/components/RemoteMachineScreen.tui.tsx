@@ -104,32 +104,29 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       cancelled = true;
     };
   }, [flow, identity]);
+
+  const resolveRemoteWorkspaceProjectName = useCallback((workspaceId: string) => {
+    const separator = workspaceId.indexOf(':');
+    if (separator > 0) {
+      return workspaceId.slice(0, separator);
+    }
+    return remote.selectedProjectName;
+  }, [remote.selectedProjectName]);
+
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: remote.commandError ?? null,
     attachSession: (params) => remote.attachSession(params),
     getBundleRefreshPlan: remote.getBundleRefreshPlan,
     applyBundleRefresh: remote.applyBundleRefresh,
-    resolveProjectName: (workspaceId) => {
-      const separator = workspaceId.indexOf(':');
-      if (separator > 0) {
-        return workspaceId.slice(0, separator);
-      }
-      return remote.selectedProjectName;
-    },
+    resolveProjectName: resolveRemoteWorkspaceProjectName,
   });
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
     getBundleConfigState: remote.getBundleConfigState,
     applyBundleConfigUpdate: remote.applyBundleConfigUpdate,
-    resolveProjectName: (workspaceId) => {
-      const separator = workspaceId.indexOf(':');
-      if (separator > 0) {
-        return workspaceId.slice(0, separator);
-      }
-      return remote.selectedProjectName;
-    },
+    resolveProjectName: resolveRemoteWorkspaceProjectName,
     onApplied: async () => {
       remote.requestWorkspaces();
       remote.requestSessions();
@@ -140,13 +137,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     flow,
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
     defaultProjectName: remote.selectedProjectName,
-    resolveProjectName: (workspaceId) => {
-      const separator = workspaceId.indexOf(':');
-      if (separator > 0) {
-        return workspaceId.slice(0, separator);
-      }
-      return remote.selectedProjectName;
-    },
+    resolveProjectName: resolveRemoteWorkspaceProjectName,
     onBeforeAttach: ({ target, params }) => {
       if (target === 'workspace' && params.workspaceId && !params.command) {
         lastScriptWorkspaceIdRef.current = params.workspaceId;
