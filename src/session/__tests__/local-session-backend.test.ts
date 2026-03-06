@@ -73,6 +73,8 @@ describe('LocalSessionBackend', () => {
         options.onOutput?.(Buffer.from('pre-output'));
         options.onPhaseStart?.('setup');
         options.onOutput?.(Buffer.from('setup-output'));
+        options.onPhaseStart?.('select');
+        options.onOutput?.(Buffer.from('select-output'));
         return { success: true };
       },
       getInbox: async () => [
@@ -195,12 +197,18 @@ describe('LocalSessionBackend', () => {
       )
       .map((event) => new TextDecoder().decode(event.data));
 
-    expect(scriptStreamChunks.some((chunk) => chunk.includes('==> pre scripts...'))).toBe(true);
-    expect(scriptStreamChunks.some((chunk) => chunk.includes('==> setup scripts...'))).toBe(true);
+    expect(scriptStreamChunks).toEqual([
+      '\r\n==> pre scripts...\r\n',
+      'pre-output',
+      '\r\n==> setup scripts...\r\n',
+      'setup-output',
+      '\r\n==> select scripts...\r\n',
+      'select-output',
+    ]);
 
     expect(events).toContainEqual({
       type: 'script_output',
-      phase: 'setup',
+      phase: 'select',
       data: new Uint8Array(0),
       done: true,
     });
