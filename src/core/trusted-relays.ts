@@ -8,6 +8,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { getIdentityDir } from "./identity.js";
@@ -104,6 +105,59 @@ function isLocalhostUrl(url: string): boolean {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
     return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeHost(host: string): string {
+  return host.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").split("%", 1)[0] ?? host.toLowerCase();
+}
+
+function isPrivateIpv4Host(host: string): boolean {
+  const parts = host.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  return parts[0] === 10
+    || parts[0] === 127
+    || (parts[0] === 169 && parts[1] === 254)
+    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    || (parts[0] === 192 && parts[1] === 168);
+}
+
+function isPrivateIpv6Host(host: string): boolean {
+  if (host === "::1") {
+    return true;
+  }
+
+  if (host.startsWith("::ffff:")) {
+    return true;
+  }
+
+  return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+}
+
+export function isCloudReachableRelayUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = normalizeHost(parsed.hostname);
+
+    if (host === "localhost" || host.endsWith(".local")) {
+      return false;
+    }
+
+    const ipVersion = isIP(host);
+    if (ipVersion === 4) {
+      return !isPrivateIpv4Host(host);
+    }
+
+    if (ipVersion === 6) {
+      return !isPrivateIpv6Host(host);
+    }
+
+    return true;
   } catch {
     return false;
   }

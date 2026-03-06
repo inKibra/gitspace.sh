@@ -12,7 +12,9 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   ensureControlStore,
+  getVaultMeta,
   isVaultInitialized,
+  setVaultMeta,
   upsertVaultCategory,
   upsertVaultMachine,
 } from './control/store.js';
@@ -106,6 +108,18 @@ describe('relay vault', () => {
 
       const result = initializeVault(key);
       expect(result).toBe(false);
+    });
+
+    test('initializeVault can repair incomplete legacy metadata when allowed', () => {
+      const key = fakePrivateKey();
+      setVaultMeta('vault_initialized', '1');
+
+      const result = initializeVault(key, { allowRepair: true });
+
+      expect(result).toBe(true);
+      expect(getVaultMeta('vault_salt')).toBeTruthy();
+      expect(getVaultMeta('vault_key_check')).toBeTruthy();
+      expect(isVaultUnlocked()).toBe(true);
     });
 
     test('initializeVault with different keys creates different vaults', () => {

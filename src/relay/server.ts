@@ -171,6 +171,7 @@ import {
 } from "./sync/runtime.js";
 import {
   isVaultUnlocked,
+  isVaultMetadataComplete,
   unlockVault,
   initializeVault,
   openAllMachineUnlockKeys,
@@ -570,8 +571,8 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   // Determine owner from vault metadata when available
   const ownerUserRootId = getVaultMeta('owner_user_root_id') ?? null;
   if (ownerUserRootId) {
-    console.log(`[relay] Vault initialized, owner: ${ownerUserRootId.slice(0, 8)}...`);
-    console.log(`[relay] Vault state: ${getVaultLockState()}`);
+    console.log(`[relay] Vault owner: ${ownerUserRootId.slice(0, 8)}...`);
+    console.log(`[relay] Vault state: ${isVaultInitialized() ? getVaultLockState() : 'uninitialized'}`);
   }
 
   const state: RelayServerState = {
@@ -1596,19 +1597,36 @@ async function handleProtocolMessage(
         return;
       }
 
-      // If vault is not initialized, initialize it with the proof as seed material
-      // The proof field carries the HKDF-derived material the vault needs
-      if (!isVaultInitialized()) {
+      const needsVaultRepair = isVaultInitialized() && !isVaultMetadataComplete();
+
+      // If vault is not initialized, initialize it with the proof as seed material.
+      // The proof field carries the HKDF-derived material the vault needs.
+      // Legacy relays may also have an incomplete init flag without salt/key-check;
+      // allow a repair only for that broken state.
+      if (!isVaultInitialized() || needsVaultRepair) {
         // First-time vault init: derive vault key from the proof
         // The proof is HMAC(challenge, userRootPrivateKey) — we use it as the key material
         const proofBytes = new Uint8Array(Buffer.from(unlockMsg.proof, "base64"));
-        const success = initializeVault(proofBytes);
+        let success = false;
+        try {
+          success = initializeVault(proofBytes, { allowRepair: needsVaultRepair });
+        } catch (error) {
+          ws.send(serializeMessage({
+            type: "unlock_relay_result",
+            success: false,
+            error: error instanceof Error ? error.message : "Vault initialization failed",
+          }));
+          return;
+        }
+
         if (success) {
           // Store owner identity
           const { setVaultMeta: setMeta } = await import("./control/store.js");
           setMeta('owner_user_root_id', userRootId);
           state.ownerUserRootId = userRootId;
-          console.log(`[relay] Vault initialized by owner ${userRootId.slice(0, 8)}...`);
+          console.log(
+            `[relay] Vault ${needsVaultRepair ? 'repaired' : 'initialized'} by owner ${userRootId.slice(0, 8)}...`
+          );
           ws.send(serializeMessage({
             type: "unlock_relay_result",
             success: true,
@@ -1618,7 +1636,7 @@ async function handleProtocolMessage(
           ws.send(serializeMessage({
             type: "unlock_relay_result",
             success: false,
-            error: "Vault already initialized",
+            error: needsVaultRepair ? "Vault repair failed" : "Vault already initialized",
           }));
         }
         return;

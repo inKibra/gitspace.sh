@@ -21,6 +21,7 @@ import {
   isRelayTrusted,
   addTrustedRelay,
   getTrustedRelay,
+  isCloudReachableRelayUrl,
   isLocalhost,
   computeRelayFingerprint,
   type RelayTrustStatus,
@@ -268,6 +269,10 @@ async function resolveRelayUrlForServe(
   }
 
   return selectedRelay;
+}
+
+function resolveCloudRelayUrlForConfig(relayUrl: string): string | undefined {
+  return isCloudReachableRelayUrl(relayUrl) ? relayUrl : undefined;
 }
 
 /**
@@ -1378,6 +1383,7 @@ export async function serveStart(options: {
   try {
     writeRelayConfig({
       relayUrl: effectiveRelayUrl,
+      cloudRelayUrl: resolveCloudRelayUrlForConfig(effectiveRelayUrl),
       machineId,
       savedAt: Date.now(),
     });
