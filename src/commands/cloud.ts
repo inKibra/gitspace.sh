@@ -67,10 +67,10 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
   const hostConfig = readHostConfig();
   const relayConfig = readRelayConfig();
 
-  // External URL for hosted mode, saved relay URL for explicit relay mode.
-  const relayUrl = hostConfig?.subdomain
-    ? `wss://${hostConfig.subdomain}.gitspace.sh/ws`
-    : relayConfig?.relayUrl;
+  // Prefer the last relay URL actually used by serve; fallback to hosted account
+  // subdomain only when no explicit relay config is available.
+  const relayUrl = relayConfig?.relayUrl
+    ?? (hostConfig?.subdomain ? `wss://${hostConfig.subdomain}.gitspace.sh/ws` : undefined);
 
   if (!relayUrl) {
     throw new SpacesError(
@@ -96,7 +96,7 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
   const relayPublicIdentity = getRelayPublicIdentity();
   if (!relayPublicIdentity) {
     throw new SpacesError(
-      'Relay identity is not initialized yet. Start `gssh machine serve start` (hosted mode) to initialize and pin relay identity first.',
+      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before launching cloud workspaces.',
       'USER_ERROR',
       1
     );
@@ -596,6 +596,28 @@ function requireWorkspace(workspaceId: string) {
   return ws;
 }
 
+function resolveRelayUrlForCloudConnect(explicitRelay?: string): string {
+  if (explicitRelay?.trim()) {
+    return explicitRelay.trim();
+  }
+
+  const relayConfig = readRelayConfig();
+  if (relayConfig?.relayUrl) {
+    return relayConfig.relayUrl;
+  }
+
+  const hostConfig = readHostConfig();
+  if (hostConfig?.subdomain) {
+    return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
+  }
+
+  throw new SpacesError(
+    'Relay URL is required. Pass --relay <url> or start machine serve once to save relay config.',
+    'USER_ERROR',
+    1,
+  );
+}
+
 const SPRITE_BOOTSTRAP_SCRIPT_PATH = `/tmp/${CLOUD_BOOTSTRAP_BUNDLE_FILENAME}`;
 
 function buildLegacySpriteServeStartCommand(): string[] {
@@ -924,6 +946,70 @@ export async function cloudDestroy(
   logger.log('');
 }
 
+export async function cloudConnect(
+  workspaceId: string,
+  options: { relay?: string; yes?: boolean } = {},
+  dependencies: {
+    resolveRelayUrl?: (explicitRelay?: string) => string;
+    connectToRemote?: (
+      target?: string,
+      options?: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean },
+    ) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const workspace = requireWorkspace(workspaceId);
+
+  if (!workspace.machineId) {
+    throw new SpacesError(
+      `Workspace '${workspaceId}' does not have an attached machine identity yet.`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (workspace.status === 'hibernated') {
+    throw new SpacesError(
+      `Workspace '${workspaceId}' is hibernated. Resume it first:\n  gssh cloud resume ${workspaceId}`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (workspace.status === 'destroyed') {
+    throw new SpacesError(
+      `Workspace '${workspaceId}' is destroyed and cannot be connected.`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (workspace.status === 'error') {
+    throw new SpacesError(
+      `Workspace '${workspaceId}' is in error state. Inspect with:\n  gssh cloud list`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (workspace.status === 'provisioning' || workspace.status === 'bootstrapping' || workspace.status === 'offline') {
+    throw new SpacesError(
+      `Workspace '${workspaceId}' is currently '${workspace.status}'. Wait until it is ready, then retry.`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const relayUrl = (dependencies.resolveRelayUrl ?? resolveRelayUrlForCloudConnect)(options.relay);
+  const connectToRemote = dependencies.connectToRemote
+    ?? (await import('./connect.js')).connectToRemote;
+
+  logger.info(`Connecting to cloud workspace ${workspaceId} via machine ${workspace.machineId}...`);
+  await connectToRemote(workspace.machineId, {
+    relay: relayUrl,
+    yes: options.yes,
+  });
+}
+
 export async function cloudList(): Promise<void> {
   const serveStatus = await queryServeStatus();
   if (!serveStatus) {
@@ -961,6 +1047,9 @@ export async function cloudList(): Promise<void> {
     logger.log(`  ${workspace.id}`);
     logger.log(`    Provider: ${workspace.provider}`);
     logger.log(`    Status:   ${workspace.status}`);
+    if (workspace.machineId) {
+      logger.log(`    Machine:  ${workspace.machineId}`);
+    }
     if (workspace.repo) {
       logger.log(`    Repo:     ${workspace.repo}`);
     }
@@ -970,6 +1059,9 @@ export async function cloudList(): Promise<void> {
     logger.log(`    Updated:  ${workspace.updatedAt}`);
     if (workspace.error) {
       logger.warning(`    Error:    ${workspace.error}`);
+    }
+    if (workspace.machineId && workspace.status === 'ready') {
+      logger.dim(`    Connect:  gssh cloud connect ${workspace.id}`);
     }
   }
 

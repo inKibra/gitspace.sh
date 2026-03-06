@@ -13,6 +13,7 @@ import {
   getCloudWorkspace,
   getLatestCloudBootstrapToken,
   listCloudEvents,
+  markCloudBootstrapVmCreated,
   markCloudBootstrapReady,
   upsertCloudWorkspace,
   validateCloudBootstrapToken,
@@ -107,6 +108,7 @@ describe('cloud bootstrap tokens', () => {
       id: 'ws-bootstrap-1',
       provider: 'sprites',
       providerWorkspaceId: 'sprite-1',
+      machinePublicKey: 'machine-signing-pub',
       status: 'bootstrapping',
       repo: 'owner/repo',
       branch: 'main',
@@ -204,6 +206,16 @@ describe('cloud bootstrap tokens', () => {
   });
 
   test('can look up workspace by machine public key', () => {
+    upsertCloudWorkspace({
+      id: 'ws-bootstrap-1',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-1',
+      machinePublicKey: 'machine-pub-by-key',
+      status: 'bootstrapping',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
     const issued = createCloudBootstrapToken({
       workspaceId: 'ws-bootstrap-1',
       ownerIdentityId: 'owner-abc',
@@ -259,7 +271,115 @@ describe('cloud bootstrap tokens', () => {
     expect(consumed).toBeNull();
   });
 
+  test('consumes bootstrap token in vm_created state', () => {
+    const issued = createCloudBootstrapToken({
+      workspaceId: 'ws-bootstrap-1',
+      ownerIdentityId: 'owner-abc',
+      ttlMs: 5 * 60 * 1000,
+    });
+
+    markCloudBootstrapVmCreated('ws-bootstrap-1');
+
+    const unlock = consumeCloudBootstrapTokenForUnlock({
+      token: issued.token,
+      workspaceId: 'ws-bootstrap-1',
+      machineSigningPublicKey: 'machine-signing-pub',
+    });
+    expect(unlock).toBeDefined();
+  });
+
+  test('unlock grant fails when workspace is not bootstrapping', () => {
+    upsertCloudWorkspace({
+      id: 'ws-ready',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-ready',
+      machinePublicKey: 'machine-ready-key',
+      status: 'ready',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
+    const issued = createCloudBootstrapToken({
+      workspaceId: 'ws-ready',
+      ownerIdentityId: 'owner-abc',
+      ttlMs: 5 * 60 * 1000,
+    });
+
+    const consumed = consumeCloudBootstrapTokenForUnlock({
+      token: issued.token,
+      workspaceId: 'ws-ready',
+      machineSigningPublicKey: 'machine-ready-key',
+    });
+    expect(consumed).toBeNull();
+
+    const latest = getLatestCloudBootstrapToken('ws-ready');
+    expect(latest?.state).toBe('pending');
+  });
+
+  test('unlock grant fails when workspace already has machine id', () => {
+    upsertCloudWorkspace({
+      id: 'ws-has-machine',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-has-machine',
+      machineId: 'machine-existing',
+      machinePublicKey: 'machine-existing-key',
+      status: 'bootstrapping',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
+    const issued = createCloudBootstrapToken({
+      workspaceId: 'ws-has-machine',
+      ownerIdentityId: 'owner-abc',
+      ttlMs: 5 * 60 * 1000,
+    });
+
+    const consumed = consumeCloudBootstrapTokenForUnlock({
+      token: issued.token,
+      workspaceId: 'ws-has-machine',
+      machineSigningPublicKey: 'machine-existing-key',
+    });
+    expect(consumed).toBeNull();
+  });
+
+  test('unlock grant fails when workspace machine key is missing', () => {
+    upsertCloudWorkspace({
+      id: 'ws-no-key',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-no-key',
+      status: 'bootstrapping',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
+    const issued = createCloudBootstrapToken({
+      workspaceId: 'ws-no-key',
+      ownerIdentityId: 'owner-abc',
+      ttlMs: 5 * 60 * 1000,
+    });
+
+    const consumed = consumeCloudBootstrapTokenForUnlock({
+      token: issued.token,
+      workspaceId: 'ws-no-key',
+      machineSigningPublicKey: 'machine-signing-no-key',
+    });
+    expect(consumed).toBeNull();
+
+    const latest = getLatestCloudBootstrapToken('ws-no-key');
+    expect(latest?.state).toBe('failed');
+  });
+
   test('token cannot be consumed by a different machine key once workspace key is established', () => {
+    upsertCloudWorkspace({
+      id: 'ws-bootstrap-1',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-1',
+      machinePublicKey: 'machine-pub-1',
+      status: 'bootstrapping',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
     const first = createCloudBootstrapToken({
       workspaceId: 'ws-bootstrap-1',
       ownerIdentityId: 'owner-abc',
@@ -324,5 +444,72 @@ describe('cloud bootstrap tokens', () => {
       machineSigningPublicKey: 'machine-signing-other',
     });
     expect(wrongKey).toBeNull();
+  });
+
+  test('register permit fails when workspace is no longer bootstrapping', () => {
+    const issued = createCloudBootstrapToken({
+      workspaceId: 'ws-bootstrap-1',
+      ownerIdentityId: 'owner-abc',
+      ttlMs: 5 * 60 * 1000,
+    });
+
+    const unlock = consumeCloudBootstrapTokenForUnlock({
+      token: issued.token,
+      workspaceId: 'ws-bootstrap-1',
+      machineSigningPublicKey: 'machine-signing-pub',
+    });
+    expect(unlock).toBeDefined();
+
+    upsertCloudWorkspace({
+      id: 'ws-bootstrap-1',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-1',
+      machinePublicKey: 'machine-signing-pub',
+      status: 'ready',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
+    const register = consumeCloudRegisterPermit({
+      registerPermit: unlock!.registerPermit,
+      workspaceId: 'ws-bootstrap-1',
+      machineId: 'machine-xyz',
+      machineSigningPublicKey: 'machine-signing-pub',
+    });
+    expect(register).toBeNull();
+  });
+
+  test('register permit fails when workspace machine id conflicts', () => {
+    const issued = createCloudBootstrapToken({
+      workspaceId: 'ws-bootstrap-1',
+      ownerIdentityId: 'owner-abc',
+      ttlMs: 5 * 60 * 1000,
+    });
+
+    const unlock = consumeCloudBootstrapTokenForUnlock({
+      token: issued.token,
+      workspaceId: 'ws-bootstrap-1',
+      machineSigningPublicKey: 'machine-signing-pub',
+    });
+    expect(unlock).toBeDefined();
+
+    upsertCloudWorkspace({
+      id: 'ws-bootstrap-1',
+      provider: 'sprites',
+      providerWorkspaceId: 'sprite-1',
+      machineId: 'machine-existing',
+      machinePublicKey: 'machine-signing-pub',
+      status: 'bootstrapping',
+      repo: 'owner/repo',
+      branch: 'main',
+    });
+
+    const register = consumeCloudRegisterPermit({
+      registerPermit: unlock!.registerPermit,
+      workspaceId: 'ws-bootstrap-1',
+      machineId: 'machine-new',
+      machineSigningPublicKey: 'machine-signing-pub',
+    });
+    expect(register).toBeNull();
   });
 });
