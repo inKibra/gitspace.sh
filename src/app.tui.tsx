@@ -439,7 +439,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
     onAttachCancelled: ({ target }) => {
-      if (target === 'workspace') {
+      if (target === 'workspace' && state.view === 'scripts') {
         return;
       }
       dispatch({ type: 'SET_VIEW', view: 'projects' });
