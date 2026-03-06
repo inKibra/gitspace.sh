@@ -533,8 +533,77 @@ describe("E2E: Encrypted Data Exchange", () => {
 });
 
 describe("E2E: Error Scenarios", () => {
-  test.skip("unauthorized client is rejected", async () => {
-    // Replaced by ACL-gated authorization coverage in relay/server.test.ts.
+  test("unauthorized client is rejected when connecting to machine", async () => {
+    // Register the machine so it's online
+    const accessList = new AccessControlList();
+    const { ws: machineWs } = await createMachineConnection(
+      testFixtures.machine,
+      accessList,
+    );
+
+    // Grant relay+machine access for the OWNER (testUserRoot) so the machine
+    // is fully set up, but do NOT grant access for the outsider.
+    grantRelayAccess({
+      ownerUserRootId: testOwnerUserRootId,
+      clientUserRootId: testUserRoot.id,
+      label: "e2e-unauth-owner",
+    });
+    grantMachineAccess({
+      machineId: testFixtures.machine.id,
+      ownerUserRootId: testOwnerUserRootId,
+      clientUserRootId: testUserRoot.id,
+      label: "e2e-unauth-owner",
+    });
+
+    // Create an outsider user root (different from relay owner)
+    const outsiderUserRoot = mnemonicToUserIdentity(generateMnemonic());
+    const outsiderClient = createTestIdentity("Outsider Client");
+    const outsiderCert = JSON.stringify(createDeviceCertificate(
+      outsiderUserRoot,
+      outsiderClient.signing.publicKey,
+      outsiderClient.keyExchange.publicKey,
+    ));
+
+    // Connect outsider — should be rejected at the relay level
+    let errorReceived: Error | null = null;
+    let disconnected = false;
+
+    const client = new RelayClient(
+      {
+        relayUrl,
+        machineId: testFixtures.machine.id,
+        identity: outsiderClient,
+        deviceCertificate: outsiderCert,
+      },
+      {
+        onError: (error) => {
+          errorReceived = error;
+        },
+        onDisconnect: () => {
+          disconnected = true;
+        },
+      },
+    );
+
+    await client.connect();
+
+    // Wait for the error/disconnect to arrive
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (errorReceived || disconnected) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+    });
+
+    // The relay should have rejected the outsider
+    expect(errorReceived).not.toBeNull();
+    expect(errorReceived!.message).toMatch(/not authorized|FORBIDDEN/i);
+
+    client.disconnect();
+    machineWs.close();
   });
 
   test("client handles machine disconnect gracefully", async () => {
@@ -867,7 +936,7 @@ describe("E2E: PTY Session Flow", () => {
     machineWs.close();
   });
 
-  test.skip("ClientSessionManager handles multiple concurrent clients", async () => {
+  test("ClientSessionManager handles multiple concurrent clients", async () => {
     // Create a second client identity
     const bob = createTestIdentity("Bob");
 
@@ -946,7 +1015,20 @@ describe("E2E: PTY Session Flow", () => {
       };
     });
 
-    // Relay-side ACL auth uses user-root access checks only.
+    // Grant relay + machine access for the owner user root.
+    // Both alice and bob present device certs signed by testUserRoot,
+    // so a single grant covers both clients.
+    grantRelayAccess({
+      ownerUserRootId: testOwnerUserRootId,
+      clientUserRootId: testUserRoot.id,
+      label: 'e2e-concurrent',
+    });
+    grantMachineAccess({
+      machineId: testFixtures.machine.id,
+      ownerUserRootId: testOwnerUserRootId,
+      clientUserRootId: testUserRoot.id,
+      label: 'e2e-concurrent',
+    });
 
     // Machine message handler
     machineWs.onmessage = async (event) => {
@@ -975,7 +1057,7 @@ describe("E2E: PTY Session Flow", () => {
       }
     };
 
-    // Connect both clients concurrently (no tokens needed)
+    // Connect both clients concurrently
     let aliceHandshakeComplete = false;
     let bobHandshakeComplete = false;
 
@@ -985,7 +1067,6 @@ describe("E2E: PTY Session Flow", () => {
         machineId: testFixtures.machine.id,
         identity: testFixtures.alice,
         deviceCertificate: createTestDeviceCertificate(testFixtures.alice),
-        // No token needed
       },
       {
         onHandshakeComplete: () => {
@@ -1003,7 +1084,6 @@ describe("E2E: PTY Session Flow", () => {
         machineId: testFixtures.machine.id,
         identity: bob,
         deviceCertificate: createTestDeviceCertificate(bob),
-        // No token needed
       },
       {
         onHandshakeComplete: () => {

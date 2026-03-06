@@ -12,7 +12,7 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { promptConfirm, promptInput } from '../utils/prompts.js';
+import { promptConfirm, promptInput, promptPassword } from '../utils/prompts.js';
 import {
   generateNewMnemonic,
   initFromMnemonic,
@@ -20,9 +20,15 @@ import {
   getUserRootPublicInfo,
   userRootIdentityExists,
   removeUserRootIdentity,
-  verifyMnemonicMatchesStored,
   formatFingerprint,
 } from '../core/user-identity.js';
+import {
+  backupCurrentUserRootToCloud,
+  deleteCloudIdentityBackup,
+  getCloudIdentityBackup,
+  getCloudIdentityBackupStatus,
+  recoverUserRootFromCloudBackup,
+} from '../core/identity-backup.js';
 import { formatUserRootPublicKey } from '../lib/tmux-lite/crypto/user-identity.js';
 import { SpacesError } from '../types/errors.js';
 
@@ -160,7 +166,14 @@ export async function showIdentity(
  * Recover identity from a 24-word mnemonic.
  * Prompts the user to enter their mnemonic, derives keys, stores in keychain.
  */
-export async function recoverIdentity(options: { force?: boolean } = {}): Promise<void> {
+export async function recoverIdentity(
+  options: { force?: boolean; cloud?: boolean; yes?: boolean } = {},
+): Promise<void> {
+  if (options.cloud) {
+    await recoverIdentityFromCloud(options);
+    return;
+  }
+
   const exists = await userRootIdentityExists();
 
   if (exists && !options.force) {
@@ -171,7 +184,7 @@ export async function recoverIdentity(options: { force?: boolean } = {}): Promis
     );
   }
 
-  if (exists && options.force) {
+  if (exists && options.force && !options.yes) {
     const confirmed = await promptConfirm(
       'This will replace your current identity. Continue?',
       false,
@@ -199,11 +212,50 @@ export async function recoverIdentity(options: { force?: boolean } = {}): Promis
   // Derive and store
   logger.info('Deriving identity from mnemonic...');
   const identity = await initFromMnemonic(normalized, options.force ?? exists ?? false);
+  logIdentityRecovered(identity, 'Identity recovered and stored in keychain');
+}
 
+export async function recoverIdentityFromCloud(options: { force?: boolean; yes?: boolean } = {}): Promise<void> {
+  const exists = await userRootIdentityExists();
+
+  if (exists && !options.force) {
+    throw new SpacesError(
+      'Identity already exists. Use --force to overwrite.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (exists && options.force && !options.yes) {
+    const confirmed = await promptConfirm(
+      'This will replace your current identity using cloud backup. Continue?',
+      false,
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
+  }
+
+  const backupPassword = await promptPassword('Enter your identity backup password:');
+  if (!backupPassword) {
+    logger.info('Cancelled');
+    return;
+  }
+
+  logger.info('Recovering identity from cloud backup...');
+  const identity = await recoverUserRootFromCloudBackup(backupPassword, {
+    force: options.force ?? exists ?? false,
+  });
+
+  logIdentityRecovered(identity, 'Identity recovered from cloud backup and stored in keychain');
+}
+
+function logIdentityRecovered(identity: Awaited<ReturnType<typeof initFromMnemonic>>, successMessage: string): void {
   const publicKeyString = formatUserRootPublicKey(identity);
   const fingerprint = formatFingerprint(identity.signing.publicKey);
 
-  logger.success('Identity recovered and stored in keychain');
+  logger.success(successMessage);
   logger.log('');
   logger.bold('Identity Information:');
   logger.log(`  ID:          ${identity.id}`);
@@ -302,4 +354,122 @@ export async function removeIdentity(options: { force?: boolean } = {}): Promise
   } else {
     logger.info('No identity found in keychain.');
   }
+}
+
+export async function enableIdentityBackup(options: { yes?: boolean } = {}): Promise<void> {
+  const identity = await loadUserRootIdentity();
+  if (!identity) {
+    throw new SpacesError(
+      'No identity found. Run `gssh user identity init` or `gssh user identity recover` first.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const existing = await getCloudIdentityBackup();
+  if (existing && !options.yes) {
+    const confirmed = await promptConfirm(
+      'An identity backup already exists in the cloud. Overwrite it?',
+      false,
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
+  }
+
+  const backupPassword = await promptPassword('Create identity backup password:');
+  if (!backupPassword) {
+    logger.info('Cancelled');
+    return;
+  }
+
+  const confirmPassword = await promptPassword('Confirm identity backup password:');
+  if (backupPassword !== confirmPassword) {
+    throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+  }
+
+  const record = await backupCurrentUserRootToCloud(backupPassword);
+  logger.success('Encrypted identity backup saved to GitSpace cloud');
+  logger.log(`  Owner ID: ${record.ownerUserRootId}`);
+  logger.log(`  Updated:  ${new Date(record.updatedAt).toISOString()}`);
+}
+
+export async function showIdentityBackupStatus(): Promise<void> {
+  const status = await getCloudIdentityBackupStatus();
+  if (!status.enabled) {
+    logger.info('Cloud identity backup is not enabled for this account.');
+    logger.dim('Run `gssh user identity backup enable` to create one.');
+    return;
+  }
+
+  logger.bold('Cloud Identity Backup');
+  logger.log(`  Enabled:  yes`);
+  if (status.ownerUserRootId) {
+    logger.log(`  Owner ID: ${status.ownerUserRootId}`);
+  }
+  if (status.createdAt) {
+    logger.log(`  Created:  ${new Date(status.createdAt).toISOString()}`);
+  }
+  if (status.updatedAt) {
+    logger.log(`  Updated:  ${new Date(status.updatedAt).toISOString()}`);
+  }
+}
+
+export async function disableIdentityBackup(options: { yes?: boolean } = {}): Promise<void> {
+  if (!options.yes) {
+    const confirmed = await promptConfirm(
+      'Delete your cloud identity backup? You will need your mnemonic to recover if no backup exists.',
+      false,
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
+  }
+
+  const removed = await deleteCloudIdentityBackup();
+  if (!removed) {
+    logger.info('No cloud identity backup found.');
+    return;
+  }
+
+  logger.success('Cloud identity backup deleted');
+}
+
+export async function rotateIdentityBackupPassword(options: { yes?: boolean } = {}): Promise<void> {
+  const existing = await getCloudIdentityBackup();
+  if (!existing) {
+    throw new SpacesError(
+      'No cloud identity backup found. Run `gssh user identity backup enable` first.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (!options.yes) {
+    const confirmed = await promptConfirm(
+      'Rotate cloud backup password now?',
+      true,
+    );
+    if (!confirmed) {
+      logger.info('Cancelled');
+      return;
+    }
+  }
+
+  const backupPassword = await promptPassword('Enter new identity backup password:');
+  if (!backupPassword) {
+    logger.info('Cancelled');
+    return;
+  }
+
+  const confirmPassword = await promptPassword('Confirm new identity backup password:');
+  if (backupPassword !== confirmPassword) {
+    throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+  }
+
+  const record = await backupCurrentUserRootToCloud(backupPassword);
+  logger.success('Cloud identity backup password rotated');
+  logger.log(`  Updated: ${new Date(record.updatedAt).toISOString()}`);
 }

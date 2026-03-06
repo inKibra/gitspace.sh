@@ -57,6 +57,8 @@ function registerIdentityCommands(user: Command): void {
   identity
     .command('recover')
     .description('Recover identity from 24-word mnemonic')
+    .option('--cloud', 'Recover from GitSpace cloud backup (requires login)')
+    .option('-y, --yes', 'Auto-confirm prompts')
     .option('--force', 'Overwrite existing identity')
     .action(withErrorHandler(async (options) => {
       const { recoverIdentity } = await import('../../commands/identity.js');
@@ -91,6 +93,45 @@ function registerIdentityCommands(user: Command): void {
       const { removeIdentity } = await import('../../commands/identity.js');
       await removeIdentity(options);
     }));
+
+  const backup = identity
+    .command('backup')
+    .description('Manage optional encrypted cloud backup of your user identity');
+
+  backup
+    .command('enable')
+    .description('Enable/update encrypted cloud backup for your identity')
+    .option('-y, --yes', 'Auto-confirm prompts')
+    .action(withErrorHandler(async (options) => {
+      const { enableIdentityBackup } = await import('../../commands/identity.js');
+      await enableIdentityBackup(options);
+    }));
+
+  backup
+    .command('status')
+    .description('Show cloud backup status for your identity')
+    .action(withErrorHandler(async () => {
+      const { showIdentityBackupStatus } = await import('../../commands/identity.js');
+      await showIdentityBackupStatus();
+    }));
+
+  backup
+    .command('disable')
+    .description('Disable and remove encrypted cloud backup for your identity')
+    .option('-y, --yes', 'Auto-confirm prompts')
+    .action(withErrorHandler(async (options) => {
+      const { disableIdentityBackup } = await import('../../commands/identity.js');
+      await disableIdentityBackup(options);
+    }));
+
+  backup
+    .command('rotate-password')
+    .description('Rotate the password used to encrypt cloud identity backup')
+    .option('-y, --yes', 'Auto-confirm prompts')
+    .action(withErrorHandler(async (options) => {
+      const { rotateIdentityBackupPassword } = await import('../../commands/identity.js');
+      await rotateIdentityBackupPassword(options);
+    }));
 }
 
 // ============================================================================
@@ -105,9 +146,10 @@ function registerAuthCommands(user: Command): void {
   auth
     .command('login')
     .description('Login with GitHub')
-    .action(withErrorHandler(async () => {
+    .option('-y, --yes', 'Auto-confirm prompts')
+    .action(withErrorHandler(async (options) => {
       const { authLogin } = await import('../../commands/auth.js');
-      await authLogin();
+      await authLogin(options);
     }));
 
   auth
@@ -178,6 +220,14 @@ function registerHostCommands(user: Command): void {
     .action(withErrorHandler(async () => {
       const { hostStatus } = await import('../../commands/host.js');
       await hostStatus();
+    }, { skipSetupCheck: true }));
+
+  host
+    .command('doctor')
+    .description('Check hosted relay readiness and remediation steps')
+    .action(withErrorHandler(async () => {
+      const { hostDoctor } = await import('../../commands/host.js');
+      await hostDoctor();
     }, { skipSetupCheck: true }));
 }
 

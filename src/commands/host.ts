@@ -56,8 +56,165 @@ interface SubdomainCreateResponse {
   isPrimary: boolean;
 }
 
+export type HostReadinessStatus = 'configured' | 'missing' | 'error';
+
+export interface HostReadinessCheck {
+  status: HostReadinessStatus;
+  detail: string;
+  fix?: string;
+}
+
+export interface HostSyncReport {
+  ready: boolean;
+  primarySubdomain: string | null;
+  serveSubdomain: string | null;
+  subdomain: HostReadinessCheck;
+  tunnelToken: HostReadinessCheck;
+  serveTunnelToken: HostReadinessCheck;
+  warnings: string[];
+}
+
 function normalizeSubdomain(subdomain: string): string {
   return subdomain.toLowerCase().trim();
+}
+
+function configuredCheck(detail: string): HostReadinessCheck {
+  return { status: 'configured', detail };
+}
+
+function missingCheck(detail: string, fix?: string): HostReadinessCheck {
+  return { status: 'missing', detail, fix };
+}
+
+function errorCheck(detail: string, fix?: string): HostReadinessCheck {
+  return { status: 'error', detail, fix };
+}
+
+function createInitialHostSyncReport(): HostSyncReport {
+  return {
+    ready: false,
+    primarySubdomain: null,
+    serveSubdomain: null,
+    subdomain: missingCheck('Not checked yet.'),
+    tunnelToken: missingCheck('Not checked yet.'),
+    serveTunnelToken: missingCheck('Not checked yet.'),
+    warnings: [],
+  };
+}
+
+function isConfigured(check: HostReadinessCheck): boolean {
+  return check.status === 'configured';
+}
+
+async function setPrimarySubdomainViaSync(headers: Record<string, string>, subdomain: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/subdomains/${normalizeSubdomain(subdomain)}/set-primary`, {
+      method: 'POST',
+      headers,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureTokenFromApi(args: {
+  headers: Record<string, string>;
+  apiSubdomain: string;
+  secretKey: string;
+  description: string;
+}): Promise<HostReadinessCheck> {
+  const existingToken = await getSecret(args.secretKey);
+  if (existingToken) {
+    return configuredCheck('Configured in keychain.');
+  }
+
+  try {
+    const tokenRes = await fetch(`${API_BASE}/subdomains/${args.apiSubdomain}/token`, {
+      headers: args.headers,
+    });
+
+    if (!tokenRes.ok) {
+      return errorCheck(
+        `Could not fetch ${args.description} (${tokenRes.status} ${tokenRes.statusText}).`,
+        'gssh user host status',
+      );
+    }
+
+    const tokenData = await tokenRes.json() as { tunnelToken?: string };
+    const token = tokenData.tunnelToken;
+    if (!token) {
+      return errorCheck(
+        `${args.description} response missing tunnelToken.`,
+        'gssh user host status',
+      );
+    }
+
+    await setSecret(args.secretKey, token);
+    return configuredCheck('Fetched from API and saved to keychain.');
+  } catch (error) {
+    return errorCheck(
+      `Could not fetch ${args.description} (${error instanceof Error ? error.message : String(error)}).`,
+      'gssh user host status',
+    );
+  }
+}
+
+function checkStatusLabel(check: HostReadinessCheck): string {
+  if (check.status === 'configured') {
+    return 'configured';
+  }
+  if (check.status === 'missing') {
+    return 'missing';
+  }
+  return 'error';
+}
+
+function collectRecommendedCommands(report: HostSyncReport): string[] {
+  const commands = [report.subdomain.fix, report.tunnelToken.fix, report.serveTunnelToken.fix]
+    .filter((value): value is string => Boolean(value));
+  return [...new Set(commands)];
+}
+
+export function printHostSyncReport(report: HostSyncReport, title: string = 'Hosted relay readiness'): void {
+  logger.bold(title);
+  logger.log('');
+
+  logger.log(`  Subdomain:         ${checkStatusLabel(report.subdomain)}`);
+  logger.dim(`    ${report.subdomain.detail}`);
+
+  logger.log(`  Tunnel token:      ${checkStatusLabel(report.tunnelToken)}`);
+  logger.dim(`    ${report.tunnelToken.detail}`);
+
+  logger.log(`  Serve token:       ${checkStatusLabel(report.serveTunnelToken)}`);
+  logger.dim(`    ${report.serveTunnelToken.detail}`);
+
+  if (report.primarySubdomain) {
+    logger.log(`  Primary host:      ${report.primarySubdomain}.gitspace.sh`);
+  }
+  if (report.serveSubdomain) {
+    logger.log(`  Serve host:        ${report.serveSubdomain}.gitspace.sh`);
+  }
+
+  for (const warning of report.warnings) {
+    logger.warning(warning);
+  }
+
+  logger.log('');
+  if (report.ready) {
+    logger.success('Hosted relay is ready.');
+  } else {
+    logger.warning('Hosted relay is not ready yet.');
+  }
+
+  const commands = collectRecommendedCommands(report);
+  if (commands.length > 0) {
+    logger.log('');
+    logger.dim('Recommended next steps:');
+    for (const cmd of commands) {
+      logger.log(`  ${logger.command(cmd)}`);
+    }
+  }
 }
 
 async function logApiFailure(context: string, response: Response): Promise<void> {
@@ -118,108 +275,139 @@ function writeHostConfig(config: HostConfig): void {
  * Called after login and subdomain changes to keep local config in sync
  * @param interactive - If true, prompt user to select primary if needed
  */
-export async function syncHostConfig(interactive: boolean = false): Promise<void> {
+export async function syncHostConfig(interactive: boolean = false): Promise<HostSyncReport> {
+  const report = createInitialHostSyncReport();
+
   const token = await getSecret('GITSPACE_TOKEN');
-  if (!token) return;
+  if (!token) {
+    report.subdomain = missingCheck('Not logged in to gitspace.sh.', 'gssh user auth login');
+    report.tunnelToken = missingCheck('Unavailable until login is complete.', 'gssh user auth login');
+    report.serveTunnelToken = missingCheck('Unavailable until login is complete.', 'gssh user auth login');
+    return report;
+  }
 
+  let headers: Record<string, string>;
   try {
-    const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE}/subdomains`, { headers });
+    headers = await getAuthHeaders();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    report.subdomain = errorCheck(detail, 'gssh user identity init');
+    report.tunnelToken = missingCheck('Unavailable until identity is configured.', 'gssh user identity init');
+    report.serveTunnelToken = missingCheck('Unavailable until identity is configured.', 'gssh user identity init');
+    return report;
+  }
 
-    if (!res.ok) return;
+  let activeSubdomains: SubdomainInfo[] = [];
+  try {
+    const res = await fetch(`${API_BASE}/subdomains`, { headers });
+    if (!res.ok) {
+      report.subdomain = errorCheck(
+        `Could not list subdomains (${res.status} ${res.statusText}).`,
+        'gssh user host status',
+      );
+      report.tunnelToken = missingCheck('Unavailable until subdomains are reachable.', 'gssh user host status');
+      report.serveTunnelToken = missingCheck('Unavailable until subdomains are reachable.', 'gssh user host status');
+      return report;
+    }
 
     const subdomains: SubdomainInfo[] = await res.json();
-    const activeSubdomains = subdomains.filter((s) => s.status === 'active');
-
-    // No subdomains - tell user to reserve one
-    if (activeSubdomains.length === 0) {
-      if (interactive) {
-        logger.log('');
-        logger.dim('No subdomains reserved yet.');
-        logger.dim('To enable remote access, reserve a subdomain:');
-        logger.command('  gssh user host reserve <name>');
-      }
-      return;
-    }
-
-    // Check for primary
-    let primary = activeSubdomains.find((s) => s.is_primary);
-
-    // If no primary set and interactive, ask user to pick one
-    if (!primary && interactive && activeSubdomains.length > 0) {
-      logger.log('');
-      logger.log('Your subdomains:');
-      activeSubdomains.forEach((s, i) => {
-        logger.log(`  ${i + 1}. ${s.subdomain}.gitspace.sh`);
-      });
-
-      if (activeSubdomains.length === 1) {
-        // Auto-set the only one as primary
-        primary = activeSubdomains[0];
-        logger.dim(`Setting ${primary.subdomain}.gitspace.sh as primary...`);
-        await hostSetPrimary(primary.subdomain);
-      } else {
-        logger.log('');
-        logger.dim('Select a primary subdomain for this machine:');
-        logger.command('  gssh user host set-primary <name>');
-      }
-    }
-
-    if (primary) {
-      const serveSubdomain = activeSubdomains.find(
-        (s) => s.subdomain === `${primary.subdomain}.serve`
-      );
-      const resolvedServeSubdomain = serveSubdomain?.subdomain ?? `${primary.subdomain}.serve`;
-      writeHostConfig({
-        subdomain: primary.subdomain,
-        serveSubdomain: resolvedServeSubdomain,
-        subdomains: activeSubdomains.map((s) => s.subdomain),
-        createdAt: primary.created_at,
-      });
-
-      // Sync tunnel token if not present (e.g., new machine with existing account)
-      const existingToken = await getSecret(getTunnelTokenKey(primary.subdomain));
-      if (!existingToken) {
-        if (interactive) {
-          logger.dim(`Fetching tunnel credentials for ${primary.subdomain}.gitspace.sh...`);
-        }
-        try {
-          const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
-          if (tokenRes.ok) {
-            const { tunnelToken } = await tokenRes.json();
-            await setSecret(getTunnelTokenKey(primary.subdomain), tunnelToken);
-            if (interactive) {
-              logger.success('Tunnel credentials saved');
-            }
-          }
-        } catch {
-          // Ignore token fetch errors
-        }
-      }
-
-      const serveTokenKey = getServeTokenKey(primary.subdomain);
-      const existingServeToken = await getSecret(serveTokenKey);
-      if (!existingServeToken) {
-        if (interactive) {
-          logger.dim(`Fetching tunnel credentials for ${resolvedServeSubdomain}.gitspace.sh...`);
-        }
-        try {
-          const tokenRes = await fetch(`${API_BASE}/subdomains/${resolvedServeSubdomain}/token`, { headers });
-          if (tokenRes.ok) {
-            const { tunnelToken } = await tokenRes.json();
-            await setSecret(serveTokenKey, tunnelToken);
-            if (interactive) {
-              logger.success('Serve tunnel credentials saved');
-            }
-          }
-        } catch {
-          // Ignore token fetch errors
-        }
-      }
-    }
-  } catch {
-    // Ignore sync errors
+    activeSubdomains = subdomains.filter((entry) => entry.status === 'active');
+  } catch (error) {
+    report.subdomain = errorCheck(
+      `Could not reach gitspace.sh API (${error instanceof Error ? error.message : String(error)}).`,
+      'gssh user host status',
+    );
+    report.tunnelToken = missingCheck('Unavailable while API is unreachable.', 'gssh user host status');
+    report.serveTunnelToken = missingCheck('Unavailable while API is unreachable.', 'gssh user host status');
+    return report;
   }
+
+  if (activeSubdomains.length === 0) {
+    report.subdomain = missingCheck(
+      'No active subdomain reserved for this account.',
+      'gssh user host reserve <name>',
+    );
+    report.tunnelToken = missingCheck('No relay host selected yet.', 'gssh user host reserve <name>');
+    report.serveTunnelToken = missingCheck('No relay host selected yet.', 'gssh user host reserve <name>');
+
+    if (interactive) {
+      logger.log('');
+      logger.dim('No subdomains reserved yet.');
+      logger.dim('To enable remote access, reserve a subdomain:');
+      logger.log(`  ${logger.command('gssh user host reserve <name>')}`);
+    }
+
+    return report;
+  }
+
+  let primary = activeSubdomains.find((entry) => Boolean(entry.is_primary));
+
+  if (!primary && interactive && activeSubdomains.length > 0) {
+    logger.log('');
+    logger.log('Your subdomains:');
+    activeSubdomains.forEach((entry, index) => {
+      logger.log(`  ${index + 1}. ${entry.subdomain}.gitspace.sh`);
+    });
+
+    if (activeSubdomains.length === 1) {
+      const only = activeSubdomains[0]!;
+      logger.dim(`Setting ${only.subdomain}.gitspace.sh as primary...`);
+      const updated = await setPrimarySubdomainViaSync(headers, only.subdomain);
+      if (updated) {
+        primary = only;
+      } else {
+        report.warnings.push(`Could not auto-set ${only.subdomain}.gitspace.sh as primary.`);
+      }
+    } else {
+      logger.log('');
+      logger.dim('Select a primary subdomain for this machine:');
+      logger.log(`  ${logger.command('gssh user host set-primary <name>')}`);
+    }
+  }
+
+  const selected = primary ?? activeSubdomains[0]!;
+  const serveSubdomain = activeSubdomains.find((entry) => entry.subdomain === `${selected.subdomain}.serve`);
+  const resolvedServeSubdomain = serveSubdomain?.subdomain ?? `${selected.subdomain}.serve`;
+
+  writeHostConfig({
+    subdomain: selected.subdomain,
+    serveSubdomain: resolvedServeSubdomain,
+    subdomains: activeSubdomains.map((entry) => entry.subdomain),
+    createdAt: selected.created_at,
+  });
+
+  report.primarySubdomain = selected.subdomain;
+  report.serveSubdomain = resolvedServeSubdomain;
+
+  if (primary) {
+    report.subdomain = configuredCheck(`Primary subdomain ${selected.subdomain}.gitspace.sh is active.`);
+  } else {
+    report.subdomain = configuredCheck(`Using ${selected.subdomain}.gitspace.sh (no primary set).`);
+    report.subdomain.fix = 'gssh user host set-primary <name>';
+    report.warnings.push(
+      'No primary subdomain is set. Non-interactive relay startup may auto-select from available hosts.',
+    );
+  }
+
+  report.tunnelToken = await ensureTokenFromApi({
+    headers,
+    apiSubdomain: selected.subdomain,
+    secretKey: getTunnelTokenKey(selected.subdomain),
+    description: `tunnel credentials for ${selected.subdomain}.gitspace.sh`,
+  });
+
+  report.serveTunnelToken = await ensureTokenFromApi({
+    headers,
+    apiSubdomain: resolvedServeSubdomain,
+    secretKey: getServeTokenKey(selected.subdomain),
+    description: `serve tunnel credentials for ${resolvedServeSubdomain}.gitspace.sh`,
+  });
+
+  report.ready = isConfigured(report.subdomain)
+    && isConfigured(report.tunnelToken)
+    && isConfigured(report.serveTunnelToken);
+
+  return report;
 }
 
 // ============================================================================
@@ -602,6 +790,15 @@ export async function hostSetPrimary(subdomain: string): Promise<void> {
 // ============================================================================
 // Status
 // ============================================================================
+
+/**
+ * Check hosted relay readiness with actionable diagnostics.
+ */
+export async function hostDoctor(): Promise<void> {
+  const report = await syncHostConfig(false);
+  logger.log('');
+  printHostSyncReport(report, 'Hosted relay diagnostics');
+}
 
 /**
  * Show hosting status

@@ -856,7 +856,10 @@ export function consumeCloudBootstrapTokenForUnlock(
           workspace_id,
           owner_identity_id,
           expires_at,
-          consumed_at
+          consumed_at,
+          state,
+          machine_public_key,
+          machine_id
         FROM cloud_bootstrap_tokens
         WHERE token_hash = ?
         LIMIT 1
@@ -867,6 +870,9 @@ export function consumeCloudBootstrapTokenForUnlock(
         owner_identity_id: string;
         expires_at: string;
         consumed_at: string | null;
+        state: string;
+        machine_public_key: string | null;
+        machine_id: string | null;
       } | null;
 
       if (!row) {
@@ -880,6 +886,11 @@ export function consumeCloudBootstrapTokenForUnlock(
       }
 
       if (row.consumed_at) {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (row.state !== 'pending' && row.state !== 'vm_created') {
         db.exec('ROLLBACK');
         return null;
       }
@@ -898,21 +909,59 @@ export function consumeCloudBootstrapTokenForUnlock(
 
       const workspaceRow = db.query(
         `
-        SELECT machine_public_key
+        SELECT machine_public_key, machine_id, status
         FROM cloud_workspaces
         WHERE id = ?
         `
-      ).get(row.workspace_id) as { machine_public_key: string | null } | null;
+      ).get(row.workspace_id) as {
+        machine_public_key: string | null;
+        machine_id: string | null;
+        status: string;
+      } | null;
 
       if (!workspaceRow) {
         db.exec('ROLLBACK');
         return null;
       }
 
+      if (workspaceRow.status !== 'bootstrapping') {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (workspaceRow.machine_id) {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (!workspaceRow.machine_public_key) {
+        db.query(
+          `
+          UPDATE cloud_bootstrap_tokens
+          SET state = 'failed', last_error = ?, updated_at = ?
+          WHERE token_id = ?
+          `
+        ).run('Workspace machine key is missing for unlock grant', now, row.token_id);
+        db.exec('COMMIT');
+        return null;
+      }
+
       if (
-        workspaceRow.machine_public_key &&
         workspaceRow.machine_public_key !== input.machineSigningPublicKey
       ) {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (
+        row.machine_public_key &&
+        row.machine_public_key !== input.machineSigningPublicKey
+      ) {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (row.machine_id) {
         db.exec('ROLLBACK');
         return null;
       }
@@ -1017,7 +1066,8 @@ export function consumeCloudRegisterPermit(
           p.machine_public_key,
           p.expires_at,
           p.consumed_at,
-          b.owner_identity_id
+          b.owner_identity_id,
+          b.state AS bootstrap_state
         FROM cloud_register_permits p
         INNER JOIN cloud_bootstrap_tokens b ON b.token_id = p.token_id
         WHERE p.permit_hash = ?
@@ -1031,6 +1081,7 @@ export function consumeCloudRegisterPermit(
         expires_at: string;
         consumed_at: string | null;
         owner_identity_id: string;
+        bootstrap_state: string;
       } | null;
 
       if (!row) {
@@ -1053,6 +1104,11 @@ export function consumeCloudRegisterPermit(
         return null;
       }
 
+      if (row.bootstrap_state !== 'unlock_granted') {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
       if (row.machine_public_key !== input.machineSigningPublicKey) {
         db.exec('ROLLBACK');
         return null;
@@ -1060,13 +1116,22 @@ export function consumeCloudRegisterPermit(
 
       const workspaceRow = db.query(
         `
-        SELECT machine_public_key
+        SELECT machine_public_key, machine_id, status
         FROM cloud_workspaces
         WHERE id = ?
         `
-      ).get(row.workspace_id) as { machine_public_key: string | null } | null;
+      ).get(row.workspace_id) as {
+        machine_public_key: string | null;
+        machine_id: string | null;
+        status: string;
+      } | null;
 
       if (!workspaceRow) {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (workspaceRow.status !== 'bootstrapping') {
         db.exec('ROLLBACK');
         return null;
       }
@@ -1075,6 +1140,11 @@ export function consumeCloudRegisterPermit(
         workspaceRow.machine_public_key &&
         workspaceRow.machine_public_key !== input.machineSigningPublicKey
       ) {
+        db.exec('ROLLBACK');
+        return null;
+      }
+
+      if (workspaceRow.machine_id && workspaceRow.machine_id !== input.machineId) {
         db.exec('ROLLBACK');
         return null;
       }
