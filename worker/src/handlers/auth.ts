@@ -11,6 +11,14 @@ import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
 
+function getGitHubOauthBase(env: Env): string {
+  return env.GITHUB_OAUTH_BASE ?? 'https://github.com';
+}
+
+function getGitHubApiBase(env: Env): string {
+  return env.GITHUB_API_BASE ?? 'https://api.github.com';
+}
+
 // ============================================================================
 // GitHub OAuth (Portal - redirect-based)
 // ============================================================================
@@ -27,7 +35,7 @@ app.get('/github', (c) => {
     state: crypto.randomUUID(),
   });
 
-  return c.redirect(`https://github.com/login/oauth/authorize?${params}`);
+  return c.redirect(`${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`);
 });
 
 /**
@@ -43,7 +51,7 @@ app.get('/github/callback', async (c) => {
 
   try {
     // Exchange code for access token
-    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+      const tokenRes = await fetch(`${getGitHubOauthBase(c.env)}/login/oauth/access_token`, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -66,7 +74,7 @@ app.get('/github/callback', async (c) => {
     }
 
     // Fetch GitHub user
-    const githubUser = await fetchGitHubUser(tokenData.access_token);
+      const githubUser = await fetchGitHubUser(c.env, tokenData.access_token);
 
     // Find or create user (with account limit check)
     const maxAccounts = parseInt(c.env.MAX_ACCOUNTS, 10) || undefined;
@@ -212,7 +220,7 @@ app.post('/github/device', async (c) => {
 
   let githubUser: GitHubUser;
   try {
-    githubUser = await fetchGitHubUser(github_token);
+    githubUser = await fetchGitHubUser(c.env, github_token);
   } catch (error) {
     return c.json({ error: 'Invalid GitHub token' }, 401);
   }
@@ -311,8 +319,8 @@ app.post('/logout', async (c) => {
 /**
  * Fetch GitHub user info from API
  */
-async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> {
-  const userRes = await fetch('https://api.github.com/user', {
+async function fetchGitHubUser(env: Env, accessToken: string): Promise<GitHubUser> {
+  const userRes = await fetch(`${getGitHubApiBase(env)}/user`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'User-Agent': 'gitspace.sh',
@@ -328,7 +336,7 @@ async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> {
 
   // If email not in profile, try to get it from emails endpoint
   if (!user.email) {
-    const emailsRes = await fetch('https://api.github.com/user/emails', {
+    const emailsRes = await fetch(`${getGitHubApiBase(env)}/user/emails`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'User-Agent': 'gitspace.sh',

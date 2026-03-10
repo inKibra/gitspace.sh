@@ -14,6 +14,9 @@ export interface Env {
   CF_ACCOUNT_ID: string;
   CF_ZONE_ID: string;
   ENCRYPTION_KEY: string;
+  GITHUB_OAUTH_BASE?: string;
+  GITHUB_API_BASE?: string;
+  CF_API_BASE?: string;
 }
 
 /**
@@ -71,6 +74,16 @@ export interface Session {
   expires_at: number;
   ip_address: string | null;
   user_agent: string | null;
+}
+
+export interface IdentityBackupRecord {
+  user_id: string;
+  version: number;
+  kind: string;
+  owner_user_root_id: string;
+  envelope_json: string;
+  created_at: number;
+  updated_at: number;
 }
 
 /**
