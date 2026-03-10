@@ -12,6 +12,7 @@ import { cors } from 'hono/cors';
 import type { Env, User } from './types';
 import { authMiddleware, type AuthContext } from './middleware/auth';
 import authHandlers from './handlers/auth';
+import identityHandlers from './handlers/identity';
 import userHandlers from './handlers/user';
 import subdomainHandlers from './handlers/subdomains';
 
@@ -46,10 +47,15 @@ app.get('/config', (c) => {
 app.route('/auth', authHandlers);
 
 // Protected routes (require valid token)
+app.use('/me', authMiddleware);
 app.use('/me/*', authMiddleware);
+app.use('/subdomains', authMiddleware);
 app.use('/subdomains/*', authMiddleware);
+app.use('/identity', authMiddleware);
+app.use('/identity/*', authMiddleware);
 app.route('/me', userHandlers);
 app.route('/subdomains', subdomainHandlers);
+app.route('/identity', identityHandlers);
 
 // Root redirect to portal
 app.get('/', (c) => {

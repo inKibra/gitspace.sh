@@ -28,6 +28,114 @@ const PAID_SUBDOMAIN_LIMIT = 10;
 // Subdomain format validation
 const SUBDOMAIN_REGEX = /^[a-z0-9][a-z0-9-]{1,18}[a-z0-9]$/;
 
+function isServeSubdomain(subdomain: string): boolean {
+  return subdomain.endsWith('.serve');
+}
+
+function getServeSubdomain(subdomain: string): string {
+  return `${subdomain}.serve`;
+}
+
+interface StoredSubdomainRecord {
+  id: string;
+  tunnel_id: string;
+  dns_record_ids: string;
+  custom_hostname_id: string | null;
+}
+
+async function cleanupStoredSubdomain(env: Env, record: StoredSubdomainRecord): Promise<void> {
+  try {
+    await deleteTunnel(env, record.tunnel_id);
+  } catch (error) {
+    console.error('Tunnel deletion failed:', error);
+  }
+
+  try {
+    const dnsRecordIds = JSON.parse(record.dns_record_ids) as string[];
+    await deleteDNSRecords(env, dnsRecordIds);
+  } catch (error) {
+    console.error('DNS deletion failed:', error);
+  }
+
+  if (record.custom_hostname_id) {
+    try {
+      await deleteCustomHostname(env, record.custom_hostname_id);
+    } catch (error) {
+      console.error('Custom hostname deletion failed:', error);
+    }
+  }
+}
+
+async function createManagedSubdomain(
+  env: Env,
+  userId: string,
+  subdomain: string,
+  isPrimary: boolean,
+): Promise<{ id: string; tunnelToken: string }> {
+  let tunnel;
+  try {
+    tunnel = await createTunnel(env, subdomain);
+  } catch (error) {
+    console.error('Tunnel creation failed:', error);
+    throw new Error('Failed to create tunnel');
+  }
+
+  try {
+    await configureTunnelIngress(env, tunnel.id, subdomain);
+  } catch (error) {
+    await deleteTunnel(env, tunnel.id).catch(() => {});
+    console.error('Tunnel ingress configuration failed:', error);
+    throw new Error('Failed to configure tunnel');
+  }
+
+  let dnsRecordIds: string[];
+  try {
+    dnsRecordIds = await createDNSRecords(env, subdomain, tunnel.id);
+  } catch (error) {
+    await deleteTunnel(env, tunnel.id).catch(() => {});
+    console.error('DNS creation failed:', error);
+    throw new Error('Failed to create DNS records');
+  }
+
+  let customHostnameId: string | null = null;
+  try {
+    const customHostname = await createCustomHostname(env, subdomain);
+    customHostnameId = customHostname.id;
+    console.log(`Custom hostname created: ${customHostname.hostname} (${customHostname.status})`);
+  } catch (error) {
+    console.error('Custom hostname creation failed (non-fatal):', error);
+  }
+
+  const encryptedToken = await encryptToken(env, tunnel.token);
+  const now = Date.now();
+  const subdomainId = crypto.randomUUID();
+
+  await env.DB.prepare(
+    `
+    INSERT INTO subdomains (
+      id, subdomain, user_id, tunnel_id, dns_record_ids, custom_hostname_id,
+      tunnel_token_encrypted, status, is_primary, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+  )
+    .bind(
+      subdomainId,
+      subdomain,
+      userId,
+      tunnel.id,
+      JSON.stringify(dnsRecordIds),
+      customHostnameId,
+      encryptedToken,
+      'active',
+      isPrimary ? 1 : 0,
+      now,
+      now,
+    )
+    .run();
+
+  return { id: subdomainId, tunnelToken: tunnel.token };
+}
+
 /**
  * List user's subdomains
  * GET /subdomains
@@ -39,7 +147,7 @@ app.get('/', async (c) => {
     `
     SELECT id, subdomain, status, is_primary, created_at, updated_at
     FROM subdomains
-    WHERE user_id = ? AND status != 'deleted'
+    WHERE user_id = ? AND status != 'deleted' AND subdomain NOT LIKE '%.serve'
     ORDER BY is_primary DESC, created_at DESC
   `
   )
@@ -147,7 +255,7 @@ app.post('/', async (c) => {
 
   // Check user's subdomain limit
   const countResult = await c.env.DB.prepare(
-    "SELECT COUNT(*) as count FROM subdomains WHERE user_id = ? AND status = 'active'"
+    "SELECT COUNT(*) as count FROM subdomains WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
   )
     .bind(user.id)
     .first<{ count: number }>();
@@ -160,95 +268,74 @@ app.post('/', async (c) => {
     );
   }
 
-  // Create tunnel via Cloudflare API
-  let tunnel;
-  try {
-    tunnel = await createTunnel(c.env, subdomain);
-  } catch (error) {
-    console.error('Tunnel creation failed:', error);
-    return c.json({ error: 'Failed to create tunnel' }, 500);
-  }
-
-  // Configure tunnel ingress (routes traffic to local relay on port 4480)
-  try {
-    await configureTunnelIngress(c.env, tunnel.id, subdomain);
-  } catch (error) {
-    // Cleanup: delete the tunnel we just created
-    await deleteTunnel(c.env, tunnel.id).catch(() => {});
-    console.error('Tunnel ingress configuration failed:', error);
-    return c.json({ error: 'Failed to configure tunnel' }, 500);
-  }
-
-  // Create DNS records
-  let dnsRecordIds: string[];
-  try {
-    dnsRecordIds = await createDNSRecords(c.env, subdomain, tunnel.id);
-  } catch (error) {
-    // Cleanup: delete the tunnel we just created
-    await deleteTunnel(c.env, tunnel.id).catch(() => {});
-    console.error('DNS creation failed:', error);
-    return c.json({ error: 'Failed to create DNS records' }, 500);
-  }
-
-  // Create custom hostname for wildcard SSL (Cloudflare for SaaS)
-  let customHostnameId: string | null = null;
-  try {
-    const customHostname = await createCustomHostname(c.env, subdomain);
-    customHostnameId = customHostname.id;
-    console.log(`Custom hostname created: ${customHostname.hostname} (${customHostname.status})`);
-  } catch (error) {
-    // Non-fatal: wildcard SSL won't work but base subdomain will
-    console.error('Custom hostname creation failed (non-fatal):', error);
-  }
-
-  // Encrypt tunnel token for storage
-  const encryptedToken = await encryptToken(c.env, tunnel.token);
-
   // Check if this is user's first subdomain (set as primary)
   const isPrimary = count === 0 || body.isPrimary;
 
   // If setting as primary, unset other primaries
   if (isPrimary) {
     await c.env.DB.prepare(
-      "UPDATE subdomains SET is_primary = 0 WHERE user_id = ? AND status = 'active'"
+      "UPDATE subdomains SET is_primary = 0 WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
     )
       .bind(user.id)
       .run();
   }
 
-  // Store in database
-  const now = Date.now();
-  const subdomainId = crypto.randomUUID();
-
-  await c.env.DB.prepare(
-    `
-    INSERT INTO subdomains (
-      id, subdomain, user_id, tunnel_id, dns_record_ids, custom_hostname_id,
-      tunnel_token_encrypted, status, is_primary, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `
+  const serveSubdomain = getServeSubdomain(subdomain);
+  const existingServe = await c.env.DB.prepare(
+    "SELECT id, user_id, status FROM subdomains WHERE subdomain = ?"
   )
-    .bind(
-      subdomainId,
-      subdomain,
-      user.id,
-      tunnel.id,
-      JSON.stringify(dnsRecordIds),
-      customHostnameId,
-      encryptedToken,
-      'active',
-      isPrimary ? 1 : 0,
-      now,
-      now
-    )
-    .run();
+    .bind(serveSubdomain)
+    .first<{ id: string; user_id: string; status: string }>();
 
-  return c.json({
-    id: subdomainId,
-    subdomain,
-    hosts: [`${subdomain}.gitspace.sh`, `*.${subdomain}.gitspace.sh`],
-    isPrimary,
-  });
+  if (existingServe) {
+    if (existingServe.user_id !== user.id && existingServe.status !== 'deleted') {
+      return c.json({ error: 'Serve subdomain is already taken' }, 400);
+    }
+
+    if (existingServe.user_id === user.id || existingServe.status === 'deleted') {
+      await c.env.DB.prepare('DELETE FROM subdomains WHERE id = ?')
+        .bind(existingServe.id)
+        .run();
+    }
+  }
+
+  let createdPrimary: { id: string; tunnelToken: string } | null = null;
+
+  try {
+    createdPrimary = await createManagedSubdomain(c.env, user.id, subdomain, Boolean(isPrimary));
+    const createdServe = await createManagedSubdomain(c.env, user.id, serveSubdomain, false);
+
+    return c.json({
+      id: createdPrimary.id,
+      subdomain,
+      tunnelToken: createdPrimary.tunnelToken,
+      serveSubdomain,
+      serveTunnelToken: createdServe.tunnelToken,
+      hosts: [`${subdomain}.gitspace.sh`, `*.${subdomain}.gitspace.sh`],
+      isPrimary,
+    });
+  } catch (error) {
+    if (createdPrimary) {
+      const primaryRecord = await c.env.DB.prepare(
+        `
+        SELECT id, tunnel_id, dns_record_ids, custom_hostname_id
+        FROM subdomains
+        WHERE id = ?
+      `,
+      )
+        .bind(createdPrimary.id)
+        .first<StoredSubdomainRecord>();
+
+      if (primaryRecord) {
+        await cleanupStoredSubdomain(c.env, primaryRecord);
+        await c.env.DB.prepare("UPDATE subdomains SET status = 'deleted', updated_at = ? WHERE id = ?")
+          .bind(Date.now(), primaryRecord.id)
+          .run();
+      }
+    }
+
+    return c.json({ error: error instanceof Error ? error.message : 'Failed to reserve subdomain' }, 500);
+  }
 });
 
 /**
@@ -286,9 +373,13 @@ app.post('/:subdomain/set-primary', async (c) => {
   const user = c.get('user');
   const subdomain = c.req.param('subdomain');
 
+  if (isServeSubdomain(subdomain)) {
+    return c.json({ error: 'Serve subdomains cannot be primary' }, 400);
+  }
+
   // Verify ownership
   const record = await c.env.DB.prepare(
-    "SELECT id FROM subdomains WHERE subdomain = ? AND user_id = ? AND status = 'active'"
+    "SELECT id FROM subdomains WHERE subdomain = ? AND user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
   )
     .bind(subdomain, user.id)
     .first();
@@ -299,7 +390,7 @@ app.post('/:subdomain/set-primary', async (c) => {
 
   // Unset all primaries
   await c.env.DB.prepare(
-    "UPDATE subdomains SET is_primary = 0 WHERE user_id = ? AND status = 'active'"
+    "UPDATE subdomains SET is_primary = 0 WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
   )
     .bind(user.id)
     .run();
@@ -336,39 +427,30 @@ app.delete('/:subdomain', async (c) => {
     return c.json({ error: 'Subdomain not found' }, 404);
   }
 
-  // Delete tunnel (this immediately blocks new connections)
-  try {
-    await deleteTunnel(c.env, record.tunnel_id);
-  } catch (error) {
-    console.error('Tunnel deletion failed:', error);
-    // Continue anyway to clean up database
-  }
+  const recordsToDelete: Array<StoredSubdomainRecord> = [record];
+  if (!isServeSubdomain(subdomain)) {
+    const serveRecord = await c.env.DB.prepare(
+      `
+      SELECT id, tunnel_id, dns_record_ids, custom_hostname_id
+      FROM subdomains
+      WHERE subdomain = ? AND user_id = ? AND status = 'active'
+    `,
+    )
+      .bind(getServeSubdomain(subdomain), user.id)
+      .first<StoredSubdomainRecord>();
 
-  // Delete DNS records
-  try {
-    const dnsRecordIds = JSON.parse(record.dns_record_ids) as string[];
-    await deleteDNSRecords(c.env, dnsRecordIds);
-  } catch (error) {
-    console.error('DNS deletion failed:', error);
-    // Continue anyway
-  }
-
-  // Delete custom hostname (Cloudflare for SaaS)
-  if (record.custom_hostname_id) {
-    try {
-      await deleteCustomHostname(c.env, record.custom_hostname_id);
-    } catch (error) {
-      console.error('Custom hostname deletion failed:', error);
-      // Continue anyway
+    if (serveRecord) {
+      recordsToDelete.push(serveRecord);
     }
   }
 
-  // Mark as deleted in database
-  await c.env.DB.prepare(
-    "UPDATE subdomains SET status = 'deleted', updated_at = ? WHERE id = ?"
-  )
-    .bind(Date.now(), record.id)
-    .run();
+  const deletedAt = Date.now();
+  for (const target of recordsToDelete) {
+    await cleanupStoredSubdomain(c.env, target);
+    await c.env.DB.prepare("UPDATE subdomains SET status = 'deleted', updated_at = ? WHERE id = ?")
+      .bind(deletedAt, target.id)
+      .run();
+  }
 
   return c.json({ success: true });
 });

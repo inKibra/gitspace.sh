@@ -44,6 +44,7 @@ temp/
 
 # Cloudflare
 .wrangler/
+worker/.mf-build/
 
 # GitSpace marker files
 gitspace.lock

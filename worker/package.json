@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
     "typecheck": "tsc --noEmit",
     "db:init": "wrangler d1 execute gitspace --local --file=schema.sql",
     "db:migrate": "wrangler d1 execute gitspace --file=schema.sql"
@@ -15,6 +17,7 @@
     "@noble/curves": "^1.7.0"
   },
   "devDependencies": {
+    "miniflare": "^3.20250718.3",
     "wrangler": "^3.95.0",
     "@cloudflare/workers-types": "^4.20241127.0",
     "typescript": "^5.7.2"
