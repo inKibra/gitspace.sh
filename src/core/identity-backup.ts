@@ -218,6 +218,10 @@ export async function decryptMnemonicEnvelope(
     throw new SpacesError('Backup password is required.', 'USER_ERROR', 1);
   }
 
+  if (!Number.isSafeInteger(envelope.iterations) || envelope.iterations < PBKDF2_ITERATIONS) {
+    throw new SpacesError('Cloud backup payload uses unsupported key derivation parameters.', 'USER_ERROR', 1);
+  }
+
   const salt = decodeBase64(envelope.salt);
   const iv = decodeBase64(envelope.iv);
   const packedCiphertext = decodeBase64(envelope.ciphertext);

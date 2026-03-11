@@ -28,4 +28,15 @@ describe('identity-backup crypto', () => {
     };
     await expect(decryptMnemonicEnvelope(tampered, 'backup-pass-1')).rejects.toThrow();
   });
+
+  test('decrypt rejects weakened PBKDF2 iteration counts', async () => {
+    const mnemonic = generateMnemonic();
+    const envelope = await encryptMnemonicEnvelope(mnemonic, 'backup-pass-1');
+    const weakened = {
+      ...envelope,
+      iterations: 1,
+    };
+
+    await expect(decryptMnemonicEnvelope(weakened, 'backup-pass-1')).rejects.toThrow(/unsupported key derivation parameters/i);
+  });
 });

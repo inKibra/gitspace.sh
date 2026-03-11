@@ -126,4 +126,14 @@ describe('cloudConnect', () => {
       });
     });
   });
+
+  test('throws when relay identity metadata is not pinned', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+
+      await expect(
+        cloudConnect('ws-test', { relay: 'wss://relay.test/ws' })
+      ).rejects.toThrow(/relay identity is not pinned yet/i);
+    });
+  });
 });

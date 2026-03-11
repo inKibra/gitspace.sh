@@ -832,7 +832,7 @@ async function connectToRelay(
       const trustResult = await verifyRelayTrust(
         url,
         relayPublicKey,
-        computedFingerprint,
+        relayFingerprint,
         relayLabel,
         explicitPubkey,
         Boolean(autoYes),

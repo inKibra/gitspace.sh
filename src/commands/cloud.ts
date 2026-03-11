@@ -990,6 +990,13 @@ export async function cloudConnect(
 
   const relayUrl = (dependencies.resolveRelayUrl ?? resolveRelayUrlForCloudConnect)(options.relay);
   const relayPubkey = readControlMeta().relaySigningPublicKey;
+  if (!relayPubkey) {
+    throw new SpacesError(
+      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before connecting cloud workspaces.',
+      'USER_ERROR',
+      1,
+    );
+  }
   const connectToRemote = dependencies.connectToRemote
     ?? (await import('./connect.js')).connectToRemote;
 

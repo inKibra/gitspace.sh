@@ -111,8 +111,10 @@ export async function authLogin(
     if (!confirmPassword) {
       requireIdentityPassword('device identity confirmation');
     }
-    const resolvedCreatePassword = createPassword ?? requireIdentityPassword('device identity creation');
-    const resolvedConfirmPassword = confirmPassword ?? requireIdentityPassword('device identity confirmation');
+
+    const resolvedCreatePassword = createPassword!;
+    const resolvedConfirmPassword = confirmPassword!;
+
     if (resolvedCreatePassword !== resolvedConfirmPassword) {
       throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
     }
@@ -129,12 +131,14 @@ export async function authLogin(
     if (!password) {
       requireIdentityPassword('identity unlock');
     }
-    passwordForIdentity = password ?? requireIdentityPassword('identity unlock');
+    passwordForIdentity = password;
   }
+
+  const resolvedPasswordForIdentity = passwordForIdentity!;
 
   let identity;
   try {
-    identity = await loadKeypair(passwordForIdentity);
+    identity = await loadKeypair(resolvedPasswordForIdentity);
   } catch (error) {
     if (error instanceof SpacesError) {
       throw error;
