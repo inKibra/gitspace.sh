@@ -1050,7 +1050,11 @@ export async function serveStart(options: {
 
     // Send password via stdin (non-unlock mode)
     if (!usingUnlockMode) {
-      child.stdin.write(password ?? '');
+      if (!password) {
+        throw new SpacesError('Failed to pass identity password to serve daemon startup.', 'SYSTEM_ERROR', 2);
+      }
+
+      child.stdin.write(password);
       child.stdin.end();
     } else {
       child.stdin.end();

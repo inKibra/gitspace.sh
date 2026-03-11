@@ -81,20 +81,28 @@ export function computeRelayFingerprint(publicKey: string): string {
  * Removes trailing slashes and normalizes protocol
  */
 function normalizeUrl(url: string): string {
-  // Normalize the URL
-  let normalized = url.toLowerCase().trim();
+  const normalized = url.toLowerCase().trim();
 
-  // Remove trailing slashes
-  while (normalized.endsWith("/")) {
-    normalized = normalized.slice(0, -1);
+  try {
+    const parsed = new URL(normalized);
+    const local = isLocalhostUrl(parsed.toString());
+    if (parsed.protocol === 'ws:' && !local) {
+      parsed.protocol = 'wss:';
+    }
+
+    const path = parsed.pathname.replace(/\/+$/, '');
+    parsed.pathname = !path || path === '/' ? '/ws' : path;
+    parsed.search = '';
+    parsed.hash = '';
+
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    let fallback = normalized;
+    while (fallback.endsWith('/')) {
+      fallback = fallback.slice(0, -1);
+    }
+    return fallback;
   }
-
-  // Normalize ws:// to wss:// for non-localhost
-  if (normalized.startsWith("ws://") && !isLocalhostUrl(normalized)) {
-    normalized = "wss://" + normalized.slice(5);
-  }
-
-  return normalized;
 }
 
 /**
@@ -154,7 +162,7 @@ function isPrivateIpv4Host(host: string): boolean {
     || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127)
     || (parts[0] === 169 && parts[1] === 254)
     || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
-    || (parts[0] === 192 && parts[1] === 0)
+    || (parts[0] === 192 && parts[1] === 0 && (parts[2] === 0 || parts[2] === 2))
     || (parts[0] === 192 && parts[1] === 168)
     || (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19))
     || (parts[0] === 203 && parts[1] === 0 && parts[2] === 113)
