@@ -54,10 +54,23 @@ describe('isCloudReachableRelayUrl', () => {
     expect(getTrustedRelay('wss://relay.example.test/ws/')).not.toBeNull();
   });
 
+  test('matches legacy bare trusted relay entries against /ws lookups', () => {
+    addTrustedRelay('wss://relay.example.test', 'pubkey-bare', 'relay');
+
+    expect(getTrustedRelay('wss://relay.example.test/ws')?.publicKey).toBe('pubkey-bare');
+  });
+
   test('preserves path case while normalizing host and protocol', () => {
     addTrustedRelay('ws://Relay.EXAMPLE.test/RelayA', 'pubkey-case', 'relay');
 
     expect(getTrustedRelay('wss://relay.example.test/RelayA')).not.toBeNull();
     expect(getTrustedRelay('wss://relay.example.test/relaya')).toBeNull();
+  });
+
+  test('preserves non-root trailing slash semantics', () => {
+    addTrustedRelay('wss://relay.example.test/relay/', 'pubkey-slash', 'relay');
+
+    expect(getTrustedRelay('wss://relay.example.test/relay/')?.publicKey).toBe('pubkey-slash');
+    expect(getTrustedRelay('wss://relay.example.test/relay')).toBeNull();
   });
 });

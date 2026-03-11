@@ -435,7 +435,6 @@ export async function startRelay(options: {
     if (userRoot) {
       ownerUserRootId = userRoot.id;
       ensureControlStore();
-      bindControlOwner(ownerUserRootId);
       const existingOwner = getVaultMeta("owner_user_root_id");
       if (existingOwner && existingOwner !== ownerUserRootId) {
         throw new SpacesError(
@@ -455,6 +454,11 @@ export async function startRelay(options: {
           );
         }
 
+      }
+
+      bindControlOwner(ownerUserRootId);
+
+      if (!existingOwner) {
         setVaultMeta("owner_user_root_id", ownerUserRootId);
       }
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);

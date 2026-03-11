@@ -819,6 +819,7 @@ async function connectToRelay(
   enrollmentToken?: string,
   deviceCertificate?: string,
   autoYes?: boolean,
+  skipRelayTrustVerification?: boolean,
 ): Promise<{ relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null> {
   let trustedRelayIdentity: { relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null = null;
 
@@ -830,6 +831,16 @@ async function connectToRelay(
     eventHandler,
     async (url, relayPublicKey, relayFingerprint, relayLabel, explicitPubkey) => {
       const computedFingerprint = computeRelayFingerprint(relayPublicKey);
+      if (skipRelayTrustVerification) {
+        trustedRelayIdentity = {
+          relayPublicKey,
+          relayFingerprint: computedFingerprint,
+          relayLabel,
+        };
+
+        return { trusted: true };
+      }
+
       const trustResult = await verifyRelayTrust(
         url,
         relayPublicKey,
@@ -920,6 +931,7 @@ export async function serveStart(options: {
   ignoreKeychainAndSkipSecrets?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
+  const skipRelayTrustVerification = process.env.GITSPACE_SKIP_RELAY_TRUST_VERIFICATION === '1';
   // Check if already running
   if (isServeRunning()) {
     const pid = getServePid();
@@ -1064,7 +1076,10 @@ export async function serveStart(options: {
       stdin: 'pipe',
       stdout: Bun.file(logFile),
       stderr: Bun.file(logFile),
-      env: process.env,
+      env: {
+        ...process.env,
+        ...(usingUnlockMode ? {} : { GITSPACE_SKIP_RELAY_TRUST_VERIFICATION: '1' }),
+      },
     });
 
     // Send password via stdin (non-unlock mode)
@@ -1364,6 +1379,7 @@ export async function serveStart(options: {
       enrollmentToken,
       deviceCertificate,
       options.yes,
+      skipRelayTrustVerification,
     );
 
     if (trustedRelayIdentity) {

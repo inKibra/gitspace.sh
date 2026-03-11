@@ -92,8 +92,11 @@ function normalizeUrl(url: string): string {
       parsed.protocol = 'wss:';
     }
 
-    const path = parsed.pathname.replace(/\/+$/, '');
-    parsed.pathname = !path || path === '/' ? '/ws' : path;
+    if (parsed.pathname === '/' || parsed.pathname === '') {
+      parsed.pathname = '';
+    } else if (/^\/ws\/+$/i.test(parsed.pathname)) {
+      parsed.pathname = '/ws';
+    }
     parsed.search = '';
     parsed.hash = '';
 
@@ -105,6 +108,26 @@ function normalizeUrl(url: string): string {
     }
     return fallback;
   }
+}
+
+function getNormalizedUrlVariants(url: string): string[] {
+  const normalized = normalizeUrl(url);
+  const variants = new Set([normalized]);
+
+  try {
+    const parsed = new URL(normalized);
+    const base = `${parsed.protocol}//${parsed.host}`;
+
+    if (parsed.pathname === '' || parsed.pathname === '/') {
+      variants.add(`${base}/ws`);
+    } else if (parsed.pathname === '/ws') {
+      variants.add(base);
+    }
+  } catch {
+    // Keep only the fallback normalized form.
+  }
+
+  return [...variants];
 }
 
 /**
@@ -323,9 +346,10 @@ export function addTrustedRelay(
 ): TrustedRelay {
   const relays = getTrustedRelays();
   const normalizedUrl = normalizeUrl(url);
+  const candidateUrls = new Set(getNormalizedUrlVariants(url));
 
   // Check if already exists by URL
-  const existing = relays.find((r) => normalizeUrl(r.url) === normalizedUrl);
+  const existing = relays.find((r) => getNormalizedUrlVariants(r.url).some((candidate) => candidateUrls.has(candidate)));
 
   if (existing) {
     // Update existing entry
@@ -396,9 +420,9 @@ export function removeTrustedRelay(
  */
 export function getTrustedRelay(url: string): TrustedRelay | null {
   const relays = getTrustedRelays();
-  const normalizedUrl = normalizeUrl(url);
+  const candidateUrls = new Set(getNormalizedUrlVariants(url));
 
-  return relays.find((r) => normalizeUrl(r.url) === normalizedUrl) ?? null;
+  return relays.find((r) => getNormalizedUrlVariants(r.url).some((candidate) => candidateUrls.has(candidate))) ?? null;
 }
 
 /**

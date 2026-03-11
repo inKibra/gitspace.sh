@@ -92,6 +92,14 @@ export async function authLogin(
     );
   };
 
+  const requireCollectedPassword = (value: string | null, context: string): string => {
+    if (value === null || value.length === 0) {
+      requireIdentityPassword(context);
+    }
+
+    return value as string;
+  };
+
   if (!keypairExists()) {
     const shouldCreate = options.yes || await promptConfirm(
       'No local device identity found. Create one now?',
@@ -102,17 +110,15 @@ export async function authLogin(
       throw new NoIdentityError();
     }
 
-    const createPassword = await promptPassword('Create password for local device identity:');
-    if (createPassword === null || createPassword.length === 0) {
-      requireIdentityPassword('device identity creation');
-    }
-    const resolvedCreatePassword = createPassword ?? requireIdentityPassword('device identity creation');
+    const resolvedCreatePassword = requireCollectedPassword(
+      await promptPassword('Create password for local device identity:'),
+      'device identity creation',
+    );
 
-    const confirmPassword = await promptPassword('Confirm local identity password:');
-    if (confirmPassword === null || confirmPassword.length === 0) {
-      requireIdentityPassword('device identity confirmation');
-    }
-    const resolvedConfirmPassword = confirmPassword ?? requireIdentityPassword('device identity confirmation');
+    const resolvedConfirmPassword = requireCollectedPassword(
+      await promptPassword('Confirm local identity password:'),
+      'device identity confirmation',
+    );
 
     if (resolvedCreatePassword !== resolvedConfirmPassword) {
       throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
@@ -126,14 +132,13 @@ export async function authLogin(
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
   if (!passwordForIdentity) {
-    const password = await promptPassword('Enter identity password:');
-    if (!password) {
-      requireIdentityPassword('identity unlock');
-    }
-    passwordForIdentity = password;
+    passwordForIdentity = requireCollectedPassword(
+      await promptPassword('Enter identity password:'),
+      'identity unlock',
+    );
   }
 
-  const resolvedPasswordForIdentity = passwordForIdentity!;
+  const resolvedPasswordForIdentity = passwordForIdentity;
 
   let identity;
   try {
