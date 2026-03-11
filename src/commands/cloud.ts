@@ -936,12 +936,12 @@ export async function cloudDestroy(
 
 export async function cloudConnect(
   workspaceId: string,
-  options: { relay?: string; yes?: boolean } = {},
+  options: { relay?: string; yes?: boolean; passwordStdin?: boolean } = {},
   dependencies: {
     resolveRelayUrl?: (explicitRelay?: string) => string;
     connectToRemote?: (
       target?: string,
-      options?: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean },
+      options?: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean },
     ) => Promise<void>;
   } = {},
 ): Promise<void> {
@@ -995,6 +995,7 @@ export async function cloudConnect(
   await connectToRemote(workspace.machineId, {
     relay: relayUrl,
     yes: options.yes,
+    passwordStdin: options.passwordStdin,
   });
 }
 

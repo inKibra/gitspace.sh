@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { Command } from 'commander';
 
 const mockListRemoteMachines = mock(
-  async (_options: { relay?: string; relayPubkey?: string; yes?: boolean; json?: boolean }) => {
+  async (_options: { relay?: string; relayPubkey?: string; yes?: boolean; json?: boolean; passwordStdin?: boolean }) => {
     return;
   },
 );
@@ -10,7 +10,7 @@ const mockListRemoteMachines = mock(
 const mockConnectToRemote = mock(
   async (
     _target?: string,
-    _options?: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean },
+    _options?: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean },
   ) => {
     return;
   },
@@ -64,6 +64,7 @@ describe('registerClientCommands', () => {
         '--relay-pubkey',
         'relay-pubkey-b64',
         '--yes',
+        '--password-stdin',
         '--json',
       ],
       { from: 'user' },
@@ -74,6 +75,7 @@ describe('registerClientCommands', () => {
       relay: 'wss://relay.test/ws',
       relayPubkey: 'relay-pubkey-b64',
       yes: true,
+      passwordStdin: true,
       json: true,
     });
   });
@@ -91,6 +93,7 @@ describe('registerClientCommands', () => {
         '--relay-pubkey',
         'relay-pubkey-b64',
         '--yes',
+        '--password-stdin',
       ],
       { from: 'user' },
     );
@@ -100,6 +103,7 @@ describe('registerClientCommands', () => {
       relay: 'wss://relay.test/ws',
       relayPubkey: 'relay-pubkey-b64',
       yes: true,
+      passwordStdin: true,
     });
   });
 
@@ -117,6 +121,7 @@ describe('registerClientCommands', () => {
         '--relay-pubkey',
         'local-pubkey-b64',
         '--yes',
+        '--password-stdin',
       ],
       { from: 'user' },
     );
@@ -127,6 +132,7 @@ describe('registerClientCommands', () => {
       relay: 'ws://127.0.0.1:4480/ws',
       relayPubkey: 'local-pubkey-b64',
       yes: true,
+      passwordStdin: true,
     });
   });
 

@@ -98,7 +98,8 @@ export function registerCloudCommands(parent: Command): void {
     .argument('<workspaceId>', 'Cloud workspace ID')
     .option('--relay <url>', 'Override relay URL')
     .option('-y, --yes', 'Auto-confirm prompts')
-    .action(withErrorHandler(async (workspaceId: string, options: { relay?: string; yes?: boolean }) => {
+    .option('--password-stdin', 'Read password from stdin')
+    .action(withErrorHandler(async (workspaceId: string, options: { relay?: string; yes?: boolean; passwordStdin?: boolean }) => {
       const { cloudConnect } = await import('../../commands/cloud.js');
       await cloudConnect(workspaceId, options);
     }));

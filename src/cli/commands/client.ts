@@ -24,6 +24,7 @@ export function registerClientCommands(parent: Command): void {
     .requiredOption('--relay <url>', 'Relay URL')
     .option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
     .option('-y, --yes', 'Auto-confirm prompts')
+    .option('--password-stdin', 'Read password from stdin')
     .option('--json', 'Output in JSON format')
     .action(withErrorHandler(async (options) => {
       const { listRemoteMachines } = await import('../../commands/connect.js');
@@ -39,6 +40,7 @@ export function registerClientCommands(parent: Command): void {
     .option('--relay-pubkey <pubkey>', 'Relay public key for explicit trust (base64)')
     .option('--machine <id>', 'Machine ID for direct mode')
     .option('-y, --yes', 'Auto-confirm prompts')
+    .option('--password-stdin', 'Read password from stdin')
     .action(withErrorHandler(async (target, options) => {
       const { connectToRemote } = await import('../../commands/connect.js');
       await connectToRemote(target, options);

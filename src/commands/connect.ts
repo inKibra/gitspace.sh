@@ -52,6 +52,41 @@ export interface RelayIdentityProbe {
   label?: string;
 }
 
+async function loadPasswordFromStdin(): Promise<string> {
+  const reader = process.stdin;
+  const chunks: Buffer[] = [];
+
+  const onData = (chunk: Buffer) => chunks.push(chunk);
+  reader.on('data', onData);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeoutId = setTimeout(() => reject(new Error('Timeout reading password from stdin')), 10000);
+      const onEnd = () => {
+        clearTimeout(timeoutId);
+        resolve();
+      };
+      const onError = (error: Error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      };
+
+      reader.once('end', onEnd);
+      reader.once('error', onError);
+    });
+  } finally {
+    reader.removeListener('data', onData);
+    reader.pause();
+  }
+
+  const password = Buffer.concat(chunks).toString().trim();
+  if (!password) {
+    throw new SpacesError('No password provided via stdin.', 'USER_ERROR', 1);
+  }
+
+  return password;
+}
+
 function relayHealthUrl(relayUrl: string): string {
   const parsed = new URL(relayUrl);
   const protocol = parsed.protocol === 'wss:' ? 'https:' : 'http:';
@@ -173,7 +208,9 @@ export async function verifyClientRelayTrust(
   logger.success('Relay trusted and saved.');
 }
 
-async function ensureDeviceIdentityPassword(options: { yes?: boolean } = {}): Promise<string | null> {
+async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordStdin?: boolean } = {}): Promise<string | null> {
+  const stdinPassword = options.passwordStdin ? await loadPasswordFromStdin() : null;
+
   if (!keypairExists()) {
     const shouldCreate = options.yes || await promptConfirm(
       'No local device identity found. Create one now?',
@@ -183,12 +220,12 @@ async function ensureDeviceIdentityPassword(options: { yes?: boolean } = {}): Pr
       throw new NoIdentityError();
     }
 
-    const password = await promptPassword('Create password for local device identity:');
+    const password = stdinPassword ?? await promptPassword('Create password for local device identity:');
     if (!password) {
       return null;
     }
 
-    const confirmPassword = await promptPassword('Confirm local identity password:');
+    const confirmPassword = stdinPassword ?? await promptPassword('Confirm local identity password:');
     if (password !== confirmPassword) {
       throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
     }
@@ -198,7 +235,7 @@ async function ensureDeviceIdentityPassword(options: { yes?: boolean } = {}): Pr
     return password;
   }
 
-  const password = await promptPassword('Enter password to unlock identity:');
+  const password = stdinPassword ?? await promptPassword('Enter password to unlock identity:');
   return password;
 }
 
@@ -210,7 +247,7 @@ async function ensureDeviceIdentityPassword(options: { yes?: boolean } = {}): Pr
  */
 export async function connectToRemote(
   target?: string,
-  options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean } = {}
+  options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {}
 ): Promise<void> {
   if (!target && !options.machine) {
     throw new SpacesError(
@@ -251,7 +288,7 @@ export async function connectToRemote(
   });
 
   // Step 3: Load local identity
-  const password = await ensureDeviceIdentityPassword({ yes: options.yes });
+  const password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
   if (!password) {
     logger.info('Cancelled');
     return;
@@ -390,6 +427,7 @@ export async function listRemoteMachines(options: {
   relayPubkey?: string;
   json?: boolean;
   yes?: boolean;
+  passwordStdin?: boolean;
 }): Promise<void> {
   if (!options.relay) {
     throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
@@ -401,7 +439,7 @@ export async function listRemoteMachines(options: {
     yes: options.yes,
   });
 
-  const password = await ensureDeviceIdentityPassword({ yes: options.yes });
+  const password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
   if (!password) {
     logger.info('Cancelled');
     return;
