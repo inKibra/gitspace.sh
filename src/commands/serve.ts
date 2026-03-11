@@ -931,7 +931,6 @@ export async function serveStart(options: {
   ignoreKeychainAndSkipSecrets?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
-  const skipRelayTrustVerification = process.env.GITSPACE_SKIP_RELAY_TRUST_VERIFICATION === '1';
   // Check if already running
   if (isServeRunning()) {
     const pid = getServePid();
