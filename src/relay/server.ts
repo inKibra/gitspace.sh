@@ -1605,7 +1605,7 @@ async function handleProtocolMessage(
         return;
       }
 
-      const storedOwner = getVaultMeta('owner_user_root_id');
+      const storedOwner = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id');
       if (storedOwner && storedOwner !== userRootId) {
         ws.send(serializeMessage({
           type: "unlock_relay_result",

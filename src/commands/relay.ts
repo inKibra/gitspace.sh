@@ -451,10 +451,17 @@ export async function startRelay(options: {
       logger.dim("  No user root identity found - machines will need enrollment tokens");
     }
   } catch (error) {
-    if (error instanceof SpacesError) throw error;
-    // User root identity not initialized - relay starts without an owner.
-    // Machines will need enrollment tokens to register.
-    logger.dim("  No user root identity found - machines will need enrollment tokens");
+    if (error instanceof SpacesError) {
+      throw error;
+    }
+
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error(`Failed to load relay owner identity: ${detail}`);
+    throw new SpacesError(
+      'Failed to determine relay owner identity during startup.',
+      'SYSTEM_ERROR',
+      2,
+    );
   }
 
   // Display relay identity prominently

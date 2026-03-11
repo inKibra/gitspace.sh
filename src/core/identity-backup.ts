@@ -17,12 +17,14 @@ import {
 import { mnemonicToUserIdentity, validateMnemonic } from '../lib/tmux-lite/crypto/user-identity.js';
 import type { UserRootIdentity } from '../types/identity.js';
 import { SpacesError } from '../types/errors.js';
+import { logger } from '../utils/logger.js';
 
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
 const BACKUP_ENDPOINT = `${API_BASE}/identity/backup`;
 const BACKUP_STATUS_ENDPOINT = `${API_BASE}/identity/backup/status`;
 
 const PBKDF2_ITERATIONS = 210_000;
+const PBKDF2_MAX_ITERATIONS = 1_000_000;
 const PBKDF2_KEY_LENGTH = 32;
 const PBKDF2_DIGEST = 'sha256';
 const AES_ALGORITHM = 'aes-256-gcm';
@@ -174,6 +176,16 @@ function parseApiError(status: number, statusText: string, body: string): string
   }
 }
 
+async function fetchBackupApi(url: string, init: RequestInit, context: string): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error(`${context}: ${detail}`);
+    throw new SpacesError(`${context}: ${detail}`, 'SERVICE_ERROR', 3);
+  }
+}
+
 export async function encryptMnemonicEnvelope(
   mnemonic: string,
   passphrase: string,
@@ -218,7 +230,11 @@ export async function decryptMnemonicEnvelope(
     throw new SpacesError('Backup password is required.', 'USER_ERROR', 1);
   }
 
-  if (!Number.isSafeInteger(envelope.iterations) || envelope.iterations < PBKDF2_ITERATIONS) {
+  if (
+    !Number.isSafeInteger(envelope.iterations)
+    || envelope.iterations < PBKDF2_ITERATIONS
+    || envelope.iterations > PBKDF2_MAX_ITERATIONS
+  ) {
     throw new SpacesError('Cloud backup payload uses unsupported key derivation parameters.', 'USER_ERROR', 1);
   }
 
@@ -252,7 +268,7 @@ export async function decryptMnemonicEnvelope(
 
 export async function getCloudIdentityBackup(): Promise<CloudIdentityBackupRecord | null> {
   const headers = await getAuthHeaders();
-  const response = await fetch(BACKUP_ENDPOINT, { method: 'GET', headers });
+  const response = await fetchBackupApi(BACKUP_ENDPOINT, { method: 'GET', headers }, 'Failed to fetch identity backup');
 
   if (response.status === 404) {
     return null;
@@ -281,11 +297,11 @@ export async function getCloudIdentityBackup(): Promise<CloudIdentityBackupRecor
 
 export async function putCloudIdentityBackup(record: CloudIdentityBackupRecord): Promise<void> {
   const headers = await getAuthHeaders();
-  const response = await fetch(BACKUP_ENDPOINT, {
+  const response = await fetchBackupApi(BACKUP_ENDPOINT, {
     method: 'PUT',
     headers,
     body: JSON.stringify(record),
-  });
+  }, 'Failed to save identity backup');
 
   if (!response.ok) {
     const body = await response.text();
@@ -299,7 +315,7 @@ export async function putCloudIdentityBackup(record: CloudIdentityBackupRecord):
 
 export async function deleteCloudIdentityBackup(): Promise<boolean> {
   const headers = await getAuthHeaders();
-  const response = await fetch(BACKUP_ENDPOINT, { method: 'DELETE', headers });
+  const response = await fetchBackupApi(BACKUP_ENDPOINT, { method: 'DELETE', headers }, 'Failed to delete identity backup');
 
   if (response.status === 404) {
     return false;
@@ -319,7 +335,7 @@ export async function deleteCloudIdentityBackup(): Promise<boolean> {
 
 export async function getCloudIdentityBackupStatus(): Promise<CloudIdentityBackupStatus> {
   const headers = await getAuthHeaders();
-  const response = await fetch(BACKUP_STATUS_ENDPOINT, { method: 'GET', headers });
+  const response = await fetchBackupApi(BACKUP_STATUS_ENDPOINT, { method: 'GET', headers }, 'Failed to fetch backup status');
 
   if (response.status === 404) {
     const backup = await getCloudIdentityBackup();

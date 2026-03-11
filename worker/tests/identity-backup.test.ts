@@ -85,6 +85,42 @@ describe('identity backup routes', () => {
     expect(response.status).toBe(401);
   });
 
+  test('rejects unsupported backup envelope algorithms and iteration counts', async () => {
+    const session = await harness.createDeviceSession();
+
+    const badAlgorithm = await harness.request('/identity/backup', {
+      method: 'PUT',
+      headers: {
+        ...session.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...backupPayload,
+        envelope: {
+          ...backupPayload.envelope,
+          algorithm: 'PBKDF2-AES-CBC',
+        },
+      }),
+    });
+    expect(badAlgorithm.status).toBe(400);
+
+    const weakIterations = await harness.request('/identity/backup', {
+      method: 'PUT',
+      headers: {
+        ...session.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...backupPayload,
+        envelope: {
+          ...backupPayload.envelope,
+          iterations: 1,
+        },
+      }),
+    });
+    expect(weakIterations.status).toBe(400);
+  });
+
   test('isolates identity backups across accounts', async () => {
     const ownerSession = await harness.createDeviceSession();
     const otherSession = await harness.createDeviceSession({

@@ -60,6 +60,13 @@ describe('worker portal auth routes', () => {
     expect(callback.status).toBe(302);
     expect(callback.headers.get('Location')).toBe('https://gitspace.sh/dashboard');
 
+    expect(harness.upstream.getLastGithubOauthTokenRequest()).toMatchObject({
+      client_id: 'github-client-id',
+      client_secret: 'github-client-secret',
+      code: 'test-code',
+      redirect_uri: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/auth\/github\/callback$/),
+    });
+
     const setCookie = callback.headers.get('Set-Cookie');
     expect(setCookie).toContain('session=');
     expect(setCookie).toContain('HttpOnly');
@@ -95,5 +102,21 @@ describe('worker portal auth routes', () => {
       .bind(resolvedSessionId)
       .first();
     expect(deleted).toBeNull();
+  });
+
+  test('callback validates the exact OAuth state cookie name', async () => {
+    const start = await harness.request('/auth/github', { redirect: 'manual' });
+    const location = start.headers.get('Location');
+    const state = new URL(location!).searchParams.get('state');
+
+    const callback = await harness.request(`/auth/github/callback?code=test-code&state=${state}`, {
+      redirect: 'manual',
+      headers: {
+        Cookie: `not_gitspace_oauth_state=${state}`,
+      },
+    });
+
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get('Location')).toBe('https://gitspace.sh?error=invalid_state');
   });
 });

@@ -23,6 +23,9 @@ interface IdentityBackupPayload {
 }
 
 const app = new Hono<{ Bindings: Env; Variables: AuthContext }>();
+const BACKUP_ENVELOPE_ALGORITHM = 'PBKDF2-AES-GCM';
+const BACKUP_MIN_ITERATIONS = 210_000;
+const BACKUP_MAX_ITERATIONS = 1_000_000;
 
 function isValidEnvelope(value: unknown): value is IdentityBackupEnvelope {
   if (!value || typeof value !== 'object') {
@@ -30,9 +33,13 @@ function isValidEnvelope(value: unknown): value is IdentityBackupEnvelope {
   }
 
   const envelope = value as Partial<IdentityBackupEnvelope>;
+  const iterations = envelope.iterations;
   return envelope.version === 1
-    && typeof envelope.algorithm === 'string'
-    && typeof envelope.iterations === 'number'
+    && envelope.algorithm === BACKUP_ENVELOPE_ALGORITHM
+    && typeof iterations === 'number'
+    && Number.isSafeInteger(iterations)
+    && iterations >= BACKUP_MIN_ITERATIONS
+    && iterations <= BACKUP_MAX_ITERATIONS
     && typeof envelope.salt === 'string'
     && typeof envelope.iv === 'string'
     && typeof envelope.ciphertext === 'string'

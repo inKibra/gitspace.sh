@@ -5,6 +5,7 @@ export interface MockUpstream {
   githubApiBase: string;
   githubOauthBase: string;
   cloudflareApiBase: string;
+  getLastGithubOauthTokenRequest: () => Record<string, unknown> | null;
   registerGitHubUser: (token: string, user: { id: number; login: string; name: string; email: string; avatar_url: string }) => void;
   close: () => void;
 }
@@ -20,6 +21,7 @@ export function startMockUpstream(): MockUpstream {
   const dnsRecords = new Map<string, { id: string; name: string; content: string }>();
   const customHostnames = new Map<string, { id: string; hostname: string; status: string }>();
   const githubUsers = new Map<string, { id: number; login: string; name: string; email: string; avatar_url: string }>();
+  let lastGithubOauthTokenRequest: Record<string, unknown> | null = null;
 
   githubUsers.set('github-access-token', {
     id: 12345,
@@ -37,7 +39,10 @@ export function startMockUpstream(): MockUpstream {
       const path = url.pathname;
 
       if (path === '/login/oauth/access_token' && request.method === 'POST') {
-        return Response.json({ access_token: 'github-access-token' });
+        return request.json().then((body: any) => {
+          lastGithubOauthTokenRequest = body && typeof body === 'object' ? body : null;
+          return Response.json({ access_token: 'github-access-token' });
+        });
       }
 
       if (path === '/user' && request.method === 'GET') {
@@ -180,6 +185,7 @@ export function startMockUpstream(): MockUpstream {
     githubApiBase: base,
     githubOauthBase: base,
     cloudflareApiBase: `${base}/client/v4`,
+    getLastGithubOauthTokenRequest: () => lastGithubOauthTokenRequest,
     registerGitHubUser: (token, user) => {
       githubUsers.set(token, user);
     },

@@ -996,6 +996,8 @@ export async function serveStart(options: {
           1
         );
       }
+
+      await resolveUserRootAuthorizationConfig({ yes: options.yes });
     }
 
     if (!options.relay) {

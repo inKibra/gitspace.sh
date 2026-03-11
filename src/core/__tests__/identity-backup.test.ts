@@ -39,4 +39,15 @@ describe('identity-backup crypto', () => {
 
     await expect(decryptMnemonicEnvelope(weakened, 'backup-pass-1')).rejects.toThrow(/unsupported key derivation parameters/i);
   });
+
+  test('decrypt rejects excessive PBKDF2 iteration counts', async () => {
+    const mnemonic = generateMnemonic();
+    const envelope = await encryptMnemonicEnvelope(mnemonic, 'backup-pass-1');
+    const excessive = {
+      ...envelope,
+      iterations: 5_000_000,
+    };
+
+    await expect(decryptMnemonicEnvelope(excessive, 'backup-pass-1')).rejects.toThrow(/unsupported key derivation parameters/i);
+  });
 });

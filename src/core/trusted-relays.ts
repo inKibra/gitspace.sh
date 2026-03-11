@@ -103,8 +103,12 @@ function normalizeUrl(url: string): string {
 function isLocalhostUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    const host = normalizeHost(parsed.hostname);
+    const mappedIpv4 = extractMappedIpv4Host(host);
+    return host === "localhost"
+      || host === "127.0.0.1"
+      || host === "::1"
+      || mappedIpv4 === '127.0.0.1';
   } catch {
     return false;
   }
@@ -114,30 +118,64 @@ function normalizeHost(host: string): string {
   return host.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").split("%", 1)[0] ?? host.toLowerCase();
 }
 
+function extractMappedIpv4Host(host: string): string | null {
+  if (!host.startsWith('::ffff:')) {
+    return null;
+  }
+
+  const mapped = host.slice('::ffff:'.length);
+  if (mapped.includes('.')) {
+    return mapped;
+  }
+
+  const parts = mapped.split(':');
+  if (parts.length !== 2) {
+    return null;
+  }
+
+  const upper = Number.parseInt(parts[0], 16);
+  const lower = Number.parseInt(parts[1], 16);
+  if (Number.isNaN(upper) || Number.isNaN(lower) || upper < 0 || lower < 0 || upper > 0xffff || lower > 0xffff) {
+    return null;
+  }
+
+  return `${upper >> 8}.${upper & 0xff}.${lower >> 8}.${lower & 0xff}`;
+}
+
 function isPrivateIpv4Host(host: string): boolean {
   const parts = host.split(".").map((part) => Number.parseInt(part, 10));
   if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
     return false;
   }
 
-  return parts[0] === 10
+  return parts[0] === 0
+    || parts[0] === 10
     || parts[0] === 127
+    || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127)
     || (parts[0] === 169 && parts[1] === 254)
     || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
-    || (parts[0] === 192 && parts[1] === 168);
+    || (parts[0] === 192 && parts[1] === 0)
+    || (parts[0] === 192 && parts[1] === 168)
+    || (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19))
+    || (parts[0] === 203 && parts[1] === 0 && parts[2] === 113)
+    || parts[0] >= 224;
 }
 
 function isPrivateIpv6Host(host: string): boolean {
-  if (host === "::1") {
+  if (host === "::" || host === "::1") {
     return true;
   }
 
-  if (host.startsWith("::ffff:")) {
-    const mappedIpv4 = host.slice("::ffff:".length);
+  const mappedIpv4 = extractMappedIpv4Host(host);
+  if (mappedIpv4) {
     return isPrivateIpv4Host(mappedIpv4);
   }
 
-  return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+  return host.startsWith("fc")
+    || host.startsWith("fd")
+    || host.startsWith("fe80:")
+    || host.startsWith("ff")
+    || host.startsWith("2001:db8:");
 }
 
 export function isCloudReachableRelayUrl(url: string): boolean {
@@ -154,7 +192,7 @@ export function isCloudReachableRelayUrl(url: string): boolean {
       return !isPrivateIpv4Host(host);
     }
 
-    if (ipVersion === 6) {
+    if (ipVersion === 6 || host.includes(':')) {
       return !isPrivateIpv6Host(host);
     }
 

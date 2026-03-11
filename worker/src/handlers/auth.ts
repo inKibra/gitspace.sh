@@ -12,6 +12,21 @@ import { hashToken } from '../middleware/auth';
 const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
 
+function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
+  if (!cookieHeader) {
+    return null;
+  }
+
+  for (const part of cookieHeader.split(';')) {
+    const [rawName, ...rawValue] = part.trim().split('=');
+    if (rawName === name) {
+      return rawValue.join('=') || null;
+    }
+  }
+
+  return null;
+}
+
 function getGitHubOauthBase(env: Env): string {
   return env.GITHUB_OAUTH_BASE ?? 'https://github.com';
 }
@@ -54,7 +69,8 @@ app.get('/github', (c) => {
 app.get('/github/callback', async (c) => {
   const code = c.req.query('code');
   const state = c.req.query('state');
-  const stateCookie = c.req.header('Cookie')?.match(new RegExp(`${OAUTH_STATE_COOKIE}=([^;]+)`))?.[1];
+  const redirectUri = new URL('/auth/github/callback', c.req.url).toString();
+  const stateCookie = getCookieValue(c.req.header('Cookie') ?? undefined, OAUTH_STATE_COOKIE);
 
   if (!code) {
     return c.redirect(`${c.env.PORTAL_URL}?error=missing_code`);
@@ -76,6 +92,7 @@ app.get('/github/callback', async (c) => {
         client_id: c.env.GITHUB_CLIENT_ID,
         client_secret: c.env.GITHUB_CLIENT_SECRET,
         code,
+        redirect_uri: redirectUri,
       }),
     });
 
