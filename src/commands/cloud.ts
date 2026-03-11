@@ -304,7 +304,7 @@ export async function cloudSetupClear(): Promise<void> {
 }
 
 export interface CloudLaunchOptions {
-  repo: string;
+  repo?: string;
   branch?: string;
   image?: string;
 }
@@ -312,8 +312,8 @@ export interface CloudLaunchOptions {
 export interface CloudLaunchProvider {
   createWorkspace(options: {
     name: string;
-    repo: string;
-    branch: string;
+    repo?: string;
+    branch?: string;
     image?: string;
     env: Record<string, string>;
   }): Promise<{ providerWorkspaceId: string; rawState: string }>;
@@ -347,7 +347,13 @@ export async function cloudLaunch(
   options: CloudLaunchOptions,
   dependencies: CloudLaunchDependencies = {}
 ): Promise<void> {
-  const { repo, branch = 'main', image } = options;
+  const repo = options.repo?.trim() || undefined;
+  const branch = options.branch?.trim() || undefined;
+  const { image } = options;
+
+  if (branch && !repo) {
+    throw new SpacesError('`--branch` requires `--repo` for cloud launch metadata.', 'USER_ERROR', 1);
+  }
 
   // 1. Require identity
   const identityId = dependencies.identityId ?? await requireLocalIdentityId();
@@ -377,8 +383,12 @@ export async function cloudLaunch(
   logger.bold('Launching Cloud Workspace');
   logger.log('');
   logger.log(`  Workspace:  ${workspaceId}`);
-  logger.log(`  Repo:       ${repo}`);
-  logger.log(`  Branch:     ${branch}`);
+  if (repo) {
+    logger.log(`  Repo:       ${repo}`);
+  }
+  if (branch) {
+    logger.log(`  Branch:     ${branch}`);
+  }
   logger.log('');
 
   // 5. Create workspace record (bootstrapping state)
@@ -419,17 +429,19 @@ export async function cloudLaunch(
   logCloudEvent({
     workspaceId,
     eventType: 'launch_started',
-    message: `Launching workspace for ${repo}@${branch}`,
+    message: repo
+      ? `Launching workspace for ${repo}${branch ? `@${branch}` : ''}`
+      : 'Launching machine-first workspace',
     metadata: {
       identityId,
-      repo,
-      branch,
       relayUrl: relayInfo.relayUrl,
       relayFingerprint: relayInfo.relayFingerprint,
       bootstrapTokenId: bootstrap.tokenId,
       bootstrapExpiresAt: bootstrap.expiresAt,
       enrollmentInviteId: enrollmentInvite.inviteId,
       enrollmentInviteExpiresAt: enrollmentInvite.expiresAt,
+      ...(repo ? { repo } : {}),
+      ...(branch ? { branch } : {}),
     },
   });
 

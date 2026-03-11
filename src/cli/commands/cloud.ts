@@ -49,10 +49,10 @@ export function registerCloudCommands(parent: Command): void {
   cmd
     .command('launch')
     .description('Launch a new cloud agent workspace')
-    .requiredOption('--repo <owner/repo>', 'GitHub repository (e.g. myorg/myrepo)')
-    .option('--branch <branch>', 'Branch to check out', 'main')
+    .option('--repo <owner/repo>', 'GitHub repository metadata (optional)')
+    .option('--branch <branch>', 'Branch metadata (optional; requires --repo)')
     .option('--image <image>', 'Docker image override for the agent VM')
-    .action(withErrorHandler(async (options: { repo: string; branch?: string; image?: string }) => {
+    .action(withErrorHandler(async (options: { repo?: string; branch?: string; image?: string }) => {
       const { cloudLaunch } = await import('../../commands/cloud.js');
       await cloudLaunch({
         repo: options.repo,

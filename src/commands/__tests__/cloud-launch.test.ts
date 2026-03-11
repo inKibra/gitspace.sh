@@ -138,6 +138,52 @@ describe('cloudLaunch', () => {
     expect(ws?.status).toBe('bootstrapping');
   });
 
+  test('creates machine-first workspace without repo or branch metadata', async () => {
+    let createdWorkspaceId: string | null = null;
+    let createOptions: Record<string, unknown> | null = null;
+    mockCreateWorkspaceImpl = async (opts) => {
+      createdWorkspaceId = opts.name as string;
+      createOptions = opts;
+      return { providerWorkspaceId: 'sprite-machine-first', rawState: 'running' };
+    };
+
+    await cloudLaunch({}, makeDeps());
+
+    expect(createOptions).not.toBeNull();
+    const resolvedCreateOptions = createOptions!;
+    expect(resolvedCreateOptions.repo).toBeUndefined();
+    expect(resolvedCreateOptions.branch).toBeUndefined();
+    const ws = getCloudWorkspace(createdWorkspaceId!);
+    expect(ws?.repo).toBeUndefined();
+    expect(ws?.branch).toBeUndefined();
+    const launchEvent = listCloudEvents({ workspaceId: createdWorkspaceId! }).find((event) => event.eventType === 'launch_started');
+    expect(launchEvent?.message).toMatch(/machine-first workspace/i);
+  });
+
+  test('keeps repo metadata when branch is omitted', async () => {
+    let createdWorkspaceId: string | null = null;
+    let createOptions: Record<string, unknown> | null = null;
+    mockCreateWorkspaceImpl = async (opts) => {
+      createdWorkspaceId = opts.name as string;
+      createOptions = opts;
+      return { providerWorkspaceId: 'sprite-repo-only', rawState: 'running' };
+    };
+
+    await cloudLaunch({ repo: 'owner/repo' }, makeDeps());
+
+    expect(createOptions).not.toBeNull();
+    const resolvedCreateOptions = createOptions!;
+    expect(resolvedCreateOptions.repo).toBe('owner/repo');
+    expect(resolvedCreateOptions.branch).toBeUndefined();
+    const ws = getCloudWorkspace(createdWorkspaceId!);
+    expect(ws?.repo).toBe('owner/repo');
+    expect(ws?.branch).toBeUndefined();
+  });
+
+  test('rejects branch metadata without repo metadata', async () => {
+    await expect(cloudLaunch({ branch: 'main' }, makeDeps())).rejects.toThrow(/--branch.*requires.*--repo/i);
+  });
+
   test('logs launch_started and vm_created events on success', async () => {
     let capturedId: string | null = null;
     mockCreateWorkspaceImpl = async (opts) => {
