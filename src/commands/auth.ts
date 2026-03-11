@@ -103,17 +103,16 @@ export async function authLogin(
     }
 
     const createPassword = await promptPassword('Create password for local device identity:');
-    if (!createPassword) {
+    if (createPassword === null || createPassword.length === 0) {
       requireIdentityPassword('device identity creation');
     }
+    const resolvedCreatePassword = createPassword ?? requireIdentityPassword('device identity creation');
 
     const confirmPassword = await promptPassword('Confirm local identity password:');
-    if (!confirmPassword) {
+    if (confirmPassword === null || confirmPassword.length === 0) {
       requireIdentityPassword('device identity confirmation');
     }
-
-    const resolvedCreatePassword = createPassword!;
-    const resolvedConfirmPassword = confirmPassword!;
+    const resolvedConfirmPassword = confirmPassword ?? requireIdentityPassword('device identity confirmation');
 
     if (resolvedCreatePassword !== resolvedConfirmPassword) {
       throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);

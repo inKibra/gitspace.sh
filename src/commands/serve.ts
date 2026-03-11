@@ -1377,12 +1377,20 @@ export async function serveStart(options: {
 
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
-    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
-    if (error instanceof SpacesError) {
-      throw error;
+    const originalError = error;
+    try {
+      await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+    } catch (cleanupError) {
+      logger.error(
+        `[serve] Cleanup after relay connection failure also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      );
+    }
+
+    if (originalError instanceof SpacesError) {
+      throw originalError;
     }
     throw new SpacesError(
-      `Failed to connect to relay: ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to connect to relay: ${originalError instanceof Error ? originalError.message : String(originalError)}`,
       'SYSTEM_ERROR',
       2
     );
