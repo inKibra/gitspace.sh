@@ -152,6 +152,47 @@ function extractMappedIpv4Host(host: string): string | null {
   return `${upper >> 8}.${upper & 0xff}.${lower >> 8}.${lower & 0xff}`;
 }
 
+function expandIpv6Hextets(host: string): number[] | null {
+  if (host.includes('.')) {
+    return null;
+  }
+
+  const parts = host.split('::');
+  if (parts.length > 2) {
+    return null;
+  }
+
+  const parseSegment = (segment: string): number[] | null => {
+    if (!segment) {
+      return [];
+    }
+
+    const values = segment.split(':').map((part) => Number.parseInt(part, 16));
+    if (values.some((value) => Number.isNaN(value) || value < 0 || value > 0xffff)) {
+      return null;
+    }
+
+    return values;
+  };
+
+  const left = parseSegment(parts[0] ?? '');
+  const right = parseSegment(parts[1] ?? '');
+  if (!left || !right) {
+    return null;
+  }
+
+  if (parts.length === 1) {
+    return left.length === 8 ? left : null;
+  }
+
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) {
+    return null;
+  }
+
+  return [...left, ...Array(missing).fill(0), ...right];
+}
+
 function isPrivateIpv4Host(host: string): boolean {
   const parts = host.split(".").map((part) => Number.parseInt(part, 10));
   if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
@@ -181,12 +222,13 @@ function isPrivateIpv6Host(host: string): boolean {
     return isPrivateIpv4Host(mappedIpv4);
   }
 
-  const hextets = host.split(':');
-  const firstHextet = Number.parseInt(hextets[0] || '0', 16);
-  const secondHextet = Number.parseInt(hextets[1] || '0', 16);
-  if (Number.isNaN(firstHextet) || Number.isNaN(secondHextet)) {
+  const hextets = expandIpv6Hextets(host);
+  if (!hextets) {
     return false;
   }
+
+  const firstHextet = hextets[0] ?? 0;
+  const secondHextet = hextets[1] ?? 0;
 
   return (firstHextet & 0xfe00) === 0xfc00
     || (firstHextet & 0xffc0) === 0xfe80

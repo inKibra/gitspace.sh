@@ -38,9 +38,13 @@ describe('isCloudReachableRelayUrl', () => {
 
   test('rejects IPv6 special-use ranges and mapped loopback', () => {
     expect(isCloudReachableRelayUrl('ws://[::]:4480/ws')).toBe(false);
+    expect(isCloudReachableRelayUrl('ws://[fc00::1]:4480/ws')).toBe(false);
+    expect(isCloudReachableRelayUrl('ws://[fd12::1]:4480/ws')).toBe(false);
+    expect(isCloudReachableRelayUrl('ws://[fe80::1]:4480/ws')).toBe(false);
     expect(isCloudReachableRelayUrl('ws://[ff02::1]:4480/ws')).toBe(false);
     expect(isCloudReachableRelayUrl('ws://[::ffff:127.0.0.1]:4480/ws')).toBe(false);
     expect(isCloudReachableRelayUrl('wss://[::ffff:93.184.216.34]/ws')).toBe(true);
+    expect(isCloudReachableRelayUrl('wss://[2606:4700:4700::1111]/ws')).toBe(true);
   });
 
   test('normalizes relay URLs with and without /ws consistently', () => {
