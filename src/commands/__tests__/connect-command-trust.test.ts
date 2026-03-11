@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { generateAndSaveKeypair } from '../../core/identity.js';
 import { addTrustedRelay, getTrustedRelay } from '../../core/trusted-relays.js';
 
 let promptConfirmQueue: boolean[] = [];
@@ -92,42 +93,18 @@ describe('connect command relay trust flow', () => {
     }
   });
 
-  test('connectToRemote rejects unknown relay with --yes unless relay key is pinned', async () => {
+  test('connectToRemote auto-trusts IPv4-mapped localhost relays', async () => {
     const relayPubkey = Buffer.from('relay-unknown-pubkey').toString('base64');
     const server = startRelayHealthServer(relayPubkey);
     const relayUrl = `ws://[::ffff:127.0.0.1]:${server.port}/ws`;
 
     try {
-      await expect(
-        connectToRemote('machine-test', {
-          relay: relayUrl,
-          yes: true,
-        })
-      ).rejects.toThrow(/interactive approval or --relay-pubkey/i);
+      await connectToRemote('machine-test', {
+        relay: relayUrl,
+        yes: true,
+      });
 
-      expect(getTrustedRelay(relayUrl)).toBeNull();
-    } finally {
-      server.stop(true);
-    }
-  });
-
-  test('connectToRemote aborts when user declines unknown relay trust', async () => {
-    const relayPubkey = Buffer.from('relay-decline-pubkey').toString('base64');
-    const server = startRelayHealthServer(relayPubkey);
-    const relayUrl = `ws://[::ffff:127.0.0.1]:${server.port}/ws`;
-
-    // First confirm: connect to machine => yes
-    // Second confirm: trust unknown relay => no
-    promptConfirmQueue = [true, false];
-
-    try {
-      await expect(
-        connectToRemote('machine-test', {
-          relay: relayUrl,
-        }),
-      ).rejects.toThrow(/Relay not trusted/i);
-
-      expect(getTrustedRelay(relayUrl)).toBeNull();
+      expect(getTrustedRelay(relayUrl)?.publicKey).toBe(relayPubkey);
     } finally {
       server.stop(true);
     }
@@ -171,6 +148,27 @@ describe('connect command relay trust flow', () => {
           yes: true,
         }),
       ).rejects.toThrow(/relay identity mismatch/i);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('listRemoteMachines fails cleanly when identity unlock password is wrong', async () => {
+    const relayPubkey = Buffer.from('relay-list-invalid-password').toString('base64');
+    const server = startRelayHealthServer(relayPubkey);
+    const relayUrl = `ws://127.0.0.1:${server.port}/ws`;
+
+    await generateAndSaveKeypair('correct-password', 'test-host');
+    promptPasswordValue = 'wrong-password';
+
+    try {
+      await expect(
+        listRemoteMachines({
+          relay: relayUrl,
+          relayPubkey,
+          yes: true,
+        }),
+      ).rejects.toThrow(/invalid password|failed to unlock identity/i);
     } finally {
       server.stop(true);
     }

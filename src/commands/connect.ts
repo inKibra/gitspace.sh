@@ -208,9 +208,11 @@ async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordSt
       return null;
     }
 
-    const confirmPassword = stdinPassword ?? await promptPassword('Confirm local identity password:');
-    if (password !== confirmPassword) {
-      throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+    if (!stdinPassword) {
+      const confirmPassword = await promptPassword('Confirm local identity password:');
+      if (password !== confirmPassword) {
+        throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+      }
     }
 
     await generateAndSaveKeypair(password, os.hostname());
@@ -429,6 +431,14 @@ export async function listRemoteMachines(options: {
   }
 
   const identity = await loadKeypair(password);
+  if (!identity) {
+    throw new SpacesError(
+      'Failed to unlock identity. Check your password.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
   await ensureUserRootIdentityWithRecovery({
     yes: options.yes,
     context: 'remote machine directory authorization',

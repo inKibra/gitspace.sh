@@ -81,10 +81,12 @@ export function computeRelayFingerprint(publicKey: string): string {
  * Removes trailing slashes and normalizes protocol
  */
 function normalizeUrl(url: string): string {
-  const normalized = url.toLowerCase().trim();
+  const normalized = url.trim();
 
   try {
     const parsed = new URL(normalized);
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
     const local = isLocalhostUrl(parsed.toString());
     if (parsed.protocol === 'ws:' && !local) {
       parsed.protocol = 'wss:';
@@ -179,11 +181,17 @@ function isPrivateIpv6Host(host: string): boolean {
     return isPrivateIpv4Host(mappedIpv4);
   }
 
-  return host.startsWith("fc")
-    || host.startsWith("fd")
-    || host.startsWith("fe80:")
-    || host.startsWith("ff")
-    || host.startsWith("2001:db8:");
+  const hextets = host.split(':');
+  const firstHextet = Number.parseInt(hextets[0] || '0', 16);
+  const secondHextet = Number.parseInt(hextets[1] || '0', 16);
+  if (Number.isNaN(firstHextet) || Number.isNaN(secondHextet)) {
+    return false;
+  }
+
+  return (firstHextet & 0xfe00) === 0xfc00
+    || (firstHextet & 0xffc0) === 0xfe80
+    || (firstHextet & 0xff00) === 0xff00
+    || (firstHextet === 0x2001 && secondHextet === 0x0db8);
 }
 
 export function isCloudReachableRelayUrl(url: string): boolean {

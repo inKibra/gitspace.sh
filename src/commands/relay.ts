@@ -19,9 +19,11 @@ import {
 import { loadUserRootIdentity } from "../core/user-identity.js";
 import { getSpacesDir } from "../core/config.js";
 import {
+  bindControlOwner,
   ensureControlStore,
   setVaultMeta,
   getVaultMeta,
+  isVaultInitialized,
   listVaultMachinesForOwner,
   removeVaultMachineForOwner,
 } from "../relay/control/store.js";
@@ -433,6 +435,7 @@ export async function startRelay(options: {
     if (userRoot) {
       ownerUserRootId = userRoot.id;
       ensureControlStore();
+      bindControlOwner(ownerUserRootId);
       const existingOwner = getVaultMeta("owner_user_root_id");
       if (existingOwner && existingOwner !== ownerUserRootId) {
         throw new SpacesError(
@@ -443,7 +446,17 @@ export async function startRelay(options: {
           1,
         );
       }
-      setVaultMeta("owner_user_root_id", ownerUserRootId);
+      if (!existingOwner) {
+        if (isVaultInitialized()) {
+          throw new SpacesError(
+            'Relay vault is initialized but owner metadata is missing. Repair the control store before starting the relay.',
+            'SYSTEM_ERROR',
+            2,
+          );
+        }
+
+        setVaultMeta("owner_user_root_id", ownerUserRootId);
+      }
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
     } else {
       // User root identity not initialized - relay starts without an owner.

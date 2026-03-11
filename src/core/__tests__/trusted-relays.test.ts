@@ -49,4 +49,11 @@ describe('isCloudReachableRelayUrl', () => {
     expect(getTrustedRelay('ws://relay.example.test')).not.toBeNull();
     expect(getTrustedRelay('wss://relay.example.test/ws/')).not.toBeNull();
   });
+
+  test('preserves path case while normalizing host and protocol', () => {
+    addTrustedRelay('ws://Relay.EXAMPLE.test/RelayA', 'pubkey-case', 'relay');
+
+    expect(getTrustedRelay('wss://relay.example.test/RelayA')).not.toBeNull();
+    expect(getTrustedRelay('wss://relay.example.test/relaya')).toBeNull();
+  });
 });
