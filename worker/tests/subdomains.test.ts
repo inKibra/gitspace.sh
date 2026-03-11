@@ -78,4 +78,79 @@ describe('subdomain routes', () => {
     });
     expect(serveTokenResponse.status).toBe(404);
   });
+
+  test('reuses an existing active subdomain instead of tearing it down first', async () => {
+    const session = await harness.createDeviceSession();
+
+    const firstCreate = await harness.request('/subdomains', {
+      method: 'POST',
+      headers: {
+        ...session.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ subdomain: 'brad' }),
+    });
+    expect(firstCreate.status).toBe(200);
+    const firstBody = await firstCreate.json() as {
+      tunnelToken: string;
+      serveTunnelToken: string;
+      isPrimary: boolean;
+    };
+
+    const secondCreate = await harness.request('/subdomains', {
+      method: 'POST',
+      headers: {
+        ...session.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ subdomain: 'brad' }),
+    });
+    expect(secondCreate.status).toBe(200);
+    const secondBody = await secondCreate.json() as {
+      tunnelToken: string;
+      serveTunnelToken: string;
+      isPrimary: boolean;
+    };
+
+    expect(secondBody.tunnelToken).toBe(firstBody.tunnelToken);
+    expect(secondBody.serveTunnelToken).toBe(firstBody.serveTunnelToken);
+    expect(secondBody.isPrimary).toBe(true);
+
+    const listResponse = await harness.request('/subdomains', { headers: session.headers });
+    const subdomains = await listResponse.json() as Array<{ subdomain: string; is_primary: number }>;
+    expect(subdomains).toHaveLength(1);
+    expect(subdomains[0]?.subdomain).toBe('brad');
+  });
+
+  test('keeps the current primary when replacement provisioning fails', async () => {
+    const session = await harness.createDeviceSession();
+
+    const firstCreate = await harness.request('/subdomains', {
+      method: 'POST',
+      headers: {
+        ...session.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ subdomain: 'brad' }),
+    });
+    expect(firstCreate.status).toBe(200);
+
+    harness.upstream.failNextTunnelCreate('gitspace-alice.serve');
+    const failedCreate = await harness.request('/subdomains', {
+      method: 'POST',
+      headers: {
+        ...session.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ subdomain: 'alice', isPrimary: true }),
+    });
+    expect(failedCreate.status).toBe(500);
+
+    const listResponse = await harness.request('/subdomains', { headers: session.headers });
+    expect(listResponse.status).toBe(200);
+    const subdomains = await listResponse.json() as Array<{ subdomain: string; is_primary: number }>;
+    expect(subdomains).toHaveLength(1);
+    expect(subdomains[0]?.subdomain).toBe('brad');
+    expect(subdomains[0]?.is_primary).toBe(1);
+  });
 });

@@ -6,6 +6,7 @@ export interface MockUpstream {
   githubOauthBase: string;
   cloudflareApiBase: string;
   getLastGithubOauthTokenRequest: () => Record<string, unknown> | null;
+  failNextTunnelCreate: (tunnelName: string, status?: number, body?: string) => void;
   registerGitHubUser: (token: string, user: { id: number; login: string; name: string; email: string; avatar_url: string }) => void;
   close: () => void;
 }
@@ -22,6 +23,7 @@ export function startMockUpstream(): MockUpstream {
   const customHostnames = new Map<string, { id: string; hostname: string; status: string }>();
   const githubUsers = new Map<string, { id: number; login: string; name: string; email: string; avatar_url: string }>();
   let lastGithubOauthTokenRequest: Record<string, unknown> | null = null;
+  const failingTunnelCreates = new Map<string, { status: number; body: string }>();
 
   githubUsers.set('github-access-token', {
     id: 12345,
@@ -85,6 +87,12 @@ export function startMockUpstream(): MockUpstream {
       if (path.endsWith('/cfd_tunnel') && request.method === 'POST') {
         return request.json().then((body: any) => {
           const name = body?.name ?? 'tunnel';
+          const configuredFailure = failingTunnelCreates.get(name);
+          if (configuredFailure) {
+            failingTunnelCreates.delete(name);
+            return new Response(configuredFailure.body, { status: configuredFailure.status });
+          }
+
           const tunnel = {
             id: crypto.randomUUID(),
             name,
@@ -186,6 +194,9 @@ export function startMockUpstream(): MockUpstream {
     githubOauthBase: base,
     cloudflareApiBase: `${base}/client/v4`,
     getLastGithubOauthTokenRequest: () => lastGithubOauthTokenRequest,
+    failNextTunnelCreate: (tunnelName, status = 500, body = 'tunnel create failed') => {
+      failingTunnelCreates.set(tunnelName, { status, body });
+    },
     registerGitHubUser: (token, user) => {
       githubUsers.set(token, user);
     },

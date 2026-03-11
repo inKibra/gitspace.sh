@@ -46,6 +46,12 @@ interface StoredSubdomainRecord {
 interface ExistingSubdomainRecord extends StoredSubdomainRecord {
   user_id: string;
   status: string;
+  tunnel_token_encrypted: string;
+  is_primary: number;
+}
+
+async function getStoredTunnelToken(env: Env, record: Pick<ExistingSubdomainRecord, 'tunnel_token_encrypted'>): Promise<string> {
+  return decryptToken(env, record.tunnel_token_encrypted);
 }
 
 async function cleanupStoredSubdomain(env: Env, record: StoredSubdomainRecord): Promise<void> {
@@ -253,7 +259,11 @@ app.post('/', async (c) => {
 
   // Check if subdomain exists
   const existing = await c.env.DB.prepare(
-    "SELECT id, user_id, status, tunnel_id, dns_record_ids, custom_hostname_id FROM subdomains WHERE subdomain = ?"
+    `
+    SELECT id, user_id, status, tunnel_id, dns_record_ids, custom_hostname_id, tunnel_token_encrypted, is_primary
+    FROM subdomains
+    WHERE subdomain = ?
+  `
   )
     .bind(subdomain)
     .first<ExistingSubdomainRecord>();
@@ -263,19 +273,20 @@ app.post('/', async (c) => {
     if (existing.user_id !== user.id && existing.status !== 'deleted') {
       return c.json({ error: 'This subdomain is already taken' }, 400);
     }
-
-    // If it's the same user or was deleted, we'll reconfigure it
-    // Delete the old record first (we'll create a fresh one)
-    if (existing.user_id === user.id || existing.status === 'deleted') {
+    if (existing.status === 'deleted') {
       await hardDeleteStoredSubdomain(c.env, existing);
     }
   }
 
   // Check user's subdomain limit
   const countResult = await c.env.DB.prepare(
-    "SELECT COUNT(*) as count FROM subdomains WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
+    `
+    SELECT COUNT(*) as count
+    FROM subdomains
+    WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve' AND subdomain != ?
+  `
   )
-    .bind(user.id)
+    .bind(user.id, subdomain)
     .first<{ count: number }>();
 
   const count = countResult?.count ?? 0;
@@ -287,20 +298,17 @@ app.post('/', async (c) => {
   }
 
   // Check if this is user's first subdomain (set as primary)
-  const isPrimary = count === 0 || body.isPrimary;
-
-  // If setting as primary, unset other primaries
-  if (isPrimary) {
-    await c.env.DB.prepare(
-      "UPDATE subdomains SET is_primary = 0 WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
-    )
-      .bind(user.id)
-      .run();
-  }
+  const isPrimary = existing?.user_id === user.id && existing.status === 'active' && existing.is_primary === 1
+    ? true
+    : count === 0 || Boolean(body.isPrimary);
 
   const serveSubdomain = getServeSubdomain(subdomain);
   const existingServe = await c.env.DB.prepare(
-    "SELECT id, user_id, status, tunnel_id, dns_record_ids, custom_hostname_id FROM subdomains WHERE subdomain = ?"
+    `
+    SELECT id, user_id, status, tunnel_id, dns_record_ids, custom_hostname_id, tunnel_token_encrypted, is_primary
+    FROM subdomains
+    WHERE subdomain = ?
+  `
   )
     .bind(serveSubdomain)
     .first<ExistingSubdomainRecord>();
@@ -309,17 +317,47 @@ app.post('/', async (c) => {
     if (existingServe.user_id !== user.id && existingServe.status !== 'deleted') {
       return c.json({ error: 'Serve subdomain is already taken' }, 400);
     }
-
-    if (existingServe.user_id === user.id || existingServe.status === 'deleted') {
+    if (existingServe.status === 'deleted') {
       await hardDeleteStoredSubdomain(c.env, existingServe);
     }
   }
 
   let createdPrimary: { id: string; tunnelToken: string } | null = null;
+  let createdServe: { id: string; tunnelToken: string } | null = null;
+  let createdPrimaryNew = false;
+  let createdServeNew = false;
 
   try {
-    createdPrimary = await createManagedSubdomain(c.env, user.id, subdomain, Boolean(isPrimary));
-    const createdServe = await createManagedSubdomain(c.env, user.id, serveSubdomain, false);
+    if (existing && existing.user_id === user.id && existing.status === 'active') {
+      createdPrimary = {
+        id: existing.id,
+        tunnelToken: await getStoredTunnelToken(c.env, existing),
+      };
+    } else {
+      createdPrimary = await createManagedSubdomain(c.env, user.id, subdomain, false);
+      createdPrimaryNew = true;
+    }
+
+    if (existingServe && existingServe.user_id === user.id && existingServe.status === 'active') {
+      createdServe = {
+        id: existingServe.id,
+        tunnelToken: await getStoredTunnelToken(c.env, existingServe),
+      };
+    } else {
+      createdServe = await createManagedSubdomain(c.env, user.id, serveSubdomain, false);
+      createdServeNew = true;
+    }
+
+    if (isPrimary) {
+      await c.env.DB.batch([
+        c.env.DB.prepare(
+          "UPDATE subdomains SET is_primary = 0 WHERE user_id = ? AND status = 'active' AND subdomain NOT LIKE '%.serve'"
+        ).bind(user.id),
+        c.env.DB.prepare(
+          "UPDATE subdomains SET is_primary = 1, updated_at = ? WHERE id = ?"
+        ).bind(Date.now(), createdPrimary.id),
+      ]);
+    }
 
     return c.json({
       id: createdPrimary.id,
@@ -331,7 +369,26 @@ app.post('/', async (c) => {
       isPrimary,
     });
   } catch (error) {
-    if (createdPrimary) {
+    if (createdServeNew && createdServe) {
+      const serveRecord = await c.env.DB.prepare(
+        `
+        SELECT id, tunnel_id, dns_record_ids, custom_hostname_id
+        FROM subdomains
+        WHERE id = ?
+      `,
+      )
+        .bind(createdServe.id)
+        .first<StoredSubdomainRecord>();
+
+      if (serveRecord) {
+        await cleanupStoredSubdomain(c.env, serveRecord);
+        await c.env.DB.prepare("UPDATE subdomains SET status = 'deleted', updated_at = ? WHERE id = ?")
+          .bind(Date.now(), serveRecord.id)
+          .run();
+      }
+    }
+
+    if (createdPrimaryNew && createdPrimary) {
       const primaryRecord = await c.env.DB.prepare(
         `
         SELECT id, tunnel_id, dns_record_ids, custom_hostname_id

@@ -78,6 +78,7 @@ import { listSessions } from '../lib/tmux-lite/cli.js';
 import { loadProcessesConfig } from '../lib/processes/config.js';
 import { parseProcessSessionName } from '../lib/processes/names.js';
 import { resolveWorkspaceRef } from '../lib/events/paths.js';
+import { fetchRelayIdentity } from './connect.js';
 import { getGitspaceDir } from '../core/config.js';
 import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js';
 import type { ProcessPortConfig } from '../types/processes.js';
@@ -997,12 +998,30 @@ export async function serveStart(options: {
         );
       }
 
-      await resolveUserRootAuthorizationConfig({ yes: options.yes });
     }
 
     if (!options.relay) {
       const daemonHostConfig = readHostConfig();
       options.relay = await resolveRelayUrlForServe(undefined, daemonHostConfig);
+    }
+
+    if (!usingUnlockMode) {
+      const userRootAuth = await resolveUserRootAuthorizationConfig({ yes: options.yes });
+      ensureControlStore();
+      bindControlOwner(userRootAuth.ownerUserRootId);
+
+      const relayIdentity = await fetchRelayIdentity(options.relay);
+      const trustResult = await verifyRelayTrust(
+        options.relay,
+        relayIdentity.publicKey,
+        relayIdentity.fingerprint,
+        relayIdentity.label,
+        options.relayPubkey,
+        Boolean(options.yes),
+      );
+      if (!trustResult.trusted) {
+        throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
+      }
     }
 
     logger.log('Starting serve daemon...');
