@@ -133,7 +133,8 @@ function isPrivateIpv6Host(host: string): boolean {
   }
 
   if (host.startsWith("::ffff:")) {
-    return true;
+    const mappedIpv4 = host.slice("::ffff:".length);
+    return isPrivateIpv4Host(mappedIpv4);
   }
 
   return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");

@@ -73,6 +73,7 @@ import {
   type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
+import { readPasswordFromStdin } from '../utils/password-stdin.js';
 import { listSessions } from '../lib/tmux-lite/cli.js';
 import { loadProcessesConfig } from '../lib/processes/config.js';
 import { parseProcessSessionName } from '../lib/processes/names.js';
@@ -300,6 +301,14 @@ async function verifyRelayTrust(
   explicitPubkey?: string,
   autoYes: boolean = false,
 ): Promise<RelayTrustResult> {
+  const computedFingerprint = computeRelayFingerprint(relayPublicKey);
+  if (relayFingerprint !== computedFingerprint) {
+    logger.error(
+      `Relay at ${relayUrl} reported fingerprint ${relayFingerprint}, but computed ${computedFingerprint} from relayPublicKey.`,
+    );
+    return { trusted: false, reason: 'Relay identity response is inconsistent' };
+  }
+
   const trustStatus = isRelayTrusted(relayUrl, relayPublicKey);
 
   if (trustStatus === 'mismatch') {
@@ -307,7 +316,7 @@ async function verifyRelayTrust(
     logger.log('');
     logger.error('SECURITY WARNING: Relay public key mismatch!');
     logger.error(`Expected:  ${getTrustedRelay(relayUrl)?.fingerprint}`);
-    logger.error(`Received:  ${relayFingerprint}`);
+    logger.error(`Received:  ${computedFingerprint}`);
     logger.log('');
     logger.error('The relay identity has changed. This could indicate a man-in-the-middle attack.');
     logger.error('If this is expected, remove the old relay entry from ~/.gitspace/.identity/trusted-relays.json and retry.');
@@ -328,7 +337,7 @@ async function verifyRelayTrust(
       } else {
         logger.error('Relay public key does not match --relay-pubkey');
         logger.error(`Expected:  ${computeRelayFingerprint(explicitPubkey)}`);
-        logger.error(`Received:  ${relayFingerprint}`);
+        logger.error(`Received:  ${computedFingerprint}`);
         return { trusted: false, reason: 'Relay public key does not match --relay-pubkey' };
       }
     } else {
@@ -336,14 +345,19 @@ async function verifyRelayTrust(
       logger.log('');
       logger.bold('Unknown Relay');
       logger.log(`  URL:         ${relayUrl}`);
-      logger.log(`  Fingerprint: ${relayFingerprint}`);
+      logger.log(`  Fingerprint: ${computedFingerprint}`);
       if (relayLabel) {
         logger.log(`  Label:       ${relayLabel}`);
       }
       logger.log('');
 
       // Ask for confirmation
-      const shouldTrust = autoYes || await promptConfirm('Trust this relay?');
+      if (autoYes) {
+        logger.error('Unknown relay requires interactive approval or --relay-pubkey.');
+        return { trusted: false, reason: 'Unknown relay requires interactive approval or --relay-pubkey' };
+      }
+
+      const shouldTrust = await promptConfirm('Trust this relay?');
 
       if (!shouldTrust) {
         logger.info('Relay not trusted, aborting connection');
@@ -814,10 +828,11 @@ async function connectToRelay(
     sessionManager,
     eventHandler,
     async (url, relayPublicKey, relayFingerprint, relayLabel, explicitPubkey) => {
+      const computedFingerprint = computeRelayFingerprint(relayPublicKey);
       const trustResult = await verifyRelayTrust(
         url,
         relayPublicKey,
-        relayFingerprint,
+        computedFingerprint,
         relayLabel,
         explicitPubkey,
         Boolean(autoYes),
@@ -826,7 +841,7 @@ async function connectToRelay(
       if (trustResult.trusted) {
         trustedRelayIdentity = {
           relayPublicKey,
-          relayFingerprint,
+          relayFingerprint: computedFingerprint,
           relayLabel,
         };
       }
@@ -920,37 +935,6 @@ export async function serveStart(options: {
   let registerPermit: string | undefined;
   let enrollmentToken = options.enrollmentToken;
 
-  const loadPasswordFromStdin = async (): Promise<string> => {
-    const reader = process.stdin;
-    const chunks: Buffer[] = [];
-
-    const onData = (chunk: Buffer) => chunks.push(chunk);
-    reader.on('data', onData);
-
-    await new Promise<void>((resolve, reject) => {
-      const timeoutId = setTimeout(() => reject(new Error('Timeout reading password from stdin')), 10000);
-      const onEnd = () => {
-        clearTimeout(timeoutId);
-        resolve();
-      };
-      const onError = (err: Error) => {
-        clearTimeout(timeoutId);
-        reject(err);
-      };
-      reader.once('end', onEnd);
-      reader.once('error', onError);
-    });
-
-    reader.removeListener('data', onData);
-    reader.pause();
-
-    const result = Buffer.concat(chunks).toString().trim();
-    if (!result) {
-      throw new SpacesError('No password provided via stdin', 'USER_ERROR', 1);
-    }
-    return result;
-  };
-
   // If not foreground mode, fork to background
   if (!options.foreground) {
     if (usingUnlockMode) {
@@ -974,7 +958,7 @@ export async function serveStart(options: {
         }
 
         if (options.passwordStdin) {
-          password = await loadPasswordFromStdin();
+          password = await readPasswordFromStdin();
         } else {
           password = await promptPassword('Create password for local device identity:');
           if (!password) {
@@ -993,7 +977,7 @@ export async function serveStart(options: {
 
       if (options.passwordStdin) {
         if (!password) {
-          password = await loadPasswordFromStdin();
+          password = await readPasswordFromStdin();
         }
       } else if (!password) {
         password = await promptPassword('Enter password to unlock identity:');
@@ -1123,7 +1107,7 @@ export async function serveStart(options: {
       }
 
       if (options.passwordStdin) {
-        password = await loadPasswordFromStdin();
+        password = await readPasswordFromStdin();
       } else {
         password = await promptPassword('Create password for local device identity:');
         if (!password) {
@@ -1144,7 +1128,7 @@ export async function serveStart(options: {
 
     if (options.passwordStdin) {
       if (!password) {
-        password = await loadPasswordFromStdin();
+        password = await readPasswordFromStdin();
       }
     } else if (!password) {
       password = await promptPassword('Enter password to unlock identity:');

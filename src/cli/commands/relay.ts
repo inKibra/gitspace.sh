@@ -5,6 +5,7 @@
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
 import { SpacesError } from '../../types/errors.js';
+import { logger } from '../../utils/logger.js';
 
 type RelayStartMode = 'auto' | 'hosted' | 'local';
 
@@ -27,6 +28,7 @@ function parseRelayStartMode(rawMode: string): RelayStartMode {
     return normalized;
   }
 
+  logger.error(`Invalid relay start mode: ${rawMode}`);
   throw new SpacesError(
     'Invalid relay mode. Expected one of: auto, hosted, local.',
     'USER_ERROR',

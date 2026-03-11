@@ -6,8 +6,31 @@
 
 import type { Env } from '../types';
 
+type CryptoKeyUsageValue = 'encrypt' | 'decrypt' | 'sign' | 'verify' | 'deriveKey' | 'deriveBits' | 'wrapKey' | 'unwrapKey';
+
 function getCloudflareApiBase(env: Env): string {
-  return env.CF_API_BASE ?? 'https://api.cloudflare.com/client/v4';
+  const rawBase = env.CF_API_BASE?.trim();
+  if (env.CF_API_BASE === undefined) {
+    return 'https://api.cloudflare.com/client/v4';
+  }
+
+  if (!rawBase) {
+    throw new Error('CF_API_BASE cannot be empty');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawBase);
+  } catch {
+    throw new Error('CF_API_BASE must be a valid URL');
+  }
+
+  const allowedHosts = new Set(['api.cloudflare.com', 'localhost', '127.0.0.1', '::1']);
+  if (!allowedHosts.has(parsed.hostname)) {
+    throw new Error('CF_API_BASE override is only allowed for api.cloudflare.com or localhost-based test endpoints');
+  }
+
+  return parsed.toString().replace(/\/$/, '');
 }
 
 /**
@@ -516,7 +539,7 @@ const TOKEN_DERIVATION_SALT = new Uint8Array(32);
 
 async function deriveTokenKey(
   env: Env,
-  usages: KeyUsage[]
+  usages: CryptoKeyUsageValue[]
 ): Promise<CryptoKey> {
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
@@ -542,7 +565,7 @@ async function deriveTokenKey(
 
 async function deriveLegacyTokenKey(
   env: Env,
-  usages: KeyUsage[]
+  usages: CryptoKeyUsageValue[]
 ): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',

@@ -233,6 +233,27 @@ describe('cloudLaunch', () => {
     expect(env.GSSH_RELAY_URL).toBe('wss://relay.legacy.test/ws');
   });
 
+  test('ignores invalid saved cloud relay URL and falls back to public relay URL', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    seedSavedRelayConfig({
+      relayUrl: 'wss://relay.legacy.test/ws',
+      cloudRelayUrl: 'ws://127.0.0.1:4480/ws',
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.legacy.test/ws');
+  });
+
   test('fails when only a local relay URL is saved', async () => {
     seedSavedRelayConfig({
       relayUrl: 'ws://127.0.0.1:4480/ws',

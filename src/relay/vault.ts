@@ -28,6 +28,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
+import { logger } from '../utils/logger.js';
+import { SpacesError } from '../types/errors.js';
 import {
   getVaultCategory,
   getVaultMeta,
@@ -144,13 +146,28 @@ export function initializeVault(
   userRootPrivateKey: Uint8Array,
   options: { allowRepair?: boolean } = {},
 ): boolean {
+  const encryptedStateExists = hasVaultEncryptedState();
+  if (!isVaultInitialized() && encryptedStateExists) {
+    logger.error('Vault has encrypted state but is missing initialization metadata. Refusing to reinitialize.');
+    throw new SpacesError(
+      'Vault has encrypted state but is missing initialization metadata.',
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
   if (isVaultInitialized()) {
     if (!options.allowRepair || isVaultMetadataComplete()) {
       return false;
     }
 
-    if (hasVaultEncryptedState()) {
-      throw new Error('Vault metadata is incomplete but encrypted data already exists');
+    if (encryptedStateExists) {
+      logger.error('Vault metadata is incomplete but encrypted data already exists. Refusing repair.');
+      throw new SpacesError(
+        'Vault metadata is incomplete but encrypted data already exists.',
+        'SYSTEM_ERROR',
+        2,
+      );
     }
   }
 

@@ -43,6 +43,11 @@ interface StoredSubdomainRecord {
   custom_hostname_id: string | null;
 }
 
+interface ExistingSubdomainRecord extends StoredSubdomainRecord {
+  user_id: string;
+  status: string;
+}
+
 async function cleanupStoredSubdomain(env: Env, record: StoredSubdomainRecord): Promise<void> {
   try {
     await deleteTunnel(env, record.tunnel_id);
@@ -64,6 +69,11 @@ async function cleanupStoredSubdomain(env: Env, record: StoredSubdomainRecord): 
       console.error('Custom hostname deletion failed:', error);
     }
   }
+}
+
+async function hardDeleteStoredSubdomain(env: Env, record: StoredSubdomainRecord): Promise<void> {
+  await cleanupStoredSubdomain(env, record);
+  await env.DB.prepare('DELETE FROM subdomains WHERE id = ?').bind(record.id).run();
 }
 
 async function createManagedSubdomain(
@@ -106,32 +116,42 @@ async function createManagedSubdomain(
     console.error('Custom hostname creation failed (non-fatal):', error);
   }
 
-  const encryptedToken = await encryptToken(env, tunnel.token);
   const now = Date.now();
   const subdomainId = crypto.randomUUID();
 
-  await env.DB.prepare(
-    `
-    INSERT INTO subdomains (
-      id, subdomain, user_id, tunnel_id, dns_record_ids, custom_hostname_id,
-      tunnel_token_encrypted, status, is_primary, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `,
-  )
-    .bind(
-      subdomainId,
-      subdomain,
-      userId,
-      tunnel.id,
-      JSON.stringify(dnsRecordIds),
-      customHostnameId,
-      encryptedToken,
-      'active',
-      isPrimary ? 1 : 0,
-      now,
-      now,
+  try {
+    const encryptedToken = await encryptToken(env, tunnel.token);
+
+    await env.DB.prepare(
+      `
+      INSERT INTO subdomains (
+        id, subdomain, user_id, tunnel_id, dns_record_ids, custom_hostname_id,
+        tunnel_token_encrypted, status, is_primary, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
     )
-    .run();
+      .bind(
+        subdomainId,
+        subdomain,
+        userId,
+        tunnel.id,
+        JSON.stringify(dnsRecordIds),
+        customHostnameId,
+        encryptedToken,
+        'active',
+        isPrimary ? 1 : 0,
+        now,
+        now,
+      )
+      .run();
+  } catch (error) {
+    await Promise.allSettled([
+      deleteTunnel(env, tunnel.id),
+      deleteDNSRecords(env, dnsRecordIds),
+      customHostnameId ? deleteCustomHostname(env, customHostnameId) : Promise.resolve(),
+    ]);
+    throw error;
+  }
 
   return { id: subdomainId, tunnelToken: tunnel.token };
 }
@@ -233,10 +253,10 @@ app.post('/', async (c) => {
 
   // Check if subdomain exists
   const existing = await c.env.DB.prepare(
-    "SELECT id, user_id, status FROM subdomains WHERE subdomain = ?"
+    "SELECT id, user_id, status, tunnel_id, dns_record_ids, custom_hostname_id FROM subdomains WHERE subdomain = ?"
   )
     .bind(subdomain)
-    .first<{ id: string; user_id: string; status: string }>();
+    .first<ExistingSubdomainRecord>();
 
   if (existing) {
     // If it belongs to another user and is active, reject
@@ -247,9 +267,7 @@ app.post('/', async (c) => {
     // If it's the same user or was deleted, we'll reconfigure it
     // Delete the old record first (we'll create a fresh one)
     if (existing.user_id === user.id || existing.status === 'deleted') {
-      await c.env.DB.prepare('DELETE FROM subdomains WHERE id = ?')
-        .bind(existing.id)
-        .run();
+      await hardDeleteStoredSubdomain(c.env, existing);
     }
   }
 
@@ -282,10 +300,10 @@ app.post('/', async (c) => {
 
   const serveSubdomain = getServeSubdomain(subdomain);
   const existingServe = await c.env.DB.prepare(
-    "SELECT id, user_id, status FROM subdomains WHERE subdomain = ?"
+    "SELECT id, user_id, status, tunnel_id, dns_record_ids, custom_hostname_id FROM subdomains WHERE subdomain = ?"
   )
     .bind(serveSubdomain)
-    .first<{ id: string; user_id: string; status: string }>();
+    .first<ExistingSubdomainRecord>();
 
   if (existingServe) {
     if (existingServe.user_id !== user.id && existingServe.status !== 'deleted') {
@@ -293,9 +311,7 @@ app.post('/', async (c) => {
     }
 
     if (existingServe.user_id === user.id || existingServe.status === 'deleted') {
-      await c.env.DB.prepare('DELETE FROM subdomains WHERE id = ?')
-        .bind(existingServe.id)
-        .run();
+      await hardDeleteStoredSubdomain(c.env, existingServe);
     }
   }
 
@@ -412,6 +428,10 @@ app.post('/:subdomain/set-primary', async (c) => {
 app.delete('/:subdomain', async (c) => {
   const user = c.get('user');
   const subdomain = c.req.param('subdomain');
+
+  if (isServeSubdomain(subdomain)) {
+    return c.json({ error: 'Serve subdomains cannot be deleted directly' }, 400);
+  }
 
   const record = await c.env.DB.prepare(
     `

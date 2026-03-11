@@ -48,17 +48,26 @@ describe('identity backup routes', () => {
     });
     expect(putResponse.status).toBe(200);
 
+    const putBody = await putResponse.json() as { success: boolean; backup: typeof backupPayload };
+    expect(putBody.success).toBe(true);
+    expect(putBody.backup.createdAt).toBeGreaterThan(0);
+    expect(putBody.backup.updatedAt).toBeGreaterThanOrEqual(putBody.backup.createdAt);
+
     const getResponse = await harness.request('/identity/backup', { headers: session.headers });
     expect(getResponse.status).toBe(200);
-    await expect(getResponse.json()).resolves.toEqual(backupPayload);
+    const storedBackup = await getResponse.json() as typeof backupPayload;
+    expect(storedBackup.ownerUserRootId).toBe(backupPayload.ownerUserRootId);
+    expect(storedBackup.envelope).toEqual(backupPayload.envelope);
+    expect(storedBackup.createdAt).toBe(putBody.backup.createdAt);
+    expect(storedBackup.updatedAt).toBe(putBody.backup.updatedAt);
 
     const statusAfter = await harness.request('/identity/backup/status', { headers: session.headers });
     expect(statusAfter.status).toBe(200);
     await expect(statusAfter.json()).resolves.toEqual({
       enabled: true,
       ownerUserRootId: backupPayload.ownerUserRootId,
-      createdAt: backupPayload.createdAt,
-      updatedAt: backupPayload.updatedAt,
+      createdAt: putBody.backup.createdAt,
+      updatedAt: putBody.backup.updatedAt,
     });
 
     const deleteResponse = await harness.request('/identity/backup', {
@@ -74,5 +83,41 @@ describe('identity backup routes', () => {
   test('requires auth for identity backup routes', async () => {
     const response = await harness.request('/identity/backup/status');
     expect(response.status).toBe(401);
+  });
+
+  test('isolates identity backups across accounts', async () => {
+    const ownerSession = await harness.createDeviceSession();
+    const otherSession = await harness.createDeviceSession({
+      githubToken: 'github-access-token-other',
+      githubUser: {
+        id: 67890,
+        login: 'spacecat',
+        name: 'Space Cat',
+        email: 'spacecat@example.com',
+        avatar_url: 'https://avatars.example.com/spacecat',
+      },
+    });
+
+    const putResponse = await harness.request('/identity/backup', {
+      method: 'PUT',
+      headers: {
+        ...ownerSession.headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(backupPayload),
+    });
+    expect(putResponse.status).toBe(200);
+
+    const otherGet = await harness.request('/identity/backup', { headers: otherSession.headers });
+    expect(otherGet.status).toBe(404);
+
+    const otherDelete = await harness.request('/identity/backup', {
+      method: 'DELETE',
+      headers: otherSession.headers,
+    });
+    expect(otherDelete.status).toBe(404);
+
+    const ownerGet = await harness.request('/identity/backup', { headers: ownerSession.headers });
+    expect(ownerGet.status).toBe(200);
   });
 });

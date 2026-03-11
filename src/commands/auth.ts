@@ -84,6 +84,14 @@ export async function authLogin(
 ): Promise<void> {
   let passwordForIdentity: string | null = null;
 
+  const requireIdentityPassword = (context: string): never => {
+    throw new SpacesError(
+      `A local identity password is required for ${context} and could not be collected non-interactively.`,
+      'USER_ERROR',
+      1,
+    );
+  };
+
   if (!keypairExists()) {
     const shouldCreate = options.yes || await promptConfirm(
       'No local device identity found. Create one now?',
@@ -96,17 +104,21 @@ export async function authLogin(
 
     const createPassword = await promptPassword('Create password for local device identity:');
     if (!createPassword) {
-      logger.info('Cancelled');
-      return;
+      requireIdentityPassword('device identity creation');
     }
 
     const confirmPassword = await promptPassword('Confirm local identity password:');
-    if (createPassword !== confirmPassword) {
+    if (!confirmPassword) {
+      requireIdentityPassword('device identity confirmation');
+    }
+    const resolvedCreatePassword = createPassword ?? requireIdentityPassword('device identity creation');
+    const resolvedConfirmPassword = confirmPassword ?? requireIdentityPassword('device identity confirmation');
+    if (resolvedCreatePassword !== resolvedConfirmPassword) {
       throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
     }
 
-    await generateAndSaveKeypair(createPassword, os.hostname());
-    passwordForIdentity = createPassword;
+    await generateAndSaveKeypair(resolvedCreatePassword, os.hostname());
+    passwordForIdentity = resolvedCreatePassword;
     logger.success('Created local device identity');
   }
 
@@ -115,10 +127,9 @@ export async function authLogin(
   if (!passwordForIdentity) {
     const password = await promptPassword('Enter identity password:');
     if (!password) {
-      logger.info('Cancelled');
-      return;
+      requireIdentityPassword('identity unlock');
     }
-    passwordForIdentity = password;
+    passwordForIdentity = password ?? requireIdentityPassword('identity unlock');
   }
 
   let identity;

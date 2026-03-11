@@ -106,7 +106,6 @@ app.put('/backup', async (c) => {
       kind = excluded.kind,
       owner_user_root_id = excluded.owner_user_root_id,
       envelope_json = excluded.envelope_json,
-      created_at = excluded.created_at,
       updated_at = excluded.updated_at
   `,
   )
@@ -116,12 +115,13 @@ app.put('/backup', async (c) => {
       payload.kind,
       payload.ownerUserRootId,
       JSON.stringify(payload.envelope),
-      payload.createdAt ?? now,
-      payload.updatedAt ?? now,
+      now,
+      now,
     )
     .run();
 
-  return c.json({ success: true, backup: payload });
+  const backup = await getBackupRow(c.env.DB, user.id);
+  return c.json({ success: true, backup: backup ? serializeBackup(backup) : payload });
 });
 
 app.delete('/backup', async (c) => {

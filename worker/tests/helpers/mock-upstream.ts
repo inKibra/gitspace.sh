@@ -5,6 +5,7 @@ export interface MockUpstream {
   githubApiBase: string;
   githubOauthBase: string;
   cloudflareApiBase: string;
+  registerGitHubUser: (token: string, user: { id: number; login: string; name: string; email: string; avatar_url: string }) => void;
   close: () => void;
 }
 
@@ -18,6 +19,15 @@ export function startMockUpstream(): MockUpstream {
   const tunnels = new Map<string, TunnelRecord>();
   const dnsRecords = new Map<string, { id: string; name: string; content: string }>();
   const customHostnames = new Map<string, { id: string; hostname: string; status: string }>();
+  const githubUsers = new Map<string, { id: number; login: string; name: string; email: string; avatar_url: string }>();
+
+  githubUsers.set('github-access-token', {
+    id: 12345,
+    login: 'octocat',
+    name: 'The Octocat',
+    email: 'octocat@example.com',
+    avatar_url: 'https://avatars.example.com/octocat',
+  });
 
   const server = Bun.serve({
     port: 0,
@@ -31,18 +41,24 @@ export function startMockUpstream(): MockUpstream {
       }
 
       if (path === '/user' && request.method === 'GET') {
-        return Response.json({
-          id: 12345,
-          login: 'octocat',
-          name: 'The Octocat',
-          email: 'octocat@example.com',
-          avatar_url: 'https://avatars.example.com/octocat',
-        });
+        const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+        const user = githubUsers.get(token);
+        if (!user) {
+          return new Response('Unauthorized', { status: 401 });
+        }
+
+        return Response.json(user);
       }
 
       if (path === '/user/emails' && request.method === 'GET') {
+        const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+        const user = githubUsers.get(token);
+        if (!user) {
+          return new Response('Unauthorized', { status: 401 });
+        }
+
         return Response.json([
-          { email: 'octocat@example.com', primary: true, verified: true },
+          { email: user.email, primary: true, verified: true },
         ]);
       }
 
@@ -164,6 +180,9 @@ export function startMockUpstream(): MockUpstream {
     githubApiBase: base,
     githubOauthBase: base,
     cloudflareApiBase: `${base}/client/v4`,
+    registerGitHubUser: (token, user) => {
+      githubUsers.set(token, user);
+    },
     close: () => server.stop(true),
   };
 }

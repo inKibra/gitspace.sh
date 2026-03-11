@@ -588,14 +588,23 @@ describe("E2E: Error Scenarios", () => {
     await client.connect();
 
     // Wait for the error/disconnect to arrive
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const check = setInterval(() => {
-        if (errorReceived || disconnected) {
+        if (errorReceived) {
           clearInterval(check);
           resolve();
+          return;
+        }
+
+        if (disconnected) {
+          clearInterval(check);
+          reject(new Error('Client disconnected before surfacing the authorization error'));
         }
       }, 50);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+      setTimeout(() => {
+        clearInterval(check);
+        reject(new Error('Timed out waiting for authorization error'));
+      }, 5000);
     });
 
     // The relay should have rejected the outsider

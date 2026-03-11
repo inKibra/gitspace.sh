@@ -629,7 +629,10 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       if (msg.bootstrapToken !== undefined && !isValidIdentifier(msg.bootstrapToken)) return null;
       if (msg.registerPermit !== undefined && !isValidIdentifier(msg.registerPermit)) return null;
       if (msg.enrollmentToken !== undefined && !isValidKeyString(msg.enrollmentToken)) return null;
-      if (msg.deviceCertificate !== undefined && typeof msg.deviceCertificate !== 'string') return null;
+      if (
+        msg.deviceCertificate !== undefined
+        && (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0)
+      ) return null;
       return {
         type: "register_machine",
         machineId: msg.machineId,

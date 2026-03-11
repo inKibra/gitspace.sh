@@ -30,17 +30,30 @@ describe('worker portal auth routes', () => {
     expect(url.origin).toBe(harness.upstream.githubOauthBase);
     expect(url.pathname).toBe('/login/oauth/authorize');
     expect(url.searchParams.get('client_id')).toBe('github-client-id');
-    expect(url.searchParams.get('redirect_uri')).toBe('https://api.gitspace.sh/auth/github/callback');
+    const redirectUri = new URL(url.searchParams.get('redirect_uri')!);
+    expect(redirectUri.pathname).toBe('/auth/github/callback');
+    expect(redirectUri.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     expect(url.searchParams.get('scope')).toBe('read:user user:email');
     expect(url.searchParams.get('state')).toBeTruthy();
+    expect(response.headers.get('Set-Cookie')).toContain('gitspace_oauth_state=');
   });
 
   test('callback creates a session cookie and logout clears it', async () => {
-    const callback = await harness.request('/auth/github/callback?code=test-code', {
+    const start = await harness.request('/auth/github', { redirect: 'manual' });
+    const location = start.headers.get('Location');
+    expect(location).toBeTruthy();
+    const state = new URL(location!).searchParams.get('state');
+    expect(state).toBeTruthy();
+    const oauthCookie = start.headers.get('Set-Cookie');
+    expect(oauthCookie).toContain('gitspace_oauth_state=');
+    const oauthCookieHeader = oauthCookie!.split(';', 1)[0]!;
+
+    const callback = await harness.request(`/auth/github/callback?code=test-code&state=${state}`, {
       redirect: 'manual',
       headers: {
         'CF-Connecting-IP': '127.0.0.1',
         'User-Agent': 'worker-test-agent',
+        Cookie: oauthCookieHeader,
       },
     });
 

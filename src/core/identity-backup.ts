@@ -399,6 +399,8 @@ export async function recoverUserRootFromCloudBackup(
   }
 
   const exists = await userRootIdentityExists();
+  // Default recovery behavior overwrites an existing local identity unless the
+  // caller explicitly passes force: false.
   const force = options.force ?? exists;
   return initFromMnemonic(mnemonic, force);
 }

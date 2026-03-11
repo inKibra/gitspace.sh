@@ -48,7 +48,7 @@ describe('fetchRelayIdentity', () => {
 
   test('reads relay identity from health endpoint', async () => {
     const relayPublicKey = Buffer.from('relay-public-key-1').toString('base64');
-    const relayFingerprint = 'abcd:1234';
+    const relayFingerprint = computeRelayFingerprint(relayPublicKey);
 
     const server = Bun.serve({
       port: 0,
@@ -175,14 +175,38 @@ describe('verifyClientRelayTrust', () => {
     ).rejects.toThrow(/relay identity mismatch/i);
   });
 
-  test('trusts unknown relay non-interactively with --yes', async () => {
+  test('rejects inconsistent fingerprint metadata from health endpoint', async () => {
+    const relayPublicKey = Buffer.from('relay-public-key-3').toString('base64');
+
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch: () => {
+        return new Response(
+          JSON.stringify({
+            relayPublicKey,
+            relayFingerprint: 'wrong:fingerprint',
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    try {
+      await expect(fetchRelayIdentity(`ws://127.0.0.1:${server.port}/ws`)).rejects.toThrow(/inconsistent identity metadata/i);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('rejects unknown relay non-interactively with --yes', async () => {
     const relayUrl = 'wss://relay-yes.example.test/ws';
     const relayPublicKey = Buffer.from('new-key').toString('base64');
 
-    await verifyClientRelayTrust(relayUrl, makeProbe(relayPublicKey), { yes: true });
+    await expect(
+      verifyClientRelayTrust(relayUrl, makeProbe(relayPublicKey), { yes: true })
+    ).rejects.toThrow(/interactive approval or --relay-pubkey/i);
 
-    const trusted = getTrustedRelay(relayUrl);
-    expect(trusted).not.toBeNull();
-    expect(trusted?.publicKey).toBe(relayPublicKey);
+    expect(getTrustedRelay(relayUrl)).toBeNull();
   });
 });

@@ -371,7 +371,7 @@ export async function startRelay(options: {
     );
   }
 
-  if (mode !== "local") {
+  if (mode !== "local" && !hostname) {
     const accountTarget = await resolveAccountRelayTarget();
     if (!accountTarget) {
       if (mode === "hosted") {
@@ -386,7 +386,7 @@ export async function startRelay(options: {
         tunnelToken = await ensureSubdomainTunnelToken(accountTarget.subdomain);
         hostname = accountTarget.hostname;
         tunnelSubdomain = accountTarget.subdomain;
-        logger.info(`Using account host ${hostname} for relay tunnel`);
+        logger.info(`Using account host ${accountTarget.hostname} for relay tunnel`);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         if (mode === "hosted") {

@@ -10,6 +10,7 @@ import type { Env, User, GitHubUser } from '../types';
 import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
+const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
 
 function getGitHubOauthBase(env: Env): string {
   return env.GITHUB_OAUTH_BASE ?? 'https://github.com';
@@ -28,14 +29,22 @@ function getGitHubApiBase(env: Env): string {
  * GET /auth/github
  */
 app.get('/github', (c) => {
+  const redirectUri = new URL('/auth/github/callback', c.req.url).toString();
+  const state = crypto.randomUUID();
   const params = new URLSearchParams({
     client_id: c.env.GITHUB_CLIENT_ID,
-    redirect_uri: `https://api.gitspace.sh/auth/github/callback`,
+    redirect_uri: redirectUri,
     scope: 'read:user user:email',
-    state: crypto.randomUUID(),
+    state,
   });
 
-  return c.redirect(`${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`,
+      'Set-Cookie': `${OAUTH_STATE_COOKIE}=${state}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+    },
+  });
 });
 
 /**
@@ -44,9 +53,15 @@ app.get('/github', (c) => {
  */
 app.get('/github/callback', async (c) => {
   const code = c.req.query('code');
+  const state = c.req.query('state');
+  const stateCookie = c.req.header('Cookie')?.match(new RegExp(`${OAUTH_STATE_COOKIE}=([^;]+)`))?.[1];
 
   if (!code) {
     return c.redirect(`${c.env.PORTAL_URL}?error=missing_code`);
+  }
+
+  if (!state || !stateCookie || state !== stateCookie) {
+    return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
   }
 
   try {

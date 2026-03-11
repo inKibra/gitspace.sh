@@ -92,24 +92,20 @@ describe('connect command relay trust flow', () => {
     }
   });
 
-  test('connectToRemote trusts unknown relay with --yes before password cancel', async () => {
+  test('connectToRemote rejects unknown relay with --yes unless relay key is pinned', async () => {
     const relayPubkey = Buffer.from('relay-unknown-pubkey').toString('base64');
     const server = startRelayHealthServer(relayPubkey);
     const relayUrl = `ws://[::ffff:127.0.0.1]:${server.port}/ws`;
 
-    // No local keypair in temp HOME => command asks to create one.
-    // Return null to simulate user cancelling password prompt after trust step.
-    promptPasswordValue = null;
-
     try {
-      await connectToRemote('machine-test', {
-        relay: relayUrl,
-        yes: true,
-      });
+      await expect(
+        connectToRemote('machine-test', {
+          relay: relayUrl,
+          yes: true,
+        })
+      ).rejects.toThrow(/interactive approval or --relay-pubkey/i);
 
-      const trusted = getTrustedRelay(relayUrl);
-      expect(trusted).not.toBeNull();
-      expect(trusted?.publicKey).toBe(relayPubkey);
+      expect(getTrustedRelay(relayUrl)).toBeNull();
     } finally {
       server.stop(true);
     }

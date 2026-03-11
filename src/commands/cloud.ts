@@ -42,8 +42,9 @@ function getSavedCloudRelayUrl(): string | null {
     return null;
   }
 
-  if (relayConfig.cloudRelayUrl?.trim()) {
-    return relayConfig.cloudRelayUrl.trim();
+  const cloudRelayUrl = relayConfig.cloudRelayUrl?.trim();
+  if (cloudRelayUrl && isCloudReachableRelayUrl(cloudRelayUrl)) {
+    return cloudRelayUrl;
   }
 
   if (isCloudReachableRelayUrl(relayConfig.relayUrl)) {
@@ -988,12 +989,14 @@ export async function cloudConnect(
   }
 
   const relayUrl = (dependencies.resolveRelayUrl ?? resolveRelayUrlForCloudConnect)(options.relay);
+  const relayPubkey = readControlMeta().relaySigningPublicKey;
   const connectToRemote = dependencies.connectToRemote
     ?? (await import('./connect.js')).connectToRemote;
 
   logger.info(`Connecting to cloud workspace ${workspaceId} via machine ${workspace.machineId}...`);
   await connectToRemote(workspace.machineId, {
     relay: relayUrl,
+    relayPubkey,
     yes: options.yes,
     passwordStdin: options.passwordStdin,
   });

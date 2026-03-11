@@ -42,6 +42,7 @@ import {
   getTrustedRelay,
   isLocalhost,
 } from '../core/trusted-relays.js';
+import { readPasswordFromStdin } from '../utils/password-stdin.js';
 import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
@@ -50,41 +51,6 @@ export interface RelayIdentityProbe {
   publicKey: string;
   fingerprint: string;
   label?: string;
-}
-
-async function loadPasswordFromStdin(): Promise<string> {
-  const reader = process.stdin;
-  const chunks: Buffer[] = [];
-
-  const onData = (chunk: Buffer) => chunks.push(chunk);
-  reader.on('data', onData);
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const timeoutId = setTimeout(() => reject(new Error('Timeout reading password from stdin')), 10000);
-      const onEnd = () => {
-        clearTimeout(timeoutId);
-        resolve();
-      };
-      const onError = (error: Error) => {
-        clearTimeout(timeoutId);
-        reject(error);
-      };
-
-      reader.once('end', onEnd);
-      reader.once('error', onError);
-    });
-  } finally {
-    reader.removeListener('data', onData);
-    reader.pause();
-  }
-
-  const password = Buffer.concat(chunks).toString().trim();
-  if (!password) {
-    throw new SpacesError('No password provided via stdin.', 'USER_ERROR', 1);
-  }
-
-  return password;
 }
 
 function relayHealthUrl(relayUrl: string): string {
@@ -122,9 +88,17 @@ export async function fetchRelayIdentity(relayUrl: string): Promise<RelayIdentit
       );
     }
 
-    const fingerprint = body.relayFingerprint && typeof body.relayFingerprint === 'string'
-      ? body.relayFingerprint
-      : computeRelayFingerprint(body.relayPublicKey);
+    const fingerprint = computeRelayFingerprint(body.relayPublicKey);
+    if (typeof body.relayFingerprint === 'string' && body.relayFingerprint !== fingerprint) {
+      logger.error(
+        `Relay at ${healthUrl} reported fingerprint ${body.relayFingerprint}, but computed ${fingerprint} from relayPublicKey.`,
+      );
+      throw new SpacesError(
+        `Relay at ${healthUrl} returned inconsistent identity metadata.`,
+        'USER_ERROR',
+        1,
+      );
+    }
 
     return {
       publicKey: body.relayPublicKey,
@@ -199,7 +173,16 @@ export async function verifyClientRelayTrust(
   }
   logger.log('');
 
-  const shouldTrust = options.yes || await promptConfirm('Trust this relay?', true);
+  if (options.yes) {
+    logger.error('Unknown relay requires interactive approval or --relay-pubkey.');
+    throw new SpacesError(
+      'Unknown relay requires interactive approval or --relay-pubkey.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const shouldTrust = await promptConfirm('Trust this relay?', true);
   if (!shouldTrust) {
     throw new SpacesError('Relay not trusted, aborting connection.', 'USER_ERROR', 1);
   }
@@ -209,7 +192,7 @@ export async function verifyClientRelayTrust(
 }
 
 async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordStdin?: boolean } = {}): Promise<string | null> {
-  const stdinPassword = options.passwordStdin ? await loadPasswordFromStdin() : null;
+  const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
 
   if (!keypairExists()) {
     const shouldCreate = options.yes || await promptConfirm(

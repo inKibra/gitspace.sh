@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cloudConnect } from '../cloud.js';
-import { ensureControlStore, upsertCloudWorkspace } from '../../relay/control/store.js';
+import { bindControlRelayIdentity, ensureControlStore, upsertCloudWorkspace } from '../../relay/control/store.js';
 
 let envLock: Promise<void> = Promise.resolve();
 
@@ -93,9 +93,14 @@ describe('cloudConnect', () => {
   test('delegates to connectToRemote when workspace is ready', async () => {
     await withIsolatedEnv(async () => {
       seedWorkspace('ready', 'machine-ready');
+      bindControlRelayIdentity({
+        relayIdentityId: 'relay-cloud-connect-test',
+        relaySigningPublicKey: 'relay-pubkey-b64',
+        relayFingerprint: 'relay-fingerprint-test',
+      });
 
       let calledTarget: string | undefined;
-      let calledOptions: { relay?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
+      let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
       await cloudConnect(
         'ws-test',
         { relay: 'wss://relay.test/ws', yes: true, passwordStdin: true },
@@ -104,6 +109,7 @@ describe('cloudConnect', () => {
             calledTarget = target;
             calledOptions = {
               relay: options?.relay,
+              relayPubkey: options?.relayPubkey,
               yes: options?.yes,
               passwordStdin: options?.passwordStdin,
             };
@@ -114,6 +120,7 @@ describe('cloudConnect', () => {
       expect(calledTarget).toBe('machine-ready');
       expect(calledOptions).toEqual({
         relay: 'wss://relay.test/ws',
+        relayPubkey: 'relay-pubkey-b64',
         yes: true,
         passwordStdin: true,
       });

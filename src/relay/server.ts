@@ -990,6 +990,14 @@ async function handleProtocolMessage(
             return;
           }
 
+          const certMachineId = getMachineIdFromCert(cert);
+          if (certMachineId !== regMsg.machineId) {
+            console.warn(`[relay] Device cert machine ID mismatch for ${regMsg.machineId}`);
+            ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Device certificate machine ID does not match registration")));
+            ws.close();
+            return;
+          }
+
           // Extract user root ID from the certificate and check against relay owner
           const certUserRootId = getUserRootIdFromCert(cert);
           const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
@@ -1597,6 +1605,16 @@ async function handleProtocolMessage(
         return;
       }
 
+      const storedOwner = getVaultMeta('owner_user_root_id');
+      if (storedOwner && storedOwner !== userRootId) {
+        ws.send(serializeMessage({
+          type: "unlock_relay_result",
+          success: false,
+          error: "Not the vault owner",
+        }));
+        return;
+      }
+
       const needsVaultRepair = isVaultInitialized() && !isVaultMetadataComplete();
 
       // If vault is not initialized, initialize it with the proof as seed material.
@@ -1643,16 +1661,6 @@ async function handleProtocolMessage(
       }
 
       // Vault exists — verify owner and unlock
-      const storedOwner = getVaultMeta('owner_user_root_id');
-      if (storedOwner && storedOwner !== userRootId) {
-        ws.send(serializeMessage({
-          type: "unlock_relay_result",
-          success: false,
-          error: "Not the vault owner",
-        }));
-        return;
-      }
-
       if (isVaultUnlocked()) {
         // Already unlocked
         const unlockKeys = openAllMachineUnlockKeys();
