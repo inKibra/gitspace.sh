@@ -231,6 +231,7 @@ function isPrivateIpv4Host(host: string): boolean {
     || (parts[0] === 192 && parts[1] === 0 && (parts[2] === 0 || parts[2] === 2))
     || (parts[0] === 192 && parts[1] === 168)
     || (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19))
+    || (parts[0] === 198 && parts[1] === 51 && parts[2] === 100)
     || (parts[0] === 203 && parts[1] === 0 && parts[2] === 113)
     || parts[0] >= 224;
 }

@@ -1076,10 +1076,7 @@ export async function serveStart(options: {
       stdin: 'pipe',
       stdout: Bun.file(logFile),
       stderr: Bun.file(logFile),
-      env: {
-        ...process.env,
-        ...(usingUnlockMode ? {} : { GITSPACE_SKIP_RELAY_TRUST_VERIFICATION: '1' }),
-      },
+      env: process.env,
     });
 
     // Send password via stdin (non-unlock mode)
@@ -1379,7 +1376,6 @@ export async function serveStart(options: {
       enrollmentToken,
       deviceCertificate,
       options.yes,
-      skipRelayTrustVerification,
     );
 
     if (trustedRelayIdentity) {
