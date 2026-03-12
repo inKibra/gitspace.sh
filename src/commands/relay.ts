@@ -441,6 +441,7 @@ export async function startRelay(options: {
   // knows who its owner is. This enables owner-based authorization for
   // machines and clients without requiring enrollment tokens.
   let ownerUserRootId: string | null = null;
+  let shouldMarkVaultInitialized = false;
   try {
     const userRoot = await loadUserRootIdentity()
       ?? await ensureUserRootIdentityWithRecovery({
@@ -474,7 +475,7 @@ export async function startRelay(options: {
         // bindControlOwner persists the control-store owner binding; the vault keeps
         // its own owner metadata and must be repaired separately for later startups.
         setVaultMeta("owner_user_root_id", ownerUserRootId);
-        setVaultMeta("vault_initialized", "1");
+        shouldMarkVaultInitialized = true;
       }
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
     } else {
@@ -548,6 +549,10 @@ export async function startRelay(options: {
       tunnelPid: tunnelProcess?.pid,
       tunnelSubdomain,
     });
+
+    if (shouldMarkVaultInitialized) {
+      setVaultMeta("vault_initialized", "1");
+    }
 
     logger.success(`Relay listening on ws://${hostname || bind}:${port}`);
     if (tunnelSubdomain) {

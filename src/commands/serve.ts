@@ -296,7 +296,7 @@ function resolveCloudRelayUrlForConfig(relayUrl: string, hostConfig: HostConfig 
  * Result of relay trust verification
  */
 type RelayTrustResult =
-  | { trusted: true }
+  | { trusted: true; fingerprint: string }
   | { trusted: false; reason: string };
 
 /**
@@ -386,7 +386,7 @@ async function verifyRelayTrust(
     }
   }
 
-  return { trusted: true };
+  return { trusted: true, fingerprint: computedFingerprint };
 }
 
 function decryptUnlockGrant(
@@ -844,7 +844,6 @@ async function connectToRelay(
     sessionManager,
     eventHandler,
     async (url, relayPublicKey, relayFingerprint, relayLabel, explicitPubkey) => {
-      const computedFingerprint = formatRelayFingerprint(relayPublicKey);
       const trustResult = await verifyRelayTrust(
         url,
         relayPublicKey,
@@ -857,7 +856,7 @@ async function connectToRelay(
       if (trustResult.trusted) {
         trustedRelayIdentity = {
           relayPublicKey,
-          relayFingerprint: computedFingerprint,
+          relayFingerprint: trustResult.fingerprint,
           relayLabel,
         };
       }
@@ -988,10 +987,6 @@ export async function serveStart(options: {
     }
 
     if (!usingUnlockMode) {
-      const userRootAuth = await resolveUserRootAuthorizationConfig({ yes: options.yes });
-      ensureControlStore();
-      bindControlOwner(userRootAuth.ownerUserRootId);
-
       const relayIdentity = await fetchRelayIdentity(options.relay);
       const trustResult = await verifyRelayTrust(
         options.relay,

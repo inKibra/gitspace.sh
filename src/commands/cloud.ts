@@ -20,6 +20,7 @@ import {
 } from '../relay/control/provider-config.js';
 import {
   assertControlOwner,
+  bindControlRelayIdentity,
   createCloudBootstrapToken,
   createCloudUnlockToken,
   getCloudWorkspace,
@@ -35,6 +36,8 @@ import { getCloudBootstrapBundleSource, CLOUD_BOOTSTRAP_BUNDLE_FILENAME } from '
 import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/workspace-identity.js';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';
+import { computeIdentityId } from '../relay/identity.js';
+import { fetchRelayIdentity } from './connect.js';
 
 function getSavedCloudRelayUrl(): string | null {
   const relayConfig = readRelayConfig();
@@ -79,7 +82,7 @@ interface CloudEnrollmentInvite {
   expiresAt: string;
 }
 
-function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
+async function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): Promise<CloudBootstrapRelayInfo> {
   const relayUrl = getSavedCloudRelayUrl();
 
   if (!relayUrl) {
@@ -106,11 +109,19 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
   // Keep owner assertion strict whenever we bootstrap cloud flows from control metadata.
   assertControlOwner(ownerIdentityId);
 
-  throw new SpacesError(
-    'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before launching cloud workspaces.',
-    'USER_ERROR',
-    1
-  );
+  const relayIdentity = await fetchRelayIdentity(relayUrl);
+  bindControlRelayIdentity({
+    relayIdentityId: computeIdentityId(relayIdentity.publicKey),
+    relaySigningPublicKey: relayIdentity.publicKey,
+    relayFingerprint: relayIdentity.fingerprint,
+  });
+
+  return {
+    relayUrl,
+    relaySigningPublicKey: relayIdentity.publicKey,
+    relayFingerprint: relayIdentity.fingerprint,
+  };
+
 }
 
 async function createCloudEnrollmentInvite(
@@ -376,7 +387,7 @@ export async function cloudLaunch(
   }
 
   // 4. Resolve relay bootstrap info and generate a local workspace ID
-  const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
+  const relayInfo = dependencies.relayInfo ?? await resolveCloudBootstrapRelayInfo(identityId);
   const workspaceId = dependencies.workspaceId ?? `ws-${randomUUID().slice(0, 8)}`;
   const appId = `gssh-${identityId.slice(0, 12)}`;
   const workspaceIdentity = dependencies.workspaceIdentity ?? await ensureWorkspaceIdentity(workspaceId);
@@ -847,7 +858,7 @@ export async function cloudResume(
   const identityId = dependencies.identityId ?? await requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
-  const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
+  const relayInfo = dependencies.relayInfo ?? await resolveCloudBootstrapRelayInfo(identityId);
 
   const storedIdentity = dependencies.workspaceIdentity ?? await getWorkspaceIdentity(workspaceId);
   if (!storedIdentity) {
