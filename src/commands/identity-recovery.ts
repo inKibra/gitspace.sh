@@ -99,6 +99,18 @@ export async function ensureUserRootIdentityWithRecovery(
     }
   }
 
+  if (!interactive) {
+    if (options.allowSkip) {
+      return null;
+    }
+
+    throw new SpacesError(
+      `User root identity recovery for ${options.context} requires an interactive terminal. Run:\n  gssh user identity recover --cloud`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
   const backupPassword = await promptPassword('Enter your identity backup password:');
   if (!backupPassword) {
     if (options.allowSkip) {

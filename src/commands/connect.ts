@@ -272,6 +272,11 @@ export async function connectToRemote(
     yes: options.yes,
   });
 
+  await ensureUserRootIdentityWithRecovery({
+    yes: options.yes,
+    context: 'remote client authorization',
+  });
+
   // Step 3: Load local identity
   const password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
   if (!password) {
@@ -288,10 +293,6 @@ export async function connectToRemote(
     );
   }
 
-  await ensureUserRootIdentityWithRecovery({
-    yes: options.yes,
-    context: 'remote client authorization',
-  });
   const deviceCertificate = await createLocalDeviceCertificate(identity);
 
   logger.info('Connecting to relay...');
@@ -424,6 +425,11 @@ export async function listRemoteMachines(options: {
     yes: options.yes,
   });
 
+  await ensureUserRootIdentityWithRecovery({
+    yes: options.yes,
+    context: 'remote machine directory authorization',
+  });
+
   const password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
   if (!password) {
     logger.info('Cancelled');
@@ -439,10 +445,6 @@ export async function listRemoteMachines(options: {
     );
   }
 
-  await ensureUserRootIdentityWithRecovery({
-    yes: options.yes,
-    context: 'remote machine directory authorization',
-  });
   const deviceCertificate = await createLocalDeviceCertificate(identity);
   const signer = createNodeRelaySigner(identity);
 

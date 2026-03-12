@@ -82,6 +82,13 @@ describe('isCloudReachableRelayUrl', () => {
     expect(getTrustedRelay('wss://relay.example.test')).toBeNull();
   });
 
+  test('removeTrustedRelay matches relay URL variants regardless of host case', () => {
+    addTrustedRelay('wss://Relay.Example.test', 'pubkey-remove-case', 'relay');
+
+    expect(removeTrustedRelay('WSS://relay.example.test/ws')?.publicKey).toBe('pubkey-remove-case');
+    expect(getTrustedRelay('wss://relay.example.test')).toBeNull();
+  });
+
   test('localhost relay entries still detect key mismatches', () => {
     addTrustedRelay('ws://127.0.0.1:4480/ws', 'pubkey-localhost-a', 'relay');
 

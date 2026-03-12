@@ -21,6 +21,10 @@ mock.module('../../utils/prompts.js', () => ({
   selectOne: async () => null,
 }));
 
+mock.module('../identity-recovery.js', () => ({
+  ensureUserRootIdentityWithRecovery: async () => ({ id: 'user-root-test' }),
+}));
+
 const { connectToRemote, listRemoteMachines } = await import('../connect.js');
 
 let originalHome: string | undefined;

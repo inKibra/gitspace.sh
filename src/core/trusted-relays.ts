@@ -388,7 +388,7 @@ export function removeTrustedRelay(
 ): TrustedRelay | null {
   const relays = getTrustedRelays();
   const searchLower = urlOrFingerprint.toLowerCase();
-  const candidateUrls = new Set(getNormalizedUrlVariants(urlOrFingerprint));
+  const candidateUrls = new Set(getNormalizedUrlVariants(urlOrFingerprint).map((candidate) => candidate.toLowerCase()));
 
   const index = relays.findIndex((r) => {
     const relayUrlVariants = getNormalizedUrlVariants(r.url).map((candidate) => candidate.toLowerCase());
