@@ -9,15 +9,14 @@ import os from 'os';
 import { getSecret, setSecret, deleteSecret } from '../utils/secrets.js';
 import {
   loadKeypair,
-  keypairExists,
   getPublicKeyWithoutPassword,
-  generateAndSaveKeypair,
 } from '../core/identity.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
-import { promptConfirm, promptPassword } from '../utils/prompts.js';
+import { promptPassword } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
-import { NoIdentityError, SpacesError } from '../types/errors.js';
+import { SpacesError } from '../types/errors.js';
 import { printHostSyncReport, syncHostConfig } from './host.js';
+import { ensureDeviceIdentityPassword } from './device-identity-password.js';
 
 // API Configuration
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
@@ -100,43 +99,12 @@ export async function authLogin(
     return value as string;
   };
 
-  if (!keypairExists()) {
-    const shouldCreate = options.yes || await promptConfirm(
-      'No local device identity found. Create one now?',
-      true,
-    );
-
-    if (!shouldCreate) {
-      throw new NoIdentityError();
-    }
-
-    const resolvedCreatePassword = requireCollectedPassword(
-      await promptPassword('Create password for local device identity:'),
-      'device identity creation',
-    );
-
-    const resolvedConfirmPassword = requireCollectedPassword(
-      await promptPassword('Confirm local identity password:'),
-      'device identity confirmation',
-    );
-
-    if (resolvedCreatePassword !== resolvedConfirmPassword) {
-      throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
-    }
-
-    await generateAndSaveKeypair(resolvedCreatePassword, os.hostname());
-    passwordForIdentity = resolvedCreatePassword;
-    logger.success('Created local device identity');
-  }
-
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  if (!passwordForIdentity) {
-    passwordForIdentity = requireCollectedPassword(
-      await promptPassword('Enter identity password:'),
-      'identity unlock',
-    );
-  }
+  passwordForIdentity = requireCollectedPassword(
+    passwordForIdentity ?? await ensureDeviceIdentityPassword({ yes: options.yes }),
+    'identity unlock',
+  );
 
   const resolvedPasswordForIdentity = passwordForIdentity;
 

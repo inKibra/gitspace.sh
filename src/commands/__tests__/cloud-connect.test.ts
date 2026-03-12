@@ -239,4 +239,14 @@ describe('cloudConnect', () => {
       ).rejects.toThrow(/relay identity is not pinned yet/i);
     });
   });
+
+  test('rejects explicit relay overrides that are not cloud-reachable', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+
+      await expect(
+        cloudConnect('ws-test', { relay: 'ws://127.0.0.1:4480/ws' })
+      ).rejects.toThrow(/cloud-reachable relay url/i);
+    });
+  });
 });

@@ -603,7 +603,16 @@ function requireWorkspace(workspaceId: string) {
 
 function resolveRelayUrlForCloudConnect(explicitRelay?: string): string {
   if (explicitRelay?.trim()) {
-    return explicitRelay.trim();
+    const relayUrl = explicitRelay.trim();
+    if (!isCloudReachableRelayUrl(relayUrl)) {
+      throw new SpacesError(
+        'Cloud connect requires a cloud-reachable relay URL. Pass a hosted or public relay with --relay <url>.',
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    return relayUrl;
   }
 
   const relayUrl = getSavedCloudRelayUrl();

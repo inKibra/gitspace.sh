@@ -147,7 +147,7 @@ describe('cloud connect password-stdin integration', () => {
             "import { bindControlRelayIdentity } from './src/relay/control/store.js';",
             `writeRelayConfig({ relayUrl: ${JSON.stringify(relayUrl)}, cloudRelayUrl: ${JSON.stringify(relayUrl)}, machineId: 'machine-ready', savedAt: Date.now() });`,
             `bindControlRelayIdentity({ relayIdentityId: 'relay-integration', relaySigningPublicKey: ${JSON.stringify(relayPublicKey)}, relayFingerprint: 'integration-relay-fingerprint' });`,
-            `await cloudConnect('ws-test', { relay: ${JSON.stringify(relayUrl)}, yes: true, passwordStdin: true });`,
+            `await cloudConnect('ws-test', { yes: true, passwordStdin: true }, { resolveRelayUrl: () => ${JSON.stringify(relayUrl)} });`,
           ].join(' '),
         ],
         cwd: process.cwd(),
