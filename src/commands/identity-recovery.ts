@@ -9,6 +9,7 @@ import { authLogin } from './auth.js';
 
 export interface EnsureUserRootIdentityWithRecoveryOptions {
   yes?: boolean;
+  passwordStdin?: boolean;
   context: string;
   allowSkip?: boolean;
   force?: boolean;
@@ -74,6 +75,7 @@ export async function ensureUserRootIdentityWithRecovery(
     try {
       await authLogin({
         yes: options.yes,
+        passwordStdin: options.passwordStdin,
         interactiveHostSync: false,
         showHostSyncSummary: false,
       });

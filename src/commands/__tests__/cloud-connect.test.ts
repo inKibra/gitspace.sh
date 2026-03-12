@@ -250,6 +250,16 @@ describe('cloudConnect', () => {
     });
   });
 
+  test('validates resolved relay URLs unless explicitly allowed for tests', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+
+      await expect(
+        cloudConnect('ws-test', {}, { resolveRelayUrl: () => 'ws://127.0.0.1:4480/ws' })
+      ).rejects.toThrow(/cloud-reachable relay url/i);
+    });
+  });
+
   test('rejects unexpected workspace statuses by default', async () => {
     await withIsolatedEnv(async () => {
       upsertCloudWorkspace({

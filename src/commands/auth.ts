@@ -76,6 +76,7 @@ interface GitspaceAuthResponse {
  */
 export async function authLogin(
   options: {
+    passwordStdin?: boolean;
     yes?: boolean;
     interactiveHostSync?: boolean;
     showHostSyncSummary?: boolean;
@@ -85,7 +86,10 @@ export async function authLogin(
 
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  passwordForIdentity = passwordForIdentity ?? await ensureDeviceIdentityPassword({ yes: options.yes });
+  passwordForIdentity = passwordForIdentity ?? await ensureDeviceIdentityPassword({
+    yes: options.yes,
+    passwordStdin: options.passwordStdin,
+  });
   if (!passwordForIdentity) {
     logger.info('Cancelled');
     return;

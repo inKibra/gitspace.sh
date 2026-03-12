@@ -924,6 +924,7 @@ function formatUptime(seconds: number): string {
 export async function serveStart(options: {
   relay?: string;
   relayPubkey?: string;
+  skipRelayTrustVerification?: boolean;
   bootstrapToken?: string;
   enrollmentToken?: string;
   unlockToken?: string;
@@ -1004,6 +1005,7 @@ export async function serveStart(options: {
       }
 
       options.relayPubkey ??= relayIdentity.publicKey;
+      options.skipRelayTrustVerification = true;
     }
 
     logger.log('Starting serve daemon...');
@@ -1015,6 +1017,7 @@ export async function serveStart(options: {
     const serveArgs = ['machine', 'serve', 'start', '--foreground'];
     if (options.relay) serveArgs.push('--relay', options.relay);
     if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
+    if (options.skipRelayTrustVerification) serveArgs.push('--skip-relay-trust-verification');
     if (options.bootstrapToken) serveArgs.push('--bootstrap-token', options.bootstrapToken);
     if (options.enrollmentToken) serveArgs.push('--enrollment-token', options.enrollmentToken);
     if (options.unlockToken) serveArgs.push('--unlock-token', options.unlockToken);
@@ -1310,6 +1313,7 @@ export async function serveStart(options: {
       enrollmentToken,
       deviceCertificate,
       options.yes,
+      options.skipRelayTrustVerification,
     );
 
     if (trustedRelayIdentity) {

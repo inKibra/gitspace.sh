@@ -237,6 +237,7 @@ export async function connectToRemote(
 
   await ensureUserRootIdentityWithRecovery({
     yes: options.yes,
+    passwordStdin: options.passwordStdin,
     context: 'remote client authorization',
   });
 
@@ -390,6 +391,7 @@ export async function listRemoteMachines(options: {
 
   await ensureUserRootIdentityWithRecovery({
     yes: options.yes,
+    passwordStdin: options.passwordStdin,
     context: 'remote machine directory authorization',
   });
 

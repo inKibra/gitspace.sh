@@ -105,7 +105,7 @@ describe('cloud connect recovery with password-stdin', () => {
           '-e',
           [
             "import { cloudConnect } from './src/commands/cloud.js';",
-            `await cloudConnect('ws-test', { yes: true, passwordStdin: true }, { resolveRelayUrl: () => ${JSON.stringify(relayUrl)} });`,
+            `await cloudConnect('ws-test', { yes: true, passwordStdin: true }, { resolveRelayUrl: () => ${JSON.stringify(relayUrl)}, allowUnsafeRelayUrl: true });`,
           ].join(' '),
         ],
         cwd: process.cwd(),
