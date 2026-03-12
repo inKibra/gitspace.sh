@@ -47,7 +47,6 @@ import {
   type HostConfig,
 } from './host.js';
 import {
-  deriveIdentityId,
   deserializeIdentity,
   getPublicIdentity as getPublicIdentityFromPrivate,
 } from '../lib/tmux-lite/crypto/identity.js';
@@ -92,7 +91,7 @@ import {
 } from '../relay-client/machine-relay-client.js';
 import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
-import { formatRelayFingerprint } from '../relay/identity.js';
+import { computeIdentityId, formatRelayFingerprint } from '../relay/identity.js';
 import { isCloudflaredInstalled, trackCloudflaredOutput } from '../utils/cloudflared.js';
 import { ensureDeviceIdentityPassword } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
@@ -1302,7 +1301,7 @@ export async function serveStart(options: {
     );
 
     if (trustedRelayIdentity) {
-      const relayIdentityId = deriveIdentityId(new Uint8Array(Buffer.from(trustedRelayIdentity.relayPublicKey, 'base64')));
+      const relayIdentityId = computeIdentityId(trustedRelayIdentity.relayPublicKey);
       bindControlRelayIdentity({
         relayIdentityId,
         relaySigningPublicKey: trustedRelayIdentity.relayPublicKey,
