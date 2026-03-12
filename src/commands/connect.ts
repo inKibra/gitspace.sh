@@ -35,10 +35,10 @@ import { ensureDeviceIdentityPassword } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 import {
   addTrustedRelay,
-  computeRelayFingerprint,
   getTrustedRelay,
   isLocalhost,
 } from '../core/trusted-relays.js';
+import { formatRelayFingerprint } from '../relay/identity.js';
 import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
@@ -84,7 +84,7 @@ export async function fetchRelayIdentity(relayUrl: string): Promise<RelayIdentit
       );
     }
 
-    const fingerprint = computeRelayFingerprint(body.relayPublicKey);
+    const fingerprint = formatRelayFingerprint(body.relayPublicKey);
     if (typeof body.relayFingerprint === 'string' && body.relayFingerprint !== fingerprint) {
       logger.error(
         `Relay at ${healthUrl} reported fingerprint ${body.relayFingerprint}, but computed ${fingerprint} from relayPublicKey.`,
@@ -143,7 +143,7 @@ export async function verifyClientRelayTrust(
   if (options.relayPubkey) {
     if (options.relayPubkey !== relayIdentity.publicKey) {
       throw new SpacesError(
-        `Relay public key does not match --relay-pubkey (expected ${computeRelayFingerprint(options.relayPubkey)}, got ${relayIdentity.fingerprint}).`,
+        `Relay public key does not match --relay-pubkey (expected ${formatRelayFingerprint(options.relayPubkey)}, got ${relayIdentity.fingerprint}).`,
         'USER_ERROR',
         1,
       );
