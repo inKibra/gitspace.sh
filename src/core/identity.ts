@@ -374,6 +374,8 @@ export function writeMachineIdentity(identity: MachineIdentity): void {
 export interface RelayConfig {
 	/** Relay WebSocket URL */
 	relayUrl: string;
+	/** Cloud-reachable/public relay URL for bootstrap/connect flows */
+	cloudRelayUrl?: string;
 	/** Machine ID registered with relay */
 	machineId: string;
 	/** When this config was saved */

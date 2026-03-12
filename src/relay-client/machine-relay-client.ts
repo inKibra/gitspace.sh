@@ -158,6 +158,7 @@ function signChallengeAndCreateRegistration(
   bootstrapToken?: string,
   registerPermit?: string,
   enrollmentToken?: string,
+  deviceCertificate?: string,
 ): { challengeResponse: string; message: object } | null {
   try {
     const nonceBytes = new Uint8Array(Buffer.from(challenge, 'base64'));
@@ -177,6 +178,7 @@ function signChallengeAndCreateRegistration(
         bootstrapToken,
         registerPermit,
         enrollmentToken,
+        deviceCertificate,
       },
     };
   } catch (err) {
@@ -220,6 +222,7 @@ export async function connectMachineRelay(
   bootstrapToken?: string,
   registerPermit?: string,
   enrollmentToken?: string,
+  deviceCertificate?: string,
 ): Promise<void> {
   const url = new URL(relayUrl);
   url.searchParams.set('role', 'machine');
@@ -338,6 +341,7 @@ export async function connectMachineRelay(
                 bootstrapToken,
                 registerPermit,
                 enrollmentToken,
+                deviceCertificate,
               );
 
               if (!registration) {

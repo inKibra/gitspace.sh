@@ -27,7 +27,8 @@ import { notifyOwnerSyncCategoryDirty } from './owner-sync-events.js'
  * Get the global gitspace directory path
  */
 export function getGitspaceDir(): string {
-	return join(homedir(), 'gitspace')
+	const home = process.env.HOME?.trim() || homedir()
+	return join(home, 'gitspace')
 }
 
 /**

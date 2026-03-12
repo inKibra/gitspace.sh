@@ -12,27 +12,27 @@
 import { appendFileSync, existsSync, writeFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
+import os from 'os';
 import { spawn, type Subprocess } from 'bun';
 import { logger } from '../utils/logger.js';
-import { promptPassword, promptConfirm, selectOne } from '../utils/prompts.js';
+import { promptConfirm, selectOne } from '../utils/prompts.js';
 import { getSecret } from '../utils/secrets.js';
 import {
   isRelayTrusted,
   addTrustedRelay,
   getTrustedRelay,
+  isCloudReachableRelayUrl,
   isLocalhost,
-  computeRelayFingerprint,
   type RelayTrustStatus,
 } from '../core/trusted-relays.js';
 import {
   loadKeypair,
-  keypairExists,
   readMachineIdentity,
   getPublicKeyWithoutPassword,
   writeRelayConfig,
   clearRelayConfig,
 } from '../core/identity.js';
-import { loadUserRootIdentity } from '../core/user-identity.js';
+import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
 import type { ServeEventHandler } from '../serve/types.js';
 import type { Identity, StoredIdentity } from '../types/identity.js';
@@ -46,7 +46,10 @@ import {
   resolveRelaySubdomains,
   type HostConfig,
 } from './host.js';
-import { deserializeIdentity, getPublicIdentity as getPublicIdentityFromPrivate } from '../lib/tmux-lite/crypto/identity.js';
+import {
+  deserializeIdentity,
+  getPublicIdentity as getPublicIdentityFromPrivate,
+} from '../lib/tmux-lite/crypto/identity.js';
 import { generateEphemeralKeypair, validateX25519PublicKey, x25519SharedSecret } from '../lib/tmux-lite/crypto/keyexchange.js';
 import { open } from '../lib/tmux-lite/crypto/secretbox.js';
 import {
@@ -70,10 +73,12 @@ import { listSessions } from '../lib/tmux-lite/cli.js';
 import { loadProcessesConfig } from '../lib/processes/config.js';
 import { parseProcessSessionName } from '../lib/processes/names.js';
 import { resolveWorkspaceRef } from '../lib/events/paths.js';
+import { fetchRelayIdentity } from './connect.js';
 import { getGitspaceDir } from '../core/config.js';
 import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js';
 import type { ProcessPortConfig } from '../types/processes.js';
 import {
+  bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
   getVaultMeta,
@@ -86,7 +91,14 @@ import {
 } from '../relay-client/machine-relay-client.js';
 import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
+import { computeIdentityId, formatRelayFingerprint } from '../relay/identity.js';
 import { isCloudflaredInstalled, trackCloudflaredOutput } from '../utils/cloudflared.js';
+import {
+  createDeviceIdentityPasswordContext,
+  ensureDeviceIdentityPassword,
+  type DeviceIdentityPasswordContext,
+} from './device-identity-password.js';
+import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -127,8 +139,16 @@ function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | und
   return parsed.ownerUserRootId;
 }
 
-async function resolveUserRootAuthorizationConfig(): Promise<UserRootAuthorizationConfig> {
-  const userRoot = await loadUserRootIdentity();
+async function resolveUserRootAuthorizationConfig(options: {
+  yes?: boolean;
+  devicePasswordContext?: DeviceIdentityPasswordContext;
+} = {}): Promise<UserRootAuthorizationConfig> {
+  const userRoot = await loadUserRootIdentity()
+    ?? await ensureUserRootIdentityWithRecovery({
+      devicePasswordContext: options.devicePasswordContext,
+      yes: options.yes,
+      context: 'machine serve authorization',
+    });
   if (!userRoot) {
     throw new SpacesError(
       'User root identity is required for serve authorization. Run `gssh user identity init` or `gssh user identity recover` first.',
@@ -258,11 +278,42 @@ async function resolveRelayUrlForServe(
   return selectedRelay;
 }
 
+function isLocalRelayBindUrl(relayUrl: string): boolean {
+  try {
+    const parsed = new URL(relayUrl);
+    return isLocalhost(relayUrl) || parsed.hostname === '0.0.0.0' || parsed.hostname === '::';
+  } catch {
+    return false;
+  }
+}
+
+export function resolveCloudRelayUrlForConfig(relayUrl: string, hostConfig: HostConfig | null): string | undefined {
+  if (isCloudReachableRelayUrl(relayUrl)) {
+    return relayUrl;
+  }
+
+  if (!hostConfig?.subdomain) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(relayUrl);
+    const port = parsed.port || (parsed.protocol === 'wss:' ? '443' : parsed.protocol === 'ws:' ? '80' : '');
+    if (port === String(LOCAL_RELAY_PORT) && isLocalRelayBindUrl(relayUrl)) {
+      return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
 /**
  * Result of relay trust verification
  */
 type RelayTrustResult =
-  | { trusted: true }
+  | { trusted: true; fingerprint: string }
   | { trusted: false; reason: string };
 
 /**
@@ -280,8 +331,17 @@ async function verifyRelayTrust(
   relayPublicKey: string,
   relayFingerprint: string,
   relayLabel: string | undefined,
-  explicitPubkey?: string
+  explicitPubkey?: string,
+  autoYes: boolean = false,
 ): Promise<RelayTrustResult> {
+  const computedFingerprint = formatRelayFingerprint(relayPublicKey);
+  if (relayFingerprint !== computedFingerprint) {
+    logger.error(
+      `Relay at ${relayUrl} reported fingerprint ${relayFingerprint}, but computed ${computedFingerprint} from relayPublicKey.`,
+    );
+    return { trusted: false, reason: 'Relay identity response is inconsistent' };
+  }
+
   const trustStatus = isRelayTrusted(relayUrl, relayPublicKey);
 
   if (trustStatus === 'mismatch') {
@@ -289,7 +349,7 @@ async function verifyRelayTrust(
     logger.log('');
     logger.error('SECURITY WARNING: Relay public key mismatch!');
     logger.error(`Expected:  ${getTrustedRelay(relayUrl)?.fingerprint}`);
-    logger.error(`Received:  ${relayFingerprint}`);
+    logger.error(`Received:  ${computedFingerprint}`);
     logger.log('');
     logger.error('The relay identity has changed. This could indicate a man-in-the-middle attack.');
     logger.error('If this is expected, remove the old relay entry from ~/.gitspace/.identity/trusted-relays.json and retry.');
@@ -309,8 +369,8 @@ async function verifyRelayTrust(
         addTrustedRelay(relayUrl, relayPublicKey, relayLabel);
       } else {
         logger.error('Relay public key does not match --relay-pubkey');
-        logger.error(`Expected:  ${computeRelayFingerprint(explicitPubkey)}`);
-        logger.error(`Received:  ${relayFingerprint}`);
+        logger.error(`Expected:  ${formatRelayFingerprint(explicitPubkey)}`);
+        logger.error(`Received:  ${computedFingerprint}`);
         return { trusted: false, reason: 'Relay public key does not match --relay-pubkey' };
       }
     } else {
@@ -318,13 +378,18 @@ async function verifyRelayTrust(
       logger.log('');
       logger.bold('Unknown Relay');
       logger.log(`  URL:         ${relayUrl}`);
-      logger.log(`  Fingerprint: ${relayFingerprint}`);
+      logger.log(`  Fingerprint: ${computedFingerprint}`);
       if (relayLabel) {
         logger.log(`  Label:       ${relayLabel}`);
       }
       logger.log('');
 
       // Ask for confirmation
+      if (autoYes) {
+        logger.error('Unknown relay requires interactive approval or --relay-pubkey.');
+        return { trusted: false, reason: 'Unknown relay requires interactive approval or --relay-pubkey' };
+      }
+
       const shouldTrust = await promptConfirm('Trust this relay?');
 
       if (!shouldTrust) {
@@ -338,7 +403,7 @@ async function verifyRelayTrust(
     }
   }
 
-  return { trusted: true };
+  return { trusted: true, fingerprint: computedFingerprint };
 }
 
 function decryptUnlockGrant(
@@ -784,20 +849,46 @@ async function connectToRelay(
   bootstrapToken?: string,
   registerPermit?: string,
   enrollmentToken?: string,
-): Promise<void> {
+  deviceCertificate?: string,
+  autoYes?: boolean,
+): Promise<{ relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null> {
+  let trustedRelayIdentity: { relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null = null;
+
   await connectMachineRelay(
     relayUrl,
     machineId,
     publicIdentity,
     sessionManager,
     eventHandler,
-    verifyRelayTrust,
+    async (url, relayPublicKey, relayFingerprint, relayLabel, explicitPubkey) => {
+      const trustResult = await verifyRelayTrust(
+        url,
+        relayPublicKey,
+        relayFingerprint,
+        relayLabel,
+        explicitPubkey,
+        Boolean(autoYes),
+      );
+
+      if (trustResult.trusted) {
+        trustedRelayIdentity = {
+          relayPublicKey,
+          relayFingerprint: trustResult.fingerprint,
+          relayLabel,
+        };
+      }
+
+      return trustResult;
+    },
     signingPrivateKey,
     relayPubkey,
     bootstrapToken,
     registerPermit,
     enrollmentToken,
+    deviceCertificate,
   );
+
+  return trustedRelayIdentity;
 }
 
 /**
@@ -858,7 +949,10 @@ export async function serveStart(options: {
   passwordStdin?: boolean;
   foreground?: boolean;
   ignoreKeychainAndSkipSecrets?: boolean;
+  yes?: boolean;
 } = {}): Promise<void> {
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+
   // Check if already running
   if (isServeRunning()) {
     const pid = getServePid();
@@ -875,37 +969,6 @@ export async function serveStart(options: {
   let registerPermit: string | undefined;
   let enrollmentToken = options.enrollmentToken;
 
-  const loadPasswordFromStdin = async (): Promise<string> => {
-    const reader = process.stdin;
-    const chunks: Buffer[] = [];
-
-    const onData = (chunk: Buffer) => chunks.push(chunk);
-    reader.on('data', onData);
-
-    await new Promise<void>((resolve, reject) => {
-      const timeoutId = setTimeout(() => reject(new Error('Timeout reading password from stdin')), 10000);
-      const onEnd = () => {
-        clearTimeout(timeoutId);
-        resolve();
-      };
-      const onError = (err: Error) => {
-        clearTimeout(timeoutId);
-        reject(err);
-      };
-      reader.once('end', onEnd);
-      reader.once('error', onError);
-    });
-
-    reader.removeListener('data', onData);
-    reader.pause();
-
-    const result = Buffer.concat(chunks).toString().trim();
-    if (!result) {
-      throw new SpacesError('No password provided via stdin', 'USER_ERROR', 1);
-    }
-    return result;
-  };
-
   // If not foreground mode, fork to background
   if (!options.foreground) {
     if (usingUnlockMode) {
@@ -919,18 +982,10 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
-      if (!keypairExists()) {
-        throw new NoIdentityError();
-      }
-
-      if (options.passwordStdin) {
-        password = await loadPasswordFromStdin();
-      } else {
-        password = await promptPassword('Enter password to unlock identity:');
-        if (!password) {
-          logger.info('Cancelled');
-          return;
-        }
+      password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
+      if (!password) {
+        logger.info('Cancelled');
+        return;
       }
 
       // Validate password before daemonizing
@@ -942,11 +997,29 @@ export async function serveStart(options: {
           1
         );
       }
+
     }
 
     if (!options.relay) {
       const daemonHostConfig = readHostConfig();
       options.relay = await resolveRelayUrlForServe(undefined, daemonHostConfig);
+    }
+
+    if (!usingUnlockMode) {
+      const relayIdentity = await fetchRelayIdentity(options.relay);
+      const trustResult = await verifyRelayTrust(
+        options.relay,
+        relayIdentity.publicKey,
+        relayIdentity.fingerprint,
+        relayIdentity.label,
+        options.relayPubkey,
+        Boolean(options.yes),
+      );
+      if (!trustResult.trusted) {
+        throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
+      }
+
+      options.relayPubkey ??= relayIdentity.publicKey;
     }
 
     logger.log('Starting serve daemon...');
@@ -964,6 +1037,9 @@ export async function serveStart(options: {
     if (options.workspaceId) serveArgs.push('--workspace-id', options.workspaceId);
     if (options.ignoreKeychainAndSkipSecrets) {
       serveArgs.push('--ignore-keychain-and-skip-secrets');
+    }
+    if (options.yes) {
+      serveArgs.push('--yes');
     }
     if (!usingUnlockMode) {
       serveArgs.push('--password-stdin');
@@ -991,7 +1067,11 @@ export async function serveStart(options: {
 
     // Send password via stdin (non-unlock mode)
     if (!usingUnlockMode) {
-      child.stdin.write(password ?? '');
+      if (!password) {
+        throw new SpacesError('Failed to pass identity password to serve daemon startup.', 'SYSTEM_ERROR', 2);
+      }
+
+      child.stdin.write(password);
       child.stdin.end();
     } else {
       child.stdin.end();
@@ -1039,20 +1119,11 @@ export async function serveStart(options: {
     identity = unlocked.identity;
     registerPermit = unlocked.registerPermit;
   } else {
-    if (!keypairExists()) {
+    password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
+    if (!password) {
+      logger.info('Cancelled');
       cleanupServeFiles();
-      throw new NoIdentityError();
-    }
-
-    if (options.passwordStdin) {
-      password = await loadPasswordFromStdin();
-    } else {
-      password = await promptPassword('Enter password to unlock identity:');
-      if (!password) {
-        logger.info('Cancelled');
-        cleanupServeFiles();
-        return;
-      }
+      return;
     }
 
     identity = await loadKeypair(password);
@@ -1102,6 +1173,7 @@ export async function serveStart(options: {
   }
 
   let ownerUserRootId: string;
+  let deviceCertificate: string | undefined;
   if (usingUnlockMode) {
     try {
       ownerUserRootId = resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken);
@@ -1112,7 +1184,10 @@ export async function serveStart(options: {
     }
   } else {
     try {
-      const userRootAuth = await resolveUserRootAuthorizationConfig();
+      const userRootAuth = await resolveUserRootAuthorizationConfig({
+        yes: options.yes,
+        devicePasswordContext,
+      });
       ownerUserRootId = userRootAuth.ownerUserRootId;
       ensureControlStore();
       bindControlOwner(ownerUserRootId);
@@ -1120,6 +1195,21 @@ export async function serveStart(options: {
       stopStatusServer();
       cleanupServeFiles();
       throw error;
+    }
+
+    // Create a device certificate: proves this machine belongs to the user root.
+    // The relay can verify this cert to auto-authorize the machine without
+    // needing enrollment tokens or preAuthorizedMachines.
+    try {
+      deviceCertificate = await createLocalDeviceCertificate(identity!);
+      logger.info(`[serve] Device certificate created for owner ${ownerUserRootId}`);
+    } catch (error) {
+      // Device cert is not strictly required — the machine may still be
+      // authorized via vault_machines, enrollmentToken, or preAuthorizedMachines.
+      // Log a warning but don't fail startup.
+      logger.warning(
+        `[serve] Could not create device certificate: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
@@ -1226,7 +1316,7 @@ export async function serveStart(options: {
 
   // Connect to relay
   try {
-    await connectToRelay(
+    const trustedRelayIdentity = await connectToRelay(
       effectiveRelayUrl,
       machineId,
       publicIdentity,
@@ -1237,12 +1327,35 @@ export async function serveStart(options: {
       options.bootstrapToken,
       registerPermit,
       enrollmentToken,
+      deviceCertificate,
+      options.yes,
     );
+
+    if (trustedRelayIdentity) {
+      const relayIdentityId = computeIdentityId(trustedRelayIdentity.relayPublicKey);
+      bindControlRelayIdentity({
+        relayIdentityId,
+        relaySigningPublicKey: trustedRelayIdentity.relayPublicKey,
+        relayFingerprint: trustedRelayIdentity.relayFingerprint,
+      });
+    }
+
     updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
-    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+    const originalError = error;
+    try {
+      await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+    } catch (cleanupError) {
+      logger.error(
+        `[serve] Cleanup after relay connection failure also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      );
+    }
+
+    if (originalError instanceof SpacesError) {
+      throw originalError;
+    }
     throw new SpacesError(
-      `Failed to connect to relay: ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to connect to relay: ${originalError instanceof Error ? originalError.message : String(originalError)}`,
       'SYSTEM_ERROR',
       2
     );
@@ -1252,6 +1365,7 @@ export async function serveStart(options: {
   try {
     writeRelayConfig({
       relayUrl: effectiveRelayUrl,
+      cloudRelayUrl: resolveCloudRelayUrlForConfig(effectiveRelayUrl, hostConfig),
       machineId,
       savedAt: Date.now(),
     });

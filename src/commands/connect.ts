@@ -7,8 +7,11 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { promptPassword, promptConfirm, promptInput, selectOne } from '../utils/prompts.js';
-import { loadKeypair, keypairExists, readRelayConfig } from '../core/identity.js';
+import { promptConfirm, promptInput, selectOne } from '../utils/prompts.js';
+import {
+  loadKeypair,
+  readRelayConfig,
+} from '../core/identity.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import WebSocket from 'ws';
 import chalk from 'chalk';
@@ -26,12 +29,166 @@ import {
   nodeRelaySocketAdapter,
 } from '../relay-client/index.js';
 import {
-  NoIdentityError,
   SpacesError,
 } from '../types/errors.js';
+import {
+  createDeviceIdentityPasswordContext,
+  ensureDeviceIdentityPassword,
+} from './device-identity-password.js';
+import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
+import {
+  addTrustedRelay,
+  getTrustedRelay,
+  isLocalhost,
+} from '../core/trusted-relays.js';
+import { formatRelayFingerprint } from '../relay/identity.js';
 import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
+
+export interface RelayIdentityProbe {
+  publicKey: string;
+  fingerprint: string;
+  label?: string;
+}
+
+function relayHealthUrl(relayUrl: string): string {
+  const parsed = new URL(relayUrl);
+  const protocol = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+  return `${protocol}//${parsed.host}/health`;
+}
+
+export async function fetchRelayIdentity(relayUrl: string): Promise<RelayIdentityProbe> {
+  const healthUrl = relayHealthUrl(relayUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(healthUrl, { signal: controller.signal });
+    if (!response.ok) {
+      throw new SpacesError(
+        `Could not fetch relay identity from ${healthUrl} (${response.status} ${response.statusText}).`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    const body = await response.json() as {
+      relayPublicKey?: string;
+      relayFingerprint?: string;
+      relayLabel?: string;
+    };
+
+    if (!body.relayPublicKey || typeof body.relayPublicKey !== 'string') {
+      throw new SpacesError(
+        `Relay at ${healthUrl} did not provide relayPublicKey.`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    const fingerprint = formatRelayFingerprint(body.relayPublicKey);
+    if (typeof body.relayFingerprint === 'string' && body.relayFingerprint !== fingerprint) {
+      logger.error(
+        `Relay at ${healthUrl} reported fingerprint ${body.relayFingerprint}, but computed ${fingerprint} from relayPublicKey.`,
+      );
+      throw new SpacesError(
+        `Relay at ${healthUrl} returned inconsistent identity metadata.`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    return {
+      publicKey: body.relayPublicKey,
+      fingerprint,
+      label: typeof body.relayLabel === 'string' ? body.relayLabel : undefined,
+    };
+  } catch (error) {
+    if (error instanceof SpacesError) {
+      throw error;
+    }
+
+    throw new SpacesError(
+      `Failed to verify relay identity (${error instanceof Error ? error.message : String(error)}).`,
+      'USER_ERROR',
+      1,
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function verifyClientRelayTrust(
+  relayUrl: string,
+  relayIdentity: RelayIdentityProbe,
+  options: { relayPubkey?: string; yes?: boolean } = {},
+): Promise<void> {
+  const trustedRelay = getTrustedRelay(relayUrl);
+
+  if (trustedRelay && trustedRelay.publicKey !== relayIdentity.publicKey) {
+    logger.log('');
+    logger.error('SECURITY WARNING: Relay public key mismatch!');
+    logger.error(`Expected:  ${trustedRelay.fingerprint}`);
+    logger.error(`Received:  ${relayIdentity.fingerprint}`);
+    logger.log('');
+    throw new SpacesError(
+      'Relay identity mismatch - possible security threat. Remove the old entry from trusted relays and retry only if expected.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (trustedRelay && trustedRelay.publicKey === relayIdentity.publicKey) {
+    return;
+  }
+
+  if (options.relayPubkey) {
+    if (options.relayPubkey !== relayIdentity.publicKey) {
+      throw new SpacesError(
+        `Relay public key does not match --relay-pubkey (expected ${formatRelayFingerprint(options.relayPubkey)}, got ${relayIdentity.fingerprint}).`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    addTrustedRelay(relayUrl, relayIdentity.publicKey, relayIdentity.label);
+    logger.success('Relay trusted via explicit --relay-pubkey.');
+    return;
+  }
+
+  if (isLocalhost(relayUrl)) {
+    addTrustedRelay(relayUrl, relayIdentity.publicKey, relayIdentity.label);
+    logger.dim(`Trusted localhost relay ${relayIdentity.fingerprint}`);
+    return;
+  }
+
+  logger.log('');
+  logger.bold('Unknown Relay');
+  logger.log(`  URL:         ${relayUrl}`);
+  logger.log(`  Fingerprint: ${relayIdentity.fingerprint}`);
+  if (relayIdentity.label) {
+    logger.log(`  Label:       ${relayIdentity.label}`);
+  }
+  logger.log('');
+
+  if (options.yes) {
+    logger.error('Unknown relay requires interactive approval or --relay-pubkey.');
+    throw new SpacesError(
+      'Unknown relay requires interactive approval or --relay-pubkey.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const shouldTrust = await promptConfirm('Trust this relay?', true);
+  if (!shouldTrust) {
+    throw new SpacesError('Relay not trusted, aborting connection.', 'USER_ERROR', 1);
+  }
+
+  addTrustedRelay(relayUrl, relayIdentity.publicKey, relayIdentity.label);
+  logger.success('Relay trusted and saved.');
+}
 
 /**
  * Connect to a remote machine as the owner identity.
@@ -41,8 +198,9 @@ import type {
  */
 export async function connectToRemote(
   target?: string,
-  options: { relay?: string; machine?: string } = {}
+  options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {}
 ): Promise<void> {
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
   if (!target && !options.machine) {
     throw new SpacesError(
       'Connection target required.\n\nUsage:\n  gssh client connect <machine-id> --relay <url>\n  gssh client connect --machine <id> --relay <url>\n\nList available machines:\n  gssh client machines list --relay <url>',
@@ -69,18 +227,26 @@ export async function connectToRemote(
   logger.log(`  Relay:       ${relayUrl}`);
   logger.log('');
 
-  const confirmed = await promptConfirm('Connect to this machine?', true);
+  const confirmed = options.yes || await promptConfirm('Connect to this machine?', true);
   if (!confirmed) {
     logger.info('Cancelled');
     return;
   }
 
-  // Step 3: Load local identity
-  if (!keypairExists()) {
-    throw new NoIdentityError();
-  }
+  const relayIdentity = await fetchRelayIdentity(relayUrl);
+  await verifyClientRelayTrust(relayUrl, relayIdentity, {
+    relayPubkey: options.relayPubkey,
+    yes: options.yes,
+  });
 
-  const password = await promptPassword('Enter password to unlock identity:');
+  await ensureUserRootIdentityWithRecovery({
+    devicePasswordContext,
+    yes: options.yes,
+    context: 'remote client authorization',
+  });
+
+  // Step 3: Load local identity
+  const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
     logger.info('Cancelled');
     return;
@@ -212,17 +378,29 @@ export async function connectToRemote(
 
 export async function listRemoteMachines(options: {
   relay?: string;
+  relayPubkey?: string;
   json?: boolean;
+  yes?: boolean;
+  passwordStdin?: boolean;
 }): Promise<void> {
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
   if (!options.relay) {
     throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
   }
 
-  if (!keypairExists()) {
-    throw new NoIdentityError();
-  }
+  const relayIdentity = await fetchRelayIdentity(options.relay);
+  await verifyClientRelayTrust(options.relay, relayIdentity, {
+    relayPubkey: options.relayPubkey,
+    yes: options.yes,
+  });
 
-  const password = await promptPassword('Enter password to unlock identity:');
+  await ensureUserRootIdentityWithRecovery({
+    devicePasswordContext,
+    yes: options.yes,
+    context: 'remote machine directory authorization',
+  });
+
+  const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
     logger.info('Cancelled');
     return;

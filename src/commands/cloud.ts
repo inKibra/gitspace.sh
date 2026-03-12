@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { promptInput } from '../utils/prompts.js';
 import { readRelayConfig } from '../core/identity.js';
+import { getTrustedRelay, isCloudReachableRelayUrl } from '../core/trusted-relays.js';
 import { loadUserRootIdentity } from '../core/user-identity.js';
 import {
   queryControlMeta,
@@ -12,7 +13,6 @@ import {
   sendAssertOwnerCommand,
   sendListCloudWorkspacesCommand,
 } from '../serve/daemon.js';
-import { readHostConfig } from './host.js';
 import {
   clearSpritesToken,
   getSpritesToken,
@@ -31,12 +31,30 @@ import {
   updateCloudWorkspaceStatus,
   upsertCloudWorkspace,
 } from '../relay/control/store.js';
-import { formatRelayFingerprint, getRelayPublicIdentity } from '../relay/identity.js';
 import { SpritesProvider } from '../relay/control/sprites-provider.js';
 import { getCloudBootstrapBundleSource, CLOUD_BOOTSTRAP_BUNDLE_FILENAME } from '../cloud/bootstrap-bundle.generated.js';
 import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/workspace-identity.js';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';
+import { computeIdentityId } from '../relay/identity.js';
+
+function getSavedCloudRelayUrl(): string | null {
+  const relayConfig = readRelayConfig();
+  if (!relayConfig) {
+    return null;
+  }
+
+  const cloudRelayUrl = relayConfig.cloudRelayUrl?.trim();
+  if (cloudRelayUrl && isCloudReachableRelayUrl(cloudRelayUrl)) {
+    return cloudRelayUrl;
+  }
+
+  if (isCloudReachableRelayUrl(relayConfig.relayUrl)) {
+    return relayConfig.relayUrl;
+  }
+
+  return null;
+}
 
 async function requireLocalIdentityId(): Promise<string> {
   const userRoot = await loadUserRootIdentity();
@@ -63,18 +81,23 @@ interface CloudEnrollmentInvite {
   expiresAt: string;
 }
 
-function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
-  const hostConfig = readHostConfig();
-  const relayConfig = readRelayConfig();
+function assertPinnedRelayMatchesSavedRelayUrl(relayUrl: string, pinnedRelayPublicKey: string): void {
+  const trustedRelay = getTrustedRelay(relayUrl);
+  if (trustedRelay && trustedRelay.publicKey !== pinnedRelayPublicKey) {
+    throw new SpacesError(
+      'Pinned relay metadata does not match the saved relay URL. Start `gssh machine serve start` against your target relay once to re-pin relay identity metadata before launching cloud workspaces.',
+      'USER_ERROR',
+      1,
+    );
+  }
+}
 
-  // External URL for hosted mode, saved relay URL for explicit relay mode.
-  const relayUrl = hostConfig?.subdomain
-    ? `wss://${hostConfig.subdomain}.gitspace.sh/ws`
-    : relayConfig?.relayUrl;
+function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
+  const relayUrl = getSavedCloudRelayUrl();
 
   if (!relayUrl) {
     throw new SpacesError(
-      'No relay URL found for cloud bootstrap. Start `gssh machine serve start` once (or configure hosting) before launching cloud workspaces.',
+      'No cloud-reachable relay URL found for cloud bootstrap. Start `gssh machine serve start` once against your target hosted or external relay before launching cloud workspaces.',
       'USER_ERROR',
       1
     );
@@ -86,6 +109,8 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
     controlMeta.relaySigningPublicKey &&
     controlMeta.relayFingerprint
   ) {
+    assertPinnedRelayMatchesSavedRelayUrl(relayUrl, controlMeta.relaySigningPublicKey);
+
     return {
       relayUrl,
       relaySigningPublicKey: controlMeta.relaySigningPublicKey,
@@ -93,29 +118,28 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
     };
   }
 
-  const relayPublicIdentity = getRelayPublicIdentity();
-  if (!relayPublicIdentity) {
+  // Keep owner assertion strict whenever we bootstrap cloud flows from control metadata.
+  assertControlOwner(ownerIdentityId);
+
+  const trustedRelay = getTrustedRelay(relayUrl);
+  if (!trustedRelay) {
     throw new SpacesError(
-      'Relay identity is not initialized yet. Start `gssh machine serve start` (hosted mode) to initialize and pin relay identity first.',
+      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before launching cloud workspaces.',
       'USER_ERROR',
-      1
+      1,
     );
   }
 
-  const relayFingerprint = formatRelayFingerprint(relayPublicIdentity.signingPublicKey);
   bindControlRelayIdentity({
-    relayIdentityId: relayPublicIdentity.id,
-    relaySigningPublicKey: relayPublicIdentity.signingPublicKey,
-    relayFingerprint,
+    relayIdentityId: computeIdentityId(trustedRelay.publicKey),
+    relaySigningPublicKey: trustedRelay.publicKey,
+    relayFingerprint: trustedRelay.fingerprint,
   });
-
-  // Keep owner assertion strict whenever we bind relay metadata from launch path.
-  assertControlOwner(ownerIdentityId);
 
   return {
     relayUrl,
-    relaySigningPublicKey: relayPublicIdentity.signingPublicKey,
-    relayFingerprint,
+    relaySigningPublicKey: trustedRelay.publicKey,
+    relayFingerprint: trustedRelay.fingerprint,
   };
 }
 
@@ -310,7 +334,7 @@ export async function cloudSetupClear(): Promise<void> {
 }
 
 export interface CloudLaunchOptions {
-  repo: string;
+  repo?: string;
   branch?: string;
   image?: string;
 }
@@ -318,8 +342,8 @@ export interface CloudLaunchOptions {
 export interface CloudLaunchProvider {
   createWorkspace(options: {
     name: string;
-    repo: string;
-    branch: string;
+    repo?: string;
+    branch?: string;
     image?: string;
     env: Record<string, string>;
   }): Promise<{ providerWorkspaceId: string; rawState: string }>;
@@ -353,7 +377,17 @@ export async function cloudLaunch(
   options: CloudLaunchOptions,
   dependencies: CloudLaunchDependencies = {}
 ): Promise<void> {
-  const { repo, branch = 'main', image } = options;
+  const repo = options.repo?.trim() || undefined;
+  const branch = options.branch?.trim() || undefined;
+  const { image } = options;
+  const workspaceMetadata = {
+    ...(repo ? { repo } : {}),
+    ...(branch ? { branch } : {}),
+  };
+
+  if (branch && !repo) {
+    throw new SpacesError('`--branch` requires `--repo` for cloud launch metadata.', 'USER_ERROR', 1);
+  }
 
   // 1. Require identity
   const identityId = dependencies.identityId ?? await requireLocalIdentityId();
@@ -383,8 +417,12 @@ export async function cloudLaunch(
   logger.bold('Launching Cloud Workspace');
   logger.log('');
   logger.log(`  Workspace:  ${workspaceId}`);
-  logger.log(`  Repo:       ${repo}`);
-  logger.log(`  Branch:     ${branch}`);
+  if (repo) {
+    logger.log(`  Repo:       ${repo}`);
+  }
+  if (branch) {
+    logger.log(`  Branch:     ${branch}`);
+  }
   logger.log('');
 
   // 5. Create workspace record (bootstrapping state)
@@ -394,8 +432,7 @@ export async function cloudLaunch(
     providerWorkspaceId: '',  // filled in after API call
     machineId: workspaceIdentity.id,
     machinePublicKey: workspaceIdentity.signingPublicKey,
-    repo,
-    branch,
+    ...workspaceMetadata,
     status: 'bootstrapping',
   });
 
@@ -425,17 +462,18 @@ export async function cloudLaunch(
   logCloudEvent({
     workspaceId,
     eventType: 'launch_started',
-    message: `Launching workspace for ${repo}@${branch}`,
+    message: repo
+      ? `Launching workspace for ${repo}${branch ? `@${branch}` : ''}`
+      : 'Launching machine-first workspace',
     metadata: {
       identityId,
-      repo,
-      branch,
       relayUrl: relayInfo.relayUrl,
       relayFingerprint: relayInfo.relayFingerprint,
       bootstrapTokenId: bootstrap.tokenId,
       bootstrapExpiresAt: bootstrap.expiresAt,
       enrollmentInviteId: enrollmentInvite.inviteId,
       enrollmentInviteExpiresAt: enrollmentInvite.expiresAt,
+      ...workspaceMetadata,
     },
   });
 
@@ -447,8 +485,7 @@ export async function cloudLaunch(
     logger.dim('  Creating Sprites VM...');
     providerResult = await provider.createWorkspace({
       name: workspaceId,
-      repo,
-      branch,
+      ...workspaceMetadata,
       image,
       env: {
         GSSH_BOOTSTRAP_TOKEN: bootstrap.token,
@@ -468,8 +505,7 @@ export async function cloudLaunch(
       providerWorkspaceId: '',
       machineId: workspaceIdentity.id,
       machinePublicKey: workspaceIdentity.signingPublicKey,
-      repo,
-      branch,
+      ...workspaceMetadata,
       status: 'error',
       error: msg,
     });
@@ -484,8 +520,7 @@ export async function cloudLaunch(
     providerWorkspaceId: providerResult.providerWorkspaceId,
     machineId: workspaceIdentity.id,
     machinePublicKey: workspaceIdentity.signingPublicKey,
-    repo,
-    branch,
+    ...workspaceMetadata,
     status: 'bootstrapping',
   });
 
@@ -594,6 +629,32 @@ function requireWorkspace(workspaceId: string) {
     );
   }
   return ws;
+}
+
+function resolveRelayUrlForCloudConnect(explicitRelay?: string): string {
+  if (explicitRelay?.trim()) {
+    const relayUrl = explicitRelay.trim();
+    if (!isCloudReachableRelayUrl(relayUrl)) {
+      throw new SpacesError(
+        'Cloud connect requires a cloud-reachable relay URL. Pass a hosted or public relay with --relay <url>.',
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    return relayUrl;
+  }
+
+  const relayUrl = getSavedCloudRelayUrl();
+  if (relayUrl) {
+    return relayUrl;
+  }
+
+  throw new SpacesError(
+    'No cloud-reachable relay URL is saved. Pass --relay <url> or start `gssh machine serve start` once against your target hosted or external relay.',
+    'USER_ERROR',
+    1,
+  );
 }
 
 const SPRITE_BOOTSTRAP_SCRIPT_PATH = `/tmp/${CLOUD_BOOTSTRAP_BUNDLE_FILENAME}`;
@@ -924,6 +985,105 @@ export async function cloudDestroy(
   logger.log('');
 }
 
+export async function cloudConnect(
+  workspaceId: string,
+  options: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {},
+  dependencies: {
+    resolveRelayUrl?: (explicitRelay?: string) => string;
+    allowUnsafeRelayUrl?: boolean;
+    connectToRemote?: (
+      target?: string,
+      options?: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean },
+    ) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const workspace = requireWorkspace(workspaceId);
+
+  if (!workspace.machineId) {
+    throw new SpacesError(
+      `Workspace '${workspaceId}' does not have an attached machine identity yet.`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  if (workspace.status !== 'ready') {
+    if (workspace.status === 'hibernated') {
+      throw new SpacesError(
+        `Workspace '${workspaceId}' is hibernated. Resume it first:\n  gssh cloud resume ${workspaceId}`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    if (workspace.status === 'destroyed') {
+      throw new SpacesError(
+        `Workspace '${workspaceId}' is destroyed and cannot be connected.`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    if (workspace.status === 'error') {
+      throw new SpacesError(
+        `Workspace '${workspaceId}' is in error state. Inspect with:\n  gssh cloud list`,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    throw new SpacesError(
+      `Workspace '${workspaceId}' is currently '${workspace.status}'. Wait until it is ready, then retry.`,
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const explicitRelay = options.relay?.trim() || undefined;
+  const relayUrl = (dependencies.resolveRelayUrl ?? resolveRelayUrlForCloudConnect)(explicitRelay);
+  if (!dependencies.allowUnsafeRelayUrl && !isCloudReachableRelayUrl(relayUrl)) {
+    throw new SpacesError(
+      'Cloud connect requires a cloud-reachable relay URL. Pass a hosted or public relay with --relay <url>.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const pinnedRelayPubkey = readControlMeta().relaySigningPublicKey;
+  if (!explicitRelay && pinnedRelayPubkey) {
+    assertPinnedRelayMatchesSavedRelayUrl(relayUrl, pinnedRelayPubkey);
+  }
+
+  if (explicitRelay && !options.relayPubkey) {
+    throw new SpacesError(
+      'Explicit relay overrides require `--relay-pubkey <pubkey>` so the override relay can be trusted explicitly.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const relayPubkey = explicitRelay
+    ? options.relayPubkey
+    : options.relayPubkey ?? pinnedRelayPubkey;
+  if (!relayPubkey) {
+    throw new SpacesError(
+      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before connecting cloud workspaces.',
+      'USER_ERROR',
+      1,
+    );
+  }
+  const connectToRemote = dependencies.connectToRemote
+    ?? (await import('./connect.js')).connectToRemote;
+
+  logger.info(`Connecting to cloud workspace ${workspaceId} via machine ${workspace.machineId}...`);
+  await connectToRemote(workspace.machineId, {
+    relay: relayUrl,
+    relayPubkey,
+    yes: options.yes,
+    passwordStdin: options.passwordStdin,
+  });
+}
+
 export async function cloudList(): Promise<void> {
   const serveStatus = await queryServeStatus();
   if (!serveStatus) {
@@ -961,6 +1121,9 @@ export async function cloudList(): Promise<void> {
     logger.log(`  ${workspace.id}`);
     logger.log(`    Provider: ${workspace.provider}`);
     logger.log(`    Status:   ${workspace.status}`);
+    if (workspace.machineId) {
+      logger.log(`    Machine:  ${workspace.machineId}`);
+    }
     if (workspace.repo) {
       logger.log(`    Repo:     ${workspace.repo}`);
     }
@@ -970,6 +1133,9 @@ export async function cloudList(): Promise<void> {
     logger.log(`    Updated:  ${workspace.updatedAt}`);
     if (workspace.error) {
       logger.warning(`    Error:    ${workspace.error}`);
+    }
+    if (workspace.machineId && workspace.status === 'ready') {
+      logger.dim(`    Connect:  gssh cloud connect ${workspace.id}`);
     }
   }
 

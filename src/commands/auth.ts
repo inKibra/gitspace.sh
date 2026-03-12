@@ -7,12 +7,19 @@
 import open from 'open';
 import os from 'os';
 import { getSecret, setSecret, deleteSecret } from '../utils/secrets.js';
-import { loadKeypair, keypairExists, getPublicKeyWithoutPassword } from '../core/identity.js';
+import {
+  loadKeypair,
+  getPublicKeyWithoutPassword,
+} from '../core/identity.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
-import { promptPassword } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
-import { NoIdentityError, SpacesError } from '../types/errors.js';
-import { syncHostConfig } from './host.js';
+import { SpacesError } from '../types/errors.js';
+import { printHostSyncReport, syncHostConfig } from './host.js';
+import {
+  createDeviceIdentityPasswordContext,
+  ensureDeviceIdentityPassword,
+  type DeviceIdentityPasswordContext,
+} from './device-identity-password.js';
 
 // API Configuration
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
@@ -70,23 +77,29 @@ interface GitspaceAuthResponse {
 /**
  * Login to gitspace.sh using GitHub Device Flow
  */
-export async function authLogin(): Promise<void> {
-  // Check if identity exists
-  if (!keypairExists()) {
-    throw new NoIdentityError();
-  }
+export async function authLogin(
+  options: {
+    devicePasswordContext?: DeviceIdentityPasswordContext;
+    passwordStdin?: boolean;
+    yes?: boolean;
+    interactiveHostSync?: boolean;
+    showHostSyncSummary?: boolean;
+  } = {},
+): Promise<void> {
+  const devicePasswordContext = options.devicePasswordContext
+    ?? createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
 
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  const password = await promptPassword('Enter identity password:');
-  if (!password) {
+  const passwordForIdentity = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
+  if (!passwordForIdentity) {
     logger.info('Cancelled');
     return;
   }
 
   let identity;
   try {
-    identity = await loadKeypair(password);
+    identity = await loadKeypair(passwordForIdentity);
   } catch (error) {
     if (error instanceof SpacesError) {
       throw error;
@@ -198,7 +211,11 @@ export async function authLogin(): Promise<void> {
 
   // Step 6: Sync host config (fetches existing subdomains from API)
   // Interactive mode will prompt user to select primary or reserve a subdomain
-  await syncHostConfig(true);
+  const hostSyncReport = await syncHostConfig(options.interactiveHostSync ?? true);
+  if (options.showHostSyncSummary ?? true) {
+    logger.log('');
+    printHostSyncReport(hostSyncReport, 'Hosted relay readiness');
+  }
 }
 
 // ============================================================================

@@ -10,6 +10,30 @@ import type { Env, User, GitHubUser } from '../types';
 import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
+const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
+
+function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
+  if (!cookieHeader) {
+    return null;
+  }
+
+  for (const part of cookieHeader.split(';')) {
+    const [rawName, ...rawValue] = part.trim().split('=');
+    if (rawName === name) {
+      return rawValue.join('=') || null;
+    }
+  }
+
+  return null;
+}
+
+function getGitHubOauthBase(env: Env): string {
+  return env.GITHUB_OAUTH_BASE ?? 'https://github.com';
+}
+
+function getGitHubApiBase(env: Env): string {
+  return env.GITHUB_API_BASE ?? 'https://api.github.com';
+}
 
 // ============================================================================
 // GitHub OAuth (Portal - redirect-based)
@@ -20,14 +44,22 @@ const app = new Hono<{ Bindings: Env }>();
  * GET /auth/github
  */
 app.get('/github', (c) => {
+  const redirectUri = new URL('/auth/github/callback', c.req.url).toString();
+  const state = crypto.randomUUID();
   const params = new URLSearchParams({
     client_id: c.env.GITHUB_CLIENT_ID,
-    redirect_uri: `https://api.gitspace.sh/auth/github/callback`,
+    redirect_uri: redirectUri,
     scope: 'read:user user:email',
-    state: crypto.randomUUID(),
+    state,
   });
 
-  return c.redirect(`https://github.com/login/oauth/authorize?${params}`);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`,
+      'Set-Cookie': `${OAUTH_STATE_COOKIE}=${state}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+    },
+  });
 });
 
 /**
@@ -36,14 +68,21 @@ app.get('/github', (c) => {
  */
 app.get('/github/callback', async (c) => {
   const code = c.req.query('code');
+  const state = c.req.query('state');
+  const redirectUri = new URL('/auth/github/callback', c.req.url).toString();
+  const stateCookie = getCookieValue(c.req.header('Cookie') ?? undefined, OAUTH_STATE_COOKIE);
 
   if (!code) {
     return c.redirect(`${c.env.PORTAL_URL}?error=missing_code`);
   }
 
+  if (!state || !stateCookie || state !== stateCookie) {
+    return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
+  }
+
   try {
     // Exchange code for access token
-    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+      const tokenRes = await fetch(`${getGitHubOauthBase(c.env)}/login/oauth/access_token`, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -53,6 +92,7 @@ app.get('/github/callback', async (c) => {
         client_id: c.env.GITHUB_CLIENT_ID,
         client_secret: c.env.GITHUB_CLIENT_SECRET,
         code,
+        redirect_uri: redirectUri,
       }),
     });
 
@@ -66,7 +106,7 @@ app.get('/github/callback', async (c) => {
     }
 
     // Fetch GitHub user
-    const githubUser = await fetchGitHubUser(tokenData.access_token);
+      const githubUser = await fetchGitHubUser(c.env, tokenData.access_token);
 
     // Find or create user (with account limit check)
     const maxAccounts = parseInt(c.env.MAX_ACCOUNTS, 10) || undefined;
@@ -212,7 +252,7 @@ app.post('/github/device', async (c) => {
 
   let githubUser: GitHubUser;
   try {
-    githubUser = await fetchGitHubUser(github_token);
+    githubUser = await fetchGitHubUser(c.env, github_token);
   } catch (error) {
     return c.json({ error: 'Invalid GitHub token' }, 401);
   }
@@ -311,8 +351,8 @@ app.post('/logout', async (c) => {
 /**
  * Fetch GitHub user info from API
  */
-async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> {
-  const userRes = await fetch('https://api.github.com/user', {
+async function fetchGitHubUser(env: Env, accessToken: string): Promise<GitHubUser> {
+  const userRes = await fetch(`${getGitHubApiBase(env)}/user`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'User-Agent': 'gitspace.sh',
@@ -328,7 +368,7 @@ async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> {
 
   // If email not in profile, try to get it from emails endpoint
   if (!user.email) {
-    const emailsRes = await fetch('https://api.github.com/user/emails', {
+    const emailsRes = await fetch(`${getGitHubApiBase(env)}/user/emails`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'User-Agent': 'gitspace.sh',

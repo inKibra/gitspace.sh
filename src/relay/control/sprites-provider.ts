@@ -23,8 +23,8 @@ export interface SpritesProviderOptions {
 
 export interface CreateWorkspaceOptions {
   name: string;
-  repo: string;
-  branch: string;
+  repo?: string;
+  branch?: string;
   image?: string;
   env?: Record<string, string>;
 }

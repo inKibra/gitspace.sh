@@ -3,8 +3,10 @@
  */
 
 import type { Command } from 'commander';
+import type { RelayStartMode } from '../../commands/relay.js';
 import { withErrorHandler } from '../error.js';
 import { SpacesError } from '../../types/errors.js';
+import { logger } from '../../utils/logger.js';
 
 function parseRelayPort(rawPort: string): number {
   if (!/^\d+$/.test(rawPort)) {
@@ -19,6 +21,20 @@ function parseRelayPort(rawPort: string): number {
   return port;
 }
 
+function parseRelayStartMode(rawMode: string): RelayStartMode {
+  const normalized = rawMode.trim().toLowerCase();
+  if (normalized === 'auto' || normalized === 'hosted' || normalized === 'local') {
+    return normalized;
+  }
+
+  logger.error(`Invalid relay start mode: ${rawMode}`);
+  throw new SpacesError(
+    'Invalid relay mode. Expected one of: auto, hosted, local.',
+    'USER_ERROR',
+    1,
+  );
+}
+
 export function registerRelayCommands(parent: Command): void {
   const cmd = parent
     .command('relay')
@@ -30,14 +46,18 @@ export function registerRelayCommands(parent: Command): void {
     .option('--port <port>', 'Port to listen on', '4480')
     .option('--bind <address>', 'Address to bind to', '0.0.0.0')
     .option('--hostname <host>', 'Only serve requests for this domain (optional)')
+    .option('--mode <mode>', 'Startup mode: auto, hosted, local', 'auto')
     .option('--label <label>', 'Human-readable label for this relay')
+    .option('-y, --yes', 'Auto-confirm prompts')
     .action(withErrorHandler(async (options) => {
       const { startRelay } = await import('../../commands/relay.js');
       await startRelay({
         port: parseRelayPort(options.port),
         bind: options.bind,
         hostname: options.hostname,
+        mode: parseRelayStartMode(options.mode),
         label: options.label,
+        yes: options.yes,
       });
     }, { skipSetupCheck: true }));
 

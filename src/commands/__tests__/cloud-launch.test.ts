@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CloudLaunchDependencies, CloudLaunchProvider } from '../cloud.js';
 import { cloudLaunch } from '../cloud.js';
+import { writeRelayConfig } from '../../core/identity.js';
+import { addTrustedRelay } from '../../core/trusted-relays.js';
 import {
+  bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
+  readControlMeta,
+  writeControlMeta,
 } from '../../relay/control/store.js';
 
 const TEST_OWNER_ID = 'owner-launch-test-001';
@@ -82,6 +87,21 @@ function setup() {
   mockWriteImpl = async (_id, opts) => ({ path: String(opts.path ?? '/tmp/bootstrap.mjs'), size: 1, mode: '0644' });
 }
 
+function seedSavedRelayConfig(args: { relayUrl: string; cloudRelayUrl?: string }) {
+  bindControlRelayIdentity({
+    relayIdentityId: 'relay-cloud-launch-test',
+    relaySigningPublicKey: TEST_RELAY_INFO.relaySigningPublicKey,
+    relayFingerprint: TEST_RELAY_INFO.relayFingerprint,
+  });
+
+  writeRelayConfig({
+    relayUrl: args.relayUrl,
+    cloudRelayUrl: args.cloudRelayUrl,
+    machineId: 'machine-saved-relay',
+    savedAt: Date.now(),
+  });
+}
+
 function teardown() {
   if (originalHome === undefined) {
     delete process.env.HOME;
@@ -119,6 +139,52 @@ describe('cloudLaunch', () => {
     expect(ws?.branch).toBe('main');
     expect(ws?.provider).toBe('sprites');
     expect(ws?.status).toBe('bootstrapping');
+  });
+
+  test('creates machine-first workspace without repo or branch metadata', async () => {
+    let createdWorkspaceId: string | null = null;
+    let createOptions: Record<string, unknown> | null = null;
+    mockCreateWorkspaceImpl = async (opts) => {
+      createdWorkspaceId = opts.name as string;
+      createOptions = opts;
+      return { providerWorkspaceId: 'sprite-machine-first', rawState: 'running' };
+    };
+
+    await cloudLaunch({}, makeDeps());
+
+    expect(createOptions).not.toBeNull();
+    const resolvedCreateOptions = createOptions!;
+    expect(resolvedCreateOptions.repo).toBeUndefined();
+    expect(resolvedCreateOptions.branch).toBeUndefined();
+    const ws = getCloudWorkspace(createdWorkspaceId!);
+    expect(ws?.repo).toBeUndefined();
+    expect(ws?.branch).toBeUndefined();
+    const launchEvent = listCloudEvents({ workspaceId: createdWorkspaceId! }).find((event) => event.eventType === 'launch_started');
+    expect(launchEvent?.message).toMatch(/machine-first workspace/i);
+  });
+
+  test('keeps repo metadata when branch is omitted', async () => {
+    let createdWorkspaceId: string | null = null;
+    let createOptions: Record<string, unknown> | null = null;
+    mockCreateWorkspaceImpl = async (opts) => {
+      createdWorkspaceId = opts.name as string;
+      createOptions = opts;
+      return { providerWorkspaceId: 'sprite-repo-only', rawState: 'running' };
+    };
+
+    await cloudLaunch({ repo: 'owner/repo' }, makeDeps());
+
+    expect(createOptions).not.toBeNull();
+    const resolvedCreateOptions = createOptions!;
+    expect(resolvedCreateOptions.repo).toBe('owner/repo');
+    expect(resolvedCreateOptions.branch).toBeUndefined();
+    const ws = getCloudWorkspace(createdWorkspaceId!);
+    expect(ws?.repo).toBe('owner/repo');
+    expect(ws?.branch).toBeUndefined();
+  });
+
+  test('rejects branch metadata without repo metadata', async () => {
+    await expect(cloudLaunch({ branch: 'main' }, makeDeps())).rejects.toThrow(/--branch.*requires.*--repo/i);
   });
 
   test('logs launch_started and vm_created events on success', async () => {
@@ -173,6 +239,150 @@ describe('cloudLaunch', () => {
     await expect(
       cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps({ token: '' }))
     ).rejects.toThrow(/sprites token/i);
+  });
+
+  test('prefers saved cloud relay URL over local relay URL', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    seedSavedRelayConfig({
+      relayUrl: 'ws://127.0.0.1:4480/ws',
+      cloudRelayUrl: 'wss://relay.public.test/ws',
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.public.test/ws');
+  });
+
+  test('falls back to legacy saved relay URL when it is already cloud reachable', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    seedSavedRelayConfig({
+      relayUrl: 'wss://relay.legacy.test/ws',
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.legacy.test/ws');
+  });
+
+  test('ignores invalid saved cloud relay URL and falls back to public relay URL', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    seedSavedRelayConfig({
+      relayUrl: 'wss://relay.legacy.test/ws',
+      cloudRelayUrl: 'ws://127.0.0.1:4480/ws',
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.legacy.test/ws');
+  });
+
+  test('fails when only a local relay URL is saved', async () => {
+    seedSavedRelayConfig({
+      relayUrl: 'ws://127.0.0.1:4480/ws',
+    });
+
+    await expect(
+      cloudLaunch(
+        { repo: 'owner/repo', branch: 'main' },
+        makeDeps({ relayInfo: undefined }),
+      ),
+    ).rejects.toThrow(/No cloud-reachable relay URL found/i);
+  });
+
+  test('recovers relay metadata from trusted relay store when control metadata is missing', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    writeRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+      machineId: 'machine-saved-relay',
+      savedAt: Date.now(),
+    });
+    addTrustedRelay('wss://relay.test/ws', TEST_RELAY_INFO.relaySigningPublicKey, 'trusted-relay');
+    writeControlMeta({
+      ...readControlMeta(),
+      relayIdentityId: undefined,
+      relaySigningPublicKey: undefined,
+      relayFingerprint: undefined,
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.test/ws');
+    expect(env.GSSH_RELAY_PUBKEY).toBe(TEST_RELAY_INFO.relaySigningPublicKey);
+    expect(readControlMeta().relaySigningPublicKey).toBe(TEST_RELAY_INFO.relaySigningPublicKey);
+  });
+
+  test('fails closed when relay metadata is missing and relay is not trusted', async () => {
+    writeRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+      machineId: 'machine-saved-relay',
+      savedAt: Date.now(),
+    });
+    writeControlMeta({
+      ...readControlMeta(),
+      relayIdentityId: undefined,
+      relaySigningPublicKey: undefined,
+      relayFingerprint: undefined,
+    });
+
+    await expect(
+      cloudLaunch(
+        { repo: 'owner/repo', branch: 'main' },
+        makeDeps({ relayInfo: undefined }),
+      ),
+    ).rejects.toThrow(/Relay identity is not pinned yet/i);
+  });
+
+  test('fails when saved relay URL trust does not match pinned control metadata', async () => {
+    seedSavedRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+    });
+    addTrustedRelay('wss://relay.test/ws', Buffer.from('different-relay-key').toString('base64'), 'other-relay');
+
+    await expect(
+      cloudLaunch(
+        { repo: 'owner/repo', branch: 'main' },
+        makeDeps({ relayInfo: undefined }),
+      ),
+    ).rejects.toThrow(/Pinned relay metadata does not match the saved relay URL/i);
   });
 
   test('leaves workspace in error state when VM creation fails', async () => {

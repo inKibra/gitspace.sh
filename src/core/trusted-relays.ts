@@ -8,9 +8,10 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { join } from "node:path";
-import { sha256 } from "@noble/hashes/sha2.js";
 import { getIdentityDir } from "./identity.js";
+import { formatRelayFingerprint } from "../relay/identity.js";
 
 // ============================================================================
 // Types
@@ -63,12 +64,7 @@ function getTrustedRelaysPath(): string {
  *
  * Format: "Kx4f:2nB9:mP3q:vR8s" (16 chars with colons)
  */
-export function computeRelayFingerprint(publicKey: string): string {
-  const keyBytes = Buffer.from(publicKey, "base64");
-  const hash = sha256(keyBytes);
-  const b64url = Buffer.from(hash).toString("base64url").substring(0, 16);
-  return b64url.match(/.{1,4}/g)?.join(":") || b64url;
-}
+export const computeRelayFingerprint = formatRelayFingerprint;
 
 // ============================================================================
 // URL Normalization
@@ -80,20 +76,53 @@ export function computeRelayFingerprint(publicKey: string): string {
  * Removes trailing slashes and normalizes protocol
  */
 function normalizeUrl(url: string): string {
-  // Normalize the URL
-  let normalized = url.toLowerCase().trim();
+  const normalized = url.trim();
 
-  // Remove trailing slashes
-  while (normalized.endsWith("/")) {
-    normalized = normalized.slice(0, -1);
+  try {
+    const parsed = new URL(normalized);
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
+    const local = isLocalhostUrl(parsed.toString());
+    if (parsed.protocol === 'ws:' && !local) {
+      parsed.protocol = 'wss:';
+    }
+
+    if (parsed.pathname === '/' || parsed.pathname === '') {
+      parsed.pathname = '';
+    } else if (/^\/ws\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = '/ws';
+    }
+    parsed.search = '';
+    parsed.hash = '';
+
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    let fallback = normalized;
+    while (fallback.endsWith('/')) {
+      fallback = fallback.slice(0, -1);
+    }
+    return fallback;
+  }
+}
+
+function getNormalizedUrlVariants(url: string): string[] {
+  const normalized = normalizeUrl(url);
+  const variants = new Set([normalized]);
+
+  try {
+    const parsed = new URL(normalized);
+    const base = `${parsed.protocol}//${parsed.host}`;
+
+    if (parsed.pathname === '' || parsed.pathname === '/') {
+      variants.add(`${base}/ws`);
+    } else if (parsed.pathname === '/ws') {
+      variants.add(base);
+    }
+  } catch {
+    // Keep only the fallback normalized form.
   }
 
-  // Normalize ws:// to wss:// for non-localhost
-  if (normalized.startsWith("ws://") && !isLocalhostUrl(normalized)) {
-    normalized = "wss://" + normalized.slice(5);
-  }
-
-  return normalized;
+  return [...variants];
 }
 
 /**
@@ -102,8 +131,149 @@ function normalizeUrl(url: string): string {
 function isLocalhostUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    const host = normalizeHost(parsed.hostname);
+    const mappedIpv4 = extractMappedIpv4Host(host);
+    return host === "localhost"
+      || host === "127.0.0.1"
+      || host === "::1"
+      || mappedIpv4 === '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
+function normalizeHost(host: string): string {
+  return host.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").split("%", 1)[0] ?? host.toLowerCase();
+}
+
+function extractMappedIpv4Host(host: string): string | null {
+  if (!host.startsWith('::ffff:')) {
+    return null;
+  }
+
+  const mapped = host.slice('::ffff:'.length);
+  if (mapped.includes('.')) {
+    return mapped;
+  }
+
+  const parts = mapped.split(':');
+  if (parts.length !== 2) {
+    return null;
+  }
+
+  const upper = Number.parseInt(parts[0], 16);
+  const lower = Number.parseInt(parts[1], 16);
+  if (Number.isNaN(upper) || Number.isNaN(lower) || upper < 0 || lower < 0 || upper > 0xffff || lower > 0xffff) {
+    return null;
+  }
+
+  return `${upper >> 8}.${upper & 0xff}.${lower >> 8}.${lower & 0xff}`;
+}
+
+function expandIpv6Hextets(host: string): number[] | null {
+  if (host.includes('.')) {
+    return null;
+  }
+
+  const parts = host.split('::');
+  if (parts.length > 2) {
+    return null;
+  }
+
+  const parseSegment = (segment: string): number[] | null => {
+    if (!segment) {
+      return [];
+    }
+
+    const values = segment.split(':').map((part) => Number.parseInt(part, 16));
+    if (values.some((value) => Number.isNaN(value) || value < 0 || value > 0xffff)) {
+      return null;
+    }
+
+    return values;
+  };
+
+  const left = parseSegment(parts[0] ?? '');
+  const right = parseSegment(parts[1] ?? '');
+  if (!left || !right) {
+    return null;
+  }
+
+  if (parts.length === 1) {
+    return left.length === 8 ? left : null;
+  }
+
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) {
+    return null;
+  }
+
+  return [...left, ...Array(missing).fill(0), ...right];
+}
+
+function isPrivateIpv4Host(host: string): boolean {
+  const parts = host.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  return parts[0] === 0
+    || parts[0] === 10
+    || parts[0] === 127
+    || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127)
+    || (parts[0] === 169 && parts[1] === 254)
+    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    || (parts[0] === 192 && parts[1] === 0 && (parts[2] === 0 || parts[2] === 2))
+    || (parts[0] === 192 && parts[1] === 168)
+    || (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19))
+    || (parts[0] === 198 && parts[1] === 51 && parts[2] === 100)
+    || (parts[0] === 203 && parts[1] === 0 && parts[2] === 113)
+    || parts[0] >= 224;
+}
+
+function isPrivateIpv6Host(host: string): boolean {
+  if (host === "::" || host === "::1") {
+    return true;
+  }
+
+  const mappedIpv4 = extractMappedIpv4Host(host);
+  if (mappedIpv4) {
+    return isPrivateIpv4Host(mappedIpv4);
+  }
+
+  const hextets = expandIpv6Hextets(host);
+  if (!hextets) {
+    return false;
+  }
+
+  const firstHextet = hextets[0] ?? 0;
+  const secondHextet = hextets[1] ?? 0;
+
+  return (firstHextet & 0xfe00) === 0xfc00
+    || (firstHextet & 0xffc0) === 0xfe80
+    || (firstHextet & 0xff00) === 0xff00
+    || (firstHextet === 0x2001 && secondHextet === 0x0db8);
+}
+
+export function isCloudReachableRelayUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = normalizeHost(parsed.hostname);
+
+    if (host === "localhost" || host.endsWith(".local")) {
+      return false;
+    }
+
+    const ipVersion = isIP(host);
+    if (ipVersion === 4) {
+      return !isPrivateIpv4Host(host);
+    }
+
+    if (ipVersion === 6 || host.includes(':')) {
+      return !isPrivateIpv6Host(host);
+    }
+
+    return true;
   } catch {
     return false;
   }
@@ -172,9 +342,10 @@ export function addTrustedRelay(
 ): TrustedRelay {
   const relays = getTrustedRelays();
   const normalizedUrl = normalizeUrl(url);
+  const candidateUrls = new Set(getNormalizedUrlVariants(url));
 
   // Check if already exists by URL
-  const existing = relays.find((r) => normalizeUrl(r.url) === normalizedUrl);
+  const existing = relays.find((r) => getNormalizedUrlVariants(r.url).some((candidate) => candidateUrls.has(candidate)));
 
   if (existing) {
     // Update existing entry
@@ -212,15 +383,15 @@ export function removeTrustedRelay(
 ): TrustedRelay | null {
   const relays = getTrustedRelays();
   const searchLower = urlOrFingerprint.toLowerCase();
+  const candidateUrls = new Set(getNormalizedUrlVariants(urlOrFingerprint).map((candidate) => candidate.toLowerCase()));
 
   const index = relays.findIndex((r) => {
-    const urlLower = normalizeUrl(r.url);
+    const relayUrlVariants = getNormalizedUrlVariants(r.url).map((candidate) => candidate.toLowerCase());
     const fingerprintLower = r.fingerprint.toLowerCase();
     const labelLower = r.label?.toLowerCase();
 
     return (
-      urlLower === searchLower ||
-      urlLower.includes(searchLower) ||
+      relayUrlVariants.some((candidate) => candidate === searchLower || candidate.includes(searchLower) || candidateUrls.has(candidate)) ||
       fingerprintLower === searchLower ||
       fingerprintLower.startsWith(searchLower) ||
       labelLower === searchLower
@@ -245,9 +416,9 @@ export function removeTrustedRelay(
  */
 export function getTrustedRelay(url: string): TrustedRelay | null {
   const relays = getTrustedRelays();
-  const normalizedUrl = normalizeUrl(url);
+  const candidateUrls = new Set(getNormalizedUrlVariants(url));
 
-  return relays.find((r) => normalizeUrl(r.url) === normalizedUrl) ?? null;
+  return relays.find((r) => getNormalizedUrlVariants(r.url).some((candidate) => candidateUrls.has(candidate))) ?? null;
 }
 
 /**
@@ -287,12 +458,11 @@ export function isRelayTrusted(
   url: string,
   publicKey: string
 ): RelayTrustStatus {
-  // Localhost is always auto-trusted
-  if (isLocalhostUrl(url)) {
-    return "trusted";
-  }
-
   const trustedRelay = getTrustedRelay(url);
+
+  if (!trustedRelay && isLocalhostUrl(url)) {
+    return "unknown";
+  }
 
   if (!trustedRelay) {
     return "unknown";

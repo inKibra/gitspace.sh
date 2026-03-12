@@ -58,6 +58,7 @@ function registerMachineServeCommands(machine: Command): void {
     .option('--unlock-token <token>', 'One-time token to request unlock grant from relay')
     .option('--workspace-id <id>', 'Cloud workspace id for unlock-token flow')
     .option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
+    .option('-y, --yes', 'Auto-confirm prompts')
     .option('--password-stdin', 'Read password from stdin')
     .option('--foreground', "Run in foreground (don't daemonize)")
     .action(withErrorHandler(async (options) => {

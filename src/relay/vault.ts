@@ -28,6 +28,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
+import { logger } from '../utils/logger.js';
+import { SpacesError } from '../types/errors.js';
 import {
   getVaultCategory,
   getVaultMeta,
@@ -74,6 +76,14 @@ let vaultKey: Uint8Array | null = null;
  */
 export function getVaultLockState(): VaultLockState {
   return vaultKey !== null ? 'unlocked' : 'locked';
+}
+
+export function isVaultMetadataComplete(): boolean {
+  return Boolean(getVaultMeta('vault_salt') && getVaultMeta('vault_key_check'));
+}
+
+function hasVaultEncryptedState(): boolean {
+  return listVaultCategories().length > 0 || listVaultMachineUnlockKeys().length > 0;
 }
 
 /**
@@ -132,9 +142,33 @@ function checksumPayload(payload: Uint8Array): string {
  * @returns true if initialized, false if already initialized
  * @throws {Error} If initialization fails
  */
-export function initializeVault(userRootPrivateKey: Uint8Array): boolean {
+export function initializeVault(
+  userRootPrivateKey: Uint8Array,
+  options: { allowRepair?: boolean } = {},
+): boolean {
+  const encryptedStateExists = hasVaultEncryptedState();
+  if (!isVaultInitialized() && encryptedStateExists) {
+    logger.error('Vault has encrypted state but is missing initialization metadata. Refusing to reinitialize.');
+    throw new SpacesError(
+      'Vault has encrypted state but is missing initialization metadata.',
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
   if (isVaultInitialized()) {
-    return false;
+    if (!options.allowRepair || isVaultMetadataComplete()) {
+      return false;
+    }
+
+    if (encryptedStateExists) {
+      logger.error('Vault metadata is incomplete but encrypted data already exists. Refusing repair.');
+      throw new SpacesError(
+        'Vault metadata is incomplete but encrypted data already exists.',
+        'SYSTEM_ERROR',
+        2,
+      );
+    }
   }
 
   // Generate random salt

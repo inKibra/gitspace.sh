@@ -120,7 +120,7 @@ export function formatRelayFingerprint(publicKey: string): string {
  * @param publicKey - Base64 encoded Ed25519 public key
  * @returns Identity ID string
  */
-function computeIdentityId(publicKey: string): string {
+export function computeIdentityId(publicKey: string): string {
   const pubKeyBytes = Buffer.from(publicKey, "base64");
   const hash = sha256(pubKeyBytes);
   return Buffer.from(hash).toString("base64url").substring(0, 22);

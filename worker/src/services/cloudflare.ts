@@ -6,6 +6,33 @@
 
 import type { Env } from '../types';
 
+type CryptoKeyUsageValue = 'encrypt' | 'decrypt' | 'sign' | 'verify' | 'deriveKey' | 'deriveBits' | 'wrapKey' | 'unwrapKey';
+
+function getCloudflareApiBase(env: Env): string {
+  const rawBase = env.CF_API_BASE?.trim();
+  if (env.CF_API_BASE === undefined) {
+    return 'https://api.cloudflare.com/client/v4';
+  }
+
+  if (!rawBase) {
+    throw new Error('CF_API_BASE cannot be empty');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawBase);
+  } catch {
+    throw new Error('CF_API_BASE must be a valid URL');
+  }
+
+  const allowedHosts = new Set(['api.cloudflare.com', 'localhost', '127.0.0.1', '::1']);
+  if (!allowedHosts.has(parsed.hostname)) {
+    throw new Error('CF_API_BASE override is only allowed for api.cloudflare.com or localhost-based test endpoints');
+  }
+
+  return parsed.toString().replace(/\/$/, '');
+}
+
 /**
  * Tunnel creation result
  */
@@ -24,7 +51,7 @@ async function findTunnelByName(
   const tunnelName = `gitspace-${name}`;
 
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel?name=${encodeURIComponent(tunnelName)}`,
+    `${getCloudflareApiBase(env)}/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel?name=${encodeURIComponent(tunnelName)}`,
     {
       method: 'GET',
       headers: {
@@ -57,7 +84,7 @@ async function getTunnelToken(
   tunnelId: string
 ): Promise<string> {
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}/token`,
+    `${getCloudflareApiBase(env)}/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}/token`,
     {
       method: 'GET',
       headers: {
@@ -108,7 +135,7 @@ export async function createTunnel(
   const secret = btoa(String.fromCharCode(...secretBytes));
 
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel`,
+    `${getCloudflareApiBase(env)}/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel`,
     {
       method: 'POST',
       headers: {
@@ -157,7 +184,7 @@ export async function configureTunnelIngress(
   subdomain: string
 ): Promise<void> {
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}/configurations`,
+    `${getCloudflareApiBase(env)}/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}/configurations`,
     {
       method: 'PUT',
       headers: {
@@ -197,7 +224,7 @@ export async function configureTunnelIngress(
 export async function deleteTunnel(env: Env, tunnelId: string): Promise<void> {
   // First, clean up the tunnel connections
   await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}/connections`,
+    `${getCloudflareApiBase(env)}/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}/connections`,
     {
       method: 'DELETE',
       headers: {
@@ -208,7 +235,7 @@ export async function deleteTunnel(env: Env, tunnelId: string): Promise<void> {
 
   // Then delete the tunnel
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}`,
+    `${getCloudflareApiBase(env)}/accounts/${env.CF_ACCOUNT_ID}/cfd_tunnel/${tunnelId}`,
     {
       method: 'DELETE',
       headers: {
@@ -233,7 +260,7 @@ async function findDNSRecord(
   const fullName = name.endsWith('.gitspace.sh') ? name : `${name}.gitspace.sh`;
 
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records?name=${encodeURIComponent(fullName)}`,
+    `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/dns_records?name=${encodeURIComponent(fullName)}`,
     {
       method: 'GET',
       headers: {
@@ -269,7 +296,7 @@ async function updateDNSRecord(
   comment: string
 ): Promise<void> {
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records/${recordId}`,
+    `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/dns_records/${recordId}`,
     {
       method: 'PUT',
       headers: {
@@ -320,8 +347,8 @@ export async function createDNSRecords(
     }
 
     // Create new record
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records`,
+      const response = await fetch(
+      `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/dns_records`,
       {
         method: 'POST',
         headers: {
@@ -365,7 +392,7 @@ export async function deleteDNSRecords(
 ): Promise<void> {
   for (const recordId of recordIds) {
     await fetch(
-      `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records/${recordId}`,
+      `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/dns_records/${recordId}`,
       {
         method: 'DELETE',
         headers: {
@@ -403,7 +430,7 @@ export async function createCustomHostname(
   const hostname = `${subdomain}.gitspace.sh`;
 
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/custom_hostnames`,
+    `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/custom_hostnames`,
     {
       method: 'POST',
       headers: {
@@ -456,7 +483,7 @@ export async function deleteCustomHostname(
   customHostnameId: string
 ): Promise<void> {
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/custom_hostnames/${customHostnameId}`,
+    `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/custom_hostnames/${customHostnameId}`,
     {
       method: 'DELETE',
       headers: {
@@ -479,7 +506,7 @@ export async function getCustomHostnameStatus(
   customHostnameId: string
 ): Promise<{ status: string; sslStatus: string }> {
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/custom_hostnames/${customHostnameId}`,
+    `${getCloudflareApiBase(env)}/zones/${env.CF_ZONE_ID}/custom_hostnames/${customHostnameId}`,
     {
       method: 'GET',
       headers: {
@@ -512,7 +539,7 @@ const TOKEN_DERIVATION_SALT = new Uint8Array(32);
 
 async function deriveTokenKey(
   env: Env,
-  usages: KeyUsage[]
+  usages: CryptoKeyUsageValue[]
 ): Promise<CryptoKey> {
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
@@ -538,7 +565,7 @@ async function deriveTokenKey(
 
 async function deriveLegacyTokenKey(
   env: Env,
-  usages: KeyUsage[]
+  usages: CryptoKeyUsageValue[]
 ): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',

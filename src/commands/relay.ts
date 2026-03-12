@@ -19,6 +19,12 @@ import {
 import { loadUserRootIdentity } from "../core/user-identity.js";
 import { getSpacesDir } from "../core/config.js";
 import {
+  bindControlOwner,
+  ensureControlStore,
+  setVaultMeta,
+  getVaultMeta,
+  isVaultInitialized,
+  listVaultMachines,
   listVaultMachinesForOwner,
   removeVaultMachineForOwner,
 } from "../relay/control/store.js";
@@ -29,6 +35,7 @@ import {
 } from "./host.js";
 import { selectOne } from "../utils/prompts.js";
 import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
+import { ensureUserRootIdentityWithRecovery } from "./identity-recovery.js";
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -36,6 +43,55 @@ const RELAY_RUNTIME_DIR = ".relay/runtime";
 const RELAY_STATE_FILE = "relay-state.json";
 const CLOUDFLARED_STARTUP_DELAY_MS = 1200;
 const CLOUDFLARED_EARLY_EXIT_RACE_MS = 100;
+
+export function assertRelayOwnerRepairIsSafe(ownerUserRootId: string): void {
+  const machineOwners = new Set(listVaultMachines().map((machine) => machine.ownerUserRootId));
+  if (machineOwners.size === 0) {
+    return;
+  }
+
+  if (machineOwners.size !== 1 || !machineOwners.has(ownerUserRootId)) {
+    throw new SpacesError(
+      'Relay vault owner metadata is missing, but persisted machine registrations belong to a different owner. Recover with the original owner identity or clear relay state before rebinding.',
+      'USER_ERROR',
+      1,
+    );
+  }
+}
+
+export function bindRelayOwnerForStartup(ownerUserRootId: string): {
+  repairedOwnerBinding: boolean;
+  missingVaultInitialization: boolean;
+} {
+  ensureControlStore();
+
+  const existingOwner = getVaultMeta("owner_user_root_id");
+  if (existingOwner && existingOwner !== ownerUserRootId) {
+    throw new SpacesError(
+      `Relay is already owned by a different user root identity.\n`
+      + `  Existing owner: ${existingOwner.slice(0, 8)}...\n`
+      + `  Current user:   ${ownerUserRootId.slice(0, 8)}...`,
+      "USER_ERROR",
+      1,
+    );
+  }
+
+  const vaultInitialized = isVaultInitialized();
+  if (!existingOwner) {
+    assertRelayOwnerRepairIsSafe(ownerUserRootId);
+  }
+
+  bindControlOwner(ownerUserRootId);
+
+  if (!existingOwner) {
+    setVaultMeta("owner_user_root_id", ownerUserRootId);
+  }
+
+  return {
+    repairedOwnerBinding: !existingOwner,
+    missingVaultInitialization: !vaultInitialized,
+  };
+}
 
 interface RelayRuntimeState {
   pid: number;
@@ -61,6 +117,8 @@ interface RelayStatusSnapshot {
   publicRelayUrl: string | null;
   startedAt: number | null;
 }
+
+export type RelayStartMode = "auto" | "hosted" | "local";
 
 function getRelayRuntimeDir(): string {
   return join(getSpacesDir(), RELAY_RUNTIME_DIR);
@@ -305,7 +363,9 @@ export async function startRelay(options: {
   port?: number;
   hostname?: string;
   bind?: string;
+  mode?: RelayStartMode;
   label?: string;
+  yes?: boolean;
 }): Promise<void> {
   const existingState = readRelayState();
   if (existingState?.pid && isProcessRunning(existingState.pid)) {
@@ -348,33 +408,114 @@ export async function startRelay(options: {
     }
   }
 
+  const mode: RelayStartMode = options.mode ?? "auto";
   const port = options.port ?? parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
   const bind = options.bind ?? process.env.RELAY_BIND ?? "0.0.0.0";
-  let hostname = options.hostname ?? process.env.RELAY_HOST;
+  const explicitHostname = options.hostname;
+  let hostname = explicitHostname ?? process.env.RELAY_HOST;
   let tunnelSubdomain: string | undefined;
   let tunnelToken: string | undefined;
 
-  if (!hostname) {
+  if (mode === "hosted" && explicitHostname) {
+    throw new SpacesError(
+      "Hosted mode does not support explicit --hostname. Remove --hostname and use your account host.",
+      "USER_ERROR",
+      1,
+    );
+  }
+
+  if (mode === "hosted") {
+    hostname = undefined;
+  }
+
+  if (mode !== "local" && !hostname) {
     const accountTarget = await resolveAccountRelayTarget();
-    if (accountTarget) {
+    if (!accountTarget) {
+      if (mode === "hosted") {
+        throw new SpacesError(
+          "Hosted relay startup requires an active gitspace.sh host.\n\nRun:\n  gssh user host reserve <name>\n  gssh user host status",
+          "USER_ERROR",
+          1,
+        );
+      }
+    } else {
       try {
         tunnelToken = await ensureSubdomainTunnelToken(accountTarget.subdomain);
         hostname = accountTarget.hostname;
         tunnelSubdomain = accountTarget.subdomain;
-        logger.info(`Using account host ${hostname} for relay tunnel`);
+        logger.info(`Using account host ${accountTarget.hostname} for relay tunnel`);
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (mode === "hosted") {
+          throw new SpacesError(
+            `Hosted relay startup failed while loading tunnel credentials for ${accountTarget.subdomain}.gitspace.sh.\n\n${detail}\n\nRun:\n  gssh user host status`,
+            "USER_ERROR",
+            1,
+          );
+        }
+
         logger.warning(
           `Could not load tunnel token for ${accountTarget.subdomain}.gitspace.sh. `
           + "Falling back to local relay start without tunnel.",
         );
-        logger.dim(error instanceof Error ? error.message : String(error));
+        logger.dim(detail);
       }
     }
+  }
+
+  if (mode === "hosted" && !tunnelToken) {
+    throw new SpacesError(
+      "Hosted relay mode requires an active tunnel but none was configured.\n\nRun:\n  gssh user host status",
+      "USER_ERROR",
+      1,
+    );
   }
 
   // Load or create relay identity
   const identity = await loadOrCreateRelayIdentity(options.label);
   const fingerprint = formatRelayFingerprint(identity.signingPublicKey);
+
+  // ── Bind owner identity to relay ──────────────────────────────────────
+  // Read the user root identity (from mnemonic in keychain) so the relay
+  // knows who its owner is. This enables owner-based authorization for
+  // machines and clients without requiring enrollment tokens.
+  let ownerUserRootId: string | null = null;
+  try {
+    const userRoot = await loadUserRootIdentity()
+      ?? await ensureUserRootIdentityWithRecovery({
+        yes: options.yes,
+        context: 'relay startup owner binding',
+        allowSkip: true,
+        allowAuthLogin: false,
+      });
+    if (userRoot) {
+      ownerUserRootId = userRoot.id;
+      const ownerBinding = bindRelayOwnerForStartup(ownerUserRootId);
+      if (ownerBinding.repairedOwnerBinding && !ownerBinding.missingVaultInitialization) {
+        logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
+      } else if (ownerBinding.missingVaultInitialization) {
+        logger.info('Relay vault is not initialized yet; owner binding will be completed when the owner first unlocks the relay.');
+      }
+
+      logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
+    } else {
+      // User root identity not initialized - relay starts without an owner.
+      // Machines will need enrollment tokens to register.
+      logger.dim("  No user root identity found - machines will need enrollment tokens");
+    }
+  } catch (error) {
+    if (error instanceof SpacesError) {
+      throw error;
+    }
+
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error(`Failed to load relay owner identity: ${detail}`);
+    throw new SpacesError(
+      'Failed to determine relay owner identity during startup.',
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
 
   // Display relay identity prominently
   logger.log("");
@@ -392,11 +533,15 @@ export async function startRelay(options: {
 
   logger.log(`  Port:     ${port}`);
   logger.log(`  Bind:     ${bind}`);
+  logger.log(`  Mode:     ${mode}`);
   if (hostname) {
     logger.log(`  Hostname: ${hostname} (only serving this domain)`);
   }
   if (tunnelSubdomain) {
     logger.log(`  Tunnel:   ${tunnelSubdomain}.gitspace.sh`);
+  }
+  if (ownerUserRootId) {
+    logger.log(`  Owner:    ${ownerUserRootId.slice(0, 16)}...`);
   }
   logger.log("");
 

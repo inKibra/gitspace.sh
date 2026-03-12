@@ -44,6 +44,10 @@ export interface RegisterMachineMessage {
   registerPermit?: string;
   /** One-time relay-machine invite token for machine enrollment */
   enrollmentToken?: string;
+  /** JSON-serialized device certificate signed by owner's user root identity.
+   *  If present and valid, the relay can auto-authorize the machine when the
+   *  certificate's userRootId matches the relay's owner. */
+  deviceCertificate?: string;
   /** Ed25519 signature of message */
   signature?: SignatureBlock;
 }
@@ -625,6 +629,10 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       if (msg.bootstrapToken !== undefined && !isValidIdentifier(msg.bootstrapToken)) return null;
       if (msg.registerPermit !== undefined && !isValidIdentifier(msg.registerPermit)) return null;
       if (msg.enrollmentToken !== undefined && !isValidKeyString(msg.enrollmentToken)) return null;
+      if (
+        msg.deviceCertificate !== undefined
+        && (typeof msg.deviceCertificate !== 'string' || msg.deviceCertificate.length === 0)
+      ) return null;
       return {
         type: "register_machine",
         machineId: msg.machineId,
@@ -636,6 +644,7 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         bootstrapToken: msg.bootstrapToken,
         registerPermit: msg.registerPermit,
         enrollmentToken: msg.enrollmentToken,
+        deviceCertificate: msg.deviceCertificate,
       };
     }
 
