@@ -282,7 +282,7 @@ function resolveCloudRelayUrlForConfig(relayUrl: string, hostConfig: HostConfig 
   try {
     const parsed = new URL(relayUrl);
     const port = parsed.port || (parsed.protocol === 'wss:' ? '443' : parsed.protocol === 'ws:' ? '80' : '');
-    if (port === String(LOCAL_RELAY_PORT) && isLocalhost(parsed.hostname)) {
+    if (port === String(LOCAL_RELAY_PORT) && isLocalhost(relayUrl)) {
       return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
     }
   } catch {
