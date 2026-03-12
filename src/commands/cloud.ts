@@ -98,6 +98,15 @@ async function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): Promise<
     controlMeta.relaySigningPublicKey &&
     controlMeta.relayFingerprint
   ) {
+    const trustedRelay = getTrustedRelay(relayUrl);
+    if (trustedRelay && trustedRelay.publicKey !== controlMeta.relaySigningPublicKey) {
+      throw new SpacesError(
+        'Pinned relay metadata does not match the saved relay URL. Start `gssh machine serve start` against your target relay once to re-pin relay identity metadata before launching cloud workspaces.',
+        'USER_ERROR',
+        1,
+      );
+    }
+
     return {
       relayUrl,
       relaySigningPublicKey: controlMeta.relaySigningPublicKey,
@@ -1036,6 +1045,14 @@ export async function cloudConnect(
     );
   }
   const pinnedRelayPubkey = readControlMeta().relaySigningPublicKey;
+  if (explicitRelay && !options.relayPubkey) {
+    throw new SpacesError(
+      'Explicit relay overrides require `--relay-pubkey <pubkey>` so the override relay can be trusted explicitly.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
   const relayPubkey = options.relayPubkey ?? pinnedRelayPubkey;
   if (!relayPubkey) {
     throw new SpacesError(

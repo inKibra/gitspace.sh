@@ -5,7 +5,35 @@ import { NoIdentityError, SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import { readPasswordFromStdin } from '../utils/password-stdin.js';
 
-export async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordStdin?: boolean } = {}): Promise<string | null> {
+export interface DeviceIdentityPasswordContext {
+  resolved: boolean;
+  password: string | null;
+}
+
+export function createDeviceIdentityPasswordContext(): DeviceIdentityPasswordContext {
+  return {
+    resolved: false,
+    password: null,
+  };
+}
+
+export async function ensureDeviceIdentityPassword(
+  options: { yes?: boolean; passwordStdin?: boolean } = {},
+  context?: DeviceIdentityPasswordContext,
+): Promise<string | null> {
+  if (context?.resolved) {
+    return context.password;
+  }
+
+  const remember = (password: string | null): string | null => {
+    if (context) {
+      context.resolved = true;
+      context.password = password;
+    }
+
+    return password;
+  };
+
   if (!keypairExists()) {
     const shouldCreate = options.yes || await promptConfirm(
       'No local device identity found. Create one now?',
@@ -18,7 +46,7 @@ export async function ensureDeviceIdentityPassword(options: { yes?: boolean; pas
     const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
     const password = stdinPassword ?? await promptPassword('Create password for local device identity:');
     if (!password) {
-      return null;
+      return remember(null);
     }
 
     if (!stdinPassword) {
@@ -30,9 +58,9 @@ export async function ensureDeviceIdentityPassword(options: { yes?: boolean; pas
 
     await generateAndSaveKeypair(password, os.hostname());
     logger.success('Created local device identity');
-    return password;
+    return remember(password);
   }
 
   const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
-  return stdinPassword ?? await promptPassword('Enter password to unlock identity:');
+  return remember(stdinPassword ?? await promptPassword('Enter password to unlock identity:'));
 }

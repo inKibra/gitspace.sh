@@ -377,16 +377,21 @@ export async function startRelay(options: {
   const mode: RelayStartMode = options.mode ?? "auto";
   const port = options.port ?? parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
   const bind = options.bind ?? process.env.RELAY_BIND ?? "0.0.0.0";
-  let hostname = options.hostname ?? process.env.RELAY_HOST;
+  const explicitHostname = options.hostname;
+  let hostname = explicitHostname ?? process.env.RELAY_HOST;
   let tunnelSubdomain: string | undefined;
   let tunnelToken: string | undefined;
 
-  if (mode === "hosted" && hostname) {
+  if (mode === "hosted" && explicitHostname) {
     throw new SpacesError(
       "Hosted mode does not support explicit --hostname. Remove --hostname and use your account host.",
       "USER_ERROR",
       1,
     );
+  }
+
+  if (mode === "hosted") {
+    hostname = undefined;
   }
 
   if (mode !== "local" && !hostname) {
@@ -462,11 +467,14 @@ export async function startRelay(options: {
           1,
         );
       }
+      const vaultInitialized = isVaultInitialized();
       if (!existingOwner) {
         assertRelayOwnerRepairIsSafe(ownerUserRootId);
-        if (isVaultInitialized()) {
+        if (vaultInitialized) {
           logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
         }
+      } else if (!vaultInitialized) {
+        logger.info('Relay vault initialization metadata is incomplete; repairing it after startup succeeds.');
       }
 
       bindControlOwner(ownerUserRootId);
@@ -475,8 +483,8 @@ export async function startRelay(options: {
         // bindControlOwner persists the control-store owner binding; the vault keeps
         // its own owner metadata and must be repaired separately for later startups.
         setVaultMeta("owner_user_root_id", ownerUserRootId);
-        shouldMarkVaultInitialized = true;
       }
+      shouldMarkVaultInitialized = !vaultInitialized;
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
     } else {
       // User root identity not initialized - relay starts without an owner.

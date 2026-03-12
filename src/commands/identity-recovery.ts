@@ -6,8 +6,10 @@ import { recoverUserRootFromCloudBackup } from '../core/identity-backup.js';
 import type { UserRootIdentity } from '../types/identity.js';
 import { SpacesError } from '../types/errors.js';
 import { authLogin } from './auth.js';
+import type { DeviceIdentityPasswordContext } from './device-identity-password.js';
 
 export interface EnsureUserRootIdentityWithRecoveryOptions {
+  devicePasswordContext?: DeviceIdentityPasswordContext;
   yes?: boolean;
   passwordStdin?: boolean;
   context: string;
@@ -74,6 +76,7 @@ export async function ensureUserRootIdentityWithRecovery(
 
     try {
       await authLogin({
+        devicePasswordContext: options.devicePasswordContext,
         yes: options.yes,
         passwordStdin: options.passwordStdin,
         interactiveHostSync: false,

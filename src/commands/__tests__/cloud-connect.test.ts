@@ -128,7 +128,7 @@ describe('cloudConnect', () => {
     });
   });
 
-  test('reuses pinned relay pubkey for explicit relay overrides by default', async () => {
+  test('requires explicit relay pubkey for explicit relay overrides', async () => {
     await withIsolatedEnv(async () => {
       seedWorkspace('ready', 'machine-ready');
       bindControlRelayIdentity({
@@ -137,28 +137,9 @@ describe('cloudConnect', () => {
         relayFingerprint: 'relay-fingerprint-test',
       });
 
-      let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
-      await cloudConnect(
-        'ws-test',
-        { relay: 'wss://override.test/ws', yes: true, passwordStdin: true },
-        {
-          connectToRemote: async (_target, options) => {
-            calledOptions = {
-              relay: options?.relay,
-              relayPubkey: options?.relayPubkey,
-              yes: options?.yes,
-              passwordStdin: options?.passwordStdin,
-            };
-          },
-        },
-      );
-
-      expect(calledOptions).toEqual({
-        relay: 'wss://override.test/ws',
-        relayPubkey: 'relay-pubkey-b64',
-        yes: true,
-        passwordStdin: true,
-      });
+      await expect(
+        cloudConnect('ws-test', { relay: 'wss://override.test/ws', yes: true, passwordStdin: true })
+      ).rejects.toThrow(/explicit relay overrides require `--relay-pubkey/i);
     });
   });
 
@@ -207,7 +188,7 @@ describe('cloudConnect', () => {
 
       await expect(
         cloudConnect('ws-test', { relay: 'wss://override.test/ws', yes: true })
-      ).rejects.toThrow(/relay identity is not pinned yet for this cloud workspace/i);
+      ).rejects.toThrow(/explicit relay overrides require `--relay-pubkey/i);
     });
   });
 

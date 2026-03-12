@@ -93,7 +93,11 @@ import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { computeIdentityId, formatRelayFingerprint } from '../relay/identity.js';
 import { isCloudflaredInstalled, trackCloudflaredOutput } from '../utils/cloudflared.js';
-import { ensureDeviceIdentityPassword } from './device-identity-password.js';
+import {
+  createDeviceIdentityPasswordContext,
+  ensureDeviceIdentityPassword,
+  type DeviceIdentityPasswordContext,
+} from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 
 /** Package version for daemon status */
@@ -135,10 +139,16 @@ function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | und
   return parsed.ownerUserRootId;
 }
 
-async function resolveUserRootAuthorizationConfig(options: { yes?: boolean } = {}): Promise<UserRootAuthorizationConfig> {
+async function resolveUserRootAuthorizationConfig(options: {
+  yes?: boolean;
+  passwordStdin?: boolean;
+  devicePasswordContext?: DeviceIdentityPasswordContext;
+} = {}): Promise<UserRootAuthorizationConfig> {
   const userRoot = await loadUserRootIdentity()
     ?? await ensureUserRootIdentityWithRecovery({
+      devicePasswordContext: options.devicePasswordContext,
       yes: options.yes,
+      passwordStdin: options.passwordStdin,
       context: 'machine serve authorization',
     });
   if (!userRoot) {
@@ -934,6 +944,8 @@ export async function serveStart(options: {
   ignoreKeychainAndSkipSecrets?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
+  const devicePasswordContext = createDeviceIdentityPasswordContext();
+
   // Check if already running
   if (isServeRunning()) {
     const pid = getServePid();
@@ -963,7 +975,10 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
-      password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
+      password = await ensureDeviceIdentityPassword(
+        { yes: options.yes, passwordStdin: options.passwordStdin },
+        devicePasswordContext,
+      );
       if (!password) {
         logger.info('Cancelled');
         return;
@@ -1100,7 +1115,10 @@ export async function serveStart(options: {
     identity = unlocked.identity;
     registerPermit = unlocked.registerPermit;
   } else {
-    password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
+    password = await ensureDeviceIdentityPassword(
+      { yes: options.yes, passwordStdin: options.passwordStdin },
+      devicePasswordContext,
+    );
     if (!password) {
       logger.info('Cancelled');
       cleanupServeFiles();
@@ -1165,7 +1183,11 @@ export async function serveStart(options: {
     }
   } else {
     try {
-      const userRootAuth = await resolveUserRootAuthorizationConfig({ yes: options.yes });
+      const userRootAuth = await resolveUserRootAuthorizationConfig({
+        yes: options.yes,
+        passwordStdin: options.passwordStdin,
+        devicePasswordContext,
+      });
       ownerUserRootId = userRootAuth.ownerUserRootId;
       ensureControlStore();
       bindControlOwner(ownerUserRootId);

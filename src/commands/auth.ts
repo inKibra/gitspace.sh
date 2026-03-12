@@ -16,7 +16,10 @@ import { promptPassword } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { printHostSyncReport, syncHostConfig } from './host.js';
-import { ensureDeviceIdentityPassword } from './device-identity-password.js';
+import {
+  ensureDeviceIdentityPassword,
+  type DeviceIdentityPasswordContext,
+} from './device-identity-password.js';
 
 // API Configuration
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
@@ -76,6 +79,7 @@ interface GitspaceAuthResponse {
  */
 export async function authLogin(
   options: {
+    devicePasswordContext?: DeviceIdentityPasswordContext;
     passwordStdin?: boolean;
     yes?: boolean;
     interactiveHostSync?: boolean;
@@ -89,7 +93,7 @@ export async function authLogin(
   passwordForIdentity = passwordForIdentity ?? await ensureDeviceIdentityPassword({
     yes: options.yes,
     passwordStdin: options.passwordStdin,
-  });
+  }, options.devicePasswordContext);
   if (!passwordForIdentity) {
     logger.info('Cancelled');
     return;

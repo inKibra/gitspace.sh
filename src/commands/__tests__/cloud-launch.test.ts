@@ -370,6 +370,21 @@ describe('cloudLaunch', () => {
     ).rejects.toThrow(/Relay identity is not pinned yet/i);
   });
 
+  test('fails when saved relay URL trust does not match pinned control metadata', async () => {
+    seedSavedRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+    });
+    addTrustedRelay('wss://relay.test/ws', Buffer.from('different-relay-key').toString('base64'), 'other-relay');
+
+    await expect(
+      cloudLaunch(
+        { repo: 'owner/repo', branch: 'main' },
+        makeDeps({ relayInfo: undefined }),
+      ),
+    ).rejects.toThrow(/Pinned relay metadata does not match the saved relay URL/i);
+  });
+
   test('leaves workspace in error state when VM creation fails', async () => {
     let capturedId: string | null = null;
     mockCreateWorkspaceImpl = async (opts) => {
