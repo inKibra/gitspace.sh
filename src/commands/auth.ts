@@ -83,28 +83,13 @@ export async function authLogin(
 ): Promise<void> {
   let passwordForIdentity: string | null = null;
 
-  const requireIdentityPassword = (context: string): never => {
-    throw new SpacesError(
-      `A local identity password is required for ${context} and could not be collected non-interactively.`,
-      'USER_ERROR',
-      1,
-    );
-  };
-
-  const requireCollectedPassword = (value: string | null, context: string): string => {
-    if (value === null || value.length === 0) {
-      requireIdentityPassword(context);
-    }
-
-    return value as string;
-  };
-
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  passwordForIdentity = requireCollectedPassword(
-    passwordForIdentity ?? await ensureDeviceIdentityPassword({ yes: options.yes }),
-    'identity unlock',
-  );
+  passwordForIdentity = passwordForIdentity ?? await ensureDeviceIdentityPassword({ yes: options.yes });
+  if (!passwordForIdentity) {
+    logger.info('Cancelled');
+    return;
+  }
 
   const resolvedPasswordForIdentity = passwordForIdentity;
 

@@ -23,7 +23,6 @@ import {
   getTrustedRelay,
   isCloudReachableRelayUrl,
   isLocalhost,
-  computeRelayFingerprint,
   type RelayTrustStatus,
 } from '../core/trusted-relays.js';
 import {
@@ -93,6 +92,7 @@ import {
 } from '../relay-client/machine-relay-client.js';
 import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
+import { formatRelayFingerprint } from '../relay/identity.js';
 import { isCloudflaredInstalled, trackCloudflaredOutput } from '../utils/cloudflared.js';
 import { ensureDeviceIdentityPassword } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
@@ -300,7 +300,7 @@ async function verifyRelayTrust(
   explicitPubkey?: string,
   autoYes: boolean = false,
 ): Promise<RelayTrustResult> {
-  const computedFingerprint = computeRelayFingerprint(relayPublicKey);
+  const computedFingerprint = formatRelayFingerprint(relayPublicKey);
   if (relayFingerprint !== computedFingerprint) {
     logger.error(
       `Relay at ${relayUrl} reported fingerprint ${relayFingerprint}, but computed ${computedFingerprint} from relayPublicKey.`,
@@ -335,7 +335,7 @@ async function verifyRelayTrust(
         addTrustedRelay(relayUrl, relayPublicKey, relayLabel);
       } else {
         logger.error('Relay public key does not match --relay-pubkey');
-        logger.error(`Expected:  ${computeRelayFingerprint(explicitPubkey)}`);
+        logger.error(`Expected:  ${formatRelayFingerprint(explicitPubkey)}`);
         logger.error(`Received:  ${computedFingerprint}`);
         return { trusted: false, reason: 'Relay public key does not match --relay-pubkey' };
       }
@@ -828,7 +828,7 @@ async function connectToRelay(
     sessionManager,
     eventHandler,
     async (url, relayPublicKey, relayFingerprint, relayLabel, explicitPubkey) => {
-      const computedFingerprint = computeRelayFingerprint(relayPublicKey);
+      const computedFingerprint = formatRelayFingerprint(relayPublicKey);
       if (skipRelayTrustVerification) {
         trustedRelayIdentity = {
           relayPublicKey,
