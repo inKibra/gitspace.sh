@@ -366,7 +366,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
   }
 
   if (!primary) {
-    report.subdomain = configuredCheck('Active subdomains exist, but no primary subdomain is set.');
+    report.subdomain = missingCheck('Active subdomains exist, but no primary subdomain is set.', 'gssh user host set-primary <name>');
     report.subdomain.fix = 'gssh user host set-primary <name>';
     report.tunnelToken = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
     report.serveTunnelToken = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
