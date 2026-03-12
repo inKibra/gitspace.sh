@@ -60,7 +60,6 @@ function registerMachineServeCommands(machine: Command): void {
     .option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
     .option('-y, --yes', 'Auto-confirm prompts')
     .option('--password-stdin', 'Read password from stdin')
-    .option('--skip-relay-trust-verification', 'Internal: skip foreground relay trust verification')
     .option('--foreground', "Run in foreground (don't daemonize)")
     .action(withErrorHandler(async (options) => {
       const { serveStart } = await import('../../commands/serve.js');
