@@ -461,9 +461,11 @@ export async function startRelay(options: {
           1,
         );
       }
-      if (!existingOwner && isVaultInitialized()) {
+      if (!existingOwner) {
         assertRelayOwnerRepairIsSafe(ownerUserRootId);
-        logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
+        if (isVaultInitialized()) {
+          logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
+        }
       }
 
       bindControlOwner(ownerUserRootId);
@@ -546,7 +548,7 @@ export async function startRelay(options: {
       tunnelSubdomain,
     });
 
-    logger.success(`Relay listening on ws://${hostname || bind}:${port}/ws`);
+    logger.success(`Relay listening on ws://${hostname || bind}:${port}`);
     if (tunnelSubdomain) {
       logger.success(`Public relay URL: wss://${tunnelSubdomain}.gitspace.sh/ws`);
     }
@@ -645,7 +647,7 @@ function getRelayStatusSnapshot(): RelayStatusSnapshot {
   const running = isProcessRunning(state.pid);
   const tunnelRunning = typeof state.tunnelPid === "number" && isProcessRunning(state.tunnelPid);
 
-  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}/ws`;
+  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}`;
   const publicRelayUrl = state.tunnelSubdomain
     ? `wss://${state.tunnelSubdomain}.gitspace.sh/ws`
     : null;
