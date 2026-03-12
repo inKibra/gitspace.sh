@@ -141,14 +141,12 @@ function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | und
 
 async function resolveUserRootAuthorizationConfig(options: {
   yes?: boolean;
-  passwordStdin?: boolean;
   devicePasswordContext?: DeviceIdentityPasswordContext;
 } = {}): Promise<UserRootAuthorizationConfig> {
   const userRoot = await loadUserRootIdentity()
     ?? await ensureUserRootIdentityWithRecovery({
       devicePasswordContext: options.devicePasswordContext,
       yes: options.yes,
-      passwordStdin: options.passwordStdin,
       context: 'machine serve authorization',
     });
   if (!userRoot) {
@@ -944,7 +942,7 @@ export async function serveStart(options: {
   ignoreKeychainAndSkipSecrets?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
-  const devicePasswordContext = createDeviceIdentityPasswordContext();
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
 
   // Check if already running
   if (isServeRunning()) {
@@ -975,10 +973,7 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
-      password = await ensureDeviceIdentityPassword(
-        { yes: options.yes, passwordStdin: options.passwordStdin },
-        devicePasswordContext,
-      );
+      password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
       if (!password) {
         logger.info('Cancelled');
         return;
@@ -1115,10 +1110,7 @@ export async function serveStart(options: {
     identity = unlocked.identity;
     registerPermit = unlocked.registerPermit;
   } else {
-    password = await ensureDeviceIdentityPassword(
-      { yes: options.yes, passwordStdin: options.passwordStdin },
-      devicePasswordContext,
-    );
+    password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
     if (!password) {
       logger.info('Cancelled');
       cleanupServeFiles();
@@ -1185,7 +1177,6 @@ export async function serveStart(options: {
     try {
       const userRootAuth = await resolveUserRootAuthorizationConfig({
         yes: options.yes,
-        passwordStdin: options.passwordStdin,
         devicePasswordContext,
       });
       ownerUserRootId = userRootAuth.ownerUserRootId;

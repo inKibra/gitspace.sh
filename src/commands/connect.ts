@@ -200,7 +200,7 @@ export async function connectToRemote(
   target?: string,
   options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {}
 ): Promise<void> {
-  const devicePasswordContext = createDeviceIdentityPasswordContext();
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
   if (!target && !options.machine) {
     throw new SpacesError(
       'Connection target required.\n\nUsage:\n  gssh client connect <machine-id> --relay <url>\n  gssh client connect --machine <id> --relay <url>\n\nList available machines:\n  gssh client machines list --relay <url>',
@@ -242,15 +242,11 @@ export async function connectToRemote(
   await ensureUserRootIdentityWithRecovery({
     devicePasswordContext,
     yes: options.yes,
-    passwordStdin: options.passwordStdin,
     context: 'remote client authorization',
   });
 
   // Step 3: Load local identity
-  const password = await ensureDeviceIdentityPassword(
-    { yes: options.yes, passwordStdin: options.passwordStdin },
-    devicePasswordContext,
-  );
+  const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
     logger.info('Cancelled');
     return;
@@ -387,7 +383,7 @@ export async function listRemoteMachines(options: {
   yes?: boolean;
   passwordStdin?: boolean;
 }): Promise<void> {
-  const devicePasswordContext = createDeviceIdentityPasswordContext();
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
   if (!options.relay) {
     throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
   }
@@ -401,14 +397,10 @@ export async function listRemoteMachines(options: {
   await ensureUserRootIdentityWithRecovery({
     devicePasswordContext,
     yes: options.yes,
-    passwordStdin: options.passwordStdin,
     context: 'remote machine directory authorization',
   });
 
-  const password = await ensureDeviceIdentityPassword(
-    { yes: options.yes, passwordStdin: options.passwordStdin },
-    devicePasswordContext,
-  );
+  const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
     logger.info('Cancelled');
     return;

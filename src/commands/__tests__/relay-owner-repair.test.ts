@@ -2,12 +2,15 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureControlStore, setVaultMeta, upsertVaultMachine } from '../../relay/control/store.js';
-import { assertRelayOwnerRepairIsSafe } from '../relay.js';
+import { ensureControlStore, getVaultMeta, setVaultMeta, upsertVaultMachine } from '../../relay/control/store.js';
+import { assertRelayOwnerRepairIsSafe, bindRelayOwnerForStartup } from '../relay.js';
 
 let envLock: Promise<void> = Promise.resolve();
 
-async function withIsolatedEnv(run: () => Promise<void>): Promise<void> {
+async function withIsolatedEnv(
+  run: () => Promise<void>,
+  options: { initializeVault?: boolean } = {},
+): Promise<void> {
   const previous = envLock;
   let release!: () => void;
   envLock = new Promise<void>((resolve) => {
@@ -24,7 +27,9 @@ async function withIsolatedEnv(run: () => Promise<void>): Promise<void> {
     process.env.HOME = testDir;
     process.env.GITSPACE_CONTROL_DIR = join(testDir, '.relay', 'control');
     ensureControlStore();
-    setVaultMeta('vault_initialized', '1');
+    if (options.initializeVault !== false) {
+      setVaultMeta('vault_initialized', '1');
+    }
     await run();
   } finally {
     if (originalHome === undefined) {
@@ -78,5 +83,35 @@ describe('assertRelayOwnerRepairIsSafe', () => {
 
       expect(() => assertRelayOwnerRepairIsSafe('owner-a')).toThrow(/persisted machine registrations belong to a different owner/i);
     });
+  });
+});
+
+describe('bindRelayOwnerForStartup', () => {
+  test('preserves existing vault initialization metadata while repairing the owner binding', async () => {
+    await withIsolatedEnv(async () => {
+      const result = bindRelayOwnerForStartup('owner-a');
+
+      expect(result).toEqual({
+        repairedOwnerBinding: true,
+        missingVaultInitialization: false,
+      });
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(getVaultMeta('vault_initialized')).toBe('1');
+    });
+  });
+
+  test('leaves vault initialization unset when startup binds an owner before first unlock', async () => {
+    await withIsolatedEnv(async () => {
+      const result = bindRelayOwnerForStartup('owner-a');
+
+      expect(result).toEqual({
+        repairedOwnerBinding: true,
+        missingVaultInitialization: true,
+      });
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(getVaultMeta('vault_initialized')).toBeUndefined();
+      expect(getVaultMeta('vault_salt')).toBeUndefined();
+      expect(getVaultMeta('vault_key_check')).toBeUndefined();
+    }, { initializeVault: false });
   });
 });

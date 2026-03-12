@@ -81,6 +81,17 @@ interface CloudEnrollmentInvite {
   expiresAt: string;
 }
 
+function assertPinnedRelayMatchesSavedRelayUrl(relayUrl: string, pinnedRelayPublicKey: string): void {
+  const trustedRelay = getTrustedRelay(relayUrl);
+  if (trustedRelay && trustedRelay.publicKey !== pinnedRelayPublicKey) {
+    throw new SpacesError(
+      'Pinned relay metadata does not match the saved relay URL. Start `gssh machine serve start` against your target relay once to re-pin relay identity metadata before launching cloud workspaces.',
+      'USER_ERROR',
+      1,
+    );
+  }
+}
+
 function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
   const relayUrl = getSavedCloudRelayUrl();
 
@@ -98,14 +109,7 @@ function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrap
     controlMeta.relaySigningPublicKey &&
     controlMeta.relayFingerprint
   ) {
-    const trustedRelay = getTrustedRelay(relayUrl);
-    if (trustedRelay && trustedRelay.publicKey !== controlMeta.relaySigningPublicKey) {
-      throw new SpacesError(
-        'Pinned relay metadata does not match the saved relay URL. Start `gssh machine serve start` against your target relay once to re-pin relay identity metadata before launching cloud workspaces.',
-        'USER_ERROR',
-        1,
-      );
-    }
+    assertPinnedRelayMatchesSavedRelayUrl(relayUrl, controlMeta.relaySigningPublicKey);
 
     return {
       relayUrl,
@@ -1044,7 +1048,12 @@ export async function cloudConnect(
       1,
     );
   }
+
   const pinnedRelayPubkey = readControlMeta().relaySigningPublicKey;
+  if (!explicitRelay && pinnedRelayPubkey) {
+    assertPinnedRelayMatchesSavedRelayUrl(relayUrl, pinnedRelayPubkey);
+  }
+
   if (explicitRelay && !options.relayPubkey) {
     throw new SpacesError(
       'Explicit relay overrides require `--relay-pubkey <pubkey>` so the override relay can be trusted explicitly.',
@@ -1053,12 +1062,12 @@ export async function cloudConnect(
     );
   }
 
-  const relayPubkey = options.relayPubkey ?? pinnedRelayPubkey;
+  const relayPubkey = explicitRelay
+    ? options.relayPubkey
+    : options.relayPubkey ?? pinnedRelayPubkey;
   if (!relayPubkey) {
     throw new SpacesError(
-      explicitRelay
-        ? 'Relay identity is not pinned yet for this cloud workspace. Pass `--relay-pubkey <pubkey>` or start `gssh machine serve start` against your target relay once to pin relay identity metadata before connecting cloud workspaces.'
-        : 'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before connecting cloud workspaces.',
+      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before connecting cloud workspaces.',
       'USER_ERROR',
       1,
     );

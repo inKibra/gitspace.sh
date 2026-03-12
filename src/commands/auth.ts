@@ -12,11 +12,11 @@ import {
   getPublicKeyWithoutPassword,
 } from '../core/identity.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
-import { promptPassword } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { printHostSyncReport, syncHostConfig } from './host.js';
 import {
+  createDeviceIdentityPasswordContext,
   ensureDeviceIdentityPassword,
   type DeviceIdentityPasswordContext,
 } from './device-identity-password.js';
@@ -86,12 +86,12 @@ export async function authLogin(
     showHostSyncSummary?: boolean;
   } = {},
 ): Promise<void> {
+  const devicePasswordContext = options.devicePasswordContext
+    ?? createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  const passwordForIdentity = await ensureDeviceIdentityPassword({
-    yes: options.yes,
-    passwordStdin: options.passwordStdin,
-  }, options.devicePasswordContext);
+  const passwordForIdentity = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!passwordForIdentity) {
     logger.info('Cancelled');
     return;

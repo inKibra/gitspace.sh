@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cloudConnect } from '../cloud.js';
+import { addTrustedRelay } from '../../core/trusted-relays.js';
 import { bindControlRelayIdentity, ensureControlStore, upsertCloudWorkspace } from '../../relay/control/store.js';
 
 let envLock: Promise<void> = Promise.resolve();
@@ -199,6 +200,22 @@ describe('cloudConnect', () => {
       await expect(
         cloudConnect('ws-test', { relay: '   ' }, { resolveRelayUrl: () => 'wss://relay.test/ws' })
       ).rejects.toThrow(/relay identity is not pinned yet/i);
+    });
+  });
+
+  test('fails when saved relay trust does not match pinned relay metadata', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+      bindControlRelayIdentity({
+        relayIdentityId: 'relay-cloud-connect-test',
+        relaySigningPublicKey: 'relay-pubkey-b64',
+        relayFingerprint: 'relay-fingerprint-test',
+      });
+      addTrustedRelay('wss://relay.test/ws', 'different-relay-pubkey', 'other-relay');
+
+      await expect(
+        cloudConnect('ws-test', {}, { resolveRelayUrl: () => 'wss://relay.test/ws' })
+      ).rejects.toThrow(/pinned relay metadata does not match the saved relay url/i);
     });
   });
 

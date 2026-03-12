@@ -59,6 +59,40 @@ export function assertRelayOwnerRepairIsSafe(ownerUserRootId: string): void {
   }
 }
 
+export function bindRelayOwnerForStartup(ownerUserRootId: string): {
+  repairedOwnerBinding: boolean;
+  missingVaultInitialization: boolean;
+} {
+  ensureControlStore();
+
+  const existingOwner = getVaultMeta("owner_user_root_id");
+  if (existingOwner && existingOwner !== ownerUserRootId) {
+    throw new SpacesError(
+      `Relay is already owned by a different user root identity.\n`
+      + `  Existing owner: ${existingOwner.slice(0, 8)}...\n`
+      + `  Current user:   ${ownerUserRootId.slice(0, 8)}...`,
+      "USER_ERROR",
+      1,
+    );
+  }
+
+  const vaultInitialized = isVaultInitialized();
+  if (!existingOwner) {
+    assertRelayOwnerRepairIsSafe(ownerUserRootId);
+  }
+
+  bindControlOwner(ownerUserRootId);
+
+  if (!existingOwner) {
+    setVaultMeta("owner_user_root_id", ownerUserRootId);
+  }
+
+  return {
+    repairedOwnerBinding: !existingOwner,
+    missingVaultInitialization: !vaultInitialized,
+  };
+}
+
 interface RelayRuntimeState {
   pid: number;
   startedAt: number;
@@ -446,7 +480,6 @@ export async function startRelay(options: {
   // knows who its owner is. This enables owner-based authorization for
   // machines and clients without requiring enrollment tokens.
   let ownerUserRootId: string | null = null;
-  let shouldMarkVaultInitialized = false;
   try {
     const userRoot = await loadUserRootIdentity()
       ?? await ensureUserRootIdentityWithRecovery({
@@ -456,35 +489,13 @@ export async function startRelay(options: {
       });
     if (userRoot) {
       ownerUserRootId = userRoot.id;
-      ensureControlStore();
-      const existingOwner = getVaultMeta("owner_user_root_id");
-      if (existingOwner && existingOwner !== ownerUserRootId) {
-        throw new SpacesError(
-          `Relay is already owned by a different user root identity.\n` +
-          `  Existing owner: ${existingOwner.slice(0, 8)}...\n` +
-          `  Current user:   ${ownerUserRootId.slice(0, 8)}...`,
-          "USER_ERROR",
-          1,
-        );
-      }
-      const vaultInitialized = isVaultInitialized();
-      if (!existingOwner) {
-        assertRelayOwnerRepairIsSafe(ownerUserRootId);
-        if (vaultInitialized) {
-          logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
-        }
-      } else if (!vaultInitialized) {
-        logger.info('Relay vault initialization metadata is incomplete; repairing it after startup succeeds.');
+      const ownerBinding = bindRelayOwnerForStartup(ownerUserRootId);
+      if (ownerBinding.repairedOwnerBinding && !ownerBinding.missingVaultInitialization) {
+        logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
+      } else if (ownerBinding.missingVaultInitialization) {
+        logger.info('Relay vault is not initialized yet; owner binding will be completed when the owner first unlocks the relay.');
       }
 
-      bindControlOwner(ownerUserRootId);
-
-      if (!existingOwner) {
-        // bindControlOwner persists the control-store owner binding; the vault keeps
-        // its own owner metadata and must be repaired separately for later startups.
-        setVaultMeta("owner_user_root_id", ownerUserRootId);
-      }
-      shouldMarkVaultInitialized = !vaultInitialized;
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
     } else {
       // User root identity not initialized - relay starts without an owner.
@@ -557,10 +568,6 @@ export async function startRelay(options: {
       tunnelPid: tunnelProcess?.pid,
       tunnelSubdomain,
     });
-
-    if (shouldMarkVaultInitialized) {
-      setVaultMeta("vault_initialized", "1");
-    }
 
     logger.success(`Relay listening on ws://${hostname || bind}:${port}`);
     if (tunnelSubdomain) {

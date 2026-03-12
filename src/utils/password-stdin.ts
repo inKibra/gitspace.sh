@@ -4,34 +4,65 @@ export async function readPasswordFromStdin(): Promise<string> {
   const reader = process.stdin;
   const chunks: Buffer[] = [];
 
-  const onData = (chunk: Buffer) => chunks.push(chunk);
-  reader.on('data', onData);
+  const readAvailableChunks = () => {
+    let chunk = reader.read();
+    while (chunk !== null) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      chunk = reader.read();
+    }
+  };
+
+  readAvailableChunks();
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        reject(new SpacesError('Timeout reading password from stdin.', 'USER_ERROR', 1));
-      }, 10000);
+    if (!reader.readableEnded) {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          clearTimeout(timeoutId);
+          reader.removeListener('readable', onReadable);
+          reader.removeListener('end', onEnd);
+          reader.removeListener('error', onError);
+        };
 
-      const onEnd = () => {
-        clearTimeout(timeoutId);
-        resolve();
-      };
+        const timeoutId = setTimeout(() => {
+          cleanup();
+          reject(new SpacesError('Timeout reading password from stdin.', 'USER_ERROR', 1));
+        }, 10000);
 
-      const onError = (error: Error) => {
-        clearTimeout(timeoutId);
-        reject(new SpacesError(
-          `Failed to read password from stdin: ${error.message}`,
-          'USER_ERROR',
-          1,
-        ));
-      };
+        const onReadable = () => {
+          readAvailableChunks();
+          if (reader.readableEnded) {
+            cleanup();
+            resolve();
+          }
+        };
 
-      reader.once('end', onEnd);
-      reader.once('error', onError);
-    });
+        const onEnd = () => {
+          readAvailableChunks();
+          cleanup();
+          resolve();
+        };
+
+        const onError = (error: Error) => {
+          cleanup();
+          reject(new SpacesError(
+            `Failed to read password from stdin: ${error.message}`,
+            'USER_ERROR',
+            1,
+          ));
+        };
+
+        reader.on('readable', onReadable);
+        reader.once('end', onEnd);
+        reader.once('error', onError);
+        readAvailableChunks();
+        if (reader.readableEnded) {
+          cleanup();
+          resolve();
+        }
+      });
+    }
   } finally {
-    reader.removeListener('data', onData);
     reader.pause();
   }
 
