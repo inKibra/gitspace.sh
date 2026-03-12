@@ -1033,6 +1033,8 @@ export async function serveStart(options: {
       if (!trustResult.trusted) {
         throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
       }
+
+      options.relayPubkey ??= relayIdentity.publicKey;
     }
 
     logger.log('Starting serve daemon...');

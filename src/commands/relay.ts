@@ -445,11 +445,8 @@ export async function startRelay(options: {
           1,
         );
       }
-      if (!existingOwner) {
-        if (isVaultInitialized()) {
-          logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
-        }
-
+      if (!existingOwner && isVaultInitialized()) {
+        logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
       }
 
       bindControlOwner(ownerUserRootId);

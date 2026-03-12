@@ -350,6 +350,10 @@ export async function cloudLaunch(
   const repo = options.repo?.trim() || undefined;
   const branch = options.branch?.trim() || undefined;
   const { image } = options;
+  const workspaceMetadata = {
+    ...(repo ? { repo } : {}),
+    ...(branch ? { branch } : {}),
+  };
 
   if (branch && !repo) {
     throw new SpacesError('`--branch` requires `--repo` for cloud launch metadata.', 'USER_ERROR', 1);
@@ -398,8 +402,7 @@ export async function cloudLaunch(
     providerWorkspaceId: '',  // filled in after API call
     machineId: workspaceIdentity.id,
     machinePublicKey: workspaceIdentity.signingPublicKey,
-    repo,
-    branch,
+    ...workspaceMetadata,
     status: 'bootstrapping',
   });
 
@@ -440,8 +443,7 @@ export async function cloudLaunch(
       bootstrapExpiresAt: bootstrap.expiresAt,
       enrollmentInviteId: enrollmentInvite.inviteId,
       enrollmentInviteExpiresAt: enrollmentInvite.expiresAt,
-      ...(repo ? { repo } : {}),
-      ...(branch ? { branch } : {}),
+      ...workspaceMetadata,
     },
   });
 
@@ -453,8 +455,7 @@ export async function cloudLaunch(
     logger.dim('  Creating Sprites VM...');
     providerResult = await provider.createWorkspace({
       name: workspaceId,
-      repo,
-      branch,
+      ...workspaceMetadata,
       image,
       env: {
         GSSH_BOOTSTRAP_TOKEN: bootstrap.token,
@@ -474,8 +475,7 @@ export async function cloudLaunch(
       providerWorkspaceId: '',
       machineId: workspaceIdentity.id,
       machinePublicKey: workspaceIdentity.signingPublicKey,
-      repo,
-      branch,
+      ...workspaceMetadata,
       status: 'error',
       error: msg,
     });
@@ -490,8 +490,7 @@ export async function cloudLaunch(
     providerWorkspaceId: providerResult.providerWorkspaceId,
     machineId: workspaceIdentity.id,
     machinePublicKey: workspaceIdentity.signingPublicKey,
-    repo,
-    branch,
+    ...workspaceMetadata,
     status: 'bootstrapping',
   });
 

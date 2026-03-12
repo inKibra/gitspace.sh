@@ -192,8 +192,6 @@ export async function verifyClientRelayTrust(
 }
 
 async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordStdin?: boolean } = {}): Promise<string | null> {
-  const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
-
   if (!keypairExists()) {
     const shouldCreate = options.yes || await promptConfirm(
       'No local device identity found. Create one now?',
@@ -203,6 +201,7 @@ async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordSt
       throw new NoIdentityError();
     }
 
+    const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
     const password = stdinPassword ?? await promptPassword('Create password for local device identity:');
     if (!password) {
       return null;
@@ -220,6 +219,7 @@ async function ensureDeviceIdentityPassword(options: { yes?: boolean; passwordSt
     return password;
   }
 
+  const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
   const password = stdinPassword ?? await promptPassword('Enter password to unlock identity:');
   return password;
 }
