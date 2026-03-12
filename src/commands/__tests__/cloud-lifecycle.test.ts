@@ -18,13 +18,16 @@ import { join } from 'node:path';
 import type { CloudLifecycleDependencies, CloudLifecycleProvider } from '../cloud.js';
 import { cloudDestroy, cloudResume, cloudStop } from '../cloud.js';
 import { writeRelayConfig } from '../../core/identity.js';
+import { addTrustedRelay } from '../../core/trusted-relays.js';
 import {
   bindControlOwner,
   bindControlRelayIdentity,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
+  readControlMeta,
   upsertCloudWorkspace,
+  writeControlMeta,
 } from '../../relay/control/store.js';
 import type { CloudWorkspaceStatus } from '../../relay/control/types.js';
 
@@ -263,6 +266,40 @@ describe('cloudResume', () => {
     });
 
     expect(execCalls[0]?.options.env?.GSSH_RELAY_URL).toBe('wss://relay.public.test/ws');
+  });
+
+  test('recovers relay metadata from trusted relay store during resume', async () => {
+    const execCalls: Array<{ id: string; options: { command: string[]; env?: Record<string, string>; dir?: string } }> = [];
+    const provider = makeMockProvider({
+      exec: async (id, options) => {
+        execCalls.push({ id, options });
+        return { exitCode: 0, stdout: 'started', stderr: '' };
+      },
+    });
+
+    writeRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+      machineId: 'machine-cloud-lifecycle',
+      savedAt: Date.now(),
+    });
+    addTrustedRelay('wss://relay.test/ws', TEST_RELAY_INFO.relaySigningPublicKey, 'trusted-relay');
+    writeControlMeta({
+      ...readControlMeta(),
+      relayIdentityId: undefined,
+      relaySigningPublicKey: undefined,
+      relayFingerprint: undefined,
+    });
+
+    await seedWorkspaceWithIdentity('ws-r-trusted', 'hibernated');
+    await cloudResume('ws-r-trusted', provider, {
+      ...lifecycleDeps,
+      relayInfo: undefined,
+    });
+
+    expect(execCalls[0]?.options.env?.GSSH_RELAY_URL).toBe('wss://relay.test/ws');
+    expect(execCalls[0]?.options.env?.GSSH_RELAY_PUBKEY).toBe(TEST_RELAY_INFO.relaySigningPublicKey);
+    expect(readControlMeta().relaySigningPublicKey).toBe(TEST_RELAY_INFO.relaySigningPublicKey);
   });
 
   test('logs resume_exec_succeeded after bootstrap exec success', async () => {

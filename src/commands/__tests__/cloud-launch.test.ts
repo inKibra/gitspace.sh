@@ -5,12 +5,15 @@ import { join } from 'node:path';
 import type { CloudLaunchDependencies, CloudLaunchProvider } from '../cloud.js';
 import { cloudLaunch } from '../cloud.js';
 import { writeRelayConfig } from '../../core/identity.js';
+import { addTrustedRelay } from '../../core/trusted-relays.js';
 import {
   bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
+  readControlMeta,
+  writeControlMeta,
 } from '../../relay/control/store.js';
 
 const TEST_OWNER_ID = 'owner-launch-test-001';
@@ -311,6 +314,60 @@ describe('cloudLaunch', () => {
         makeDeps({ relayInfo: undefined }),
       ),
     ).rejects.toThrow(/No cloud-reachable relay URL found/i);
+  });
+
+  test('recovers relay metadata from trusted relay store when control metadata is missing', async () => {
+    const execCalls: Array<{ id: string; opts: Record<string, unknown> }> = [];
+    mockExecImpl = async (id, opts) => {
+      execCalls.push({ id, opts });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+
+    writeRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+      machineId: 'machine-saved-relay',
+      savedAt: Date.now(),
+    });
+    addTrustedRelay('wss://relay.test/ws', TEST_RELAY_INFO.relaySigningPublicKey, 'trusted-relay');
+    writeControlMeta({
+      ...readControlMeta(),
+      relayIdentityId: undefined,
+      relaySigningPublicKey: undefined,
+      relayFingerprint: undefined,
+    });
+
+    await cloudLaunch(
+      { repo: 'owner/repo', branch: 'main' },
+      makeDeps({ relayInfo: undefined }),
+    );
+
+    const env = execCalls[0]?.opts.env as Record<string, string>;
+    expect(env.GSSH_RELAY_URL).toBe('wss://relay.test/ws');
+    expect(env.GSSH_RELAY_PUBKEY).toBe(TEST_RELAY_INFO.relaySigningPublicKey);
+    expect(readControlMeta().relaySigningPublicKey).toBe(TEST_RELAY_INFO.relaySigningPublicKey);
+  });
+
+  test('fails closed when relay metadata is missing and relay is not trusted', async () => {
+    writeRelayConfig({
+      relayUrl: 'wss://relay.test/ws',
+      cloudRelayUrl: 'wss://relay.test/ws',
+      machineId: 'machine-saved-relay',
+      savedAt: Date.now(),
+    });
+    writeControlMeta({
+      ...readControlMeta(),
+      relayIdentityId: undefined,
+      relaySigningPublicKey: undefined,
+      relayFingerprint: undefined,
+    });
+
+    await expect(
+      cloudLaunch(
+        { repo: 'owner/repo', branch: 'main' },
+        makeDeps({ relayInfo: undefined }),
+      ),
+    ).rejects.toThrow(/Relay identity is not pinned yet/i);
   });
 
   test('leaves workspace in error state when VM creation fails', async () => {

@@ -5,7 +5,7 @@ import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { promptInput } from '../utils/prompts.js';
 import { readRelayConfig } from '../core/identity.js';
-import { isCloudReachableRelayUrl } from '../core/trusted-relays.js';
+import { getTrustedRelay, isCloudReachableRelayUrl } from '../core/trusted-relays.js';
 import { loadUserRootIdentity } from '../core/user-identity.js';
 import {
   queryControlMeta,
@@ -37,7 +37,6 @@ import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';
 import { computeIdentityId } from '../relay/identity.js';
-import { fetchRelayIdentity } from './connect.js';
 
 function getSavedCloudRelayUrl(): string | null {
   const relayConfig = readRelayConfig();
@@ -109,19 +108,26 @@ async function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): Promise<
   // Keep owner assertion strict whenever we bootstrap cloud flows from control metadata.
   assertControlOwner(ownerIdentityId);
 
-  const relayIdentity = await fetchRelayIdentity(relayUrl);
+  const trustedRelay = getTrustedRelay(relayUrl);
+  if (!trustedRelay) {
+    throw new SpacesError(
+      'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before launching cloud workspaces.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
   bindControlRelayIdentity({
-    relayIdentityId: computeIdentityId(relayIdentity.publicKey),
-    relaySigningPublicKey: relayIdentity.publicKey,
-    relayFingerprint: relayIdentity.fingerprint,
+    relayIdentityId: computeIdentityId(trustedRelay.publicKey),
+    relaySigningPublicKey: trustedRelay.publicKey,
+    relayFingerprint: trustedRelay.fingerprint,
   });
 
   return {
     relayUrl,
-    relaySigningPublicKey: relayIdentity.publicKey,
-    relayFingerprint: relayIdentity.fingerprint,
+    relaySigningPublicKey: trustedRelay.publicKey,
+    relayFingerprint: trustedRelay.fingerprint,
   };
-
 }
 
 async function createCloudEnrollmentInvite(
