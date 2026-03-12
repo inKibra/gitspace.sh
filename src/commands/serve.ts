@@ -15,7 +15,7 @@ import { createHash } from 'crypto';
 import os from 'os';
 import { spawn, type Subprocess } from 'bun';
 import { logger } from '../utils/logger.js';
-import { promptPassword, promptConfirm, selectOne } from '../utils/prompts.js';
+import { promptConfirm, selectOne } from '../utils/prompts.js';
 import { getSecret } from '../utils/secrets.js';
 import {
   isRelayTrusted,
@@ -28,8 +28,6 @@ import {
 } from '../core/trusted-relays.js';
 import {
   loadKeypair,
-  keypairExists,
-  generateAndSaveKeypair,
   readMachineIdentity,
   getPublicKeyWithoutPassword,
   writeRelayConfig,
@@ -73,7 +71,6 @@ import {
   type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
-import { readPasswordFromStdin } from '../utils/password-stdin.js';
 import { listSessions } from '../lib/tmux-lite/cli.js';
 import { loadProcessesConfig } from '../lib/processes/config.js';
 import { parseProcessSessionName } from '../lib/processes/names.js';
@@ -97,6 +94,7 @@ import {
 import { deriveUnlockKey } from '../relay/unlock-kdf.js';
 import { parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { isCloudflaredInstalled, trackCloudflaredOutput } from '../utils/cloudflared.js';
+import { ensureDeviceIdentityPassword } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 
 /** Package version for daemon status */
@@ -170,43 +168,6 @@ async function resolveUserRootAuthorizationConfig(options: { yes?: boolean } = {
   return {
     ownerUserRootId: userRoot.id,
   };
-}
-
-async function ensureServeDeviceIdentityPassword(options: { yes?: boolean; passwordStdin?: boolean } = {}): Promise<string | null> {
-  let password: string | null = null;
-
-  if (!keypairExists()) {
-    const shouldCreate = options.yes || await promptConfirm(
-      'No local device identity found. Create one now?',
-      true,
-    );
-    if (!shouldCreate) {
-      throw new NoIdentityError();
-    }
-
-    const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
-    password = stdinPassword ?? await promptPassword('Create password for local device identity:');
-    if (!password) {
-      return null;
-    }
-
-    if (!stdinPassword) {
-      const confirmPassword = await promptPassword('Confirm local identity password:');
-      if (password !== confirmPassword) {
-        throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
-      }
-    }
-
-    await generateAndSaveKeypair(password, os.hostname());
-    logger.success('Created local device identity');
-  }
-
-  if (!password) {
-    const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
-    password = stdinPassword ?? await promptPassword('Enter password to unlock identity:');
-  }
-
-  return password;
 }
 
 async function isRelayHealthy(relayUrl: string): Promise<boolean> {
@@ -997,7 +958,7 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
-      password = await ensureServeDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
+      password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
       if (!password) {
         logger.info('Cancelled');
         return;
@@ -1138,7 +1099,7 @@ export async function serveStart(options: {
     identity = unlocked.identity;
     registerPermit = unlocked.registerPermit;
   } else {
-    password = await ensureServeDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
+    password = await ensureDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
     if (!password) {
       logger.info('Cancelled');
       cleanupServeFiles();

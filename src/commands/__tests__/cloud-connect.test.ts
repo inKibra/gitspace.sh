@@ -229,4 +229,14 @@ describe('cloudConnect', () => {
       });
     });
   });
+
+  test('treats whitespace relay overrides as absent and still requires pinned relay metadata', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+
+      await expect(
+        cloudConnect('ws-test', { relay: '   ' }, { resolveRelayUrl: () => 'wss://relay.test/ws' })
+      ).rejects.toThrow(/relay identity is not pinned yet/i);
+    });
+  });
 });

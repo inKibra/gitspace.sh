@@ -999,10 +999,11 @@ export async function cloudConnect(
     );
   }
 
-  const relayUrl = (dependencies.resolveRelayUrl ?? resolveRelayUrlForCloudConnect)(options.relay);
+  const explicitRelay = options.relay?.trim() || undefined;
+  const relayUrl = (dependencies.resolveRelayUrl ?? resolveRelayUrlForCloudConnect)(explicitRelay);
   const pinnedRelayPubkey = readControlMeta().relaySigningPublicKey;
-  const relayPubkey = options.relay ? options.relayPubkey : (options.relayPubkey ?? pinnedRelayPubkey);
-  if (!relayPubkey && !options.relay) {
+  const relayPubkey = explicitRelay ? options.relayPubkey : (options.relayPubkey ?? pinnedRelayPubkey);
+  if (!relayPubkey && !explicitRelay) {
     throw new SpacesError(
       'Relay identity is not pinned yet. Start `gssh machine serve start` against your target relay once to pin relay identity metadata before connecting cloud workspaces.',
       'USER_ERROR',
