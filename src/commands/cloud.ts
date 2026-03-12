@@ -976,31 +976,31 @@ export async function cloudConnect(
     );
   }
 
-  if (workspace.status === 'hibernated') {
-    throw new SpacesError(
-      `Workspace '${workspaceId}' is hibernated. Resume it first:\n  gssh cloud resume ${workspaceId}`,
-      'USER_ERROR',
-      1,
-    );
-  }
+  if (workspace.status !== 'ready') {
+    if (workspace.status === 'hibernated') {
+      throw new SpacesError(
+        `Workspace '${workspaceId}' is hibernated. Resume it first:\n  gssh cloud resume ${workspaceId}`,
+        'USER_ERROR',
+        1,
+      );
+    }
 
-  if (workspace.status === 'destroyed') {
-    throw new SpacesError(
-      `Workspace '${workspaceId}' is destroyed and cannot be connected.`,
-      'USER_ERROR',
-      1,
-    );
-  }
+    if (workspace.status === 'destroyed') {
+      throw new SpacesError(
+        `Workspace '${workspaceId}' is destroyed and cannot be connected.`,
+        'USER_ERROR',
+        1,
+      );
+    }
 
-  if (workspace.status === 'error') {
-    throw new SpacesError(
-      `Workspace '${workspaceId}' is in error state. Inspect with:\n  gssh cloud list`,
-      'USER_ERROR',
-      1,
-    );
-  }
+    if (workspace.status === 'error') {
+      throw new SpacesError(
+        `Workspace '${workspaceId}' is in error state. Inspect with:\n  gssh cloud list`,
+        'USER_ERROR',
+        1,
+      );
+    }
 
-  if (workspace.status === 'provisioning' || workspace.status === 'bootstrapping' || workspace.status === 'offline') {
     throw new SpacesError(
       `Workspace '${workspaceId}' is currently '${workspace.status}'. Wait until it is ready, then retry.`,
       'USER_ERROR',

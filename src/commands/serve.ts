@@ -271,7 +271,11 @@ async function resolveRelayUrlForServe(
   return selectedRelay;
 }
 
-function resolveCloudRelayUrlForConfig(relayUrl: string): string | undefined {
+function resolveCloudRelayUrlForConfig(relayUrl: string, hostConfig: HostConfig | null): string | undefined {
+  if (hostConfig?.subdomain) {
+    return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
+  }
+
   return isCloudReachableRelayUrl(relayUrl) ? relayUrl : undefined;
 }
 
@@ -1342,7 +1346,7 @@ export async function serveStart(options: {
   try {
     writeRelayConfig({
       relayUrl: effectiveRelayUrl,
-      cloudRelayUrl: resolveCloudRelayUrlForConfig(effectiveRelayUrl),
+      cloudRelayUrl: resolveCloudRelayUrlForConfig(effectiveRelayUrl, hostConfig),
       machineId,
       savedAt: Date.now(),
     });

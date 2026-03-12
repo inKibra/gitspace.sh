@@ -249,4 +249,23 @@ describe('cloudConnect', () => {
       ).rejects.toThrow(/cloud-reachable relay url/i);
     });
   });
+
+  test('rejects unexpected workspace statuses by default', async () => {
+    await withIsolatedEnv(async () => {
+      upsertCloudWorkspace({
+        id: 'ws-test',
+        provider: 'sprites',
+        providerWorkspaceId: 'sprite-test',
+        machineId: 'machine-ready',
+        machinePublicKey: 'machine-pub-test',
+        repo: 'owner/repo',
+        branch: 'main',
+        status: 'mystery' as never,
+      } as never);
+
+      await expect(
+        cloudConnect('ws-test', {}, { resolveRelayUrl: () => 'wss://relay.test/ws' })
+      ).rejects.toThrow(/currently 'mystery'/i);
+    });
+  });
 });
