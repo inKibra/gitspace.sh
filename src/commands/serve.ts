@@ -172,6 +172,43 @@ async function resolveUserRootAuthorizationConfig(options: { yes?: boolean } = {
   };
 }
 
+async function ensureServeDeviceIdentityPassword(options: { yes?: boolean; passwordStdin?: boolean } = {}): Promise<string | null> {
+  let password: string | null = null;
+
+  if (!keypairExists()) {
+    const shouldCreate = options.yes || await promptConfirm(
+      'No local device identity found. Create one now?',
+      true,
+    );
+    if (!shouldCreate) {
+      throw new NoIdentityError();
+    }
+
+    const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
+    password = stdinPassword ?? await promptPassword('Create password for local device identity:');
+    if (!password) {
+      return null;
+    }
+
+    if (!stdinPassword) {
+      const confirmPassword = await promptPassword('Confirm local identity password:');
+      if (password !== confirmPassword) {
+        throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+      }
+    }
+
+    await generateAndSaveKeypair(password, os.hostname());
+    logger.success('Created local device identity');
+  }
+
+  if (!password) {
+    const stdinPassword = options.passwordStdin ? await readPasswordFromStdin() : null;
+    password = stdinPassword ?? await promptPassword('Enter password to unlock identity:');
+  }
+
+  return password;
+}
+
 async function isRelayHealthy(relayUrl: string): Promise<boolean> {
   try {
     const relay = new URL(relayUrl);
@@ -960,43 +997,10 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
-      if (!keypairExists()) {
-        const shouldCreate = options.yes || await promptConfirm(
-          'No local device identity found. Create one now?',
-          true,
-        );
-        if (!shouldCreate) {
-          throw new NoIdentityError();
-        }
-
-        if (options.passwordStdin) {
-          password = await readPasswordFromStdin();
-        } else {
-          password = await promptPassword('Create password for local device identity:');
-          if (!password) {
-            logger.info('Cancelled');
-            return;
-          }
-          const confirmPassword = await promptPassword('Confirm local identity password:');
-          if (password !== confirmPassword) {
-            throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
-          }
-        }
-
-        await generateAndSaveKeypair(password, os.hostname());
-        logger.success('Created local device identity');
-      }
-
-      if (options.passwordStdin) {
-        if (!password) {
-          password = await readPasswordFromStdin();
-        }
-      } else if (!password) {
-        password = await promptPassword('Enter password to unlock identity:');
-        if (!password) {
-          logger.info('Cancelled');
-          return;
-        }
+      password = await ensureServeDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
+      if (!password) {
+        logger.info('Cancelled');
+        return;
       }
 
       // Validate password before daemonizing
@@ -1134,47 +1138,11 @@ export async function serveStart(options: {
     identity = unlocked.identity;
     registerPermit = unlocked.registerPermit;
   } else {
-    if (!keypairExists()) {
-      const shouldCreate = options.yes || await promptConfirm(
-        'No local device identity found. Create one now?',
-        true,
-      );
-      if (!shouldCreate) {
-        cleanupServeFiles();
-        throw new NoIdentityError();
-      }
-
-      if (options.passwordStdin) {
-        password = await readPasswordFromStdin();
-      } else {
-        password = await promptPassword('Create password for local device identity:');
-        if (!password) {
-          logger.info('Cancelled');
-          cleanupServeFiles();
-          return;
-        }
-        const confirmPassword = await promptPassword('Confirm local identity password:');
-        if (password !== confirmPassword) {
-          cleanupServeFiles();
-          throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
-        }
-      }
-
-      await generateAndSaveKeypair(password, os.hostname());
-      logger.success('Created local device identity');
-    }
-
-    if (options.passwordStdin) {
-      if (!password) {
-        password = await readPasswordFromStdin();
-      }
-    } else if (!password) {
-      password = await promptPassword('Enter password to unlock identity:');
-      if (!password) {
-        logger.info('Cancelled');
-        cleanupServeFiles();
-        return;
-      }
+    password = await ensureServeDeviceIdentityPassword({ yes: options.yes, passwordStdin: options.passwordStdin });
+    if (!password) {
+      logger.info('Cancelled');
+      cleanupServeFiles();
+      return;
     }
 
     identity = await loadKeypair(password);

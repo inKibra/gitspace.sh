@@ -90,7 +90,7 @@ describe('cloudConnect', () => {
     });
   });
 
-  test('delegates to connectToRemote when workspace is ready', async () => {
+  test('delegates pinned relay pubkey when using saved relay selection', async () => {
     await withIsolatedEnv(async () => {
       seedWorkspace('ready', 'machine-ready');
       bindControlRelayIdentity({
@@ -103,8 +103,9 @@ describe('cloudConnect', () => {
       let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
       await cloudConnect(
         'ws-test',
-        { relay: 'wss://relay.test/ws', yes: true, passwordStdin: true },
+        { yes: true, passwordStdin: true },
         {
+          resolveRelayUrl: () => 'wss://relay.test/ws',
           connectToRemote: async (target, options) => {
             calledTarget = target;
             calledOptions = {
@@ -127,13 +128,105 @@ describe('cloudConnect', () => {
     });
   });
 
-  test('throws when relay identity metadata is not pinned', async () => {
+  test('does not force pinned relay pubkey for explicit relay overrides', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+      bindControlRelayIdentity({
+        relayIdentityId: 'relay-cloud-connect-test',
+        relaySigningPublicKey: 'relay-pubkey-b64',
+        relayFingerprint: 'relay-fingerprint-test',
+      });
+
+      let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
+      await cloudConnect(
+        'ws-test',
+        { relay: 'wss://override.test/ws', yes: true, passwordStdin: true },
+        {
+          connectToRemote: async (_target, options) => {
+            calledOptions = {
+              relay: options?.relay,
+              relayPubkey: options?.relayPubkey,
+              yes: options?.yes,
+              passwordStdin: options?.passwordStdin,
+            };
+          },
+        },
+      );
+
+      expect(calledOptions).toEqual({
+        relay: 'wss://override.test/ws',
+        relayPubkey: undefined,
+        yes: true,
+        passwordStdin: true,
+      });
+    });
+  });
+
+  test('passes explicit relay pubkey for relay overrides', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+
+      let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
+      await cloudConnect(
+        'ws-test',
+        { relay: 'wss://override.test/ws', relayPubkey: 'override-pubkey-b64', yes: true, passwordStdin: true },
+        {
+          connectToRemote: async (_target, options) => {
+            calledOptions = {
+              relay: options?.relay,
+              relayPubkey: options?.relayPubkey,
+              yes: options?.yes,
+              passwordStdin: options?.passwordStdin,
+            };
+          },
+        },
+      );
+
+      expect(calledOptions).toEqual({
+        relay: 'wss://override.test/ws',
+        relayPubkey: 'override-pubkey-b64',
+        yes: true,
+        passwordStdin: true,
+      });
+    });
+  });
+
+  test('throws when saved relay selection has no pinned relay identity metadata', async () => {
     await withIsolatedEnv(async () => {
       seedWorkspace('ready', 'machine-ready');
 
       await expect(
-        cloudConnect('ws-test', { relay: 'wss://relay.test/ws' })
+        cloudConnect('ws-test', {}, { resolveRelayUrl: () => 'wss://relay.test/ws' })
       ).rejects.toThrow(/relay identity is not pinned yet/i);
+    });
+  });
+
+  test('allows explicit relay overrides without pinned relay identity metadata', async () => {
+    await withIsolatedEnv(async () => {
+      seedWorkspace('ready', 'machine-ready');
+
+      let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
+      await cloudConnect(
+        'ws-test',
+        { relay: 'wss://override.test/ws', yes: true },
+        {
+          connectToRemote: async (_target, options) => {
+            calledOptions = {
+              relay: options?.relay,
+              relayPubkey: options?.relayPubkey,
+              yes: options?.yes,
+              passwordStdin: options?.passwordStdin,
+            };
+          },
+        },
+      );
+
+      expect(calledOptions).toEqual({
+        relay: 'wss://override.test/ws',
+        relayPubkey: undefined,
+        yes: true,
+        passwordStdin: undefined,
+      });
     });
   });
 });

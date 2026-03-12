@@ -24,6 +24,7 @@ import {
   setVaultMeta,
   getVaultMeta,
   isVaultInitialized,
+  listVaultMachines,
   listVaultMachinesForOwner,
   removeVaultMachineForOwner,
 } from "../relay/control/store.js";
@@ -42,6 +43,21 @@ const RELAY_RUNTIME_DIR = ".relay/runtime";
 const RELAY_STATE_FILE = "relay-state.json";
 const CLOUDFLARED_STARTUP_DELAY_MS = 1200;
 const CLOUDFLARED_EARLY_EXIT_RACE_MS = 100;
+
+export function assertRelayOwnerRepairIsSafe(ownerUserRootId: string): void {
+  const machineOwners = new Set(listVaultMachines().map((machine) => machine.ownerUserRootId));
+  if (machineOwners.size === 0) {
+    return;
+  }
+
+  if (machineOwners.size !== 1 || !machineOwners.has(ownerUserRootId)) {
+    throw new SpacesError(
+      'Relay vault owner metadata is missing, but persisted machine registrations belong to a different owner. Recover with the original owner identity or clear relay state before rebinding.',
+      'USER_ERROR',
+      1,
+    );
+  }
+}
 
 interface RelayRuntimeState {
   pid: number;
@@ -446,6 +462,7 @@ export async function startRelay(options: {
         );
       }
       if (!existingOwner && isVaultInitialized()) {
+        assertRelayOwnerRepairIsSafe(ownerUserRootId);
         logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
       }
 
