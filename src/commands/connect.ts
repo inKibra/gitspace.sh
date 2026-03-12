@@ -407,14 +407,6 @@ export async function listRemoteMachines(options: {
   }
 
   const identity = await loadKeypair(password);
-  if (!identity) {
-    throw new SpacesError(
-      'Failed to unlock identity. Check your password.',
-      'USER_ERROR',
-      1,
-    );
-  }
-
   const deviceCertificate = await createLocalDeviceCertificate(identity);
   const signer = createNodeRelaySigner(identity);
 
