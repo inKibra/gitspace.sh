@@ -447,11 +447,7 @@ export async function startRelay(options: {
       }
       if (!existingOwner) {
         if (isVaultInitialized()) {
-          throw new SpacesError(
-            'Relay vault is initialized but owner metadata is missing. Repair the control store before starting the relay.',
-            'SYSTEM_ERROR',
-            2,
-          );
+          logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
         }
 
       }

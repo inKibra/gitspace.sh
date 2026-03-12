@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { addTrustedRelay, getTrustedRelay, isCloudReachableRelayUrl } from '../trusted-relays.js';
+import { addTrustedRelay, getTrustedRelay, isCloudReachableRelayUrl, isRelayTrusted, removeTrustedRelay } from '../trusted-relays.js';
 import { afterEach, beforeEach } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -73,5 +73,19 @@ describe('isCloudReachableRelayUrl', () => {
 
     expect(getTrustedRelay('wss://relay.example.test/relay/')?.publicKey).toBe('pubkey-slash');
     expect(getTrustedRelay('wss://relay.example.test/relay')).toBeNull();
+  });
+
+  test('removeTrustedRelay matches legacy bare and /ws variants consistently', () => {
+    addTrustedRelay('wss://relay.example.test', 'pubkey-remove', 'relay');
+
+    expect(removeTrustedRelay('wss://relay.example.test/ws')?.publicKey).toBe('pubkey-remove');
+    expect(getTrustedRelay('wss://relay.example.test')).toBeNull();
+  });
+
+  test('localhost relay entries still detect key mismatches', () => {
+    addTrustedRelay('ws://127.0.0.1:4480/ws', 'pubkey-localhost-a', 'relay');
+
+    expect(isRelayTrusted('ws://127.0.0.1:4480/ws', 'pubkey-localhost-a')).toBe('trusted');
+    expect(isRelayTrusted('ws://127.0.0.1:4480/ws', 'pubkey-localhost-b')).toBe('mismatch');
   });
 });

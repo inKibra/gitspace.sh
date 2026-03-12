@@ -94,7 +94,7 @@ function normalizeUrl(url: string): string {
 
     if (parsed.pathname === '/' || parsed.pathname === '') {
       parsed.pathname = '';
-    } else if (/^\/ws\/+$/i.test(parsed.pathname)) {
+    } else if (/^\/ws\/?$/i.test(parsed.pathname)) {
       parsed.pathname = '/ws';
     }
     parsed.search = '';
@@ -388,15 +388,15 @@ export function removeTrustedRelay(
 ): TrustedRelay | null {
   const relays = getTrustedRelays();
   const searchLower = urlOrFingerprint.toLowerCase();
+  const candidateUrls = new Set(getNormalizedUrlVariants(urlOrFingerprint));
 
   const index = relays.findIndex((r) => {
-    const urlLower = normalizeUrl(r.url);
+    const relayUrlVariants = getNormalizedUrlVariants(r.url).map((candidate) => candidate.toLowerCase());
     const fingerprintLower = r.fingerprint.toLowerCase();
     const labelLower = r.label?.toLowerCase();
 
     return (
-      urlLower === searchLower ||
-      urlLower.includes(searchLower) ||
+      relayUrlVariants.some((candidate) => candidate === searchLower || candidate.includes(searchLower) || candidateUrls.has(candidate)) ||
       fingerprintLower === searchLower ||
       fingerprintLower.startsWith(searchLower) ||
       labelLower === searchLower
@@ -463,12 +463,11 @@ export function isRelayTrusted(
   url: string,
   publicKey: string
 ): RelayTrustStatus {
-  // Localhost is always auto-trusted
-  if (isLocalhostUrl(url)) {
-    return "trusted";
-  }
-
   const trustedRelay = getTrustedRelay(url);
+
+  if (!trustedRelay && isLocalhostUrl(url)) {
+    return "unknown";
+  }
 
   if (!trustedRelay) {
     return "unknown";
