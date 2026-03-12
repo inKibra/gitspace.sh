@@ -271,11 +271,25 @@ async function resolveRelayUrlForServe(
 }
 
 function resolveCloudRelayUrlForConfig(relayUrl: string, hostConfig: HostConfig | null): string | undefined {
-  if (hostConfig?.subdomain) {
-    return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
+  if (isCloudReachableRelayUrl(relayUrl)) {
+    return relayUrl;
   }
 
-  return isCloudReachableRelayUrl(relayUrl) ? relayUrl : undefined;
+  if (!hostConfig?.subdomain) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(relayUrl);
+    const port = parsed.port || (parsed.protocol === 'wss:' ? '443' : parsed.protocol === 'ws:' ? '80' : '');
+    if (port === String(LOCAL_RELAY_PORT) && isLocalhost(parsed.hostname)) {
+      return `wss://${hostConfig.subdomain}.gitspace.sh/ws`;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
 }
 
 /**
