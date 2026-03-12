@@ -3,11 +3,10 @@
  */
 
 import type { Command } from 'commander';
+import type { RelayStartMode } from '../../commands/relay.js';
 import { withErrorHandler } from '../error.js';
 import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
-
-type RelayStartMode = 'auto' | 'hosted' | 'local';
 
 function parseRelayPort(rawPort: string): number {
   if (!/^\d+$/.test(rawPort)) {

@@ -68,7 +68,7 @@ interface RelayStatusSnapshot {
   startedAt: number | null;
 }
 
-type RelayStartMode = "auto" | "hosted" | "local";
+export type RelayStartMode = "auto" | "hosted" | "local";
 
 function getRelayRuntimeDir(): string {
   return join(getSpacesDir(), RELAY_RUNTIME_DIR);

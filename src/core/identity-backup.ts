@@ -24,6 +24,7 @@ const BACKUP_ENDPOINT = `${API_BASE}/identity/backup`;
 const BACKUP_STATUS_ENDPOINT = `${API_BASE}/identity/backup/status`;
 
 const PBKDF2_ITERATIONS = 210_000;
+const PBKDF2_MIN_ACCEPTED_ITERATIONS = 100_000;
 const PBKDF2_MAX_ITERATIONS = 1_000_000;
 const PBKDF2_KEY_LENGTH = 32;
 const PBKDF2_DIGEST = 'sha256';
@@ -232,7 +233,7 @@ export async function decryptMnemonicEnvelope(
 
   if (
     !Number.isSafeInteger(envelope.iterations)
-    || envelope.iterations < PBKDF2_ITERATIONS
+    || envelope.iterations < PBKDF2_MIN_ACCEPTED_ITERATIONS
     || envelope.iterations > PBKDF2_MAX_ITERATIONS
   ) {
     throw new SpacesError('Cloud backup payload uses unsupported key derivation parameters.', 'USER_ERROR', 1);
