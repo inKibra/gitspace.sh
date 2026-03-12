@@ -86,11 +86,9 @@ export async function authLogin(
     showHostSyncSummary?: boolean;
   } = {},
 ): Promise<void> {
-  let passwordForIdentity: string | null = null;
-
   // Load identity (requires password for signing)
   logger.info('Loading identity...');
-  passwordForIdentity = passwordForIdentity ?? await ensureDeviceIdentityPassword({
+  const passwordForIdentity = await ensureDeviceIdentityPassword({
     yes: options.yes,
     passwordStdin: options.passwordStdin,
   }, options.devicePasswordContext);
@@ -99,11 +97,9 @@ export async function authLogin(
     return;
   }
 
-  const resolvedPasswordForIdentity = passwordForIdentity;
-
   let identity;
   try {
-    identity = await loadKeypair(resolvedPasswordForIdentity);
+    identity = await loadKeypair(passwordForIdentity);
   } catch (error) {
     if (error instanceof SpacesError) {
       throw error;

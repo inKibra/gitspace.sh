@@ -10,8 +10,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { join } from "node:path";
-import { sha256 } from "@noble/hashes/sha2.js";
 import { getIdentityDir } from "./identity.js";
+import { formatRelayFingerprint } from "../relay/identity.js";
 
 // ============================================================================
 // Types
@@ -64,12 +64,7 @@ function getTrustedRelaysPath(): string {
  *
  * Format: "Kx4f:2nB9:mP3q:vR8s" (16 chars with colons)
  */
-export function computeRelayFingerprint(publicKey: string): string {
-  const keyBytes = Buffer.from(publicKey, "base64");
-  const hash = sha256(keyBytes);
-  const b64url = Buffer.from(hash).toString("base64url").substring(0, 16);
-  return b64url.match(/.{1,4}/g)?.join(":") || b64url;
-}
+export const computeRelayFingerprint = formatRelayFingerprint;
 
 // ============================================================================
 // URL Normalization

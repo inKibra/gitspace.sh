@@ -81,7 +81,7 @@ interface CloudEnrollmentInvite {
   expiresAt: string;
 }
 
-async function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): Promise<CloudBootstrapRelayInfo> {
+function resolveCloudBootstrapRelayInfo(ownerIdentityId: string): CloudBootstrapRelayInfo {
   const relayUrl = getSavedCloudRelayUrl();
 
   if (!relayUrl) {
@@ -402,7 +402,7 @@ export async function cloudLaunch(
   }
 
   // 4. Resolve relay bootstrap info and generate a local workspace ID
-  const relayInfo = dependencies.relayInfo ?? await resolveCloudBootstrapRelayInfo(identityId);
+  const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
   const workspaceId = dependencies.workspaceId ?? `ws-${randomUUID().slice(0, 8)}`;
   const appId = `gssh-${identityId.slice(0, 12)}`;
   const workspaceIdentity = dependencies.workspaceIdentity ?? await ensureWorkspaceIdentity(workspaceId);
@@ -873,7 +873,7 @@ export async function cloudResume(
   const identityId = dependencies.identityId ?? await requireLocalIdentityId();
   const provider = injectedProvider ?? await makeSpritesProvider(identityId);
   const ws = requireWorkspace(workspaceId);
-  const relayInfo = dependencies.relayInfo ?? await resolveCloudBootstrapRelayInfo(identityId);
+  const relayInfo = dependencies.relayInfo ?? resolveCloudBootstrapRelayInfo(identityId);
 
   const storedIdentity = dependencies.workspaceIdentity ?? await getWorkspaceIdentity(workspaceId);
   if (!storedIdentity) {
