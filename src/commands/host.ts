@@ -365,7 +365,16 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
     }
   }
 
-  const selected = primary ?? activeSubdomains[0]!;
+  if (!primary) {
+    report.subdomain = configuredCheck('Active subdomains exist, but no primary subdomain is set.');
+    report.subdomain.fix = 'gssh user host set-primary <name>';
+    report.tunnelToken = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
+    report.serveTunnelToken = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
+    report.warnings.push('Host config was not updated because no primary subdomain is set.');
+    return report;
+  }
+
+  const selected = primary;
   const serveSubdomain = activeSubdomains.find((entry) => entry.subdomain === `${selected.subdomain}.serve`);
   const resolvedServeSubdomain = serveSubdomain?.subdomain ?? `${selected.subdomain}.serve`;
 
@@ -379,15 +388,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
   report.primarySubdomain = selected.subdomain;
   report.serveSubdomain = resolvedServeSubdomain;
 
-  if (primary) {
-    report.subdomain = configuredCheck(`Primary subdomain ${selected.subdomain}.gitspace.sh is active.`);
-  } else {
-    report.subdomain = configuredCheck(`Using ${selected.subdomain}.gitspace.sh (no primary set).`);
-    report.subdomain.fix = 'gssh user host set-primary <name>';
-    report.warnings.push(
-      'No primary subdomain is set. Non-interactive relay startup may auto-select from available hosts.',
-    );
-  }
+  report.subdomain = configuredCheck(`Primary subdomain ${selected.subdomain}.gitspace.sh is active.`);
 
   report.tunnelToken = await ensureTokenFromApi({
     headers,

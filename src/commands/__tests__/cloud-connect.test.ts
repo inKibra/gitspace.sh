@@ -128,7 +128,7 @@ describe('cloudConnect', () => {
     });
   });
 
-  test('does not force pinned relay pubkey for explicit relay overrides', async () => {
+  test('reuses pinned relay pubkey for explicit relay overrides by default', async () => {
     await withIsolatedEnv(async () => {
       seedWorkspace('ready', 'machine-ready');
       bindControlRelayIdentity({
@@ -155,7 +155,7 @@ describe('cloudConnect', () => {
 
       expect(calledOptions).toEqual({
         relay: 'wss://override.test/ws',
-        relayPubkey: undefined,
+        relayPubkey: 'relay-pubkey-b64',
         yes: true,
         passwordStdin: true,
       });
@@ -201,32 +201,13 @@ describe('cloudConnect', () => {
     });
   });
 
-  test('allows explicit relay overrides without pinned relay identity metadata', async () => {
+  test('requires explicit relay overrides to provide a relay pubkey when no pin exists', async () => {
     await withIsolatedEnv(async () => {
       seedWorkspace('ready', 'machine-ready');
 
-      let calledOptions: { relay?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } | undefined;
-      await cloudConnect(
-        'ws-test',
-        { relay: 'wss://override.test/ws', yes: true },
-        {
-          connectToRemote: async (_target, options) => {
-            calledOptions = {
-              relay: options?.relay,
-              relayPubkey: options?.relayPubkey,
-              yes: options?.yes,
-              passwordStdin: options?.passwordStdin,
-            };
-          },
-        },
-      );
-
-      expect(calledOptions).toEqual({
-        relay: 'wss://override.test/ws',
-        relayPubkey: undefined,
-        yes: true,
-        passwordStdin: undefined,
-      });
+      await expect(
+        cloudConnect('ws-test', { relay: 'wss://override.test/ws', yes: true })
+      ).rejects.toThrow(/relay identity is not pinned yet for this cloud workspace/i);
     });
   });
 

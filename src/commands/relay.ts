@@ -474,6 +474,7 @@ export async function startRelay(options: {
         // bindControlOwner persists the control-store owner binding; the vault keeps
         // its own owner metadata and must be repaired separately for later startups.
         setVaultMeta("owner_user_root_id", ownerUserRootId);
+        setVaultMeta("vault_initialized", "1");
       }
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
     } else {
