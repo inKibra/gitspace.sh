@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildServeIngressConfig,
+  resolveCloudRelayUrlForConfig,
   type ProcessHostEntry,
 } from "../serve";
 import { buildProcessHostname, normalizeHostLabel } from "../../utils/hostnames";
@@ -59,5 +60,12 @@ describe("process hosting helpers", () => {
     expect(config).toContain("hostname: tcp.api-1.alpha.brad.serve.gitspace.sh");
     expect(config).toContain("service: tcp://127.0.0.1:9000");
     expect(config).toContain("service: http_status:404");
+  });
+
+  test("resolveCloudRelayUrlForConfig derives hosted relay url for 0.0.0.0 binds", () => {
+    expect(resolveCloudRelayUrlForConfig('ws://0.0.0.0:4480/ws', {
+      subdomain: 'brad',
+      createdAt: Date.now(),
+    })).toBe('wss://brad.gitspace.sh/ws');
   });
 });

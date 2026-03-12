@@ -17,6 +17,7 @@ export interface EnsureUserRootIdentityWithRecoveryOptions {
   passwordStdin?: boolean;
   context: string;
   allowSkip?: boolean;
+  allowAuthLogin?: boolean;
   force?: boolean;
 }
 
@@ -41,6 +42,7 @@ export async function ensureUserRootIdentityWithRecovery(
 ): Promise<UserRootIdentity | null> {
   const devicePasswordContext = options.devicePasswordContext
     ?? createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+  const allowAuthLogin = options.allowAuthLogin !== false;
 
   let userRoot = await loadUserRootIdentity();
   if (userRoot) {
@@ -68,6 +70,13 @@ export async function ensureUserRootIdentityWithRecovery(
 
   let token = await getSecret('GITSPACE_TOKEN');
   if (!token) {
+    if (!allowAuthLogin) {
+      if (options.allowSkip) {
+        return null;
+      }
+      throw missingIdentityError(options.context);
+    }
+
     const shouldLogin = options.yes || await promptConfirm(
       'You are not logged in to gitspace.sh. Run login now?',
       true,

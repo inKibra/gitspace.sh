@@ -486,6 +486,7 @@ export async function startRelay(options: {
         yes: options.yes,
         context: 'relay startup owner binding',
         allowSkip: true,
+        allowAuthLogin: false,
       });
     if (userRoot) {
       ownerUserRootId = userRoot.id;
