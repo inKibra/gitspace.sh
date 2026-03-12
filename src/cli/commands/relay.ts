@@ -42,13 +42,15 @@ export function registerRelayCommands(parent: Command): void {
 
   cmd
     .command('start')
-    .description('Start relay server (auto-binds account host tunnel when available)')
+    .description('Start relay server in background (auto-binds account host tunnel when available)')
     .option('--port <port>', 'Port to listen on', '4480')
     .option('--bind <address>', 'Address to bind to', '0.0.0.0')
     .option('--hostname <host>', 'Only serve requests for this domain (optional)')
     .option('--mode <mode>', 'Startup mode: auto, hosted, local', 'auto')
     .option('--label <label>', 'Human-readable label for this relay')
     .option('-y, --yes', 'Auto-confirm prompts')
+    .option('--foreground', "Run in foreground (don't daemonize)")
+    .option('--takeover', 'Clear persisted relay owner state so the current identity can take over')
     .action(withErrorHandler(async (options) => {
       const { startRelay } = await import('../../commands/relay.js');
       await startRelay({
@@ -58,6 +60,8 @@ export function registerRelayCommands(parent: Command): void {
         mode: parseRelayStartMode(options.mode),
         label: options.label,
         yes: options.yes,
+        foreground: options.foreground,
+        takeover: options.takeover,
       });
     }, { skipSetupCheck: true }));
 

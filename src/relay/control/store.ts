@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSpacesDir } from '../../core/config.js';
 import { SpacesError } from '../../types/errors.js';
@@ -61,6 +61,13 @@ export function getControlDirPath(): string {
 
 export function getControlDbPath(): string {
   return join(getControlDirPath(), 'control.db');
+}
+
+export function resetControlStore(): void {
+  const controlDbPath = getControlDbPath();
+  rmSync(controlDbPath, { force: true });
+  rmSync(`${controlDbPath}-shm`, { force: true });
+  rmSync(`${controlDbPath}-wal`, { force: true });
 }
 
 function ensureControlDir(): void {

@@ -31,6 +31,54 @@ import {
 } from '../core/identity-backup.js';
 import { formatUserRootPublicKey } from '../lib/tmux-lite/crypto/user-identity.js';
 import { SpacesError } from '../types/errors.js';
+import type { UserRootIdentity } from '../types/identity.js';
+
+// ============================================================================
+// Shared display helpers (used by identity commands and auth login bootstrap)
+// ============================================================================
+
+/**
+ * Display a 24-word recovery phrase in a formatted 4-column grid.
+ */
+export function logRecoveryPhrase(mnemonic: string): void {
+  logger.log('');
+  logger.bold('=== YOUR 24-WORD RECOVERY PHRASE ===');
+  logger.log('');
+
+  const words = mnemonic.split(' ');
+  for (let row = 0; row < 6; row++) {
+    const cols = [0, 6, 12, 18].map((base) => {
+      const idx = base + row;
+      const num = String(idx + 1).padStart(2, ' ');
+      return `${num}. ${(words[idx] ?? '').padEnd(10)}`;
+    });
+    logger.log(`  ${cols.join('  ')}`);
+  }
+
+  logger.log('');
+  logger.bold('=== WRITE THIS DOWN AND STORE IT SAFELY ===');
+  logger.log('');
+  logger.dim('This phrase is the ONLY way to recover your identity on a new device.');
+  logger.dim('It will NOT be shown again after this step.');
+  logger.dim('The mnemonic is stored in your OS keychain on this machine.');
+}
+
+/**
+ * Display identity information (ID, fingerprint, public key).
+ */
+export function logIdentityInfo(identity: UserRootIdentity, successMessage: string): void {
+  const publicKeyString = formatUserRootPublicKey(identity);
+  const fingerprint = formatFingerprint(identity.signing.publicKey);
+
+  logger.success(successMessage);
+  logger.log('');
+  logger.bold('Identity Information:');
+  logger.log(`  ID:          ${identity.id}`);
+  logger.log(`  Fingerprint: ${fingerprint}`);
+  logger.log('');
+  logger.bold('Public Key:');
+  logger.log(`  ${publicKeyString}`);
+}
 
 // ============================================================================
 // gssh user identity init
@@ -73,42 +121,9 @@ export async function initIdentity(options: { force?: boolean } = {}): Promise<v
   logger.info('Generating identity from new mnemonic...');
   const identity = await initFromMnemonic(mnemonic, options.force ?? false);
 
-  const publicKeyString = formatUserRootPublicKey(identity);
-  const fingerprint = formatFingerprint(identity.signing.publicKey);
-
-  // Display mnemonic (one-time only)
+  logRecoveryPhrase(mnemonic);
   logger.log('');
-  logger.bold('=== YOUR 24-WORD RECOVERY PHRASE ===');
-  logger.log('');
-
-  const words = mnemonic.split(' ');
-  // Display in 4 columns of 6 words
-  for (let row = 0; row < 6; row++) {
-    const cols = [0, 6, 12, 18].map((base) => {
-      const idx = base + row;
-      const num = String(idx + 1).padStart(2, ' ');
-      return `${num}. ${words[idx].padEnd(10)}`;
-    });
-    logger.log(`  ${cols.join('  ')}`);
-  }
-
-  logger.log('');
-  logger.bold('=== WRITE THIS DOWN AND STORE IT SAFELY ===');
-  logger.log('');
-  logger.dim('This phrase is the ONLY way to recover your identity on a new device.');
-  logger.dim('It will NOT be shown again after this step.');
-  logger.dim('The mnemonic is stored in your OS keychain on this machine.');
-  logger.log('');
-
-  // Display identity info
-  logger.success('Identity created and stored in keychain');
-  logger.log('');
-  logger.bold('Identity Information:');
-  logger.log(`  ID:          ${identity.id}`);
-  logger.log(`  Fingerprint: ${fingerprint}`);
-  logger.log('');
-  logger.bold('Public Key:');
-  logger.log(`  ${publicKeyString}`);
+  logIdentityInfo(identity, 'Identity created and stored in keychain');
 }
 
 // ============================================================================
@@ -212,7 +227,7 @@ export async function recoverIdentity(
   // Derive and store
   logger.info('Deriving identity from mnemonic...');
   const identity = await initFromMnemonic(normalized, options.force ?? exists ?? false);
-  logIdentityRecovered(identity, 'Identity recovered and stored in keychain');
+  logIdentityInfo(identity, 'Identity recovered and stored in keychain');
 }
 
 export async function recoverIdentityFromCloud(options: { force?: boolean; yes?: boolean } = {}): Promise<void> {
@@ -248,22 +263,10 @@ export async function recoverIdentityFromCloud(options: { force?: boolean; yes?:
     force: options.force ?? exists ?? false,
   });
 
-  logIdentityRecovered(identity, 'Identity recovered from cloud backup and stored in keychain');
+  logIdentityInfo(identity, 'Identity recovered from cloud backup and stored in keychain');
 }
 
-function logIdentityRecovered(identity: Awaited<ReturnType<typeof initFromMnemonic>>, successMessage: string): void {
-  const publicKeyString = formatUserRootPublicKey(identity);
-  const fingerprint = formatFingerprint(identity.signing.publicKey);
 
-  logger.success(successMessage);
-  logger.log('');
-  logger.bold('Identity Information:');
-  logger.log(`  ID:          ${identity.id}`);
-  logger.log(`  Fingerprint: ${fingerprint}`);
-  logger.log('');
-  logger.bold('Public Key:');
-  logger.log(`  ${publicKeyString}`);
-}
 
 // ============================================================================
 // gssh user identity export
