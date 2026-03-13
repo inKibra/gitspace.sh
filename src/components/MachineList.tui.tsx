@@ -29,6 +29,9 @@ const COLORS = {
 
 interface MachineListTUIProps extends UseMachineListReturn {
   focused?: boolean;
+  relayLabel?: string;
+  relayError?: string | null;
+  isAutoConnected?: boolean;
 }
 
 // ============================================================================
@@ -45,10 +48,13 @@ export function MachineListTUI(props: MachineListTUIProps) {
     hasError,
     error,
     focused = true,
+    relayLabel,
+    relayError,
+    isAutoConnected = false,
   } = props;
 
-  // Loading state
-  if (isLoading) {
+  // Loading state without fallback machines
+  if (isLoading && items.length === 0) {
     return (
       <box
         flexGrow={1}
@@ -63,8 +69,8 @@ export function MachineListTUI(props: MachineListTUIProps) {
     );
   }
 
-  // Error state
-  if (hasError) {
+  // Error state without fallback machines
+  if (hasError && items.length === 0) {
     return (
       <box
         flexGrow={1}
@@ -130,6 +136,16 @@ export function MachineListTUI(props: MachineListTUIProps) {
         {' '}Machines ({items.length}){' '}
       </text>
 
+      {(relayLabel || relayError) && (
+        <box flexDirection="column" paddingLeft={1} paddingTop={1}>
+          <text fg={COLORS.textDim}>
+            {isAutoConnected ? 'Auto-connected relay' : 'Relay'}: {relayLabel ?? 'configured'}
+          </text>
+          {!!relayError && <text fg={COLORS.offline}>Remote listing unavailable - {relayError}</text>}
+          {!!relayError && <text fg={COLORS.textDim}>You can still enter local projects from "This Machine".</text>}
+        </box>
+      )}
+
       {/* Machine list */}
       <box flexDirection="column" paddingLeft={1} paddingTop={1} flexGrow={1} overflow="scroll">
         {items.map((item) => {
@@ -157,7 +173,7 @@ export function MachineListTUI(props: MachineListTUIProps) {
 
       {/* Footer */}
       <text fg={COLORS.textDim} height={1} paddingLeft={1}>
-        [↑↓] Navigate  [Enter] Connect  [r] Refresh
+        [↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help
       </text>
     </box>
   );

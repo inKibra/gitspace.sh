@@ -305,6 +305,17 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     onError: (error) => dispatch({ type: 'SET_ERROR', error: error.message }),
   });
 
+  const relayStatusLabel = relayConfig?.label ?? relayConfig?.url;
+  const machineListStatusHint = relayConfig
+    ? remoteMachines.status === 'connecting'
+      ? `relay: connecting to ${relayStatusLabel}`
+      : remoteMachines.status === 'connected'
+        ? `relay: ${relayStatusLabel}`
+        : remoteMachines.status === 'error'
+          ? `relay unavailable - local access still works`
+          : `relay: ${relayStatusLabel}`
+    : 'local only';
+
   const isLocalMachineContext = !isRemoteMode || state.selectedMachine?.machineId === 'local';
 
   // Local machine session engine hook
@@ -319,6 +330,9 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     requestWorkspaces: requestLocalWorkspaces,
     requestSessions: requestLocalSessions,
     createProject: createLocalProject,
+    prepareProjectCreation: prepareLocalProjectCreation,
+    finalizeProjectCreation: finalizeLocalProjectCreation,
+    cancelProjectCreation: cancelLocalProjectCreation,
     createWorkspace: createLocalWorkspace,
     deleteProject: deleteLocalProject,
     requestInbox: requestLocalInbox,
@@ -543,6 +557,9 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
     listRemoteBranches: listLocalRemoteBranches,
     listLinearIssues: listLocalLinearIssues,
     createProject: createLocalProject,
+    prepareProjectCreation: prepareLocalProjectCreation,
+    finalizeProjectCreation: finalizeLocalProjectCreation,
+    cancelProjectCreation: cancelLocalProjectCreation,
     createWorkspace: createLocalWorkspace,
     deleteProject: deleteLocalProject,
     getProjectNames: () => localProjects.map((project) => project.name),
@@ -1970,8 +1987,17 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
       <Fragment>
         <Toaster position="top-right" />
         <box flexDirection="column" flexGrow={1}>
-          <MachineListTUI {...machineListProps} focused={true} />
-          <StatusBar hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit" rightHint={keyboardModeHint} />
+          <MachineListTUI
+            {...machineListProps}
+            focused={true}
+            relayLabel={relayStatusLabel}
+            relayError={remoteMachines.error}
+            isAutoConnected={relayConfig?.autoConnected === true}
+          />
+          <StatusBar
+            hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit"
+            rightHint={`${machineListStatusHint}  ${keyboardModeHint}`}
+          />
           <FlowTUI flow={flow} />
         </box>
       </Fragment>

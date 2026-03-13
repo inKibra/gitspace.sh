@@ -17,6 +17,9 @@ import {
 
 export interface RelayConfig {
   url: string;
+  label?: string;
+  source?: 'account' | 'cached' | 'local' | 'explicit';
+  autoConnected?: boolean;
 }
 
 export interface UseRemoteMachinesOptions {

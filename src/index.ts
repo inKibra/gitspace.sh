@@ -39,6 +39,7 @@ import { VERSION as GENERATED_VERSION } from './version.generated.js';
 import { logger } from './utils/logger.js';
 import { SpacesError } from './types/errors.js';
 import { initializeOwnerSync } from './core/owner-sync.js';
+import { findReachableRelayCandidate } from './core/relay-discovery.js';
 
 // ============================================================================
 // Version resolution
@@ -146,10 +147,23 @@ if (process.argv.length === 2 || hasOnlyTuiOptions) {
 	const { checkFirstTimeSetup } = await import('./cli/setup.js');
 	const { launchTUI } = await import('./tui/index.js');
 
-	const relayConfig = relayUrlFromArgs ? { url: relayUrlFromArgs } : undefined;
-
 	checkFirstTimeSetup()
-		.then(() => launchTUI(relayConfig, { ignoreKeychainAndSkipSecrets }))
+		.then(async () => {
+			const relayCandidate = relayUrlFromArgs
+				? { url: relayUrlFromArgs, label: relayUrlFromArgs, source: 'explicit' as const }
+				: await findReachableRelayCandidate({ includeLocalRelay: false });
+
+			const relayConfig = relayCandidate
+				? {
+					url: relayCandidate.url,
+					label: relayCandidate.label,
+					source: relayCandidate.source,
+					autoConnected: !relayUrlFromArgs,
+				}
+				: undefined;
+
+			return launchTUI(relayConfig, { ignoreKeychainAndSkipSecrets });
+		})
 		.catch((error) => {
 			if (error instanceof SpacesError) {
 				logger.error(error.message);

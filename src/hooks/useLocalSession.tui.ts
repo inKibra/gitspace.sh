@@ -3,6 +3,8 @@ import {
   useSessionEngine,
   type AttachSessionParams,
   type CreateProjectParams,
+  type FinalizeProjectParams,
+  type PreparedProjectResult,
   type CreateWorkspaceParams,
   type DeleteProjectParams,
   type DeleteWorkspaceParams,
@@ -256,6 +258,39 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     }, { strict: true });
   }, [backendKey, runWithBackend]);
 
+  const prepareProjectCreation = useCallback(async (
+    params: CreateProjectParams
+  ): Promise<PreparedProjectResult> => {
+    let result: PreparedProjectResult | null = null;
+    await runWithBackend(async (sessionEngine) => {
+      result = await sessionEngine.prepareProjectCreation(backendKey, params);
+    }, { strict: true });
+
+    if (!result) {
+      throw new SpacesError('Project preparation unavailable', 'SYSTEM_ERROR', 2);
+    }
+
+    return result;
+  }, [backendKey, runWithBackend]);
+
+  const finalizeProjectCreation = useCallback(async (params: FinalizeProjectParams) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.finalizeProjectCreation(backendKey, params);
+      await sessionEngine.listProjects(backendKey);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    }, { strict: true });
+  }, [backendKey, runWithBackend]);
+
+  const cancelProjectCreation = useCallback(async (projectName: string) => {
+    await runWithBackend(async (sessionEngine) => {
+      await sessionEngine.cancelProjectCreation(backendKey, projectName);
+      await sessionEngine.listProjects(backendKey);
+      await sessionEngine.listWorkspaces(backendKey);
+      await sessionEngine.listSessions(backendKey);
+    }, { strict: true });
+  }, [backendKey, runWithBackend]);
+
   const createWorkspace = useCallback(async (params: CreateWorkspaceParams) => {
     await runWithBackend(async (sessionEngine) => {
       await sessionEngine.createWorkspace(backendKey, params);
@@ -484,6 +519,9 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     requestWorkspaces,
     requestSessions,
     createProject,
+    prepareProjectCreation,
+    finalizeProjectCreation,
+    cancelProjectCreation,
     createWorkspace,
     deleteProject,
     requestInbox,

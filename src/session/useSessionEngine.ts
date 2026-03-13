@@ -5,6 +5,8 @@ import type {
   SessionBackend,
   AttachSessionParams,
   CreateProjectParams,
+  FinalizeProjectParams,
+  PreparedProjectResult,
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
@@ -281,6 +283,51 @@ export function useSessionEngine() {
     await withBackend(backendKey, (backend) => backend.createProject(params));
   }, [withBackend]);
 
+  const prepareProjectCreation = useCallback(async (
+    backendKey: BackendKey,
+    params: CreateProjectParams
+  ): Promise<PreparedProjectResult> => {
+    let result: PreparedProjectResult | null = null;
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.prepareProjectCreation) {
+        throw new SpacesError('Project preparation is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      result = await backend.prepareProjectCreation(params);
+    });
+
+    if (!result) {
+      throw new SpacesError('Project preparation was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+
+    return result;
+  }, [withBackend]);
+
+  const finalizeProjectCreation = useCallback(async (
+    backendKey: BackendKey,
+    params: FinalizeProjectParams
+  ) => {
+    dispatch({
+      type: 'SET_COMMAND_ERROR',
+      backendKey,
+      commandError: null,
+    });
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.finalizeProjectCreation) {
+        throw new SpacesError('Project finalization is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      await backend.finalizeProjectCreation(params);
+    });
+  }, [withBackend]);
+
+  const cancelProjectCreation = useCallback(async (backendKey: BackendKey, projectName: string) => {
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.cancelProjectCreation) {
+        return;
+      }
+      await backend.cancelProjectCreation(projectName);
+    });
+  }, [withBackend]);
+
   const createWorkspace = useCallback(async (backendKey: BackendKey, params: CreateWorkspaceParams) => {
     dispatch({
       type: 'SET_COMMAND_ERROR',
@@ -511,6 +558,9 @@ export function useSessionEngine() {
     listWorkspaces,
     listSessions,
     createProject,
+    prepareProjectCreation,
+    finalizeProjectCreation,
+    cancelProjectCreation,
     createWorkspace,
     deleteProject,
     attachSession,
@@ -547,6 +597,9 @@ export function useSessionEngine() {
     listWorkspaces,
     listSessions,
     createProject,
+    prepareProjectCreation,
+    finalizeProjectCreation,
+    cancelProjectCreation,
     createWorkspace,
     deleteProject,
     attachSession,

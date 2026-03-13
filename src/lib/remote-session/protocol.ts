@@ -30,6 +30,10 @@ export type {
   SessionLinearIssueSummary,
   WorkspaceSource,
 } from "../../types/lifecycle.js";
+export type {
+  ConfirmStepResult,
+  SpacesBundle,
+} from '../../types/bundle.js';
 
 // Re-export attached mode control types from tmux-lite
 // These are used in attached mode for resize/detach/attach-init
@@ -126,6 +130,34 @@ export interface CreateProjectRequest {
   projectName?: string;
   baseBranch?: string;
   setCurrent?: boolean;
+}
+
+/** Prepare a project clone and inspect bundle onboarding before finalizing */
+export interface PrepareProjectCreationRequest {
+  type: 'prepare_project_creation';
+  repository: string;
+  projectName?: string;
+  baseBranch?: string;
+  setCurrent?: boolean;
+}
+
+/** Finalize a prepared project after onboarding values have been collected */
+export interface FinalizeProjectCreationRequest {
+  type: 'finalize_project_creation';
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: import('../../types/bundle.js').SpacesBundle;
+  inputValues?: Record<string, string>;
+  secretValues?: Record<string, string>;
+  confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>;
+  setCurrent?: boolean;
+}
+
+/** Cancel an in-progress prepared project creation */
+export interface CancelProjectCreationRequest {
+  type: 'cancel_project_creation';
+  projectName: string;
 }
 
 /** Create a workspace in an existing project */
@@ -336,12 +368,28 @@ export interface LinearIssueListResponse {
   issues: import("../../types/lifecycle.js").SessionLinearIssueSummary[];
 }
 
+/** Prepared project clone with optional bundle onboarding requirements */
+export interface ProjectCreationPreparedResponse {
+  type: 'project_creation_prepared';
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: import('../../types/bundle.js').SpacesBundle;
+  confirmStatuses?: Record<string, 'found' | 'missing'>;
+}
+
 /** Project created successfully */
 export interface ProjectCreatedResponse {
   type: "project_created";
   projectName: string;
   repository: string;
   baseBranch: string;
+}
+
+/** Prepared project creation cancelled and cleaned up */
+export interface ProjectCreationCancelledResponse {
+  type: 'project_creation_cancelled';
+  projectName: string;
 }
 
 /** Workspace created successfully */
@@ -496,6 +544,9 @@ export type ClientToMachineMessage =
   | ListRemoteBranchesRequest
   | ListLinearIssuesRequest
   | CreateProjectRequest
+  | PrepareProjectCreationRequest
+  | FinalizeProjectCreationRequest
+  | CancelProjectCreationRequest
   | CreateWorkspaceRequest
   | DeleteProjectRequest
   | KillSessionRequest
@@ -526,7 +577,9 @@ export type MachineToClientMessage =
   | GithubRepoListResponse
   | RemoteBranchListResponse
   | LinearIssueListResponse
+  | ProjectCreationPreparedResponse
   | ProjectCreatedResponse
+  | ProjectCreationCancelledResponse
   | WorkspaceCreatedResponse
   | ProjectDeletedResponse
   | SessionKilledResponse
@@ -589,6 +642,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListRemoteBranchesRequest
   | ListLinearIssuesRequest
   | CreateProjectRequest
+  | PrepareProjectCreationRequest
+  | FinalizeProjectCreationRequest
+  | CancelProjectCreationRequest
   | CreateWorkspaceRequest
   | DeleteProjectRequest
   | GetBundleConfigStateRequest
@@ -603,6 +659,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     "list_remote_branches",
     "list_linear_issues",
     "create_project",
+    'prepare_project_creation',
+    'finalize_project_creation',
+    'cancel_project_creation',
     "create_workspace",
     "delete_project",
     'get_bundle_config_state',

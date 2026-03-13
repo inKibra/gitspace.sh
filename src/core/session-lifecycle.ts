@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   createProject,
@@ -15,10 +15,14 @@ import { listAllRepos } from './github.js';
 import { fetchUnstartedIssues, getLinearConfig } from './linear.js';
 import { deleteProjectCore } from './workspace.js';
 import { syncBundleWorkspaceState } from './bundle-refresh.js';
+import { detectBundleInRepo, loadBundleFromPath } from './bundle.js';
+import { applyProjectBundleState } from './project-lifecycle.js';
 import { SpacesError } from '../types/errors.js';
 import { extractRepoName, isValidBranchName, sanitizeForFileSystem } from '../utils/sanitize.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
+import type { ConfirmStep, ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
+import { checkCommandExists } from '../utils/deps.js';
 
 export interface SessionCreateProjectParams {
   repository: string;
@@ -31,6 +35,25 @@ export interface SessionCreateProjectResult {
   projectName: string;
   repository: string;
   baseBranch: string;
+}
+
+export interface SessionPrepareProjectResult {
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: SpacesBundle;
+  confirmStatuses?: Record<string, 'found' | 'missing'>;
+}
+
+export interface SessionFinalizeProjectParams {
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: SpacesBundle;
+  inputValues?: Record<string, string>;
+  secretValues?: Record<string, string>;
+  confirmResults?: Record<string, ConfirmStepResult>;
+  setCurrent?: boolean;
 }
 
 export interface SessionCreateWorkspaceParams {
@@ -104,6 +127,25 @@ function assertRepositoryNotTracked(repository: string): void {
       }
     }
   }
+}
+
+async function resolveConfirmStatuses(bundle: SpacesBundle | undefined): Promise<Record<string, 'found' | 'missing'> | undefined> {
+  const steps = (bundle?.onboarding ?? []).filter(
+    (step): step is ConfirmStep =>
+      step.type === 'confirm' && typeof step.checkCommand === 'string' && step.checkCommand.length > 0
+  );
+  if (!steps || steps.length === 0) {
+    return undefined;
+  }
+
+  const entries = await Promise.all(
+    steps.map(async (step) => {
+      const found = step.checkCommand ? await checkCommandExists(step.checkCommand) : false;
+      return [step.id, found ? 'found' : 'missing'] as const;
+    })
+  );
+
+  return Object.fromEntries(entries);
 }
 
 function resolveWorkspaceAndBranchNames(
@@ -215,7 +257,7 @@ export async function createProjectForSession(
 
   assertRepositoryNotTracked(repository);
 
-  const projectDir = getProjectDir(projectName);
+	const projectDir = getProjectDir(projectName);
   mkdirSync(projectDir, { recursive: true });
 
   const baseDir = getProjectBaseDir(projectName);
@@ -233,6 +275,106 @@ export async function createProjectForSession(
     repository,
     baseBranch,
   };
+}
+
+export async function prepareProjectForSession(
+  params: SessionCreateProjectParams
+): Promise<SessionPrepareProjectResult> {
+  const repository = validateRepository(params.repository);
+  const projectName = sanitizeProjectName(params.projectName?.trim() || extractRepoName(repository));
+
+  if (projectExists(projectName)) {
+    throw new SpacesError(`Project "${projectName}" already exists.`, 'USER_ERROR', 1);
+  }
+
+  assertRepositoryNotTracked(repository);
+
+  const projectDir = getProjectDir(projectName);
+  if (existsSync(projectDir)) {
+    throw new SpacesError(
+      `Project directory already exists for "${projectName}". Remove it or complete the existing setup first.`,
+      'USER_ERROR',
+      1
+    );
+  }
+
+  mkdirSync(projectDir, { recursive: true });
+
+  try {
+    const baseDir = getProjectBaseDir(projectName);
+    await cloneRepository(repository, baseDir);
+
+    const baseBranch = params.baseBranch?.trim() || (await getDefaultBranch(baseDir));
+    const bundleDir = detectBundleInRepo(baseDir);
+    const loadedBundle = bundleDir ? loadBundleFromPath(bundleDir) : null;
+
+    return {
+      projectName,
+      repository,
+      baseBranch,
+      bundle: loadedBundle?.bundle,
+      confirmStatuses: await resolveConfirmStatuses(loadedBundle?.bundle),
+    };
+  } catch (error) {
+    rmSync(projectDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function finalizePreparedProjectForSession(
+  params: SessionFinalizeProjectParams
+): Promise<SessionCreateProjectResult> {
+  const repository = validateRepository(params.repository);
+  const projectName = sanitizeProjectName(params.projectName.trim());
+
+  if (projectExists(projectName)) {
+    throw new SpacesError(`Project "${projectName}" already exists.`, 'USER_ERROR', 1);
+  }
+
+  const baseDir = getProjectBaseDir(projectName);
+  if (!existsSync(baseDir)) {
+    throw new SpacesError(
+      `Prepared project files for "${projectName}" were not found. Start project creation again.`,
+      'USER_ERROR',
+      1
+    );
+  }
+
+  createProject(projectName, repository, params.baseBranch);
+
+  if (params.bundle) {
+    await applyProjectBundleState({
+      projectName,
+      bundle: params.bundle,
+      inputValues: params.inputValues,
+      secretValues: params.secretValues,
+      confirmResults: params.confirmResults,
+    });
+  }
+
+  if (params.setCurrent ?? true) {
+    setCurrentProject(projectName);
+  }
+
+  return {
+    projectName,
+    repository,
+    baseBranch: params.baseBranch,
+  };
+}
+
+export async function cancelPreparedProjectForSession(projectNameInput: string): Promise<void> {
+  const projectName = sanitizeProjectName(projectNameInput.trim());
+  if (projectExists(projectName)) {
+    throw new SpacesError(`Project "${projectName}" already exists.`, 'USER_ERROR', 1);
+  }
+
+  const projectDir = getProjectDir(projectName);
+  if (!existsSync(projectDir)) {
+    return;
+  }
+
+  rmSync(projectDir, { recursive: true, force: true });
 }
 
 export async function createWorkspaceForSession(
