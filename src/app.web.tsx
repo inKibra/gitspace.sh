@@ -1581,10 +1581,17 @@ export default function App() {
                   This usually means the browser identity is not the relay owner identity, or the relay is connected but not authorized to show any machines for this identity.
                 </p>
                 <button
-                  onClick={relay.refreshMachines}
+                  onClick={() => {
+                    if (machineListProps.status === 'disconnected') {
+                      void relay.connect();
+                      return;
+                    }
+
+                    relay.refreshMachines();
+                  }}
                   className="px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg min-h-[48px] text-[#e6edf3]"
                 >
-                  Retry
+                  {machineListProps.status === 'disconnected' ? 'Reconnect' : 'Retry'}
                 </button>
               </div>
             </div>
