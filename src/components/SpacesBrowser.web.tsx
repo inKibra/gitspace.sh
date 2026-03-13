@@ -611,6 +611,9 @@ function ActionButton({
         event.stopPropagation();
         onClick();
       }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+      }}
       title={title}
       className={`px-2.5 py-1.5 rounded border text-xs min-h-[36px] ${toneClass}`}
     >

@@ -257,7 +257,7 @@ export async function createProjectForSession(
 
   assertRepositoryNotTracked(repository);
 
-  const projectDir = getProjectDir(projectName);
+	const projectDir = getProjectDir(projectName);
   mkdirSync(projectDir, { recursive: true });
 
   const baseDir = getProjectBaseDir(projectName);
@@ -289,7 +289,7 @@ export async function prepareProjectForSession(
 
   assertRepositoryNotTracked(repository);
 
-    const projectDir = getProjectDir(projectName);
+  const projectDir = getProjectDir(projectName);
   if (existsSync(projectDir)) {
     throw new SpacesError(
       `Project directory already exists for "${projectName}". Remove it or complete the existing setup first.`,

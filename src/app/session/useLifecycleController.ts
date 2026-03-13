@@ -254,8 +254,12 @@ export function useLifecycleController(
 
     const startOnboardingFlow = (prepared: PreparedProjectResult) => {
       const onboardingSteps = prepared.bundle?.onboarding ?? [];
-      if (!finalizeProjectCreation || onboardingSteps.length === 0) {
+      if (onboardingSteps.length === 0) {
         return false;
+      }
+
+      if (!finalizeProjectCreation || !cancelProjectCreation) {
+        throw new Error('Project onboarding requires prepare, finalize, and cancel support');
       }
 
       flow.showWizard({
@@ -349,7 +353,7 @@ export function useLifecycleController(
           });
 
           try {
-            if (prepareProjectCreation && finalizeProjectCreation) {
+            if (prepareProjectCreation && finalizeProjectCreation && cancelProjectCreation) {
               const prepared = await prepareProjectCreation({ repository: repo, projectName });
               if (startOnboardingFlow(prepared)) {
                 return;
