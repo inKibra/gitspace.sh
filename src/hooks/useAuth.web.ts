@@ -10,7 +10,7 @@
  * The token is used for API calls (identity backup fetch, etc.).
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 
 const AUTH_TOKEN_KEY = 'gssh.auth.token.v1';
 const API_BASE = 'https://api.gitspace.sh';
@@ -64,7 +64,11 @@ function consumeCallbackToken(): string | null {
 function consumeAndPersistCallbackToken(): string | null {
   const callbackToken = consumeCallbackToken();
   if (callbackToken) {
-    localStorage.setItem(AUTH_TOKEN_KEY, callbackToken);
+    try {
+      localStorage.setItem(AUTH_TOKEN_KEY, callbackToken);
+    } catch {
+      return callbackToken;
+    }
     return callbackToken;
   }
   return getStoredToken();
@@ -80,7 +84,9 @@ export function useAuth() {
    * Start the GitHub OAuth redirect flow.
    */
   const startLogin = useCallback(() => {
-    const returnTo = encodeURIComponent(window.location.origin);
+    const returnTo = encodeURIComponent(
+      `${window.location.origin}${window.location.pathname}${window.location.search}`,
+    );
     window.location.href = `${API_BASE}/auth/github?return_to=${returnTo}`;
   }, []);
 
@@ -96,7 +102,7 @@ export function useAuth() {
    * Make an authenticated fetch request to the API.
    */
   const fetchWithAuth = useCallback(async (path: string, init?: RequestInit): Promise<Response> => {
-    const token = getStoredToken();
+    const token = state.token ?? getStoredToken();
     if (!token) {
       throw new Error('Not authenticated');
     }
@@ -108,7 +114,7 @@ export function useAuth() {
         Authorization: `Bearer ${token}`,
       },
     });
-  }, []);
+  }, [state.token]);
 
   return {
     token: state.token,

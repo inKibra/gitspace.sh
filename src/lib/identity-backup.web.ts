@@ -7,6 +7,8 @@
  */
 
 const API_BASE = 'https://api.gitspace.sh';
+const PBKDF2_MIN_ACCEPTED_ITERATIONS = 100_000;
+const PBKDF2_MAX_ACCEPTED_ITERATIONS = 1_000_000;
 
 export interface CloudBackupEnvelope {
   version: 1;
@@ -96,6 +98,14 @@ export async function decryptBackupEnvelope(
 ): Promise<string> {
   if (envelope.algorithm !== 'PBKDF2-AES-GCM') {
     throw new Error(`Unsupported backup algorithm: ${envelope.algorithm}`);
+  }
+
+  if (
+    !Number.isSafeInteger(envelope.iterations)
+    || envelope.iterations < PBKDF2_MIN_ACCEPTED_ITERATIONS
+    || envelope.iterations > PBKDF2_MAX_ACCEPTED_ITERATIONS
+  ) {
+    throw new Error('Cloud backup payload uses unsupported key derivation parameters.');
   }
 
   const salt = base64ToBytes(envelope.salt);

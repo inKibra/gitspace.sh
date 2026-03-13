@@ -13,16 +13,18 @@ const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
 
 /**
- * Validate a return_to URL is a trusted origin (*.gitspace.sh or localhost dev).
- * Returns the validated origin or null.
+ * Validate a return_to URL is a trusted web app URL.
+ * Returns the validated URL without any hash fragment, or null.
  */
 function validateReturnTo(returnTo: string | undefined): string | null {
   if (!returnTo) return null;
   try {
     const url = new URL(returnTo);
-    if (url.origin === 'http://localhost:5173') return url.origin;
-    if (url.protocol === 'https:' && /^[a-z0-9-]+\.gitspace\.sh$/.test(url.hostname)) {
-      return url.origin;
+    const isLocalDev = url.origin === 'http://localhost:5173';
+    const isGitspaceWeb = url.protocol === 'https:'
+      && (url.hostname === 'gitspace.sh' || /^[a-z0-9-]+\.gitspace\.sh$/.test(url.hostname));
+    if (isLocalDev || isGitspaceWeb) {
+      return `${url.origin}${url.pathname}${url.search}`;
     }
     return null;
   } catch {
@@ -174,10 +176,12 @@ app.get('/github/callback', async (c) => {
       ).run();
 
       // Clear the state cookie and redirect with token in fragment
+      const returnToUrl = new URL(returnTo);
+      returnToUrl.hash = `token=${tokenPlain}`;
       return new Response(null, {
         status: 302,
         headers: {
-          Location: `${returnTo}/#token=${tokenPlain}`,
+          Location: returnToUrl.toString(),
           'Set-Cookie': `${OAUTH_STATE_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
         },
       });

@@ -150,6 +150,8 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
         throw new Error('Decrypted data is not a valid mnemonic.');
       }
       pendingMnemonicRef.current = normalized;
+      setPasswordValue('');
+      setMnemonicValue('');
       setStep('create-pin');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Decryption failed');
@@ -170,6 +172,8 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
     }
 
     pendingMnemonicRef.current = normalized;
+    setMnemonicValue('');
+    setPasswordValue('');
     setStep('create-pin');
   }, [mnemonicValue]);
 
@@ -198,6 +202,8 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
       await storeMnemonic(pendingMnemonicRef.current, newPinValue);
       // Clear sensitive data from memory
       pendingMnemonicRef.current = null;
+      setPasswordValue('');
+      setMnemonicValue('');
       setNewPinValue('');
       setConfirmPinValue('');
       completeWithIdentity();
