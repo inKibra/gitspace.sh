@@ -181,8 +181,11 @@ async function discoverRelayCandidates(hostConfig: HostConfig | null): Promise<R
 		includeLocalRelay: true,
 		includeCachedRelay: false,
 	});
-	const healthChecks = await Promise.all(candidates.map((candidate) => isRelayHealthy(candidate.url)));
-	return candidates.filter((_, index) => healthChecks[index]);
+	const localCandidates = candidates.filter((candidate) => candidate.source === 'local');
+	const remoteCandidates = candidates.filter((candidate) => candidate.source !== 'local');
+	const localHealthChecks = await Promise.all(localCandidates.map((candidate) => isRelayHealthy(candidate.url)));
+	const healthyLocalCandidates = localCandidates.filter((_, index) => localHealthChecks[index]);
+	return [...healthyLocalCandidates, ...remoteCandidates];
 }
 
 async function resolveRelayUrlForServe(

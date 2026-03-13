@@ -84,6 +84,11 @@ function normalizeExpectedProjectName(projectName: string | undefined, repositor
 	return sanitizeForFileSystem(candidate) || candidate;
 }
 
+function normalizeProjectName(projectName: string): string {
+	const trimmed = projectName.trim();
+	return sanitizeForFileSystem(trimmed) || trimmed;
+}
+
 interface RelayDataMessage {
   type: 'data';
   data: string;
@@ -668,7 +673,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {
-    if (this.pendingCreateProject) {
+    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
       throw new Error('Project creation request already in progress');
     }
 
@@ -712,7 +717,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
-    if (this.pendingPrepareProject) {
+    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
       throw new Error('Project preparation request already in progress');
     }
 
@@ -756,7 +761,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
-    if (this.pendingCreateProject) {
+    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
       throw new Error('Project creation request already in progress');
     }
 
@@ -771,6 +776,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       confirmResults: params.confirmResults,
       setCurrent: params.setCurrent,
     };
+    const expectedProjectName = normalizeExpectedProjectName(params.projectName, params.repository);
 
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -784,7 +790,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
       this.pendingCreateProject = {
-        projectName: params.projectName,
+        projectName: expectedProjectName,
         resolve,
         reject,
         timeout,
@@ -803,9 +809,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async cancelProjectCreation(projectName: string): Promise<void> {
-    if (this.pendingCancelProject) {
+    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
       throw new Error('Project cancellation request already in progress');
     }
+
+    const expectedProjectName = normalizeProjectName(projectName);
 
     const command: CancelProjectCreationRequest = {
       type: 'cancel_project_creation',
@@ -815,16 +823,16 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const pending = this.pendingCancelProject;
-        if (!pending || pending.projectName !== projectName) {
+        if (!pending || pending.projectName !== expectedProjectName) {
           return;
         }
 
         this.pendingCancelProject = null;
-        pending.reject(new Error(`Timed out waiting for project cancellation response (${projectName})`));
+        pending.reject(new Error(`Timed out waiting for project cancellation response (${expectedProjectName})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
       this.pendingCancelProject = {
-        projectName,
+        projectName: expectedProjectName,
         resolve,
         reject,
         timeout,

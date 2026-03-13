@@ -41,14 +41,14 @@ export function FlowWeb({ flow }: FlowWebProps) {
 
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (
+      const isTypingField = (
         target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement
         || target?.isContentEditable
-      ) {
-        if (e.key !== 'Escape') {
-          return;
-        }
+      );
+
+      if (isTypingField && e.key !== 'Escape' && e.key !== 'Enter') {
+        return;
       }
 
       if (e.key === 'Escape') {
@@ -57,19 +57,19 @@ export function FlowWeb({ flow }: FlowWebProps) {
       } else if (e.key === 'Enter') {
         e.preventDefault();
         handleConfirm();
-      } else if (e.key === 'ArrowUp' || e.key === 'k') {
+      } else if (!isTypingField && (e.key === 'ArrowUp' || e.key === 'k')) {
         e.preventDefault();
         moveUp();
-      } else if (e.key === 'ArrowDown' || e.key === 'j') {
+      } else if (!isTypingField && (e.key === 'ArrowDown' || e.key === 'j')) {
         e.preventDefault();
         moveDown();
-      } else if (state.type === 'confirm' && (e.key === 'y' || e.key === 'Y')) {
+      } else if (!isTypingField && state.type === 'confirm' && (e.key === 'y' || e.key === 'Y')) {
         e.preventDefault();
         handleConfirm();
-      } else if (state.type === 'confirm' && (e.key === 'n' || e.key === 'N')) {
+      } else if (!isTypingField && state.type === 'confirm' && (e.key === 'n' || e.key === 'N')) {
         e.preventDefault();
         handleCancel();
-      } else if ((state.type === 'message' || state.type === 'confirm') && (e.key === 'c' || e.key === 'C')) {
+      } else if (!isTypingField && (state.type === 'message' || state.type === 'confirm') && (e.key === 'c' || e.key === 'C')) {
         e.preventDefault();
         copyCurrentMessage();
       }
@@ -291,13 +291,13 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
                 No matches for "{state.searchQuery ?? ''}".
               </div>
             )}
-            {visibleOptions.map(({ option }, idx) => {
-              const isSelected = idx === state.selectedIndex;
+            {visibleOptions.map(({ option, index }) => {
+              const isSelected = index === state.selectedIndex;
               return (
                 <div
-                  key={idx}
+                  key={index}
                   onClick={() => {
-                    flow.handleSelect(idx);
+                    flow.handleSelect(index);
                     flow.handleConfirm();
                   }}
                   className={`p-4 rounded-lg cursor-pointer min-h-[52px] border ${

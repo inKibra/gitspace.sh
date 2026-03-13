@@ -9,6 +9,7 @@ import type {
 } from '../../session/backend.js';
 import type { ConfirmStepResult, OnboardingStep } from '../../types/bundle.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../../types/lifecycle.js';
+import { logger } from '../../utils/logger.js';
 import {
   extractRepoName,
   generateWorkspaceName,
@@ -137,7 +138,7 @@ function toWizardSteps(
       title: step.title,
       type: step.type,
       description: step.description,
-      defaultValue: step.type === 'input' ? step.defaultValue : '',
+      defaultValue: step.type === 'input' ? step.defaultValue : undefined,
       validation: buildOnboardingValidation(step),
     };
   });
@@ -262,7 +263,10 @@ export function useLifecycleController(
         steps: toWizardSteps(onboardingSteps, prepared.confirmStatuses),
         onCancel: () => {
           if (cancelProjectCreation) {
-            void cancelProjectCreation(prepared.projectName).catch(() => undefined);
+            void cancelProjectCreation(prepared.projectName).catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              logger.error(`[lifecycle] Failed to cancel project creation for ${prepared.projectName}: ${message}`);
+            });
           }
         },
         onComplete: async (values) => {

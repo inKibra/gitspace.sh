@@ -613,11 +613,15 @@ export default function App() {
       : [],
     [selectedProjectName, terminal.workspaces]
   );
+  const filteredWorkspaceIds = useMemo(
+    () => new Set(filteredWorkspaces.map((workspace) => workspace.id)),
+    [filteredWorkspaces]
+  );
   const filteredSessions = useMemo(
     () => selectedProjectName
-      ? terminal.sessions.filter((session) => session.workspaceId.startsWith(`${selectedProjectName}:`))
+      ? terminal.sessions.filter((session) => filteredWorkspaceIds.has(session.workspaceId))
       : [],
-    [selectedProjectName, terminal.sessions]
+    [filteredWorkspaceIds, selectedProjectName, terminal.sessions]
   );
 
   // Spaces browser hook
@@ -655,8 +659,8 @@ export default function App() {
   }, [flow]);
 
   const handleOpenCreateMenu = useCallback(() => {
-    lifecycleController.openCreateMenu(selectedProjectName ?? terminal.selectedProjectName);
-  }, [lifecycleController, selectedProjectName, terminal.selectedProjectName]);
+    lifecycleController.openCreateMenu(selectedProjectName);
+  }, [lifecycleController, selectedProjectName]);
 
   const handleCreateWorkspaceForProject = useCallback((projectName: string) => {
     lifecycleController.openCreateWorkspaceFlow(projectName);

@@ -308,12 +308,12 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   const relayStatusLabel = relayConfig?.label ?? relayConfig?.url;
   const machineListStatusHint = relayConfig
     ? remoteMachines.status === 'connecting'
-      ? `relay: connecting to ${relayStatusLabel ?? relayConfig.url}`
+      ? `relay: connecting to ${relayStatusLabel}`
       : remoteMachines.status === 'connected'
-        ? `relay: ${relayStatusLabel ?? relayConfig.url}`
+        ? `relay: ${relayStatusLabel}`
         : remoteMachines.status === 'error'
           ? `relay unavailable - local access still works`
-          : `relay: ${relayStatusLabel ?? relayConfig.url}`
+          : `relay: ${relayStatusLabel}`
     : 'local only';
 
   const isLocalMachineContext = !isRemoteMode || state.selectedMachine?.machineId === 'local';

@@ -10,6 +10,10 @@ import type { TreeItem, UseSpacesBrowserReturn } from './SpacesBrowser.js';
 import { formatTime } from './SpacesBrowser.js';
 import type { WorkspaceInfo } from '../lib/remote-session/protocol.js';
 
+function isActivateKey(key: string): boolean {
+  return key === 'Enter' || key === ' ';
+}
+
 export interface SpacesBrowserWebProps extends UseSpacesBrowserReturn {
   onReview?: (workspace: WorkspaceInfo) => void;
   onCreate?: () => void;
@@ -127,6 +131,16 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   e.stopPropagation();
                   void activateIndex(index);
                 }}
+                onKeyDown={(e) => {
+                  if (!isActivateKey(e.key)) {
+                    return;
+                  }
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                role="button"
+                tabIndex={0}
                 className={
                   `px-4 py-3 text-xs uppercase tracking-wide border-b border-[#30363d] min-h-[52px] flex items-center justify-between gap-3 cursor-pointer ${
                     isSelected
@@ -167,6 +181,16 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   e.stopPropagation();
                   void activateIndex(index);
                 }}
+                onKeyDown={(e) => {
+                  if (!isActivateKey(e.key)) {
+                    return;
+                  }
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                role="button"
+                tabIndex={0}
                 className={`
                   px-4 py-4 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[56px] gap-3
                   ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
@@ -222,6 +246,16 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   e.stopPropagation();
                   void activateIndex(index);
                 }}
+                onKeyDown={(e) => {
+                  if (!isActivateKey(e.key)) {
+                    return;
+                  }
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                role="button"
+                tabIndex={0}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px] gap-3
                   ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
@@ -266,6 +300,16 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   e.stopPropagation();
                   void activateIndex(index);
                 }}
+                onKeyDown={(e) => {
+                  if (!isActivateKey(e.key)) {
+                    return;
+                  }
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                role="button"
+                tabIndex={0}
                 className={`
                   pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px] gap-3
                   ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
@@ -421,6 +465,7 @@ function Header({
       <div className="flex items-center gap-3 min-w-0 flex-1">
         <button
           onClick={onBack}
+          aria-label="Back"
           className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
         >
           ← <span className="hidden sm:inline ml-1">Back</span>
@@ -446,6 +491,7 @@ function Header({
         {onHelp && (
           <button
             onClick={onHelp}
+            aria-label="Help"
             className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
           >
             ? <span className="hidden sm:inline ml-1">Help</span>
@@ -454,6 +500,7 @@ function Header({
         {onCreate && (
           <button
             onClick={onCreate}
+            aria-label="New workspace or project"
             className="px-3 py-2 text-sm bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] rounded text-[#0d1117] font-medium min-h-[44px] shadow-glow"
           >
             + <span className="hidden sm:inline ml-1">New</span>
@@ -468,6 +515,7 @@ function Header({
         {onDisconnect && (
           <button
             onClick={onDisconnect}
+            aria-label="Disconnect"
             className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
           >
             <span className="hidden sm:inline">Disconnect</span>
@@ -605,6 +653,16 @@ function SimpleTreeRow({
         e.stopPropagation();
         void onActivate(index);
       }}
+      onKeyDown={(e) => {
+        if (!isActivateKey(e.key)) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        void onActivate(index);
+      }}
+      role="button"
+      tabIndex={0}
       className={`
         pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
         ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
