@@ -66,6 +66,10 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
   // Initial check: do we have a stored mnemonic or an auth token?
   // ================================================================
   useEffect(() => {
+    // Only run during the initial check phase — don't clobber user progress
+    // if auth state changes while they're mid-flow (e.g. at create-pin).
+    if (step !== 'checking') return;
+
     if (hasStoredMnemonic()) {
       setStep('unlock-pin');
       return;
@@ -78,7 +82,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
     }
 
     setStep('login');
-  }, [auth.isLoggedIn]);
+  }, [auth.isLoggedIn, step]);
 
   // ================================================================
   // When step transitions to fetching-backup, auto-fetch
