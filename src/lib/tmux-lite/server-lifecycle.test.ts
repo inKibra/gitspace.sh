@@ -8,18 +8,49 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { spawn } from "bun";
 import { existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
+import { applyTmuxLiteSandboxEnvironment, getTmuxLitePathsForSandbox } from "./protocol";
+import { createSession, killServer, listSessions } from "./cli";
 
 // Use the same paths as --test mode in cli.ts and server.ts
 const TEST_SOCKET = "/tmp/tmux-lite-test.sock";
 const TEST_SESSION_DIR = "/tmp/tmux-lite-test";
 const CLI_SCRIPT = join(import.meta.dir, "cli.ts");
+const TMUX_ENV_KEYS = [
+  "TMUX_LITE_SANDBOX",
+  "TMUX_LITE_SOCKET",
+  "TMUX_LITE_SESSION_DIR",
+  "TMUX_LITE_PID_FILE",
+  "TMUX_LITE_REPLAY_DIR",
+] as const;
+
+function captureTmuxEnv(): Record<(typeof TMUX_ENV_KEYS)[number], string | undefined> {
+  return Object.fromEntries(TMUX_ENV_KEYS.map((key) => [key, process.env[key]])) as Record<(typeof TMUX_ENV_KEYS)[number], string | undefined>;
+}
+
+function restoreTmuxEnv(env: Record<(typeof TMUX_ENV_KEYS)[number], string | undefined>): void {
+  for (const key of TMUX_ENV_KEYS) {
+    const value = env[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+function cleanupSandbox(name: string): void {
+  const paths = getTmuxLitePathsForSandbox(name);
+  try { unlinkSync(paths.routerSocket); } catch {}
+  try { unlinkSync(paths.pidFile); } catch {}
+  try { rmSync(paths.sessionDir, { recursive: true, force: true }); } catch {}
+}
 
 /**
  * Helper to run CLI commands in test mode
  */
-async function runCli(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
-    cmd: ["bun", "run", CLI_SCRIPT, command, "--test"],
+    cmd: ["bun", "run", CLI_SCRIPT, ...args],
     stdout: "pipe",
     stderr: "pipe",
     env: {
@@ -45,7 +76,7 @@ async function isServerRunning(): Promise<boolean> {
   if (!existsSync(TEST_SOCKET)) return false;
 
   try {
-    const result = await runCli("list");
+    const result = await runCli(["list", "--test"]);
     // If we can list sessions, server is running
     return result.exitCode === 0;
   } catch {
@@ -87,7 +118,7 @@ describe("tmux-lite server lifecycle", () => {
   afterEach(async () => {
     // Kill server if still running and cleanup
     try {
-      await runCli("kill-server");
+      await runCli(["kill-server", "--test"]);
       await Bun.sleep(200); // Wait for cleanup
     } catch {}
     forceCleanup();
@@ -99,7 +130,7 @@ describe("tmux-lite server lifecycle", () => {
       expect(existsSync(TEST_SOCKET)).toBe(false);
 
       // Start server by running any command (list auto-starts)
-      const result = await runCli("list");
+      const result = await runCli(["list", "--test"]);
 
       // Wait for server to be ready
       const started = await waitFor(async () => existsSync(TEST_SOCKET));
@@ -112,11 +143,11 @@ describe("tmux-lite server lifecycle", () => {
 
     it("should not fail if server is already running", async () => {
       // Start server first time
-      await runCli("list");
+      await runCli(["list", "--test"]);
       await waitFor(async () => existsSync(TEST_SOCKET));
 
       // Run another command - should not fail
-      const result = await runCli("list");
+      const result = await runCli(["list", "--test"]);
       expect(result.exitCode).toBe(0);
     });
   });
@@ -124,12 +155,12 @@ describe("tmux-lite server lifecycle", () => {
   describe("server stop", () => {
     it("should stop server and remove socket file", async () => {
       // Start server
-      await runCli("list");
+      await runCli(["list", "--test"]);
       await waitFor(async () => existsSync(TEST_SOCKET));
       expect(existsSync(TEST_SOCKET)).toBe(true);
 
       // Stop server
-      await runCli("kill-server");
+      await runCli(["kill-server", "--test"]);
 
       // Wait for socket to be cleaned up
       const cleaned = await waitFor(async () => !existsSync(TEST_SOCKET), 2000);
@@ -144,7 +175,7 @@ describe("tmux-lite server lifecycle", () => {
       expect(existsSync(TEST_SOCKET)).toBe(false);
 
       // Stop should handle gracefully
-      const result = await runCli("kill-server");
+      const result = await runCli(["kill-server", "--test"]);
       // CLI shows "Server not running" but exits cleanly
       expect(result.exitCode).toBe(0);
     });
@@ -155,18 +186,18 @@ describe("tmux-lite server lifecycle", () => {
       // This is the main regression test for the socket cleanup fix
 
       // Start server
-      await runCli("list");
+      await runCli(["list", "--test"]);
       const started1 = await waitFor(async () => existsSync(TEST_SOCKET));
       expect(started1).toBe(true);
 
       // Stop server
-      await runCli("kill-server");
+      await runCli(["kill-server", "--test"]);
       const stopped = await waitFor(async () => !existsSync(TEST_SOCKET), 2000);
       expect(stopped).toBe(true);
 
       // Start server again - THIS WAS FAILING before the fix
       // because the socket file wasn't being cleaned up
-      await runCli("list");
+      await runCli(["list", "--test"]);
       const started2 = await waitFor(async () => existsSync(TEST_SOCKET));
       expect(started2).toBe(true);
 
@@ -178,7 +209,7 @@ describe("tmux-lite server lifecycle", () => {
     it("should handle multiple restart cycles", async () => {
       for (let i = 0; i < 3; i++) {
         // Start
-        await runCli("list");
+        await runCli(["list", "--test"]);
         const started = await waitFor(async () => existsSync(TEST_SOCKET));
         expect(started).toBe(true);
 
@@ -187,7 +218,7 @@ describe("tmux-lite server lifecycle", () => {
         expect(running).toBe(true);
 
         // Stop
-        await runCli("kill-server");
+        await runCli(["kill-server", "--test"]);
         const stopped = await waitFor(async () => !existsSync(TEST_SOCKET), 2000);
         expect(stopped).toBe(true);
       }
@@ -201,12 +232,66 @@ describe("tmux-lite server lifecycle", () => {
       expect(existsSync(TEST_SOCKET)).toBe(true);
 
       // Start server - should clean up stale socket and start fresh
-      await runCli("list");
+      await runCli(["list", "--test"]);
       const started = await waitFor(async () => {
         // Socket exists AND server responds
         return await isServerRunning();
       });
       expect(started).toBe(true);
+    });
+  });
+
+  describe("sandbox isolation", () => {
+    it("should start isolated servers for different sandboxes", async () => {
+      const sandboxA = "lifecycle-a";
+      const sandboxB = "lifecycle-b";
+      const pathsA = getTmuxLitePathsForSandbox(sandboxA);
+      const pathsB = getTmuxLitePathsForSandbox(sandboxB);
+
+      cleanupSandbox(sandboxA);
+      cleanupSandbox(sandboxB);
+
+      try {
+        await runCli(["list", `--sandbox=${sandboxA}`]);
+        await runCli(["list", `--sandbox=${sandboxB}`]);
+
+        const started = await waitFor(async () => existsSync(pathsA.routerSocket) && existsSync(pathsB.routerSocket));
+        expect(started).toBe(true);
+        expect(pathsA.routerSocket).not.toBe(pathsB.routerSocket);
+        expect(pathsA.sessionDir).not.toBe(pathsB.sessionDir);
+      } finally {
+        try { await runCli(["kill-server", `--sandbox=${sandboxA}`]); } catch {}
+        try { await runCli(["kill-server", `--sandbox=${sandboxB}`]); } catch {}
+        cleanupSandbox(sandboxA);
+        cleanupSandbox(sandboxB);
+      }
+    });
+  });
+
+  describe("session socket cleanup", () => {
+    it("should remove the per-session socket after process exit", async () => {
+      const sandbox = "session-cleanup";
+      const previousEnv = captureTmuxEnv();
+      cleanupSandbox(sandbox);
+      applyTmuxLiteSandboxEnvironment(sandbox);
+
+      try {
+        const session = await createSession("cleanup-check", process.cwd(), {
+          command: "/bin/sh",
+          args: ["-lc", "printf 'cleanup-check'; exit 0"],
+        });
+
+        const created = await waitFor(async () => existsSync(session.socketPath));
+        expect(created).toBe(true);
+
+        const removed = await waitFor(async () => !existsSync(session.socketPath), 5000);
+        expect(removed).toBe(true);
+        expect(await listSessions()).toEqual([]);
+      } finally {
+        try { await killServer(); } catch {}
+        cleanupSandbox(sandbox);
+        restoreTmuxEnv(previousEnv);
+      }
     });
   });
 });

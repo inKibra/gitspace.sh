@@ -124,6 +124,7 @@ let initializePromise: Promise<void> | null = null;
 let syncContext: InitializedOwnerSyncContext | null = null;
 let pushQueue: Promise<void> = Promise.resolve();
 let relayUnavailableWarningShown = false;
+let writeHandlerInstalled = false;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -1250,6 +1251,14 @@ async function onCategoryDirty(category: SyncCategory): Promise<void> {
   addDirtyCategory(state, category);
   writeStateFile(state);
 
+  if (!initialized) {
+    try {
+      await initializeOwnerSync();
+    } catch {
+      return;
+    }
+  }
+
   if (!syncContext) {
     return;
   }
@@ -1276,6 +1285,8 @@ async function onCategoryDirty(category: SyncCategory): Promise<void> {
 }
 
 export async function initializeOwnerSync(): Promise<void> {
+  installOwnerSyncWriteHandler();
+
   if (initialized) {
     return;
   }
@@ -1286,8 +1297,6 @@ export async function initializeOwnerSync(): Promise<void> {
   }
 
   initializePromise = (async () => {
-    setOwnerSyncWriteHandler((category) => onCategoryDirty(category));
-
     syncContext = await initializeContext();
     if (!syncContext) {
       initialized = true;
@@ -1310,11 +1319,21 @@ export async function initializeOwnerSync(): Promise<void> {
   }
 }
 
+export function installOwnerSyncWriteHandler(): void {
+  if (writeHandlerInstalled) {
+    return;
+  }
+
+  setOwnerSyncWriteHandler((category) => onCategoryDirty(category));
+  writeHandlerInstalled = true;
+}
+
 export function resetOwnerSyncForTests(): void {
   initialized = false;
   initializePromise = null;
   syncContext = null;
   pushQueue = Promise.resolve();
   relayUnavailableWarningShown = false;
+  writeHandlerInstalled = false;
   setOwnerSyncWriteHandler(null);
 }

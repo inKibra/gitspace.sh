@@ -293,6 +293,46 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'replay') {
+            const replay = item.replay;
+            const tone = replay.status === 'crashed' ? 'text-[#ff7b72]' : 'text-[#79c0ff]';
+            return (
+              <div
+                key={`replay-${replay.replayId}`}
+                ref={isSelected ? selectedRowRef : null}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                onKeyDown={(e) => {
+                  if (!isActivateKey(e.key)) {
+                    return;
+                  }
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                role="button"
+                tabIndex={0}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px] gap-3
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <span className={`${tone} flex-shrink-0`}>↺</span>
+                  <div className="min-w-0 flex-1">
+                    <span className="text-[#8b949e] truncate block">{replay.sessionName}</span>
+                    <span className={`text-xs truncate block ${tone}`}>{replay.status === 'crashed' ? 'crashed replay' : 'ghost replay'}</span>
+                  </div>
+                </div>
+                <div className="text-xs text-[#6e7681] hidden sm:block">
+                  {formatTime(replay.endedAt ?? replay.startedAt)}
+                </div>
+              </div>
+            );
+          }
+
           if (item.type === 'process') {
             const statusIcon = item.status === 'running' ? '▶' : item.status === 'failed' ? '✗' : '■';
             const statusColor = item.status === 'running' ? 'text-[#3fb950]' : item.status === 'failed' ? 'text-[#f85149]' : 'text-[#8b949e]';
@@ -580,6 +620,13 @@ function getFooterHint(selectedItem: TreeItem | null, hasVisibleActions: boolean
     return {
       desktop: ['Enter Attach', 'Kill Session', 'i Inbox', '? Help'],
       mobile: 'Tap to attach • Use Kill to end a session',
+    };
+  }
+
+  if (selectedItem?.type === 'replay') {
+    return {
+      desktop: ['Enter Replay', 'r Refresh', '? Help'],
+      mobile: 'Tap to open replay',
     };
   }
 

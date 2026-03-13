@@ -1,5 +1,6 @@
 import type { NotificationConfig } from '../notifications/types.js';
 import type { BackendEvent } from './events.js';
+import type { ReplayInfo, TerminalSnapshot } from '../lib/tmux-lite/replay/index.js';
 import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
@@ -108,6 +109,7 @@ export interface SessionBackend {
   listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]>;
   listWorkspaces(): Promise<void>;
   listSessions(workspaceId?: string): Promise<void>;
+  listReplays?(workspaceId?: string): Promise<void>;
 
   createProject(params: CreateProjectParams): Promise<void>;
   prepareProjectCreation?(params: CreateProjectParams): Promise<PreparedProjectResult>;
@@ -154,6 +156,24 @@ export interface SessionBackend {
 
   writePtyData?(data: Uint8Array): Promise<void>;
   resizePty?(cols: number, rows: number): Promise<void>;
+  createCheckpoint?(sessionId: string): Promise<void>;
+  getReplaySnapshot?(replayId: string, atMs?: number, scrollbackLines?: number): Promise<TerminalSnapshot>;
+  getReplayText?(
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+    includeScrollback?: boolean,
+    trimTrailingBlankRows?: boolean,
+  ): Promise<string>;
+  getReplayMarkdown?(
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+    includeScrollback?: boolean,
+    trimTrailingBlankRows?: boolean,
+  ): Promise<string>;
 
   onEvent(handler: (event: BackendEvent) => void): () => void;
 }
+
+export type { ReplayInfo, TerminalSnapshot };

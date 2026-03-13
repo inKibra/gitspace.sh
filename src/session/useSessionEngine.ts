@@ -78,6 +78,9 @@ export function useSessionEngine() {
         case 'sessions':
           dispatch({ type: 'SET_SESSIONS', backendKey, sessions: event.sessions });
           break;
+        case 'replays':
+          dispatch({ type: 'SET_REPLAYS', backendKey, replays: event.replays });
+          break;
         case 'inbox':
           dispatch({
             type: 'SET_INBOX',
@@ -272,6 +275,15 @@ export function useSessionEngine() {
 
   const listSessions = useCallback(async (backendKey: BackendKey, workspaceId?: string) => {
     await withBackend(backendKey, (backend) => backend.listSessions(workspaceId));
+  }, [withBackend]);
+
+  const listReplays = useCallback(async (backendKey: BackendKey, workspaceId?: string) => {
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.listReplays) {
+        throw new SpacesError('Replay listing is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      await backend.listReplays(workspaceId);
+    });
   }, [withBackend]);
 
   const createProject = useCallback(async (backendKey: BackendKey, params: CreateProjectParams) => {
@@ -538,6 +550,76 @@ export function useSessionEngine() {
     });
   }, [withBackend]);
 
+  const createCheckpoint = useCallback(async (backendKey: BackendKey, sessionId: string) => {
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.createCheckpoint) {
+        throw new SpacesError('Checkpoint creation is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      await backend.createCheckpoint(sessionId);
+    });
+  }, [withBackend]);
+
+  const getReplaySnapshot = useCallback(async (
+    backendKey: BackendKey,
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+  ) => {
+    let snapshot = null;
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.getReplaySnapshot) {
+        throw new SpacesError('Replay snapshots are not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      snapshot = await backend.getReplaySnapshot(replayId, atMs, scrollbackLines);
+    });
+    if (!snapshot) {
+      throw new SpacesError('Replay snapshot was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+    return snapshot;
+  }, [withBackend]);
+
+  const getReplayText = useCallback(async (
+    backendKey: BackendKey,
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+    includeScrollback?: boolean,
+    trimTrailingBlankRows?: boolean,
+  ) => {
+    let text: string | null = null;
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.getReplayText) {
+        throw new SpacesError('Replay text rendering is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      text = await backend.getReplayText(replayId, atMs, scrollbackLines, includeScrollback, trimTrailingBlankRows);
+    });
+    if (text === null) {
+      throw new SpacesError('Replay text was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+    return text;
+  }, [withBackend]);
+
+  const getReplayMarkdown = useCallback(async (
+    backendKey: BackendKey,
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+    includeScrollback?: boolean,
+    trimTrailingBlankRows?: boolean,
+  ) => {
+    let markdown: string | null = null;
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.getReplayMarkdown) {
+        throw new SpacesError('Replay markdown rendering is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      markdown = await backend.getReplayMarkdown(replayId, atMs, scrollbackLines, includeScrollback, trimTrailingBlankRows);
+    });
+    if (markdown === null) {
+      throw new SpacesError('Replay markdown was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+    return markdown;
+  }, [withBackend]);
+
   return useMemo(() => ({
     state,
     activeBackendKey: getActiveBackendKey(state),
@@ -557,6 +639,7 @@ export function useSessionEngine() {
     listLinearIssues,
     listWorkspaces,
     listSessions,
+    listReplays,
     createProject,
     prepareProjectCreation,
     finalizeProjectCreation,
@@ -583,6 +666,10 @@ export function useSessionEngine() {
     startProcess,
     stopProcess,
     requestEvents,
+    createCheckpoint,
+    getReplaySnapshot,
+    getReplayText,
+    getReplayMarkdown,
   }), [
     state,
     registerBackend,
@@ -596,6 +683,7 @@ export function useSessionEngine() {
     listLinearIssues,
     listWorkspaces,
     listSessions,
+    listReplays,
     createProject,
     prepareProjectCreation,
     finalizeProjectCreation,
@@ -620,5 +708,9 @@ export function useSessionEngine() {
     startProcess,
     stopProcess,
     requestEvents,
+    createCheckpoint,
+    getReplaySnapshot,
+    getReplayText,
+    getReplayMarkdown,
   ]);
 }

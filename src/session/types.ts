@@ -8,6 +8,7 @@ import type {
 import type { NotificationConfig } from '../notifications/types.js';
 import type { BackendDescriptor, BackendKey } from './backend.js';
 import type { WideEvent, SavedEventFilter } from '../types/events.js';
+import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 
 export interface ScriptRuntimeState {
   phase: ScriptOutputResponse['phase'];
@@ -25,6 +26,7 @@ export interface BackendSessionState {
   projects: ProjectInfo[];
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
+  replays: ReplayInfo[];
 
   inbox: InboxItem[];
   inboxUnreadCount: number;
@@ -61,6 +63,7 @@ export type SessionEngineAction =
   | { type: 'SET_PROJECTS'; backendKey: BackendKey; projects: ProjectInfo[] }
   | { type: 'SET_WORKSPACES'; backendKey: BackendKey; workspaces: WorkspaceInfo[] }
   | { type: 'SET_SESSIONS'; backendKey: BackendKey; sessions: SessionInfo[] }
+  | { type: 'SET_REPLAYS'; backendKey: BackendKey; replays: ReplayInfo[] }
   | {
       type: 'SET_INBOX';
       backendKey: BackendKey;

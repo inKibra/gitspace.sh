@@ -8,16 +8,112 @@ export const PROTOCOL_VERSION = 1;
 /** Package version - should match package.json */
 export const PACKAGE_VERSION = "1.0.0";
 
+export const TMUX_LITE_SANDBOX_ENV = "TMUX_LITE_SANDBOX";
 const DEFAULT_ROUTER_SOCKET = "/tmp/tmux-lite.sock";
 const DEFAULT_PID_FILE = "/tmp/tmux-lite.pid";
 const DEFAULT_SESSION_DIR = "/tmp";
 
+export interface TmuxLitePaths {
+  routerSocket: string;
+  pidFile: string;
+  sessionDir: string;
+  replayDir: string;
+}
+
+function normalizeSessionDir(dir: string): string {
+  return dir.endsWith("/") ? dir.slice(0, -1) : dir;
+}
+
+export function normalizeTmuxLiteSandboxName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(trimmed)) {
+    throw new Error(`Invalid tmux-lite sandbox name: ${name}`);
+  }
+  return trimmed;
+}
+
+export function getTmuxLiteSandbox(): string | undefined {
+  const raw = process.env[TMUX_LITE_SANDBOX_ENV]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  return normalizeTmuxLiteSandboxName(raw);
+}
+
+export function getTmuxLitePathsForSandbox(sandbox: string): TmuxLitePaths {
+  const normalized = normalizeTmuxLiteSandboxName(sandbox);
+  const base = `/tmp/tmux-lite-${normalized}`;
+  return {
+    routerSocket: `${base}.sock`,
+    pidFile: `${base}.pid`,
+    sessionDir: base,
+    replayDir: `${base}/replays`,
+  };
+}
+
+export function getTmuxLitePaths(): TmuxLitePaths {
+  const explicitSessionDir = process.env.TMUX_LITE_SESSION_DIR?.trim();
+  const explicitReplayDir = process.env.TMUX_LITE_REPLAY_DIR?.trim();
+  const explicitRouterSocket = process.env.TMUX_LITE_SOCKET?.trim();
+  const explicitPidFile = process.env.TMUX_LITE_PID_FILE?.trim();
+  const sandbox = getTmuxLiteSandbox();
+
+  if (sandbox) {
+    const sandboxPaths = getTmuxLitePathsForSandbox(sandbox);
+    return {
+      routerSocket: explicitRouterSocket || sandboxPaths.routerSocket,
+      pidFile: explicitPidFile || sandboxPaths.pidFile,
+      sessionDir: normalizeSessionDir(explicitSessionDir || sandboxPaths.sessionDir),
+      replayDir: explicitReplayDir || sandboxPaths.replayDir,
+    };
+  }
+
+  const sessionDir = normalizeSessionDir(explicitSessionDir || DEFAULT_SESSION_DIR);
+  return {
+    routerSocket: explicitRouterSocket || DEFAULT_ROUTER_SOCKET,
+    pidFile: explicitPidFile || DEFAULT_PID_FILE,
+    sessionDir,
+    replayDir: explicitReplayDir || `${sessionDir}/tmux-lite-replays`,
+  };
+}
+
+export function applyTmuxLiteSandboxEnvironment(
+  sandbox: string,
+  options: { preserveExplicit?: boolean } = {}
+): TmuxLitePaths {
+  const normalized = normalizeTmuxLiteSandboxName(sandbox);
+  const paths = getTmuxLitePathsForSandbox(normalized);
+  const preserveExplicit = options.preserveExplicit === true;
+  process.env[TMUX_LITE_SANDBOX_ENV] = normalized;
+  if (!preserveExplicit || !process.env.TMUX_LITE_SOCKET?.trim()) {
+    process.env.TMUX_LITE_SOCKET = paths.routerSocket;
+  }
+  if (!preserveExplicit || !process.env.TMUX_LITE_PID_FILE?.trim()) {
+    process.env.TMUX_LITE_PID_FILE = paths.pidFile;
+  }
+  if (!preserveExplicit || !process.env.TMUX_LITE_SESSION_DIR?.trim()) {
+    process.env.TMUX_LITE_SESSION_DIR = paths.sessionDir;
+  }
+  if (!preserveExplicit || !process.env.TMUX_LITE_REPLAY_DIR?.trim()) {
+    process.env.TMUX_LITE_REPLAY_DIR = paths.replayDir;
+  }
+  return paths;
+}
+
 export function getRouterSocket(): string {
-  return process.env.TMUX_LITE_SOCKET || DEFAULT_ROUTER_SOCKET;
+  return getTmuxLitePaths().routerSocket;
 }
 
 export function getPidFile(): string {
-  return process.env.TMUX_LITE_PID_FILE || DEFAULT_PID_FILE;
+  return getTmuxLitePaths().pidFile;
+}
+
+export function getSessionDir(): string {
+  return getTmuxLitePaths().sessionDir;
+}
+
+export function getReplayDir(): string {
+  return getTmuxLitePaths().replayDir;
 }
 
 /**
@@ -41,8 +137,7 @@ export function getSessionSocketPath(id: string): string {
   if (!isValidSessionId(id)) {
     throw new Error(`Invalid session ID: ${id}`);
   }
-  const dir = process.env.TMUX_LITE_SESSION_DIR || DEFAULT_SESSION_DIR;
-  const normalizedDir = dir.endsWith("/") ? dir.slice(0, -1) : dir;
+  const normalizedDir = getSessionDir();
   return `${normalizedDir}/tmux-lite-${id}.sock`;
 }
 
@@ -98,8 +193,29 @@ export interface SessionCreateHooks {
   };
 }
 
+export type { ReplayInfo, ReplayStatus, TerminalSnapshot } from './replay/types.js';
+
 export type Command =
   | { type: "list" }
+  | { type: "list-replays"; workspaceId?: string; sessionId?: string; status?: import('./replay/types.js').ReplayStatus[] }
+  | { type: "replay-snapshot"; replayId: string; atMs?: number; scrollbackLines?: number }
+  | {
+      type: "replay-text";
+      replayId: string;
+      atMs?: number;
+      scrollbackLines?: number;
+      includeScrollback?: boolean;
+      trimTrailingBlankRows?: boolean;
+    }
+  | {
+      type: "replay-markdown";
+      replayId: string;
+      atMs?: number;
+      scrollbackLines?: number;
+      includeScrollback?: boolean;
+      trimTrailingBlankRows?: boolean;
+    }
+  | { type: "create-checkpoint"; id: string }
   | {
       type: "new";
       name?: string;
@@ -120,6 +236,10 @@ export type Command =
 
 export type Response =
   | { type: "sessions"; sessions: Session[] }
+  | { type: "replays"; replays: import('./replay/types.js').ReplayInfo[] }
+  | { type: "replay-snapshot"; snapshot: import('./replay/types.js').TerminalSnapshot }
+  | { type: "replay-text"; text: string }
+  | { type: "replay-markdown"; markdown: string }
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }

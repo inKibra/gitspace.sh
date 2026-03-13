@@ -13,7 +13,9 @@ import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
 import { getNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
+import { resolveWorkspaceRef } from "../events/paths.js";
 import {
+  applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
   getSessionSocketPath,
   getPidFile,
@@ -34,6 +36,16 @@ import {
   FrameType,
   MAX_FRAME_SIZE,
 } from "./protocol";
+import {
+  appendReplayEvent,
+  initializeReplay,
+  listReplayInfos,
+  reconcileRunningReplaysAsCrashed,
+  updateReplayManifest,
+  writeReplayCheckpoint,
+} from "./replay/store.js";
+import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/types.js";
+import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 
 // Chunk size for large PTY data (leave room for frame header overhead)
 // Using 512KB to be well under the 1MB limit
@@ -45,14 +57,15 @@ const SERIALIZE_SCROLLBACK_LINES = 10_000;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
-  process.env.TMUX_LITE_SOCKET = "/tmp/tmux-lite-test.sock";
-  process.env.TMUX_LITE_SESSION_DIR = "/tmp/tmux-lite-test";
-  process.env.TMUX_LITE_PID_FILE = "/tmp/tmux-lite-test.pid";
+  applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
 }
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
 const SERVER_START_TIME = Date.now();
+const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
+const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
+const REPLAY_CHECKPOINT_BYTE_INTERVAL = 128 * 1024;
 
 // Load notification config (with fallback to defaults)
 let notificationConfig: NotificationConfig;
@@ -91,8 +104,29 @@ try { unlinkSync(ROUTER_SOCKET); } catch {}
 // Write PID file
 writeFileSync(PID_FILE, String(process.pid));
 
+try {
+  const reconciled = reconcileRunningReplaysAsCrashed();
+  if (reconciled.length > 0) {
+    console.log(`[replay] marked ${reconciled.length} running replays as crashed`);
+  }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[replay] failed to reconcile running replays: ${message}`);
+}
+
+interface ReplayRuntime {
+  replayId: string;
+  startedAt: number;
+  nextSeq: number;
+  eventCount: number;
+  checkpointCount: number;
+  lastCheckpointAt: number;
+  bytesSinceCheckpoint: number;
+}
+
 interface SessionData {
   info: Session;
+  listener: any;
   ptyTerminal: Bun.Terminal;
   xterm: XTerminal;
   serialize: SerializeAddon;
@@ -109,10 +143,31 @@ interface SessionData {
   lastInteraction: number;  // Timestamp of last user input
   lastDetached: number;  // Timestamp of last detach (for grace period)
   lastAttached: number;  // Timestamp of last attach (for grace period)
+  replay: ReplayRuntime | null;
+  replayCheckpointPending: boolean;
 }
 
 const sessions = new Map<string, SessionData>();
 const inbox: InboxItem[] = [];
+let routerListener: any = null;
+let shuttingDown = false;
+
+function stopListener(listener: any): void {
+  if (!listener || typeof listener.stop !== "function") {
+    return;
+  }
+  try {
+    listener.stop(true);
+  } catch {
+    try {
+      listener.stop();
+    } catch {}
+  }
+}
+
+function safeUnlink(path: string): void {
+  try { unlinkSync(path); } catch {}
+}
 
 function writeToClient(session: SessionData, data: Buffer): void {
   if (!session.client) return;
@@ -153,6 +208,35 @@ function getRouterSocketState(socket: object): RouterSocketState {
 
 function clearRouterSocketState(socket: object): void {
   routerSocketStates.delete(socket);
+}
+
+function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean } = {}): void {
+  stopListener(session.listener);
+  safeUnlink(session.info.socketPath);
+  if (options.removeFromMap !== false) {
+    sessions.delete(session.info.id);
+  }
+}
+
+function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}): void {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+
+  for (const session of sessions.values()) {
+    if (options.markRunningSessionsCrashed !== false) {
+      markReplayCrashed(session);
+    }
+    try { session.xterm.dispose(); } catch {}
+    cleanupSessionResources(session, { removeFromMap: false });
+    try { session.proc.kill(9); } catch {}
+  }
+  sessions.clear();
+
+  stopListener(routerListener);
+  safeUnlink(PID_FILE);
+  safeUnlink(ROUTER_SOCKET);
 }
 
 // How long after last interaction before we consider the user "inactive"
@@ -390,6 +474,253 @@ function genInboxId(): string {
   return String(inboxCounter++);
 }
 
+function buildCanonicalWorkspaceId(projectName: string, workspaceName: string): string {
+  return `${projectName}:${workspaceName}`;
+}
+
+function createReplayId(sessionId: string): string {
+  return `${Date.now()}-${sessionId}`;
+}
+
+function createReplayRuntime(
+  sessionId: string,
+  sessionName: string,
+  cwd: string,
+  cols: number,
+  rows: number
+): ReplayRuntime | null {
+  const startedAt = Date.now();
+  const replayId = createReplayId(sessionId);
+  const workspaceRef = resolveWorkspaceRef(cwd);
+  const workspaceId = workspaceRef
+    ? buildCanonicalWorkspaceId(workspaceRef.projectName, workspaceRef.workspaceId)
+    : undefined;
+
+  const manifest: ReplayManifest = {
+    version: 1,
+    replayId,
+    sessionId,
+    sessionName,
+    cwd,
+    workspaceId,
+    projectName: workspaceRef?.projectName,
+    workspaceName: workspaceRef?.workspaceId,
+    startedAt,
+    status: "running",
+    initialTerminal: {
+      cols,
+      rows,
+      termType: process.env.TERM,
+    },
+    metadata: {},
+    stats: {
+      lastSeq: 0,
+      eventCount: 0,
+      checkpointCount: 0,
+      durationMs: 0,
+    },
+  };
+
+  try {
+    initializeReplay(manifest);
+    return {
+      replayId,
+      startedAt,
+      nextSeq: 1,
+      eventCount: 0,
+      checkpointCount: 0,
+      lastCheckpointAt: startedAt,
+      bytesSinceCheckpoint: 0,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[replay] failed to initialize replay for ${sessionName}: ${message}`);
+    return null;
+  }
+}
+
+function disableReplay(session: SessionData, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[replay] disabling replay for ${session.info.name}: ${message}`);
+  session.replay = null;
+}
+
+function syncReplayManifest(
+  session: SessionData,
+  options: {
+    status?: ReplayManifest["status"];
+    endedAt?: number;
+    title?: string;
+    processTitle?: string;
+    exitCode?: number;
+    durationMs?: number;
+  } = {}
+): void {
+  const replay = session.replay;
+  if (!replay) {
+    return;
+  }
+
+  const now = Date.now();
+  const durationMs = Math.max(options.durationMs ?? 0, now - replay.startedAt);
+
+  try {
+    updateReplayManifest(replay.replayId, (manifest) => ({
+      ...manifest,
+      status: options.status ?? manifest.status,
+      endedAt: options.endedAt ?? manifest.endedAt,
+      metadata: {
+        ...manifest.metadata,
+        ...(options.title !== undefined ? { title: options.title } : {}),
+        ...(options.processTitle !== undefined ? { processTitle: options.processTitle } : {}),
+        ...(options.exitCode !== undefined ? { exitCode: options.exitCode } : {}),
+      },
+      stats: {
+        ...manifest.stats,
+        lastSeq: Math.max(0, replay.nextSeq - 1),
+        eventCount: replay.eventCount,
+        checkpointCount: replay.checkpointCount,
+        durationMs,
+      },
+    }));
+  } catch (error) {
+    disableReplay(session, error);
+  }
+}
+
+function createReplayEvent(replay: ReplayRuntime, event: Omit<ReplayEvent, "v" | "seq" | "t">): ReplayEvent {
+  const base = {
+    v: 1 as const,
+    seq: replay.nextSeq,
+    t: Date.now() - replay.startedAt,
+  };
+
+  switch (event.type) {
+    case "output":
+      return { ...base, type: "output", encoding: event.encoding, data: event.data };
+    case "input":
+      return { ...base, type: "input", encoding: event.encoding, data: event.data };
+    case "resize":
+      return { ...base, type: "resize", cols: event.cols, rows: event.rows };
+    case "marker":
+      return { ...base, type: "marker", label: event.label };
+    case "title":
+      return { ...base, type: "title", title: event.title };
+    case "process-title":
+      return { ...base, type: "process-title", processTitle: event.processTitle };
+    case "exit":
+      return { ...base, type: "exit", code: event.code };
+  }
+}
+
+function recordReplayEvent(session: SessionData, event: Omit<ReplayEvent, "v" | "seq" | "t">): void {
+  const replay = session.replay;
+  if (!replay) {
+    return;
+  }
+
+  try {
+    appendReplayEvent(replay.replayId, createReplayEvent(replay, event));
+    replay.eventCount++;
+    replay.nextSeq++;
+  } catch (error) {
+    disableReplay(session, error);
+  }
+}
+
+function createReplayCheckpoint(replay: ReplayRuntime, session: SessionData): ReplayCheckpoint {
+  const checkpointId = String(replay.checkpointCount).padStart(6, "0");
+  return {
+    version: 1,
+    checkpointId,
+    seq: Math.max(0, replay.nextSeq - 1),
+    t: Date.now() - replay.startedAt,
+    terminal: {
+      cols: session.xterm.cols,
+      rows: session.xterm.rows,
+    },
+    metadata: {
+      title: session.processTitle || undefined,
+      processTitle: session.processTitle || undefined,
+      exitCode: session.info.exitCode,
+    },
+    serializer: {
+      kind: "xterm-serialize",
+      scrollbackLines: SERIALIZE_SCROLLBACK_LINES,
+    },
+    ansiPath: `checkpoints/${checkpointId}.ansi`,
+  };
+}
+
+function writeReplayCheckpointNow(session: SessionData): void {
+  const replay = session.replay;
+  if (!replay) {
+    return;
+  }
+
+  try {
+    const checkpoint = createReplayCheckpoint(replay, session);
+    const serialized = session.serialize.serialize({
+      scrollback: SERIALIZE_SCROLLBACK_LINES,
+    });
+    writeReplayCheckpoint(replay.replayId, checkpoint, serialized);
+    replay.checkpointCount++;
+    replay.lastCheckpointAt = Date.now();
+    replay.bytesSinceCheckpoint = 0;
+    syncReplayManifest(session);
+  } catch (error) {
+    disableReplay(session, error);
+  }
+}
+
+function scheduleReplayCheckpoint(session: SessionData, force = false): void {
+  const replay = session.replay;
+  if (!replay) {
+    return;
+  }
+
+  const now = Date.now();
+  if (!force) {
+    if (replay.bytesSinceCheckpoint < REPLAY_CHECKPOINT_BYTE_INTERVAL) {
+      return;
+    }
+    if (now - replay.lastCheckpointAt < REPLAY_CHECKPOINT_MIN_INTERVAL_MS) {
+      return;
+    }
+  }
+
+  if (session.replayCheckpointPending) {
+    return;
+  }
+
+  session.replayCheckpointPending = true;
+  const flush = () => {
+    if (!sessions.has(session.info.id)) {
+      return;
+    }
+    if (session.pendingWrites > 0) {
+      setTimeout(flush, 10);
+      return;
+    }
+    session.replayCheckpointPending = false;
+    writeReplayCheckpointNow(session);
+  };
+
+  setTimeout(flush, 0);
+}
+
+function markReplayCrashed(session: SessionData, endedAt = Date.now()): void {
+  if (!session.replay) {
+    return;
+  }
+  syncReplayManifest(session, {
+    status: "crashed",
+    endedAt,
+    processTitle: session.processTitle || undefined,
+    durationMs: endedAt - session.replay.startedAt,
+  });
+}
+
 function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
   // Check if this notification type is enabled in config
   if (!isNotificationTypeEnabled(item.type)) {
@@ -580,6 +911,8 @@ function setupXtermEventHandlers(
     const session = sessions.get(id);
     if (session) {
       session.processTitle = title;
+      recordReplayEvent(session, { type: "process-title", processTitle: title });
+      syncReplayManifest(session, { processTitle: title, title });
       // Update client's terminal title if attached
       if (session.client) {
         sendTitle(session.client, sessionName, title);
@@ -642,6 +975,16 @@ function createPtyDataHandler(
 
     const session = sessions.get(id);
     if (!session) return;
+
+    recordReplayEvent(session, {
+      type: "output",
+      encoding: "base64",
+      data: data.toString("base64"),
+    });
+    if (session.replay) {
+      session.replay.bytesSinceCheckpoint += data.length;
+      scheduleReplayCheckpoint(session);
+    }
 
     const str = data.toString();
     const now = Date.now();
@@ -746,6 +1089,10 @@ function handleProcessExit(
 ): (code: number) => void {
   return (code) => {
     const session = sessions.get(id);
+    if (!session) {
+      return;
+    }
+    const endedAt = Date.now();
 
     // Clean up parser hooks
     try { disposeDsr(); } catch {}
@@ -766,18 +1113,23 @@ function handleProcessExit(
     ));
 
     // Update session info with exit code
-    if (session) {
-      session.info.exitCode = code;
-    }
+    session.info.exitCode = code;
+    recordReplayEvent(session, { type: "exit", code });
+    syncReplayManifest(session, {
+      status: "closed",
+      endedAt,
+      exitCode: code,
+      processTitle: session.processTitle || getProcessTitle(),
+      durationMs: session.replay ? endedAt - session.replay.startedAt : undefined,
+    });
 
-    if (session?.client) {
+    if (session.client) {
       writeToClient(session, encodeControl({ type: "exited", code }));
-      session.client.end();
+      try { session.client.end(); } catch {}
     }
 
     xterm.dispose();
-    try { unlinkSync(socketPath); } catch {}
-    sessions.delete(id);
+    cleanupSessionResources(session);
     console.log(`[${sessionName}] exited (${code})`);
   };
 }
@@ -987,6 +1339,8 @@ function createSessionSocketHandlers(
         try {
           session.ptyTerminal.resize(cols, rows);
           session.xterm.resize(cols, rows);
+          recordReplayEvent(session, { type: "resize", cols, rows });
+          scheduleReplayCheckpoint(session, true);
           // Send SIGWINCH to process group so children (vim, etc.) get it
           try {
             process.kill(-proc.pid, "SIGWINCH");
@@ -1062,6 +1416,13 @@ function createSessionSocketHandlers(
           } else {
             // Raw PTY input - write to terminal
             session.ptyTerminal.write(frame.payload);
+          }
+          if (RECORD_REPLAY_INPUT) {
+            recordReplayEvent(session, {
+              type: "input",
+              encoding: "base64",
+              data: Buffer.from(frame.payload).toString("base64"),
+            });
           }
           // Track last interaction time
           session.lastInteraction = Date.now();
@@ -1172,9 +1533,11 @@ function createSession(
   if (!existsSync(socketDir)) {
     mkdirSync(socketDir, { recursive: true });
   }
+  safeUnlink(socketPath);
 
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
+  const replay = createReplayRuntime(id, sessionName, cwd, cols, rows);
 
   // Create xterm-headless for proper terminal state tracking
   const xterm = new XTerminal({
@@ -1279,7 +1642,7 @@ function createSession(
   const socketHandlers = createSessionSocketHandlers(id, sessionName, proc, startAttach);
 
   // Create session socket
-  Bun.listen({
+  const listener = Bun.listen({
     unix: socketPath,
     socket: socketHandlers,
   });
@@ -1287,6 +1650,7 @@ function createSession(
   // Store session data
   sessions.set(id, {
     info,
+    listener,
     ptyTerminal,
     xterm,
     serialize,
@@ -1298,26 +1662,37 @@ function createSession(
     attaching: false,
     attachBuffer: [],
     attachPending: false,
-    attachTimer: null,
-    processTitle: '',
-    lastInteraction: 0,  // No interaction yet
-    lastDetached: 0,  // Never detached yet
-    lastAttached: 0,  // Never attached yet (will be set on first attach)
-  });
+      attachTimer: null,
+      processTitle: '',
+      lastInteraction: 0,  // No interaction yet
+      lastDetached: 0,  // Never detached yet
+      lastAttached: 0,  // Never attached yet (will be set on first attach)
+      replay,
+      replayCheckpointPending: false,
+    });
+
+  const session = sessions.get(id);
+  if (session?.replay) {
+    writeReplayCheckpointNow(session);
+  }
 
   console.log(`[${sessionName}] created (pid ${proc.pid})`);
   return info;
 }
 
 // Router server
-Bun.listen({
+routerListener = Bun.listen({
   unix: ROUTER_SOCKET,
   socket: {
     open(socket) {
       const socketState = getRouterSocketState(socket);
       socketState.writer = createBufferedSocketWriter(socket as any);
     },
-    data(socket, data) {
+    close(socket) {
+      clearRouterSocketState(socket);
+    },
+
+    async data(socket, data) {
       const socketState = getRouterSocketState(socket);
       const combined = Buffer.concat([socketState.buffer, Buffer.from(data)]);
       let decoded;
@@ -1351,6 +1726,77 @@ Bun.listen({
               sessions: Array.from(sessions.values()).map(getSessionInfo)
             };
             break;
+
+          case "list-replays":
+            res = {
+              type: "replays",
+              replays: listReplayInfos({
+                workspaceId: cmd.workspaceId,
+                sessionId: cmd.sessionId,
+                status: cmd.status,
+              }),
+            };
+            break;
+
+          case "replay-snapshot":
+            try {
+              res = {
+                type: "replay-snapshot",
+                snapshot: await getReplaySnapshot(cmd.replayId, {
+                  atMs: cmd.atMs,
+                  scrollbackLines: cmd.scrollbackLines,
+                }),
+              };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: "error", message: `Failed to load replay snapshot: ${errMsg}` };
+            }
+            break;
+
+          case "replay-text":
+            try {
+              res = {
+                type: "replay-text",
+                text: await getReplayText(cmd.replayId, {
+                  atMs: cmd.atMs,
+                  scrollbackLines: cmd.scrollbackLines,
+                  includeScrollback: cmd.includeScrollback,
+                  trimTrailingBlankRows: cmd.trimTrailingBlankRows,
+                }),
+              };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: "error", message: `Failed to load replay text: ${errMsg}` };
+            }
+            break;
+
+          case "replay-markdown":
+            try {
+              res = {
+                type: "replay-markdown",
+                markdown: await getReplayMarkdown(cmd.replayId, {
+                  atMs: cmd.atMs,
+                  scrollbackLines: cmd.scrollbackLines,
+                  includeScrollback: cmd.includeScrollback,
+                  trimTrailingBlankRows: cmd.trimTrailingBlankRows,
+                }),
+              };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: "error", message: `Failed to load replay markdown: ${errMsg}` };
+            }
+            break;
+
+          case "create-checkpoint": {
+            const s = sessions.get(cmd.id);
+            if (!s) {
+              res = { type: "error", message: `Session ${cmd.id} not found` };
+            } else {
+              writeReplayCheckpointNow(s);
+              res = { type: "ok" };
+            }
+            break;
+          }
 
           case "new":
             try {
@@ -1394,18 +1840,12 @@ Bun.listen({
 
           case "kill-server":
             console.log("Shutting down...");
-            for (const [id, s] of sessions) {
-              s.xterm.dispose();
-              s.proc.kill(9);  // Use SIGKILL - shells ignore SIGTERM
-            }
-            // Clean up PID file
-            try { unlinkSync(PID_FILE); } catch {}
             res = { type: "ok" };
             if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
             else socket.write(encodeRouterMessage(res));
             // Clean up socket file after sending response, before exit
             setTimeout(() => {
-              try { unlinkSync(ROUTER_SOCKET); } catch {}
+              shutdownServer();
               process.exit(0);
             }, 100);
             return;
@@ -1479,6 +1919,7 @@ function cleanupAndExit(signal: string) {
   console.log(`\nReceived ${signal}, cleaning up sessions...`);
   for (const [id, s] of sessions) {
     try {
+      markReplayCrashed(s);
       s.xterm.dispose();
       s.proc.kill(9);
     } catch {}
@@ -1494,3 +1935,14 @@ process.on('SIGHUP', () => cleanupAndExit('SIGHUP'));
 
 console.log("tmux-lite server running (xterm-headless)");
 console.log(`Socket: ${ROUTER_SOCKET}\n`);
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    shutdownServer();
+    process.exit(0);
+  });
+}
+
+process.on("exit", () => {
+  shutdownServer({ markRunningSessionsCrashed: false });
+});

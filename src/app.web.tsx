@@ -624,12 +624,22 @@ export default function App() {
     [filteredWorkspaceIds, selectedProjectName, terminal.sessions]
   );
 
+  const handleOpenReplay = useCallback(() => {
+    flow.showMessage({
+      title: 'Replay Unavailable',
+      message: 'Replay viewing is not available in the web terminal yet.',
+      variant: 'info',
+    });
+  }, [flow]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: filteredWorkspaces,
     sessions: filteredSessions,
+    replays: [],
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
+    onOpenReplay: handleOpenReplay,
     onEditProcesses: handleEditProcesses,
     onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: (params) => processActions.handleStartProcess(params),

@@ -17,6 +17,7 @@ import { existsSync, readFileSync, unlinkSync } from "fs";
 import { select } from "@inquirer/prompts";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import {
+  applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
   getPidFile,
   PROTOCOL_VERSION,
@@ -26,6 +27,9 @@ import {
   type Session,
   type SessionEvent,
   type InboxItem,
+  type ReplayInfo,
+  type ReplayStatus,
+  type TerminalSnapshot,
   type SessionCreateHooks,
   encodeRouterMessage,
   decodeRouterMessages,
@@ -37,7 +41,7 @@ import {
 } from "./protocol";
 
 // Re-export types
-export type { Session, InboxItem, Command, Response };
+export type { Session, InboxItem, Command, Response, ReplayInfo, ReplayStatus, TerminalSnapshot };
 
 // Re-export constants
 export { PROTOCOL_VERSION, PACKAGE_VERSION, getRouterSocket, getPidFile };
@@ -57,16 +61,47 @@ const TERM_RESET = "\x1bc";
 
 const SERVER_SCRIPT = `${import.meta.dir}/server.ts`;
 
+function getOptionValue(args: string[], optionName: string): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === optionName) {
+      return args[index + 1];
+    }
+    if (arg?.startsWith(`${optionName}=`)) {
+      return arg.slice(optionName.length + 1);
+    }
+  }
+  return undefined;
+}
+
+function stripOption(args: string[], optionName: string): string[] {
+  const stripped: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === optionName) {
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith(`${optionName}=`)) {
+      continue;
+    }
+    stripped.push(arg);
+  }
+  return stripped;
+}
+
 // CLI args
 const rawArgs = process.argv.slice(2);
 const isTestMode = rawArgs.includes("--test");
-const args = rawArgs.filter(arg => arg !== "--test");
-const cmd = args[0] || "list";
-
-if (isTestMode) {
-  process.env.TMUX_LITE_SOCKET = "/tmp/tmux-lite-test.sock";
-  process.env.TMUX_LITE_SESSION_DIR = "/tmp/tmux-lite-test";
+const sandboxName = getOptionValue(rawArgs, "--sandbox");
+if (sandboxName) {
+  applyTmuxLiteSandboxEnvironment(sandboxName);
 }
+if (isTestMode) {
+  applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
+}
+const args = stripOption(rawArgs.filter(arg => arg !== "--test"), "--sandbox");
+const cmd = args[0] || "list";
 
 const getServerCommand = (): string[] => {
   // Detect if we're running as a compiled binary (not bun)
@@ -119,6 +154,7 @@ export async function ensureServer(): Promise<void> {
     cmd: getServerCommand(),
     stdout: "ignore",
     stderr: "ignore",
+    env: process.env as Record<string, string>,
   });
 
   for (let i = 0; i < 30; i++) {
@@ -279,6 +315,70 @@ export async function listSessions(): Promise<Session[]> {
   const res = await send({ type: "list" });
   if (res.type === "sessions") return res.sessions;
   throw new Error("Unexpected response");
+}
+
+export async function listReplays(options: {
+  workspaceId?: string;
+  sessionId?: string;
+  status?: ReplayStatus[];
+} = {}): Promise<ReplayInfo[]> {
+  await ensureServer();
+  const res = await send({ type: "list-replays", ...options });
+  if (res.type === "replays") return res.replays;
+  if (res.type === "error") throw new Error(res.message);
+  throw new Error("Unexpected response");
+}
+
+export async function getReplaySnapshot(
+  replayId: string,
+  options: {
+    atMs?: number;
+    scrollbackLines?: number;
+  } = {}
+): Promise<TerminalSnapshot> {
+  await ensureServer();
+  const res = await send({ type: "replay-snapshot", replayId, ...options });
+  if (res.type === "replay-snapshot") return res.snapshot;
+  if (res.type === "error") throw new Error(res.message);
+  throw new Error("Unexpected response");
+}
+
+export async function getReplayText(
+  replayId: string,
+  options: {
+    atMs?: number;
+    scrollbackLines?: number;
+    includeScrollback?: boolean;
+    trimTrailingBlankRows?: boolean;
+  } = {}
+): Promise<string> {
+  await ensureServer();
+  const res = await send({ type: "replay-text", replayId, ...options });
+  if (res.type === "replay-text") return res.text;
+  if (res.type === "error") throw new Error(res.message);
+  throw new Error("Unexpected response");
+}
+
+export async function getReplayMarkdown(
+  replayId: string,
+  options: {
+    atMs?: number;
+    scrollbackLines?: number;
+    includeScrollback?: boolean;
+    trimTrailingBlankRows?: boolean;
+  } = {}
+): Promise<string> {
+  await ensureServer();
+  const res = await send({ type: "replay-markdown", replayId, ...options });
+  if (res.type === "replay-markdown") return res.markdown;
+  if (res.type === "error") throw new Error(res.message);
+  throw new Error("Unexpected response");
+}
+
+export async function createCheckpoint(id: string): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: "create-checkpoint", id });
+  if (res.type === "error") throw new Error(res.message);
 }
 
 export async function createSession(
@@ -653,6 +753,7 @@ async function main() {
       // This allows CLI to exit cleanly when piped
       stdout: "ignore",
       stderr: "ignore",
+      env: process.env as Record<string, string>,
     });
     await Bun.sleep(300);
     if (!(await isServerRunning())) {

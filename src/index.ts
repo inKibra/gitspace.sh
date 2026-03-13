@@ -39,7 +39,7 @@ import { VERSION as GENERATED_VERSION } from './version.generated.js';
 import { logger } from './utils/logger.js';
 import { getCrashLogPath, writeCrashLog } from './utils/crash-log.js';
 import { SpacesError } from './types/errors.js';
-import { initializeOwnerSync } from './core/owner-sync.js';
+import { installOwnerSyncWriteHandler } from './core/owner-sync.js';
 import { findReachableRelayCandidate } from './core/relay-discovery.js';
 import { keypairExists, loadKeypair } from './core/identity.js';
 import { promptPassword } from './utils/prompts.js';
@@ -109,11 +109,7 @@ logger.debug(`Crash log path: ${getCrashLogPath()}`);
 
 const args = process.argv.slice(2);
 
-try {
-	await initializeOwnerSync();
-} catch {
-	// owner sync is best-effort; continue on local cache
-}
+installOwnerSyncWriteHandler();
 
 // Guard: workspace session only allows `space` and help commands
 if (isWorkspaceScopedSession() && !isAllowedWorkspaceSessionCommand(args)) {

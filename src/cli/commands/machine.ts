@@ -8,6 +8,17 @@
 
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
+import { applyTmuxLiteSandboxEnvironment } from '../../lib/tmux-lite/protocol.js';
+
+function configureTmuxSandbox(command: Command): void {
+  command.option('--sandbox <name>', 'Use an isolated tmux-lite runtime sandbox');
+  command.hook('preAction', (_command, actionCommand) => {
+    const sandbox = actionCommand.opts().sandbox ?? actionCommand.parent?.opts().sandbox;
+    if (sandbox) {
+      applyTmuxLiteSandboxEnvironment(sandbox);
+    }
+  });
+}
 
 export function registerMachineCommands(parent: Command): void {
   const cmd = parent
@@ -33,7 +44,7 @@ export function registerMachineCommands(parent: Command): void {
     }));
 
   // --------------------------------------------------------------------------
-  // gssh machine tmux [start|stop|status|list|new|attach|kill]
+  // gssh machine tmux [start|stop|status|list|new|attach|kill|replay]
   // --------------------------------------------------------------------------
   registerMachineTmuxCommands(cmd);
 }
@@ -58,6 +69,7 @@ function registerMachineServeCommands(machine: Command): void {
     .option('--unlock-token <token>', 'One-time token to request unlock grant from relay')
     .option('--workspace-id <id>', 'Cloud workspace id for unlock-token flow')
     .option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
+    .option('--takeover', 'Clear persisted relay control state so the current identity can take ownership')
     .option('-y, --yes', 'Auto-confirm prompts')
     .option('--password-stdin', 'Read password from stdin')
     .option('--foreground', "Run in foreground (don't daemonize)")
@@ -94,6 +106,7 @@ function registerMachineTmuxCommands(machine: Command): void {
   const tmux = machine
     .command('tmux')
     .description('Manage tmux-lite terminal session daemon');
+  configureTmuxSandbox(tmux);
 
   tmux
     .command('start')
@@ -154,5 +167,52 @@ function registerMachineTmuxCommands(machine: Command): void {
     .action(withErrorHandler(async (id) => {
       const { killTmux } = await import('../../commands/tmux.js');
       await killTmux(id);
+    }, { skipSetupCheck: true }));
+
+  const replay = tmux
+    .command('replay')
+    .description('Inspect saved tmux-lite replays');
+  configureTmuxSandbox(replay);
+
+  replay
+    .command('list')
+    .description('List captured replays')
+    .action(withErrorHandler(async () => {
+      const { listTmuxReplays } = await import('../../commands/tmux.js');
+      await listTmuxReplays();
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('text')
+    .description('Print replay terminal text')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .option('--at-ms <number>', 'Replay time offset in milliseconds', (value: string) => parseInt(value, 10))
+    .option('--scrollback-lines <number>', 'Scrollback lines to include', (value: string) => parseInt(value, 10))
+    .option('--include-scrollback', 'Include scrollback lines before the visible screen')
+    .action(withErrorHandler(async (replayRef, options) => {
+      const { showTmuxReplayText } = await import('../../commands/tmux.js');
+      await showTmuxReplayText(replayRef, {
+        atMs: options.atMs,
+        scrollbackLines: options.scrollbackLines,
+        includeScrollback: options.includeScrollback,
+      });
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('screenshot')
+    .description('Render a replay frame to PNG')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .option('--at-ms <number>', 'Replay time offset in milliseconds', (value: string) => parseInt(value, 10))
+    .option('--scrollback-lines <number>', 'Scrollback lines to include', (value: string) => parseInt(value, 10))
+    .option('--include-scrollback', 'Include scrollback lines before the visible screen')
+    .option('-o, --output <path>', 'Write PNG to this path')
+    .action(withErrorHandler(async (replayRef, options) => {
+      const { screenshotTmuxReplay } = await import('../../commands/tmux.js');
+      await screenshotTmuxReplay(replayRef, {
+        output: options.output,
+        atMs: options.atMs,
+        scrollbackLines: options.scrollbackLines,
+        includeScrollback: options.includeScrollback,
+      });
     }, { skipSetupCheck: true }));
 }

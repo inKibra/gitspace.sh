@@ -457,6 +457,14 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     });
   }, [flow]);
 
+  const handleOpenReplay = useCallback(() => {
+    flow.showMessage({
+      title: 'Replay Unavailable',
+      message: 'Replay view is not available in this remote TUI screen yet.',
+      variant: 'info',
+    });
+  }, [flow]);
+
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     pendingProcessEditValidationArmedRef.current = false;
     pendingProcessEditWorkspacesRef.current = remote.workspaces;
@@ -487,8 +495,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
+    replays: [],
     onRequestSessions: () => remote.requestSessions(),
     onAttachSession: handleAttachSession,
+    onOpenReplay: handleOpenReplay,
     onEditProcesses: handleEditProcesses,
     onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: handleStartProcess,

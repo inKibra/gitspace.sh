@@ -94,12 +94,14 @@ const state: SecretRuntimeState = {
 
 export interface InitializeSecretRuntimeOptions {
   ignoreKeychainAndSkipSecrets?: boolean;
+  preloadSecrets?: boolean;
 }
 
 export async function initializeSecretRuntime(
   options: InitializeSecretRuntimeOptions = {}
 ): Promise<void> {
   const ignore = options.ignoreKeychainAndSkipSecrets ?? false;
+  const preloadSecrets = options.preloadSecrets ?? true;
   state.ignoreKeychainAndSkipSecrets = ignore;
   state.legacyEntriesDetected = false;
   state.legacyReminderConsumed = false;
@@ -113,6 +115,10 @@ export async function initializeSecretRuntime(
         'Ignoring keychain and skipping secret-dependent scripts (use with caution).'
       );
     }
+    return;
+  }
+
+  if (!preloadSecrets) {
     return;
   }
 
