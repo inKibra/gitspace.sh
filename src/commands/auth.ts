@@ -12,14 +12,12 @@ import {
   getPublicKeyWithoutPassword,
 } from '../core/identity.js';
 import {
-  generateNewMnemonic,
-  initFromMnemonic,
   loadUserRootIdentity,
 } from '../core/user-identity.js';
-import { logRecoveryPhrase, logIdentityInfo } from './identity.js';
 import {
   backupCurrentUserRootToCloud,
   getCloudIdentityBackupStatus,
+  recoverUserRootFromCloudBackup,
 } from '../core/identity-backup.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
 
@@ -41,25 +39,44 @@ function canPromptInteractively(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
-async function maybeBootstrapUserRootIdentityAfterLogin(): Promise<UserRootIdentity | null> {
+async function maybeRecoverUserRootIdentityAfterLogin(): Promise<UserRootIdentity | null> {
   const existingIdentity = await loadUserRootIdentity();
   if (existingIdentity) {
     return existingIdentity;
   }
 
   if (!canPromptInteractively()) {
-    logger.warning('No user root identity found. Run `gssh user identity init` to create one.');
+    logger.warning('No user root identity found. Run `gssh user identity recover --cloud` or `gssh user identity init`.');
+    return null;
+  }
+
+  const backupStatus = await getCloudIdentityBackupStatus();
+  if (!backupStatus.enabled) {
+    logger.warning('No local user root identity found after login.');
+    logger.dim('Run `gssh user identity recover --cloud` to restore it, or `gssh user identity init` to create a new one.');
     return null;
   }
 
   logger.log('');
-  logger.info('No user root identity found. Creating one now...');
+  const shouldRecover = await promptConfirm(
+    'No local user root identity found. Recover it from your GitSpace cloud backup now?',
+    true,
+  );
+  if (!shouldRecover) {
+    logger.warning('Skipped cloud identity recovery.');
+    logger.dim('Run `gssh user identity recover --cloud` to restore your identity before starting relays or machines.');
+    return null;
+  }
 
-  const mnemonic = generateNewMnemonic();
-  const identity = await initFromMnemonic(mnemonic);
-  logRecoveryPhrase(mnemonic);
-  logger.log('');
-  logIdentityInfo(identity, 'Identity created and stored in keychain');
+  const backupPassword = await promptPassword('Enter your identity backup password:');
+  if (!backupPassword) {
+    logger.info('Skipped cloud identity recovery');
+    logger.dim('Run `gssh user identity recover --cloud` to restore your identity later.');
+    return null;
+  }
+
+  const identity = await recoverUserRootFromCloudBackup(backupPassword, { force: false });
+  logger.success('Recovered user root identity from GitSpace cloud backup');
   return identity;
 }
 
@@ -292,7 +309,7 @@ export async function authLogin(
   logger.success('Token saved to keychain');
 
   try {
-    const userRootIdentity = await maybeBootstrapUserRootIdentityAfterLogin();
+    const userRootIdentity = await maybeRecoverUserRootIdentityAfterLogin();
     await maybeOfferIdentityBackupAfterLogin({
       userRootIdentity,
       yes: options.yes,
@@ -301,7 +318,7 @@ export async function authLogin(
     logger.warning(
       `Could not finish identity setup after login: ${error instanceof Error ? error.message : String(error)}`,
     );
-    logger.dim('Run `gssh user identity init` or `gssh user identity backup enable` to finish setup.');
+    logger.dim('Run `gssh user identity recover --cloud` or `gssh user identity init` to finish setup.');
   }
 
   // Step 6: Sync host config (fetches existing subdomains from API)

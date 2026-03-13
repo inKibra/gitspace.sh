@@ -401,6 +401,8 @@ async function resolveAccountRelayTarget(): Promise<{
     );
   }
 
+  logger.info(`Selected account host ${selectedSubdomain}.gitspace.sh for relay tunnel`);
+
   return {
     hostname: `${selectedSubdomain}.gitspace.sh`,
     subdomain: selectedSubdomain,

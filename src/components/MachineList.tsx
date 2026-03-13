@@ -80,8 +80,8 @@ export function useMachineList(props: UseMachineListProps): UseMachineListReturn
 
   // Computed values
   const isLoading = status === 'connecting';
-  const hasError = status === 'error';
-  const isEmpty = machines.length === 0 && status === 'connected';
+  const hasError = status === 'error' || Boolean(error);
+  const isEmpty = machines.length === 0 && status === 'connected' && !error;
 
   // Build items with selection state
   const items: MachineListItem[] = useMemo(() => {

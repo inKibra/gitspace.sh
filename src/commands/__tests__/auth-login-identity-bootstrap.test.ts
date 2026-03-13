@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
-describe('authLogin identity bootstrap', () => {
+describe('authLogin identity recovery', () => {
   const originalStdoutIsTTY = process.stdout.isTTY;
   const originalStdinIsTTY = process.stdin.isTTY;
   const originalSshClient = process.env.SSH_CLIENT;
@@ -24,7 +24,7 @@ describe('authLogin identity bootstrap', () => {
     mock.restore();
   });
 
-  test('creates a missing user root identity after login and offers cloud backup', async () => {
+  test('recovers a missing user root identity from cloud backup after login', async () => {
     const ensureDeviceIdentityPasswordMock = mock(async () => 'device-password');
     const loadKeypairMock = mock(async () => ({ signing: { secretKey: new Uint8Array(64) } }));
     const signMock = mock(() => new Uint8Array([1, 2, 3]));
@@ -33,17 +33,13 @@ describe('authLogin identity bootstrap', () => {
     const syncHostConfigMock = mock(async () => ({ ok: true }));
     const printHostSyncReportMock = mock(() => undefined);
     const loadUserRootIdentityMock = mock(async () => null);
-    const initFromMnemonicMock = mock(async () => ({
+    const recoverUserRootFromCloudBackupMock = mock(async () => ({
       id: 'user-root-1',
       signing: { publicKey: new Uint8Array(32) },
       keyExchange: { publicKey: new Uint8Array(32) },
       createdAt: Date.now(),
     }));
-    const getCloudIdentityBackupStatusMock = mock(async () => ({ enabled: false }));
-    const backupCurrentUserRootToCloudMock = mock(async () => ({
-      ownerUserRootId: 'user-root-1',
-      updatedAt: Date.now(),
-    }));
+    const getCloudIdentityBackupStatusMock = mock(async () => ({ enabled: true }));
     const promptConfirmMock = mock(async () => true);
     const promptPasswordMock = mock(async () => 'backup-password');
 
@@ -75,23 +71,20 @@ describe('authLogin identity bootstrap', () => {
 
     mock.module('../../core/user-identity.js', () => ({
       formatFingerprint: mock(() => 'aa:bb:cc:dd'),
-      generateNewMnemonic: mock(() => 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega'),
-      initFromMnemonic: initFromMnemonicMock,
       loadUserRootIdentity: loadUserRootIdentityMock,
     }));
 
     mock.module('../../core/identity-backup.js', () => ({
       getCloudIdentityBackupStatus: getCloudIdentityBackupStatusMock,
-      backupCurrentUserRootToCloud: backupCurrentUserRootToCloudMock,
+      backupCurrentUserRootToCloud: mock(async () => ({
+        ownerUserRootId: 'user-root-1',
+        updatedAt: Date.now(),
+      })),
+      recoverUserRootFromCloudBackup: recoverUserRootFromCloudBackupMock,
     }));
 
     mock.module('../../lib/tmux-lite/crypto/user-identity.js', () => ({
       formatUserRootPublicKey: mock(() => 'gssh-user:PUBLICKEY'),
-    }));
-
-    mock.module('../identity.js', () => ({
-      logRecoveryPhrase: mock(() => undefined),
-      logIdentityInfo: mock(() => undefined),
     }));
 
     mock.module('../../utils/prompts.js', () => ({
@@ -144,8 +137,7 @@ describe('authLogin identity bootstrap', () => {
 
     await authLogin({ yes: false, interactiveHostSync: false, showHostSyncSummary: false });
 
-    expect(initFromMnemonicMock).toHaveBeenCalledTimes(1);
-    expect(backupCurrentUserRootToCloudMock).toHaveBeenCalledWith('backup-password');
+    expect(recoverUserRootFromCloudBackupMock).toHaveBeenCalledWith('backup-password', { force: false });
     expect(syncHostConfigMock).toHaveBeenCalledWith(false);
     expect(setSecretMock).toHaveBeenCalledWith('GITSPACE_TOKEN', 'gitspace-token');
   });

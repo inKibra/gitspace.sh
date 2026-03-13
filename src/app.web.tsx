@@ -1566,19 +1566,59 @@ export default function App() {
 
         {/* Machine list */}
         <div className="flex-1 overflow-auto">
-          {relay.status === "connecting" ? (
+          {machineListProps.isLoading ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-[#8b949e]">Connecting to relay...</div>
             </div>
-          ) : relay.machines.length === 0 ? (
+          ) : machineListProps.hasError ? (
             <div className="flex items-center justify-center h-full p-4">
-              <div className="text-center max-w-md">
-                <div className="text-[#8b949e] mb-2">No machines available</div>
-                <p className="text-sm text-[#6e7681]">
-                  {relay.status === "connected"
-                    ? "The machine may not be online. Check if 'gssh machine serve start' is running."
-                    : "Unable to connect to relay."}
+              <div className="text-center max-w-xl">
+                <div className="text-[#f85149] mb-2">Could not list machines</div>
+                <p className="text-sm text-[#8b949e] mb-3">
+                  {machineListProps.error ?? 'The relay rejected or failed the machine listing request.'}
                 </p>
+                <p className="text-sm text-[#6e7681] mb-4">
+                  This usually means the browser identity is not the relay owner identity, or the relay is connected but not authorized to show any machines for this identity.
+                </p>
+                <button
+                  onClick={relay.refreshMachines}
+                  className="px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg min-h-[48px] text-[#e6edf3]"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          ) : machineListProps.status === "disconnected" && relay.machines.length === 0 ? (
+            <div className="flex items-center justify-center h-full p-4">
+              <div className="text-center max-w-xl">
+                <div className="text-[#8b949e] mb-2">Unable to connect to relay</div>
+                <p className="text-sm text-[#6e7681] mb-4">
+                  Check that your hosted or local relay is running, then reconnect and try again.
+                </p>
+                <button
+                  onClick={relay.connect}
+                  className="px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg min-h-[48px] text-[#e6edf3]"
+                >
+                  Reconnect
+                </button>
+              </div>
+            </div>
+          ) : machineListProps.isEmpty ? (
+            <div className="flex items-center justify-center h-full p-4">
+              <div className="text-center max-w-xl">
+                <div className="text-[#8b949e] mb-2">No machines available</div>
+                <p className="text-sm text-[#6e7681] mb-3">
+                  The relay connection succeeded, but no machines are visible to this browser identity.
+                </p>
+                <p className="text-sm text-[#6e7681] mb-4">
+                  Make sure your machine is running `gssh machine serve start` and that this browser is using the same owner identity as the machine.
+                </p>
+                <button
+                  onClick={relay.refreshMachines}
+                  className="px-6 py-3 text-base bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium shadow-glow rounded-lg min-h-[48px]"
+                >
+                  Refresh
+                </button>
               </div>
             </div>
           ) : (

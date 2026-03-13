@@ -133,7 +133,7 @@ export function MachineListTUI(props: MachineListTUIProps) {
     >
       {/* Header */}
       <text fg={COLORS.title} paddingLeft={1}>
-        {' '}Machines ({items.length}){' '}
+		 {` Machines (${items.length}) `}
       </text>
 
       {(relayLabel || relayError) && (

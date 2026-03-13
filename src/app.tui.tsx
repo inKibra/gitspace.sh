@@ -113,6 +113,7 @@ import {
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
+import type { Identity } from './types/identity.js';
 
 // ============================================================================
 // Workspace Flow Types (Custom State Machine)
@@ -235,6 +236,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
 export interface AppProps {
   relayConfig?: RelayConfig;
+  remoteIdentity?: Identity | null;
   onQuit?: () => void;
   keyboardMode: 'kitty' | 'vt';
 }
@@ -243,7 +245,7 @@ export interface AppProps {
 // Main App Component
 // ============================================================================
 
-function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
+function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const isRemoteMode = !!relayConfig;
   const keyboardModeHint = `kbd: ${keyboardMode}`;
 
@@ -303,6 +305,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   const remoteMachines = useRemoteMachines({
     relayConfig,
     onError: (error) => dispatch({ type: 'SET_ERROR', error: error.message }),
+    identity: remoteIdentity ?? undefined,
   });
 
   const relayStatusLabel = relayConfig?.label ?? relayConfig?.url;
@@ -2583,7 +2586,7 @@ export type TUIRelayConfig = RelayConfig;
 
 export async function launchTUI(
   relayConfig?: RelayConfig,
-  options: { ignoreKeychainAndSkipSecrets?: boolean } = {}
+  options: { ignoreKeychainAndSkipSecrets?: boolean; remoteIdentity?: Identity | null } = {}
 ): Promise<void> {
   await initializeSecretRuntime({
     ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
@@ -2638,10 +2641,24 @@ export async function launchTUI(
     renderer = await createRendererForKeyboardMode('vt');
     activeRenderer = renderer;
     root = createRoot(renderer);
-    root.render(<App relayConfig={relayConfig} onQuit={handleQuit} keyboardMode={resolvedKeyboardMode} />);
+    root.render(
+      <App
+        relayConfig={relayConfig}
+        remoteIdentity={options.remoteIdentity}
+        onQuit={handleQuit}
+        keyboardMode={resolvedKeyboardMode}
+      />,
+    );
     renderer.start();
     return;
   }
 
-  root.render(<App relayConfig={relayConfig} onQuit={handleQuit} keyboardMode={resolvedKeyboardMode} />);
+  root.render(
+    <App
+      relayConfig={relayConfig}
+      remoteIdentity={options.remoteIdentity}
+      onQuit={handleQuit}
+      keyboardMode={resolvedKeyboardMode}
+    />,
+  );
 }
