@@ -11,6 +11,7 @@ import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
+const MAX_RETURN_TO_LENGTH = 1024;
 
 /**
  * Validate a return_to URL is a trusted web app URL.
@@ -24,7 +25,11 @@ function validateReturnTo(returnTo: string | undefined): string | null {
     const isGitspaceWeb = url.protocol === 'https:'
       && (url.hostname === 'gitspace.sh' || /^[a-z0-9-]+\.gitspace\.sh$/.test(url.hostname));
     if (isLocalDev || isGitspaceWeb) {
-      return `${url.origin}${url.pathname}${url.search}`;
+      const normalized = `${url.origin}${url.pathname}${url.search}`;
+      if (normalized.length > MAX_RETURN_TO_LENGTH) {
+        return null;
+      }
+      return normalized;
     }
     return null;
   } catch {
@@ -102,7 +107,14 @@ app.get('/github/callback', async (c) => {
     return c.redirect(`${c.env.PORTAL_URL}?error=missing_code`);
   }
 
-  const decodedStateCookie = stateCookie ? decodeURIComponent(stateCookie) : null;
+  let decodedStateCookie: string | null = null;
+  if (stateCookie) {
+    try {
+      decodedStateCookie = decodeURIComponent(stateCookie);
+    } catch {
+      return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
+    }
+  }
   if (!state || !decodedStateCookie || state !== decodedStateCookie) {
     return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
   }
