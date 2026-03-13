@@ -40,6 +40,17 @@ export function FlowWeb({ flow }: FlowWebProps) {
     if (!isOpen) return;
 
     const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target?.isContentEditable
+      ) {
+        if (e.key !== 'Escape') {
+          return;
+        }
+      }
+
       if (e.key === 'Escape') {
         e.preventDefault();
         handleCancel();
@@ -258,7 +269,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
         </Modal>
       );
 
-    case 'select':
+    case 'select': {
       const visibleOptions = getVisibleSelectOptions(state);
       return (
         <Modal title={state.title} width="lg">
@@ -313,6 +324,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
           </div>
         </Modal>
       );
+    }
 
     case 'wizard':
       const step = state.steps[state.currentStep];

@@ -579,7 +579,17 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async cancelProjectCreation(projectName: string): Promise<void> {
-    await this.deps.cancelPreparedProjectForSession(projectName);
+    try {
+      await this.deps.cancelPreparedProjectForSession(projectName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: 'command_error',
+        code: getErrorCode(error, 'CREATE_PROJECT_FAILED'),
+        message,
+      });
+      throw error;
+    }
   }
 
   async createWorkspace(params: CreateWorkspaceParams): Promise<void> {

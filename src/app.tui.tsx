@@ -302,7 +302,7 @@ function App({ relayConfig, onQuit, keyboardMode }: AppProps) {
   // Remote machines hook
   const remoteMachines = useRemoteMachines({
     relayConfig,
-    onError: () => {},
+    onError: (error) => dispatch({ type: 'SET_ERROR', error: error.message }),
   });
 
   const relayStatusLabel = relayConfig?.label ?? relayConfig?.url;

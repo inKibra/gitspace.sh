@@ -345,7 +345,7 @@ export function useRemoteSessionClient<ConnectParams>(
 
     if (projects.length === 0) {
       if (selectedProjectName !== null) {
-        setSelectedProjectName(null);
+        selectProject(null);
       }
       return;
     }
@@ -356,9 +356,9 @@ export function useRemoteSessionClient<ConnectParams>(
 
     const preferredProjectName = projects.find((project) => project.isCurrent)?.name ?? projects[0]?.name ?? null;
     if (preferredProjectName && preferredProjectName !== selectedProjectName) {
-      setSelectedProjectName(preferredProjectName);
+      selectProject(preferredProjectName);
     }
-  }, [activeBackendState?.projects, selectedProjectName]);
+  }, [activeBackendState?.projects, selectProject, selectedProjectName]);
 
   const killSession = useCallback((sessionId: string) => {
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));

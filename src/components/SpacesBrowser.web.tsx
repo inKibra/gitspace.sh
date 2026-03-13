@@ -123,7 +123,17 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
               <div
                 key={`project-${item.name}`}
                 ref={isSelected ? selectedRowRef : null}
-                className="px-4 py-3 text-xs text-[#6e7681] uppercase tracking-wide bg-[#161b22] border-b border-[#30363d] min-h-[52px] flex items-center justify-between gap-3"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={
+                  `px-4 py-3 text-xs uppercase tracking-wide border-b border-[#30363d] min-h-[52px] flex items-center justify-between gap-3 cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff] text-[#e6edf3]'
+                      : 'bg-[#161b22] text-[#6e7681] hover:bg-[#1b2129] active:bg-[#21262d]'
+                  }`
+                }
               >
                 <span>{item.name} ({item.workspaceCount})</span>
                 <div className="flex items-center gap-2">

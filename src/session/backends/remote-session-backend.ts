@@ -55,6 +55,7 @@ import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEvent, WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
+import { extractRepoName, sanitizeForFileSystem } from '../../utils/sanitize.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
   ReviewRequestError,
@@ -77,6 +78,11 @@ import type { BackendEvent } from '../events.js';
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30000;
+
+function normalizeExpectedProjectName(projectName: string | undefined, repository: string): string {
+	const candidate = projectName?.trim() || extractRepoName(repository);
+	return sanitizeForFileSystem(candidate) || candidate;
+}
 
 interface RelayDataMessage {
   type: 'data';
@@ -413,7 +419,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     | null = null;
   private pendingCreateProject:
     | {
-        projectName?: string;
+        projectName: string;
         resolve: () => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
@@ -421,7 +427,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     | null = null;
   private pendingPrepareProject:
     | {
-        projectName?: string;
+        projectName: string;
         resolve: (result: PreparedProjectResult) => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
@@ -673,6 +679,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       baseBranch: params.baseBranch,
       setCurrent: params.setCurrent,
     };
+    const expectedProjectName = normalizeExpectedProjectName(params.projectName, params.repository);
 
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -686,7 +693,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
       this.pendingCreateProject = {
-        projectName: params.projectName,
+        projectName: expectedProjectName,
         resolve,
         reject,
         timeout,
@@ -716,6 +723,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       baseBranch: params.baseBranch,
       setCurrent: params.setCurrent,
     };
+    const expectedProjectName = normalizeExpectedProjectName(params.projectName, params.repository);
 
     return new Promise<PreparedProjectResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -729,7 +737,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
       this.pendingPrepareProject = {
-        projectName: params.projectName,
+        projectName: expectedProjectName,
         resolve,
         reject,
         timeout,
@@ -1745,7 +1753,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
-    if (pending.projectName && pending.projectName !== message.projectName) {
+    if (pending.projectName !== message.projectName) {
       return;
     }
 
@@ -1760,9 +1768,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
-  private resolveCreateProject(_message: ProjectCreatedResponse): void {
+  private resolveCreateProject(message: ProjectCreatedResponse): void {
     const pending = this.pendingCreateProject;
     if (!pending) {
+      return;
+    }
+
+    if (pending.projectName !== message.projectName) {
       return;
     }
 
@@ -1875,7 +1887,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
-    if (!force && projectName && pending.projectName && pending.projectName !== projectName) {
+    if (!force && projectName && pending.projectName !== projectName) {
       return;
     }
 
@@ -1894,7 +1906,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
-    if (!force && projectName && pending.projectName && pending.projectName !== projectName) {
+    if (!force && projectName && pending.projectName !== projectName) {
       return;
     }
 

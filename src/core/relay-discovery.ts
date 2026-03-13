@@ -87,15 +87,19 @@ export async function discoverRelayCandidates(
 	}
 
 	if (includeCachedRelay) {
-		const cachedRelay = readRelayConfig();
-		const cachedUrl = cachedRelay?.cloudRelayUrl ?? cachedRelay?.relayUrl;
-		if (cachedUrl && !isLocalRelayUrl(cachedUrl)) {
-			addCandidate({
-				url: cachedUrl,
-				label: 'Recent relay',
-				source: 'cached',
-				description: 'Last relay used on this machine',
-			});
+		try {
+			const cachedRelay = readRelayConfig();
+			const cachedUrl = cachedRelay?.cloudRelayUrl ?? cachedRelay?.relayUrl;
+			if (cachedUrl && !isLocalRelayUrl(cachedUrl)) {
+				addCandidate({
+					url: cachedUrl,
+					label: 'Recent relay',
+					source: 'cached',
+					description: 'Last relay used on this machine',
+				});
+			}
+		} catch {
+			// Ignore corrupt cached relay state and continue with other discovery sources.
 		}
 	}
 

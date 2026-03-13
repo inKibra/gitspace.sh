@@ -176,9 +176,13 @@ async function resolveUserRootAuthorizationConfig(options: {
 }
 
 async function discoverRelayCandidates(hostConfig: HostConfig | null): Promise<RelayCandidate[]> {
-  const candidates = await discoverRelayCandidatesBase({ hostConfig, includeLocalRelay: true });
-  const healthChecks = await Promise.all(candidates.map((candidate) => isRelayHealthy(candidate.url)));
-  return candidates.filter((_, index) => healthChecks[index]);
+	const candidates = await discoverRelayCandidatesBase({
+		hostConfig,
+		includeLocalRelay: true,
+		includeCachedRelay: false,
+	});
+	const healthChecks = await Promise.all(candidates.map((candidate) => isRelayHealthy(candidate.url)));
+	return candidates.filter((_, index) => healthChecks[index]);
 }
 
 async function resolveRelayUrlForServe(

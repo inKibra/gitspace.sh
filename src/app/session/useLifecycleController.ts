@@ -97,8 +97,12 @@ function buildOnboardingValidation(step: OnboardingStep): ((value: string) => st
       return null;
     }
 
-    const regex = new RegExp(step.validationPattern);
-    return regex.test(trimmed) ? null : step.validationMessage ?? `Invalid value for ${step.title}`;
+    try {
+      const regex = new RegExp(step.validationPattern);
+      return regex.test(trimmed) ? null : step.validationMessage ?? `Invalid value for ${step.title}`;
+    } catch {
+      return `Invalid validation pattern for ${step.title}`;
+    }
   };
 }
 
