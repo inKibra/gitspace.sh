@@ -11,7 +11,6 @@ import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
-const OAUTH_RETURN_TO_COOKIE = 'gitspace_oauth_return_to';
 
 /**
  * Validate a return_to URL is a trusted origin (*.gitspace.sh or localhost dev).
@@ -64,7 +63,13 @@ function getGitHubApiBase(env: Env): string {
  */
 app.get('/github', (c) => {
   const redirectUri = new URL('/auth/github/callback', c.req.url).toString();
-  const state = crypto.randomUUID();
+  const nonce = crypto.randomUUID();
+  const returnTo = validateReturnTo(c.req.query('return_to') ?? undefined);
+
+  // Encode return_to inside the state value so it's bound to this OAuth
+  // transaction via the CSRF cookie. Format: "nonce" or "nonce:return_to"
+  const state = returnTo ? `${nonce}:${returnTo}` : nonce;
+
   const params = new URLSearchParams({
     client_id: c.env.GITHUB_CLIENT_ID,
     redirect_uri: redirectUri,
@@ -72,17 +77,13 @@ app.get('/github', (c) => {
     state,
   });
 
-  const headers = new Headers();
-  headers.set('Location', `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`);
-  headers.append('Set-Cookie', `${OAUTH_STATE_COOKIE}=${state}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
-
-  // If return_to is provided and valid, store it for the callback
-  const returnTo = validateReturnTo(c.req.query('return_to') ?? undefined);
-  if (returnTo) {
-    headers.append('Set-Cookie', `${OAUTH_RETURN_TO_COOKIE}=${encodeURIComponent(returnTo)}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
-  }
-
-  return new Response(null, { status: 302, headers });
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`,
+      'Set-Cookie': `${OAUTH_STATE_COOKIE}=${encodeURIComponent(state)}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+    },
+  });
 });
 
 /**
@@ -99,7 +100,8 @@ app.get('/github/callback', async (c) => {
     return c.redirect(`${c.env.PORTAL_URL}?error=missing_code`);
   }
 
-  if (!state || !stateCookie || state !== stateCookie) {
+  const decodedStateCookie = stateCookie ? decodeURIComponent(stateCookie) : null;
+  if (!state || !decodedStateCookie || state !== decodedStateCookie) {
     return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
   }
 
@@ -143,9 +145,9 @@ app.get('/github/callback', async (c) => {
       throw error;
     }
 
-    // Check if this is a subdomain/client OAuth flow (return_to cookie set)
-    const returnToCookie = getCookieValue(c.req.header('Cookie') ?? undefined, OAUTH_RETURN_TO_COOKIE);
-    const returnTo = returnToCookie ? validateReturnTo(decodeURIComponent(returnToCookie)) : null;
+    // Extract return_to from the state value (format: "nonce:return_to")
+    const colonIndex = state!.indexOf(':');
+    const returnTo = colonIndex >= 0 ? validateReturnTo(state!.slice(colonIndex + 1)) : null;
 
     if (returnTo) {
       // ================================================================
@@ -155,7 +157,7 @@ app.get('/github/callback', async (c) => {
       const tokenPlain = `gst_${crypto.randomUUID().replace(/-/g, '')}`;
       const tokenPrefix = tokenPlain.slice(0, 12);
       const tokenHash = await hashToken(tokenPlain);
-      const tokenExpiresAt = now + 90 * 24 * 60 * 60 * 1000; // 90 days
+      const tokenExpiresAt = now + 30 * 24 * 60 * 60 * 1000; // 30 days (browser tokens)
 
       await c.env.DB.prepare(
         `INSERT INTO tokens (id, prefix, user_id, device_name, device_fingerprint, created_at, expires_at, last_used_at)
@@ -171,12 +173,14 @@ app.get('/github/callback', async (c) => {
         now,
       ).run();
 
-      // Clear the return_to cookie and redirect with token in fragment
-      const headers = new Headers();
-      headers.set('Location', `${returnTo}/#token=${tokenPlain}`);
-      headers.append('Set-Cookie', `${OAUTH_RETURN_TO_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
-      headers.append('Set-Cookie', `${OAUTH_STATE_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
-      return new Response(null, { status: 302, headers });
+      // Clear the state cookie and redirect with token in fragment
+      return new Response(null, {
+        status: 302,
+        headers: {
+          Location: `${returnTo}/#token=${tokenPlain}`,
+          'Set-Cookie': `${OAUTH_STATE_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+        },
+      });
     }
 
     // ================================================================

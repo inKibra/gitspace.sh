@@ -56,20 +56,25 @@ function consumeCallbackToken(): string | null {
   return token;
 }
 
-export function useAuth() {
-  const [state, setState] = useState<AuthState>({
-    token: getStoredToken(),
-    loading: false,
-  });
+/**
+ * Synchronously consume the OAuth callback token from the URL fragment
+ * and persist it BEFORE the first render, so that components see
+ * `isLoggedIn === true` on their initial render (no flash of login screen).
+ */
+function consumeAndPersistCallbackToken(): string | null {
+  const callbackToken = consumeCallbackToken();
+  if (callbackToken) {
+    localStorage.setItem(AUTH_TOKEN_KEY, callbackToken);
+    return callbackToken;
+  }
+  return getStoredToken();
+}
 
-  // On mount, check for OAuth callback token in URL fragment
-  useEffect(() => {
-    const callbackToken = consumeCallbackToken();
-    if (callbackToken) {
-      localStorage.setItem(AUTH_TOKEN_KEY, callbackToken);
-      setState({ token: callbackToken, loading: false });
-    }
-  }, []);
+export function useAuth() {
+  const [state, setState] = useState<AuthState>(() => ({
+    token: consumeAndPersistCallbackToken(),
+    loading: false,
+  }));
 
   /**
    * Start the GitHub OAuth redirect flow.

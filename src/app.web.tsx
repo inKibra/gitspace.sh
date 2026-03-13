@@ -305,11 +305,14 @@ export default function App() {
     }
   }, []);
 
-  // Auto-connect when identity becomes available
+  // Auto-connect when identity becomes available.
+  // relay.status is intentionally omitted — including it would cause reconnect
+  // loops on every status transition. We only want to trigger on identity change.
   useEffect(() => {
     if (resolvedIdentity && relay.status === "disconnected") {
       relay.connect();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedIdentity]);
 
   useEffect(() => {
@@ -1078,6 +1081,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [notifications.activeToast, notifications.attachToActiveToast, flow]);
 
+  // Show identity gate before any view (including review deep links)
+  if (!resolvedIdentity) {
+    return <IdentityGate onIdentityReady={setResolvedIdentity} />;
+  }
+
   // ========== Review View ==========
   if (view === 'review' && reviewWorkspace) {
     if (terminal.status === 'established') {
@@ -1435,10 +1443,7 @@ export default function App() {
 
   // ========== Machine List View ==========
   // This is now the main/default view - shows machines and your identity
-  // Show identity gate before allowing relay connection
-  if (!resolvedIdentity) {
-    return <IdentityGate onIdentityReady={setResolvedIdentity} />;
-  }
+  // (Identity gate is handled above, before any view rendering)
 
   return (
     <>

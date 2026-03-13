@@ -21,6 +21,7 @@ import {
   unlockMnemonic,
   storeMnemonic,
   getUnlockedIdentity,
+  clearStoredMnemonic,
 } from '../lib/storage/identity-store.web';
 import {
   isValidMnemonic,
@@ -177,6 +178,10 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
       setError('PIN is required.');
       return;
     }
+    if (newPinValue.length < 4) {
+      setError('PIN must be at least 4 characters.');
+      return;
+    }
     if (newPinValue !== confirmPinValue) {
       setError('PINs do not match.');
       return;
@@ -191,6 +196,10 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
 
     try {
       await storeMnemonic(pendingMnemonicRef.current, newPinValue);
+      // Clear sensitive data from memory
+      pendingMnemonicRef.current = null;
+      setNewPinValue('');
+      setConfirmPinValue('');
       completeWithIdentity();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to store identity');
@@ -257,7 +266,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
               <button
                 onClick={() => {
                   // Reset stored identity — user needs to re-import
-                  localStorage.removeItem('gssh.browser.identity.v1');
+                  clearStoredMnemonic();
                   setStep(auth.isLoggedIn ? 'fetching-backup' : 'login');
                   setError(null);
                   setPinValue('');

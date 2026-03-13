@@ -26,10 +26,8 @@ interface UseRelayConnectionOptions {
 export function useRelayConnection(options?: UseRelayConnectionOptions) {
   const identityRef = useRef<Identity | null>(options?.identity ?? null);
 
-  // Keep ref in sync with prop
-  if (options?.identity) {
-    identityRef.current = options.identity;
-  }
+  // Keep ref in sync with prop (handle null transitions for logout)
+  identityRef.current = options?.identity ?? null;
 
   const machineDirectory = useMachineDirectory<
     WebSocket,

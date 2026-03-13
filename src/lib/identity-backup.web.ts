@@ -132,7 +132,8 @@ export async function decryptBackupEnvelope(
       aesKey,
       toArrayBuffer(ciphertext),
     );
-  } catch {
+  } catch (err) {
+    console.debug('[identity-backup] Decryption failed:', err);
     throw new Error('Invalid backup password.');
   }
 
