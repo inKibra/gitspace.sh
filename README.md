@@ -465,6 +465,10 @@ When `--relay` is omitted, `gssh machine serve start` lets you choose from:
 - local relay (`ws://127.0.0.1:4480/ws`) if running
 - account relays (`*.gitspace.sh`) discovered from your host config/account
 
+`gssh relay start` always keeps the relay reachable locally. If account hosting is configured,
+`auto` and `hosted` modes add a `*.gitspace.sh` tunnel on top of the same local relay instead of
+replacing loopback access.
+
 ### Identity Management
 
 Every machine and client has a cryptographic identity (Ed25519 + X25519 keypair):

@@ -136,6 +136,24 @@ interface RelayStatusSnapshot {
   startedAt: number | null;
 }
 
+function formatRelayHostForUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function getRecommendedLocalRelayHost(bind: string): string {
+  if (bind === "0.0.0.0") {
+    return "127.0.0.1";
+  }
+  if (bind === "::") {
+    return "::1";
+  }
+  return bind;
+}
+
+function buildLocalRelayUrl(bind: string, port: number): string {
+  return `ws://${formatRelayHostForUrl(getRecommendedLocalRelayHost(bind))}:${port}/ws`;
+}
+
 export type RelayStartMode = "auto" | "hosted" | "local";
 
 function getRelayRuntimeDir(): string {
@@ -456,6 +474,9 @@ export async function startRelay(options: {
     const snapshot = await waitForRelayRunning(RELAY_DAEMON_STARTUP_TIMEOUT_MS);
     if (snapshot.running) {
       logger.success(`relay daemon started${snapshot.pid ? ` (pid ${snapshot.pid})` : ""}`);
+      if (snapshot.relayUrl) {
+        logger.log(`  Local URL:  ${snapshot.relayUrl}`);
+      }
       if (snapshot.publicRelayUrl) {
         logger.log(`  Public URL: ${snapshot.publicRelayUrl}`);
       }
@@ -657,7 +678,7 @@ export async function startRelay(options: {
   logger.log(`  Bind:     ${bind}`);
   logger.log(`  Mode:     ${mode}`);
   if (hostname) {
-    logger.log(`  Hostname: ${hostname} (only serving this domain)`);
+    logger.log(`  Hostname: ${hostname} (remote host; loopback still allowed)`);
   }
   if (tunnelSubdomain) {
     logger.log(`  Tunnel:   ${tunnelSubdomain}.gitspace.sh`);
@@ -692,7 +713,7 @@ export async function startRelay(options: {
       tunnelSubdomain,
     });
 
-    logger.success(`Relay listening on ws://${hostname || bind}:${port}`);
+    logger.success(`Local relay URL: ${buildLocalRelayUrl(bind, port)}`);
     if (tunnelSubdomain) {
       logger.success(`Public relay URL: wss://${tunnelSubdomain}.gitspace.sh/ws`);
     }
@@ -791,7 +812,7 @@ function getRelayStatusSnapshot(): RelayStatusSnapshot {
   const running = isProcessRunning(state.pid);
   const tunnelRunning = typeof state.tunnelPid === "number" && isProcessRunning(state.tunnelPid);
 
-  const relayUrl = `ws://${state.hostname || state.bind}:${state.port}`;
+  const relayUrl = buildLocalRelayUrl(state.bind, state.port);
   const publicRelayUrl = state.tunnelSubdomain
     ? `wss://${state.tunnelSubdomain}.gitspace.sh/ws`
     : null;
@@ -840,11 +861,11 @@ export async function relayStatus(options: { json?: boolean } = {}): Promise<voi
   logger.log("");
   logger.log(`  State:      ${chalk.green("running")}`);
   logger.log(`  PID:        ${snapshot.pid}`);
-  logger.log(`  Relay URL:  ${snapshot.relayUrl ?? "-"}`);
+  logger.log(`  Local URL:  ${snapshot.relayUrl ?? "-"}`);
   logger.log(`  Bind:       ${snapshot.bind ?? "-"}`);
   logger.log(`  Port:       ${snapshot.port ?? "-"}`);
   if (snapshot.hostname) {
-    logger.log(`  Hostname:   ${snapshot.hostname}`);
+    logger.log(`  Hostname:   ${snapshot.hostname} (loopback allowed)`);
   }
 
   if (snapshot.startedAt) {

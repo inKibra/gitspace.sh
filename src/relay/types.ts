@@ -51,7 +51,7 @@ export interface RelayConfig {
   port: number;
   /** Address to bind to (default: 0.0.0.0) */
   bind?: string;
-  /** Allowed hostname - only serve requests with matching Host header (optional) */
+  /** Preferred hosted hostname; loopback hosts remain allowed for local access (optional) */
   hostname?: string;
   /**
    * Disable best-effort in-memory connection rate limiting.
