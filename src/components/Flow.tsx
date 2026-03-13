@@ -304,19 +304,25 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
 
   // Handle cancel action
   const handleCancel = useCallback(async () => {
-    if (flow.type === 'confirm' && flow.onCancel) {
-      await flow.onCancel();
-    } else if (flow.type === 'confirm-typed' && flow.onCancel) {
-      await flow.onCancel();
-    } else if (flow.type === 'input' && flow.onCancel) {
-      await flow.onCancel();
-    } else if (flow.type === 'select' && flow.onCancel) {
-      await flow.onCancel();
-    } else if (flow.type === 'wizard' && flow.onCancel) {
-      await flow.onCancel();
+    try {
+      if (flow.type === 'confirm' && flow.onCancel) {
+        await flow.onCancel();
+      } else if (flow.type === 'confirm-typed' && flow.onCancel) {
+        await flow.onCancel();
+      } else if (flow.type === 'input' && flow.onCancel) {
+        await flow.onCancel();
+      } else if (flow.type === 'select' && flow.onCancel) {
+        await flow.onCancel();
+      } else if (flow.type === 'wizard' && flow.onCancel) {
+        await flow.onCancel();
+      }
+      close();
+    } catch (error) {
+      if (onError && error instanceof Error) {
+        onError(error);
+      }
     }
-    close();
-  }, [flow, close]);
+  }, [flow, close, onError]);
 
   // Handle input change
   const handleInput = useCallback((value: string) => {
@@ -347,9 +353,12 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
       return;
     }
 
-    const visibleOptions = getVisibleSelectOptions(flow);
-    const nextSelectedIndex = visibleOptions.find(({ index }) => index === flow.selectedIndex)?.index
-      ?? visibleOptions[0]?.index
+    const nextVisibleOptions = filterVisibleSelectOptions(
+      flow.options.map((option, index) => ({ option, index })),
+      value
+    );
+    const nextSelectedIndex = nextVisibleOptions.find(({ index }) => index === flow.selectedIndex)?.index
+      ?? nextVisibleOptions[0]?.index
       ?? 0;
 
     setFlow({
@@ -487,14 +496,23 @@ export function getVisibleSelectOptions(
   const entries = flow.options.map((option, index) => ({ option, index }));
   const query = flow.searchable ? flow.searchQuery?.trim().toLowerCase() : '';
 
-  if (!query) {
+  return filterVisibleSelectOptions(entries, query);
+}
+
+function filterVisibleSelectOptions(
+  entries: Array<{ option: FlowSelect['options'][number]; index: number }>,
+  query: string | undefined
+): Array<{ option: FlowSelect['options'][number]; index: number }> {
+  const normalizedQuery = query?.trim().toLowerCase() ?? '';
+
+  if (!normalizedQuery) {
     return entries;
   }
 
   return entries.filter(({ option }) => {
     const label = option.label.toLowerCase();
     const description = option.description?.toLowerCase() ?? '';
-    return label.includes(query) || description.includes(query);
+    return label.includes(normalizedQuery) || description.includes(normalizedQuery);
   });
 }
 
