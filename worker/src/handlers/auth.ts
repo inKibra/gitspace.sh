@@ -11,6 +11,25 @@ import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
+const OAUTH_RETURN_TO_COOKIE = 'gitspace_oauth_return_to';
+
+/**
+ * Validate a return_to URL is a trusted origin (*.gitspace.sh or localhost dev).
+ * Returns the validated origin or null.
+ */
+function validateReturnTo(returnTo: string | undefined): string | null {
+  if (!returnTo) return null;
+  try {
+    const url = new URL(returnTo);
+    if (url.origin === 'http://localhost:5173') return url.origin;
+    if (url.protocol === 'https:' && /^[a-z0-9-]+\.gitspace\.sh$/.test(url.hostname)) {
+      return url.origin;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
   if (!cookieHeader) {
@@ -53,13 +72,17 @@ app.get('/github', (c) => {
     state,
   });
 
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`,
-      'Set-Cookie': `${OAUTH_STATE_COOKIE}=${state}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
-    },
-  });
+  const headers = new Headers();
+  headers.set('Location', `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`);
+  headers.append('Set-Cookie', `${OAUTH_STATE_COOKIE}=${state}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
+
+  // If return_to is provided and valid, store it for the callback
+  const returnTo = validateReturnTo(c.req.query('return_to') ?? undefined);
+  if (returnTo) {
+    headers.append('Set-Cookie', `${OAUTH_RETURN_TO_COOKIE}=${encodeURIComponent(returnTo)}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
+  }
+
+  return new Response(null, { status: 302, headers });
 });
 
 /**
@@ -120,7 +143,45 @@ app.get('/github/callback', async (c) => {
       throw error;
     }
 
-    // Create session
+    // Check if this is a subdomain/client OAuth flow (return_to cookie set)
+    const returnToCookie = getCookieValue(c.req.header('Cookie') ?? undefined, OAUTH_RETURN_TO_COOKIE);
+    const returnTo = returnToCookie ? validateReturnTo(decodeURIComponent(returnToCookie)) : null;
+
+    if (returnTo) {
+      // ================================================================
+      // Client flow: create a Bearer token and redirect back to origin
+      // ================================================================
+      const now = Date.now();
+      const tokenPlain = `gst_${crypto.randomUUID().replace(/-/g, '')}`;
+      const tokenPrefix = tokenPlain.slice(0, 12);
+      const tokenHash = await hashToken(tokenPlain);
+      const tokenExpiresAt = now + 90 * 24 * 60 * 60 * 1000; // 90 days
+
+      await c.env.DB.prepare(
+        `INSERT INTO tokens (id, prefix, user_id, device_name, device_fingerprint, created_at, expires_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        tokenHash,
+        tokenPrefix,
+        user.id,
+        'Browser',
+        null, // No device fingerprint for browser tokens
+        now,
+        tokenExpiresAt,
+        now,
+      ).run();
+
+      // Clear the return_to cookie and redirect with token in fragment
+      const headers = new Headers();
+      headers.set('Location', `${returnTo}/#token=${tokenPlain}`);
+      headers.append('Set-Cookie', `${OAUTH_RETURN_TO_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+      headers.append('Set-Cookie', `${OAUTH_STATE_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+      return new Response(null, { status: 302, headers });
+    }
+
+    // ================================================================
+    // Portal flow: create session cookie (existing behavior)
+    // ================================================================
     const sessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
 

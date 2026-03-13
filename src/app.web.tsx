@@ -10,6 +10,8 @@ import {
 import { FloatingControls } from "./components/FloatingControls.web";
 import { useTerminal } from "./hooks/useTerminal.web";
 import { useRelayConnection } from "./hooks/useRelayConnection.web";
+import { IdentityGate } from "./components/IdentityGate.web";
+import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
@@ -116,8 +118,11 @@ export default function App() {
     workspaceLabel?: string;
   } | null>(null);
 
+  // Identity state (resolved by IdentityGate before relay connection)
+  const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
+
   // Relay connection (for machine list)
-  const relay = useRelayConnection();
+  const relay = useRelayConnection({ identity: resolvedIdentity });
 
   // Terminal connection (for PTY)
   const terminal = useTerminal();
@@ -300,12 +305,12 @@ export default function App() {
     }
   }, []);
 
-  // Auto-connect on load (no token required for personal relays)
+  // Auto-connect when identity becomes available
   useEffect(() => {
-    if (relay.status === "disconnected") {
+    if (resolvedIdentity && relay.status === "disconnected") {
       relay.connect();
     }
-  }, []);
+  }, [resolvedIdentity]);
 
   useEffect(() => {
     if (terminal.scriptState?.isRunning) {
@@ -1430,6 +1435,11 @@ export default function App() {
 
   // ========== Machine List View ==========
   // This is now the main/default view - shows machines and your identity
+  // Show identity gate before allowing relay connection
+  if (!resolvedIdentity) {
+    return <IdentityGate onIdentityReady={setResolvedIdentity} />;
+  }
+
   return (
     <>
       <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
