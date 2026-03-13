@@ -166,7 +166,7 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
     };
   }
 
-  return {
+  return useMemo(() => ({
     status: directory.status,
     error: directory.error,
     identity: directory.identity,
@@ -176,5 +176,16 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
     refreshMachines,
     isRemoteMode,
     isLocal,
-  };
+  }), [
+    directory.error,
+    directory.identity,
+    directory.machines,
+    directory.status,
+    localMachine,
+    connect,
+    disconnect,
+    refreshMachines,
+    isRemoteMode,
+    isLocal,
+  ]);
 }

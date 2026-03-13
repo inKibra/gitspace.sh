@@ -133,7 +133,7 @@ interface PendingEventsChunk {
 
 export interface RemoteSessionSocketHandlers {
   onOpen: () => void;
-  onClose: () => void;
+  onClose: (info?: { code?: number; reason?: string }) => void;
   onMessage: (data: string) => void;
   onError: (error: Error) => void;
 }
@@ -1317,8 +1317,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       onOpen: () => {
         this.sendRelayConnectMessage();
       },
-      onClose: () => {
-        this.rejectConnect(new Error('Socket closed before handshake completed'));
+      onClose: (info) => {
+        const closeMessage = info?.code || info?.reason
+          ? `Socket closed before handshake completed (code=${info?.code ?? 'unknown'}, reason=${info?.reason || 'none'})`
+          : 'Socket closed before handshake completed';
+        this.rejectConnect(new Error(closeMessage));
         this.resetState();
         this.emit({ type: 'status', status: 'disconnected' });
       },

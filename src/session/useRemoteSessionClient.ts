@@ -150,6 +150,9 @@ export function useRemoteSessionClient<ConnectParams>(
 ): UseRemoteSessionClientReturn<ConnectParams> {
   const { createBackend, mapConnectionStatus = defaultStatusMapper } = options;
   const engine = useSessionEngine();
+  const registerBackend = engine.registerBackend;
+  const setActiveBackend = engine.setActiveBackend;
+  const connectBackend = engine.connectBackend;
   const disconnectBackend = engine.disconnectBackend;
   const unregisterBackend = engine.unregisterBackend;
 
@@ -188,8 +191,8 @@ export function useRemoteSessionClient<ConnectParams>(
     async (params: ConnectParams) => {
       const previousBackendKey = activeBackendKeyRef.current;
       if (previousBackendKey) {
-        await engine.disconnectBackend(previousBackendKey);
-        await engine.unregisterBackend(previousBackendKey);
+        await disconnectBackend(previousBackendKey);
+        await unregisterBackend(previousBackendKey);
         activeBackendKeyRef.current = null;
         backendRef.current = null;
       }
@@ -202,19 +205,19 @@ export function useRemoteSessionClient<ConnectParams>(
       backendRef.current = backend;
       activeBackendKeyRef.current = backendKey;
 
-      engine.registerBackend(backend);
-      engine.setActiveBackend(backendKey);
+      registerBackend(backend);
+      setActiveBackend(backendKey);
 
       try {
-        await engine.connectBackend(backendKey);
+        await connectBackend(backendKey);
       } catch (error) {
-        await engine.unregisterBackend(backendKey);
+        await unregisterBackend(backendKey);
         activeBackendKeyRef.current = null;
         backendRef.current = null;
         throw error;
       }
     },
-    [createBackend, engine]
+    [connectBackend, createBackend, disconnectBackend, registerBackend, setActiveBackend, unregisterBackend]
   );
 
   const disconnect = useCallback(() => {
@@ -223,13 +226,13 @@ export function useRemoteSessionClient<ConnectParams>(
       return;
     }
 
-    void engine.disconnectBackend(backendKey).then(async () => {
-      await engine.unregisterBackend(backendKey);
+    void disconnectBackend(backendKey).then(async () => {
+      await unregisterBackend(backendKey);
       activeBackendKeyRef.current = null;
       backendRef.current = null;
       setSelectedProjectName(null);
     });
-  }, [engine]);
+  }, [disconnectBackend, unregisterBackend]);
 
   const requestProjects = useCallback(() => {
     void withActiveBackend((backendKey) => engine.listProjects(backendKey));
@@ -535,7 +538,7 @@ export function useRemoteSessionClient<ConnectParams>(
     };
   }, [disconnectBackend, unregisterBackend]);
 
-  return {
+  return useMemo(() => ({
     status,
     mode: activeBackendState?.mode ?? 'browsing',
 
@@ -597,5 +600,45 @@ export function useRemoteSessionClient<ConnectParams>(
     startProcess,
     stopProcess,
     requestEvents,
-  };
+  }), [
+    status,
+    activeBackendState,
+    selectedProjectName,
+    connect,
+    disconnect,
+    requestProjects,
+    listGithubRepos,
+    listRemoteBranches,
+    listLinearIssues,
+    requestWorkspaces,
+    requestSessions,
+    createProject,
+    prepareProjectCreation,
+    finalizeProjectCreation,
+    cancelProjectCreation,
+    createWorkspace,
+    deleteProject,
+    attachSession,
+    detachSession,
+    cancelPendingScripts,
+    selectProject,
+    killSession,
+    deleteWorkspace,
+    getBundleRefreshPlan,
+    applyBundleRefresh,
+    getBundleConfigState,
+    applyBundleConfigUpdate,
+    send,
+    resize,
+    setWriteCallback,
+    requestInbox,
+    clearInboxItem,
+    markInboxItemRead,
+    requestNotificationConfig,
+    updateNotificationConfig,
+    sendReviewRequest,
+    startProcess,
+    stopProcess,
+    requestEvents,
+  ]);
 }

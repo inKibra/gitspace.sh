@@ -5,7 +5,7 @@
  * Provides a unified way to handle confirmations, selections, and wizards.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 
 // ============================================================================
 // Types - Base Modal Types
@@ -433,7 +433,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
     }
   }, [flow]);
 
-  return {
+  return useMemo(() => ({
     flow,
     isOpen,
     showMessage,
@@ -455,7 +455,29 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
     nextStep,
     prevStep,
     updateCheckStatus,
-  };
+  }), [
+    flow,
+    isOpen,
+    showMessage,
+    showLoading,
+    showHelp,
+    showConfirm,
+    showConfirmTyped,
+    showInput,
+    showSelect,
+    showWizard,
+    close,
+    handleConfirm,
+    handleCancel,
+    handleInput,
+    handleSelect,
+    updateSelectQuery,
+    moveUp,
+    moveDown,
+    nextStep,
+    prevStep,
+    updateCheckStatus,
+  ]);
 }
 
 // ============================================================================

@@ -138,10 +138,8 @@ export function MachineListTUI(props: MachineListTUIProps) {
 
       {(relayLabel || relayError) && (
         <box flexDirection="column" paddingLeft={1} paddingTop={1}>
-          <text fg={COLORS.textDim}>
-            {isAutoConnected ? 'Auto-connected relay' : 'Relay'}: {relayLabel ?? 'configured'}
-          </text>
-          {!!relayError && <text fg={COLORS.offline}>Remote listing unavailable - {relayError}</text>}
+          <text fg={COLORS.textDim}>{`${isAutoConnected ? 'Auto-connected relay' : 'Relay'}: ${relayLabel ?? 'configured'}`}</text>
+          {!!relayError && <text fg={COLORS.offline}>{`Remote listing unavailable - ${relayError}`}</text>}
           {!!relayError && <text fg={COLORS.textDim}>You can still enter local projects from "This Machine".</text>}
         </box>
       )}
@@ -157,16 +155,18 @@ export function MachineListTUI(props: MachineListTUIProps) {
                                   statusColor === 'red' ? COLORS.offline : COLORS.textDim;
 
           return (
-            <text
+            <box
               key={machine.machineId}
-              fg={isConnectable ? textColor : COLORS.textDim}
+              flexDirection="row"
               height={1}
             >
-              {isSelected ? '>' : ' '} <text fg={indicatorColor}>{indicator}</text> {getMachineLabel(machine)}
+              <text fg={isConnectable ? textColor : COLORS.textDim}>{`${isSelected ? '>' : ' '} `}</text>
+              <text fg={indicatorColor}>{indicator}</text>
+              <text fg={isConnectable ? textColor : COLORS.textDim}>{` ${getMachineLabel(machine)}`}</text>
               {machine.lastConnectedAt && (
-                <text fg={COLORS.textDim}> ({formatLastSeen(machine.lastConnectedAt)})</text>
+                <text fg={COLORS.textDim}>{` (${formatLastSeen(machine.lastConnectedAt)})`}</text>
               )}
-            </text>
+            </box>
           );
         })}
       </box>

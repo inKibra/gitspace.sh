@@ -35,6 +35,7 @@ import { useWorkspaceDeleteFlow } from '../app/session/useWorkspaceDeleteFlow.js
 import { useLifecycleController } from '../app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from '../lib/processes/editor.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
+import { writeCrashLog } from '../utils/crash-log.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -59,9 +60,32 @@ export interface RemoteMachineScreenProps {
   onBack: () => void;
 }
 
+function formatRemoteConnectError(machine: MachineInfo, relayUrl: string, error: unknown): string[] {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const machineName = machine.label || machine.machineId;
+
+  let detail = rawMessage;
+  if (rawMessage === 'Socket closed before handshake completed') {
+    detail =
+      'The relay connection closed before the remote handshake finished. This usually means the relay or machine rejected the request or dropped the connection early.';
+  } else if (rawMessage === 'Unexpected pre-handshake relay payload') {
+    detail =
+      'The relay returned data before the encrypted handshake completed. That usually means the relay and machine are out of sync about the connection state.';
+  }
+
+  return [
+    `Could not connect to remote machine ${machineName}.`,
+    `Relay: ${relayUrl}`,
+    `Machine ID: ${machine.machineId}`,
+    `Reason: ${detail}`,
+    'See terminal stderr for the full stack trace.',
+  ];
+}
+
 export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: RemoteMachineScreenProps) {
   const remote = useRemoteTerminal();
   const renderer = useRenderer();
+  const [connectErrorLines, setConnectErrorLines] = useState<string[]>([]);
   const [deviceCertificate, setDeviceCertificate] = useState<string | null>(null);
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
@@ -71,12 +95,20 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
   const lastScriptWorkspaceIdRef = useRef<string | null>(null);
+  const activeConnectKeyRef = useRef<string | null>(null);
+  const connectRemoteRef = useRef(remote.connect);
+  const disconnectRemoteRef = useRef(remote.disconnect);
   const flow = useFlow({
     onError: (error) => {
       remote.disconnect();
       console.error(`[tui] Remote machine flow error: ${error.message}`);
     },
   });
+
+  useEffect(() => {
+    connectRemoteRef.current = remote.connect;
+    disconnectRemoteRef.current = remote.disconnect;
+  }, [remote.connect, remote.disconnect]);
 
   useEffect(() => {
     let cancelled = false;
@@ -103,7 +135,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     return () => {
       cancelled = true;
     };
-  }, [flow, identity]);
+  }, [flow.showMessage, identity]);
 
   const resolveRemoteWorkspaceProjectName = useCallback((workspaceId: string) => {
     const separator = workspaceId.indexOf(':');
@@ -208,22 +240,62 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   });
 
   useEffect(() => {
+    return () => {
+      activeConnectKeyRef.current = null;
+      disconnectRemoteRef.current();
+    };
+  }, [identity.id, machine.machineId, relayUrl]);
+
+  useEffect(() => {
     if (!deviceCertificate) {
       return;
     }
 
-    void remote.connect({
+    const connectKey = [relayUrl, machine.machineId, identity.id, deviceCertificate].join('|');
+    if (activeConnectKeyRef.current === connectKey) {
+      return;
+    }
+
+    activeConnectKeyRef.current = connectKey;
+    let cancelled = false;
+    setConnectErrorLines([]);
+
+    void connectRemoteRef.current({
       relayUrl,
       identity,
       machineId: machine.machineId,
       machineLabel: machine.label,
       deviceCertificate,
+    }).catch((error) => {
+      if (cancelled) {
+        return;
+      }
+
+      const messageLines = formatRemoteConnectError(machine, relayUrl, error);
+      setConnectErrorLines(messageLines);
+      const logPath = writeCrashLog('remote-machine-connect', error, {
+        relayUrl,
+        machineId: machine.machineId,
+        machineLabel: machine.label ?? null,
+      });
+      setConnectErrorLines([...messageLines, `Crash log: ${logPath}`]);
+      if (error instanceof Error && error.stack) {
+        console.error(`[tui] Remote machine connect error:\n${error.stack}`);
+      } else {
+        console.error(`[tui] Remote machine connect error: ${String(error)}`);
+      }
     });
 
     return () => {
-      remote.disconnect();
+      cancelled = true;
     };
-  }, [deviceCertificate, identity, machine.label, machine.machineId, relayUrl]);
+  }, [
+    deviceCertificate,
+    identity,
+    machine.label,
+    machine.machineId,
+    relayUrl,
+  ]);
 
   useEffect(() => {
     if (remote.status !== 'established' || remote.mode !== 'browsing') {
@@ -805,8 +877,14 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     return (
       <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
         <text fg={remote.status === 'error' ? COLORS.error : COLORS.loading}>{statusMessage}</text>
+        {connectErrorLines.length > 0 && (
+          <box marginTop={1} width={76} border borderStyle="single" borderColor={COLORS.error} paddingLeft={1} paddingRight={1} paddingTop={1} paddingBottom={1} flexDirection="column">
+            {connectErrorLines.map((line, index) => (
+              <text key={`${index}:${line}`} fg={COLORS.error}>{line}</text>
+            ))}
+          </box>
+        )}
         <text fg={COLORS.textDim} marginTop={1}>Press Esc to return to machines</text>
-        <FlowTUI flow={flow} />
       </box>
     );
   }
@@ -814,7 +892,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   return (
     <box flexDirection="column" flexGrow={1}>
       <box flexDirection="row" justifyContent="space-between" paddingLeft={1} paddingRight={1}>
-        <text fg={COLORS.title}>● {machine.label || machine.machineId}</text>
+        <text fg={COLORS.title}>{`● ${machine.label || machine.machineId}`}</text>
         <text fg={COLORS.textDim}>{`Inbox: ${remote.inboxUnreadCount}`}</text>
       </box>
       <SpacesBrowserTUI {...spacesBrowserProps} focused={true} />

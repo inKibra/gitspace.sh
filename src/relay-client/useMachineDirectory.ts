@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MachineInfo } from '../components/MachineList.js';
 import { SpacesError } from '../types/errors.js';
 import {
@@ -164,7 +164,7 @@ export function useMachineDirectory<TSocket, TIdentity, TContext = undefined>(
     };
   }, [autoConnect, connect, disconnect, enabled]);
 
-  return {
+  return useMemo(() => ({
     status,
     error,
     machines,
@@ -174,5 +174,15 @@ export function useMachineDirectory<TSocket, TIdentity, TContext = undefined>(
     disconnect,
     refreshMachines,
     getSocket,
-  };
+  }), [
+    status,
+    error,
+    machines,
+    identity,
+    context,
+    connect,
+    disconnect,
+    refreshMachines,
+    getSocket,
+  ]);
 }

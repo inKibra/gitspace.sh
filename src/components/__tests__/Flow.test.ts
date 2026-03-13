@@ -20,6 +20,17 @@ afterAll(() => {
 });
 
 describe('useFlow searchable select', () => {
+  it('returns a stable object across inert rerenders', () => {
+    const { result, rerender } = renderHook(() => useFlow());
+
+    const first = result.current;
+    rerender();
+
+    expect(result.current).toBe(first);
+    expect(result.current.showMessage).toBe(first.showMessage);
+    expect(result.current.handleConfirm).toBe(first.handleConfirm);
+  });
+
   it('filters options and confirms using the filtered selection', async () => {
     const onSelect = mock(async () => {});
     const { result } = renderHook(() => useFlow());

@@ -30,7 +30,12 @@ export type NodeRemoteSocket = WebSocket;
 export const nodeRemoteSocketAdapter: RemoteSessionSocketAdapter<WebSocket> = {
   setHandlers: (socket, handlers) => {
     socket.on('open', handlers.onOpen);
-    socket.on('close', handlers.onClose);
+    socket.on('close', (code, reason) => {
+      handlers.onClose({
+        code,
+        reason: typeof reason === 'string' ? reason : reason?.toString() || '',
+      });
+    });
     socket.on('message', (data) => {
       const raw = typeof data === 'string' ? data : data.toString();
       handlers.onMessage(raw);
