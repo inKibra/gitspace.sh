@@ -22,8 +22,6 @@ function isValidToken(token: string): boolean {
 export interface AuthState {
   /** The Bearer token, or null if not logged in */
   token: string | null;
-  /** Whether we're currently processing a callback */
-  loading: boolean;
 }
 
 /**
@@ -82,7 +80,6 @@ function consumeAndPersistCallbackToken(): string | null {
 export function useAuth() {
   const [state, setState] = useState<AuthState>(() => ({
     token: consumeAndPersistCallbackToken(),
-    loading: false,
   }));
 
   /**
@@ -100,33 +97,13 @@ export function useAuth() {
    */
   const logout = useCallback(() => {
     localStorage.removeItem(AUTH_TOKEN_KEY);
-    setState({ token: null, loading: false });
+    setState({ token: null });
   }, []);
-
-  /**
-   * Make an authenticated fetch request to the API.
-   */
-  const fetchWithAuth = useCallback(async (path: string, init?: RequestInit): Promise<Response> => {
-    const token = state.token ?? getStoredToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-
-    const headers = new Headers(init?.headers);
-    headers.set('Authorization', `Bearer ${token}`);
-
-    return fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers,
-    });
-  }, [state.token]);
 
   return {
     token: state.token,
     isLoggedIn: state.token !== null,
-    loading: state.loading,
     startLogin,
     logout,
-    fetchWithAuth,
   };
 }
