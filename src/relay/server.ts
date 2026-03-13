@@ -243,6 +243,18 @@ function getClientIp(req: Request): string {
   return "unknown";
 }
 
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").replace(/\.$/, "").split("%", 1)[0] ?? hostname.toLowerCase();
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = normalizeHostname(hostname);
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized === "::ffff:127.0.0.1";
+}
+
 function consumeConnectionSlot(ip: string): boolean {
   const now = Date.now();
   const record = connectionRateLimits.get(ip);
@@ -599,6 +611,8 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
         const clientCount = clientConnections.size;
         return Response.json({
           status: "ok",
+          configuredHostname: hostname ?? null,
+          loopbackAllowed: true,
           relayPublicKey: relayIdentity.signingPublicKey,
           relayFingerprint: formatRelayFingerprint(relayIdentity.signingPublicKey),
           relayLabel: relayIdentity.label ?? null,
@@ -607,11 +621,12 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
         });
       }
 
-      // Check Host header if hostname is specified (after health check which is always allowed)
+      // When a hosted hostname is configured, keep that host reachable while also
+      // preserving same-machine loopback access for local clients and daemons.
       if (hostname) {
-        const hostHeader = req.headers.get("host");
-        const host = hostHeader?.split(":")[0]; // Remove port
-        if (host !== hostname) {
+        const requestHost = normalizeHostname(url.hostname);
+        const expectedHost = normalizeHostname(hostname);
+        if (requestHost !== expectedHost && !isLoopbackHostname(requestHost)) {
           return new Response("Not found", { status: 404 });
         }
       }

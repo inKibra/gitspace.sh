@@ -307,6 +307,12 @@ Run your own relay for complete control:
 gssh relay start --port 8080
 ```
 
+Relay startup modes control whether GitSpace should also attach managed hosting:
+
+- `gssh relay start --mode local` keeps the relay local only.
+- `gssh relay start --mode hosted` requires gitspace.sh hosting and still keeps loopback access.
+- `gssh relay start --mode auto` keeps local access and adds hosted tunneling when available.
+
 ### Multiple Machines
 
 Each machine needs its own identity:

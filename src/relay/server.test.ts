@@ -158,8 +158,39 @@ describe('relay basics', () => {
     const res = await fetch(`${relayHttpBase}/health`);
     expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body.status).toBe('ok');
+    expect(body.configuredHostname).toBe(TEST_HOST);
+    expect(body.loopbackAllowed).toBe(true);
     expect(typeof body.machineCount).toBe('number');
     expect(typeof body.connectedClients).toBe('number');
+  });
+
+  test('allows loopback websocket upgrades when hosted hostname is configured', async () => {
+    const hostedRelay = startRelayServer({
+      bind: TEST_HOST,
+      hostname: 'myrelay.gitspace.sh',
+      disableRateLimit: true,
+      identity: generateRelayIdentity('hosted-loopback-relay'),
+    });
+
+    const ws = new WebSocket(`ws://${TEST_HOST}:${hostedRelay.port}/ws?role=client`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeoutId = setTimeout(() => reject(new Error('Connection timeout')), 5000);
+        ws.onopen = () => {
+          clearTimeout(timeoutId);
+          resolve();
+        };
+        ws.onerror = () => {
+          clearTimeout(timeoutId);
+          reject(new Error('Client WebSocket connection failed'));
+        };
+      });
+    } finally {
+      ws.close();
+      hostedRelay.stop(true);
+    }
   });
 
   test('rejects unknown endpoint', async () => {

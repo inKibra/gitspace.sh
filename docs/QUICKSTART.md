@@ -100,6 +100,10 @@ gssh machine enroll --invite "ws://localhost:4480/ws#<TOKEN>" --label "My Mac"
 gssh machine serve start --relay ws://localhost:4480/ws
 ```
 
+`gssh relay start` always exposes the relay locally at `ws://127.0.0.1:4480/ws`. If you also have
+gitspace.sh hosting configured, `auto` and `hosted` modes add the remote tunnel without disabling
+same-machine access.
+
 ### Connect from Another Device
 
 ```bash
