@@ -19,11 +19,18 @@ import subdomainHandlers from './handlers/subdomains';
 // Create app with typed bindings
 const app = new Hono<{ Bindings: Env; Variables: AuthContext }>();
 
-// CORS for portal and CLI
+// CORS for portal, CLI, and *.gitspace.sh subdomains
 app.use(
   '*',
   cors({
-    origin: ['https://gitspace.sh', 'http://localhost:5173'],
+    origin: (origin) => {
+      if (!origin) return 'https://gitspace.sh';
+      if (origin === 'https://gitspace.sh') return origin;
+      if (origin === 'http://localhost:5173') return origin;
+      // Allow any *.gitspace.sh subdomain (for web terminals)
+      if (/^https:\/\/[a-z0-9-]+\.gitspace\.sh$/.test(origin)) return origin;
+      return null;
+    },
     credentials: true,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Device-Fingerprint'],

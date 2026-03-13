@@ -11,6 +11,31 @@ import { hashToken } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = 'gitspace_oauth_state';
+const MAX_RETURN_TO_LENGTH = 1024;
+
+/**
+ * Validate a return_to URL is a trusted web app URL.
+ * Returns the validated URL without any hash fragment, or null.
+ */
+function validateReturnTo(returnTo: string | undefined): string | null {
+  if (!returnTo) return null;
+  try {
+    const url = new URL(returnTo);
+    const isLocalDev = url.origin === 'http://localhost:5173';
+    const isGitspaceWeb = url.protocol === 'https:'
+      && (url.hostname === 'gitspace.sh' || /^[a-z0-9-]+\.gitspace\.sh$/.test(url.hostname));
+    if (isLocalDev || isGitspaceWeb) {
+      const normalized = `${url.origin}${url.pathname}${url.search}`;
+      if (normalized.length > MAX_RETURN_TO_LENGTH) {
+        return null;
+      }
+      return normalized;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
   if (!cookieHeader) {
@@ -45,7 +70,13 @@ function getGitHubApiBase(env: Env): string {
  */
 app.get('/github', (c) => {
   const redirectUri = new URL('/auth/github/callback', c.req.url).toString();
-  const state = crypto.randomUUID();
+  const nonce = crypto.randomUUID();
+  const returnTo = validateReturnTo(c.req.query('return_to') ?? undefined);
+
+  // Encode return_to inside the state value so it's bound to this OAuth
+  // transaction via the CSRF cookie. Format: "nonce" or "nonce:return_to"
+  const state = returnTo ? `${nonce}:${returnTo}` : nonce;
+
   const params = new URLSearchParams({
     client_id: c.env.GITHUB_CLIENT_ID,
     redirect_uri: redirectUri,
@@ -57,7 +88,7 @@ app.get('/github', (c) => {
     status: 302,
     headers: {
       Location: `${getGitHubOauthBase(c.env)}/login/oauth/authorize?${params}`,
-      'Set-Cookie': `${OAUTH_STATE_COOKIE}=${state}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      'Set-Cookie': `${OAUTH_STATE_COOKIE}=${encodeURIComponent(state)}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
     },
   });
 });
@@ -76,7 +107,15 @@ app.get('/github/callback', async (c) => {
     return c.redirect(`${c.env.PORTAL_URL}?error=missing_code`);
   }
 
-  if (!state || !stateCookie || state !== stateCookie) {
+  let decodedStateCookie: string | null = null;
+  if (stateCookie) {
+    try {
+      decodedStateCookie = decodeURIComponent(stateCookie);
+    } catch {
+      return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
+    }
+  }
+  if (!state || !decodedStateCookie || state !== decodedStateCookie) {
     return c.redirect(`${c.env.PORTAL_URL}?error=invalid_state`);
   }
 
@@ -120,7 +159,49 @@ app.get('/github/callback', async (c) => {
       throw error;
     }
 
-    // Create session
+    // Extract return_to from the state value (format: "nonce:return_to")
+    const colonIndex = state!.indexOf(':');
+    const returnTo = colonIndex >= 0 ? validateReturnTo(state!.slice(colonIndex + 1)) : null;
+
+    if (returnTo) {
+      // ================================================================
+      // Client flow: create a Bearer token and redirect back to origin
+      // ================================================================
+      const now = Date.now();
+      const tokenPlain = `gst_${crypto.randomUUID().replace(/-/g, '')}`;
+      const tokenPrefix = tokenPlain.slice(0, 12);
+      const tokenHash = await hashToken(tokenPlain);
+      const tokenExpiresAt = now + 30 * 24 * 60 * 60 * 1000; // 30 days (browser tokens)
+
+      await c.env.DB.prepare(
+        `INSERT INTO tokens (id, prefix, user_id, device_name, device_fingerprint, created_at, expires_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        tokenHash,
+        tokenPrefix,
+        user.id,
+        'Browser',
+        null, // No device fingerprint for browser tokens
+        now,
+        tokenExpiresAt,
+        now,
+      ).run();
+
+      // Clear the state cookie and redirect with token in fragment
+      const returnToUrl = new URL(returnTo);
+      returnToUrl.hash = `token=${tokenPlain}`;
+      return new Response(null, {
+        status: 302,
+        headers: {
+          Location: returnToUrl.toString(),
+          'Set-Cookie': `${OAUTH_STATE_COOKIE}=; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+        },
+      });
+    }
+
+    // ================================================================
+    // Portal flow: create session cookie (existing behavior)
+    // ================================================================
     const sessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
 

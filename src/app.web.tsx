@@ -10,6 +10,8 @@ import {
 import { FloatingControls } from "./components/FloatingControls.web";
 import { useTerminal } from "./hooks/useTerminal.web";
 import { useRelayConnection } from "./hooks/useRelayConnection.web";
+import { IdentityGate } from "./components/IdentityGate.web";
+import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
@@ -116,8 +118,11 @@ export default function App() {
     workspaceLabel?: string;
   } | null>(null);
 
+  // Identity state (resolved by IdentityGate before relay connection)
+  const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
+
   // Relay connection (for machine list)
-  const relay = useRelayConnection();
+  const relay = useRelayConnection({ identity: resolvedIdentity });
 
   // Terminal connection (for PTY)
   const terminal = useTerminal();
@@ -300,12 +305,14 @@ export default function App() {
     }
   }, []);
 
-  // Auto-connect on load (no token required for personal relays)
+  // Auto-connect when identity becomes available.
+  // relay.status is intentionally omitted — including it would cause reconnect
+  // loops on every status transition. We only want to trigger on identity change.
   useEffect(() => {
-    if (relay.status === "disconnected") {
+    if (resolvedIdentity && relay.status === "disconnected") {
       relay.connect();
     }
-  }, []);
+  }, [resolvedIdentity, relay.connect]);
 
   useEffect(() => {
     if (terminal.scriptState?.isRunning) {
@@ -1073,6 +1080,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [notifications.activeToast, notifications.attachToActiveToast, flow]);
 
+  // Show identity gate before any view (including review deep links)
+  if (!resolvedIdentity) {
+    return <IdentityGate onIdentityReady={setResolvedIdentity} />;
+  }
+
   // ========== Review View ==========
   if (view === 'review' && reviewWorkspace) {
     if (terminal.status === 'established') {
@@ -1430,6 +1442,8 @@ export default function App() {
 
   // ========== Machine List View ==========
   // This is now the main/default view - shows machines and your identity
+  // (Identity gate is handled above, before any view rendering)
+
   return (
     <>
       <div className="h-screen w-screen flex flex-col bg-[#0d1117]">

@@ -1,19 +1,15 @@
 /**
  * Hook for relay connection before terminal session.
+ *
+ * Identity is now resolved externally by IdentityGate and passed in.
+ * This hook no longer uses window.prompt() — it just takes the identity
+ * and wires up the relay connection.
  */
 
 import { useCallback, useRef } from 'react';
 import {
-  getUnlockedIdentity,
-  hasStoredMnemonic,
-  storeMnemonic,
-  unlockMnemonic,
-} from '../lib/storage/identity-store.web';
-import {
   createSelfSignedDeviceCertificate,
   exportUserRootPublicKey,
-  isValidMnemonic,
-  normalizeMnemonic,
 } from '../session/crypto/identity.web';
 import { signRelayMessage } from '../session/crypto/relay-signing.web';
 import type { Identity } from '../types/identity';
@@ -22,65 +18,16 @@ import {
 } from '../relay-client/useMachineDirectory.js';
 import { browserRelaySocketAdapter } from '../relay-client/adapters/browser.js';
 
-export function useRelayConnection() {
-  const unlockedIdentityRef = useRef<Identity | null>(null);
+interface UseRelayConnectionOptions {
+  /** Pre-resolved identity from IdentityGate */
+  identity: Identity | null;
+}
 
-  const resolveOwnerIdentity = useCallback(async (): Promise<Identity> => {
-    if (unlockedIdentityRef.current) {
-      return unlockedIdentityRef.current;
-    }
+export function useRelayConnection(options?: UseRelayConnectionOptions) {
+  const identityRef = useRef<Identity | null>(options?.identity ?? null);
 
-    const sessionIdentity = getUnlockedIdentity('Browser Owner');
-    if (sessionIdentity) {
-      unlockedIdentityRef.current = sessionIdentity;
-      return sessionIdentity;
-    }
-
-    if (hasStoredMnemonic()) {
-      const passphrase = window.prompt('Enter your browser unlock PIN/password:') ?? '';
-      if (!passphrase.trim()) {
-        throw new Error('Browser identity unlock cancelled.');
-      }
-
-      await unlockMnemonic(passphrase);
-      const unlocked = getUnlockedIdentity('Browser Owner');
-      if (!unlocked) {
-        throw new Error('Failed to unlock browser identity.');
-      }
-
-      unlockedIdentityRef.current = unlocked;
-      return unlocked;
-    }
-
-    const mnemonicInput = window.prompt('Enter your 24-word recovery phrase to authorize this browser:');
-    if (!mnemonicInput) {
-      throw new Error('Browser identity setup cancelled.');
-    }
-
-    const normalizedMnemonic = normalizeMnemonic(mnemonicInput);
-    if (!isValidMnemonic(normalizedMnemonic)) {
-      throw new Error('Invalid 24-word recovery phrase.');
-    }
-
-    const passphrase = window.prompt('Create a local unlock PIN/password for this browser:') ?? '';
-    if (!passphrase.trim()) {
-      throw new Error('Unlock PIN/password is required.');
-    }
-
-    const confirmPassphrase = window.prompt('Confirm your browser unlock PIN/password:') ?? '';
-    if (passphrase !== confirmPassphrase) {
-      throw new Error('Unlock PIN/password confirmation does not match.');
-    }
-
-    await storeMnemonic(normalizedMnemonic, passphrase);
-    const initialized = getUnlockedIdentity('Browser Owner');
-    if (!initialized) {
-      throw new Error('Failed to initialize browser identity.');
-    }
-
-    unlockedIdentityRef.current = initialized;
-    return initialized;
-  }, []);
+  // Keep ref in sync with prop (handle null transitions for logout)
+  identityRef.current = options?.identity ?? null;
 
   const machineDirectory = useMachineDirectory<
     WebSocket,
@@ -89,7 +36,11 @@ export function useRelayConnection() {
   >({
     socketAdapter: browserRelaySocketAdapter,
     resolveClientConfig: async () => {
-      const identity = await resolveOwnerIdentity();
+      const identity = identityRef.current;
+      if (!identity) {
+        throw new Error('No identity available. Complete identity setup first.');
+      }
+
       const publicKey = exportUserRootPublicKey(identity);
       const deviceCertificate = createSelfSignedDeviceCertificate(identity);
 
@@ -109,7 +60,7 @@ export function useRelayConnection() {
 
   const connect = useCallback(async () => {
     await machineDirectory.connect();
-  }, [machineDirectory]);
+  }, [machineDirectory.connect]);
 
   return {
     status: machineDirectory.status,
