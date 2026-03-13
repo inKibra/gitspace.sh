@@ -12,6 +12,12 @@ import {
   isValidMnemonic,
   normalizeMnemonic,
 } from '../../session/crypto/identity.web.js';
+import {
+  base64ToBytes,
+  bytesToBase64,
+  toArrayBuffer,
+  deriveAesKey,
+} from '../browser-crypto.js';
 
 const STORAGE_KEY = 'gssh.browser.identity.v1';
 const PBKDF2_ITERATIONS = 210_000;
@@ -29,32 +35,11 @@ interface EncryptedMnemonicBlob {
 
 let unlockedMnemonic: string | null = null;
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(input: string): Uint8Array {
-  const binary = atob(input);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
 function getCryptoApi(): Crypto {
   if (typeof window === 'undefined' || !window.crypto?.subtle) {
     throw new Error('Secure browser crypto APIs are unavailable.');
   }
   return window.crypto;
-}
-
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 function readBlob(): EncryptedMnemonicBlob | null {
@@ -83,39 +68,6 @@ function readBlob(): EncryptedMnemonicBlob | null {
 
 function writeBlob(blob: EncryptedMnemonicBlob): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(blob));
-}
-
-async function deriveAesKey(
-  passphrase: string,
-  salt: Uint8Array,
-  iterations: number,
-): Promise<CryptoKey> {
-  const cryptoApi = getCryptoApi();
-  const encoder = new TextEncoder();
-
-  const keyMaterial = await cryptoApi.subtle.importKey(
-    'raw',
-    encoder.encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveKey'],
-  );
-
-  return cryptoApi.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: toArrayBuffer(salt),
-      iterations,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    {
-      name: 'AES-GCM',
-      length: 256,
-    },
-    false,
-    ['encrypt', 'decrypt'],
-  );
 }
 
 export function hasStoredMnemonic(): boolean {

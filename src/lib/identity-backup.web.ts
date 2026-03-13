@@ -2,9 +2,12 @@
  * Browser-side cloud identity backup recovery.
  *
  * Fetches the encrypted identity backup from api.gitspace.sh and decrypts it
- * using Web Crypto API (PBKDF2 + AES-256-GCM), matching the server-side
- * encryption in core/identity-backup.ts.
+ * using the shared PBKDF2-AES-GCM primitives from browser-crypto.ts,
+ * matching the server-side encryption in core/identity-backup.ts.
  */
+
+import { base64ToBytes, toArrayBuffer, deriveAesKey } from './browser-crypto';
+import { SpacesError } from '../types/errors';
 
 const API_BASE = 'https://api.gitspace.sh';
 const PBKDF2_MIN_ACCEPTED_ITERATIONS = 100_000;
@@ -30,19 +33,6 @@ export interface CloudBackup {
   updatedAt: number;
 }
 
-function base64ToBytes(input: string): Uint8Array {
-  const binary = atob(input);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
 /**
  * Fetch the encrypted identity backup from the cloud.
  */
@@ -56,7 +46,8 @@ export async function fetchCloudBackup(token: string): Promise<CloudBackup | nul
   }
 
   if (!res.ok) {
-    throw new Error(`Failed to fetch backup: ${res.status}`);
+    console.error('[identity-backup] Failed to fetch backup:', res.status);
+    throw new SpacesError(`Failed to fetch backup: ${res.status}`, 'SERVICE_ERROR');
   }
 
   return res.json() as Promise<CloudBackup>;
@@ -75,7 +66,8 @@ export async function decryptBackupEnvelope(
   password: string,
 ): Promise<string> {
   if (envelope.algorithm !== 'PBKDF2-AES-GCM') {
-    throw new Error(`Unsupported backup algorithm: ${envelope.algorithm}`);
+    console.error('[identity-backup] Unsupported algorithm:', envelope.algorithm);
+    throw new SpacesError(`Unsupported backup algorithm: ${envelope.algorithm}`, 'SERVICE_ERROR');
   }
 
   if (
@@ -83,36 +75,16 @@ export async function decryptBackupEnvelope(
     || envelope.iterations < PBKDF2_MIN_ACCEPTED_ITERATIONS
     || envelope.iterations > PBKDF2_MAX_ACCEPTED_ITERATIONS
   ) {
-    throw new Error('Cloud backup payload uses unsupported key derivation parameters.');
+    console.error('[identity-backup] Invalid PBKDF2 iterations:', envelope.iterations);
+    throw new SpacesError('Cloud backup payload uses unsupported key derivation parameters.', 'SERVICE_ERROR');
   }
 
   const salt = base64ToBytes(envelope.salt);
   const iv = base64ToBytes(envelope.iv);
   const ciphertext = base64ToBytes(envelope.ciphertext);
 
-  // Derive AES key from password using PBKDF2
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(password),
-    'PBKDF2',
-    false,
-    ['deriveKey'],
-  );
+  const aesKey = await deriveAesKey(password, salt, envelope.iterations);
 
-  const aesKey = await crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: toArrayBuffer(salt),
-      iterations: envelope.iterations,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['decrypt'],
-  );
-
-  // Decrypt
   let plaintext: ArrayBuffer;
   try {
     plaintext = await crypto.subtle.decrypt(
@@ -122,7 +94,7 @@ export async function decryptBackupEnvelope(
     );
   } catch (err) {
     console.debug('[identity-backup] Decryption failed:', err);
-    throw new Error('Invalid backup password.');
+    throw new SpacesError('Invalid backup password.', 'USER_ERROR');
   }
 
   return new TextDecoder().decode(plaintext);
