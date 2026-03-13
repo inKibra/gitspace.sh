@@ -12,6 +12,7 @@ import { SpacesError } from "../types/errors.js";
 import chalk from "chalk";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   loadOrCreateRelayIdentity,
   formatRelayFingerprint,
@@ -27,13 +28,14 @@ import {
   listVaultMachines,
   listVaultMachinesForOwner,
   removeVaultMachineForOwner,
+  resetControlStore,
 } from "../relay/control/store.js";
 import {
   ensureSubdomainTunnelToken,
   readHostConfig,
   resolveRelaySubdomains,
 } from "./host.js";
-import { selectOne } from "../utils/prompts.js";
+import { promptConfirm, selectOne } from "../utils/prompts.js";
 import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
 import { ensureUserRootIdentityWithRecovery } from "./identity-recovery.js";
 
@@ -41,8 +43,10 @@ import { ensureUserRootIdentityWithRecovery } from "./identity-recovery.js";
 const DEFAULT_PORT = 4480;
 const RELAY_RUNTIME_DIR = ".relay/runtime";
 const RELAY_STATE_FILE = "relay-state.json";
+const RELAY_LOG_FILE = "relay.log";
 const CLOUDFLARED_STARTUP_DELAY_MS = 1200;
 const CLOUDFLARED_EARLY_EXIT_RACE_MS = 100;
+const RELAY_DAEMON_STARTUP_TIMEOUT_MS = 5000;
 
 export function assertRelayOwnerRepairIsSafe(ownerUserRootId: string): void {
   const machineOwners = new Set(listVaultMachines().map((machine) => machine.ownerUserRootId));
@@ -70,7 +74,8 @@ export function bindRelayOwnerForStartup(ownerUserRootId: string): {
     throw new SpacesError(
       `Relay is already owned by a different user root identity.\n`
       + `  Existing owner: ${existingOwner.slice(0, 8)}...\n`
-      + `  Current user:   ${ownerUserRootId.slice(0, 8)}...`,
+      + `  Current user:   ${ownerUserRootId.slice(0, 8)}...\n\n`
+      + 'Recover the original identity, or re-run with `gssh relay start --takeover` to clear persisted relay control state and rebind ownership.',
       "USER_ERROR",
       1,
     );
@@ -91,6 +96,19 @@ export function bindRelayOwnerForStartup(ownerUserRootId: string): {
     repairedOwnerBinding: !existingOwner,
     missingVaultInitialization: !vaultInitialized,
   };
+}
+
+export function takeOverRelayOwnerForStartup(ownerUserRootId: string): {
+  repairedOwnerBinding: boolean;
+  missingVaultInitialization: boolean;
+} {
+  resetControlStore();
+  return bindRelayOwnerForStartup(ownerUserRootId);
+}
+
+function isRelayOwnerMismatchError(error: unknown): boolean {
+  return error instanceof SpacesError
+    && error.message.includes('Relay is already owned by a different user root identity.');
 }
 
 interface RelayRuntimeState {
@@ -126,6 +144,22 @@ function getRelayRuntimeDir(): string {
 
 function getRelayStatePath(): string {
   return join(getRelayRuntimeDir(), RELAY_STATE_FILE);
+}
+
+function getRelayLogPath(): string {
+  return join(getRelayRuntimeDir(), RELAY_LOG_FILE);
+}
+
+async function waitForRelayRunning(timeoutMs: number): Promise<RelayStatusSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = getRelayStatusSnapshot();
+
+  while (!snapshot.running && Date.now() < deadline) {
+    await Bun.sleep(100);
+    snapshot = getRelayStatusSnapshot();
+  }
+
+  return snapshot;
 }
 
 function isProcessRunning(pid: number): boolean {
@@ -210,7 +244,8 @@ function isOwnedProcessCommand(command: string, kind: RelayProcessKind): boolean
       && normalizedCommand.includes("run");
   }
 
-  return normalizedCommand.includes("relay start");
+  return normalizedCommand.includes("relay start")
+    || (normalizedCommand.includes("commands/relay.ts") && normalizedCommand.includes("startrelay"));
 }
 
 function isOwnedProcess(pid: number, kind: RelayProcessKind): boolean {
@@ -366,7 +401,73 @@ export async function startRelay(options: {
   mode?: RelayStartMode;
   label?: string;
   yes?: boolean;
+  foreground?: boolean;
+  takeover?: boolean;
 }): Promise<void> {
+  if (!options.foreground) {
+    logger.log("Starting relay daemon...");
+
+    const isCompiled = !process.execPath.endsWith("bun");
+    const relayArgs = ["relay", "start", "--foreground"];
+    if (options.port) relayArgs.push("--port", String(options.port));
+    if (options.bind) relayArgs.push("--bind", options.bind);
+    if (options.hostname) relayArgs.push("--hostname", options.hostname);
+    if (options.mode) relayArgs.push("--mode", options.mode);
+    if (options.label) relayArgs.push("--label", options.label);
+    if (options.yes) relayArgs.push("--yes");
+    if (options.takeover) {
+      relayArgs.push("--takeover");
+      // Auto-imply --yes for the daemon child: the user already explicitly
+      // requested --takeover in the parent, and the child process has no stdin
+      // to prompt for confirmation.
+      if (!options.yes) relayArgs.push("--yes");
+    }
+
+    const relayModuleUrl = pathToFileURL(join(import.meta.dir, "relay.ts")).href;
+    const foregroundOptions = JSON.stringify({ ...options, foreground: true });
+    const cmd = isCompiled
+      ? [process.execPath, ...relayArgs]
+      : [
+        "bun",
+        "--eval",
+        `const { startRelay } = await import(${JSON.stringify(relayModuleUrl)}); await startRelay(${foregroundOptions});`,
+      ];
+
+    const runtimeDir = getRelayRuntimeDir();
+    if (!existsSync(runtimeDir)) {
+      mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+    }
+
+    const logFile = getRelayLogPath();
+    await Bun.write(logFile, `[${new Date().toISOString()}] Starting relay daemon...\n`);
+
+    // Clear stale state so polling only sees state written by the new child.
+    // Without this, a reused PID from an old relay-state.json could cause a
+    // false-positive "relay started" before the child even initializes.
+    clearRelayState();
+
+    Bun.spawn(cmd, {
+      stdin: "ignore",
+      stdout: Bun.file(logFile),
+      stderr: Bun.file(logFile),
+      env: process.env,
+    });
+
+    const snapshot = await waitForRelayRunning(RELAY_DAEMON_STARTUP_TIMEOUT_MS);
+    if (snapshot.running) {
+      logger.success(`relay daemon started${snapshot.pid ? ` (pid ${snapshot.pid})` : ""}`);
+      if (snapshot.publicRelayUrl) {
+        logger.log(`  Public URL: ${snapshot.publicRelayUrl}`);
+      }
+      process.exit(0);
+    }
+
+    const logContent = await Bun.file(logFile).text();
+    logger.error("Relay log:");
+    logger.log(logContent);
+    throw new SpacesError("Failed to start relay daemon. Check log above for details.", "SYSTEM_ERROR", 2);
+  }
+
   const existingState = readRelayState();
   if (existingState?.pid && isProcessRunning(existingState.pid)) {
     const existingCommand = getProcessCommand(existingState.pid);
@@ -490,7 +591,28 @@ export async function startRelay(options: {
       });
     if (userRoot) {
       ownerUserRootId = userRoot.id;
-      const ownerBinding = bindRelayOwnerForStartup(ownerUserRootId);
+      let ownerBinding;
+      try {
+        ownerBinding = bindRelayOwnerForStartup(ownerUserRootId);
+      } catch (error) {
+        if (!options.takeover || !isRelayOwnerMismatchError(error)) {
+          throw error;
+        }
+
+        if (!options.yes) {
+          const confirmed = await promptConfirm(
+            'Relay ownership belongs to a different identity. Clear persisted relay registrations, access lists, invites, and owner metadata so the current identity can take over?',
+            false,
+          );
+          if (!confirmed) {
+            throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+          }
+        }
+
+        logger.warning('Clearing persisted relay control state and taking ownership with the current identity.');
+        ownerBinding = takeOverRelayOwnerForStartup(ownerUserRootId);
+      }
+
       if (ownerBinding.repairedOwnerBinding && !ownerBinding.missingVaultInitialization) {
         logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
       } else if (ownerBinding.missingVaultInitialization) {

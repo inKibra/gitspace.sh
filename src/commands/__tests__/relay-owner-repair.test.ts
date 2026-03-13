@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureControlStore, getVaultMeta, setVaultMeta, upsertVaultMachine } from '../../relay/control/store.js';
-import { assertRelayOwnerRepairIsSafe, bindRelayOwnerForStartup } from '../relay.js';
+import { ensureControlStore, getVaultMeta, listVaultMachines, setVaultMeta, upsertVaultMachine } from '../../relay/control/store.js';
+import { assertRelayOwnerRepairIsSafe, bindRelayOwnerForStartup, takeOverRelayOwnerForStartup } from '../relay.js';
 
 let envLock: Promise<void> = Promise.resolve();
 
@@ -113,5 +113,27 @@ describe('bindRelayOwnerForStartup', () => {
       expect(getVaultMeta('vault_salt')).toBeUndefined();
       expect(getVaultMeta('vault_key_check')).toBeUndefined();
     }, { initializeVault: false });
+  });
+
+  test('can explicitly take over relay ownership by clearing persisted control state', async () => {
+    await withIsolatedEnv(async () => {
+      setVaultMeta('owner_user_root_id', 'owner-b');
+      upsertVaultMachine({
+        machineId: 'machine-a',
+        ownerUserRootId: 'owner-b',
+        signingKey: 'signing-a',
+        keyExchangeKey: 'kex-a',
+      });
+
+      const result = takeOverRelayOwnerForStartup('owner-a');
+
+      expect(result).toEqual({
+        repairedOwnerBinding: true,
+        missingVaultInitialization: true,
+      });
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(getVaultMeta('vault_initialized')).toBeUndefined();
+      expect(listVaultMachines()).toHaveLength(0);
+    });
   });
 });

@@ -11,18 +11,100 @@ import {
   loadKeypair,
   getPublicKeyWithoutPassword,
 } from '../core/identity.js';
+import {
+  generateNewMnemonic,
+  initFromMnemonic,
+  loadUserRootIdentity,
+} from '../core/user-identity.js';
+import { logRecoveryPhrase, logIdentityInfo } from './identity.js';
+import {
+  backupCurrentUserRootToCloud,
+  getCloudIdentityBackupStatus,
+} from '../core/identity-backup.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
+
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { printHostSyncReport, syncHostConfig } from './host.js';
+import { promptConfirm, promptPassword } from '../utils/prompts.js';
 import {
   createDeviceIdentityPasswordContext,
   ensureDeviceIdentityPassword,
   type DeviceIdentityPasswordContext,
 } from './device-identity-password.js';
+import type { UserRootIdentity } from '../types/identity.js';
 
 // API Configuration
 const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
+
+function canPromptInteractively(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+async function maybeBootstrapUserRootIdentityAfterLogin(): Promise<UserRootIdentity | null> {
+  const existingIdentity = await loadUserRootIdentity();
+  if (existingIdentity) {
+    return existingIdentity;
+  }
+
+  if (!canPromptInteractively()) {
+    logger.warning('No user root identity found. Run `gssh user identity init` to create one.');
+    return null;
+  }
+
+  logger.log('');
+  logger.info('No user root identity found. Creating one now...');
+
+  const mnemonic = generateNewMnemonic();
+  const identity = await initFromMnemonic(mnemonic);
+  logRecoveryPhrase(mnemonic);
+  logger.log('');
+  logIdentityInfo(identity, 'Identity created and stored in keychain');
+  return identity;
+}
+
+async function maybeOfferIdentityBackupAfterLogin(options: {
+  userRootIdentity: UserRootIdentity | null;
+  yes?: boolean;
+}): Promise<void> {
+  if (!options.userRootIdentity) {
+    return;
+  }
+
+  const backupStatus = await getCloudIdentityBackupStatus();
+  if (backupStatus.enabled) {
+    return;
+  }
+
+  if (!canPromptInteractively()) {
+    logger.dim('Run `gssh user identity backup enable` to create an encrypted cloud backup.');
+    return;
+  }
+
+  const shouldBackup = options.yes || await promptConfirm(
+    'Back up your identity to GitSpace cloud now?',
+    true,
+  );
+  if (!shouldBackup) {
+    logger.dim('Run `gssh user identity backup enable` any time to create an encrypted cloud backup.');
+    return;
+  }
+
+  const backupPassword = await promptPassword('Create identity backup password:');
+  if (!backupPassword) {
+    logger.info('Skipped cloud identity backup setup');
+    return;
+  }
+
+  const confirmPassword = await promptPassword('Confirm identity backup password:');
+  if (backupPassword !== confirmPassword) {
+    throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
+  }
+
+  const record = await backupCurrentUserRootToCloud(backupPassword);
+  logger.success('Encrypted identity backup saved to GitSpace cloud');
+  logger.log(`  Owner ID: ${record.ownerUserRootId}`);
+}
 
 /**
  * Fetch GitHub Client ID from the API
@@ -208,6 +290,19 @@ export async function authLogin(
   logger.success('Authentication complete');
   logger.success(`Logged in as ${user.github_username}`);
   logger.success('Token saved to keychain');
+
+  try {
+    const userRootIdentity = await maybeBootstrapUserRootIdentityAfterLogin();
+    await maybeOfferIdentityBackupAfterLogin({
+      userRootIdentity,
+      yes: options.yes,
+    });
+  } catch (error) {
+    logger.warning(
+      `Could not finish identity setup after login: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    logger.dim('Run `gssh user identity init` or `gssh user identity backup enable` to finish setup.');
+  }
 
   // Step 6: Sync host config (fetches existing subdomains from API)
   // Interactive mode will prompt user to select primary or reserve a subdomain
