@@ -60,7 +60,7 @@ export function useRelayConnection(options?: UseRelayConnectionOptions) {
 
   const connect = useCallback(async () => {
     await machineDirectory.connect();
-  }, [machineDirectory]);
+  }, [machineDirectory.connect]);
 
   return {
     status: machineDirectory.status,

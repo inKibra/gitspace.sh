@@ -312,8 +312,7 @@ export default function App() {
     if (resolvedIdentity && relay.status === "disconnected") {
       relay.connect();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedIdentity]);
+  }, [resolvedIdentity, relay.connect]);
 
   useEffect(() => {
     if (terminal.scriptState?.isRunning) {
