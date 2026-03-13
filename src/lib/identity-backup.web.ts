@@ -30,13 +30,6 @@ export interface CloudBackup {
   updatedAt: number;
 }
 
-export interface BackupStatus {
-  enabled: boolean;
-  ownerUserRootId?: string;
-  createdAt?: number;
-  updatedAt?: number;
-}
-
 function base64ToBytes(input: string): Uint8Array {
   const binary = atob(input);
   const bytes = new Uint8Array(binary.length);
@@ -48,21 +41,6 @@ function base64ToBytes(input: string): Uint8Array {
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-/**
- * Check if a cloud backup exists for the authenticated user.
- */
-export async function fetchBackupStatus(token: string): Promise<BackupStatus> {
-  const res = await fetch(`${API_BASE}/identity/backup/status`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Failed to check backup status: ${res.status}`);
-  }
-
-  return res.json() as Promise<BackupStatus>;
 }
 
 /**
