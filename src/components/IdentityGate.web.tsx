@@ -287,9 +287,12 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
               </button>
               <button
                 onClick={() => {
-                  // Reset stored identity — user needs to re-import
+                  // Full reset: clear stored identity and auth token so the
+                  // user re-authenticates with a fresh token instead of
+                  // hitting fetching-backup with a potentially expired one.
                   clearStoredMnemonic();
-                  setStep(auth.isLoggedIn ? 'fetching-backup' : 'login');
+                  auth.logout();
+                  setStep('login');
                   setError(null);
                   setPinValue('');
                 }}
