@@ -35,12 +35,15 @@ import { listProjectSummaries } from "../../core/project-catalog";
 import { deleteWorkspaceCore } from "../../core/workspace";
 import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
 import {
+  cancelPreparedProjectForSession,
   createProjectForSession,
   createWorkspaceForSession,
   deleteProjectForSession,
+  finalizePreparedProjectForSession,
   listGithubReposForSession,
   listLinearIssuesForSession,
   listRemoteBranchesForSession,
+  prepareProjectForSession,
 } from '../../core/session-lifecycle.js';
 
 // Import review operations
@@ -306,6 +309,47 @@ export class RemoteSessionHandler {
           return;
         }
         await this.handleCreateProject(session, msg, sendResponse);
+        break;
+
+      case 'prepare_project_creation':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to create projects'
+          );
+          return;
+        }
+        await this.handlePrepareProjectCreation(session, msg, sendResponse);
+        break;
+
+      case 'finalize_project_creation':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to create projects',
+            { projectName: msg.projectName }
+          );
+          return;
+        }
+        await this.handleFinalizeProjectCreation(session, msg, sendResponse);
+        break;
+
+      case 'cancel_project_creation':
+        if (!canManage(session.accessType)) {
+          await this.sendError(
+            session,
+            sendResponse,
+            'PERMISSION_DENIED',
+            'Requires full access to create projects',
+            { projectName: msg.projectName }
+          );
+          return;
+        }
+        await this.handleCancelProjectCreation(session, msg.projectName, sendResponse);
         break;
 
       case 'create_workspace':
@@ -943,6 +987,99 @@ export class RemoteSessionHandler {
       const message = error instanceof Error ? error.message : 'Failed to create project';
       await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
         projectName: request.projectName,
+      });
+    }
+  }
+
+  private async handlePrepareProjectCreation(
+    session: RemoteClientSession,
+    request: {
+      repository: string;
+      projectName?: string;
+      baseBranch?: string;
+      setCurrent?: boolean;
+    },
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const result = await prepareProjectForSession({
+        repository: request.repository,
+        projectName: request.projectName,
+        baseBranch: request.baseBranch,
+        setCurrent: request.setCurrent,
+      });
+
+      await this.sendMessage(session, sendResponse, {
+        type: 'project_creation_prepared',
+        projectName: result.projectName,
+        repository: result.repository,
+        baseBranch: result.baseBranch,
+        bundle: result.bundle,
+        confirmStatuses: result.confirmStatuses,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to prepare project creation';
+      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
+        projectName: request.projectName,
+      });
+    }
+  }
+
+  private async handleFinalizeProjectCreation(
+    session: RemoteClientSession,
+    request: {
+      projectName: string;
+      repository: string;
+      baseBranch: string;
+      bundle?: import('../../types/bundle.js').SpacesBundle;
+      inputValues?: Record<string, string>;
+      secretValues?: Record<string, string>;
+      confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>;
+      setCurrent?: boolean;
+    },
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      const result = await finalizePreparedProjectForSession({
+        projectName: request.projectName,
+        repository: request.repository,
+        baseBranch: request.baseBranch,
+        bundle: request.bundle,
+        inputValues: request.inputValues,
+        secretValues: request.secretValues,
+        confirmResults: request.confirmResults,
+        setCurrent: request.setCurrent,
+      });
+
+      await this.sendMessage(session, sendResponse, {
+        type: 'project_created',
+        projectName: result.projectName,
+        repository: result.repository,
+        baseBranch: result.baseBranch,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to finalize project creation';
+      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
+        projectName: request.projectName,
+      });
+    }
+  }
+
+  private async handleCancelProjectCreation(
+    session: RemoteClientSession,
+    projectName: string,
+    sendResponse: (data: Uint8Array) => void
+  ): Promise<void> {
+    try {
+      await cancelPreparedProjectForSession(projectName);
+      await this.sendMessage(session, sendResponse, {
+        type: 'project_creation_cancelled',
+        projectName,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel project creation';
+      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
+        projectName,
       });
     }
   }

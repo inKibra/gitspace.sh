@@ -6,6 +6,7 @@
  * Receives all state and actions from useProjectList hook.
  */
 
+import { useEffect, useRef } from 'react';
 import type { UseProjectListReturn } from './ProjectList.js';
 import { formatWorkspaceCount, getShortRepoName } from './ProjectList.js';
 
@@ -13,66 +14,80 @@ import { formatWorkspaceCount, getShortRepoName } from './ProjectList.js';
 // Component
 // ============================================================================
 
-export function ProjectListWeb(props: UseProjectListReturn) {
+export interface ProjectListWebProps extends UseProjectListReturn {
+  embedded?: boolean;
+  title?: string;
+}
+
+export function ProjectListWeb(props: ProjectListWebProps) {
   const {
     items,
     isEmpty,
-    selectIndex,
-    selectProject,
+    activateIndex,
+    deleteIndex,
     createNew,
-    deleteSelected,
     refresh,
+    embedded = false,
+    title = 'Projects',
   } = props;
+  const selectedRowRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [items]);
+
+  const shellClassName = embedded
+    ? 'h-full flex flex-col bg-[#0d1117]'
+    : 'h-screen flex flex-col bg-[#0d1117]';
 
   // Empty state
   if (isEmpty) {
     return (
-      <div className="h-screen flex flex-col bg-gray-900">
-        <Header onRefresh={refresh} onCreateNew={createNew} />
-        <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
-          <div className="text-lg mb-2">No projects</div>
+      <div className={shellClassName}>
+        <Header title={title} onRefresh={refresh} onCreateNew={createNew} />
+        <div className="flex-1 flex flex-col items-center justify-center text-[#8b949e] px-4">
+          <div className="text-lg mb-2 text-center">No projects</div>
           <button
             onClick={createNew}
-            className="text-blue-400 hover:text-blue-300"
+            className="mt-3 px-4 py-3 rounded-lg bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium min-h-[48px] shadow-glow"
           >
             Create your first project
           </button>
         </div>
+        {!embedded && <Footer />}
       </div>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-900">
-      <Header onRefresh={refresh} onCreateNew={createNew} />
+    <div className={shellClassName}>
+      <Header title={title} onRefresh={refresh} onCreateNew={createNew} />
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto min-h-0">
         {items.map((project) => (
           <div
             key={project.name}
-            onClick={() => {
-              selectIndex(project.index);
-              selectProject();
-            }}
+            ref={project.isSelected ? selectedRowRef : null}
+            onClick={() => activateIndex(project.index)}
             className={`
-              px-4 py-3 cursor-pointer border-b border-gray-800 flex items-center justify-between
-              ${project.isSelected ? 'bg-gray-700 border-l-4 border-l-blue-500' : 'hover:bg-gray-800'}
+              px-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between gap-3 min-h-[56px]
+              ${project.isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
             `}
           >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded bg-gray-700 flex items-center justify-center text-lg">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="w-10 h-10 rounded bg-[#21262d] border border-[#30363d] flex items-center justify-center text-lg flex-shrink-0">
                 📁
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-white font-medium">{project.name}</span>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[#e6edf3] font-medium truncate">{project.name}</span>
                   {project.isCurrent && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-yellow-900 text-yellow-300">
+                    <span className="text-xs px-2 py-0.5 rounded bg-[#3d2f00] text-[#d29922] flex-shrink-0">
                       Current
                     </span>
                   )}
                 </div>
-                <div className="text-xs text-gray-500">
+                <div className="text-xs text-[#8b949e] truncate">
                   {getShortRepoName(project.repository)} · {formatWorkspaceCount(project.workspaceCount)}
                 </div>
               </div>
@@ -80,10 +95,9 @@ export function ProjectListWeb(props: UseProjectListReturn) {
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                selectIndex(project.index);
-                deleteSelected();
+                deleteIndex(project.index);
               }}
-              className="text-gray-600 hover:text-red-400 p-2"
+              className="text-[#6e7681] hover:text-[#ff7b72] p-2 rounded min-h-[40px] min-w-[40px]"
               title="Delete project"
             >
               🗑️
@@ -92,7 +106,7 @@ export function ProjectListWeb(props: UseProjectListReturn) {
         ))}
       </div>
 
-      <Footer />
+      {!embedded && <Footer />}
     </div>
   );
 }
@@ -102,25 +116,27 @@ export function ProjectListWeb(props: UseProjectListReturn) {
 // ============================================================================
 
 function Header({
+  title,
   onRefresh,
   onCreateNew,
 }: {
+  title: string;
   onRefresh: () => void;
   onCreateNew: () => void;
 }) {
   return (
-    <div className="bg-gray-800 px-4 py-3 flex items-center justify-between border-b border-gray-700">
-      <div className="text-white font-medium">Projects</div>
+    <div className="bg-[#161b22] px-4 py-3 flex items-center justify-between border-b border-[#30363d] gap-3">
+      <div className="text-[#e6edf3] font-medium truncate">{title}</div>
       <div className="flex gap-2">
         <button
           onClick={onRefresh}
-          className="text-sm text-gray-400 hover:text-white px-2 py-1"
+          className="text-sm text-[#8b949e] hover:text-[#e6edf3] px-2 py-1 min-h-[40px]"
         >
           Refresh
         </button>
         <button
           onClick={onCreateNew}
-          className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded"
+          className="text-sm bg-[#22c55e] hover:bg-[#16a34a] text-[#0d1117] px-3 py-1 rounded min-h-[40px] font-medium"
         >
           + New Project
         </button>
@@ -131,7 +147,7 @@ function Header({
 
 function Footer() {
   return (
-    <div className="bg-gray-800 px-4 py-2 border-t border-gray-700 text-xs text-gray-500 flex gap-4">
+    <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d] text-xs text-[#6e7681] flex gap-4">
       <span>↑↓ Navigate</span>
       <span>Enter Select</span>
       <span>n New</span>

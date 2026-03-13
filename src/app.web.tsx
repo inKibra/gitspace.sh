@@ -29,6 +29,7 @@ import { buildEditProcessesCommand } from './lib/processes/editor.js';
 // Import shared components and hooks
 import {
   useMachineList,
+  useProjectList,
   useSpacesBrowser,
   useFlow,
   getDefaultShortcuts,
@@ -36,6 +37,7 @@ import {
   type WorkspaceInfo,
 } from "./components/index.js";
 import { MachineListWeb } from "./components/MachineList.web.js";
+import { ProjectListWeb } from './components/ProjectList.web.js';
 import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
@@ -263,12 +265,21 @@ export default function App() {
     listRemoteBranches: terminal.listRemoteBranches,
     listLinearIssues: terminal.listLinearIssues,
     createProject: terminal.createProject,
+    prepareProjectCreation: terminal.prepareProjectCreation,
+    finalizeProjectCreation: terminal.finalizeProjectCreation,
+    cancelProjectCreation: terminal.cancelProjectCreation,
     createWorkspace: terminal.createWorkspace,
     deleteProject: terminal.deleteProject,
     getProjectNames: () => terminal.projects.map((project) => project.name),
     refreshProjects: () => terminal.requestProjects(),
     refreshWorkspaces: () => terminal.requestWorkspaces(),
     refreshSessions: () => terminal.requestSessions(),
+    onProjectCreated: ({ projectName }) => {
+      terminal.selectProject(projectName);
+    },
+    onWorkspaceCreated: ({ projectName }) => {
+      terminal.selectProject(projectName);
+    },
   });
 
   useEffect(() => {
@@ -595,10 +606,24 @@ export default function App() {
     await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
   }, [bundleConfigFlow, terminal.selectedProjectName, terminal.workspaces]);
 
+  const selectedProjectName = terminal.selectedProjectName;
+  const filteredWorkspaces = useMemo(
+    () => selectedProjectName
+      ? terminal.workspaces.filter((workspace) => workspace.projectName === selectedProjectName)
+      : [],
+    [selectedProjectName, terminal.workspaces]
+  );
+  const filteredSessions = useMemo(
+    () => selectedProjectName
+      ? terminal.sessions.filter((session) => session.workspaceId.startsWith(`${selectedProjectName}:`))
+      : [],
+    [selectedProjectName, terminal.sessions]
+  );
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
-    workspaces: terminal.workspaces,
-    sessions: terminal.sessions,
+    workspaces: filteredWorkspaces,
+    sessions: filteredSessions,
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
     onEditProcesses: handleEditProcesses,
@@ -619,26 +644,69 @@ export default function App() {
     onRefresh: terminal.requestWorkspaces,
     onRefreshSessions: () => terminal.requestSessions(),
     onBack: handleBackToMachines,
-    machineName: selectedMachine?.label || selectedMachine?.machineId,
+    machineName: selectedProjectName
+      ? `${selectedProjectName} - ${selectedMachine?.label || selectedMachine?.machineId || 'machine'}`
+      : selectedMachine?.label || selectedMachine?.machineId,
+    showProjectHeaders: false,
   });
 
-  const selectedProjectName = useMemo(() => {
-    const selected = spacesBrowserProps.selectedItem;
-    if (!selected) {
-      return null;
-    }
-    if (selected.type === 'project') {
-      return selected.name;
-    }
-    if (selected.type === 'workspace') {
-      return selected.workspace.projectName;
-    }
-    if ('workspaceId' in selected && typeof selected.workspaceId === 'string') {
-      const separator = selected.workspaceId.indexOf(':');
-      return separator > 0 ? selected.workspaceId.slice(0, separator) : null;
-    }
-    return null;
-  }, [spacesBrowserProps.selectedItem]);
+  const handleOpenHelp = useCallback(() => {
+    flow.showHelp(getDefaultShortcuts());
+  }, [flow]);
+
+  const handleOpenCreateMenu = useCallback(() => {
+    lifecycleController.openCreateMenu(selectedProjectName ?? terminal.selectedProjectName);
+  }, [lifecycleController, selectedProjectName, terminal.selectedProjectName]);
+
+  const handleCreateWorkspaceForProject = useCallback((projectName: string) => {
+    lifecycleController.openCreateWorkspaceFlow(projectName);
+  }, [lifecycleController]);
+
+  const handleDeleteProject = useCallback((projectName: string) => {
+    lifecycleController.openDeleteProjectFlow(projectName);
+  }, [lifecycleController]);
+
+  const handleDeleteSession = useCallback((sessionId: string, sessionName: string) => {
+    flow.showConfirm({
+      title: 'Kill Session',
+      message: `Kill session "${sessionName}"?`,
+      variant: 'warning',
+      confirmLabel: 'Kill',
+      onConfirm: () => {
+        terminal.killSession(sessionId);
+      },
+    });
+  }, [flow, terminal]);
+
+  const handleDeleteWorkspace = useCallback((workspace: WorkspaceInfo) => {
+    const sessionCount = workspace.sessionCount || 0;
+    flow.showConfirmTyped({
+      title: 'Delete Workspace',
+      message: `Are you sure you want to delete workspace "${workspace.name}"?`,
+      confirmText: workspace.name,
+      warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
+      onConfirm: async () => {
+        await deleteWorkspaceWithPrompt({
+          projectName: workspace.projectName,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+        });
+      },
+    });
+  }, [deleteWorkspaceWithPrompt, flow]);
+
+  const projectListProps = useProjectList({
+    projects: terminal.projects,
+    selectedProjectName,
+    onSelect: (project) => {
+      terminal.selectProject(project.name);
+    },
+    onCreateNew: lifecycleController.openCreateProjectFlow,
+    onDelete: (project) => {
+      handleDeleteProject(project.name);
+    },
+    onRefresh: () => terminal.requestProjects(),
+  });
 
   // Inbox hook
   const inboxProps = useInbox({
@@ -1206,47 +1274,41 @@ export default function App() {
 
     return (
       <>
-        <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-              <button
-                onClick={handleBackToMachines}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
-              >
-                ← <span className="hidden sm:inline ml-1">Machines</span>
-              </button>
-              <div className="text-sm text-[#8b949e] truncate hidden sm:block">
-                <span className="text-[#3fb950] shadow-glow">●</span>{" "}
-                {selectedMachine?.label || selectedMachine?.machineId}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
-              <button
-                onClick={() => {
-                  terminal.requestInbox();
-                  setShowInbox(true);
-                }}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] flex items-center gap-1 py-2 px-2 min-h-[44px]"
-              >
-                <span className="hidden sm:inline text-xs text-[#6e7681]">[i]</span>
-                <span>Inbox</span>
-                {terminal.inboxUnreadCount > 0 && (
-                  <span className="ml-1 px-1.5 py-0.5 text-xs bg-[#58a6ff] rounded-full text-[#0d1117] font-medium">
-                    {terminal.inboxUnreadCount}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={handleDisconnect}
-                className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
-              >
-                <span className="hidden sm:inline">Disconnect</span>
-                <span className="sm:hidden">×</span>
-              </button>
-            </div>
+        <div className="h-screen w-screen flex flex-col md:flex-row bg-[#0d1117]">
+          <div className="h-[34vh] min-h-[240px] border-b border-[#30363d] md:h-full md:w-[320px] md:flex-shrink-0 md:border-b-0 md:border-r">
+            <ProjectListWeb
+              {...projectListProps}
+              embedded={true}
+              title={selectedMachine?.label || selectedMachine?.machineId || 'Projects'}
+            />
           </div>
-          <div className="flex-1 overflow-hidden">
-            <SpacesBrowserWeb {...spacesBrowserProps} onReview={handleOpenReview} />
+          <div className="flex-1 min-h-0">
+            <SpacesBrowserWeb
+              {...spacesBrowserProps}
+              embedded={true}
+              emptyTitle={selectedProjectName ? `No workspaces in ${selectedProjectName}` : 'No project selected'}
+              emptyDescription={selectedProjectName
+                ? 'Create the first workspace for this project.'
+                : terminal.projects.length > 0
+                  ? 'Pick a project from the list to browse its workspaces.'
+                  : 'Create a project to start working from the web UI.'}
+              emptyActionLabel={selectedProjectName ? 'New Workspace' : 'New Project'}
+              onEmptyAction={selectedProjectName
+                ? () => handleCreateWorkspaceForProject(selectedProjectName)
+                : lifecycleController.openCreateProjectFlow}
+              onReview={handleOpenReview}
+              onCreate={selectedProjectName ? () => handleCreateWorkspaceForProject(selectedProjectName) : handleOpenCreateMenu}
+              onHelp={handleOpenHelp}
+              onOpenInbox={() => {
+                terminal.requestInbox();
+                setShowInbox(true);
+              }}
+              inboxUnreadCount={terminal.inboxUnreadCount}
+              onDisconnect={handleDisconnect}
+              onCreateWorkspaceForProject={handleCreateWorkspaceForProject}
+              onDeleteWorkspace={handleDeleteWorkspace}
+              onDeleteSession={handleDeleteSession}
+            />
           </div>
         </div>
         <FlowWeb flow={flow} />
@@ -1465,6 +1527,12 @@ export default function App() {
                 </span>
               </div>
               <button
+                onClick={handleOpenHelp}
+                className="text-xs text-[#6e7681] hover:text-[#e6edf3] px-2 py-1"
+              >
+                Help
+              </button>
+              <button
                 onClick={relay.refreshMachines}
                 className="text-xs text-[#6e7681] hover:text-[#e6edf3] px-2 py-1"
               >
@@ -1517,7 +1585,7 @@ export default function App() {
         {/* Footer */}
         <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d]">
           <p className="text-xs text-[#6e7681] text-center">
-            End-to-end encrypted via X3DH
+            End-to-end encrypted via X3DH • ↑↓ Navigate • Enter Connect • ? Help
           </p>
         </div>
       </div>

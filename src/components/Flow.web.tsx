@@ -7,7 +7,7 @@
 
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import type { UseFlowReturn, FlowState } from './Flow.js';
+import { getVisibleSelectOptions, type UseFlowReturn, type FlowState } from './Flow.js';
 
 // ============================================================================
 // Props
@@ -34,13 +34,6 @@ export function FlowWeb({ flow }: FlowWebProps) {
 
     void navigator.clipboard.writeText(message);
   };
-
-  // Debug: log when modal state changes
-  useEffect(() => {
-    if (isOpen) {
-      console.log('Modal OPEN - type:', state.type);
-    }
-  }, [isOpen, state.type]);
 
   // Keyboard handling
   useEffect(() => {
@@ -266,10 +259,28 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
       );
 
     case 'select':
+      const visibleOptions = getVisibleSelectOptions(state);
       return (
         <Modal title={state.title} width="lg">
+          {state.searchable && (
+            <div className="mb-4">
+              <input
+                type="text"
+                value={state.searchQuery ?? ''}
+                onChange={(e) => flow.updateSelectQuery(e.target.value)}
+                placeholder="Filter options..."
+                className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
+                autoFocus
+              />
+            </div>
+          )}
           <div className="space-y-2 max-h-64 sm:max-h-80 overflow-y-auto -mx-2 px-2">
-            {state.options.map((option, idx) => {
+            {visibleOptions.length === 0 && (
+              <div className="p-4 rounded-lg border border-[#30363d] bg-[#0d1117] text-sm text-[#8b949e]">
+                No matches for "{state.searchQuery ?? ''}".
+              </div>
+            )}
+            {visibleOptions.map(({ option }, idx) => {
               const isSelected = idx === state.selectedIndex;
               return (
                 <div

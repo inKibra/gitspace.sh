@@ -1,10 +1,13 @@
 import { useCallback } from 'react';
-import type { UseFlowReturn } from '../../components/Flow.js';
+import type { FlowWizardStep, UseFlowReturn } from '../../components/Flow.js';
 import type {
   CreateProjectParams,
   CreateWorkspaceParams,
   DeleteProjectParams,
+  FinalizeProjectParams,
+  PreparedProjectResult,
 } from '../../session/backend.js';
+import type { ConfirmStepResult, OnboardingStep } from '../../types/bundle.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../../types/lifecycle.js';
 import {
   extractRepoName,
@@ -21,21 +24,30 @@ export interface WorkspaceCreatedDetails {
   workspaceSource?: WorkspaceSource;
 }
 
+export interface ProjectCreatedDetails {
+  projectName: string;
+  repository: string;
+}
+
 export interface UseLifecycleControllerOptions {
   flow: Pick<
     UseFlowReturn,
-    'showLoading' | 'showSelect' | 'showInput' | 'showConfirmTyped' | 'showMessage' | 'close'
+    'showLoading' | 'showSelect' | 'showInput' | 'showConfirmTyped' | 'showMessage' | 'showWizard' | 'close'
   >;
   listGithubRepos: (org?: string) => Promise<string[]>;
   listRemoteBranches: (projectName: string) => Promise<string[]>;
   listLinearIssues: (projectName: string) => Promise<SessionLinearIssueSummary[]>;
   createProject: (params: CreateProjectParams) => Promise<void>;
+  prepareProjectCreation?: (params: CreateProjectParams) => Promise<PreparedProjectResult>;
+  finalizeProjectCreation?: (params: FinalizeProjectParams) => Promise<void>;
+  cancelProjectCreation?: (projectName: string) => Promise<void>;
   createWorkspace: (params: CreateWorkspaceParams) => Promise<void>;
   deleteProject: (projectName: string, params?: DeleteProjectParams) => Promise<void>;
   getProjectNames: () => string[];
   refreshProjects: () => void | Promise<void>;
   refreshWorkspaces: () => void | Promise<void>;
   refreshSessions?: () => void | Promise<void>;
+  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
   onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
   showCreateWorkspaceSuccessMessage?: boolean;
 }
@@ -70,6 +82,63 @@ function buildLinearIssueLabel(issue: SessionLinearIssueSummary): string {
   return `${issue.identifier} - ${trimmedTitle.slice(0, 57)}...`;
 }
 
+function buildOnboardingValidation(step: OnboardingStep): ((value: string) => string | null) | undefined {
+  if (step.type !== 'input' && step.type !== 'secret') {
+    return undefined;
+  }
+
+  return (value: string) => {
+    const trimmed = value.trim();
+    if (step.required !== false && trimmed.length === 0) {
+      return `${step.title} is required`;
+    }
+
+    if (trimmed.length === 0 || !step.validationPattern) {
+      return null;
+    }
+
+    const regex = new RegExp(step.validationPattern);
+    return regex.test(trimmed) ? null : step.validationMessage ?? `Invalid value for ${step.title}`;
+  };
+}
+
+function toWizardSteps(
+  steps: OnboardingStep[],
+  confirmStatuses?: Record<string, 'found' | 'missing'>
+): FlowWizardStep[] {
+  return steps.map((step) => {
+    if (step.type === 'info') {
+      return {
+        id: step.id,
+        title: step.title,
+        type: 'info' as const,
+        description: step.description,
+      };
+    }
+
+    if (step.type === 'confirm') {
+      return {
+        id: step.id,
+        title: step.title,
+        type: 'confirm' as const,
+        description: step.description,
+        checkCommand: step.checkCommand,
+        checkStatus: step.checkCommand ? confirmStatuses?.[step.id] : undefined,
+        installUrl: step.installUrl,
+      };
+    }
+
+    return {
+      id: step.id,
+      title: step.title,
+      type: step.type,
+      description: step.description,
+      defaultValue: step.type === 'input' ? step.defaultValue : '',
+      validation: buildOnboardingValidation(step),
+    };
+  });
+}
+
 const SOURCE_OPTIONS: Array<{
   label: string;
   description: string;
@@ -101,12 +170,16 @@ export function useLifecycleController(
     listRemoteBranches,
     listLinearIssues,
     createProject,
+    prepareProjectCreation,
+    finalizeProjectCreation,
+    cancelProjectCreation,
     createWorkspace,
     deleteProject,
     getProjectNames,
     refreshProjects,
     refreshWorkspaces,
     refreshSessions,
+    onProjectCreated,
     onWorkspaceCreated,
     showCreateWorkspaceSuccessMessage = true,
   } = options;
@@ -164,6 +237,85 @@ export function useLifecycleController(
   ]);
 
   const openCreateProjectFlow = useCallback(() => {
+    const completeProjectCreation = async (projectName: string, repo: string) => {
+      await refreshAll();
+      await onProjectCreated?.({ projectName, repository: repo });
+      flow.showMessage({
+        title: 'Project Created',
+        message: `Created project "${projectName}" from ${repo}.`,
+        variant: 'success',
+      });
+    };
+
+    const startOnboardingFlow = (prepared: PreparedProjectResult) => {
+      const onboardingSteps = prepared.bundle?.onboarding ?? [];
+      if (!finalizeProjectCreation || onboardingSteps.length === 0) {
+        return false;
+      }
+
+      flow.showWizard({
+        title: `Set Up ${prepared.projectName}`,
+        steps: toWizardSteps(onboardingSteps, prepared.confirmStatuses),
+        onCancel: () => {
+          if (cancelProjectCreation) {
+            void cancelProjectCreation(prepared.projectName).catch(() => undefined);
+          }
+        },
+        onComplete: async (values) => {
+          flow.showLoading({
+            title: 'Creating Project',
+            message: `Finalizing ${prepared.projectName}...`,
+          });
+
+          try {
+            const inputValues: Record<string, string> = {};
+            const secretValues: Record<string, string> = {};
+            const confirmResults: Record<string, ConfirmStepResult> = {};
+
+            for (const step of onboardingSteps) {
+              if (step.type === 'input') {
+                inputValues[step.configKey] = (values[step.id] ?? step.defaultValue ?? '').trim();
+                continue;
+              }
+
+              if (step.type === 'secret') {
+                secretValues[step.configKey] = (values[step.id] ?? '').trim();
+                continue;
+              }
+
+              if (step.type === 'confirm') {
+                confirmResults[step.id] = {
+                  status: step.checkCommand
+                    ? prepared.confirmStatuses?.[step.id] === 'found' ? 'passed' : 'skipped'
+                    : 'passed',
+                  checkCommand: step.checkCommand,
+                };
+              }
+            }
+
+            await finalizeProjectCreation({
+              projectName: prepared.projectName,
+              repository: prepared.repository,
+              baseBranch: prepared.baseBranch,
+              bundle: prepared.bundle,
+              inputValues,
+              secretValues,
+              confirmResults,
+            });
+            await completeProjectCreation(prepared.projectName, prepared.repository);
+          } catch (error) {
+            flow.showMessage({
+              title: 'Create Project Failed',
+              message: toErrorMessage(error, 'Failed to create project'),
+              variant: 'error',
+            });
+          }
+        },
+      });
+
+      return true;
+    };
+
     const openProjectNamePrompt = (repo: string) => {
       const defaultName = defaultProjectNameForRepo(repo);
 
@@ -189,13 +341,24 @@ export function useLifecycleController(
           });
 
           try {
+            if (prepareProjectCreation && finalizeProjectCreation) {
+              const prepared = await prepareProjectCreation({ repository: repo, projectName });
+              if (startOnboardingFlow(prepared)) {
+                return;
+              }
+
+              await finalizeProjectCreation({
+                projectName: prepared.projectName,
+                repository: prepared.repository,
+                baseBranch: prepared.baseBranch,
+                bundle: prepared.bundle,
+              });
+              await completeProjectCreation(prepared.projectName, prepared.repository);
+              return;
+            }
+
             await createProject({ repository: repo, projectName });
-            await refreshAll();
-            flow.showMessage({
-              title: 'Project Created',
-              message: `Created project "${projectName}" from ${repo}.`,
-              variant: 'success',
-            });
+            await completeProjectCreation(projectName, repo);
           } catch (error) {
             flow.showMessage({
               title: 'Create Project Failed',
@@ -294,7 +457,16 @@ export function useLifecycleController(
         })();
       },
     });
-  }, [createProject, flow, listGithubRepos, refreshAll]);
+  }, [
+    cancelProjectCreation,
+    createProject,
+    finalizeProjectCreation,
+    flow,
+    listGithubRepos,
+    onProjectCreated,
+    prepareProjectCreation,
+    refreshAll,
+  ]);
 
   const openManualWorkspaceFlow = useCallback((projectName: string) => {
     flow.showInput({

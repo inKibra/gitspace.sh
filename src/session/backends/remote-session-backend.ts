@@ -4,6 +4,7 @@ import {
   parseRemoteMessage,
   type ApplyBundleRefreshRequest,
   type AttachSessionRequest,
+  type CancelProjectCreationRequest,
   type CreateProjectRequest,
   type CreateWorkspaceRequest,
   type DeleteProjectRequest,
@@ -31,8 +32,12 @@ import {
   type ListWorkspacesRequest,
   type MachineToClientMessage,
   type MarkInboxReadRequest,
+  type PrepareProjectCreationRequest,
+  type ProjectCreationCancelledResponse,
+  type ProjectCreationPreparedResponse,
   type ReviewRequest,
   type ReviewResponse,
+  type FinalizeProjectCreationRequest,
   type EventsListResponse,
   type ProjectCreatedResponse,
   type ProjectDeletedResponse,
@@ -60,6 +65,8 @@ import type {
   AttachSessionParams,
   BackendDescriptor,
   CreateProjectParams,
+  FinalizeProjectParams,
+  PreparedProjectResult,
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
@@ -192,6 +199,8 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'github_repo_list',
   'remote_branch_list',
   'linear_issue_list',
+  'project_creation_prepared',
+  'project_creation_cancelled',
   'project_created',
   'workspace_created',
   'project_deleted',
@@ -405,6 +414,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private pendingCreateProject:
     | {
         projectName?: string;
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingPrepareProject:
+    | {
+        projectName?: string;
+        resolve: (result: PreparedProjectResult) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingCancelProject:
+    | {
+        projectName: string;
         resolve: () => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
@@ -674,6 +699,136 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         }
         clearTimeout(pending.timeout);
         this.pendingCreateProject = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
+    if (this.pendingPrepareProject) {
+      throw new Error('Project preparation request already in progress');
+    }
+
+    const command: PrepareProjectCreationRequest = {
+      type: 'prepare_project_creation',
+      repository: params.repository,
+      projectName: params.projectName,
+      baseBranch: params.baseBranch,
+      setCurrent: params.setCurrent,
+    };
+
+    return new Promise<PreparedProjectResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingPrepareProject;
+        if (!pending) {
+          return;
+        }
+
+        this.pendingPrepareProject = null;
+        pending.reject(new Error('Timed out waiting for project preparation response'));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingPrepareProject = {
+        projectName: params.projectName,
+        resolve,
+        reject,
+        timeout,
+      };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingPrepareProject;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingPrepareProject = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
+    if (this.pendingCreateProject) {
+      throw new Error('Project creation request already in progress');
+    }
+
+    const command: FinalizeProjectCreationRequest = {
+      type: 'finalize_project_creation',
+      projectName: params.projectName,
+      repository: params.repository,
+      baseBranch: params.baseBranch,
+      bundle: params.bundle,
+      inputValues: params.inputValues,
+      secretValues: params.secretValues,
+      confirmResults: params.confirmResults,
+      setCurrent: params.setCurrent,
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingCreateProject;
+        if (!pending) {
+          return;
+        }
+
+        this.pendingCreateProject = null;
+        pending.reject(new Error('Timed out waiting for project creation response'));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingCreateProject = {
+        projectName: params.projectName,
+        resolve,
+        reject,
+        timeout,
+      };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingCreateProject;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingCreateProject = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async cancelProjectCreation(projectName: string): Promise<void> {
+    if (this.pendingCancelProject) {
+      throw new Error('Project cancellation request already in progress');
+    }
+
+    const command: CancelProjectCreationRequest = {
+      type: 'cancel_project_creation',
+      projectName,
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingCancelProject;
+        if (!pending || pending.projectName !== projectName) {
+          return;
+        }
+
+        this.pendingCancelProject = null;
+        pending.reject(new Error(`Timed out waiting for project cancellation response (${projectName})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingCancelProject = {
+        projectName,
+        resolve,
+        reject,
+        timeout,
+      };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingCancelProject;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingCancelProject = null;
         pending.reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
@@ -1163,7 +1318,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingGithubRepoList(error.message);
         this.rejectPendingRemoteBranches(error.message, undefined, true);
         this.rejectPendingLinearIssues(error.message, undefined, true);
+        this.rejectPendingPrepareProject(error.message, undefined, true);
         this.rejectPendingProjectCreate(error.message, undefined, true);
+        this.rejectPendingCancelProject(error.message, undefined, true);
         this.rejectPendingWorkspaceCreate(error.message, undefined, undefined, true);
         this.rejectPendingProjectDelete(error.message, undefined, true);
         this.rejectPendingWorkspaceDelete('DELETE_FAILED', error.message);
@@ -1378,6 +1535,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'linear_issue_list':
         this.resolveLinearIssueList(message);
         return;
+      case 'project_creation_prepared':
+        this.resolvePrepareProject(message);
+        return;
+      case 'project_creation_cancelled':
+        this.resolveCancelProject(message);
+        return;
       case 'project_created':
         this.resolveCreateProject(message);
         await this.listProjects();
@@ -1500,7 +1663,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingGithubRepoList(message.message);
         this.rejectPendingRemoteBranches(message.message, message.projectName);
         this.rejectPendingLinearIssues(message.message, message.projectName);
+        this.rejectPendingPrepareProject(message.message, message.projectName);
         this.rejectPendingProjectCreate(message.message, message.projectName);
+        this.rejectPendingCancelProject(message.message, message.projectName);
         this.rejectPendingWorkspaceCreate(message.message, message.workspaceId, message.projectName);
         this.rejectPendingProjectDelete(message.message, message.projectName);
         if (message.workspaceId) {
@@ -1574,6 +1739,27 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.resolve(message.issues);
   }
 
+  private resolvePrepareProject(message: ProjectCreationPreparedResponse): void {
+    const pending = this.pendingPrepareProject;
+    if (!pending) {
+      return;
+    }
+
+    if (pending.projectName && pending.projectName !== message.projectName) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingPrepareProject = null;
+    pending.resolve({
+      projectName: message.projectName,
+      repository: message.repository,
+      baseBranch: message.baseBranch,
+      bundle: message.bundle,
+      confirmStatuses: message.confirmStatuses,
+    });
+  }
+
   private resolveCreateProject(_message: ProjectCreatedResponse): void {
     const pending = this.pendingCreateProject;
     if (!pending) {
@@ -1582,6 +1768,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
     clearTimeout(pending.timeout);
     this.pendingCreateProject = null;
+    pending.resolve();
+  }
+
+  private resolveCancelProject(message: ProjectCreationCancelledResponse): void {
+    const pending = this.pendingCancelProject;
+    if (!pending) {
+      return;
+    }
+
+    if (pending.projectName !== message.projectName) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingCancelProject = null;
     pending.resolve();
   }
 
@@ -1680,6 +1881,44 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
     clearTimeout(pending.timeout);
     this.pendingCreateProject = null;
+    pending.reject(new Error(message));
+  }
+
+  private rejectPendingPrepareProject(
+    message: string,
+    projectName?: string,
+    force = false
+  ): void {
+    const pending = this.pendingPrepareProject;
+    if (!pending) {
+      return;
+    }
+
+    if (!force && projectName && pending.projectName && pending.projectName !== projectName) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingPrepareProject = null;
+    pending.reject(new Error(message));
+  }
+
+  private rejectPendingCancelProject(
+    message: string,
+    projectName?: string,
+    force = false
+  ): void {
+    const pending = this.pendingCancelProject;
+    if (!pending) {
+      return;
+    }
+
+    if (!force && projectName && pending.projectName !== projectName) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingCancelProject = null;
     pending.reject(new Error(message));
   }
 
@@ -2050,7 +2289,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingGithubRepoList('Remote session disconnected');
     this.rejectPendingRemoteBranches('Remote session disconnected', undefined, true);
     this.rejectPendingLinearIssues('Remote session disconnected', undefined, true);
+    this.rejectPendingPrepareProject('Remote session disconnected', undefined, true);
     this.rejectPendingProjectCreate('Remote session disconnected', undefined, true);
+    this.rejectPendingCancelProject('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceCreate('Remote session disconnected', undefined, undefined, true);
     this.rejectPendingProjectDelete('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);

@@ -78,6 +78,11 @@ import { getGitspaceDir } from '../core/config.js';
 import { buildProcessHostname, normalizeHostLabel } from '../utils/hostnames.js';
 import type { ProcessPortConfig } from '../types/processes.js';
 import {
+  discoverRelayCandidates as discoverRelayCandidatesBase,
+  isRelayHealthy,
+  type RelayCandidate,
+} from '../core/relay-discovery.js';
+import {
   bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
@@ -117,13 +122,6 @@ const CLOUDFLARED_RESTART_DELAY = 5000;
 
 interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
-}
-
-interface RelayCandidate {
-  url: string;
-  label: string;
-  source: 'local' | 'account';
-  description?: string;
 }
 
 function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | undefined): string {
@@ -177,50 +175,10 @@ async function resolveUserRootAuthorizationConfig(options: {
   };
 }
 
-async function isRelayHealthy(relayUrl: string): Promise<boolean> {
-  try {
-    const relay = new URL(relayUrl);
-    const protocol = relay.protocol === 'wss:' ? 'https:' : 'http:';
-    const healthUrl = `${protocol}//${relay.host}/health`;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1200);
-    try {
-      const response = await fetch(healthUrl, { signal: controller.signal });
-      return response.ok;
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch {
-    return false;
-  }
-}
-
 async function discoverRelayCandidates(hostConfig: HostConfig | null): Promise<RelayCandidate[]> {
-  const candidates: RelayCandidate[] = [];
-
-  const localRelayUrl = `ws://127.0.0.1:${LOCAL_RELAY_PORT}/ws`;
-  if (await isRelayHealthy(localRelayUrl)) {
-    candidates.push({
-      url: localRelayUrl,
-      label: `Local relay (${localRelayUrl})`,
-      source: 'local',
-      description: 'Detected running on this machine',
-    });
-  }
-
-  const deduped = await resolveRelaySubdomains(hostConfig);
-
-  for (const subdomain of deduped) {
-    candidates.push({
-      url: `wss://${subdomain}.gitspace.sh/ws`,
-      label: `${subdomain}.gitspace.sh`,
-      source: 'account',
-      description: hostConfig?.subdomain === subdomain ? 'Primary account relay' : 'Account relay',
-    });
-  }
-
-  return candidates;
+  const candidates = await discoverRelayCandidatesBase({ hostConfig, includeLocalRelay: true });
+  const healthChecks = await Promise.all(candidates.map((candidate) => isRelayHealthy(candidate.url)));
+  return candidates.filter((_, index) => healthChecks[index]);
 }
 
 async function resolveRelayUrlForServe(

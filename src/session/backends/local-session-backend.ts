@@ -29,14 +29,18 @@ import { scanWorkspaces } from '../../lib/remote-session/workspace-scanner.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
 import {
+  cancelPreparedProjectForSession,
   createProjectForSession,
   createWorkspaceForSession,
   deleteProjectForSession,
+  finalizePreparedProjectForSession,
   listGithubReposForSession,
   listLinearIssuesForSession,
   listRemoteBranchesForSession,
+  prepareProjectForSession,
   type SessionCreateProjectParams,
   type SessionCreateWorkspaceParams,
+  type SessionFinalizeProjectParams,
 } from '../../core/session-lifecycle.js';
 import {
   getBundleRefreshPlan as getBundleRefreshPlanCore,
@@ -57,6 +61,8 @@ import type {
   AttachSessionParams,
   BackendDescriptor,
   CreateProjectParams,
+  FinalizeProjectParams,
+  PreparedProjectResult,
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
@@ -105,6 +111,9 @@ export interface LocalSessionBackendDependencies {
   listRemoteBranchesForSession: typeof listRemoteBranchesForSession;
   listLinearIssuesForSession: typeof listLinearIssuesForSession;
   createProjectForSession: (params: SessionCreateProjectParams) => Promise<unknown>;
+  prepareProjectForSession: (params: SessionCreateProjectParams) => Promise<PreparedProjectResult>;
+  finalizePreparedProjectForSession: (params: SessionFinalizeProjectParams) => Promise<unknown>;
+  cancelPreparedProjectForSession: (projectName: string) => Promise<void>;
   createWorkspaceForSession: (params: SessionCreateWorkspaceParams) => Promise<unknown>;
   deleteProjectForSession: typeof deleteProjectForSession;
   scanWorkspaces: typeof scanWorkspaces;
@@ -353,9 +362,12 @@ function buildDeps(
     listProjectSummaries,
     listGithubReposForSession,
     listRemoteBranchesForSession,
-    listLinearIssuesForSession,
-    createProjectForSession,
-    createWorkspaceForSession,
+      listLinearIssuesForSession,
+      createProjectForSession,
+      prepareProjectForSession,
+      finalizePreparedProjectForSession,
+      cancelPreparedProjectForSession,
+      createWorkspaceForSession,
     deleteProjectForSession,
     scanWorkspaces,
     deleteWorkspaceCore,
@@ -536,6 +548,38 @@ export class LocalSessionBackend implements SessionBackend {
       });
       throw error;
     }
+  }
+
+  async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
+    try {
+      return await this.deps.prepareProjectForSession(params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: 'command_error',
+        code: getErrorCode(error, 'CREATE_PROJECT_FAILED'),
+        message,
+      });
+      throw error;
+    }
+  }
+
+  async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
+    try {
+      await this.deps.finalizePreparedProjectForSession(params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: 'command_error',
+        code: getErrorCode(error, 'CREATE_PROJECT_FAILED'),
+        message,
+      });
+      throw error;
+    }
+  }
+
+  async cancelProjectCreation(projectName: string): Promise<void> {
+    await this.deps.cancelPreparedProjectForSession(projectName);
   }
 
   async createWorkspace(params: CreateWorkspaceParams): Promise<void> {

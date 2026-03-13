@@ -62,6 +62,7 @@ describe('useLifecycleController project flow', () => {
           showInput: (opts) => {
             showInputCalls.push({ title: opts.title, onSubmit: opts.onSubmit })
           },
+          showWizard: () => {},
           showConfirmTyped: () => {},
           showMessage,
           close: () => {},
@@ -126,6 +127,7 @@ describe('useLifecycleController project flow', () => {
           showInput: (opts) => {
             showInputCalls.push({ title: opts.title, onSubmit: opts.onSubmit })
           },
+          showWizard: () => {},
           showConfirmTyped: () => {},
           showMessage: () => {},
           close,
@@ -184,6 +186,7 @@ describe('useLifecycleController project flow', () => {
           showInput: (opts) => {
             showInputCalls.push({ title: opts.title, onSubmit: opts.onSubmit })
           },
+          showWizard: () => {},
           showConfirmTyped: () => {},
           showMessage,
           close: () => {},
@@ -207,6 +210,136 @@ describe('useLifecycleController project flow', () => {
     expect(showMessage).toHaveBeenCalledTimes(1)
     expect(showInputCalls.length).toBe(1)
     expect(showInputCalls[0]?.title).toBe('Repository Remote')
+  })
+
+  it('runs bundle onboarding before finalizing a prepared project', async () => {
+    const showSelectCalls: Array<SelectCall<'manual' | 'github'>> = []
+    const showInputCalls: InputCall[] = []
+    const showWizardCalls: Array<{
+      title: string
+      onComplete: (values: Record<string, string>) => void | Promise<void>
+      onCancel?: () => void
+    }> = []
+    const showMessage = mock(() => {})
+
+    const prepareProjectCreation = mock(async () => ({
+      projectName: 'widgets',
+      repository: 'acme/widgets',
+      baseBranch: 'main',
+      bundle: {
+        version: '1.0' as const,
+        name: 'widgets-bundle',
+        onboarding: [
+          {
+            id: 'region-step',
+            type: 'input' as const,
+            title: 'Region',
+            description: 'Pick a region',
+            configKey: 'REGION',
+            defaultValue: 'us-east-1',
+          },
+          {
+            id: 'token-step',
+            type: 'secret' as const,
+            title: 'Token',
+            description: 'Enter an API token',
+            configKey: 'API_TOKEN',
+          },
+        ],
+      },
+      confirmStatuses: undefined,
+    }))
+    const finalizeProjectCreation = mock(async () => {})
+    const refreshProjects = mock(async () => {})
+    const refreshWorkspaces = mock(async () => {})
+    const refreshSessions = mock(async () => {})
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading: () => {},
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              onSelect: opts.onSelect as (value: 'manual' | 'github') => void | Promise<void>,
+              searchable: opts.searchable,
+            })
+          },
+          showInput: (opts) => {
+            showInputCalls.push({ title: opts.title, onSubmit: opts.onSubmit })
+          },
+          showWizard: (opts) => {
+            showWizardCalls.push({ title: opts.title, onComplete: opts.onComplete, onCancel: opts.onCancel })
+          },
+          showConfirmTyped: () => {},
+          showMessage,
+          close: () => {},
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => [],
+        listLinearIssues: async () => [],
+        createProject: async () => {},
+        prepareProjectCreation,
+        finalizeProjectCreation,
+        cancelProjectCreation: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        getProjectNames: () => [],
+        refreshProjects,
+        refreshWorkspaces,
+        refreshSessions,
+      })
+    )
+
+    result.current.openCreateProjectFlow()
+    await showSelectCalls[0]!.onSelect('manual')
+    await showInputCalls[0]!.onSubmit('acme/widgets')
+    await showInputCalls[1]!.onSubmit('widgets')
+
+    expect(prepareProjectCreation).toHaveBeenCalledWith({
+      repository: 'acme/widgets',
+      projectName: 'widgets',
+    })
+    expect(showWizardCalls[0]?.title).toBe('Set Up widgets')
+
+    await showWizardCalls[0]!.onComplete({
+      'region-step': 'eu-west-1',
+      'token-step': 'secret-token',
+    })
+
+    expect(finalizeProjectCreation).toHaveBeenCalledWith({
+      projectName: 'widgets',
+      repository: 'acme/widgets',
+      baseBranch: 'main',
+      bundle: {
+        version: '1.0',
+        name: 'widgets-bundle',
+        onboarding: [
+          {
+            id: 'region-step',
+            type: 'input',
+            title: 'Region',
+            description: 'Pick a region',
+            configKey: 'REGION',
+            defaultValue: 'us-east-1',
+          },
+          {
+            id: 'token-step',
+            type: 'secret',
+            title: 'Token',
+            description: 'Enter an API token',
+            configKey: 'API_TOKEN',
+          },
+        ],
+      },
+      inputValues: { REGION: 'eu-west-1' },
+      secretValues: { API_TOKEN: 'secret-token' },
+      confirmResults: {},
+    })
+    expect(refreshProjects).toHaveBeenCalledTimes(1)
+    expect(refreshWorkspaces).toHaveBeenCalledTimes(1)
+    expect(refreshSessions).toHaveBeenCalledTimes(1)
+    expect(showMessage).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -242,6 +375,7 @@ describe('useLifecycleController workspace source flow', () => {
               searchable: opts.searchable,
             })
           },
+          showWizard: () => {},
           showInput: () => {},
           showConfirmTyped: () => {},
           showMessage: () => {},
@@ -288,6 +422,7 @@ describe('useLifecycleController workspace source flow', () => {
               searchable: opts.searchable,
             })
           },
+          showWizard: () => {},
           showInput: () => {},
           showConfirmTyped: () => {},
           showMessage: () => {},

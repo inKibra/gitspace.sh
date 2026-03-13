@@ -10,6 +10,8 @@ import type {
   AttachSessionParams,
   BackendKey,
   CreateProjectParams,
+  FinalizeProjectParams,
+  PreparedProjectResult,
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
@@ -73,6 +75,9 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   requestWorkspaces: () => void;
   requestSessions: (workspaceId?: string) => void;
   createProject: (params: CreateProjectParams) => Promise<void>;
+  prepareProjectCreation: (params: CreateProjectParams) => Promise<PreparedProjectResult>;
+  finalizeProjectCreation: (params: FinalizeProjectParams) => Promise<void>;
+  cancelProjectCreation: (projectName: string) => Promise<void>;
   createWorkspace: (params: CreateWorkspaceParams) => Promise<void>;
   deleteProject: (projectName: string, params?: DeleteProjectParams) => Promise<void>;
   attachSession: (params: AttachSessionParams) => void;
@@ -268,6 +273,31 @@ export function useRemoteSessionClient<ConnectParams>(
     }
   }, [engine, withActiveBackend]);
 
+  const prepareProjectCreation = useCallback(async (
+    params: CreateProjectParams
+  ): Promise<PreparedProjectResult> => {
+    const backendKey = activeBackendKeyRef.current;
+    if (!backendKey) {
+      throw new Error('No active backend connection');
+    }
+
+    return engine.prepareProjectCreation(backendKey, params);
+  }, [engine]);
+
+  const finalizeProjectCreation = useCallback(async (params: FinalizeProjectParams): Promise<void> => {
+    const result = await withActiveBackend((backendKey) => engine.finalizeProjectCreation(backendKey, params));
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
+  }, [engine, withActiveBackend]);
+
+  const cancelProjectCreation = useCallback(async (projectName: string): Promise<void> => {
+    const result = await withActiveBackend((backendKey) => engine.cancelProjectCreation(backendKey, projectName));
+    if (result === null) {
+      throw new Error('No active backend connection');
+    }
+  }, [engine, withActiveBackend]);
+
   const createWorkspace = useCallback(async (params: CreateWorkspaceParams): Promise<void> => {
     const result = await withActiveBackend((backendKey) => engine.createWorkspace(backendKey, params));
     if (result === null) {
@@ -304,10 +334,31 @@ export function useRemoteSessionClient<ConnectParams>(
       setSelectedProjectName(projectName);
       if (projectName) {
         requestWorkspaces();
+        requestSessions();
       }
     },
-    [requestWorkspaces]
+    [requestSessions, requestWorkspaces]
   );
+
+  useEffect(() => {
+    const projects = activeBackendState?.projects ?? [];
+
+    if (projects.length === 0) {
+      if (selectedProjectName !== null) {
+        setSelectedProjectName(null);
+      }
+      return;
+    }
+
+    if (selectedProjectName && projects.some((project) => project.name === selectedProjectName)) {
+      return;
+    }
+
+    const preferredProjectName = projects.find((project) => project.isCurrent)?.name ?? projects[0]?.name ?? null;
+    if (preferredProjectName && preferredProjectName !== selectedProjectName) {
+      setSelectedProjectName(preferredProjectName);
+    }
+  }, [activeBackendState?.projects, selectedProjectName]);
 
   const killSession = useCallback((sessionId: string) => {
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
@@ -499,6 +550,9 @@ export function useRemoteSessionClient<ConnectParams>(
     requestWorkspaces,
     requestSessions,
     createProject,
+    prepareProjectCreation,
+    finalizeProjectCreation,
+    cancelProjectCreation,
     createWorkspace,
     deleteProject,
     attachSession,

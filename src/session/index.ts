@@ -5,6 +5,8 @@ export type {
   SessionBackend,
   AttachSessionParams,
   CreateProjectParams,
+  PreparedProjectResult,
+  FinalizeProjectParams,
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,

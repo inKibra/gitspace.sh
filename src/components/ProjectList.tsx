@@ -29,6 +29,7 @@ export interface ProjectListItem extends ProjectInfo {
 /** Props for useProjectList hook */
 export interface UseProjectListProps {
   projects: ProjectInfo[];
+  selectedProjectName?: string | null;
   onSelect: (project: ProjectInfo) => void;
   onCreateNew: () => void;
   onDelete: (project: ProjectInfo) => void;
@@ -49,10 +50,28 @@ export interface UseProjectListReturn {
   moveUp: () => void;
   moveDown: () => void;
   selectIndex: (index: number) => void;
+  activateIndex: (index: number) => void;
+  deleteIndex: (index: number) => void;
   selectProject: () => void;
   createNew: () => void;
   deleteSelected: () => void;
   refresh: () => Promise<void>;
+}
+
+function resolvePreferredIndex(projects: ProjectInfo[], preferredProjectName?: string | null): number {
+  if (projects.length === 0) {
+    return 0;
+  }
+
+  if (preferredProjectName) {
+    const preferredIndex = projects.findIndex((project) => project.name === preferredProjectName);
+    if (preferredIndex >= 0) {
+      return preferredIndex;
+    }
+  }
+
+  const currentIndex = projects.findIndex((project) => project.isCurrent);
+  return currentIndex >= 0 ? currentIndex : 0;
 }
 
 // ============================================================================
@@ -62,6 +81,7 @@ export interface UseProjectListReturn {
 export function useProjectList(props: UseProjectListProps): UseProjectListReturn {
   const {
     projects,
+    selectedProjectName,
     onSelect,
     onCreateNew,
     onDelete,
@@ -70,9 +90,7 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
 
   // Local UI state
   const [selectedIndex, setSelectedIndex] = useState(() => {
-    // Default to current project
-    const currentIdx = projects.findIndex(p => p.isCurrent);
-    return currentIdx >= 0 ? currentIdx : 0;
+    return resolvePreferredIndex(projects, selectedProjectName);
   });
 
   // Build items with selection state
@@ -91,6 +109,17 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
 
   // Computed
   const isEmpty = projects.length === 0;
+
+  // Sync selection when caller controls the selected project.
+  useEffect(() => {
+    if (selectedProjectName === undefined) {
+      return;
+    }
+    const preferredIndex = resolvePreferredIndex(projects, selectedProjectName);
+    if (preferredIndex !== selectedIndex) {
+      setSelectedIndex(preferredIndex);
+    }
+  }, [projects, selectedIndex, selectedProjectName]);
 
   // Clamp selection when list changes
   useEffect(() => {
@@ -118,6 +147,15 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
     }
   }, [selectedProject, onSelect]);
 
+  const activateIndex = useCallback((index: number) => {
+    const project = projects[index];
+    if (!project) {
+      return;
+    }
+    setSelectedIndex(index);
+    onSelect(project);
+  }, [onSelect, projects]);
+
   const createNew = useCallback(() => {
     onCreateNew();
   }, [onCreateNew]);
@@ -127,6 +165,15 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
       onDelete(selectedProject);
     }
   }, [selectedProject, onDelete]);
+
+  const deleteIndex = useCallback((index: number) => {
+    const project = projects[index];
+    if (!project) {
+      return;
+    }
+    setSelectedIndex(index);
+    onDelete(project);
+  }, [onDelete, projects]);
 
   const refresh = useCallback(async () => {
     await onRefresh();
@@ -145,6 +192,8 @@ export function useProjectList(props: UseProjectListProps): UseProjectListReturn
     moveUp,
     moveDown,
     selectIndex,
+    activateIndex,
+    deleteIndex,
     selectProject,
     createNew,
     deleteSelected,

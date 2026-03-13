@@ -11,6 +11,7 @@ import type {
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
+import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -56,6 +57,25 @@ export interface CreateProjectParams {
   setCurrent?: boolean;
 }
 
+export interface PreparedProjectResult {
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: SpacesBundle;
+  confirmStatuses?: Record<string, 'found' | 'missing'>;
+}
+
+export interface FinalizeProjectParams {
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: SpacesBundle;
+  inputValues?: Record<string, string>;
+  secretValues?: Record<string, string>;
+  confirmResults?: Record<string, ConfirmStepResult>;
+  setCurrent?: boolean;
+}
+
 export interface CreateWorkspaceParams {
   projectName: string;
   workspaceName: string;
@@ -90,6 +110,9 @@ export interface SessionBackend {
   listSessions(workspaceId?: string): Promise<void>;
 
   createProject(params: CreateProjectParams): Promise<void>;
+  prepareProjectCreation?(params: CreateProjectParams): Promise<PreparedProjectResult>;
+  finalizeProjectCreation?(params: FinalizeProjectParams): Promise<void>;
+  cancelProjectCreation?(projectName: string): Promise<void>;
   createWorkspace(params: CreateWorkspaceParams): Promise<void>;
   deleteProject(projectName: string, params?: DeleteProjectParams): Promise<void>;
 
