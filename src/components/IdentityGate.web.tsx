@@ -177,6 +177,18 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
     setStep('create-pin');
   }, [mnemonicValue]);
 
+  const handleMnemonicBack = useCallback(() => {
+    setError(null);
+    setMnemonicValue('');
+
+    if (!auth.isLoggedIn) {
+      setStep('login');
+      return;
+    }
+
+    setStep(backupRef.current ? 'backup-password' : 'no-backup');
+  }, [auth.isLoggedIn]);
+
   const handleCreatePin = useCallback(async () => {
     if (!newPinValue.trim()) {
       setError('PIN is required.');
@@ -395,7 +407,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 Continue
               </button>
               <button
-                onClick={() => { setStep(auth.isLoggedIn ? 'fetching-backup' : 'login'); setError(null); setMnemonicValue(''); }}
+                onClick={handleMnemonicBack}
                 className="w-full mt-2 px-5 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] transition-all"
               >
                 Back
