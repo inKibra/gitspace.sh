@@ -141,8 +141,11 @@ function formatRelayHostForUrl(host: string): string {
 }
 
 function getRecommendedLocalRelayHost(bind: string): string {
-  if (bind === "0.0.0.0" || bind === "::") {
+  if (bind === "0.0.0.0") {
     return "127.0.0.1";
+  }
+  if (bind === "::") {
+    return "::1";
   }
   return bind;
 }

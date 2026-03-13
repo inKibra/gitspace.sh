@@ -247,12 +247,26 @@ function normalizeHostname(hostname: string): string {
   return hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").replace(/\.$/, "").split("%", 1)[0] ?? hostname.toLowerCase();
 }
 
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = normalizeHostname(hostname);
-  return normalized === "localhost"
-    || normalized === "127.0.0.1"
-    || normalized === "::1"
-    || normalized === "::ffff:127.0.0.1";
+function isIpv4Loopback(address: string): boolean {
+  const parts = address.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  const octets = parts.map((part) => Number.parseInt(part, 10));
+  return octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+    && octets[0] === 127;
+}
+
+function isLoopbackIp(address: string | null | undefined): boolean {
+  if (!address) {
+    return false;
+  }
+
+  const normalized = normalizeHostname(address);
+  return normalized === "::1"
+    || isIpv4Loopback(normalized)
+    || (normalized.startsWith("::ffff:") && isIpv4Loopback(normalized.slice("::ffff:".length)));
 }
 
 function consumeConnectionSlot(ip: string): boolean {
@@ -626,7 +640,8 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
       if (hostname) {
         const requestHost = normalizeHostname(url.hostname);
         const expectedHost = normalizeHostname(hostname);
-        if (requestHost !== expectedHost && !isLoopbackHostname(requestHost)) {
+        const requestIp = server.requestIP(req)?.address;
+        if (requestHost !== expectedHost && !isLoopbackIp(requestIp)) {
           return new Response("Not found", { status: 404 });
         }
       }
