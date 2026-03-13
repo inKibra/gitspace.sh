@@ -5,13 +5,19 @@
  * Presentational component for web with visible actions for desktop and mobile.
  */
 
-import { useEffect, useRef, type RefObject } from 'react';
+import { useEffect, useRef, type KeyboardEvent, type RefObject } from 'react';
 import type { TreeItem, UseSpacesBrowserReturn } from './SpacesBrowser.js';
 import { formatTime } from './SpacesBrowser.js';
 import type { WorkspaceInfo } from '../lib/remote-session/protocol.js';
 
 function isActivateKey(key: string): boolean {
   return key === 'Enter' || key === ' ';
+}
+
+function stopButtonActivationPropagation(event: KeyboardEvent<HTMLButtonElement>): void {
+  if (isActivateKey(event.key)) {
+    event.stopPropagation();
+  }
 }
 
 export interface SpacesBrowserWebProps extends UseSpacesBrowserReturn {
@@ -464,7 +470,9 @@ function Header({
     <div className="bg-[#161b22] px-4 py-3 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-3">
       <div className="flex items-center gap-3 min-w-0 flex-1">
         <button
+          type="button"
           onClick={onBack}
+          onKeyDown={stopButtonActivationPropagation}
           aria-label="Back"
           className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
         >
@@ -477,7 +485,9 @@ function Header({
       <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
         {onOpenInbox && (
           <button
+            type="button"
             onClick={onOpenInbox}
+            onKeyDown={stopButtonActivationPropagation}
             className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
           >
             Inbox
@@ -490,7 +500,9 @@ function Header({
         )}
         {onHelp && (
           <button
+            type="button"
             onClick={onHelp}
+            onKeyDown={stopButtonActivationPropagation}
             aria-label="Help"
             className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
           >
@@ -499,7 +511,9 @@ function Header({
         )}
         {onCreate && (
           <button
+            type="button"
             onClick={onCreate}
+            onKeyDown={stopButtonActivationPropagation}
             aria-label="New workspace or project"
             className="px-3 py-2 text-sm bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] rounded text-[#0d1117] font-medium min-h-[44px] shadow-glow"
           >
@@ -507,14 +521,18 @@ function Header({
           </button>
         )}
         <button
+          type="button"
           onClick={onRefresh}
+          onKeyDown={stopButtonActivationPropagation}
           className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pl-2 min-h-[44px] flex items-center flex-shrink-0"
         >
           Refresh
         </button>
         {onDisconnect && (
           <button
+            type="button"
             onClick={onDisconnect}
+            onKeyDown={stopButtonActivationPropagation}
             aria-label="Disconnect"
             className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
           >
@@ -607,13 +625,12 @@ function ActionButton({
 
   return (
     <button
+      type="button"
       onClick={(event) => {
         event.stopPropagation();
         onClick();
       }}
-      onKeyDown={(event) => {
-        event.stopPropagation();
-      }}
+      onKeyDown={stopButtonActivationPropagation}
       title={title}
       className={`px-2.5 py-1.5 rounded border text-xs min-h-[36px] ${toneClass}`}
     >

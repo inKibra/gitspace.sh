@@ -46,7 +46,7 @@ export interface FlowConfirm {
   confirmLabel?: string;
   cancelLabel?: string;
   onConfirm: () => void | Promise<void>;
-  onCancel?: () => void;
+  onCancel?: () => void | Promise<void>;
 }
 
 /** Type-to-confirm modal (for dangerous actions) */
@@ -58,7 +58,7 @@ export interface FlowConfirmTyped {
   warning?: string;
   inputValue: string;
   onConfirm: () => void | Promise<void>;
-  onCancel?: () => void;
+  onCancel?: () => void | Promise<void>;
 }
 
 /** Text input modal */
@@ -71,7 +71,7 @@ export interface FlowInput {
   inputValue: string;
   validation?: (value: string) => string | null; // Returns error message or null
   onSubmit: (value: string) => void | Promise<void>;
-  onCancel?: () => void;
+  onCancel?: () => void | Promise<void>;
 }
 
 /** Select from list modal */
@@ -83,7 +83,7 @@ export interface FlowSelect<T = unknown> {
   searchable?: boolean;
   searchQuery?: string;
   onSelect: (value: T, index: number) => void | Promise<void>;
-  onCancel?: () => void;
+  onCancel?: () => void | Promise<void>;
 }
 
 /** Multi-step wizard flow */
@@ -112,7 +112,7 @@ export interface FlowWizard {
   collectedValues: Record<string, string>;
   inputValue: string;
   onComplete: (values: Record<string, string>) => void | Promise<void>;
-  onCancel?: () => void;
+  onCancel?: () => void | Promise<void>;
 }
 
 // ============================================================================
@@ -158,7 +158,7 @@ export interface UseFlowReturn {
 
   // Interaction handlers (for keyboard/click)
   handleConfirm: () => Promise<void>;
-  handleCancel: () => void;
+  handleCancel: () => Promise<void>;
   handleInput: (value: string) => void;
   handleSelect: (index: number) => void;
   updateSelectQuery: (value: string) => void;
@@ -259,7 +259,8 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         closeIfUnchanged();
       } else if (flow.type === 'select') {
         const visibleOptions = getVisibleSelectOptions(flow);
-        const entry = visibleOptions[flow.selectedIndex];
+        const entry = visibleOptions.find(({ index }) => index === flow.selectedIndex)
+          ?? visibleOptions[0];
         if (entry) {
           await flow.onSelect(entry.option.value, entry.index);
           closeIfUnchanged();
@@ -302,17 +303,17 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   }, [flow, onError]);
 
   // Handle cancel action
-  const handleCancel = useCallback(() => {
+  const handleCancel = useCallback(async () => {
     if (flow.type === 'confirm' && flow.onCancel) {
-      flow.onCancel();
+      await flow.onCancel();
     } else if (flow.type === 'confirm-typed' && flow.onCancel) {
-      flow.onCancel();
+      await flow.onCancel();
     } else if (flow.type === 'input' && flow.onCancel) {
-      flow.onCancel();
+      await flow.onCancel();
     } else if (flow.type === 'select' && flow.onCancel) {
-      flow.onCancel();
+      await flow.onCancel();
     } else if (flow.type === 'wizard' && flow.onCancel) {
-      flow.onCancel();
+      await flow.onCancel();
     }
     close();
   }, [flow, close]);
@@ -331,11 +332,13 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   // Handle selection change
   const handleSelect = useCallback((index: number) => {
     if (flow.type === 'select') {
-      const visibleCount = getVisibleSelectOptions(flow).length;
-      const clampedIndex = visibleCount === 0
-        ? 0
-        : Math.max(0, Math.min(index, visibleCount - 1));
-      setFlow({ ...flow, selectedIndex: clampedIndex });
+      const visibleOptions = getVisibleSelectOptions(flow);
+      const hasVisibleIndex = visibleOptions.some((entry) => entry.index === index);
+      const fallbackIndex = visibleOptions[0]?.index ?? 0;
+      setFlow({
+        ...flow,
+        selectedIndex: hasVisibleIndex ? index : fallbackIndex,
+      });
     }
   }, [flow]);
 
@@ -344,32 +347,45 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
       return;
     }
 
+    const visibleOptions = getVisibleSelectOptions(flow);
+    const nextSelectedIndex = visibleOptions.find(({ index }) => index === flow.selectedIndex)?.index
+      ?? visibleOptions[0]?.index
+      ?? 0;
+
     setFlow({
       ...flow,
       searchQuery: value,
-      selectedIndex: 0,
+      selectedIndex: nextSelectedIndex,
     });
   }, [flow]);
 
   // Move selection up
   const moveUp = useCallback(() => {
     if (flow.type === 'select') {
-      const visibleCount = getVisibleSelectOptions(flow).length;
-      if (visibleCount === 0) {
+      const visibleOptions = getVisibleSelectOptions(flow);
+      if (visibleOptions.length === 0) {
         return;
       }
-      setFlow({ ...flow, selectedIndex: Math.max(0, flow.selectedIndex - 1) });
+
+      const currentVisiblePosition = visibleOptions.findIndex(({ index }) => index === flow.selectedIndex);
+      const nextVisiblePosition = currentVisiblePosition <= 0 ? 0 : currentVisiblePosition - 1;
+      setFlow({ ...flow, selectedIndex: visibleOptions[nextVisiblePosition]?.index ?? flow.selectedIndex });
     }
   }, [flow]);
 
   // Move selection down
   const moveDown = useCallback(() => {
     if (flow.type === 'select') {
-      const visibleCount = getVisibleSelectOptions(flow).length;
-      if (visibleCount === 0) {
+      const visibleOptions = getVisibleSelectOptions(flow);
+      if (visibleOptions.length === 0) {
         return;
       }
-      setFlow({ ...flow, selectedIndex: Math.min(visibleCount - 1, flow.selectedIndex + 1) });
+
+      const currentVisiblePosition = visibleOptions.findIndex(({ index }) => index === flow.selectedIndex);
+      const nextVisiblePosition = currentVisiblePosition < 0
+        ? 0
+        : Math.min(visibleOptions.length - 1, currentVisiblePosition + 1);
+      setFlow({ ...flow, selectedIndex: visibleOptions[nextVisiblePosition]?.index ?? flow.selectedIndex });
     }
   }, [flow]);
 

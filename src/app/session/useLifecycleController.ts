@@ -9,6 +9,7 @@ import type {
 } from '../../session/backend.js';
 import type { ConfirmStepResult, OnboardingStep } from '../../types/bundle.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../../types/lifecycle.js';
+import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
 import {
   extractRepoName,
@@ -259,7 +260,12 @@ export function useLifecycleController(
       }
 
       if (!finalizeProjectCreation || !cancelProjectCreation) {
-        throw new Error('Project onboarding requires prepare, finalize, and cancel support');
+        logger.error(`[lifecycle] Missing project onboarding backend support for ${prepared.projectName}`);
+        throw new SpacesError(
+          'Project onboarding requires prepare, finalize, and cancel support',
+          'SYSTEM_ERROR',
+          2
+        );
       }
 
       flow.showWizard({
