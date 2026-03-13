@@ -105,7 +105,6 @@ export class RelayMachineDirectoryClient<TSocket> {
       this.options.socketAdapter.setHandlers(socket, {
         onOpen: () => {
           opened = true;
-          this.setStatus('connected');
           this.startPing();
           this.requestMachineList();
           resolve();
@@ -217,6 +216,7 @@ export class RelayMachineDirectoryClient<TSocket> {
     }
 
     if (msg.type === 'machine_list') {
+      this.setStatus('connected');
       this.machines = msg.machines.map((machine) => ({
         machineId: machine.machineId,
         label: machine.label,
@@ -229,7 +229,10 @@ export class RelayMachineDirectoryClient<TSocket> {
     }
 
     if (msg.type === 'error') {
+      this.machines = [];
+      this.options.onMachineList?.([]);
       this.emitError(msg.message || 'Relay error');
+      this.setStatus('error');
       return;
     }
 

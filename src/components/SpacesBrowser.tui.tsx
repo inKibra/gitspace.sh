@@ -136,7 +136,7 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           if (item.type === 'project') {
             return (
               <text key={`project-${item.name}`} fg={COLORS.project} height={1}>
-                {item.name.toUpperCase()} ({item.workspaceCount})
+                {`${item.name.toUpperCase()} (${item.workspaceCount})`}
               </text>
             );
           }

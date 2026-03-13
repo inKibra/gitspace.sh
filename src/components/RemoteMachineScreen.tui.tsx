@@ -815,7 +815,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     <box flexDirection="column" flexGrow={1}>
       <box flexDirection="row" justifyContent="space-between" paddingLeft={1} paddingRight={1}>
         <text fg={COLORS.title}>● {machine.label || machine.machineId}</text>
-        <text fg={COLORS.textDim}>Inbox: {remote.inboxUnreadCount}</text>
+        <text fg={COLORS.textDim}>{`Inbox: ${remote.inboxUnreadCount}`}</text>
       </box>
       <SpacesBrowserTUI {...spacesBrowserProps} focused={true} />
       <FlowTUI flow={flow} />

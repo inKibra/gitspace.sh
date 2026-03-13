@@ -114,6 +114,7 @@ export function useMachineDirectory<TSocket, TIdentity, TContext = undefined>(
           setStatus(nextStatus);
         },
         onMachineList: (nextMachines) => {
+          setError(null);
           const mapper = mapMachinesRef.current;
           setMachines(mapper ? mapper(nextMachines) : nextMachines);
         },

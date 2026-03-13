@@ -98,7 +98,7 @@ describe('useMachineDirectory', () => {
       await result.current.connect()
     })
 
-    expect(result.current.status).toBe('connected')
+    expect(result.current.status).toBe('connecting')
     expect(result.current.identity).toEqual({ id: 'identity-1' })
     expect(result.current.context).toEqual({ publicKey: 'pubkey-1' })
 
@@ -122,6 +122,7 @@ describe('useMachineDirectory', () => {
       }))
     })
 
+    expect(result.current.status).toBe('connected')
     expect(result.current.machines).toEqual<MachineInfo[]>([
       {
         machineId: 'local',
@@ -169,5 +170,70 @@ describe('useMachineDirectory', () => {
     expect(result.current.machines).toEqual([])
     expect(onError).toHaveBeenCalledTimes(1)
     expect(onError.mock.calls[0][0].message).toBe('missing identity')
+  })
+
+  it('surfaces relay list errors and clears them after a later machine list', async () => {
+    const holder = { socket: null as FakeSocket | null }
+    const onError = mock<(error: Error) => void>(() => {})
+
+    const { result } = renderHook(() =>
+      useMachineDirectory<FakeSocket, { id: string }>({
+        socketAdapter: createAdapter(holder),
+        resolveClientConfig: async () => ({
+          relayUrl: 'ws://localhost:4480/ws',
+          clientIdentityId: 'client-2',
+          deviceCertificate: 'test-device-cert',
+          identity: { id: 'identity-2' },
+        }),
+        onError,
+      })
+    )
+
+    await act(async () => {
+      await result.current.connect()
+    })
+
+    const socket = holder.socket
+    if (!socket || !socket.handlers) {
+      throw new Error('Socket handlers missing after connect')
+    }
+
+    act(() => {
+      socket.handlers?.onMessage(JSON.stringify({
+        type: 'error',
+        message: 'Identity mismatch',
+      }))
+    })
+
+    expect(result.current.status).toBe('error')
+    expect(result.current.error).toBe('Identity mismatch')
+    expect(result.current.machines).toEqual([])
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].message).toBe('Identity mismatch')
+
+    act(() => {
+      socket.handlers?.onMessage(JSON.stringify({
+        type: 'machine_list',
+        machines: [
+          {
+            machineId: 'remote-2',
+            label: 'Recovered Box',
+            online: true,
+            isAuthorized: true,
+          },
+        ],
+      }))
+    })
+
+    expect(result.current.status).toBe('connected')
+    expect(result.current.error).toBeNull()
+    expect(result.current.machines).toEqual<MachineInfo[]>([
+      {
+        machineId: 'remote-2',
+        label: 'Recovered Box',
+        online: true,
+        isAuthorized: true,
+      },
+    ])
   })
 })

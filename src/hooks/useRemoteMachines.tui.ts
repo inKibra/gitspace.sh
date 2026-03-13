@@ -104,7 +104,7 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
       const identity = await resolveIdentity(options);
       if (!identity) {
         throw new Error(
-          'Remote relay requires an unlocked identity. Set GITSPACE_IDENTITY_PASSWORD or pass identity to useRemoteMachines.'
+          'Remote relay requires an unlocked local device identity.'
         );
       }
 

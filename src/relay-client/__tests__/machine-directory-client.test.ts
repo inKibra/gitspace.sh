@@ -44,7 +44,7 @@ function createFakeAdapter(holder: { socket: FakeSocket | null }): RelaySocketAd
 }
 
 describe('RelayMachineDirectoryClient', () => {
-  it('requests machine list on connect and normalizes machine data', async () => {
+  it('requests machine list on connect and stays connecting until the first machine list arrives', async () => {
     const holder = { socket: null as FakeSocket | null };
     const statuses: string[] = [];
     const errors: string[] = [];
@@ -67,7 +67,8 @@ describe('RelayMachineDirectoryClient', () => {
     socket.handlers!.onOpen();
     await connectPromise;
 
-    expect(statuses).toEqual(['connecting', 'connected']);
+    expect(statuses).toEqual(['connecting']);
+    expect(client.getStatus()).toBe('connecting');
     expect(socket.sent).toHaveLength(1);
 
     const outbound = JSON.parse(socket.sent[0]);
@@ -88,6 +89,8 @@ describe('RelayMachineDirectoryClient', () => {
       ],
     }));
 
+    expect(statuses).toEqual(['connecting', 'connected']);
+    expect(client.getStatus()).toBe('connected');
     expect(machineLists).toHaveLength(1);
     expect(client.getMachines()).toEqual([
       {
@@ -100,6 +103,54 @@ describe('RelayMachineDirectoryClient', () => {
     ]);
 
     expect(errors).toEqual([]);
+  });
+
+  it('treats relay error messages as error state and clears machine list', async () => {
+    const holder = { socket: null as FakeSocket | null };
+    const statuses: string[] = [];
+    const errors: string[] = [];
+    const machineLists: unknown[] = [];
+
+    const client = new RelayMachineDirectoryClient<FakeSocket>({
+      relayUrl: 'ws://localhost:4480/ws',
+      clientIdentityId: 'client-1',
+      deviceCertificate: 'test-device-cert',
+      socketAdapter: createFakeAdapter(holder),
+      onStatusChange: (status) => statuses.push(status),
+      onError: (message) => errors.push(message),
+      onMachineList: (machines) => machineLists.push(machines),
+    });
+
+    const connectPromise = client.connect();
+    const socket = holder.socket!;
+    socket.readyState = OPEN;
+    socket.handlers!.onOpen();
+    await connectPromise;
+
+    socket.handlers!.onMessage(JSON.stringify({
+      type: 'machine_list',
+      machines: [
+        {
+          machineId: 'machine-a',
+          online: true,
+          isAuthorized: true,
+        },
+      ],
+    }));
+
+    expect(client.getStatus()).toBe('connected');
+    expect(client.getMachines()).toHaveLength(1);
+
+    socket.handlers!.onMessage(JSON.stringify({
+      type: 'error',
+      message: 'Identity mismatch',
+    }));
+
+    expect(client.getStatus()).toBe('error');
+    expect(client.getMachines()).toEqual([]);
+    expect(machineLists[machineLists.length - 1]).toEqual([]);
+    expect(errors).toEqual(['Identity mismatch']);
+    expect(statuses).toEqual(['connecting', 'connected', 'error']);
   });
 
   it('refreshMachines sends another list_machines request', async () => {
