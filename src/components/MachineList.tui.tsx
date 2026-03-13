@@ -150,6 +150,7 @@ export function MachineListTUI(props: MachineListTUIProps) {
           const { machine, isSelected, isConnectable } = item;
           const statusColor = getStatusColor(machine);
           const textColor = isSelected ? COLORS.selected : COLORS.text;
+          const rowTextColor = isConnectable ? textColor : COLORS.textDim;
           const indicator = statusColor === 'green' ? '●' : statusColor === 'red' ? '○' : '◌';
           const indicatorColor = statusColor === 'green' ? COLORS.online :
                                   statusColor === 'red' ? COLORS.offline : COLORS.textDim;
@@ -160,9 +161,9 @@ export function MachineListTUI(props: MachineListTUIProps) {
               flexDirection="row"
               height={1}
             >
-              <text fg={isConnectable ? textColor : COLORS.textDim}>{`${isSelected ? '>' : ' '} `}</text>
+              <text fg={rowTextColor}>{`${isSelected ? '>' : ' '} `}</text>
               <text fg={indicatorColor}>{indicator}</text>
-              <text fg={isConnectable ? textColor : COLORS.textDim}>{` ${getMachineLabel(machine)}`}</text>
+              <text fg={rowTextColor}>{` ${getMachineLabel(machine)}`}</text>
               {machine.lastConnectedAt && (
                 <text fg={COLORS.textDim}>{` (${formatLastSeen(machine.lastConnectedAt)})`}</text>
               )}

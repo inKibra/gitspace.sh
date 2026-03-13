@@ -36,6 +36,7 @@ import { useLifecycleController } from '../app/session/useLifecycleController.js
 import { buildEditProcessesCommand } from '../lib/processes/editor.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import { writeCrashLog } from '../utils/crash-log.js';
+import { logger } from '../utils/logger.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -65,7 +66,7 @@ function formatRemoteConnectError(machine: MachineInfo, relayUrl: string, error:
   const machineName = machine.label || machine.machineId;
 
   let detail = rawMessage;
-  if (rawMessage === 'Socket closed before handshake completed') {
+  if (rawMessage.startsWith('Socket closed before handshake completed')) {
     detail =
       'The relay connection closed before the remote handshake finished. This usually means the relay or machine rejected the request or dropped the connection early.';
   } else if (rawMessage === 'Unexpected pre-handshake relay payload') {
@@ -101,7 +102,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const flow = useFlow({
     onError: (error) => {
       remote.disconnect();
-      console.error(`[tui] Remote machine flow error: ${error.message}`);
+      logger.error(`[tui] Remote machine flow error: ${error.message}`);
     },
   });
 
@@ -280,9 +281,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       });
       setConnectErrorLines([...messageLines, `Crash log: ${logPath}`]);
       if (error instanceof Error && error.stack) {
-        console.error(`[tui] Remote machine connect error:\n${error.stack}`);
+        logger.error(`[tui] Remote machine connect error:\n${error.stack}`);
       } else {
-        console.error(`[tui] Remote machine connect error: ${String(error)}`);
+        logger.error(`[tui] Remote machine connect error: ${String(error)}`);
       }
     });
 
@@ -885,6 +886,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           </box>
         )}
         <text fg={COLORS.textDim} marginTop={1}>Press Esc to return to machines</text>
+        <FlowTUI flow={flow} />
       </box>
     );
   }
