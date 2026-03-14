@@ -79,6 +79,7 @@ import type {
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
+  OpenCodeBridgeBackend,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
@@ -109,6 +110,20 @@ import { loadSavedEventFilters } from '../../lib/events/filters.js';
 import { readProjectConfig } from '../../core/config.js';
 import { existsSync } from 'fs';
 import type { TerminalSnapshot } from '../backend.js';
+import {
+  buildOpenCodeUrl,
+  decodeBridgeBody,
+  type OpenCodeBridgeRequest,
+  type OpenCodeBridgeResponse,
+  type OpenCodeBridgeStreamEvent,
+  type OpenCodeBridgeStreamOpen,
+} from '../../agents/opencode-bridge.js';
+import { consumeSseStream } from '../../agents/opencode-sse.js';
+import { createOpenCodeBasicAuthHeader, defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
+import { defaultAgentEventManager, type AgentStateUpdateDelta, type WorkspaceAgentState } from '../../serve/agent-event-manager.js';
+import { OpenCodeClient } from '../../agents/opencode-client.js';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -413,7 +428,7 @@ function buildDeps(
   };
 }
 
-export class LocalSessionBackend implements SessionBackend {
+export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBackend {
   readonly descriptor: BackendDescriptor;
   private readonly deps: LocalSessionBackendDependencies;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
@@ -625,6 +640,107 @@ export class LocalSessionBackend implements SessionBackend {
 
   async undismissReplay(replayId: string): Promise<void> {
     this.deps.undismissReplay(replayId);
+  }
+
+  async requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find((item) => matchesWorkspaceId(item, request.workspaceId));
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${request.workspaceId}`);
+    }
+
+    const runtime = await defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime({
+      workspaceId: toCanonicalWorkspaceId(workspace),
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    });
+
+    const response = await fetch(buildOpenCodeUrl(runtime.baseUrl, request.path, request.query), {
+      method: request.method,
+      headers: {
+        ...(request.headers ?? {}),
+        authorization: createOpenCodeBasicAuthHeader(runtime),
+      },
+      body: request.bodyBase64 ? Buffer.from(request.bodyBase64, 'base64') : undefined,
+    });
+
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+
+    const body = Buffer.from(await response.arrayBuffer());
+    return {
+      requestId: crypto.randomUUID(),
+      status: response.status,
+      headers,
+      bodyBase64: body.length > 0 ? body.toString('base64') : undefined,
+    };
+  }
+
+  async getOpenCodeRuntimeInfo(workspaceId: string) {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+
+    return defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime({
+      workspaceId: toCanonicalWorkspaceId(workspace),
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    });
+  }
+
+  async subscribeOpenCode(
+    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
+    handler: (event: OpenCodeBridgeStreamEvent) => void,
+  ): Promise<() => Promise<void>> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find((item) => matchesWorkspaceId(item, request.workspaceId));
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${request.workspaceId}`);
+    }
+
+    const runtime = await defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime({
+      workspaceId: toCanonicalWorkspaceId(workspace),
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    });
+
+    const controller = new AbortController();
+    const streamRequestId = crypto.randomUUID();
+    const response = await fetch(buildOpenCodeUrl(runtime.baseUrl, request.path, request.query), {
+      method: 'GET',
+      headers: {
+        accept: 'text/event-stream',
+        ...(request.headers ?? {}),
+        authorization: createOpenCodeBasicAuthHeader(runtime),
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Failed to open OpenCode stream (${response.status})`);
+    }
+
+    void consumeSseStream(response.body, async (event) => {
+      handler({
+        requestId: streamRequestId,
+        event: event.event,
+        data: event.data,
+        id: event.id,
+      });
+    }).catch((error) => {
+      this.emit({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+
+    return async () => {
+      controller.abort();
+    };
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {
@@ -1401,5 +1517,83 @@ export class LocalSessionBackend implements SessionBackend {
     for (const handler of this.handlers) {
       handler(event);
     }
+  }
+
+  // ============================================================================
+  // Agent state — backed by defaultAgentEventManager
+  // ============================================================================
+
+  subscribeAgentState(handler: (delta: AgentStateUpdateDelta) => void): () => void {
+    return defaultAgentEventManager.subscribe(handler);
+  }
+
+  getAgentStateSnapshot(): Record<string, WorkspaceAgentState> {
+    return defaultAgentEventManager.getSnapshot();
+  }
+
+  async respondToAgentPermission(
+    workspaceId: string,
+    agentSessionId: string,
+    permissionId: string,
+    response: 'allow' | 'deny',
+  ): Promise<boolean> {
+    // We don't need the workspace path here — we just need the runtime
+    const runtime = await defaultOpenCodeRuntimeManager.getWorkspaceRuntime(workspaceId);
+    if (!runtime) return false;
+    const client = new OpenCodeClient({
+      baseUrl: runtime.baseUrl,
+      fetch: (input, init) =>
+        fetch(input as RequestInfo, {
+          ...init,
+          headers: {
+            ...(init?.headers ?? {}),
+            authorization: createOpenCodeBasicAuthHeader(runtime),
+          },
+        }),
+    });
+    return client.respondToPermission(agentSessionId, permissionId, response);
+  }
+
+  // ============================================================================
+  // Agent session preferences — persisted to ~/.gitspace/.agent-sessions.json
+  // ============================================================================
+
+  private get agentPrefsPath(): string {
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
+    return join(home, 'gitspace', '.agent-sessions.json');
+  }
+
+  private agentPrefsCache: Record<string, string> | null = null;
+
+  private async loadAgentPrefs(): Promise<Record<string, string>> {
+    if (this.agentPrefsCache) return this.agentPrefsCache;
+    try {
+      const raw = await readFile(this.agentPrefsPath, 'utf8');
+      this.agentPrefsCache = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      this.agentPrefsCache = {};
+    }
+    return this.agentPrefsCache!;
+  }
+
+  private async saveAgentPrefs(prefs: Record<string, string>): Promise<void> {
+    this.agentPrefsCache = prefs;
+    try {
+      await mkdir(join(this.agentPrefsPath, '..'), { recursive: true });
+      await writeFile(this.agentPrefsPath, JSON.stringify(prefs, null, 2), 'utf8');
+    } catch {
+      // Non-fatal — preference persistence is best-effort
+    }
+  }
+
+  async getAgentSessionPreference(workspaceId: string): Promise<string | null> {
+    const prefs = await this.loadAgentPrefs();
+    return prefs[workspaceId] ?? null;
+  }
+
+  async setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void> {
+    const prefs = await this.loadAgentPrefs();
+    prefs[workspaceId] = sessionId;
+    await this.saveAgentPrefs(prefs);
   }
 }

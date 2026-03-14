@@ -476,6 +476,34 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'agents') {
+            return (
+              <div
+                key={`agents-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center justify-between
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#c678dd]">✦ Agent Sessions</span>
+                <div className="flex items-center gap-1">
+                  {(item.pendingPermissions ?? 0) > 0 && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-[#d29922] text-[#0d1117] font-medium">
+                      ⚡{item.pendingPermissions}
+                    </span>
+                  )}
+                  {(item.count ?? 0) > 0 && (
+                    <span className="text-xs px-2 py-1 rounded bg-[#30363d] text-[#e6edf3]">{item.count}</span>
+                  )}
+                </div>
+              </div>
+            );
+          }
+
           if (item.type === 'events') {
             return (
               <SimpleTreeRow

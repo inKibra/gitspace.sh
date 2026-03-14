@@ -7,6 +7,13 @@ import type {
   TerminalSnapshot,
 } from '../lib/tmux-lite/replay/index.js';
 import type {
+  OpenCodeBridgeRequest,
+  OpenCodeBridgeResponse,
+  OpenCodeBridgeStreamEvent,
+  OpenCodeBridgeStreamOpen,
+} from '../agents/opencode-bridge.js';
+import type { OpenCodeRuntimeInfo } from '../agents/opencode-runtime.js';
+import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
@@ -18,6 +25,7 @@ import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../serve/agent-event-manager.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -183,6 +191,35 @@ export interface SessionBackend {
   undismissReplay?(replayId: string): Promise<void>;
 
   onEvent(handler: (event: BackendEvent) => void): () => void;
+
+  /** Subscribe to agent state deltas. Returns an unsubscribe function. */
+  subscribeAgentState(handler: (delta: AgentStateUpdateDelta) => void): () => void;
+  /** Get the current full agent state snapshot (all workspaces). */
+  getAgentStateSnapshot(): Record<string, WorkspaceAgentState>;
+  /**
+   * Respond to an OpenCode permission request.
+   * workspaceId identifies which workspace's OpenCode runtime handles this.
+   */
+  respondToAgentPermission(
+    workspaceId: string,
+    agentSessionId: string,
+    permissionId: string,
+    response: 'allow' | 'deny',
+  ): Promise<boolean>;
+
+  /** Retrieve the persisted last-selected agent session ID for a workspace. */
+  getAgentSessionPreference(workspaceId: string): Promise<string | null>;
+  /** Persist the selected agent session ID for a workspace. */
+  setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void>;
+}
+
+export interface OpenCodeBridgeBackend {
+  getOpenCodeRuntimeInfo?(workspaceId: string): Promise<OpenCodeRuntimeInfo>;
+  requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse>;
+  subscribeOpenCode(
+    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
+    handler: (event: OpenCodeBridgeStreamEvent) => void,
+  ): Promise<() => Promise<void>>;
 }
 
 export type { ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };

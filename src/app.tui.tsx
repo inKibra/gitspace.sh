@@ -11,7 +11,7 @@
 import { createCliRenderer } from '@opentui/core';
 import type { PasteEvent } from '@opentui/core';
 import { createRoot, useKeyboard, useRenderer } from '@opentui/react';
-import { useState, useEffect, useCallback, useReducer, Fragment, useRef } from 'react';
+import { useState, useEffect, useCallback, useReducer, Fragment, useRef, useMemo } from 'react';
 import { Toaster } from '@opentui-ui/toast/react';
 
 // Terminal components
@@ -118,6 +118,12 @@ import {
   VT_KITTY_KEYBOARD_CONFIG,
   forceDisableKittyKeyboard,
 } from './tui/kitty-keyboard.js';
+import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
+import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
+import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
+import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
+import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
+import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -155,6 +161,13 @@ type SettingsFlowState =
   | { type: 'types-menu'; selectedIndex: number; config: NotificationConfig }
   | { type: 'edit-duration'; value: string; config: NotificationConfig }
   | { type: 'edit-hold-duration'; value: string; config: NotificationConfig };
+
+function getInitialInputValueForStep(step: OnboardingStep): string {
+  if (step.type === 'input') {
+    return step.defaultValue || '';
+  }
+  return '';
+}
 
 // ============================================================================
 // Constants
@@ -816,10 +829,48 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     const newValues = { ...projectFlow.collectedValues };
     const newSecrets = { ...projectFlow.collectedSecrets };
 
+    const currentValue = projectFlow.inputValue.trim();
+
+    const validateValue = (
+      required: boolean | undefined,
+      validationPattern: string | undefined,
+      validationMessage: string | undefined,
+      value: string,
+    ): string | null => {
+      if (required !== false && value.length === 0) {
+        return 'This field is required.';
+      }
+      if (validationPattern && value.length > 0) {
+        try {
+          const regex = new RegExp(validationPattern);
+          if (!regex.test(value)) {
+            return validationMessage || `Value must match pattern: ${validationPattern}`;
+          }
+        } catch {
+          return 'Invalid validation pattern in bundle.';
+        }
+      }
+      return null;
+    };
+
     // Save current step's value if applicable
     if (currentStep && (currentStep.type === 'input' || currentStep.type === 'secret')) {
       const stepWithKey = currentStep as { configKey: string; defaultValue?: string };
-      const value = projectFlow.inputValue.trim() || stepWithKey.defaultValue || '';
+      const value = currentValue || stepWithKey.defaultValue || '';
+      const validationError = validateValue(
+        currentStep.required,
+        'validationPattern' in currentStep ? currentStep.validationPattern : undefined,
+        'validationMessage' in currentStep ? currentStep.validationMessage : undefined,
+        value,
+      );
+      if (validationError) {
+        flow.showMessage({
+          title: 'Invalid Value',
+          message: validationError,
+          variant: 'error',
+        });
+        return;
+      }
 
       if (currentStep.type === 'secret') {
         newSecrets[stepWithKey.configKey] = value;
@@ -859,18 +910,19 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       }
     } else {
       // Move to next step
-      const nextStep = projectFlow.steps[nextStepIndex];
+        const nextStep = projectFlow.steps[nextStepIndex];
+        const defaultValue = (nextStep as { defaultValue?: string }).defaultValue || '';
 
-      // If it's a confirm step with checkCommand, start checking
-      if (nextStep.type === 'confirm' && (nextStep as { checkCommand?: string }).checkCommand) {
-        setProjectFlow({
-          ...projectFlow,
-          currentStep: nextStepIndex,
-          collectedValues: newValues,
-          collectedSecrets: newSecrets,
-          inputValue: '',
-          confirmStatus: 'checking',
-        });
+        // If it's a confirm step with checkCommand, start checking
+        if (nextStep.type === 'confirm' && (nextStep as { checkCommand?: string }).checkCommand) {
+          setProjectFlow({
+            ...projectFlow,
+            currentStep: nextStepIndex,
+            collectedValues: newValues,
+            collectedSecrets: newSecrets,
+            inputValue: '',
+            confirmStatus: 'checking',
+          });
 
         const found = await checkCommand((nextStep as { checkCommand: string }).checkCommand);
         setProjectFlow(prev =>
@@ -878,17 +930,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             ? { ...prev, confirmStatus: found ? 'found' : 'missing' }
             : prev
         );
-      } else {
-        const defaultValue = (nextStep as { defaultValue?: string }).defaultValue || '';
-        setProjectFlow({
-          ...projectFlow,
-          currentStep: nextStepIndex,
-          collectedValues: newValues,
-          collectedSecrets: newSecrets,
-          inputValue: defaultValue,
-          confirmStatus: null,
-        });
-      }
+        } else {
+          setProjectFlow({
+            ...projectFlow,
+            currentStep: nextStepIndex,
+            collectedValues: newValues,
+            collectedSecrets: newSecrets,
+            inputValue: defaultValue,
+            confirmStatus: null,
+          });
+        }
     }
   }, [projectFlow, checkCommand, finalizeProject, flow]);
 
@@ -922,7 +973,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         if (loadedBundle.bundle.onboarding && loadedBundle.bundle.onboarding.length > 0) {
           // Start onboarding flow
           const firstStep = loadedBundle.bundle.onboarding[0];
-          const initialInputValue = (firstStep as { defaultValue?: string }).defaultValue || '';
+          const initialInputValue = getInitialInputValueForStep(firstStep);
 
           // If first step is a confirm with checkCommand, start checking
           if (firstStep.type === 'confirm' && (firstStep as { checkCommand?: string }).checkCommand) {
@@ -1053,8 +1104,14 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     ? localReplays.filter((replay) => replay.projectName === currentProject)
     : [];
 
-  const inboxItems = localInbox as InboxItem[];
-  const inboxUnreadCount = localInboxUnreadCount;
+  // Agent inbox items — generated from useWorkspaceAgentEvents notifications
+  const [agentInboxItems, setAgentInboxItems] = useState<InboxItem[]>([]);
+
+  const inboxItems = useMemo(
+    () => [...(localInbox as InboxItem[]), ...agentInboxItems],
+    [localInbox, agentInboxItems],
+  );
+  const inboxUnreadCount = localInboxUnreadCount + agentInboxItems.filter((i) => !i.read).length;
 
   // Project list hook
   const projectListProps = useProjectList({
@@ -1197,6 +1254,54 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     return Promise.resolve(getReplayTimelineOffline(replayId));
   }, []);
 
+  const localBackend = localSession as unknown as import('./session/backend.js').SessionBackend | null;
+
+  const workspaceAgentSessions = useWorkspaceAgentSessions({
+    bridge: localSession.hasOpenCodeBridge
+      ? {
+          requestOpenCode: localSession.requestOpenCode,
+          subscribeOpenCode: localSession.subscribeOpenCode,
+        }
+      : null,
+    backend: localBackend,
+  });
+
+  // Agent event subscription — machine-side push, no per-client SSE
+  const agentEvents = useWorkspaceAgentEvents({
+    backend: localBackend,
+    onNotification: (notification) => {
+      const workspace = localWorkspaces.find((w) => w.id === notification.workspaceId);
+      const projectName = workspace?.projectName ?? 'unknown';
+      const workspaceName = workspace?.name ?? notification.workspaceId;
+      const item = agentNotificationToInboxItem(notification, projectName, workspaceName);
+      setAgentInboxItems((prev) => [item, ...prev.slice(0, 49)]);
+    },
+  });
+
+  // Per-workspace agent session persistence — use spacesBrowser's selected workspace if available
+  // Fallback to empty string when no workspace is focused (hook is always called, ID may be empty)
+  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
+  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, localBackend);
+
+  const agentSessionPicker = useAgentSessionPicker({
+    flow,
+    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
+    createSession: workspaceAgentSessions.createSession,
+    abortSession: workspaceAgentSessions.abortSession,
+    persistedSessionId: agentSessionPref.lastSessionId,
+    onPersistSession: agentSessionPref.persist,
+    onOpenSession: async (session) => {
+      agentSessionPref.persist(session.id);
+      const runtime = await localSession.getOpenCodeRuntimeInfo(session.workspaceId);
+      const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
+      await attachLocal({
+        workspaceId: session.workspaceId,
+        command: commandSpec.command,
+        args: commandSpec.args,
+      });
+    },
+  });
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
@@ -1215,6 +1320,23 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onStopProcess: handleStopProcess,
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
+    onOpenAgents: async (workspaceId) => {
+      setAgentPickerWorkspaceId(workspaceId);
+      const workspace = workspaceInfos.find((item) => item.id === workspaceId);
+      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+    },
+    agentSessionCounts: (() => {
+      // Start with explicit session load counts, then overlay live counts from agent events
+      const counts: Record<string, number> = {};
+      for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
+        counts[wid] = sessions.length;
+      }
+      for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
+        counts[wid] = Object.keys(sessions).length;
+      }
+      return counts;
+    })(),
+    pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: refreshWorkspaces,
     onRefreshSessions: async () => {
       await Promise.all([
@@ -1271,6 +1393,36 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await refreshInbox();
     },
     onAttachSession: async (sessionId) => {
+      // Check if this is an agent notification item
+      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
+      if (agentItem?.agentAction) {
+        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+        if (permissionId) {
+          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+            options: [
+              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
+              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
+              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
+            ],
+            onSelect: async (choice) => {
+              if (choice === 'allow' || choice === 'deny') {
+                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+              }
+              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+            },
+          });
+        } else {
+          // Open agent session picker pre-selected on this session
+          const workspace = workspaceInfos.find((w) => w.id === workspaceId);
+          setAgentPickerWorkspaceId(workspaceId);
+          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
+            preselectSessionId: agentSessionId,
+          });
+        }
+        return;
+      }
       dispatch({ type: 'SET_VIEW', view: 'projects' });
       await handleAttachSession({ sessionId });
     },
@@ -2610,6 +2762,9 @@ function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): stri
   }
   if (selectedItem?.type === 'bundle-config') {
     return '[Tab] Switch  [Enter] Edit Bundle Config  [b] Bundle  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'agents') {
+    return '[Tab] Switch  [Enter] Agent Sessions  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'events') {
     return '[Tab] Switch  [Enter] Open Events  [b] Bundle  [,] Settings  [?] Help  [q] Quit';

@@ -77,9 +77,9 @@ export async function runOnboarding(
 
     // Store values and metadata by step type
     if (step.type === 'secret') {
-      result.secretValues[step.configKey] = stepResult;
+      result.secretValues[step.configKey] = stepResult as string;
     } else if (step.type === 'input') {
-      result.inputValues[step.configKey] = stepResult;
+      result.inputValues[step.configKey] = stepResult as string;
     } else if (step.type === 'confirm') {
       const confirmResult: ConfirmStepResult = {
         status: stepResult === SKIP_OPTIONAL_CONFIRM ? 'skipped' : 'passed',
@@ -98,7 +98,10 @@ export async function runOnboarding(
  * Execute a single onboarding step
  * Returns collected value or null if cancelled
  */
-async function executeStep(step: OnboardingStep, options: OnboardingOptions): Promise<string | null> {
+async function executeStep(
+  step: OnboardingStep,
+  options: OnboardingOptions,
+): Promise<string | null> {
   switch (step.type) {
     case 'info':
       return executeInfoStep();

@@ -12,6 +12,7 @@ import type {
 import type { BackendEvent } from '../events';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config';
+import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager';
 
 class FakeBackend implements SessionBackend {
   readonly descriptor: BackendDescriptor;
@@ -88,6 +89,11 @@ class FakeBackend implements SessionBackend {
   async sendReviewRequest(): Promise<never> {
     throw new Error('not implemented');
   }
+  subscribeAgentState(_handler: (delta: AgentStateUpdateDelta) => void): () => void { return () => {}; }
+  getAgentStateSnapshot(): Record<string, never> { return {}; }
+  async respondToAgentPermission(): Promise<boolean> { return false; }
+  async getAgentSessionPreference(_workspaceId: string): Promise<null> { return null; }
+  async setAgentSessionPreference(_workspaceId: string, _sessionId: string): Promise<void> {}
 }
 
 describe('BackendManager', () => {

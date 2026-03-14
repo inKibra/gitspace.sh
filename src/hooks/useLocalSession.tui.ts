@@ -14,6 +14,8 @@ import {
   type SessionBackend,
 } from '../session/index.js';
 import type { NotificationConfig } from '../notifications/types.js';
+import type { OpenCodeBridgeRequest, OpenCodeBridgeResponse, OpenCodeBridgeStreamEvent, OpenCodeBridgeStreamOpen } from '../agents/opencode-bridge.js';
+import type { OpenCodeRuntimeInfo } from '../agents/opencode-runtime.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../types/bundle-config.js';
@@ -573,6 +575,40 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     backendRef.current?.setPtyOutputHandler(fn);
   }, []);
 
+  const requestOpenCode = useCallback(async (
+    request: Omit<OpenCodeBridgeRequest, 'requestId'>,
+  ): Promise<OpenCodeBridgeResponse> => {
+    const backend = backendRef.current;
+    if (!backend || typeof (backend as { requestOpenCode?: unknown }).requestOpenCode !== 'function') {
+      throw new SpacesError('OpenCode bridge unavailable', 'SYSTEM_ERROR', 2);
+    }
+    return (backend as unknown as { requestOpenCode: (request: Omit<OpenCodeBridgeRequest, 'requestId'>) => Promise<OpenCodeBridgeResponse> }).requestOpenCode(request);
+  }, []);
+
+  const subscribeOpenCode = useCallback(async (
+    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
+    handler: (event: OpenCodeBridgeStreamEvent) => void,
+  ) => {
+    const backend = backendRef.current;
+    if (!backend || typeof (backend as { subscribeOpenCode?: unknown }).subscribeOpenCode !== 'function') {
+      throw new SpacesError('OpenCode bridge unavailable', 'SYSTEM_ERROR', 2);
+    }
+    return (backend as unknown as {
+      subscribeOpenCode: (
+        request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
+        handler: (event: OpenCodeBridgeStreamEvent) => void,
+      ) => Promise<() => Promise<void>>;
+    }).subscribeOpenCode(request, handler);
+  }, []);
+
+  const getOpenCodeRuntimeInfo = useCallback(async (workspaceId: string): Promise<OpenCodeRuntimeInfo> => {
+    const backend = backendRef.current;
+    if (!backend || typeof (backend as { getOpenCodeRuntimeInfo?: unknown }).getOpenCodeRuntimeInfo !== 'function') {
+      throw new SpacesError('OpenCode runtime unavailable', 'SYSTEM_ERROR', 2);
+    }
+    return (backend as unknown as { getOpenCodeRuntimeInfo: (workspaceId: string) => Promise<OpenCodeRuntimeInfo> }).getOpenCodeRuntimeInfo(workspaceId);
+  }, []);
+
   return {
     status: enabled ? (localState?.status ?? 'disconnected') : 'disconnected',
     mode: localState?.mode ?? 'browsing',
@@ -627,5 +663,9 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     send,
     resize,
     setWriteCallback,
+    hasOpenCodeBridge: true,
+    getOpenCodeRuntimeInfo,
+    requestOpenCode,
+    subscribeOpenCode,
   };
 }

@@ -59,6 +59,7 @@ export interface SessionInfo {
 export type TreeItem =
   | { type: 'project'; name: string; workspaceCount: number }
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
+  | { type: 'agents'; workspaceId: string; count?: number; pendingPermissions?: number }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
   | { type: 'replay-section'; workspaceId: string; count: number; expanded: boolean }
   | { type: 'orphaned-replay-section'; projectName: string; count: number; expanded: boolean }
@@ -90,6 +91,10 @@ export interface UseSpacesBrowserProps {
   onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
   onProcessDisabled?: (params: { workspaceId: string; processName: string }) => void;
   onOpenEvents: (workspaceId: string) => void;
+  onOpenAgents?: (workspaceId: string) => void | Promise<void>;
+  agentSessionCounts?: Record<string, number>;
+  /** Pending permission count per workspace, from useWorkspaceAgentEvents */
+  pendingPermissionsByWorkspace?: Record<string, number>;
   onEditProcesses?: (params: { workspaceId: string }) => void;
   onManageBundleConfig?: (params: { workspaceId: string }) => void;
   onRefresh: () => void | Promise<void>;
@@ -176,7 +181,9 @@ function buildTree(
   replays: ReplayInfo[],
   expandedWorkspaces: Set<string>,
   expandedReplaySections: Set<string>,
-  showProjectHeaders: boolean = true
+  agentSessionCounts: Record<string, number>,
+  showProjectHeaders: boolean = true,
+  pendingPermissionsByWorkspace: Record<string, number> = {},
 ): TreeItem[] {
   const items: TreeItem[] = [];
   const projectGroups = groupByProject(workspaces, replays);
@@ -339,6 +346,13 @@ function buildTree(
           workspaceId: ws.id,
         });
 
+        items.push({
+          type: 'agents',
+          workspaceId: ws.id,
+          count: agentSessionCounts[ws.id] ?? 0,
+          pendingPermissions: pendingPermissionsByWorkspace[ws.id] ?? 0,
+        });
+
         // Events action
         items.push({
           type: 'events',
@@ -403,6 +417,9 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     onStopProcess,
     onProcessDisabled,
     onOpenEvents,
+    onOpenAgents,
+    agentSessionCounts = {},
+    pendingPermissionsByWorkspace = {},
     onEditProcesses,
     onManageBundleConfig,
     onRefresh,
@@ -420,8 +437,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   // Build tree
   const tree = useMemo(
-    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, showProjectHeaders),
-    [workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, showProjectHeaders]
+    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, pendingPermissionsByWorkspace),
+    [workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, pendingPermissionsByWorkspace]
   );
 
   // Add selection state
@@ -546,12 +563,14 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       onEditProcesses?.({ workspaceId: item.workspaceId });
     } else if (item.type === 'bundle-config') {
       onManageBundleConfig?.({ workspaceId: item.workspaceId });
+    } else if (item.type === 'agents') {
+      await onOpenAgents?.(item.workspaceId);
     } else if (item.type === 'events') {
       onOpenEvents(item.workspaceId);
     } else if (item.type === 'new-session') {
       await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [toggleWorkspace, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenEvents]);
+  }, [toggleWorkspace, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenAgents, onOpenEvents]);
 
   const activateSelected = useCallback(async () => {
     await activateItem(selectedItem);

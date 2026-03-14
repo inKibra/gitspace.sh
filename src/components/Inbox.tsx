@@ -12,9 +12,11 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 // ============================================================================
 
 /** Inbox item type */
-export type InboxItemType = 'exit' | 'title' | 'idle' | 'bell' | 'osc';
+export type InboxItemType =
+  | 'exit' | 'title' | 'idle' | 'bell' | 'osc'
+  | 'agent_permission' | 'agent_idle' | 'agent_error';
 
-/** Inbox item from tmux-lite */
+/** Inbox item from tmux-lite or agent notification system */
 export interface InboxItem {
   id: string;
   sessionId: string;
@@ -25,6 +27,14 @@ export interface InboxItem {
   read: boolean;
   processTitle?: string;
   exitCode?: number;
+  /** Present only for agent_* item types — carries routing metadata for the app layer */
+  agentAction?: {
+    workspaceId: string;
+    agentSessionId: string;
+    permissionId?: string;
+    permissionTitle?: string;
+    messagePreview?: string;
+  };
 }
 
 /** Parsed session name components */
@@ -110,10 +120,13 @@ export function parseSessionName(sessionName: string): ParsedSessionName {
     return { project: 'unknown', workspace: 'unknown', session: 'unknown' };
   }
   const parts = sessionName.split(':');
+  // Handle agent:<title> session segment — parts may be: project:workspace:agent:<title>
+  // where the title itself may contain colons. Join everything from index 2 onward.
+  const sessionPart = parts.slice(2).join(':') || 'unknown';
   return {
     project: parts[0] || 'unknown',
     workspace: parts[1] || 'unknown',
-    session: parts[2] || 'unknown',
+    session: sessionPart,
   };
 }
 
@@ -123,7 +136,16 @@ export function getInboxIcon(item: InboxItem): string {
   if (item.type === 'title') return '📝';
   if (item.type === 'idle') return '⏸️';
   if (item.type === 'osc') return '📟';
+  if (item.type === 'agent_permission') return '⚡';
+  if (item.type === 'agent_idle') return '💬';
+  if (item.type === 'agent_error') return '🤖';
   return '🔔';
+}
+
+/** Returns true if the item is an agent notification type */
+export function isAgentInboxItem(item: InboxItem): item is InboxItem & { agentAction: NonNullable<InboxItem['agentAction']> } {
+  return (item.type === 'agent_permission' || item.type === 'agent_idle' || item.type === 'agent_error')
+    && item.agentAction != null;
 }
 
 /** Get label for inbox item type */
@@ -132,6 +154,9 @@ export function getInboxTypeLabel(item: InboxItem): string {
   if (item.type === 'title') return 'Title Change';
   if (item.type === 'idle') return 'Activity Complete';
   if (item.type === 'osc') return 'OSC Notification';
+  if (item.type === 'agent_permission') return 'Permission Request';
+  if (item.type === 'agent_idle') return 'Agent Done';
+  if (item.type === 'agent_error') return 'Agent Error';
   return 'Bell';
 }
 
