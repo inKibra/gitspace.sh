@@ -161,10 +161,11 @@ export function extractStyledRows(
   const nullCell = buffer.getNullCell();
 
   const scrollbackLines = options.scrollbackLines ?? 80;
-  const viewportStart = options.includeScrollback
+  const includeScrollback = options.includeScrollback === true || (options.scrollbackLines ?? 0) > 0;
+  const viewportStart = includeScrollback
     ? Math.max(0, buffer.baseY - scrollbackLines)
     : buffer.baseY;
-  const rowCount = options.includeScrollback
+  const rowCount = includeScrollback
     ? Math.max(xterm.rows, buffer.baseY - viewportStart + xterm.rows)
     : xterm.rows;
 

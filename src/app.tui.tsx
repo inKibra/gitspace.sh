@@ -2146,8 +2146,21 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             dispatch({ type: 'SET_VIEW', view: 'projects' });
           }}
           onDismiss={(replayId) => {
-            dismissReplayOffline(replayId);
-            void requestLocalReplays(undefined, showDismissedReplays);
+            try {
+              if (activeReplay?.dismissedAt) {
+                undismissReplayOffline(replayId);
+              } else {
+                dismissReplayOffline(replayId);
+              }
+            } catch (error) {
+              flow.showMessage({
+                title: 'Replay Update Failed',
+                message: error instanceof Error ? error.message : String(error),
+                variant: 'error',
+              });
+            } finally {
+              void requestLocalReplays(undefined, showDismissedReplays);
+            }
           }}
         />
         <FlowTUI flow={flow} />

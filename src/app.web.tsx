@@ -675,6 +675,13 @@ export default function App() {
     try {
       if (replay.dismissedAt) {
         await terminal.undismissReplay(replay.replayId);
+        if (activeReplay?.replayId === replay.replayId) {
+          setActiveReplay({
+            ...activeReplay,
+            dismissedAt: undefined,
+            dismissedBy: undefined,
+          });
+        }
       } else {
         await terminal.dismissReplay(replay.replayId);
         if (activeReplay?.replayId === replay.replayId) {
