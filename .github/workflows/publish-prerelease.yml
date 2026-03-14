@@ -147,12 +147,6 @@ jobs:
           ' package.json > "$tmp"
           mv "$tmp" package.json
 
-      - name: Regenerate bun.lock for released version
-        run: bun install --lockfile-only --ignore-scripts
-
-      - name: Validate lockfile sync
-        run: bun run check:lockfile-sync
-
       - name: Publish platform packages
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
@@ -162,6 +156,12 @@ jobs:
 
       - name: Publish main package
         run: npm publish . --provenance --access public --tag ${{ inputs.dist_tag || 'latest' }}
+
+      - name: Regenerate bun.lock for released version
+        run: bun install --lockfile-only --ignore-scripts
+
+      - name: Validate lockfile sync
+        run: bun run check:lockfile-sync
 
       - name: Tag release and open version-bump PR
         env:
