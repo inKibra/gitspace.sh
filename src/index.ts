@@ -86,7 +86,9 @@ function isAllowedWorkspaceSessionCommand(args: string[]): boolean {
 process.on('uncaughtException', (error) => {
 	const logPath = writeCrashLog('uncaughtException', error);
 	logger.error(`Uncaught exception: ${error.message}`);
-	logger.error(`Crash log written to ${logPath}`);
+	if (logPath) {
+		logger.error(`Crash log written to ${logPath}`);
+	}
 	logger.debug(error.stack || '');
 	process.exit(1);
 });
@@ -94,7 +96,9 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason) => {
 	const logPath = writeCrashLog('unhandledRejection', reason);
 	logger.error(`Unhandled rejection: ${reason}`);
-	logger.error(`Crash log written to ${logPath}`);
+	if (logPath) {
+		logger.error(`Crash log written to ${logPath}`);
+	}
 	process.exit(1);
 });
 

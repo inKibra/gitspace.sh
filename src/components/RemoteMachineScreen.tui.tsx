@@ -273,13 +273,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       }
 
       const messageLines = formatRemoteConnectError(machine, relayUrl, error);
-      setConnectErrorLines(messageLines);
       const logPath = writeCrashLog('remote-machine-connect', error, {
         relayUrl,
         machineId: machine.machineId,
         machineLabel: machine.label ?? null,
       });
-      setConnectErrorLines([...messageLines, `Crash log: ${logPath}`]);
+      setConnectErrorLines(logPath ? [...messageLines, `Crash log: ${logPath}`] : messageLines);
       if (error instanceof Error && error.stack) {
         logger.error(`[tui] Remote machine connect error:\n${error.stack}`);
       } else {

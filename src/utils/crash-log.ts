@@ -75,20 +75,32 @@ export function redactArgv(argv: readonly string[]): string[] {
 }
 
 export function writeCrashLog(kind: string, error: unknown, context?: Record<string, unknown>): string {
-  mkdirSync(CRASH_LOG_DIR, { recursive: true });
+  try {
+    mkdirSync(CRASH_LOG_DIR, { recursive: true });
 
-  const lines = [
-    '---',
-    `[${new Date().toISOString()}] ${kind}`,
-    `pid=${process.pid}`,
-    `argv=${JSON.stringify(redactArgv(process.argv))}`,
-  ];
+    const lines = [
+      '---',
+      `[${new Date().toISOString()}] ${kind}`,
+      `pid=${process.pid}`,
+      `argv=${JSON.stringify(redactArgv(process.argv))}`,
+    ];
 
-  if (context && Object.keys(context).length > 0) {
-    lines.push(`context=${toText(context)}`);
+    if (context && Object.keys(context).length > 0) {
+      lines.push(`context=${toText(context)}`);
+    }
+
+    lines.push(toText(error), '');
+    appendFileSync(CRASH_LOG_PATH, `${lines.join('\n')}\n`, 'utf-8');
+    return CRASH_LOG_PATH;
+  } catch (writeError) {
+    try {
+      process.stderr.write(
+        `[gssh] Failed to write crash log at ${CRASH_LOG_PATH}: ${toText(writeError)}\n`,
+      );
+    } catch {
+      // Best effort only.
+    }
+
+    return '';
   }
-
-  lines.push(toText(error), '');
-  appendFileSync(CRASH_LOG_PATH, `${lines.join('\n')}\n`, 'utf-8');
-  return CRASH_LOG_PATH;
 }
