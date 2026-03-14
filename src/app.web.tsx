@@ -104,6 +104,7 @@ export default function App() {
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
   const [activeReplayAnsi, setActiveReplayAnsi] = useState<Uint8Array | null>(null);
   const [showDismissedReplays, setShowDismissedReplays] = useState(false);
+  const showDismissedReplaysRef = useRef(showDismissedReplays);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
   const eventsKeyboardStateRef = useRef<{
@@ -642,16 +643,17 @@ export default function App() {
     terminal.requestReplays(undefined, showDismissedReplays);
   }, [terminal, showDismissedReplays]);
 
+  useEffect(() => {
+    showDismissedReplaysRef.current = showDismissedReplays;
+  }, [showDismissedReplays]);
+
   const toggleShowDismissedReplayFilter = useCallback(() => {
     setShowDismissedReplays((value) => {
       const next = !value;
-      const isBrowsingView = view === 'terminal' && terminal.status === 'established' && terminal.mode === 'browsing';
-      if (!isBrowsingView) {
-        terminal.requestReplays(undefined, next);
-      }
+      terminal.requestReplays(undefined, next);
       return next;
     });
-  }, [terminal, view]);
+  }, [terminal]);
 
   const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
     const replay = terminal.replays.find((item) => item.replayId === replayId);
@@ -936,14 +938,13 @@ export default function App() {
 
   useEffect(() => {
     if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
-      terminal.requestReplays(undefined, showDismissedReplays);
+      terminal.requestReplays(undefined, showDismissedReplaysRef.current);
     }
   }, [
     view,
     terminal.status,
     terminal.mode,
     terminal.requestReplays,
-    showDismissedReplays,
   ]);
 
   // Reset view-only state when detached

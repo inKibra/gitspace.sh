@@ -2134,6 +2134,34 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     );
   }
 
+  const handleReplayDismiss = useCallback((replayId: string) => {
+    try {
+      if (activeReplay?.dismissedAt) {
+        undismissReplayOffline(replayId);
+        setActiveReplay((current) => current && current.replayId === replayId
+          ? {
+            ...current,
+            dismissedAt: undefined,
+            dismissedBy: undefined,
+          }
+          : current);
+        return false;
+      }
+
+      dismissReplayOffline(replayId);
+      return true;
+    } catch (error) {
+      flow.showMessage({
+        title: 'Replay Update Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      return false;
+    } finally {
+      void requestLocalReplays(undefined, showDismissedReplays);
+    }
+  }, [activeReplay?.dismissedAt, flow, requestLocalReplays, showDismissedReplays]);
+
   if (state.view === 'replay' && activeReplay) {
     return (
       <Fragment>
@@ -2145,39 +2173,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             setActiveReplay(null);
             dispatch({ type: 'SET_VIEW', view: 'projects' });
           }}
-          onDismiss={(replayId) => {
-            try {
-              if (activeReplay?.dismissedAt) {
-                undismissReplayOffline(replayId);
-                setActiveReplay((current) => current && current.replayId === replayId
-                  ? {
-                    ...current,
-                    dismissedAt: undefined,
-                    dismissedBy: undefined,
-                  }
-                  : current);
-                return false;
-              } else {
-                dismissReplayOffline(replayId);
-                setActiveReplay((current) => current && current.replayId === replayId
-                  ? {
-                    ...current,
-                    dismissedAt: Date.now(),
-                  }
-                  : current);
-                return true;
-              }
-            } catch (error) {
-              flow.showMessage({
-                title: 'Replay Update Failed',
-                message: error instanceof Error ? error.message : String(error),
-                variant: 'error',
-              });
-              return false;
-            } finally {
-              void requestLocalReplays(undefined, showDismissedReplays);
-            }
-          }}
+          onDismiss={handleReplayDismiss}
         />
         <FlowTUI flow={flow} />
       </Fragment>
