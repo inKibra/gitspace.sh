@@ -39,6 +39,7 @@ import {
   screenshotReplayOffline,
   dismissReplayOffline,
   undismissReplayOffline,
+  deleteReplayOffline,
   type ReplayInfo,
 } from '../lib/tmux-lite/replay/service.js';
 
@@ -455,7 +456,6 @@ export function undismissTmuxReplay(ref: string, options: TmuxCommandOptions = {
 export function deleteTmuxReplay(ref: string, options: TmuxCommandOptions = {}): void {
   applyTmuxSandbox(options);
   const replay = resolveReplayOffline(ref, { includeDismissed: true });
-  const { deleteReplayOffline } = require('../lib/tmux-lite/replay/service.js') as typeof import('../lib/tmux-lite/replay/service.js');
   deleteReplayOffline(replay.replayId);
   logger.success(`Replay deleted: ${replay.sessionName || replay.replayId}`);
 }

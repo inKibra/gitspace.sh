@@ -24,47 +24,51 @@ export async function getReplaySnapshot(
 ): Promise<TerminalSnapshot> {
   const { atMs, scrollbackLines = 80 } = options;
   const reconstructed = await reconstructReplayAt(replayId, atMs);
-  const buffer = reconstructed.xterm.buffer.active;
-  const viewportY = buffer.viewportY;
-  const visible: string[] = [];
-  for (let row = 0; row < reconstructed.rows; row++) {
-    visible.push(translateLine(buffer, viewportY + row));
-  }
+  try {
+    const buffer = reconstructed.xterm.buffer.active;
+    const viewportY = buffer.viewportY;
+    const visible: string[] = [];
+    for (let row = 0; row < reconstructed.rows; row++) {
+      visible.push(translateLine(buffer, viewportY + row));
+    }
 
-  const scrollbackStart = Math.max(0, viewportY - scrollbackLines);
-  const scrollbackTail: string[] = [];
-  for (let row = scrollbackStart; row < viewportY; row++) {
-    scrollbackTail.push(translateLine(buffer, row));
-  }
+    const scrollbackStart = Math.max(0, viewportY - scrollbackLines);
+    const scrollbackTail: string[] = [];
+    for (let row = scrollbackStart; row < viewportY; row++) {
+      scrollbackTail.push(translateLine(buffer, row));
+    }
 
-  return {
-    version: 1,
-    replayId: reconstructed.replayId,
-    sessionId: reconstructed.sessionId,
-    workspaceId: reconstructed.workspaceId,
-    source: 'replay',
-    timeMs: reconstructed.timeMs,
-    seq: reconstructed.seq,
-    terminal: {
-      cols: reconstructed.cols,
-      rows: reconstructed.rows,
-      cursorX: buffer.cursorX,
-      cursorY: buffer.cursorY,
-      viewportY,
-      baseY: buffer.baseY,
-    },
-    metadata: {
-      title: reconstructed.title,
-      processTitle: reconstructed.processTitle,
-      exitCode: reconstructed.exitCode,
-      checkpointId: reconstructed.checkpointId,
-    },
-    screen: {
-      visible,
-      scrollbackTail,
-      currentLine: translateLine(buffer, viewportY + buffer.cursorY),
-    },
-  };
+    return {
+      version: 1,
+      replayId: reconstructed.replayId,
+      sessionId: reconstructed.sessionId,
+      workspaceId: reconstructed.workspaceId,
+      source: 'replay',
+      timeMs: reconstructed.timeMs,
+      seq: reconstructed.seq,
+      terminal: {
+        cols: reconstructed.cols,
+        rows: reconstructed.rows,
+        cursorX: buffer.cursorX,
+        cursorY: buffer.cursorY,
+        viewportY,
+        baseY: buffer.baseY,
+      },
+      metadata: {
+        title: reconstructed.title,
+        processTitle: reconstructed.processTitle,
+        exitCode: reconstructed.exitCode,
+        checkpointId: reconstructed.checkpointId,
+      },
+      screen: {
+        visible,
+        scrollbackTail,
+        currentLine: translateLine(buffer, viewportY + buffer.cursorY),
+      },
+    };
+  } finally {
+    reconstructed.xterm.dispose();
+  }
 }
 
 export interface ReplayTextOptions extends ReplaySnapshotOptions {

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'fs';
@@ -45,7 +46,9 @@ function readTextFile(path: string): string | null {
 }
 
 function writeJsonFile(path: string, value: unknown): void {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
+  const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
+  renameSync(tempPath, path);
 }
 
 function parseManifest(value: unknown): ReplayManifest | null {
@@ -360,6 +363,9 @@ export function updateReplayManifest(
     throw new Error(`Replay manifest not found: ${replayId}`);
   }
   const next = updater(manifest);
+  if (next.replayId !== manifest.replayId) {
+    throw new Error(`Replay manifest updater cannot change replay ID (${manifest.replayId} -> ${next.replayId})`);
+  }
   writeReplayManifest(next);
   return next;
 }
@@ -602,10 +608,9 @@ export function deleteReplaysForWorkspace(
 }
 
 export function deleteReplaysForProject(projectName: string): number {
-  const matches = listReplayInfos({
-    includeDismissed: true,
-    projectName,
-  });
+  const matches = listReplayInfos({ includeDismissed: true }).filter((replay) =>
+    replay.projectName === projectName || replay.workspaceId?.startsWith(`${projectName}:`) === true
+  );
 
   for (const replay of matches) {
     deleteReplay(replay.replayId);

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, rmSync, statSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { Terminal as XTerminal } from '@xterm/headless';
 import {
+  extractStyledRows,
   findPngRasterizer,
   readPngDimensions,
   renderTerminalSnapshotSvg,
@@ -76,5 +78,22 @@ describe('replay screenshot rendering', () => {
     const dimensions = readPngDimensions(outputPath);
     expect(dimensions.width).toBeGreaterThan(200);
     expect(dimensions.height).toBeGreaterThan(100);
+  });
+
+  test('extracts scrollback rows when requested', async () => {
+    const xterm = new XTerminal({ cols: 20, rows: 2, allowProposedApi: true, scrollback: 100 });
+    await new Promise<void>((resolve) => xterm.write('one\r\ntwo\r\nthree', () => resolve()));
+
+    const visibleRows = extractStyledRows(xterm, { trimTrailingBlank: true });
+    const scrollbackRows = extractStyledRows(xterm, {
+      trimTrailingBlank: true,
+      includeScrollback: true,
+      scrollbackLines: 5,
+    });
+
+    expect(visibleRows.map((row) => row.map((span) => span.text).join('').trimEnd())).toEqual(['two', 'three']);
+    expect(scrollbackRows.map((row) => row.map((span) => span.text).join('').trimEnd())).toEqual(['one', 'two', 'three']);
+
+    xterm.dispose();
   });
 });

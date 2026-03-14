@@ -158,11 +158,6 @@ export function styledRowsToAnsi(rows: StyledRow[]): Buffer {
 
   for (const row of rows) {
     for (const span of row) {
-      if (span.text.trim() === '' && span.bg === null) {
-        // Whitespace with no bg — emit as-is (no SGR needed)
-        parts.push(span.text);
-        continue;
-      }
       parts.push(spanToSgr(span));
       parts.push(span.text);
     }

@@ -104,7 +104,11 @@ export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: Re
   });
 
   const statusLabel = useMemo(() => {
-    const state = replay.status === 'crashed' ? 'crashed' : 'closed';
+    const state = replay.status === 'crashed'
+      ? 'crashed'
+      : replay.status === 'running'
+        ? 'running'
+        : 'closed';
     const workspace = replay.workspaceName
       ? ` · ${replay.projectName}/${replay.workspaceName}`
       : replay.projectName

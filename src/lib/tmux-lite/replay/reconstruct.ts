@@ -47,7 +47,8 @@ export async function reconstructReplayAt(
 
   const checkpoints = listReplayCheckpoints(replayId);
   const events = readReplayEvents(replayId);
-  const targetTime = Math.max(0, atMs ?? getDefaultTargetTime(manifest, checkpoints, events));
+  const latestAvailableTime = getDefaultTargetTime(manifest, checkpoints, events);
+  const targetTime = Math.max(0, atMs === undefined ? latestAvailableTime : Math.min(atMs, latestAvailableTime));
   const checkpoint = [...checkpoints]
     .reverse()
     .find((entry) => entry.t <= targetTime);

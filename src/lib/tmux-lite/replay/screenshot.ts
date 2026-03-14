@@ -151,14 +151,23 @@ function spanStyleKey(span: StyledSpan): string {
   return `${span.fg}|${span.bg ?? ''}|${span.bold ? 'b' : ''}${span.italic ? 'i' : ''}${span.underline ? 'u' : ''}${span.dim ? 'd' : ''}${span.strikethrough ? 's' : ''}`;
 }
 
-export function extractStyledRows(xterm: XTerminal, options: { trimTrailingBlank?: boolean } = {}): StyledRow[] {
+export function extractStyledRows(
+  xterm: XTerminal,
+  options: { trimTrailingBlank?: boolean; includeScrollback?: boolean; scrollbackLines?: number } = {}
+): StyledRow[] {
   const buffer = xterm.buffer.active;
   const rows: StyledRow[] = [];
   const nullCell = buffer.getNullCell();
 
-  const viewportStart = buffer.baseY;
+  const scrollbackLines = options.scrollbackLines ?? 80;
+  const viewportStart = options.includeScrollback
+    ? Math.max(0, buffer.baseY - scrollbackLines)
+    : buffer.baseY;
+  const rowCount = options.includeScrollback
+    ? Math.max(xterm.rows, buffer.baseY - viewportStart + xterm.rows)
+    : xterm.rows;
 
-  for (let rowIndex = 0; rowIndex < xterm.rows; rowIndex++) {
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
     const line = buffer.getLine(viewportStart + rowIndex);
     if (!line) {
       rows.push([]);
@@ -474,7 +483,11 @@ export async function writeReplayScreenshot(replayId: string, options: ReplayScr
 
   const state = await reconstructReplayAt(replayId, options.atMs);
   try {
-    const rows = extractStyledRows(state.xterm, { trimTrailingBlank: true });
+    const rows = extractStyledRows(state.xterm, {
+      trimTrailingBlank: true,
+      includeScrollback: options.includeScrollback,
+      scrollbackLines: options.scrollbackLines,
+    });
     const svg = renderStyledRowsSvg(rows, state.cols, {
       title: manifest.sessionName || manifest.sessionId,
       subtitle: `replay ${manifest.replayId.slice(0, 16)} · t=${state.timeMs}ms`,

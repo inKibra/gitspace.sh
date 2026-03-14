@@ -154,6 +154,16 @@ describe('replay reconstruction', () => {
     expect(buffer.getLine(1)?.translateToString(true)).toBe('world');
   });
 
+  it('clamps requested timestamps beyond available replay duration', async () => {
+    seedReplay();
+
+    const state = await reconstructReplayAt('replay_seed', 9999);
+
+    expect(state.timeMs).toBe(60);
+    expect(state.seq).toBe(5);
+    expect(state.exitCode).toBe(0);
+  });
+
   it('projects replay state to snapshot text and markdown', async () => {
     seedReplay();
 

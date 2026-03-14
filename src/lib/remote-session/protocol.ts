@@ -718,6 +718,10 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   return [
     "list_workspaces",
     "list_sessions",
+    'list_replays',
+    'get_replay_ansi',
+    'dismiss_replay',
+    'undismiss_replay',
     "attach_session",
     'cancel_pending_attach',
     "list_github_repos",
