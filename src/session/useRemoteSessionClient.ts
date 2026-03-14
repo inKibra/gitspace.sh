@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   InboxItem,
   ProjectInfo,
+  ReplayFrameTarget,
+  ReplayInfo,
+  ReplayTimeline,
   SessionInfo,
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
@@ -67,6 +70,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   projects: ProjectInfo[];
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
+  replays: ReplayInfo[];
   attachedSessionId: string | null;
   attachedSessionName: string | null;
   selectedProjectName: string | null;
@@ -80,6 +84,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   listLinearIssues: (projectName: string) => Promise<SessionLinearIssueSummary[]>;
   requestWorkspaces: () => void;
   requestSessions: (workspaceId?: string) => void;
+  requestReplays: (workspaceId?: string, includeDismissed?: boolean) => void;
   createProject: (params: CreateProjectParams) => Promise<void>;
   prepareProjectCreation: (params: CreateProjectParams) => Promise<PreparedProjectResult>;
   finalizeProjectCreation: (params: FinalizeProjectParams) => Promise<void>;
@@ -134,6 +139,10 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   startProcess: (workspaceId: string, processName: string, instance?: number) => Promise<void>;
   stopProcess: (workspaceId: string, processName: string) => Promise<void>;
   requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
+  getReplayAnsi: (replayId: string, target?: ReplayFrameTarget) => Promise<Uint8Array>;
+  getReplayTimeline: (replayId: string) => Promise<ReplayTimeline>;
+  dismissReplay: (replayId: string) => Promise<void>;
+  undismissReplay: (replayId: string) => Promise<void>;
 }
 
 function defaultStatusMapper(
@@ -273,6 +282,10 @@ export function useRemoteSessionClient<ConnectParams>(
 
   const requestSessions = useCallback((workspaceId?: string) => {
     void withActiveBackend((backendKey) => engine.listSessions(backendKey, workspaceId));
+  }, [engine, withActiveBackend]);
+
+  const requestReplays = useCallback((workspaceId?: string, includeDismissed?: boolean) => {
+    void withActiveBackend((backendKey) => engine.listReplays(backendKey, workspaceId, includeDismissed));
   }, [engine, withActiveBackend]);
 
   const createProject = useCallback(async (params: CreateProjectParams): Promise<void> => {
@@ -525,6 +538,38 @@ export function useRemoteSessionClient<ConnectParams>(
     );
   }, [engine, withActiveBackend]);
 
+  const getReplayAnsi = useCallback(async (replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> => {
+    const backendKey = activeBackendKeyRef.current;
+    if (!backendKey) {
+      throw createMissingBackendError(`getReplayAnsi(${replayId})`);
+    }
+    return engine.getReplayAnsi(backendKey, replayId, target);
+  }, [engine]);
+
+  const getReplayTimeline = useCallback(async (replayId: string): Promise<ReplayTimeline> => {
+    const backendKey = activeBackendKeyRef.current;
+    if (!backendKey) {
+      throw createMissingBackendError(`getReplayTimeline(${replayId})`);
+    }
+    return engine.getReplayTimeline(backendKey, replayId);
+  }, [engine]);
+
+  const dismissReplay = useCallback(async (replayId: string): Promise<void> => {
+    const backendKey = activeBackendKeyRef.current;
+    if (!backendKey) {
+      throw createMissingBackendError(`dismissReplay(${replayId})`);
+    }
+    await engine.dismissReplay(backendKey, replayId);
+  }, [engine]);
+
+  const undismissReplay = useCallback(async (replayId: string): Promise<void> => {
+    const backendKey = activeBackendKeyRef.current;
+    if (!backendKey) {
+      throw createMissingBackendError(`undismissReplay(${replayId})`);
+    }
+    await engine.undismissReplay(backendKey, replayId);
+  }, [engine]);
+
   useEffect(() => {
     return () => {
       const backendKey = activeBackendKeyRef.current;
@@ -545,6 +590,7 @@ export function useRemoteSessionClient<ConnectParams>(
     projects: activeBackendState?.projects ?? [],
     workspaces: activeBackendState?.workspaces ?? [],
     sessions: activeBackendState?.sessions ?? [],
+    replays: activeBackendState?.replays ?? [],
     attachedSessionId: activeBackendState?.attachedSessionId ?? null,
     attachedSessionName: activeBackendState?.attachedSessionName ?? null,
     selectedProjectName,
@@ -558,6 +604,7 @@ export function useRemoteSessionClient<ConnectParams>(
     listLinearIssues,
     requestWorkspaces,
     requestSessions,
+    requestReplays,
     createProject,
     prepareProjectCreation,
     finalizeProjectCreation,
@@ -600,6 +647,10 @@ export function useRemoteSessionClient<ConnectParams>(
     startProcess,
     stopProcess,
     requestEvents,
+    getReplayAnsi,
+    getReplayTimeline,
+    dismissReplay,
+    undismissReplay,
   }), [
     status,
     activeBackendState,
@@ -612,6 +663,7 @@ export function useRemoteSessionClient<ConnectParams>(
     listLinearIssues,
     requestWorkspaces,
     requestSessions,
+    requestReplays,
     createProject,
     prepareProjectCreation,
     finalizeProjectCreation,
@@ -640,5 +692,9 @@ export function useRemoteSessionClient<ConnectParams>(
     startProcess,
     stopProcess,
     requestEvents,
+    getReplayAnsi,
+    getReplayTimeline,
+    dismissReplay,
+    undismissReplay,
   ]);
 }

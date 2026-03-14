@@ -18,7 +18,14 @@ import { Toaster } from '@opentui-ui/toast/react';
 import { SessionTerminal } from './components/SessionTerminal.tui.js';
 import { RemoteMachineScreen } from './components/RemoteMachineScreen.tui.js';
 import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
+import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
+import {
+  getReplayAnsiBufferOffline,
+  getReplayTimelineOffline,
+  dismissReplayOffline,
+  undismissReplayOffline,
+} from './lib/tmux-lite/replay/service.js';
 
 // Shared components and hooks
 import {
@@ -32,6 +39,7 @@ import {
   isFlowWizard,
   type MachineInfo,
   type ProjectInfo,
+  type ReplayInfo,
 } from './components/index.js';
 import { FlowTUI } from './components/Flow.tui.js';
 import { MachineListTUI } from './components/MachineList.tui.js';
@@ -296,6 +304,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   // Events view state
   const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
   const [activeRemoteIdentity, setActiveRemoteIdentity] = useState<Identity | null>(null);
+  const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
+  const [showDismissedReplays, setShowDismissedReplays] = useState(false);
+  const activeReplayDismissedRef = useRef(false);
 
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
@@ -333,6 +344,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     listLinearIssues: listLocalLinearIssues,
     requestWorkspaces: requestLocalWorkspaces,
     requestSessions: requestLocalSessions,
+    requestReplays: requestLocalReplays,
     createProject: createLocalProject,
     prepareProjectCreation: prepareLocalProjectCreation,
     finalizeProjectCreation: finalizeLocalProjectCreation,
@@ -353,6 +365,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     projects: localProjects,
     workspaces: localWorkspaces,
     sessions: localSessions,
+    replays: localReplays,
     inbox: localInbox,
     inboxUnreadCount: localInboxUnreadCount,
     attachedSessionId: localAttachedSessionId,
@@ -534,8 +547,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     await Promise.all([
       requestLocalWorkspaces(),
       requestLocalSessions(),
+      requestLocalReplays(undefined, showDismissedReplays),
     ]);
-  }, [isLocalMachineContext, requestLocalSessions, requestLocalWorkspaces]);
+  }, [isLocalMachineContext, requestLocalReplays, requestLocalSessions, requestLocalWorkspaces, showDismissedReplays]);
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
@@ -630,8 +644,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[tui] Failed to refresh sessions after project select:', message);
     });
+    void requestLocalReplays(undefined, showDismissedReplays).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[tui] Failed to refresh replays after project select:', message);
+    });
     dispatch({ type: 'SET_PANEL_FOCUS', focus: 'workspaces' });
-  }, [requestLocalProjects, requestLocalSessions, requestLocalWorkspaces]);
+  }, [requestLocalProjects, requestLocalReplays, requestLocalSessions, requestLocalWorkspaces, showDismissedReplays]);
 
   // Delete project
   const handleDeleteProject = useCallback((project: ProjectInfo) => {
@@ -1031,6 +1049,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       )
     : [];
 
+  const replayInfos = currentProject
+    ? localReplays.filter((replay) => replay.projectName === currentProject)
+    : [];
+
   const inboxItems = localInbox as InboxItem[];
   const inboxUnreadCount = localInboxUnreadCount;
 
@@ -1108,12 +1130,84 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     dispatch({ type: 'SET_VIEW', view: 'events' });
   }, [localWorkspaces, requestLocalEvents]);
 
+  const handleOpenReplay = useCallback(async (replayId: string) => {
+    const replay = localReplays.find((item) => item.replayId === replayId);
+    if (!replay) {
+      flow.showMessage({
+        title: 'Replay Missing',
+        message: 'That replay is no longer available.',
+        variant: 'error',
+      });
+      return;
+    }
+
+    setActiveReplay(replay);
+    dispatch({ type: 'SET_VIEW', view: 'replay' });
+  }, [flow, localReplays]);
+
+  const handleReplayDismiss = useCallback((replayId: string) => {
+    try {
+      const replay = localReplays.find((item) => item.replayId === replayId) ?? activeReplay;
+      if (!activeReplayDismissedRef.current && replay?.status === 'running') {
+        flow.showMessage({
+          title: 'Replay Still Running',
+          message: 'Running replays cannot be dismissed.',
+          variant: 'info',
+        });
+        return false;
+      }
+
+      if (activeReplayDismissedRef.current) {
+        undismissReplayOffline(replayId);
+        activeReplayDismissedRef.current = false;
+        setActiveReplay((current) => current && current.replayId === replayId
+          ? {
+            ...current,
+            dismissedAt: undefined,
+            dismissedBy: undefined,
+          }
+          : current);
+        return false;
+      }
+
+      dismissReplayOffline(replayId);
+      activeReplayDismissedRef.current = true;
+      return true;
+    } catch (error) {
+      flow.showMessage({
+        title: 'Replay Update Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      return false;
+    } finally {
+      void requestLocalReplays(undefined, showDismissedReplays);
+    }
+  }, [activeReplay, flow, localReplays, requestLocalReplays, showDismissedReplays]);
+
+  useEffect(() => {
+    activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
+  }, [activeReplay?.dismissedAt]);
+
+  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return getReplayAnsiBufferOffline(replayId, target);
+  }, []);
+
+  const loadReplayTimeline = useCallback((replayId: string) => {
+    return Promise.resolve(getReplayTimelineOffline(replayId));
+  }, []);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
     sessions: sessionInfos,
-    onRequestSessions: () => {}, // Sessions already loaded
+    replays: replayInfos,
+    onRequestSessions: () => {
+      void requestLocalSessions();
+      void requestLocalReplays(undefined, showDismissedReplays);
+    },
     onAttachSession: handleAttachSession,
+    onOpenReplay: handleOpenReplay,
     onEditProcesses: handleEditProcesses,
     onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: handleStartProcess,
@@ -1122,6 +1216,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onRefresh: refreshWorkspaces,
+    onRefreshSessions: async () => {
+      await Promise.all([
+        requestLocalSessions(),
+        requestLocalReplays(undefined, showDismissedReplays),
+      ]);
+    },
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,
     machineName: currentProject || undefined,
@@ -1463,7 +1563,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
 
     // Don't handle keys when in terminal view (Terminal component handles input)
-    if (state.view === 'terminal') {
+    if (state.view === 'terminal' || state.view === 'replay') {
       return;
     }
 
@@ -1874,7 +1974,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           const selected = spacesBrowserProps.selectedItem;
           const workspaceId = selected?.type === 'workspace'
             ? selected.workspace.id
-            : selected && 'workspaceId' in selected
+            : selected && 'workspaceId' in selected && selected.type !== 'replay'
               ? selected.workspaceId
               : null;
           if (workspaceId) {
@@ -1887,6 +1987,27 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             const workspace = workspaceInfos.find((item) => item.id === selected.workspace.id);
             if (workspace) {
               handleDeleteWorkspace(workspace);
+            }
+          } else if (selected?.type === 'replay') {
+            try {
+              if (!selected.replay.dismissedAt && selected.replay.status === 'running') {
+                flow.showMessage({
+                  title: 'Replay Still Running',
+                  message: 'Running replays cannot be dismissed.',
+                  variant: 'info',
+                });
+              } else if (selected.replay.dismissedAt) {
+                undismissReplayOffline(selected.replay.replayId);
+              } else {
+                dismissReplayOffline(selected.replay.replayId);
+              }
+              void requestLocalReplays(undefined, showDismissedReplays);
+            } catch (error) {
+              flow.showMessage({
+                title: 'Replay Update Failed',
+                message: error instanceof Error ? error.message : String(error),
+                variant: 'error',
+              });
             }
           }
         } else if (command === 'kill') {
@@ -1918,6 +2039,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
               variant: 'error',
             });
           }
+        } else if (command === 'toggle-hidden') {
+          setShowDismissedReplays((value) => {
+            const next = !value;
+            void requestLocalReplays(undefined, next);
+            return next;
+          });
         } else if (command === 'back') {
           dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' });
         }
@@ -2067,6 +2194,25 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         <EventsTui {...eventsProps} />
         <FlowTUI flow={flow} />
         <StatusBar hint="[Esc/q] Back  [j/k] Navigate" rightHint={keyboardModeHint} />
+      </Fragment>
+    );
+  }
+
+  if (state.view === 'replay' && activeReplay) {
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <ReplayTerminal
+          replay={activeReplay}
+          loadReplayAnsi={loadReplayAnsi}
+          loadReplayTimeline={loadReplayTimeline}
+          onBack={() => {
+            setActiveReplay(null);
+            dispatch({ type: 'SET_VIEW', view: 'projects' });
+          }}
+          onDismiss={activeReplay.status === 'running' ? undefined : handleReplayDismiss}
+        />
+        <FlowTUI flow={flow} />
       </Fragment>
     );
   }
@@ -2436,7 +2582,13 @@ function SettingsFlowModal({ flow }: { flow: SettingsFlowState }) {
 
 function getWorkspacesPanelHint(selectedItem: TreeItem | null | undefined): string {
   if (selectedItem?.type === 'session') {
-    return '[Tab] Switch  [Enter] Attach  [x] Kill  [b] Bundle  [n] New Workspace  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+    return '[Tab] Switch  [Enter] Attach  [x] Kill  [b] Bundle  [n] New Workspace  [h] Hidden  [d] Delete  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'replay') {
+    return '[Tab] Switch  [Enter] Open  [d] Dismiss/Restore  [h] Hidden  [,] Settings  [?] Help  [q] Quit';
+  }
+  if (selectedItem?.type === 'replay-section' || selectedItem?.type === 'orphaned-replay-section') {
+    return '[Tab] Switch  [Enter] Expand  [h] Hidden  [,] Settings  [?] Help  [q] Quit';
   }
   if (selectedItem?.type === 'process') {
     if (selectedItem.status === 'running') {

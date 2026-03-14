@@ -290,3 +290,10 @@ export class SessionNameExistsError extends Error {
     }
   }
 }
+
+export class ReplayScreenshotError extends SpacesError {
+  constructor(message: string) {
+    super(message, 'SYSTEM_ERROR', 2);
+    this.name = 'ReplayScreenshotError';
+  }
+}

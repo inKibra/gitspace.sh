@@ -9,10 +9,23 @@ import {
   ensureServer,
   createSession,
   killSession,
+  createCheckpoint,
   getInbox,
   clearInbox,
   markInboxRead,
+  getReplaySnapshot,
+  getReplayText,
+  getReplayMarkdown,
 } from '../../lib/tmux-lite/cli.js';
+import {
+  listReplaysOffline,
+  getReplaySnapshotOffline,
+  getReplayTextOffline,
+  getReplayAnsiBufferOffline,
+  getReplayTimelineOffline,
+  dismissReplayOffline,
+  undismissReplayOffline,
+} from '../../lib/tmux-lite/replay/service.js';
 import {
   encodeControl,
   encodePTY,
@@ -95,15 +108,25 @@ import { resolveWorkspaceRef } from '../../lib/events/paths.js';
 import { loadSavedEventFilters } from '../../lib/events/filters.js';
 import { readProjectConfig } from '../../core/config.js';
 import { existsSync } from 'fs';
+import type { TerminalSnapshot } from '../backend.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
+  listReplays: typeof listReplaysOffline;
   ensureServer: typeof ensureServer;
   createSession: typeof createSession;
   killSession: typeof killSession;
+  createCheckpoint: typeof createCheckpoint;
   getInbox: typeof getInbox;
   clearInbox: typeof clearInbox;
   markInboxRead: typeof markInboxRead;
+  getReplaySnapshot: typeof getReplaySnapshotOffline;
+  getReplayText: typeof getReplayTextOffline;
+  getReplayMarkdown: typeof getReplayMarkdown;
+  getReplayAnsi: typeof getReplayAnsiBufferOffline;
+  getReplayTimeline: typeof getReplayTimelineOffline;
+  dismissReplay: typeof dismissReplayOffline;
+  undismissReplay: typeof undismissReplayOffline;
   getNotificationConfig: typeof getNotificationConfig;
   updateNotificationConfig: typeof updateNotificationConfig;
   listProjectSummaries: typeof listProjectSummaries;
@@ -351,12 +374,21 @@ function buildDeps(
 ): LocalSessionBackendDependencies {
   return {
     listSessions,
+    listReplays: listReplaysOffline,
     ensureServer,
     createSession,
     killSession,
+    createCheckpoint,
     getInbox,
     clearInbox,
     markInboxRead,
+    getReplaySnapshot: getReplaySnapshotOffline,
+    getReplayText: getReplayTextOffline,
+    getReplayMarkdown,
+    getReplayAnsi: getReplayAnsiBufferOffline,
+    getReplayTimeline: getReplayTimelineOffline,
+    dismissReplay: dismissReplayOffline,
+    undismissReplay: undismissReplayOffline,
     getNotificationConfig,
     updateNotificationConfig,
     listProjectSummaries,
@@ -534,6 +566,65 @@ export class LocalSessionBackend implements SessionBackend {
       });
 
     this.emit({ type: 'sessions', sessions: filtered });
+  }
+
+  async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
+    const replays = await this.deps.listReplays({ workspaceId, includeDismissed });
+    this.emit({ type: 'replays', replays });
+  }
+
+  async createCheckpoint(sessionId: string): Promise<void> {
+    await this.deps.createCheckpoint(sessionId);
+  }
+
+  async getReplaySnapshot(replayId: string, atMs?: number, scrollbackLines?: number): Promise<TerminalSnapshot> {
+    return this.deps.getReplaySnapshot(replayId, { atMs, scrollbackLines });
+  }
+
+  async getReplayText(
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+    includeScrollback?: boolean,
+    trimTrailingBlankRows?: boolean,
+  ): Promise<string> {
+    return this.deps.getReplayText(replayId, {
+      atMs,
+      scrollbackLines,
+      includeScrollback,
+      trimTrailingBlankRows,
+    });
+  }
+
+  async getReplayMarkdown(
+    replayId: string,
+    atMs?: number,
+    scrollbackLines?: number,
+    includeScrollback?: boolean,
+    trimTrailingBlankRows?: boolean,
+  ): Promise<string> {
+    return this.deps.getReplayMarkdown(replayId, {
+      atMs,
+      scrollbackLines,
+      includeScrollback,
+      trimTrailingBlankRows,
+    });
+  }
+
+  async getReplayAnsi(replayId: string, target?: import('../backend.js').ReplayFrameTarget): Promise<Uint8Array> {
+    return this.deps.getReplayAnsi(replayId, target);
+  }
+
+  async getReplayTimeline(replayId: string): Promise<import('../backend.js').ReplayTimeline> {
+    return this.deps.getReplayTimeline(replayId);
+  }
+
+  async dismissReplay(replayId: string): Promise<void> {
+    this.deps.dismissReplay(replayId);
+  }
+
+  async undismissReplay(replayId: string): Promise<void> {
+    this.deps.undismissReplay(replayId);
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {

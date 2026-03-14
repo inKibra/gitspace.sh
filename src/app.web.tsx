@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { SessionTerminal, type SessionTerminalHandle } from "./components/SessionTerminal.web";
+import { ReplayTerminalWeb } from './components/ReplayTerminal.web';
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
 import {
   TerminalControls,
@@ -34,6 +35,7 @@ import {
   useFlow,
   getDefaultShortcuts,
   type MachineInfo,
+  type ReplayInfo,
   type WorkspaceInfo,
 } from "./components/index.js";
 import { MachineListWeb } from "./components/MachineList.web.js";
@@ -58,7 +60,7 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 
-type View = "machines" | "terminal" | "review";
+type View = "machines" | "terminal" | "review" | 'replay';
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
@@ -99,6 +101,9 @@ export default function App() {
   const [localNotificationConfig, setLocalNotificationConfig] =
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
+  const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
+  const [showDismissedReplays, setShowDismissedReplays] = useState(false);
+  const showDismissedReplaysRef = useRef(showDismissedReplays);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
   const eventsKeyboardStateRef = useRef<{
@@ -179,6 +184,7 @@ export default function App() {
     onApplied: async () => {
       terminal.requestWorkspaces();
       terminal.requestSessions();
+      terminal.requestReplays(undefined, showDismissedReplays);
     },
   });
 
@@ -243,6 +249,7 @@ export default function App() {
       setShowScriptTerminal(false);
       terminal.requestWorkspaces();
       terminal.requestSessions();
+      terminal.requestReplays(undefined, showDismissedReplays);
     },
     onDeleteCancelled: async () => {
       suppressDeleteScriptFailureModalRef.current = false;
@@ -624,12 +631,99 @@ export default function App() {
     [filteredWorkspaceIds, selectedProjectName, terminal.sessions]
   );
 
+  const filteredReplays = useMemo(
+    () => selectedProjectName
+      ? terminal.replays.filter((replay) => replay.projectName === selectedProjectName)
+      : [],
+    [selectedProjectName, terminal.replays]
+  );
+
+  const refreshReplayList = useCallback(() => {
+    terminal.requestReplays(undefined, showDismissedReplays);
+  }, [terminal, showDismissedReplays]);
+
+  useEffect(() => {
+    showDismissedReplaysRef.current = showDismissedReplays;
+  }, [showDismissedReplays]);
+
+  const toggleShowDismissedReplayFilter = useCallback(() => {
+    setShowDismissedReplays((value) => {
+      const next = !value;
+      terminal.requestReplays(undefined, next);
+      return next;
+    });
+  }, [terminal]);
+
+  const handleOpenReplay = useCallback(async (replayId: string) => {
+    const replay = terminal.replays.find((item) => item.replayId === replayId);
+    if (!replay) {
+      flow.showMessage({ title: 'Replay Missing', message: 'Could not find replay metadata.', variant: 'error' });
+      return;
+    }
+
+    setActiveReplay(replay);
+    setView('replay');
+  }, [flow, terminal]);
+
+  const toggleReplayDismissed = useCallback(async (replay: ReplayInfo): Promise<boolean> => {
+    try {
+      if (!replay.dismissedAt && replay.status === 'running') {
+        flow.showMessage({
+          title: 'Replay Still Running',
+          message: 'Running replays cannot be dismissed.',
+          variant: 'info',
+        });
+        return false;
+      }
+
+      if (replay.dismissedAt) {
+        await terminal.undismissReplay(replay.replayId);
+        setActiveReplay((current) => current && current.replayId === replay.replayId
+          ? {
+            ...current,
+            dismissedAt: undefined,
+            dismissedBy: undefined,
+          }
+          : current);
+        return false;
+      } else {
+        await terminal.dismissReplay(replay.replayId);
+        setActiveReplay((current) => current && current.replayId === replay.replayId
+          ? {
+            ...current,
+            dismissedAt: Date.now(),
+          }
+          : current);
+        return true;
+      }
+    } catch (error) {
+      flow.showMessage({
+        title: replay.dismissedAt ? 'Restore Failed' : 'Dismiss Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      return false;
+    } finally {
+      refreshReplayList();
+    }
+  }, [activeReplay?.replayId, flow, refreshReplayList, terminal]);
+
+  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return terminal.getReplayAnsi(replayId, target);
+  }, [terminal]);
+
+  const loadReplayTimeline = useCallback((replayId: string) => {
+    return terminal.getReplayTimeline(replayId);
+  }, [terminal]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: filteredWorkspaces,
     sessions: filteredSessions,
+    replays: filteredReplays,
     onRequestSessions: () => terminal.requestSessions(),
     onAttachSession: handleAttachSession,
+    onOpenReplay: handleOpenReplay,
     onEditProcesses: handleEditProcesses,
     onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: (params) => processActions.handleStartProcess(params),
@@ -645,8 +739,8 @@ export default function App() {
         terminal.requestEvents(workspace.path, undefined, undefined, undefined);
       }
     },
-    onRefresh: terminal.requestWorkspaces,
-    onRefreshSessions: () => terminal.requestSessions(),
+    onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },
+    onRefreshSessions: () => { terminal.requestSessions(); refreshReplayList(); },
     onBack: handleBackToMachines,
     machineName: selectedProjectName
       ? `${selectedProjectName} - ${selectedMachine?.label || selectedMachine?.machineId || 'machine'}`
@@ -853,6 +947,17 @@ export default function App() {
     terminal.requestNotificationConfig,
   ]);
 
+  useEffect(() => {
+    if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
+      terminal.requestReplays(undefined, showDismissedReplaysRef.current);
+    }
+  }, [
+    view,
+    terminal.status,
+    terminal.mode,
+    terminal.requestReplays,
+  ]);
+
   // Reset view-only state when detached
   useEffect(() => {
     if (terminal.mode !== 'attached') {
@@ -1003,7 +1108,7 @@ export default function App() {
         const selected = spacesBrowserProps.selectedItem;
         const workspaceId = selected?.type === 'workspace'
           ? selected.workspace.id
-          : selected && 'workspaceId' in selected
+          : selected && 'workspaceId' in selected && selected.type !== 'replay'
             ? selected.workspaceId
             : null;
         if (workspaceId) {
@@ -1060,7 +1165,11 @@ export default function App() {
               });
             },
           });
+        } else if (selected?.type === 'replay') {
+          void toggleReplayDismissed(selected.replay);
         }
+      } else if (command === 'toggle-hidden') {
+        toggleShowDismissedReplayFilter();
       } else if (command === 'open-inbox') {
         terminal.requestInbox();
         setShowInbox(true);
@@ -1082,6 +1191,8 @@ export default function App() {
     lifecycleController,
     handleManageBundleConfig,
     deleteWorkspaceWithPrompt,
+    toggleReplayDismissed,
+    toggleShowDismissedReplayFilter,
   ]);
 
   // Attached terminal mode keyboard handler (Shift+Esc to detach)
@@ -1210,6 +1321,31 @@ export default function App() {
     );
   }
 
+  if (view === 'replay' && activeReplay) {
+    return (
+      <>
+        <ReplayTerminalWeb
+          replay={activeReplay}
+          machineLabel={selectedMachine?.label || selectedMachine?.machineId}
+          loadReplayAnsi={loadReplayAnsi}
+          loadReplayTimeline={loadReplayTimeline}
+          onBack={() => {
+            setView('terminal');
+            setActiveReplay(null);
+          }}
+          onDismiss={activeReplay.status === 'running'
+            ? undefined
+            : (replayId) => {
+              const replay = terminal.replays.find((item) => item.replayId === replayId) ?? activeReplay;
+              return toggleReplayDismissed(replay);
+            }}
+        />
+        <FlowWeb flow={flow} />
+        <Toaster theme="dark" position="top-right" richColors />
+      </>
+    );
+  }
+
   // ========== Spaces Browser View (browsing mode) ==========
   if (
     view === 'terminal' &&
@@ -1286,7 +1422,19 @@ export default function App() {
               title={selectedMachine?.label || selectedMachine?.machineId || 'Projects'}
             />
           </div>
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="px-3 py-2 border-b border-[#30363d] bg-[#11161d] flex items-center justify-between gap-2">
+              <div className="text-xs text-[#8b949e]">
+                Replay history: <span className="text-[#e6edf3]">{showDismissedReplays ? 'showing dismissed' : 'hiding dismissed'}</span>
+              </div>
+              <button
+                onClick={toggleShowDismissedReplayFilter}
+                className="px-3 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[36px] border border-[#30363d]"
+              >
+                {showDismissedReplays ? 'Hide Dismissed' : 'Show Dismissed'}
+              </button>
+            </div>
+            <div className="flex-1 min-h-0">
             <SpacesBrowserWeb
               {...spacesBrowserProps}
               embedded={true}
@@ -1313,6 +1461,7 @@ export default function App() {
               onDeleteWorkspace={handleDeleteWorkspace}
               onDeleteSession={handleDeleteSession}
             />
+            </div>
           </div>
         </div>
         <FlowWeb flow={flow} />

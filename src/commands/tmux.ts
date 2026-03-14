@@ -31,6 +31,29 @@ import {
   PACKAGE_VERSION,
   type Session,
 } from "../lib/tmux-lite/cli.js";
+import { applyTmuxLiteSandboxEnvironment } from '../lib/tmux-lite/protocol.js';
+import {
+  listReplaysOffline,
+  resolveReplayOffline,
+  getReplayTextOffline,
+  screenshotReplayOffline,
+  dismissReplayOffline,
+  undismissReplayOffline,
+  deleteReplayOffline,
+  pruneExpiredReplaysOffline,
+  getReplayStorageSummaryOffline,
+  type ReplayInfo,
+} from '../lib/tmux-lite/replay/service.js';
+
+interface TmuxCommandOptions {
+  sandbox?: string;
+}
+
+function applyTmuxSandbox(options?: TmuxCommandOptions): void {
+  if (options?.sandbox) {
+    applyTmuxLiteSandboxEnvironment(options.sandbox);
+  }
+}
 
 /**
  * Format uptime in human-readable format
@@ -43,10 +66,31 @@ function formatUptime(seconds: number): string {
   return `${hours}h ${mins}m`;
 }
 
+function formatAge(timestamp: number): string {
+  const age = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (age < 60) return `${age}s`;
+  if (age < 3600) return `${Math.floor(age / 60)}m`;
+  return `${Math.floor(age / 3600)}h`;
+}
+
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  if (totalSeconds < 3600) return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  return `${hours}h ${minutes}m`;
+}
+
+function resolveReplay(ref: string): ReplayInfo {
+  return resolveReplayOffline(ref);
+}
+
 /**
  * Start the tmux-lite server daemon
  */
-export async function startTmux(): Promise<void> {
+export async function startTmux(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Clean up any stale PID file first
   cleanupStalePidFile();
 
@@ -69,7 +113,8 @@ export async function startTmux(): Promise<void> {
 /**
  * Stop the tmux-lite server daemon
  */
-export async function stopTmux(options: { force?: boolean } = {}): Promise<void> {
+export async function stopTmux(options: { force?: boolean; sandbox?: string } = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Clean up any stale PID file first
   cleanupStalePidFile();
 
@@ -108,7 +153,8 @@ export async function stopTmux(options: { force?: boolean } = {}): Promise<void>
 /**
  * Show tmux-lite server status
  */
-export async function statusTmux(): Promise<void> {
+export async function statusTmux(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Clean up any stale PID file first
   const wasStale = cleanupStalePidFile();
   if (wasStale) {
@@ -174,7 +220,8 @@ export async function statusTmux(): Promise<void> {
 /**
  * List tmux-lite sessions
  */
-export async function listTmux(): Promise<void> {
+export async function listTmux(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Clean up any stale PID file first
   cleanupStalePidFile();
 
@@ -211,7 +258,8 @@ export async function listTmux(): Promise<void> {
 /**
  * Create and attach to a new tmux-lite session
  */
-export async function newTmux(name?: string, cwdOverride?: string): Promise<void> {
+export async function newTmux(name?: string, cwdOverride?: string, options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Check for nested session
   if (isNested()) {
     logger.error("Already inside a tmux-lite session");
@@ -247,7 +295,8 @@ export async function newTmux(name?: string, cwdOverride?: string): Promise<void
 /**
  * Attach to an existing tmux-lite session
  */
-export async function attachTmux(id: string, options: { force?: boolean } = {}): Promise<void> {
+export async function attachTmux(id: string, options: { force?: boolean; sandbox?: string } = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Check for nested session
   if (isNested()) {
     logger.error("Already inside a tmux-lite session");
@@ -295,7 +344,8 @@ export async function attachTmux(id: string, options: { force?: boolean } = {}):
 /**
  * Kill a tmux-lite session
  */
-export async function killTmux(id: string): Promise<void> {
+export async function killTmux(id: string, options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
   // Clean up any stale PID file first
   cleanupStalePidFile();
 
@@ -315,4 +365,157 @@ export async function killTmux(id: string): Promise<void> {
 
   await killSession(session.id);
   logger.success(`Killed session: ${session.name} (id: ${session.id})`);
+}
+
+export function listTmuxReplays(options: TmuxCommandOptions & { all?: boolean } = {}): void {
+  applyTmuxSandbox(options);
+
+  const replays = listReplaysOffline({ includeDismissed: options.all ?? false });
+  if (replays.length === 0) {
+    logger.log(options.all ? 'No replays' : 'No replays (use --all to include dismissed)');
+    return;
+  }
+
+  logger.log('Replays:');
+  for (const replay of replays) {
+    const ended = replay.endedAt ? ` ${chalk.gray(`ended ${formatAge(replay.endedAt)} ago`)}` : '';
+    const status = replay.status === 'crashed'
+      ? chalk.red('crashed')
+      : replay.status === 'running'
+        ? chalk.green('running')
+        : chalk.yellow('closed');
+    const dismissed = replay.dismissedAt ? chalk.gray(' [dismissed]') : '';
+    const label = replay.sessionName || replay.sessionId;
+    const workspace = replay.workspaceName
+      ? chalk.gray(` [${replay.projectName}/${replay.workspaceName}]`)
+      : replay.projectName
+        ? chalk.gray(` [${replay.projectName}]`)
+        : '';
+    logger.log(`  ${chalk.cyan(replay.replayId.slice(0, 20))} ${label}${workspace} ${chalk.gray(`(${formatDuration(replay.durationMs)})`)} ${status}${ended}${dismissed}`);
+    logger.dim(`      ${replay.cwd}`);
+  }
+}
+
+export async function showTmuxReplayText(
+  ref: string,
+  options: {
+    atMs?: number;
+    scrollbackLines?: number;
+    includeScrollback?: boolean;
+    sandbox?: string;
+  } = {}
+): Promise<void> {
+  applyTmuxSandbox(options);
+
+  const replay = resolveReplay(ref);
+  const text = await getReplayTextOffline(replay.replayId, {
+    atMs: options.atMs,
+    scrollbackLines: options.scrollbackLines,
+    includeScrollback: options.includeScrollback,
+  });
+  logger.log(text);
+}
+
+export async function screenshotTmuxReplay(
+  ref: string,
+  options: {
+    output?: string;
+    atMs?: number;
+    scrollbackLines?: number;
+    includeScrollback?: boolean;
+    sandbox?: string;
+  } = {}
+): Promise<void> {
+  applyTmuxSandbox(options);
+
+  const replay = resolveReplay(ref);
+  const suffix = options.atMs !== undefined ? `${options.atMs}ms` : 'latest';
+  const outputPath = options.output ?? `replay-${replay.replayId}-${suffix}.png`;
+  const writtenPath = await screenshotReplayOffline(replay.replayId, {
+    outputPath,
+    atMs: options.atMs,
+    scrollbackLines: options.scrollbackLines,
+    includeScrollback: options.includeScrollback,
+  });
+
+  logger.success(`Replay screenshot written: ${writtenPath}`);
+}
+
+export function dismissTmuxReplay(ref: string, options: TmuxCommandOptions = {}): void {
+  applyTmuxSandbox(options);
+  const replay = resolveReplay(ref);
+  dismissReplayOffline(replay.replayId);
+  logger.success(`Replay dismissed: ${replay.sessionName || replay.replayId}`);
+  logger.dim('Replay will be permanently deleted in 7 days.');
+  logger.dim('Use `gssh machine tmux replay undismiss` to restore it.');
+}
+
+export function undismissTmuxReplay(ref: string, options: TmuxCommandOptions = {}): void {
+  applyTmuxSandbox(options);
+  const replay = resolveReplayOffline(ref, { includeDismissed: true });
+  undismissReplayOffline(replay.replayId);
+  logger.success(`Replay restored: ${replay.sessionName || replay.replayId}`);
+}
+
+export function deleteTmuxReplay(ref: string, options: TmuxCommandOptions = {}): void {
+  applyTmuxSandbox(options);
+  const replay = resolveReplayOffline(ref, { includeDismissed: true });
+  deleteReplayOffline(replay.replayId);
+  logger.success(`Replay deleted: ${replay.sessionName || replay.replayId}`);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+export function showTmuxReplayUsage(options: TmuxCommandOptions & { json?: boolean; top?: number } = {}): void {
+  applyTmuxSandbox(options);
+
+  const summary = getReplayStorageSummaryOffline();
+  if (summary.replayCount === 0) {
+    logger.log('No replays stored.');
+    return;
+  }
+
+  if (options.json) {
+    logger.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  const limit = options.top && options.top > 0 ? options.top : summary.replays.length;
+  const shown = summary.replays.slice(0, limit);
+
+  logger.log(`Replay storage: ${chalk.bold(formatBytes(summary.totalBytes))} across ${summary.replayCount} replay(s)\n`);
+
+  for (const replay of shown) {
+    const status = replay.status === 'crashed'
+      ? chalk.red('crashed')
+      : replay.status === 'running'
+        ? chalk.green('running')
+        : chalk.yellow('closed');
+    const dismissed = replay.dismissedAt ? chalk.gray(' [dismissed]') : '';
+    const expires = replay.expiresAt
+      ? chalk.gray(` [deletes ${new Date(replay.expiresAt).toLocaleDateString()}]`)
+      : '';
+    const label = replay.sessionName || replay.replayId;
+    logger.log(`  ${chalk.cyan(replay.replayId.slice(0, 20))} ${label} ${status} ${chalk.bold(formatBytes(replay.totalBytes))}${dismissed}${expires}`);
+    logger.dim(`      events: ${formatBytes(replay.eventsBytes)}  checkpoints: ${formatBytes(replay.checkpointsBytes)}  manifest: ${formatBytes(replay.manifestBytes)}`);
+  }
+
+  if (limit < summary.replays.length) {
+    logger.dim(`\n  ... and ${summary.replays.length - limit} more replay(s)`);
+  }
+}
+
+export function pruneTmuxReplays(options: TmuxCommandOptions = {}): void {
+  applyTmuxSandbox(options);
+  const pruned = pruneExpiredReplaysOffline();
+  if (pruned === 0) {
+    logger.log('No expired replays to prune.');
+  } else {
+    logger.success(`Pruned ${pruned} expired replay(s).`);
+  }
 }

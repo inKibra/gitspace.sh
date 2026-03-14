@@ -7,6 +7,9 @@
 
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
+import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
+
+export type { ReplayInfo };
 
 // ============================================================================
 // Types
@@ -57,6 +60,9 @@ export type TreeItem =
   | { type: 'project'; name: string; workspaceCount: number }
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
+  | { type: 'replay-section'; workspaceId: string; count: number; expanded: boolean }
+  | { type: 'orphaned-replay-section'; projectName: string; count: number; expanded: boolean }
+  | { type: 'replay'; replay: ReplayInfo; workspaceId: string }
   | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
   | { type: 'process-disabled'; processName: string; workspaceId: string; ports?: WorkspaceProcessPort[] }
   | { type: 'process-config-error'; workspaceId: string; error: string }
@@ -75,8 +81,10 @@ export type TreeItemWithState = TreeItem & {
 export interface UseSpacesBrowserProps {
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
+  replays: ReplayInfo[];
   onRequestSessions: (workspaceId?: string) => void;
   onAttachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => void | Promise<void>;
+  onOpenReplay: (replayId: string) => void | Promise<void>;
   onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
   onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
@@ -116,6 +124,7 @@ export interface UseSpacesBrowserReturn {
   activateIndex: (index: number) => Promise<void>;
   /** Direct attach - bypasses state timing issues on mobile */
   attachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => Promise<void>;
+  openReplay: (replayId: string) => Promise<void>;
   startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   startProcess: (params: { workspaceId: string; processName: string }) => void;
   stopProcess: (params: { workspaceId: string; processName: string }) => void;
@@ -137,13 +146,20 @@ interface ProjectGroup {
   workspaces: WorkspaceInfo[];
 }
 
-function groupByProject(workspaces: WorkspaceInfo[]): ProjectGroup[] {
+function groupByProject(workspaces: WorkspaceInfo[], replays: ReplayInfo[]): ProjectGroup[] {
   const projectMap = new Map<string, WorkspaceInfo[]>();
 
   for (const ws of workspaces) {
     const list = projectMap.get(ws.projectName) || [];
     list.push(ws);
     projectMap.set(ws.projectName, list);
+  }
+
+  for (const replay of replays) {
+    const projectName = replay.projectName ?? 'Unknown';
+    if (!projectMap.has(projectName)) {
+      projectMap.set(projectName, []);
+    }
   }
 
   const groups: ProjectGroup[] = [];
@@ -157,13 +173,20 @@ function groupByProject(workspaces: WorkspaceInfo[]): ProjectGroup[] {
 function buildTree(
   workspaces: WorkspaceInfo[],
   sessions: SessionInfo[],
+  replays: ReplayInfo[],
   expandedWorkspaces: Set<string>,
+  expandedReplaySections: Set<string>,
   showProjectHeaders: boolean = true
 ): TreeItem[] {
   const items: TreeItem[] = [];
-  const projectGroups = groupByProject(workspaces);
+  const projectGroups = groupByProject(workspaces, replays);
 
   for (const group of projectGroups) {
+    const workspaceIds = new Set(group.workspaces.map((workspace) => workspace.id));
+    const orphanedProjectReplays = replays
+      .filter((replay) => (replay.projectName ?? 'Unknown') === group.name && !workspaceIds.has(replay.workspaceId ?? ''))
+      .sort((a, b) => b.startedAt - a.startedAt);
+
     // Project header (optional)
     if (showProjectHeaders) {
       items.push({
@@ -272,6 +295,30 @@ function buildTree(
           });
         }
 
+        const workspaceReplays = replays
+          .filter((replay) => replay.workspaceId === ws.id)
+          .sort((a, b) => b.startedAt - a.startedAt);
+
+        if (workspaceReplays.length > 0) {
+          const replaySectionExpanded = expandedReplaySections.has(ws.id);
+          items.push({
+            type: 'replay-section',
+            workspaceId: ws.id,
+            count: workspaceReplays.length,
+            expanded: replaySectionExpanded,
+          });
+
+          if (replaySectionExpanded) {
+            for (const replay of workspaceReplays) {
+              items.push({
+                type: 'replay',
+                replay,
+                workspaceId: ws.id,
+              });
+            }
+          }
+        }
+
         if (ws.processConfigError) {
           items.push({
             type: 'process-config-error',
@@ -305,6 +352,27 @@ function buildTree(
         });
       }
     }
+
+    if (orphanedProjectReplays.length > 0) {
+      const orphanKey = `orphan:${group.name}`;
+      const orphanExpanded = expandedReplaySections.has(orphanKey);
+      items.push({
+        type: 'orphaned-replay-section',
+        projectName: group.name,
+        count: orphanedProjectReplays.length,
+        expanded: orphanExpanded,
+      });
+
+      if (orphanExpanded) {
+        for (const replay of orphanedProjectReplays) {
+          items.push({
+            type: 'replay',
+            replay,
+            workspaceId: replay.workspaceId ?? orphanKey,
+          });
+        }
+      }
+    }
   }
 
   return items;
@@ -326,8 +394,10 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   const {
     workspaces,
     sessions,
+    replays,
     onRequestSessions,
     onAttachSession,
+    onOpenReplay,
     onStartProcess,
     onStartProcessAttach,
     onStopProcess,
@@ -346,11 +416,12 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   // Local UI state
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(new Set());
+  const [expandedReplaySections, setExpandedReplaySections] = useState<Set<string>>(new Set());
 
   // Build tree
   const tree = useMemo(
-    () => buildTree(workspaces, sessions, expandedWorkspaces, showProjectHeaders),
-    [workspaces, sessions, expandedWorkspaces, showProjectHeaders]
+    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, showProjectHeaders),
+    [workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, showProjectHeaders]
   );
 
   // Add selection state
@@ -413,16 +484,34 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     });
   }, [onRequestSessions]);
 
+  const toggleReplaySection = useCallback((workspaceId: string) => {
+    setExpandedReplaySections(prev => {
+      const next = new Set(prev);
+      if (next.has(workspaceId)) {
+        next.delete(workspaceId);
+      } else {
+        next.add(workspaceId);
+      }
+      return next;
+    });
+  }, []);
+
   const activateItem = useCallback(async (item: TreeItem | null) => {
     if (!item) return;
 
     if (item.type === 'workspace') {
       toggleWorkspace(item.workspace.id);
+    } else if (item.type === 'orphaned-replay-section') {
+      toggleReplaySection(`orphan:${item.projectName}`);
+    } else if (item.type === 'replay-section') {
+      toggleReplaySection(item.workspaceId);
     } else if (item.type === 'session') {
       await onAttachSession({
         sessionId: item.session.id,
         viewOnly: item.session.processName ? true : undefined,
       });
+    } else if (item.type === 'replay') {
+      await onOpenReplay(item.replay.replayId);
     } else if (item.type === 'process') {
       if (item.status === 'running') {
         const session = findSessionForProcess(
@@ -462,7 +551,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     } else if (item.type === 'new-session') {
       await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [toggleWorkspace, onAttachSession, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenEvents]);
+  }, [toggleWorkspace, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenEvents]);
 
   const activateSelected = useCallback(async () => {
     await activateItem(selectedItem);
@@ -525,6 +614,9 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     activateIndex,
     attachSession: async (params) => {
       await onAttachSession(params);
+    },
+    openReplay: async (replayId) => {
+      await onOpenReplay(replayId);
     },
     startProcessAttach: (params) => onStartProcessAttach(params),
     startProcess: (params) => onStartProcess?.(params),

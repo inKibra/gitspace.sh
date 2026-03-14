@@ -1143,4 +1143,114 @@ describe('LocalSessionBackend', () => {
       message: 'Workspace "ws-missing" does not exist',
     });
   });
+
+  it('emits replay lists and respects includeDismissed filters', async () => {
+    const events: BackendEvent[] = [];
+    const listReplaysCalls: Array<{ workspaceId?: string; includeDismissed?: boolean }> = [];
+
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      listReplays: (filter = {}) => {
+        listReplaysCalls.push(filter);
+        return filter.includeDismissed
+          ? [
+              {
+                replayId: 'replay-visible',
+                sessionId: 'sess-1',
+                sessionName: 'visible',
+                cwd: '/tmp/ws-1',
+                workspaceId: 'ws-1',
+                projectName: 'alpha',
+                workspaceName: 'ws-1',
+                startedAt: 1,
+                endedAt: 2,
+                status: 'closed',
+                durationMs: 1,
+                eventCount: 1,
+                checkpointCount: 1,
+                lastSeq: 1,
+              },
+              {
+                replayId: 'replay-hidden',
+                sessionId: 'sess-2',
+                sessionName: 'hidden',
+                cwd: '/tmp/ws-1',
+                workspaceId: 'ws-1',
+                projectName: 'alpha',
+                workspaceName: 'ws-1',
+                startedAt: 3,
+                endedAt: 4,
+                status: 'closed',
+                durationMs: 1,
+                eventCount: 1,
+                checkpointCount: 1,
+                lastSeq: 1,
+                dismissedAt: 10,
+              },
+            ]
+          : [
+              {
+                replayId: 'replay-visible',
+                sessionId: 'sess-1',
+                sessionName: 'visible',
+                cwd: '/tmp/ws-1',
+                workspaceId: 'ws-1',
+                projectName: 'alpha',
+                workspaceName: 'ws-1',
+                startedAt: 1,
+                endedAt: 2,
+                status: 'closed',
+                durationMs: 1,
+                eventCount: 1,
+                checkpointCount: 1,
+                lastSeq: 1,
+              },
+            ];
+      },
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await backend.listReplays('ws-1');
+    await backend.listReplays('ws-1', true);
+
+    expect(listReplaysCalls).toEqual([
+      { workspaceId: 'ws-1', includeDismissed: undefined },
+      { workspaceId: 'ws-1', includeDismissed: true },
+    ]);
+
+    const replayEvents = events.filter((event) => event.type === 'replays');
+    expect(replayEvents).toHaveLength(2);
+    expect(replayEvents[0]).toEqual({
+      type: 'replays',
+      replays: [expect.objectContaining({ replayId: 'replay-visible' })],
+    });
+    expect(replayEvents[1]).toEqual({
+      type: 'replays',
+      replays: [
+        expect.objectContaining({ replayId: 'replay-visible' }),
+        expect.objectContaining({ replayId: 'replay-hidden', dismissedAt: 10 }),
+      ],
+    });
+  });
+
+  it('returns replay ansi and delegates dismiss / undismiss', async () => {
+    const dismissCalls: string[] = [];
+    const undismissCalls: string[] = [];
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      getReplayAnsi: async () => Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]),
+      dismissReplay: (replayId) => { dismissCalls.push(replayId); },
+      undismissReplay: (replayId) => { undismissCalls.push(replayId); },
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    const ansi = await backend.getReplayAnsi('replay-1');
+    expect(Array.from(ansi)).toEqual([0x1b, 0x5b, 0x33, 0x31, 0x6d]);
+
+    await backend.dismissReplay('replay-1');
+    await backend.undismissReplay('replay-1');
+
+    expect(dismissCalls).toEqual(['replay-1']);
+    expect(undismissCalls).toEqual(['replay-1']);
+  });
 });

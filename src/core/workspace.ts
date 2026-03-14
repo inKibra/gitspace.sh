@@ -28,6 +28,10 @@ import {
   killSession,
   isServerRunning,
 } from '../lib/tmux-lite/cli.js';
+import {
+  deleteReplaysForProject,
+  deleteReplaysForWorkspace,
+} from '../lib/tmux-lite/replay/store.js';
 
 /**
  * Options for workspace deletion
@@ -68,6 +72,7 @@ export interface DeleteWorkspaceResult {
   branch?: string;
   branchDeleted: boolean;
   sessionsKilled: number;
+  replaysDeleted?: number;
   errorCode?: 'WORKSPACE_NOT_FOUND' | 'REMOVE_SCRIPT_FAILED' | 'WORKTREE_REMOVE_FAILED';
   error?: string;
   removeScriptError?: string;
@@ -95,6 +100,7 @@ export async function deleteWorkspaceCore(
     workspaceName,
     branchDeleted: false,
     sessionsKilled: 0,
+    replaysDeleted: 0,
   };
 
   // Validate workspace exists before attempting deletion
@@ -247,6 +253,15 @@ export async function deleteWorkspaceCore(
     logger.debug(`Failed to update bundle workspace metadata for ${workspaceName}: ${e}`);
   }
 
+  try {
+    result.replaysDeleted = deleteReplaysForWorkspace(`${projectName}:${workspaceName}`, {
+      projectName,
+      workspaceName,
+    });
+  } catch (e) {
+    logger.debug(`Failed to delete replay history for ${workspaceName}: ${e}`);
+  }
+
   return result;
 }
 
@@ -274,6 +289,7 @@ export interface DeleteProjectResult {
   projectName: string;
   workspacesDeleted: number;
   sessionsKilled: number;
+  replaysDeleted?: number;
   wasCurrentProject: boolean;
   errors: string[];
 }
@@ -297,6 +313,7 @@ export async function deleteProjectCore(
     projectName,
     workspacesDeleted: 0,
     sessionsKilled: 0,
+    replaysDeleted: 0,
     wasCurrentProject: false,
     errors: [],
   };
@@ -331,6 +348,7 @@ export async function deleteProjectCore(
       if (wsResult.success) {
         result.workspacesDeleted++;
         result.sessionsKilled += wsResult.sessionsKilled;
+        result.replaysDeleted = (result.replaysDeleted ?? 0) + (wsResult.replaysDeleted ?? 0);
       } else if (wsResult.error) {
         result.errors.push(`${workspaceName}: ${wsResult.error}`);
       }
@@ -349,6 +367,12 @@ export async function deleteProjectCore(
     const msg = e instanceof Error ? e.message : 'Failed to remove project directory';
     result.errors.push(msg);
     return result;
+  }
+
+  try {
+    result.replaysDeleted = (result.replaysDeleted ?? 0) + deleteReplaysForProject(projectName);
+  } catch (e) {
+    logger.debug(`Failed to delete replay history for project ${projectName}: ${e}`);
   }
 
   // Update global config if this was the current project

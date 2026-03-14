@@ -34,6 +34,7 @@ export type {
   ConfirmStepResult,
   SpacesBundle,
 } from '../../types/bundle.js';
+export type { ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../tmux-lite/replay/types.js';
 
 // Re-export attached mode control types from tmux-lite
 // These are used in attached mode for resize/detach/attach-init
@@ -52,6 +53,39 @@ export interface ListWorkspacesRequest {
 export interface ListSessionsRequest {
   type: "list_sessions";
   workspaceId?: string;  // Filter by workspace, or all if omitted
+}
+
+/** Request list of saved replays, optionally filtered by workspace */
+export interface ListReplaysRequest {
+  type: 'list_replays';
+  workspaceId?: string;
+  includeDismissed?: boolean;
+}
+
+/** Request ANSI replay bytes for Ghostty/web rendering */
+export interface GetReplayAnsiRequest {
+  type: 'get_replay_ansi';
+  replayId: string;
+  atMs?: number;
+  atSeq?: number;
+}
+
+/** Request replay timeline metadata for scrubbing and playback */
+export interface GetReplayTimelineRequest {
+  type: 'get_replay_timeline';
+  replayId: string;
+}
+
+/** Soft-hide a replay */
+export interface DismissReplayRequest {
+  type: 'dismiss_replay';
+  replayId: string;
+}
+
+/** Restore a previously dismissed replay */
+export interface UndismissReplayRequest {
+  type: 'undismiss_replay';
+  replayId: string;
 }
 
 /** Attach to a session (existing or new) */
@@ -304,6 +338,39 @@ export interface SessionListResponse {
   sessions: SessionInfo[];
 }
 
+/** Response with replay list */
+export interface ReplayListResponse {
+  type: 'replay_list';
+  replays: import('../tmux-lite/replay/types.js').ReplayInfo[];
+}
+
+/** Response with replay ANSI payload */
+export interface ReplayAnsiResponse {
+  type: 'replay_ansi';
+  replayId: string;
+  data: string;
+  encoding: 'base64';
+}
+
+/** Response with replay timeline metadata */
+export interface ReplayTimelineResponse {
+  type: 'replay_timeline';
+  replayId: string;
+  timeline: import('../tmux-lite/replay/types.js').ReplayTimeline;
+}
+
+/** Replay dismissed successfully */
+export interface ReplayDismissedResponse {
+  type: 'replay_dismissed';
+  replayId: string;
+}
+
+/** Replay restored successfully */
+export interface ReplayUndismissedResponse {
+  type: 'replay_undismissed';
+  replayId: string;
+}
+
 /** Session attached successfully - transitions to attached mode */
 export interface AttachedResponse {
   type: "attached";
@@ -537,6 +604,11 @@ export interface ProcessStoppedResponse {
 export type ClientToMachineMessage =
   | ListWorkspacesRequest
   | ListSessionsRequest
+  | ListReplaysRequest
+  | GetReplayAnsiRequest
+  | GetReplayTimelineRequest
+  | DismissReplayRequest
+  | UndismissReplayRequest
   | AttachSessionRequest
   | CancelPendingAttachRequest
   | ListProjectsRequest
@@ -569,6 +641,11 @@ export type ClientToMachineMessage =
 export type MachineToClientMessage =
   | WorkspaceListResponse
   | SessionListResponse
+  | ReplayListResponse
+  | ReplayAnsiResponse
+  | ReplayTimelineResponse
+  | ReplayDismissedResponse
+  | ReplayUndismissedResponse
   | AttachedResponse
   | DetachedResponse
   | SessionExitedResponse
@@ -636,6 +713,11 @@ export function serializeRemoteMessage(msg: RemoteSessionMessage): string {
 export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListWorkspacesRequest
   | ListSessionsRequest
+  | ListReplaysRequest
+  | GetReplayAnsiRequest
+  | GetReplayTimelineRequest
+  | DismissReplayRequest
+  | UndismissReplayRequest
   | AttachSessionRequest
   | CancelPendingAttachRequest
   | ListGithubReposRequest
@@ -653,6 +735,11 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   return [
     "list_workspaces",
     "list_sessions",
+    'list_replays',
+    'get_replay_ansi',
+    'get_replay_timeline',
+    'dismiss_replay',
+    'undismiss_replay',
     "attach_session",
     'cancel_pending_attach',
     "list_github_repos",
