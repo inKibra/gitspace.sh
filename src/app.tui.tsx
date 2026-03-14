@@ -2149,9 +2149,22 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             try {
               if (activeReplay?.dismissedAt) {
                 undismissReplayOffline(replayId);
+                setActiveReplay((current) => current && current.replayId === replayId
+                  ? {
+                    ...current,
+                    dismissedAt: undefined,
+                    dismissedBy: undefined,
+                  }
+                  : current);
                 return false;
               } else {
                 dismissReplayOffline(replayId);
+                setActiveReplay((current) => current && current.replayId === replayId
+                  ? {
+                    ...current,
+                    dismissedAt: Date.now(),
+                  }
+                  : current);
                 return true;
               }
             } catch (error) {
