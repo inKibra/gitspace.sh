@@ -1805,10 +1805,10 @@ export default function App() {
               allowTapFocus={inputMode || !showMobileControls}
               allowTouchScroll={!inputMode}
               onActivity={handleTerminalActivity}
-              readOnly={isViewOnlySession}
+              readOnly={isViewOnlySession || terminal.status === 'reconnecting'}
             />
             {isReconnecting && (
-              <div className="absolute inset-0 flex items-center justify-center bg-[#0d1117]/80 pointer-events-none">
+              <div className="absolute inset-0 flex items-center justify-center bg-[#0d1117]/80">
                 <div className="text-center">
                   <div className="text-[#e6edf3] text-base mb-1 animate-pulse">Reconnecting...</div>
                   <div className="text-[#8b949e] text-sm">Your session is preserved</div>
