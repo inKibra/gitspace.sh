@@ -29,6 +29,7 @@ import type {
   X3DHResultMessage,
 } from "../../types/identity.js";
 import { signMessage, type SignatureBlock } from "../../relay/signing.js";
+import { logger } from "../../utils/logger.js";
 
 /** Relay client configuration (identity/X3DH handshake) */
 export interface RelayClientConfig {
@@ -467,7 +468,7 @@ export class RelayClient {
           const isReconnect = this.hasEverConnected;
           const previousTmuxSessionId = isReconnect ? this.activeTmuxSessionId : null;
 
-          console.log(
+          logger.log(
             isReconnect
               ? `[relay-client] Reconnected successfully.${previousTmuxSessionId ? ` Will re-attach to session ${previousTmuxSessionId}.` : ""}`
               : "[relay-client] Handshake complete, session established",

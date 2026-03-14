@@ -35,6 +35,7 @@ import {
 } from "./control/store.js";
 import { getWorkspaceIdentity } from "./control/workspace-identity.js";
 import { deriveUnlockKey } from "./unlock-kdf.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Candidate paths to web terminal dist files (built by Vite).
@@ -869,7 +870,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
 
       if (elapsed >= STALE_CLOSE_THRESHOLD_MS) {
         // Grace period expired – force-close so the machine reconnects.
-        console.log(
+        logger.log(
           `[relay] Machine ${machine.machineId} has been silent for ${Math.round(elapsed / 1000)}s – force-closing stale connection.`,
         );
         try {
@@ -880,7 +881,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
         // The close handler will mark the machine offline and notify clients.
       } else if (elapsed >= STALE_WARN_THRESHOLD_MS && !machine.staleWarned) {
         markMachineStaleWarned(machine.machineId);
-        console.log(
+        logger.warning(
           `[relay] Machine ${machine.machineId} may be stale (no heartbeat for ${Math.round(elapsed / 1000)}s). ` +
           `Will force-close in ${Math.round((STALE_CLOSE_THRESHOLD_MS - elapsed) / 1000)}s if no heartbeat received.`,
         );

@@ -196,13 +196,18 @@ export function useRemoteSessionClient<ConnectParams>(
   //     was actually in attached mode when the drop happened
   //   - lastModeRef preserves the mode across the gap so the UI doesn't flash
   //     back to browsing while the reconnect loop is in flight
-  //   - abort ref prevents races between concurrent connect() calls and loops
+  //   - abort ref prevents races between concurrent connect() calls and loops,
+  //     and is aborted on component unmount so the async loop never outlives
+  //     the component
+  //   - lastDimensionsRef tracks the most recent PTY cols/rows so reconnect
+  //     can pass the current terminal size to attachSession
   // -------------------------------------------------------------------------
   const [isReconnecting, setIsReconnecting] = useState(false);
   const connectParamsRef = useRef<ConnectParams | null>(null);
   const lastAttachedSessionIdRef = useRef<string | null>(null);
   const lastModeRef = useRef<'browsing' | 'attached'>('browsing');
   const reconnectAbortRef = useRef<{ aborted: boolean }>({ aborted: false });
+  const lastDimensionsRef = useRef<{ cols: number; rows: number } | null>(null);
 
   const activeBackendState = useMemo(() => {
     const backendKey = activeBackendKeyRef.current;
@@ -538,7 +543,14 @@ export function useRemoteSessionClient<ConnectParams>(
           }
 
           // Re-attach to the same tmux-lite session (terminal state preserved).
-          await backend.attachSession({ sessionId });
+          // Pass the last known terminal dimensions so the server-side PTY
+          // gets the correct size immediately rather than waiting for the next
+          // browser resize event (which may never come if dimensions haven't changed).
+          const dims = lastDimensionsRef.current;
+          await backend.attachSession({
+            sessionId,
+            ...(dims ? { cols: dims.cols, rows: dims.rows } : {}),
+          });
 
           if (!abort.aborted) {
             logger.log(`[session] Reconnected and re-attached to session ${sessionId}`);
@@ -570,6 +582,12 @@ export function useRemoteSessionClient<ConnectParams>(
     };
 
     void run();
+
+    // Abort the loop if the effect is cleaned up (status changed again or
+    // component unmounted) before the loop finishes.
+    return () => {
+      abort.aborted = true;
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
 
@@ -655,6 +673,9 @@ export function useRemoteSessionClient<ConnectParams>(
   }, []);
 
   const resize = useCallback((cols: number, rows: number) => {
+    // Track dimensions so the reconnect path can pass the current terminal
+    // size to attachSession instead of relying on a subsequent resize event.
+    lastDimensionsRef.current = { cols, rows };
     const backend = backendRef.current;
     if (!backend || !backend.resizePty) {
       return;
@@ -763,6 +784,10 @@ export function useRemoteSessionClient<ConnectParams>(
 
   useEffect(() => {
     return () => {
+      // Abort any in-flight reconnect loop so async callbacks don't call
+      // React state setters or create new backends after unmount.
+      reconnectAbortRef.current.aborted = true;
+
       const backendKey = activeBackendKeyRef.current;
       if (!backendKey) {
         return;

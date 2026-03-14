@@ -4,6 +4,7 @@ import { signMessage } from '../relay/signing.js';
 import { PROTOCOL_VERSION } from '../relay/protocol.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ServeEventHandler } from '../serve/types.js';
+import { SpacesError } from '../types/errors.js';
 
 export type RelayTrustResult =
   | { trusted: true }
@@ -385,7 +386,11 @@ export async function connectMachineRelay(
           } else {
             // Exhausted fast-start attempts – give up and let serve.ts surface
             // the startup failure to the user.
-            reject(new Error(`WebSocket reconnect failed after ${reconnectAttempts} attempts during initial connect`));
+            reject(new SpacesError(
+              `Failed to connect to relay after ${reconnectAttempts} attempts`,
+              'SYSTEM_ERROR',
+              1,
+            ));
           }
           return;
         }
