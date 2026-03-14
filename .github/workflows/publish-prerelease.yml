@@ -106,6 +106,8 @@ jobs:
         with:
           node-version: '24'
 
+      - uses: oven-sh/setup-bun@v2
+
       # Ensure npm is new enough for OIDC trusted publishing (requires 11.5.1+)
       - name: Update npm
         run: npm install -g npm@latest && npm --version
@@ -145,6 +147,12 @@ jobs:
           ' package.json > "$tmp"
           mv "$tmp" package.json
 
+      - name: Regenerate bun.lock for released version
+        run: bun install --lockfile-only --ignore-scripts
+
+      - name: Validate lockfile sync
+        run: bun run check:lockfile-sync
+
       - name: Publish platform packages
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
@@ -170,7 +178,7 @@ jobs:
           # Create a branch and open a PR for the version bump
           BRANCH="chore/version-bump-v${VERSION}"
           git checkout -b "$BRANCH"
-          git add package.json
+          git add package.json bun.lock
           git commit -m "chore: bump version to v${VERSION}"
           git push origin "$BRANCH"
           gh pr create \
