@@ -1137,7 +1137,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     );
   }
 
-  if (showScriptTerminal && remote.status === 'established' && remote.mode === 'browsing') {
+  if (showScriptTerminal && (remote.status === 'established' || remote.status === 'reconnecting') && remote.mode === 'browsing') {
     const isRunning = remote.scriptState?.isRunning ?? true;
     const scriptHint = isRunning
       ? '[Running scripts... c: cancel + attach anyway]'
