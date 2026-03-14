@@ -25,8 +25,9 @@ function normalizeSessionDir(dir: string): string {
 }
 
 function assertUnixSocketPathLength(path: string): void {
-  if (path.length > MAX_UNIX_SOCKET_PATH_LENGTH) {
-    throw new Error(`tmux-lite socket path exceeds ${MAX_UNIX_SOCKET_PATH_LENGTH} bytes: ${path}`);
+  const pathBytes = Buffer.byteLength(path);
+  if (pathBytes > MAX_UNIX_SOCKET_PATH_LENGTH) {
+    throw new Error(`tmux-lite socket path exceeds ${MAX_UNIX_SOCKET_PATH_LENGTH} bytes (${pathBytes}): ${path}`);
   }
 }
 
@@ -66,16 +67,20 @@ export function getTmuxLitePaths(): TmuxLitePaths {
 
   if (sandbox) {
     const sandboxPaths = getTmuxLitePathsForSandbox(sandbox);
+    const routerSocket = explicitRouterSocket || sandboxPaths.routerSocket;
+    assertUnixSocketPathLength(routerSocket);
     return {
-      routerSocket: explicitRouterSocket || sandboxPaths.routerSocket,
+      routerSocket,
       pidFile: explicitPidFile || sandboxPaths.pidFile,
       sessionDir: normalizeSessionDir(explicitSessionDir || sandboxPaths.sessionDir),
     };
   }
 
   const sessionDir = normalizeSessionDir(explicitSessionDir || DEFAULT_SESSION_DIR);
+  const routerSocket = explicitRouterSocket || DEFAULT_ROUTER_SOCKET;
+  assertUnixSocketPathLength(routerSocket);
   return {
-    routerSocket: explicitRouterSocket || DEFAULT_ROUTER_SOCKET,
+    routerSocket,
     pidFile: explicitPidFile || DEFAULT_PID_FILE,
     sessionDir,
   };

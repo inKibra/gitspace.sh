@@ -96,6 +96,7 @@ interface SessionData {
   ptyTerminal: Bun.Terminal;
   xterm: XTerminal;
   serialize: SerializeAddon;
+  idleState: IdleDetectionState;
   proc: Bun.Subprocess;
   client: any;
   clientWriter: any;
@@ -174,7 +175,16 @@ function clearRouterSocketState(socket: object): void {
   routerSocketStates.delete(socket);
 }
 
+function clearIdleTimer(session: SessionData): void {
+  if (session.idleState.idleTimer) {
+    clearTimeout(session.idleState.idleTimer);
+    session.idleState.idleTimer = null;
+  }
+}
+
 function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean } = {}): void {
+  clearIdleTimer(session);
+  session.idleState.outputSinceIdle = 0;
   clearAttachTimer(session);
   session.attachPending = false;
   session.attaching = false;
@@ -1367,6 +1377,7 @@ function createSession(
     ptyTerminal,
     xterm,
     serialize,
+    idleState,
     proc,
     client: null,
     clientWriter: null,
