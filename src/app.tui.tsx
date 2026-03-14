@@ -1147,7 +1147,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     replays: replayInfos,
     onRequestSessions: () => {
       void requestLocalSessions();
-      void requestLocalReplays();
+      void requestLocalReplays(undefined, showDismissedReplays);
     },
     onAttachSession: handleAttachSession,
     onOpenReplay: handleOpenReplay,
@@ -1160,7 +1160,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onOpenEvents: handleOpenEvents,
     onRefresh: refreshWorkspaces,
     onRefreshSessions: async () => {
-      await Promise.all([requestLocalSessions(), requestLocalReplays()]);
+      await Promise.all([
+        requestLocalSessions(),
+        requestLocalReplays(undefined, showDismissedReplays),
+      ]);
     },
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,

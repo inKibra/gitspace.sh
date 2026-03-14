@@ -1,6 +1,20 @@
 import { Terminal as XTerminal } from '@xterm/headless';
 import { listReplayCheckpoints, readReplayCheckpoint, readReplayEvents, readReplayManifest } from './store.js';
 
+function getDefaultTargetTime(
+  manifest: { status: string; stats: { durationMs: number } },
+  checkpoints: Array<{ t: number }>,
+  events: Array<{ t: number }>
+): number {
+  if (manifest.status !== 'running') {
+    return manifest.stats.durationMs;
+  }
+
+  const latestEventTime = events.length > 0 ? events[events.length - 1]?.t ?? 0 : 0;
+  const latestCheckpointTime = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1]?.t ?? 0 : 0;
+  return Math.max(manifest.stats.durationMs, latestEventTime, latestCheckpointTime);
+}
+
 export interface ReconstructedTerminalState {
   replayId: string;
   sessionId: string;
@@ -31,8 +45,9 @@ export async function reconstructReplayAt(
     throw new Error(`Replay manifest not found: ${replayId}`);
   }
 
-  const targetTime = Math.max(0, atMs ?? manifest.stats.durationMs);
   const checkpoints = listReplayCheckpoints(replayId);
+  const events = readReplayEvents(replayId);
+  const targetTime = Math.max(0, atMs ?? getDefaultTargetTime(manifest, checkpoints, events));
   const checkpoint = [...checkpoints]
     .reverse()
     .find((entry) => entry.t <= targetTime);
@@ -60,7 +75,6 @@ export async function reconstructReplayAt(
   let processTitle = checkpointRecord?.checkpoint.metadata.processTitle;
   let exitCode = checkpointRecord?.checkpoint.metadata.exitCode;
 
-  const events = readReplayEvents(replayId);
   for (const event of events) {
     if (event.seq <= seq) {
       continue;

@@ -252,7 +252,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
   const requestReplays = useCallback(async (workspaceId?: string, includeDismissed?: boolean) => {
     await runWithBackend(async (sessionEngine) => {
       await sessionEngine.listReplays(backendKey, workspaceId, includeDismissed);
-    }, { strict: true });
+    });
   }, [backendKey, runWithBackend]);
 
   const createProject = useCallback(async (params: CreateProjectParams) => {

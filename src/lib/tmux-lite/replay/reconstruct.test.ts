@@ -10,6 +10,7 @@ import {
 } from './store.js';
 import { reconstructReplayAt } from './reconstruct.js';
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from './snapshot.js';
+import { styledRowsToAnsi } from './service.js';
 import type { ReplayCheckpoint, ReplayManifest } from './types.js';
 
 describe('replay reconstruction', () => {
@@ -166,5 +167,95 @@ describe('replay reconstruction', () => {
     expect(text).toContain('hello\nworld');
     expect(markdown).toContain('```terminal');
     expect(markdown).toContain('Process: bun test');
+  });
+
+  it('uses latest event time for running replays by default', async () => {
+    const manifest: ReplayManifest = {
+      version: 1,
+      replayId: 'replay_running',
+      sessionId: 'session_running',
+      sessionName: 'project:workspace:1',
+      cwd: '/tmp/project/workspace',
+      workspaceId: 'project:workspace',
+      projectName: 'project',
+      workspaceName: 'workspace',
+      startedAt: 1000,
+      status: 'running',
+      initialTerminal: { cols: 80, rows: 24 },
+      metadata: {},
+      stats: {
+        lastSeq: 1,
+        eventCount: 1,
+        checkpointCount: 0,
+        durationMs: 0,
+      },
+    };
+
+    initializeReplay(manifest);
+    appendReplayEvent('replay_running', {
+      v: 1,
+      seq: 1,
+      t: 50,
+      type: 'output',
+      encoding: 'base64',
+      data: Buffer.from('latest-output').toString('base64'),
+    });
+
+    const state = await reconstructReplayAt('replay_running');
+    expect(state.timeMs).toBe(50);
+    expect(state.seq).toBe(1);
+    expect(state.xterm.buffer.active.getLine(0)?.translateToString(true)).toBe('latest-output');
+  });
+
+  it('tracks currentLine against the viewport when scrollback exists', async () => {
+    const manifest: ReplayManifest = {
+      version: 1,
+      replayId: 'replay_scrollback',
+      sessionId: 'session_scrollback',
+      sessionName: 'project:workspace:1',
+      cwd: '/tmp/project/workspace',
+      workspaceId: 'project:workspace',
+      projectName: 'project',
+      workspaceName: 'workspace',
+      startedAt: 1000,
+      endedAt: 1100,
+      status: 'closed',
+      initialTerminal: { cols: 80, rows: 2 },
+      metadata: {},
+      stats: { lastSeq: 1, eventCount: 1, checkpointCount: 0, durationMs: 100 },
+    };
+
+    initializeReplay(manifest);
+    appendReplayEvent('replay_scrollback', {
+      v: 1,
+      seq: 1,
+      t: 50,
+      type: 'output',
+      encoding: 'base64',
+      data: Buffer.from('line-1\r\nline-2\r\nline-3').toString('base64'),
+    });
+
+    const snapshot = await getReplaySnapshot('replay_scrollback');
+    expect(snapshot.screen.visible).toEqual(['line-2', 'line-3']);
+    expect(snapshot.screen.currentLine).toBe('line-3');
+  });
+
+  it('preserves unicode text when re-encoding styled rows to ansi', () => {
+    const buffer = styledRowsToAnsi([
+      [{
+        text: 'hello 你好 😀',
+        fg: '#ffffff',
+        bg: null,
+        bold: false,
+        italic: false,
+        underline: false,
+        dim: false,
+        strikethrough: false,
+      }],
+    ]);
+
+    const text = buffer.toString('utf8');
+    expect(text).toContain('你好');
+    expect(text).toContain('😀');
   });
 });

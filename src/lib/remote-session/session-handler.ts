@@ -33,6 +33,7 @@ import {
   dismissReplayOffline,
   undismissReplayOffline,
 } from '../tmux-lite/replay/service.js';
+import { readReplayManifest } from '../tmux-lite/replay/store.js';
 
 // Import project loading
 import { listProjectSummaries } from "../../core/project-catalog";
@@ -106,6 +107,10 @@ export interface RemoteClientSession {
   viewOnly?: boolean;
 }
 
+type ReplaySessionAccessTarget = {
+  sessionId: string;
+};
+
 // ============================================================================
 // Permission Helpers
 // ============================================================================
@@ -130,6 +135,28 @@ function canAttachSession(
     return grantedSessionId === targetSessionId;
   }
   return false;
+}
+
+export function canAccessReplayForSession(
+  accessType: AccessType | undefined,
+  grantedSessionId: string | undefined,
+  replay: ReplaySessionAccessTarget,
+): boolean {
+  return canAttachSession(accessType, grantedSessionId, replay.sessionId);
+}
+
+export function filterReplaysForSessionAccess<T extends ReplaySessionAccessTarget>(
+  accessType: AccessType | undefined,
+  grantedSessionId: string | undefined,
+  replays: T[],
+): T[] {
+  if (accessType !== 'view') {
+    return replays;
+  }
+  if (!grantedSessionId) {
+    return [];
+  }
+  return replays.filter((replay) => replay.sessionId === grantedSessionId);
 }
 
 const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
@@ -692,7 +719,11 @@ export class RemoteSessionHandler {
     includeDismissed: boolean | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
-    const replays = listReplaysOffline({ workspaceId, includeDismissed: includeDismissed ?? false });
+    const replays = filterReplaysForSessionAccess(
+      session.accessType,
+      session.grantedSessionId,
+      listReplaysOffline({ workspaceId, includeDismissed: includeDismissed ?? false }),
+    );
     await this.sendMessage(session, sendResponse, {
       type: 'replay_list',
       replays,
@@ -705,6 +736,17 @@ export class RemoteSessionHandler {
     atMs: number | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
+    const manifest = readReplayManifest(replayId);
+    if (!manifest) {
+      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`);
+      return;
+    }
+
+    if (!canAccessReplayForSession(session.accessType, session.grantedSessionId, manifest)) {
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay');
+      return;
+    }
+
     const ansi = await getReplayAnsiBufferOffline(replayId, atMs);
     await this.sendMessage(session, sendResponse, {
       type: 'replay_ansi',

@@ -62,7 +62,7 @@ export async function getReplaySnapshot(
     screen: {
       visible,
       scrollbackTail,
-      currentLine: translateLine(buffer, buffer.cursorY),
+      currentLine: translateLine(buffer, viewportY + buffer.cursorY),
     },
   };
 }
@@ -89,8 +89,12 @@ export async function getReplayMarkdown(
   options: ReplayTextOptions = {}
 ): Promise<string> {
   const snapshot = await getReplaySnapshot(replayId, options);
-  const text = await getReplayText(replayId, options);
-  const lines = [
+  const lines = options.includeScrollback
+    ? [...snapshot.screen.scrollbackTail, ...snapshot.screen.visible]
+    : [...snapshot.screen.visible];
+  const output = options.trimTrailingBlankRows === false ? lines : trimTrailingBlankLines(lines);
+  const text = output.join('\n');
+  const metadataLines = [
     `Session: ${snapshot.sessionId}`,
     `Replay: ${snapshot.replayId}`,
     `Time: ${snapshot.timeMs}ms`,
@@ -98,11 +102,11 @@ export async function getReplayMarkdown(
   ];
 
   if (snapshot.metadata.processTitle) {
-    lines.push(`Process: ${snapshot.metadata.processTitle}`);
+    metadataLines.push(`Process: ${snapshot.metadata.processTitle}`);
   }
   if (snapshot.metadata.exitCode !== undefined) {
-    lines.push(`Exit: ${snapshot.metadata.exitCode}`);
+    metadataLines.push(`Exit: ${snapshot.metadata.exitCode}`);
   }
 
-  return `${lines.join('\n')}\n\n\`\`\`terminal\n${text}\n\`\`\``;
+  return `${metadataLines.join('\n')}\n\n\`\`\`terminal\n${text}\n\`\`\``;
 }

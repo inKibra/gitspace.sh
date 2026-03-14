@@ -15,7 +15,6 @@ import { getReplaySnapshot } from './snapshot.js';
 import { extractStyledRows, writeReplayScreenshot, type StyledRow, type StyledSpan } from './screenshot.js';
 import {
   listReplayInfos,
-  readReplayManifest,
   dismissReplay,
   undismissReplay,
   deleteReplay,
@@ -171,7 +170,7 @@ export function styledRowsToAnsi(rows: StyledRow[]): Buffer {
   }
 
   parts.push('\x1b[0m');
-  return Buffer.from(parts.join(''), 'binary');
+  return Buffer.from(parts.join(''), 'utf8');
 }
 
 export async function getReplayAnsiBufferOffline(replayId: string, atMs?: number): Promise<Buffer> {
@@ -182,30 +181,6 @@ export async function getReplayAnsiBufferOffline(replayId: string, atMs?: number
   } finally {
     state.xterm.dispose();
   }
-}
-
-export async function getReplayAnsiOffline(replayId: string, atMs?: number): Promise<Buffer> {
-  const manifest = readReplayManifest(replayId);
-  if (!manifest) {
-    throw new Error(`Replay manifest not found: ${replayId}`);
-  }
-
-  // Concatenate the raw PTY output events up to atMs
-  const { readReplayEvents } = await import('./store.js');
-  const targetTime = atMs ?? manifest.stats.durationMs;
-  const events = readReplayEvents(replayId);
-
-  const chunks: Buffer[] = [];
-  for (const event of events) {
-    if (event.t > targetTime) {
-      break;
-    }
-    if (event.type === 'output') {
-      chunks.push(Buffer.from(event.data, 'base64'));
-    }
-  }
-
-  return Buffer.concat(chunks);
 }
 
 // ============================================================================
