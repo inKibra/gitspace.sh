@@ -217,15 +217,26 @@ export function useRemoteSessionClient<ConnectParams>(
     return engine.getBackendState(backendKey);
   }, [engine, engine.state]);
 
-  const status = useMemo<RemoteSessionConnectionStatus>(() => {
-    if (isReconnecting) {
-      return 'reconnecting';
-    }
+  // backendStatus reflects the raw underlying connection state, NOT overlaid
+  // with isReconnecting. This is what the reconnect useEffect watches via
+  // [backendStatus], so that setIsReconnecting(true) inside the effect doesn't
+  // change backendStatus → doesn't re-trigger the effect cleanup → doesn't
+  // abort the in-flight reconnect loop.
+  const backendStatus = useMemo<RemoteSessionConnectionStatus>(() => {
     if (!activeBackendState) {
       return 'disconnected';
     }
     return mapConnectionStatus(activeBackendState.status);
-  }, [activeBackendState, isReconnecting, mapConnectionStatus]);
+  }, [activeBackendState, mapConnectionStatus]);
+
+  // status is the value exposed to consumers — overlays 'reconnecting' on top
+  // of backendStatus, but is NOT used as the useEffect dependency.
+  const status = useMemo<RemoteSessionConnectionStatus>(() => {
+    if (isReconnecting) {
+      return 'reconnecting';
+    }
+    return backendStatus;
+  }, [backendStatus, isReconnecting]);
 
   const withActiveBackend = useCallback(
     async <T>(fn: (backendKey: BackendKey) => Promise<T>): Promise<T | null> => {
@@ -475,7 +486,7 @@ export function useRemoteSessionClient<ConnectParams>(
     //      (lastAttachedSessionIdRef is cleared on explicit detach, so this
     //       prevents re-attach when the user is in browsing mode)
     if (
-      status !== 'disconnected' ||
+      backendStatus !== 'disconnected' ||
       !connectParamsRef.current ||
       !lastAttachedSessionIdRef.current
     ) {
@@ -583,13 +594,13 @@ export function useRemoteSessionClient<ConnectParams>(
 
     void run();
 
-    // Abort the loop if the effect is cleaned up (status changed again or
-    // component unmounted) before the loop finishes.
+    // Abort the loop if backendStatus changes again or the component unmounts
+    // before the loop finishes.
     return () => {
       abort.aborted = true;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  }, [backendStatus]);
 
   const killSession = useCallback((sessionId: string) => {
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
