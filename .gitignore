@@ -9,6 +9,7 @@ dist/
 npm/
 *.tsbuildinfo
 src/relay/embedded-assets.generated.js
+src/cloud/bootstrap-bundle.generated.js
 src/version.generated.ts
 src/version.generated.js
 
