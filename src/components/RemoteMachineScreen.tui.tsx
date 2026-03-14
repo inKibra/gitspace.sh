@@ -470,7 +470,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     });
   }, [flow]);
 
-  const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
+  const handleOpenReplay = useCallback(async (replayId: string) => {
     const replay = remote.replays.find((item) => item.replayId === replayId);
     if (!replay) {
       flow.showMessage({

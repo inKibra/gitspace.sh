@@ -1130,7 +1130,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     dispatch({ type: 'SET_VIEW', view: 'events' });
   }, [localWorkspaces, requestLocalEvents]);
 
-  const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
+  const handleOpenReplay = useCallback(async (replayId: string) => {
     const replay = localReplays.find((item) => item.replayId === replayId);
     if (!replay) {
       flow.showMessage({

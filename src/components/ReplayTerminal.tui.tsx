@@ -4,9 +4,17 @@ import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import type {
   ReplayFrameTarget,
   ReplayTimeline,
-  ReplayTimelineStep,
 } from '../lib/tmux-lite/replay/index.js';
 import type { ReplayInfo } from './SpacesBrowser.js';
+import {
+  PLAYBACK_SPEEDS,
+  DEFAULT_PLAYBACK_SPEED_INDEX,
+  FAST_SCRUB_STEP_COUNT,
+  formatReplayTime,
+  clamp,
+  targetKey,
+  toFrameTarget,
+} from './replay-utils.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
 
@@ -21,9 +29,6 @@ const COLORS = {
   playing: '#3fb950',
 };
 
-const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4] as const;
-const DEFAULT_PLAYBACK_SPEED_INDEX = 2;
-const FAST_SCRUB_STEP_COUNT = 5;
 const LOADING_REPLAY_BUFFER = Buffer.from('\x1b[2J\x1b[H\x1b[2;37mLoading replay...\x1b[0m');
 const EMPTY_REPLAY_BUFFER = Buffer.from('\x1b[2J\x1b[H\x1b[2;37m(empty replay)\x1b[0m');
 
@@ -33,24 +38,6 @@ function formatAge(timestamp: number): string {
   if (age < 3600) return `${Math.floor(age / 60)}m ago`;
   if (age < 86400) return `${Math.floor(age / 3600)}h ago`;
   return `${Math.floor(age / 86400)}d ago`;
-}
-
-function formatReplayTime(timeMs: number): string {
-  const totalSeconds = Math.max(0, timeMs) / 1000;
-  if (totalSeconds < 59.95) {
-    return `${totalSeconds.toFixed(1)}s`;
-  }
-
-  const wholeSeconds = Math.round(totalSeconds);
-  const seconds = wholeSeconds % 60;
-  const minutes = Math.floor(wholeSeconds / 60) % 60;
-  const hours = Math.floor(wholeSeconds / 3600);
-
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-  }
-
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 function getTerminalSize() {
@@ -68,31 +55,6 @@ function getTerminalSize() {
     cols: cols > 0 ? cols : 80,
     rows: Math.max(1, (rows > 0 ? rows : 24) - 1),
   };
-}
-
-function targetKey(target: ReplayFrameTarget | ReplayTimelineStep | null): string | null {
-  if (!target) {
-    return null;
-  }
-
-  const timeMs = 'timeMs' in target ? target.timeMs : target.atMs;
-  const seq = 'seq' in target ? target.seq : target.atSeq;
-  return `${timeMs ?? -1}:${seq ?? -1}`;
-}
-
-function toFrameTarget(step: ReplayTimelineStep | null, fallback: ReplayFrameTarget): ReplayFrameTarget {
-  if (!step) {
-    return fallback;
-  }
-
-  return {
-    atMs: step.timeMs,
-    atSeq: step.seq,
-  };
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function padLabel(value: string, width: number): string {

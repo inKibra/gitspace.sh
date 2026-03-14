@@ -84,7 +84,7 @@ export interface UseSpacesBrowserProps {
   replays: ReplayInfo[];
   onRequestSessions: (workspaceId?: string) => void;
   onAttachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => void | Promise<void>;
-  onOpenReplay: (params: { replayId: string; workspaceId: string }) => void | Promise<void>;
+  onOpenReplay: (replayId: string) => void | Promise<void>;
   onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
   onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
@@ -124,7 +124,7 @@ export interface UseSpacesBrowserReturn {
   activateIndex: (index: number) => Promise<void>;
   /** Direct attach - bypasses state timing issues on mobile */
   attachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => Promise<void>;
-  openReplay: (params: { replayId: string; workspaceId: string }) => Promise<void>;
+  openReplay: (replayId: string) => Promise<void>;
   startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   startProcess: (params: { workspaceId: string; processName: string }) => void;
   stopProcess: (params: { workspaceId: string; processName: string }) => void;
@@ -511,10 +511,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
         viewOnly: item.session.processName ? true : undefined,
       });
     } else if (item.type === 'replay') {
-      await onOpenReplay({
-        replayId: item.replay.replayId,
-        workspaceId: item.workspaceId,
-      });
+      await onOpenReplay(item.replay.replayId);
     } else if (item.type === 'process') {
       if (item.status === 'running') {
         const session = findSessionForProcess(
@@ -618,8 +615,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     attachSession: async (params) => {
       await onAttachSession(params);
     },
-    openReplay: async (params) => {
-      await onOpenReplay(params);
+    openReplay: async (replayId) => {
+      await onOpenReplay(replayId);
     },
     startProcessAttach: (params) => onStartProcessAttach(params),
     startProcess: (params) => onStartProcess?.(params),

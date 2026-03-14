@@ -403,7 +403,7 @@ describe('useSpacesBrowser activateSelected', () => {
 
     await act(async () => { await result.current.activateSelected(); });
 
-    expect(onOpenReplay).toHaveBeenCalledWith({ replayId: 'replay-1', workspaceId: 'ws-1' });
+    expect(onOpenReplay).toHaveBeenCalledWith('replay-1');
   });
 
   it('opens orphaned replay when orphaned section is expanded', async () => {
@@ -420,7 +420,7 @@ describe('useSpacesBrowser activateSelected', () => {
     act(() => { result.current.selectIndex(replayIndex); });
     await act(async () => { await result.current.activateSelected(); });
 
-    expect(onOpenReplay).toHaveBeenCalledWith({ replayId: 'replay-orphaned', workspaceId: 'missing-workspace' });
+    expect(onOpenReplay).toHaveBeenCalledWith('replay-orphaned');
   });
 
   it('calls onEditProcesses when edit-processes item is activated', async () => {

@@ -654,7 +654,7 @@ export default function App() {
     });
   }, [terminal]);
 
-  const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
+  const handleOpenReplay = useCallback(async (replayId: string) => {
     const replay = terminal.replays.find((item) => item.replayId === replayId);
     if (!replay) {
       flow.showMessage({ title: 'Replay Missing', message: 'Could not find replay metadata.', variant: 'error' });
@@ -1202,26 +1202,6 @@ export default function App() {
     toggleReplayDismissed,
     toggleShowDismissedReplayFilter,
   ]);
-
-  useEffect(() => {
-    if (view !== 'replay' || !activeReplay) {
-      return;
-    }
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      if (e.key === 'h') {
-        e.preventDefault();
-        toggleShowDismissedReplayFilter();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeReplay, toggleShowDismissedReplayFilter, view]);
 
   // Attached terminal mode keyboard handler (Shift+Esc to detach)
   useEffect(() => {
