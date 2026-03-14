@@ -2149,8 +2149,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             try {
               if (activeReplay?.dismissedAt) {
                 undismissReplayOffline(replayId);
+                return false;
               } else {
                 dismissReplayOffline(replayId);
+                return true;
               }
             } catch (error) {
               flow.showMessage({
@@ -2158,6 +2160,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
                 message: error instanceof Error ? error.message : String(error),
                 variant: 'error',
               });
+              return false;
             } finally {
               void requestLocalReplays(undefined, showDismissedReplays);
             }

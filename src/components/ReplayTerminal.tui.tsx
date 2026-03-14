@@ -44,7 +44,7 @@ export interface ReplayTerminalProps {
   /** Load replay as ANSI bytes (styled, for Ghostty rendering) */
   loadReplayAnsi: (replayId: string) => Promise<Buffer>;
   onBack: () => void;
-  onDismiss?: (replayId: string) => void | Promise<void>;
+  onDismiss?: (replayId: string) => boolean | void | Promise<boolean | void>;
 }
 
 export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: ReplayTerminalProps) {
@@ -86,8 +86,10 @@ export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: Re
   }, []);
 
   const handleDismiss = useCallback(async () => {
-    await onDismiss?.(replay.replayId);
-    onBack();
+    const shouldGoBack = await onDismiss?.(replay.replayId);
+    if (shouldGoBack !== false) {
+      onBack();
+    }
   }, [onDismiss, onBack, replay.replayId]);
 
   useKeyboard((key) => {

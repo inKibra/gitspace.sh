@@ -643,8 +643,15 @@ export default function App() {
   }, [terminal, showDismissedReplays]);
 
   const toggleShowDismissedReplayFilter = useCallback(() => {
-    setShowDismissedReplays((value) => !value);
-  }, []);
+    setShowDismissedReplays((value) => {
+      const next = !value;
+      const isBrowsingView = view === 'terminal' && terminal.status === 'established' && terminal.mode === 'browsing';
+      if (!isBrowsingView) {
+        terminal.requestReplays(undefined, next);
+      }
+      return next;
+    });
+  }, [terminal, view]);
 
   const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
     const replay = terminal.replays.find((item) => item.replayId === replayId);
