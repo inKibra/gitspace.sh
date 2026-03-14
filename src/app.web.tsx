@@ -1166,15 +1166,7 @@ export default function App() {
             },
           });
         } else if (selected?.type === 'replay') {
-          if (!selected.replay.dismissedAt && selected.replay.status === 'running') {
-            flow.showMessage({
-              title: 'Replay Still Running',
-              message: 'Running replays cannot be dismissed.',
-              variant: 'info',
-            });
-          } else {
-            void toggleReplayDismissed(selected.replay);
-          }
+          void toggleReplayDismissed(selected.replay);
         }
       } else if (command === 'toggle-hidden') {
         toggleShowDismissedReplayFilter();
