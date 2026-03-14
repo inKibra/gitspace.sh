@@ -236,4 +236,22 @@ function registerMachineTmuxCommands(machine: Command): void {
       const { deleteTmuxReplay } = await import('../../commands/tmux.js');
       deleteTmuxReplay(replayRef, { sandbox: getTmuxLiteSandbox() });
     }, { skipSetupCheck: true }));
+
+  replay
+    .command('usage')
+    .description('Show replay storage disk usage')
+    .option('--json', 'Output as JSON')
+    .option('--top <n>', 'Show only the N largest replays', (v: string) => parseInt(v, 10))
+    .action(withErrorHandler(async (options) => {
+      const { showTmuxReplayUsage } = await import('../../commands/tmux.js');
+      showTmuxReplayUsage({ sandbox: getTmuxLiteSandbox(), json: options.json, top: options.top });
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('prune')
+    .description('Delete expired dismissed replays now')
+    .action(withErrorHandler(async () => {
+      const { pruneTmuxReplays } = await import('../../commands/tmux.js');
+      pruneTmuxReplays({ sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
 }

@@ -40,7 +40,8 @@ function writeToTerminal(xterm: XTerminal, data: string | Uint8Array): Promise<v
 
 export async function reconstructReplayAt(
   replayId: string,
-  atMs?: number
+  atMs?: number,
+  atSeq?: number,
 ): Promise<ReconstructedTerminalState> {
   const manifest = readReplayManifest(replayId);
   if (!manifest) {
@@ -54,7 +55,7 @@ export async function reconstructReplayAt(
   const targetTime = Math.max(0, atMs === undefined ? latestAvailableTime : Math.min(atMs, latestAvailableTime));
   const checkpoint = [...checkpoints]
     .reverse()
-    .find((entry) => entry.t <= targetTime);
+    .find((entry) => entry.t < targetTime || (entry.t === targetTime && (atSeq === undefined || entry.seq <= atSeq)));
   const checkpointRecord = checkpoint
     ? readReplayCheckpoint(replayId, checkpoint.checkpointId)
     : null;
@@ -84,6 +85,9 @@ export async function reconstructReplayAt(
       continue;
     }
     if (event.t > targetTime) {
+      break;
+    }
+    if (event.t === targetTime && atSeq !== undefined && event.seq > atSeq) {
       break;
     }
 

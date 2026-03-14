@@ -9,6 +9,8 @@ import {
   deleteReplay,
   deleteReplaysForProject,
   deleteReplaysForWorkspace,
+  pruneExpiredReplays,
+  getReplayStorageSummary,
   initializeReplay,
   listReplayCheckpoints,
   listReplayInfos,
@@ -18,6 +20,7 @@ import {
   readReplayManifest,
   updateReplayManifest,
   writeReplayCheckpoint,
+  DISMISS_EXPIRY_TTL_MS,
 } from './store.js';
 import { existsSync } from 'fs';
 import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from './types.js';
@@ -203,7 +206,7 @@ describe('replay store', () => {
     expect(closed?.status).toBe('closed');
   });
 
-  it('soft-dismisses and restores a replay', () => {
+  it('soft-dismisses with expiry and restores a replay', () => {
     initializeReplay(makeManifest({ replayId: 'dismiss_replay', status: 'closed', endedAt: 2000 }));
 
     expect(listReplayInfos()).toHaveLength(1);
@@ -215,11 +218,68 @@ describe('replay store', () => {
     const info = listReplayInfos({ includeDismissed: true })[0];
     expect(info.dismissedAt).toBeDefined();
     expect(info.dismissedBy).toBe('user');
+    expect(info.expiresAt).toBeDefined();
+    expect(info.expiresAt! - info.dismissedAt!).toBe(DISMISS_EXPIRY_TTL_MS);
 
     undismissReplay('dismiss_replay');
     expect(listReplayInfos()).toHaveLength(1);
     const restored = listReplayInfos()[0];
     expect(restored.dismissedAt).toBeUndefined();
+    expect(restored.expiresAt).toBeUndefined();
+  });
+
+  it('rejects dismissing a running replay', () => {
+    initializeReplay(makeManifest({ replayId: 'running_replay', status: 'running' }));
+
+    expect(() => dismissReplay('running_replay', 'user')).toThrow('Cannot dismiss running replay');
+    expect(listReplayInfos()).toHaveLength(1);
+    expect(listReplayInfos({ includeDismissed: true })[0]?.dismissedAt).toBeUndefined();
+  });
+
+  it('prunes expired replays', () => {
+    const now = Date.now();
+    initializeReplay(makeManifest({ replayId: 'expired_replay', status: 'closed', endedAt: 1000, retention: { dismissedAt: now - 100_000, expiresAt: now - 1 } }));
+    initializeReplay(makeManifest({ replayId: 'future_replay', status: 'closed', endedAt: 2000, retention: { dismissedAt: now, expiresAt: now + 100_000 } }));
+    initializeReplay(makeManifest({ replayId: 'active_replay', status: 'closed', endedAt: 3000 }));
+
+    expect(listReplayInfos({ includeDismissed: true })).toHaveLength(3);
+
+    const pruned = pruneExpiredReplays(now);
+    expect(pruned).toBe(1);
+    expect(listReplayInfos({ includeDismissed: true }).map((r) => r.replayId).sort()).toEqual(['active_replay', 'future_replay']);
+  });
+
+  it('measures replay storage summary', () => {
+    initializeReplay(makeManifest({ replayId: 'storage_replay', status: 'closed', endedAt: 2000 }));
+    appendReplayEvent('storage_replay', makeEvent({ seq: 1, t: 10 }));
+
+    const summary = getReplayStorageSummary();
+    expect(summary.replayCount).toBe(1);
+    expect(summary.totalBytes).toBeGreaterThan(0);
+    expect(summary.replays[0].replayId).toBe('storage_replay');
+    expect(summary.replays[0].eventsBytes).toBeGreaterThan(0);
+    expect(summary.replays[0].manifestBytes).toBeGreaterThan(0);
+  });
+
+  it('reads both compressed and uncompressed checkpoint ANSI', () => {
+    const manifest = makeManifest({ replayId: 'checkpoint_gz', status: 'closed', endedAt: 2000 });
+    initializeReplay(manifest);
+
+    const checkpoint: ReplayCheckpoint = {
+      version: 1,
+      checkpointId: '000000',
+      seq: 0,
+      t: 0,
+      terminal: { cols: 80, rows: 24 },
+      metadata: {},
+      serializer: { kind: 'xterm-serialize', scrollbackLines: 100 },
+      ansiPath: 'checkpoints/000000.ansi',
+    };
+
+    writeReplayCheckpoint('checkpoint_gz', checkpoint, 'hello gzip world');
+    const record = readReplayCheckpoint('checkpoint_gz', '000000');
+    expect(record).not.toBeNull();
+    expect(record!.ansi).toBe('hello gzip world');
   });
 
   it('permanently deletes a replay from disk', () => {

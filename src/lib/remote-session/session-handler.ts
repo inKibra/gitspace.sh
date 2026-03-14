@@ -30,6 +30,7 @@ import {
 import {
   listReplaysOffline,
   getReplayAnsiBufferOffline,
+  getReplayTimelineOffline,
   dismissReplayOffline,
   undismissReplayOffline,
 } from '../tmux-lite/replay/service.js';
@@ -280,7 +281,11 @@ export class RemoteSessionHandler {
         break;
 
       case 'get_replay_ansi':
-        await this.handleGetReplayAnsi(session, msg.replayId, msg.atMs, sendResponse);
+        await this.handleGetReplayAnsi(session, msg.replayId, msg.atMs, msg.atSeq, sendResponse);
+        break;
+
+      case 'get_replay_timeline':
+        await this.handleGetReplayTimeline(session, msg.replayId, sendResponse);
         break;
 
       case 'dismiss_replay':
@@ -737,6 +742,7 @@ export class RemoteSessionHandler {
     session: RemoteClientSession,
     replayId: string,
     atMs: number | undefined,
+    atSeq: number | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
     const manifest = readReplayManifest(replayId);
@@ -750,12 +756,36 @@ export class RemoteSessionHandler {
       return;
     }
 
-    const ansi = await getReplayAnsiBufferOffline(replayId, atMs);
+    const ansi = await getReplayAnsiBufferOffline(replayId, { atMs, atSeq });
     await this.sendMessage(session, sendResponse, {
       type: 'replay_ansi',
       replayId,
       data: Buffer.from(ansi).toString('base64'),
       encoding: 'base64',
+    });
+  }
+
+  private async handleGetReplayTimeline(
+    session: RemoteClientSession,
+    replayId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    const manifest = readReplayManifest(replayId);
+    if (!manifest) {
+      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`);
+      return;
+    }
+
+    if (!canAccessReplayForSession(session.accessType, session.grantedSessionId, manifest)) {
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay');
+      return;
+    }
+
+    const timeline = getReplayTimelineOffline(replayId);
+    await this.sendMessage(session, sendResponse, {
+      type: 'replay_timeline',
+      replayId,
+      timeline,
     });
   }
 
@@ -768,6 +798,20 @@ export class RemoteSessionHandler {
       await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to dismiss replays');
       return;
     }
+    const manifest = readReplayManifest(replayId);
+    if (!manifest) {
+      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`);
+      return;
+    }
+    if (!canAccessReplayForSession(session.accessType, session.grantedSessionId, manifest)) {
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay');
+      return;
+    }
+    if (manifest.status === 'running') {
+      await this.sendError(session, sendResponse, 'USER_ERROR', 'Running replays cannot be dismissed');
+      return;
+    }
+
     dismissReplayOffline(replayId);
     await this.sendMessage(session, sendResponse, { type: 'replay_dismissed', replayId });
   }

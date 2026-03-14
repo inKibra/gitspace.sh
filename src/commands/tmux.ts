@@ -40,6 +40,8 @@ import {
   dismissReplayOffline,
   undismissReplayOffline,
   deleteReplayOffline,
+  pruneExpiredReplaysOffline,
+  getReplayStorageSummaryOffline,
   type ReplayInfo,
 } from '../lib/tmux-lite/replay/service.js';
 
@@ -444,6 +446,7 @@ export function dismissTmuxReplay(ref: string, options: TmuxCommandOptions = {})
   const replay = resolveReplay(ref);
   dismissReplayOffline(replay.replayId);
   logger.success(`Replay dismissed: ${replay.sessionName || replay.replayId}`);
+  logger.dim('Replay will be permanently deleted in 7 days.');
   logger.dim('Use `gssh machine tmux replay undismiss` to restore it.');
 }
 
@@ -459,4 +462,60 @@ export function deleteTmuxReplay(ref: string, options: TmuxCommandOptions = {}):
   const replay = resolveReplayOffline(ref, { includeDismissed: true });
   deleteReplayOffline(replay.replayId);
   logger.success(`Replay deleted: ${replay.sessionName || replay.replayId}`);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+export function showTmuxReplayUsage(options: TmuxCommandOptions & { json?: boolean; top?: number } = {}): void {
+  applyTmuxSandbox(options);
+
+  const summary = getReplayStorageSummaryOffline();
+  if (summary.replayCount === 0) {
+    logger.log('No replays stored.');
+    return;
+  }
+
+  if (options.json) {
+    logger.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  const limit = options.top && options.top > 0 ? options.top : summary.replays.length;
+  const shown = summary.replays.slice(0, limit);
+
+  logger.log(`Replay storage: ${chalk.bold(formatBytes(summary.totalBytes))} across ${summary.replayCount} replay(s)\n`);
+
+  for (const replay of shown) {
+    const status = replay.status === 'crashed'
+      ? chalk.red('crashed')
+      : replay.status === 'running'
+        ? chalk.green('running')
+        : chalk.yellow('closed');
+    const dismissed = replay.dismissedAt ? chalk.gray(' [dismissed]') : '';
+    const expires = replay.expiresAt
+      ? chalk.gray(` [deletes ${new Date(replay.expiresAt).toLocaleDateString()}]`)
+      : '';
+    const label = replay.sessionName || replay.replayId;
+    logger.log(`  ${chalk.cyan(replay.replayId.slice(0, 20))} ${label} ${status} ${chalk.bold(formatBytes(replay.totalBytes))}${dismissed}${expires}`);
+    logger.dim(`      events: ${formatBytes(replay.eventsBytes)}  checkpoints: ${formatBytes(replay.checkpointsBytes)}  manifest: ${formatBytes(replay.manifestBytes)}`);
+  }
+
+  if (limit < summary.replays.length) {
+    logger.dim(`\n  ... and ${summary.replays.length - limit} more replay(s)`);
+  }
+}
+
+export function pruneTmuxReplays(options: TmuxCommandOptions = {}): void {
+  applyTmuxSandbox(options);
+  const pruned = pruneExpiredReplaysOffline();
+  if (pruned === 0) {
+    logger.log('No expired replays to prune.');
+  } else {
+    logger.success(`Pruned ${pruned} expired replay(s).`);
+  }
 }

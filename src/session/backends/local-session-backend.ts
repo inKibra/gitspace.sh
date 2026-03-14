@@ -22,6 +22,7 @@ import {
   getReplaySnapshotOffline,
   getReplayTextOffline,
   getReplayAnsiBufferOffline,
+  getReplayTimelineOffline,
   dismissReplayOffline,
   undismissReplayOffline,
 } from '../../lib/tmux-lite/replay/service.js';
@@ -123,6 +124,7 @@ export interface LocalSessionBackendDependencies {
   getReplayText: typeof getReplayTextOffline;
   getReplayMarkdown: typeof getReplayMarkdown;
   getReplayAnsi: typeof getReplayAnsiBufferOffline;
+  getReplayTimeline: typeof getReplayTimelineOffline;
   dismissReplay: typeof dismissReplayOffline;
   undismissReplay: typeof undismissReplayOffline;
   getNotificationConfig: typeof getNotificationConfig;
@@ -384,6 +386,7 @@ function buildDeps(
     getReplayText: getReplayTextOffline,
     getReplayMarkdown,
     getReplayAnsi: getReplayAnsiBufferOffline,
+    getReplayTimeline: getReplayTimelineOffline,
     dismissReplay: dismissReplayOffline,
     undismissReplay: undismissReplayOffline,
     getNotificationConfig,
@@ -608,8 +611,12 @@ export class LocalSessionBackend implements SessionBackend {
     });
   }
 
-  async getReplayAnsi(replayId: string, atMs?: number): Promise<Uint8Array> {
-    return this.deps.getReplayAnsi(replayId, atMs);
+  async getReplayAnsi(replayId: string, target?: import('../backend.js').ReplayFrameTarget): Promise<Uint8Array> {
+    return this.deps.getReplayAnsi(replayId, target);
+  }
+
+  async getReplayTimeline(replayId: string): Promise<import('../backend.js').ReplayTimeline> {
+    return this.deps.getReplayTimeline(replayId);
   }
 
   async dismissReplay(replayId: string): Promise<void> {

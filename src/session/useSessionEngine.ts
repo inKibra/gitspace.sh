@@ -623,19 +623,36 @@ export function useSessionEngine() {
   const getReplayAnsi = useCallback(async (
     backendKey: BackendKey,
     replayId: string,
-    atMs?: number,
+    target?: import('./backend.js').ReplayFrameTarget,
   ) => {
     let ansi: Uint8Array | null = null;
     await withBackend(backendKey, async (backend) => {
       if (!backend.getReplayAnsi) {
         throw new SpacesError('Replay ANSI rendering is not supported by this backend', 'SYSTEM_ERROR', 2);
       }
-      ansi = await backend.getReplayAnsi(replayId, atMs);
+      ansi = await backend.getReplayAnsi(replayId, target);
     });
     if (!ansi) {
       throw new SpacesError('Replay ANSI was not returned by backend', 'SYSTEM_ERROR', 2);
     }
     return ansi;
+  }, [withBackend]);
+
+  const getReplayTimeline = useCallback(async (
+    backendKey: BackendKey,
+    replayId: string,
+  ) => {
+    let timeline: import('./backend.js').ReplayTimeline | null = null;
+    await withBackend(backendKey, async (backend) => {
+      if (!backend.getReplayTimeline) {
+        throw new SpacesError('Replay timeline is not supported by this backend', 'SYSTEM_ERROR', 2);
+      }
+      timeline = await backend.getReplayTimeline(replayId);
+    });
+    if (!timeline) {
+      throw new SpacesError('Replay timeline was not returned by backend', 'SYSTEM_ERROR', 2);
+    }
+    return timeline;
   }, [withBackend]);
 
   const dismissReplay = useCallback(async (backendKey: BackendKey, replayId: string) => {
@@ -707,6 +724,7 @@ export function useSessionEngine() {
     getReplayText,
     getReplayMarkdown,
     getReplayAnsi,
+    getReplayTimeline,
     dismissReplay,
     undismissReplay,
   }), [
@@ -752,6 +770,7 @@ export function useSessionEngine() {
     getReplayText,
     getReplayMarkdown,
     getReplayAnsi,
+    getReplayTimeline,
     dismissReplay,
     undismissReplay,
   ]);

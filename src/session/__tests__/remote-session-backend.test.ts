@@ -422,12 +422,13 @@ describe('RemoteSessionBackend', () => {
 
     await connectAndHandshake(backend, socket);
 
-    const ansiPromise = backend.getReplayAnsi('replay-1', 50);
+    const ansiPromise = backend.getReplayAnsi('replay-1', { atMs: 50, atSeq: 2 });
     await Bun.sleep(0);
     expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
       type: 'get_replay_ansi',
       replayId: 'replay-1',
       atMs: 50,
+      atSeq: 2,
     });
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
@@ -456,6 +457,31 @@ describe('RemoteSessionBackend', () => {
     });
     socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'replay_undismissed', replayId: 'replay-1' }));
     await expect(undismissPromise).resolves.toBeUndefined();
+
+    const timelinePromise = backend.getReplayTimeline('replay-1');
+    await Bun.sleep(0);
+    expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
+      type: 'get_replay_timeline',
+      replayId: 'replay-1',
+    });
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'replay_timeline',
+      replayId: 'replay-1',
+      timeline: {
+        replayId: 'replay-1',
+        durationMs: 50,
+        latestTimeMs: 50,
+        steps: [{ timeMs: 0, seq: 0 }, { timeMs: 50, seq: 2 }],
+        checkpointSteps: [{ timeMs: 0, seq: 0 }],
+      },
+    }));
+    await expect(timelinePromise).resolves.toEqual({
+      replayId: 'replay-1',
+      durationMs: 50,
+      latestTimeMs: 50,
+      steps: [{ timeMs: 0, seq: 0 }, { timeMs: 50, seq: 2 }],
+      checkpointSteps: [{ timeMs: 0, seq: 0 }],
+    });
   });
 
   it('preserves script phase banner and output ordering during running scripts', async () => {

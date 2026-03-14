@@ -34,7 +34,7 @@ export type {
   ConfirmStepResult,
   SpacesBundle,
 } from '../../types/bundle.js';
-export type { ReplayInfo } from '../tmux-lite/replay/types.js';
+export type { ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../tmux-lite/replay/types.js';
 
 // Re-export attached mode control types from tmux-lite
 // These are used in attached mode for resize/detach/attach-init
@@ -67,6 +67,13 @@ export interface GetReplayAnsiRequest {
   type: 'get_replay_ansi';
   replayId: string;
   atMs?: number;
+  atSeq?: number;
+}
+
+/** Request replay timeline metadata for scrubbing and playback */
+export interface GetReplayTimelineRequest {
+  type: 'get_replay_timeline';
+  replayId: string;
 }
 
 /** Soft-hide a replay */
@@ -345,6 +352,13 @@ export interface ReplayAnsiResponse {
   encoding: 'base64';
 }
 
+/** Response with replay timeline metadata */
+export interface ReplayTimelineResponse {
+  type: 'replay_timeline';
+  replayId: string;
+  timeline: import('../tmux-lite/replay/types.js').ReplayTimeline;
+}
+
 /** Replay dismissed successfully */
 export interface ReplayDismissedResponse {
   type: 'replay_dismissed';
@@ -592,6 +606,7 @@ export type ClientToMachineMessage =
   | ListSessionsRequest
   | ListReplaysRequest
   | GetReplayAnsiRequest
+  | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
@@ -628,6 +643,7 @@ export type MachineToClientMessage =
   | SessionListResponse
   | ReplayListResponse
   | ReplayAnsiResponse
+  | ReplayTimelineResponse
   | ReplayDismissedResponse
   | ReplayUndismissedResponse
   | AttachedResponse
@@ -699,6 +715,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListSessionsRequest
   | ListReplaysRequest
   | GetReplayAnsiRequest
+  | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
@@ -720,6 +737,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     "list_sessions",
     'list_replays',
     'get_replay_ansi',
+    'get_replay_timeline',
     'dismiss_replay',
     'undismiss_replay',
     "attach_session",

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   InboxItem,
   ProjectInfo,
+  ReplayFrameTarget,
   ReplayInfo,
+  ReplayTimeline,
   SessionInfo,
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
@@ -137,7 +139,8 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   startProcess: (workspaceId: string, processName: string, instance?: number) => Promise<void>;
   stopProcess: (workspaceId: string, processName: string) => Promise<void>;
   requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
-  getReplayAnsi: (replayId: string, atMs?: number) => Promise<Uint8Array>;
+  getReplayAnsi: (replayId: string, target?: ReplayFrameTarget) => Promise<Uint8Array>;
+  getReplayTimeline: (replayId: string) => Promise<ReplayTimeline>;
   dismissReplay: (replayId: string) => Promise<void>;
   undismissReplay: (replayId: string) => Promise<void>;
 }
@@ -535,12 +538,20 @@ export function useRemoteSessionClient<ConnectParams>(
     );
   }, [engine, withActiveBackend]);
 
-  const getReplayAnsi = useCallback(async (replayId: string, atMs?: number): Promise<Uint8Array> => {
+  const getReplayAnsi = useCallback(async (replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> => {
     const backendKey = activeBackendKeyRef.current;
     if (!backendKey) {
       throw createMissingBackendError(`getReplayAnsi(${replayId})`);
     }
-    return engine.getReplayAnsi(backendKey, replayId, atMs);
+    return engine.getReplayAnsi(backendKey, replayId, target);
+  }, [engine]);
+
+  const getReplayTimeline = useCallback(async (replayId: string): Promise<ReplayTimeline> => {
+    const backendKey = activeBackendKeyRef.current;
+    if (!backendKey) {
+      throw createMissingBackendError(`getReplayTimeline(${replayId})`);
+    }
+    return engine.getReplayTimeline(backendKey, replayId);
   }, [engine]);
 
   const dismissReplay = useCallback(async (replayId: string): Promise<void> => {
@@ -637,6 +648,7 @@ export function useRemoteSessionClient<ConnectParams>(
     stopProcess,
     requestEvents,
     getReplayAnsi,
+    getReplayTimeline,
     dismissReplay,
     undismissReplay,
   }), [
@@ -681,6 +693,7 @@ export function useRemoteSessionClient<ConnectParams>(
     stopProcess,
     requestEvents,
     getReplayAnsi,
+    getReplayTimeline,
     dismissReplay,
     undismissReplay,
   ]);

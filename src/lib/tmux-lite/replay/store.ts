@@ -6,9 +6,12 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
+import { gzipSync, gunzipSync } from 'zlib';
+import { SpacesError } from '../../../types/errors.js';
 import {
   assertValidCheckpointId,
   assertValidReplayId,
@@ -299,6 +302,7 @@ function toReplayInfo(manifest: ReplayManifest): ReplayInfo {
     exitCode: manifest.metadata.exitCode,
     dismissedAt: manifest.retention?.dismissedAt,
     dismissedBy: manifest.retention?.dismissedBy,
+    expiresAt: manifest.retention?.expiresAt,
   };
 }
 
@@ -400,19 +404,41 @@ export function readReplayEvents(replayId: string): ReplayEvent[] {
   return events;
 }
 
+function getReplayCheckpointAnsiGzPath(replayId: string, checkpointId: string): string {
+  return getReplayCheckpointAnsiPath(replayId, checkpointId) + '.gz';
+}
+
 export function writeReplayCheckpoint(replayId: string, checkpoint: ReplayCheckpoint, ansi: string): void {
   assertValidReplayId(replayId);
   assertValidCheckpointId(checkpoint.checkpointId);
   ensureReplayCheckpointsDir(replayId);
-  writeFileSync(getReplayCheckpointAnsiPath(replayId, checkpoint.checkpointId), ansi, 'utf-8');
+
+  // Write compressed checkpoint
+  const compressed = gzipSync(Buffer.from(ansi, 'utf-8'));
+  writeFileSync(getReplayCheckpointAnsiGzPath(replayId, checkpoint.checkpointId), compressed);
   writeJsonFile(getReplayCheckpointMetaPath(replayId, checkpoint.checkpointId), checkpoint);
+}
+
+function readCheckpointAnsi(replayId: string, checkpointId: string): string | null {
+  // Try compressed first, fall back to legacy uncompressed
+  const gzPath = getReplayCheckpointAnsiGzPath(replayId, checkpointId);
+  if (existsSync(gzPath)) {
+    try {
+      const compressed = readFileSync(gzPath);
+      return gunzipSync(compressed).toString('utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  return readTextFile(getReplayCheckpointAnsiPath(replayId, checkpointId));
 }
 
 export function readReplayCheckpoint(replayId: string, checkpointId: string): ReplayCheckpointRecord | null {
   assertValidReplayId(replayId);
   assertValidCheckpointId(checkpointId);
   const metaRaw = readTextFile(getReplayCheckpointMetaPath(replayId, checkpointId));
-  const ansi = readTextFile(getReplayCheckpointAnsiPath(replayId, checkpointId));
+  const ansi = readCheckpointAnsi(replayId, checkpointId);
   if (!metaRaw || ansi === null) {
     return null;
   }
@@ -459,7 +485,25 @@ export function listReplayCheckpoints(replayId: string): ReplayCheckpoint[] {
   return checkpoints;
 }
 
+let lastPruneSweepMs = 0;
+const PRUNE_SWEEP_INTERVAL_MS = 60_000;
+
+function maybePruneExpired(): void {
+  const now = Date.now();
+  if (now - lastPruneSweepMs < PRUNE_SWEEP_INTERVAL_MS) {
+    return;
+  }
+  lastPruneSweepMs = now;
+  try {
+    pruneExpiredReplays(now);
+  } catch {
+    // Best-effort cleanup; don't break listing.
+  }
+}
+
 export function listReplayInfos(filter: ReplayListFilter = {}): ReplayInfo[] {
+  maybePruneExpired();
+
   const root = getReplayRootDir();
   if (!existsSync(root)) {
     return [];
@@ -546,15 +590,25 @@ export function reconcileRunningReplaysAsCrashed(endedAt = Date.now()): ReplayRe
   return results;
 }
 
+/** Default deletion delay after dismiss: 7 days. */
+export const DISMISS_EXPIRY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 export function dismissReplay(replayId: string, dismissedBy?: string, dismissedAt = Date.now()): void {
-  updateReplayManifest(replayId, (manifest) => ({
-    ...manifest,
-    retention: {
-      ...manifest.retention,
-      dismissedAt,
-      dismissedBy,
-    },
-  }));
+  updateReplayManifest(replayId, (manifest) => {
+    if (manifest.status === 'running') {
+      throw new SpacesError(`Cannot dismiss running replay: ${replayId}`, 'USER_ERROR', 1);
+    }
+
+    return {
+      ...manifest,
+      retention: {
+        ...manifest.retention,
+        dismissedAt,
+        dismissedBy,
+        expiresAt: dismissedAt + DISMISS_EXPIRY_TTL_MS,
+      },
+    };
+  });
 }
 
 export function undismissReplay(replayId: string): void {
@@ -562,7 +616,7 @@ export function undismissReplay(replayId: string): void {
     if (!manifest.retention) {
       return manifest;
     }
-    const { dismissedAt: _d, dismissedBy: _b, ...rest } = manifest.retention;
+    const { dismissedAt: _d, dismissedBy: _b, expiresAt: _e, ...rest } = manifest.retention;
     return {
       ...manifest,
       retention: Object.keys(rest).length > 0 ? rest : undefined,
@@ -617,4 +671,113 @@ export function deleteReplaysForProject(projectName: string): number {
   }
 
   return matches.length;
+}
+
+// ============================================================================
+// Retention sweep
+// ============================================================================
+
+/**
+ * Delete replays whose `expiresAt` has passed.
+ * Returns the number of replays permanently deleted.
+ */
+export function pruneExpiredReplays(now = Date.now()): number {
+  const root = getReplayRootDir();
+  if (!existsSync(root)) {
+    return 0;
+  }
+
+  let pruned = 0;
+  for (const entry of readdirSync(root)) {
+    let manifest: ReplayManifest | null;
+    try {
+      manifest = readReplayManifest(entry);
+    } catch {
+      continue;
+    }
+    if (!manifest) {
+      continue;
+    }
+
+    const expiresAt = manifest.retention?.expiresAt;
+    if (typeof expiresAt === 'number' && expiresAt <= now) {
+      deleteReplay(manifest.replayId);
+      pruned++;
+    }
+  }
+
+  return pruned;
+}
+
+// ============================================================================
+// Storage measurement
+// ============================================================================
+
+function safeStat(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+function dirSizeRecursive(dirPath: string): number {
+  if (!existsSync(dirPath)) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+    const full = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += dirSizeRecursive(full);
+    } else {
+      total += safeStat(full);
+    }
+  }
+  return total;
+}
+
+export function getReplayStorageInfo(replayId: string): import('./types.js').ReplayStorageInfo | null {
+  const manifest = readReplayManifest(replayId);
+  if (!manifest) {
+    return null;
+  }
+
+  const dir = getReplayDir(replayId);
+  const manifestBytes = safeStat(getReplayManifestPath(replayId));
+  const eventsBytes = safeStat(getReplayEventsPath(replayId));
+  const checkpointsDir = join(dir, 'checkpoints');
+  const checkpointsBytes = dirSizeRecursive(checkpointsDir);
+  const totalBytes = manifestBytes + eventsBytes + checkpointsBytes;
+
+  return {
+    replayId: manifest.replayId,
+    sessionName: manifest.sessionName,
+    status: manifest.status,
+    durationMs: manifest.stats.durationMs,
+    totalBytes,
+    eventsBytes,
+    checkpointsBytes,
+    manifestBytes,
+    dismissedAt: manifest.retention?.dismissedAt,
+    expiresAt: manifest.retention?.expiresAt,
+  };
+}
+
+export function getReplayStorageSummary(filter: ReplayListFilter = {}): import('./types.js').ReplayStorageSummary {
+  const infos = listReplayInfos({ ...filter, includeDismissed: true });
+  const replays: import('./types.js').ReplayStorageInfo[] = [];
+  let totalBytes = 0;
+
+  for (const info of infos) {
+    const storage = getReplayStorageInfo(info.replayId);
+    if (storage) {
+      replays.push(storage);
+      totalBytes += storage.totalBytes;
+    }
+  }
+
+  replays.sort((a, b) => b.totalBytes - a.totalBytes);
+  return { totalBytes, replayCount: replays.length, replays };
 }

@@ -23,6 +23,7 @@ import {
   type GetBundleRefreshPlanRequest,
   type GetBundleConfigStateRequest,
   type GetNotificationConfigRequest,
+  type GetReplayTimelineRequest,
   type KillSessionRequest,
   type ListLinearIssuesRequest,
   type ListProjectsRequest,
@@ -45,6 +46,7 @@ import {
   type RemoteBranchListResponse,
   type ScriptOutputResponse,
   type ReplayAnsiResponse,
+  type ReplayTimelineResponse,
   type ReplayDismissedResponse,
   type ReplayUndismissedResponse,
   type SessionCtrl,
@@ -75,6 +77,8 @@ import type {
   CreateProjectParams,
   FinalizeProjectParams,
   PreparedProjectResult,
+  ReplayFrameTarget,
+  ReplayTimeline,
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
@@ -211,6 +215,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'session_list',
   'replay_list',
   'replay_ansi',
+  'replay_timeline',
   'replay_dismissed',
   'replay_undismissed',
   'attached',
@@ -489,6 +494,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
+  private pendingReplayTimeline:
+    | {
+        replayId: string;
+        resolve: (timeline: ReplayTimeline) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
   private pendingDismissReplay:
     | {
         replayId: string;
@@ -716,12 +729,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async getReplayAnsi(replayId: string, atMs?: number): Promise<Uint8Array> {
+  async getReplayAnsi(replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> {
     if (this.pendingReplayAnsi) {
       throw new Error('Replay ANSI request already in progress');
     }
 
-    const command: GetReplayAnsiRequest = { type: 'get_replay_ansi', replayId, atMs };
+    const command: GetReplayAnsiRequest = {
+      type: 'get_replay_ansi',
+      replayId,
+      atMs: target?.atMs,
+      atSeq: target?.atSeq,
+    };
     return new Promise<Uint8Array>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const pending = this.pendingReplayAnsi;
@@ -741,6 +759,36 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         }
         clearTimeout(pending.timeout);
         this.pendingReplayAnsi = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async getReplayTimeline(replayId: string): Promise<ReplayTimeline> {
+    if (this.pendingReplayTimeline) {
+      throw new Error('Replay timeline request already in progress');
+    }
+
+    const command: GetReplayTimelineRequest = { type: 'get_replay_timeline', replayId };
+    return new Promise<ReplayTimeline>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingReplayTimeline;
+        if (!pending || pending.replayId !== replayId) {
+          return;
+        }
+        this.pendingReplayTimeline = null;
+        pending.reject(new Error(`Timed out waiting for replay timeline (${replayId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingReplayTimeline = { replayId, resolve, reject, timeout };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingReplayTimeline;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingReplayTimeline = null;
         pending.reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
@@ -1721,6 +1769,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'replay_ansi':
         this.resolveReplayAnsi(message);
         return;
+      case 'replay_timeline':
+        this.resolveReplayTimeline(message);
+        return;
       case 'replay_dismissed':
         this.resolveDismissReplay(message);
         return;
@@ -1830,6 +1881,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingWorkspaceCreate(message.message, message.workspaceId, message.projectName);
         this.rejectPendingProjectDelete(message.message, message.projectName);
         this.rejectPendingReplayAnsi(message.message, undefined, true);
+        this.rejectPendingReplayTimeline(message.message, undefined, true);
         this.rejectPendingDismissReplay(message.message, undefined, true);
         this.rejectPendingUndismissReplay(message.message, undefined, true);
         if (message.workspaceId) {
@@ -2143,6 +2195,16 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.resolve(this.crypto.decodeBase64(message.data));
   }
 
+  private resolveReplayTimeline(message: ReplayTimelineResponse): void {
+    const pending = this.pendingReplayTimeline;
+    if (!pending || pending.replayId !== message.replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingReplayTimeline = null;
+    pending.resolve(message.timeline);
+  }
+
   private rejectPendingReplayAnsi(message: string, replayId?: string, force = false): void {
     const pending = this.pendingReplayAnsi;
     if (!pending) {
@@ -2153,6 +2215,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     clearTimeout(pending.timeout);
     this.pendingReplayAnsi = null;
+    pending.reject(new Error(message));
+  }
+
+  private rejectPendingReplayTimeline(message: string, replayId?: string, force = false): void {
+    const pending = this.pendingReplayTimeline;
+    if (!pending) {
+      return;
+    }
+    if (!force && replayId && pending.replayId !== replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingReplayTimeline = null;
     pending.reject(new Error(message));
   }
 
@@ -2532,6 +2607,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingWorkspaceCreate('Remote session disconnected', undefined, undefined, true);
     this.rejectPendingProjectDelete('Remote session disconnected', undefined, true);
     this.rejectPendingReplayAnsi('Remote session disconnected', undefined, true);
+    this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);

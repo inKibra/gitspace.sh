@@ -26,6 +26,7 @@ import {
 } from '../app/input/sessionCommands.js';
 import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal } from './ScriptTerminal.tui.js';
+import { ReplayTerminal } from './ReplayTerminal.tui.js';
 import { getKeyboardInputChunk, normalizeInputText } from '../tui/input-text.js';
 import {
   applySearchableSelectPaste,
@@ -37,6 +38,7 @@ import { buildEditProcessesCommand } from '../lib/processes/editor.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import { writeCrashLog } from '../utils/crash-log.js';
 import { logger } from '../utils/logger.js';
+import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -93,10 +95,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
+  const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
   const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const activeConnectKeyRef = useRef<string | null>(null);
+  const activeReplayDismissedRef = useRef(false);
   const connectRemoteRef = useRef(remote.connect);
   const disconnectRemoteRef = useRef(remote.disconnect);
   const flow = useFlow({
@@ -322,6 +326,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
   }, [remote.mode]);
 
+  useEffect(() => {
+    if (remote.status !== 'established' || remote.mode !== 'browsing') {
+      setActiveReplay(null);
+    }
+  }, [remote.mode, remote.status]);
+
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
     setIsViewOnlySession(params.viewOnly ?? false);
     await attachController.attachFromSelection(params);
@@ -460,13 +470,73 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     });
   }, [flow]);
 
-  const handleOpenReplay = useCallback(() => {
-    flow.showMessage({
-      title: 'Replay Unavailable',
-      message: 'Replay view is not available in this remote TUI screen yet.',
-      variant: 'info',
-    });
-  }, [flow]);
+  const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
+    const replay = remote.replays.find((item) => item.replayId === replayId);
+    if (!replay) {
+      flow.showMessage({
+        title: 'Replay Missing',
+        message: 'That replay is no longer available.',
+        variant: 'error',
+      });
+      return;
+    }
+
+    setShowInbox(false);
+    setShowScriptTerminal(false);
+    setActiveReplay(replay);
+  }, [flow, remote.replays]);
+
+  const handleReplayDismiss = useCallback(async (replayId: string) => {
+    try {
+      const replay = remote.replays.find((item) => item.replayId === replayId) ?? activeReplay;
+      if (!activeReplayDismissedRef.current && replay?.status === 'running') {
+        flow.showMessage({
+          title: 'Replay Still Running',
+          message: 'Running replays cannot be dismissed.',
+          variant: 'info',
+        });
+        return false;
+      }
+
+      if (activeReplayDismissedRef.current) {
+        await remote.undismissReplay(replayId);
+        activeReplayDismissedRef.current = false;
+        setActiveReplay((current) => current && current.replayId === replayId
+          ? {
+            ...current,
+            dismissedAt: undefined,
+            dismissedBy: undefined,
+          }
+          : current);
+        return false;
+      }
+
+      await remote.dismissReplay(replayId);
+      activeReplayDismissedRef.current = true;
+      return true;
+    } catch (error) {
+      flow.showMessage({
+        title: 'Replay Update Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      return false;
+    } finally {
+      remote.requestReplays();
+    }
+  }, [activeReplay, flow, remote]);
+
+  useEffect(() => {
+    activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
+  }, [activeReplay?.dismissedAt]);
+
+  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return remote.getReplayAnsi(replayId, target).then((bytes) => Buffer.from(bytes));
+  }, [remote]);
+
+  const loadReplayTimeline = useCallback((replayId: string) => {
+    return remote.getReplayTimeline(replayId);
+  }, [remote]);
 
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     pendingProcessEditValidationArmedRef.current = false;
@@ -655,6 +725,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
 
     if (remote.mode === 'attached') {
+      return;
+    }
+
+    if (activeReplay) {
       return;
     }
 
@@ -885,6 +959,23 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         <InboxTUI {...inboxProps} focused={true} />
         <FlowTUI flow={flow} />
         <StatusBar hint="[↑↓] Navigate  [Enter] Open/Attach  [x] Delete  [c] Clear  [Esc] Back" />
+      </Fragment>
+    );
+  }
+
+  if (activeReplay && remote.status === 'established' && remote.mode === 'browsing') {
+    return (
+      <Fragment>
+        <ReplayTerminal
+          replay={activeReplay}
+          loadReplayAnsi={loadReplayAnsi}
+          loadReplayTimeline={loadReplayTimeline}
+          onBack={() => {
+            setActiveReplay(null);
+          }}
+          onDismiss={activeReplay.status === 'running' ? undefined : handleReplayDismiss}
+        />
+        <FlowTUI flow={flow} />
       </Fragment>
     );
   }

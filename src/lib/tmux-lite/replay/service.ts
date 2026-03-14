@@ -15,12 +15,23 @@ import { getReplaySnapshot } from './snapshot.js';
 import { extractStyledRows, writeReplayScreenshot, type StyledRow, type StyledSpan } from './screenshot.js';
 import {
   listReplayInfos,
+  listReplayCheckpoints,
+  readReplayEvents,
+  readReplayManifest,
   dismissReplay,
   undismissReplay,
   deleteReplay,
+  pruneExpiredReplays,
+  getReplayStorageSummary,
   type ReplayListFilter,
 } from './store.js';
-import type { ReplayInfo, TerminalSnapshot } from './types.js';
+import type {
+  ReplayFrameTarget,
+  ReplayInfo,
+  ReplayTimeline,
+  ReplayTimelineStep,
+  TerminalSnapshot,
+} from './types.js';
 import { SpacesError } from '../../../types/errors.js';
 import { logger } from '../../../utils/logger.js';
 
@@ -43,6 +54,24 @@ export interface OfflineReplayScreenshotOptions {
   atMs?: number;
   scrollbackLines?: number;
   includeScrollback?: boolean;
+}
+
+function getLatestReplayTime(
+  durationMs: number,
+  checkpoints: Array<{ t: number }>,
+  events: Array<{ t: number }>,
+): number {
+  const latestEventTime = events.length > 0 ? events[events.length - 1]?.t ?? 0 : 0;
+  const latestCheckpointTime = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1]?.t ?? 0 : 0;
+  return Math.max(durationMs, latestEventTime, latestCheckpointTime);
+}
+
+function appendUniqueStep(steps: ReplayTimelineStep[], next: ReplayTimelineStep): void {
+  const previous = steps[steps.length - 1];
+  if (previous && previous.timeMs === next.timeMs && previous.seq === next.seq) {
+    return;
+  }
+  steps.push(next);
 }
 
 // ============================================================================
@@ -83,6 +112,44 @@ export function resolveReplayOffline(ref: string, filter: ReplayListFilter = {})
   throw new SpacesError(`Replay not found: ${ref}`, 'USER_ERROR', 1);
 }
 
+export function getReplayTimelineOffline(replayId: string): ReplayTimeline {
+  const manifest = readReplayManifest(replayId);
+  if (!manifest) {
+    logger.error(`[replay.service] Replay manifest not found: ${replayId}`);
+    throw new SpacesError(`Replay manifest not found: ${replayId}`, 'USER_ERROR', 1);
+  }
+
+  const events = readReplayEvents(replayId);
+  const checkpoints = listReplayCheckpoints(replayId);
+  const latestTimeMs = getLatestReplayTime(manifest.stats.durationMs, checkpoints, events);
+
+  const steps: ReplayTimelineStep[] = [];
+  appendUniqueStep(steps, { timeMs: 0, seq: 0 });
+
+  for (const event of events) {
+    if (event.type === 'input' || event.type === 'marker') {
+      continue;
+    }
+    appendUniqueStep(steps, { timeMs: event.t, seq: event.seq });
+  }
+
+  appendUniqueStep(steps, {
+    timeMs: latestTimeMs,
+    seq: manifest.stats.lastSeq,
+  });
+
+  return {
+    replayId,
+    durationMs: manifest.stats.durationMs,
+    latestTimeMs,
+    steps,
+    checkpointSteps: checkpoints.map((checkpoint) => ({
+      timeMs: checkpoint.t,
+      seq: checkpoint.seq,
+    })),
+  };
+}
+
 // ============================================================================
 // Read
 // ============================================================================
@@ -117,8 +184,12 @@ export async function getReplaySnapshotOffline(
   return getReplaySnapshot(replayId, options);
 }
 
-export async function getReplayStyledRowsOffline(replayId: string, atMs?: number): Promise<StyledRow[]> {
-  const state = await reconstructReplayAt(replayId, atMs);
+export async function getReplayStyledRowsOffline(
+  replayId: string,
+  atMs?: number,
+  atSeq?: number,
+): Promise<StyledRow[]> {
+  const state = await reconstructReplayAt(replayId, atMs, atSeq);
   try {
     return extractStyledRows(state.xterm, { trimTrailingBlank: true });
   } finally {
@@ -177,8 +248,11 @@ export function styledRowsToAnsi(rows: StyledRow[]): Buffer {
   return Buffer.from(parts.join(''), 'utf8');
 }
 
-export async function getReplayAnsiBufferOffline(replayId: string, atMs?: number): Promise<Buffer> {
-  const state = await reconstructReplayAt(replayId, atMs);
+export async function getReplayAnsiBufferOffline(
+  replayId: string,
+  target: ReplayFrameTarget = {},
+): Promise<Buffer> {
+  const state = await reconstructReplayAt(replayId, target.atMs, target.atSeq);
   try {
     const rows = extractStyledRows(state.xterm, { trimTrailingBlank: true });
     return styledRowsToAnsi(rows);
@@ -212,4 +286,12 @@ export function undismissReplayOffline(replayId: string): void {
 
 export function deleteReplayOffline(replayId: string): void {
   deleteReplay(replayId);
+}
+
+export function pruneExpiredReplaysOffline(now?: number): number {
+  return pruneExpiredReplays(now);
+}
+
+export function getReplayStorageSummaryOffline(filter?: ReplayListFilter): import('./types.js').ReplayStorageSummary {
+  return getReplayStorageSummary(filter);
 }

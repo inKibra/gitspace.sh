@@ -102,7 +102,6 @@ export default function App() {
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
-  const [activeReplayAnsi, setActiveReplayAnsi] = useState<Uint8Array | null>(null);
   const [showDismissedReplays, setShowDismissedReplays] = useState(false);
   const showDismissedReplaysRef = useRef(showDismissedReplays);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
@@ -662,48 +661,60 @@ export default function App() {
       return;
     }
 
-    try {
-      const ansi = await terminal.getReplayAnsi(replayId);
-      setActiveReplay(replay);
-      setActiveReplayAnsi(ansi);
-      setView('replay');
-    } catch (error) {
-      flow.showMessage({
-        title: 'Replay Failed',
-        message: error instanceof Error ? error.message : String(error),
-        variant: 'error',
-      });
-    }
+    setActiveReplay(replay);
+    setView('replay');
   }, [flow, terminal]);
 
-  const toggleReplayDismissed = useCallback(async (replay: ReplayInfo) => {
+  const toggleReplayDismissed = useCallback(async (replay: ReplayInfo): Promise<boolean> => {
     try {
+      if (!replay.dismissedAt && replay.status === 'running') {
+        flow.showMessage({
+          title: 'Replay Still Running',
+          message: 'Running replays cannot be dismissed.',
+          variant: 'info',
+        });
+        return false;
+      }
+
       if (replay.dismissedAt) {
         await terminal.undismissReplay(replay.replayId);
-        if (activeReplay?.replayId === replay.replayId) {
-          setActiveReplay({
-            ...activeReplay,
+        setActiveReplay((current) => current && current.replayId === replay.replayId
+          ? {
+            ...current,
             dismissedAt: undefined,
             dismissedBy: undefined,
-          });
-        }
+          }
+          : current);
+        return false;
       } else {
         await terminal.dismissReplay(replay.replayId);
-        if (activeReplay?.replayId === replay.replayId) {
-          setActiveReplay(null);
-          setActiveReplayAnsi(null);
-          setView('terminal');
-        }
+        setActiveReplay((current) => current && current.replayId === replay.replayId
+          ? {
+            ...current,
+            dismissedAt: Date.now(),
+          }
+          : current);
+        return true;
       }
-      refreshReplayList();
     } catch (error) {
       flow.showMessage({
         title: replay.dismissedAt ? 'Restore Failed' : 'Dismiss Failed',
         message: error instanceof Error ? error.message : String(error),
         variant: 'error',
       });
+      return false;
+    } finally {
+      refreshReplayList();
     }
   }, [activeReplay?.replayId, flow, refreshReplayList, terminal]);
+
+  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return terminal.getReplayAnsi(replayId, target);
+  }, [terminal]);
+
+  const loadReplayTimeline = useCallback((replayId: string) => {
+    return terminal.getReplayTimeline(replayId);
+  }, [terminal]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -1155,7 +1166,15 @@ export default function App() {
             },
           });
         } else if (selected?.type === 'replay') {
-          void toggleReplayDismissed(selected.replay);
+          if (!selected.replay.dismissedAt && selected.replay.status === 'running') {
+            flow.showMessage({
+              title: 'Replay Still Running',
+              message: 'Running replays cannot be dismissed.',
+              variant: 'info',
+            });
+          } else {
+            void toggleReplayDismissed(selected.replay);
+          }
         }
       } else if (command === 'toggle-hidden') {
         toggleShowDismissedReplayFilter();
@@ -1194,15 +1213,7 @@ export default function App() {
         return;
       }
 
-      if (e.key === 'Escape' || e.key === 'q') {
-        e.preventDefault();
-        setView('terminal');
-        setActiveReplay(null);
-        setActiveReplayAnsi(null);
-      } else if (e.key === 'd') {
-        e.preventDefault();
-        void toggleReplayDismissed(activeReplay);
-      } else if (e.key === 'h') {
+      if (e.key === 'h') {
         e.preventDefault();
         toggleShowDismissedReplayFilter();
       }
@@ -1210,7 +1221,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeReplay, toggleReplayDismissed, toggleShowDismissedReplayFilter, view]);
+  }, [activeReplay, toggleShowDismissedReplayFilter, view]);
 
   // Attached terminal mode keyboard handler (Shift+Esc to detach)
   useEffect(() => {
@@ -1341,42 +1352,22 @@ export default function App() {
   if (view === 'replay' && activeReplay) {
     return (
       <>
-        <div className="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden">
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-              <button
-                onClick={() => {
-                  setView('terminal');
-                  setActiveReplay(null);
-                  setActiveReplayAnsi(null);
-                }}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
-              >
-                ← <span className="hidden sm:inline ml-1">Workspaces</span>
-              </button>
-              <div className="text-sm text-[#8b949e] truncate">
-                <span className={activeReplay.status === 'crashed' ? 'text-[#ff7b72]' : 'text-[#79c0ff]'}>↺</span>{' '}
-                <span className="hidden sm:inline">{selectedMachine?.label || selectedMachine?.machineId}</span>
-                <span className="hidden sm:inline text-[#6e7681] mx-1">/</span>
-                <span className="text-[#e6edf3]">{activeReplay.sessionName}</span>
-                {activeReplay.workspaceName && (
-                  <span className="text-[#6e7681]"> · {activeReplay.workspaceName}</span>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <button
-                onClick={() => void toggleReplayDismissed(activeReplay)}
-                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
-              >
-                {activeReplay.dismissedAt ? 'Restore' : 'Dismiss'}
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 min-h-0">
-            <ReplayTerminalWeb ansi={activeReplayAnsi} />
-          </div>
-        </div>
+        <ReplayTerminalWeb
+          replay={activeReplay}
+          machineLabel={selectedMachine?.label || selectedMachine?.machineId}
+          loadReplayAnsi={loadReplayAnsi}
+          loadReplayTimeline={loadReplayTimeline}
+          onBack={() => {
+            setView('terminal');
+            setActiveReplay(null);
+          }}
+          onDismiss={activeReplay.status === 'running'
+            ? undefined
+            : (replayId) => {
+              const replay = terminal.replays.find((item) => item.replayId === replayId) ?? activeReplay;
+              return toggleReplayDismissed(replay);
+            }}
+        />
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
       </>

@@ -9,6 +9,8 @@ import type {
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
+  ReplayFrameTarget,
+  ReplayTimeline,
 } from '../backend.js'
 import type { BackendEvent } from '../events.js'
 import { buildRemoteBackendKey } from '../backend-key.js'
@@ -58,7 +60,8 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   bundleApplyCalls: Array<{ projectName: string; workspaceId: string; submission: BundleRefreshSubmission }> = []
   bundleConfigStateCalls: Array<{ projectName: string; workspaceId: string }> = []
   bundleConfigUpdateCalls: Array<{ projectName: string; workspaceId: string; submission: BundleConfigSubmission }> = []
-  replayAnsiCalls: Array<{ replayId: string; atMs?: number }> = []
+  replayAnsiCalls: Array<{ replayId: string; target?: ReplayFrameTarget }> = []
+  replayTimelineCalls: string[] = []
   dismissReplayCalls: string[] = []
   undismissReplayCalls: string[] = []
   ptyWrites: Uint8Array[] = []
@@ -227,9 +230,20 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     throw new Error('not implemented')
   }
 
-  async getReplayAnsi(replayId: string, atMs?: number): Promise<Uint8Array> {
-    this.replayAnsiCalls.push({ replayId, atMs })
+  async getReplayAnsi(replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> {
+    this.replayAnsiCalls.push({ replayId, target })
     return new Uint8Array([1, 2, 3])
+  }
+
+  async getReplayTimeline(replayId: string): Promise<ReplayTimeline> {
+    this.replayTimelineCalls.push(replayId)
+    return {
+      replayId,
+      durationMs: 50,
+      latestTimeMs: 50,
+      steps: [{ timeMs: 0, seq: 0 }, { timeMs: 50, seq: 1 }],
+      checkpointSteps: [{ timeMs: 0, seq: 0 }],
+    }
   }
 
   async dismissReplay(replayId: string): Promise<void> {
@@ -498,7 +512,8 @@ describe('useRemoteSessionClient', () => {
           holdWhenIdleMs: 12000,
         },
       })
-      await result.current.getReplayAnsi('replay-1', 50)
+      await result.current.getReplayAnsi('replay-1', { atMs: 50 })
+      await result.current.getReplayTimeline('replay-1')
       await result.current.dismissReplay('replay-1')
       await result.current.undismissReplay('replay-1')
       await Bun.sleep(0)
@@ -520,7 +535,8 @@ describe('useRemoteSessionClient', () => {
     expect(activeBackend.markInboxReadCalls).toEqual(['item-2'])
     expect(activeBackend.getNotificationConfigCalls).toBe(1)
     expect(activeBackend.updateNotificationConfigCalls).toHaveLength(1)
-    expect(activeBackend.replayAnsiCalls).toEqual([{ replayId: 'replay-1', atMs: 50 }])
+    expect(activeBackend.replayAnsiCalls).toEqual([{ replayId: 'replay-1', target: { atMs: 50 } }])
+    expect(activeBackend.replayTimelineCalls).toEqual(['replay-1'])
     expect(activeBackend.dismissReplayCalls).toEqual(['replay-1'])
     expect(activeBackend.undismissReplayCalls).toEqual(['replay-1'])
 

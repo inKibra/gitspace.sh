@@ -133,6 +133,44 @@ export interface ReplayInfo {
   exitCode?: number;
   dismissedAt?: number;
   dismissedBy?: string;
+  expiresAt?: number;
+}
+
+export interface ReplayStorageInfo {
+  replayId: string;
+  sessionName: string;
+  status: ReplayStatus;
+  durationMs: number;
+  totalBytes: number;
+  eventsBytes: number;
+  checkpointsBytes: number;
+  manifestBytes: number;
+  dismissedAt?: number;
+  expiresAt?: number;
+}
+
+export interface ReplayStorageSummary {
+  totalBytes: number;
+  replayCount: number;
+  replays: ReplayStorageInfo[];
+}
+
+export interface ReplayFrameTarget {
+  atMs?: number;
+  atSeq?: number;
+}
+
+export interface ReplayTimelineStep {
+  timeMs: number;
+  seq: number;
+}
+
+export interface ReplayTimeline {
+  replayId: string;
+  durationMs: number;
+  latestTimeMs: number;
+  steps: ReplayTimelineStep[];
+  checkpointSteps: ReplayTimelineStep[];
 }
 
 export interface TerminalSnapshot {

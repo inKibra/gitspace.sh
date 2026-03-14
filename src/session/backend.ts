@@ -1,6 +1,11 @@
 import type { NotificationConfig } from '../notifications/types.js';
 import type { BackendEvent } from './events.js';
-import type { ReplayInfo, TerminalSnapshot } from '../lib/tmux-lite/replay/index.js';
+import type {
+  ReplayFrameTarget,
+  ReplayInfo,
+  ReplayTimeline,
+  TerminalSnapshot,
+} from '../lib/tmux-lite/replay/index.js';
 import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
@@ -172,11 +177,12 @@ export interface SessionBackend {
     includeScrollback?: boolean,
     trimTrailingBlankRows?: boolean,
   ): Promise<string>;
-  getReplayAnsi?(replayId: string, atMs?: number): Promise<Uint8Array>;
+  getReplayAnsi?(replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array>;
+  getReplayTimeline?(replayId: string): Promise<ReplayTimeline>;
   dismissReplay?(replayId: string): Promise<void>;
   undismissReplay?(replayId: string): Promise<void>;
 
   onEvent(handler: (event: BackendEvent) => void): () => void;
 }
 
-export type { ReplayInfo, TerminalSnapshot };
+export type { ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };

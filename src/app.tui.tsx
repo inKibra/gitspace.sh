@@ -20,7 +20,12 @@ import { RemoteMachineScreen } from './components/RemoteMachineScreen.tui.js';
 import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
 import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
-import { getReplayAnsiBufferOffline, dismissReplayOffline, undismissReplayOffline } from './lib/tmux-lite/replay/service.js';
+import {
+  getReplayAnsiBufferOffline,
+  getReplayTimelineOffline,
+  dismissReplayOffline,
+  undismissReplayOffline,
+} from './lib/tmux-lite/replay/service.js';
 
 // Shared components and hooks
 import {
@@ -1140,6 +1145,58 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     dispatch({ type: 'SET_VIEW', view: 'replay' });
   }, [flow, localReplays]);
 
+  const handleReplayDismiss = useCallback((replayId: string) => {
+    try {
+      const replay = localReplays.find((item) => item.replayId === replayId) ?? activeReplay;
+      if (!activeReplayDismissedRef.current && replay?.status === 'running') {
+        flow.showMessage({
+          title: 'Replay Still Running',
+          message: 'Running replays cannot be dismissed.',
+          variant: 'info',
+        });
+        return false;
+      }
+
+      if (activeReplayDismissedRef.current) {
+        undismissReplayOffline(replayId);
+        activeReplayDismissedRef.current = false;
+        setActiveReplay((current) => current && current.replayId === replayId
+          ? {
+            ...current,
+            dismissedAt: undefined,
+            dismissedBy: undefined,
+          }
+          : current);
+        return false;
+      }
+
+      dismissReplayOffline(replayId);
+      activeReplayDismissedRef.current = true;
+      return true;
+    } catch (error) {
+      flow.showMessage({
+        title: 'Replay Update Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      return false;
+    } finally {
+      void requestLocalReplays(undefined, showDismissedReplays);
+    }
+  }, [activeReplay, flow, localReplays, requestLocalReplays, showDismissedReplays]);
+
+  useEffect(() => {
+    activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
+  }, [activeReplay?.dismissedAt]);
+
+  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return getReplayAnsiBufferOffline(replayId, target);
+  }, []);
+
+  const loadReplayTimeline = useCallback((replayId: string) => {
+    return Promise.resolve(getReplayTimelineOffline(replayId));
+  }, []);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
@@ -1933,7 +1990,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             }
           } else if (selected?.type === 'replay') {
             try {
-              if (selected.replay.dismissedAt) {
+              if (!selected.replay.dismissedAt && selected.replay.status === 'running') {
+                flow.showMessage({
+                  title: 'Replay Still Running',
+                  message: 'Running replays cannot be dismissed.',
+                  variant: 'info',
+                });
+              } else if (selected.replay.dismissedAt) {
                 undismissReplayOffline(selected.replay.replayId);
               } else {
                 dismissReplayOffline(selected.replay.replayId);
@@ -2135,52 +2198,19 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     );
   }
 
-  const handleReplayDismiss = useCallback((replayId: string) => {
-    try {
-      if (activeReplayDismissedRef.current) {
-        undismissReplayOffline(replayId);
-        activeReplayDismissedRef.current = false;
-        setActiveReplay((current) => current && current.replayId === replayId
-          ? {
-            ...current,
-            dismissedAt: undefined,
-            dismissedBy: undefined,
-          }
-          : current);
-        return false;
-      }
-
-      dismissReplayOffline(replayId);
-      activeReplayDismissedRef.current = true;
-      return true;
-    } catch (error) {
-      flow.showMessage({
-        title: 'Replay Update Failed',
-        message: error instanceof Error ? error.message : String(error),
-        variant: 'error',
-      });
-      return false;
-    } finally {
-      void requestLocalReplays(undefined, showDismissedReplays);
-    }
-  }, [flow, requestLocalReplays, showDismissedReplays]);
-
-  useEffect(() => {
-    activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
-  }, [activeReplay?.dismissedAt]);
-
   if (state.view === 'replay' && activeReplay) {
     return (
       <Fragment>
         <Toaster position="top-right" />
         <ReplayTerminal
           replay={activeReplay}
-          loadReplayAnsi={(replayId) => getReplayAnsiBufferOffline(replayId)}
+          loadReplayAnsi={loadReplayAnsi}
+          loadReplayTimeline={loadReplayTimeline}
           onBack={() => {
             setActiveReplay(null);
             dispatch({ type: 'SET_VIEW', view: 'projects' });
           }}
-          onDismiss={handleReplayDismiss}
+          onDismiss={activeReplay.status === 'running' ? undefined : handleReplayDismiss}
         />
         <FlowTUI flow={flow} />
       </Fragment>
