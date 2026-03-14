@@ -63,11 +63,11 @@ describe('replay screenshot rendering', () => {
     expect(svg).toContain('second &lt;line&gt;');
   });
 
-  test.if(findPngRasterizer() !== null)('writes terminal snapshot png output', () => {
+  test.if(findPngRasterizer() !== null)('writes terminal snapshot png output', async () => {
     const outputPath = join(tmpdir(), `gitspace-replay-shot-${Date.now()}.png`);
     tempPaths.push(outputPath);
 
-    const writtenPath = writeTerminalSnapshotPng(makeSnapshot(), outputPath, {
+    const writtenPath = await writeTerminalSnapshotPng(makeSnapshot(), outputPath, {
       title: 'demo screenshot',
     });
 

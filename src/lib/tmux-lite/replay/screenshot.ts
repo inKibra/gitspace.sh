@@ -1,8 +1,10 @@
-import { spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import type { Terminal as XTerminal } from '@xterm/headless';
+import { ReplayScreenshotError, SpacesError } from '../../../types/errors.js';
+import { logger } from '../../../utils/logger.js';
 import { reconstructReplayAt } from './reconstruct.js';
 import type { ReplaySnapshotOptions } from './snapshot.js';
 import { readReplayManifest } from './store.js';
@@ -48,18 +50,114 @@ export function findPngRasterizer(): PngRasterizer | null {
   return null;
 }
 
-function rasterizeSvg(inputPath: string, outputPath: string, rasterizer: PngRasterizer): void {
+const RASTERIZE_TIMEOUT_MS = 15_000;
+
+interface ScreenshotErrorContext {
+  replayId?: string;
+  outputPath?: string;
+  rasterizer?: string;
+}
+
+function formatScreenshotContext(context: ScreenshotErrorContext): string {
+  return [
+    context.replayId ? `replayId=${context.replayId}` : null,
+    context.outputPath ? `outputPath=${context.outputPath}` : null,
+    context.rasterizer ? `rasterizer=${context.rasterizer}` : null,
+  ].filter((value): value is string => value !== null).join(' ');
+}
+
+function logAndCreateScreenshotError(
+  message: string,
+  context: ScreenshotErrorContext,
+  error?: unknown,
+): ReplayScreenshotError {
+  const suffix = formatScreenshotContext(context);
+  const detail = error instanceof Error ? error.message : error ? String(error) : null;
+  logger.error(`[replay.screenshot] ${message}${suffix ? ` (${suffix})` : ''}${detail ? `: ${detail}` : ''}`);
+  return new ReplayScreenshotError(message);
+}
+
+function collectOutput(chunks: Buffer[]): string {
+  return Buffer.concat(chunks).toString('utf-8').trim();
+}
+
+function buildProcessFailureMessage(rasterizer: PngRasterizer, reason: string, stdout: string, stderr: string): string {
+  const output = [stderr, stdout].filter(Boolean).join('\n').trim();
+  return output.length > 0
+    ? `Failed to rasterize screenshot with ${rasterizer.kind}: ${reason}. ${output}`
+    : `Failed to rasterize screenshot with ${rasterizer.kind}: ${reason}`;
+}
+
+async function rasterizeSvg(
+  inputPath: string,
+  outputPath: string,
+  rasterizer: PngRasterizer,
+  context: ScreenshotErrorContext,
+): Promise<void> {
   const cmd = rasterizer.kind === 'sips'
     ? [rasterizer.executable, '-s', 'format', 'png', inputPath, '--out', outputPath]
     : [rasterizer.executable, inputPath, outputPath];
 
   const [command, ...args] = cmd;
-  const result = spawnSync(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let settled = false;
 
-  if (result.status !== 0) {
-    const detail = Buffer.from(result.stderr ?? result.stdout ?? '').toString('utf-8').trim();
-    throw new Error(detail || `Failed to rasterize screenshot with ${rasterizer.kind}`);
-  }
+    const finish = (error?: ReplayScreenshotError) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        rejectPromise(error);
+      } else {
+        resolvePromise();
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      const stdout = collectOutput(stdoutChunks);
+      const stderr = collectOutput(stderrChunks);
+      finish(logAndCreateScreenshotError(
+        buildProcessFailureMessage(rasterizer, `timed out after ${RASTERIZE_TIMEOUT_MS}ms`, stdout, stderr),
+        { ...context, rasterizer: rasterizer.kind },
+      ));
+    }, RASTERIZE_TIMEOUT_MS);
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+
+    child.on('error', (error) => {
+      finish(logAndCreateScreenshotError(
+        `Failed to start screenshot rasterizer ${rasterizer.kind}`,
+        { ...context, rasterizer: rasterizer.kind },
+        error,
+      ));
+    });
+
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+
+      const stdout = collectOutput(stdoutChunks);
+      const stderr = collectOutput(stderrChunks);
+      const reason = signal ? `terminated by signal ${signal}` : `exited with code ${code ?? 'unknown'}`;
+      finish(logAndCreateScreenshotError(
+        buildProcessFailureMessage(rasterizer, reason, stdout, stderr),
+        { ...context, rasterizer: rasterizer.kind },
+      ));
+    });
+  });
 }
 
 // ============================================================================
@@ -443,51 +541,128 @@ export interface ReplayScreenshotOptions extends ReplaySnapshotOptions {
   includeScrollback?: boolean;
 }
 
-function writeSvgAsPng(svg: string, outputPath: string): string {
+async function writeSvgAsPng(svg: string, outputPath: string, replayId?: string): Promise<string> {
   const rasterizer = findPngRasterizer();
-  if (!rasterizer) {
-    throw new Error('No PNG rasterizer found. Install ImageMagick or use a system with sips available.');
-  }
-
   const absoluteOutputPath = resolve(outputPath);
-  mkdirSync(dirname(absoluteOutputPath), { recursive: true });
 
-  const tempDir = mkdtempSync(join(tmpdir(), 'gitspace-replay-shot-'));
-  const tempSvgPath = join(tempDir, 'snapshot.svg');
+  if (!rasterizer) {
+    throw logAndCreateScreenshotError(
+      'No PNG rasterizer found. Install ImageMagick or use a system with sips available.',
+      { replayId, outputPath: absoluteOutputPath },
+    );
+  }
 
   try {
-    writeFileSync(tempSvgPath, svg, 'utf-8');
-    rasterizeSvg(tempSvgPath, absoluteOutputPath, rasterizer);
+    mkdirSync(dirname(absoluteOutputPath), { recursive: true });
+  } catch (error) {
+    throw logAndCreateScreenshotError(
+      'Failed to prepare replay screenshot output directory.',
+      { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+      error,
+    );
+  }
+
+  let tempDir: string;
+  try {
+    tempDir = mkdtempSync(join(tmpdir(), 'gitspace-replay-shot-'));
+  } catch (error) {
+    throw logAndCreateScreenshotError(
+      'Failed to create temporary screenshot directory.',
+      { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+      error,
+    );
+  }
+  const tempSvgPath = join(tempDir, 'snapshot.svg');
+  let result: string | null = null;
+  let pendingError: Error | null = null;
+
+  try {
+    try {
+      writeFileSync(tempSvgPath, svg, 'utf-8');
+    } catch (error) {
+      throw logAndCreateScreenshotError(
+        'Failed to write temporary replay screenshot SVG.',
+        { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+        error,
+      );
+    }
+
+    await rasterizeSvg(tempSvgPath, absoluteOutputPath, rasterizer, {
+      replayId,
+      outputPath: absoluteOutputPath,
+    });
 
     if (!existsSync(absoluteOutputPath)) {
-      throw new Error(`Screenshot was not written: ${absoluteOutputPath}`);
+      throw logAndCreateScreenshotError(
+        `Screenshot was not written: ${absoluteOutputPath}`,
+        { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+      );
     }
 
-    const size = statSync(absoluteOutputPath).size;
+    let size: number;
+    try {
+      size = statSync(absoluteOutputPath).size;
+    } catch (error) {
+      throw logAndCreateScreenshotError(
+        'Failed to read replay screenshot output metadata.',
+        { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+        error,
+      );
+    }
+
     if (size <= 0) {
-      throw new Error(`Screenshot is empty: ${absoluteOutputPath}`);
+      throw logAndCreateScreenshotError(
+        `Screenshot is empty: ${absoluteOutputPath}`,
+        { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+      );
     }
 
-    return absoluteOutputPath;
+    result = absoluteOutputPath;
+  } catch (error) {
+    pendingError = error instanceof ReplayScreenshotError || error instanceof SpacesError
+      ? error
+      : logAndCreateScreenshotError(
+        'Unexpected replay screenshot failure.',
+        { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+        error,
+      );
   } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch (error) {
+      const cleanupFailure = logAndCreateScreenshotError(
+        'Failed to clean up temporary replay screenshot files.',
+        { replayId, outputPath: absoluteOutputPath, rasterizer: rasterizer.kind },
+        error,
+      );
+      if (!pendingError) {
+        pendingError = cleanupFailure;
+      }
+    }
   }
+
+  if (pendingError) {
+    throw pendingError;
+  }
+
+  return result as string;
 }
 
 // Legacy: write from TerminalSnapshot (plain text, no colors)
-export function writeTerminalSnapshotPng(
+export async function writeTerminalSnapshotPng(
   snapshot: TerminalSnapshot,
   outputPath: string,
   options: RenderSnapshotSvgOptions = {},
-): string {
-  return writeSvgAsPng(renderTerminalSnapshotSvg(snapshot, options), outputPath);
+): Promise<string> {
+  return writeSvgAsPng(renderTerminalSnapshotSvg(snapshot, options), outputPath, snapshot.replayId);
 }
 
 // Primary: write directly from replay, using colored xterm buffer extraction
 export async function writeReplayScreenshot(replayId: string, options: ReplayScreenshotOptions): Promise<string> {
   const manifest = readReplayManifest(replayId);
   if (!manifest) {
-    throw new Error(`Replay manifest not found: ${replayId}`);
+    logger.error(`[replay.screenshot] Replay manifest not found: replayId=${replayId} outputPath=${resolve(options.outputPath)}`);
+    throw new SpacesError(`Replay manifest not found: ${replayId}`, 'USER_ERROR', 1);
   }
 
   const state = await reconstructReplayAt(replayId, options.atMs);
@@ -501,16 +676,22 @@ export async function writeReplayScreenshot(replayId: string, options: ReplayScr
       title: manifest.sessionName || manifest.sessionId,
       subtitle: `replay ${manifest.replayId.slice(0, 16)} · t=${state.timeMs}ms`,
     });
-    return writeSvgAsPng(svg, options.outputPath);
+    return await writeSvgAsPng(svg, options.outputPath, replayId);
   } finally {
     state.xterm.dispose();
   }
 }
 
 export function readPngDimensions(pngPath: string): { width: number; height: number } {
-  const file = readFileSync(pngPath);
+  let file: Buffer;
+  try {
+    file = readFileSync(pngPath);
+  } catch (error) {
+    throw logAndCreateScreenshotError('Failed to read PNG file.', { outputPath: resolve(pngPath) }, error);
+  }
+
   if (file.length < 24 || file.toString('ascii', 1, 4) !== 'PNG') {
-    throw new Error(`Invalid PNG file: ${pngPath}`);
+    throw logAndCreateScreenshotError(`Invalid PNG file: ${pngPath}`, { outputPath: resolve(pngPath) });
   }
 
   return {

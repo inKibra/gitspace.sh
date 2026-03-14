@@ -643,12 +643,8 @@ export default function App() {
   }, [terminal, showDismissedReplays]);
 
   const toggleShowDismissedReplayFilter = useCallback(() => {
-    setShowDismissedReplays((value) => {
-      const next = !value;
-      terminal.requestReplays(undefined, next);
-      return next;
-    });
-  }, [terminal]);
+    setShowDismissedReplays((value) => !value);
+  }, []);
 
   const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
     const replay = terminal.replays.find((item) => item.replayId === replayId);
@@ -919,7 +915,6 @@ export default function App() {
       terminal.requestProjects();
       terminal.requestWorkspaces();
       terminal.requestSessions();
-      terminal.requestReplays(undefined, showDismissedReplays);
       terminal.requestNotificationConfig();
     }
   }, [
@@ -929,8 +924,18 @@ export default function App() {
     terminal.requestProjects,
     terminal.requestWorkspaces,
     terminal.requestSessions,
-    terminal.requestReplays,
     terminal.requestNotificationConfig,
+  ]);
+
+  useEffect(() => {
+    if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
+      terminal.requestReplays(undefined, showDismissedReplays);
+    }
+  }, [
+    view,
+    terminal.status,
+    terminal.mode,
+    terminal.requestReplays,
     showDismissedReplays,
   ]);
 
@@ -1168,6 +1173,7 @@ export default function App() {
     handleManageBundleConfig,
     deleteWorkspaceWithPrompt,
     toggleReplayDismissed,
+    toggleShowDismissedReplayFilter,
   ]);
 
   useEffect(() => {

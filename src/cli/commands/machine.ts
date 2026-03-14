@@ -9,6 +9,7 @@
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
 import { configureTmuxSandbox } from '../tmux-sandbox.js';
+import { getTmuxLiteSandbox } from '../../lib/tmux-lite/protocol.js';
 
 export function registerMachineCommands(parent: Command): void {
   const cmd = parent
@@ -170,7 +171,7 @@ function registerMachineTmuxCommands(machine: Command): void {
     .option('--all', 'Include dismissed replays')
     .action(withErrorHandler(async (options) => {
       const { listTmuxReplays } = await import('../../commands/tmux.js');
-      listTmuxReplays({ all: options.all });
+      listTmuxReplays({ all: options.all, sandbox: getTmuxLiteSandbox() });
     }, { skipSetupCheck: true }));
 
   replay
@@ -183,6 +184,7 @@ function registerMachineTmuxCommands(machine: Command): void {
     .action(withErrorHandler(async (replayRef, options) => {
       const { showTmuxReplayText } = await import('../../commands/tmux.js');
       await showTmuxReplayText(replayRef, {
+        sandbox: getTmuxLiteSandbox(),
         atMs: options.atMs,
         scrollbackLines: options.scrollbackLines,
         includeScrollback: options.includeScrollback,
@@ -200,6 +202,7 @@ function registerMachineTmuxCommands(machine: Command): void {
     .action(withErrorHandler(async (replayRef, options) => {
       const { screenshotTmuxReplay } = await import('../../commands/tmux.js');
       await screenshotTmuxReplay(replayRef, {
+        sandbox: getTmuxLiteSandbox(),
         output: options.output,
         atMs: options.atMs,
         scrollbackLines: options.scrollbackLines,
@@ -213,7 +216,7 @@ function registerMachineTmuxCommands(machine: Command): void {
     .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
     .action(withErrorHandler(async (replayRef) => {
       const { dismissTmuxReplay } = await import('../../commands/tmux.js');
-      dismissTmuxReplay(replayRef);
+      dismissTmuxReplay(replayRef, { sandbox: getTmuxLiteSandbox() });
     }, { skipSetupCheck: true }));
 
   replay
@@ -222,7 +225,7 @@ function registerMachineTmuxCommands(machine: Command): void {
     .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
     .action(withErrorHandler(async (replayRef) => {
       const { undismissTmuxReplay } = await import('../../commands/tmux.js');
-      undismissTmuxReplay(replayRef);
+      undismissTmuxReplay(replayRef, { sandbox: getTmuxLiteSandbox() });
     }, { skipSetupCheck: true }));
 
   replay
@@ -231,6 +234,6 @@ function registerMachineTmuxCommands(machine: Command): void {
     .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
     .action(withErrorHandler(async (replayRef) => {
       const { deleteTmuxReplay } = await import('../../commands/tmux.js');
-      deleteTmuxReplay(replayRef);
+      deleteTmuxReplay(replayRef, { sandbox: getTmuxLiteSandbox() });
     }, { skipSetupCheck: true }));
 }

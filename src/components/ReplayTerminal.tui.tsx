@@ -137,7 +137,7 @@ export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: Re
           {error && <text fg={COLORS.error}> [error]</text>}
         </box>
         <text fg={COLORS.textDim}>
-          [r] Reload  {onDismiss ? '[d] Dismiss  ' : ''}[Esc/q] Back
+          [r] Reload  {onDismiss ? `[d] ${replay.dismissedAt ? 'Restore' : 'Dismiss'}  ` : ''}[Esc/q] Back
         </text>
       </box>
       <scrollbox flexGrow={1} stickyStart="bottom">
