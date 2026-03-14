@@ -339,6 +339,125 @@ describe('RemoteSessionBackend', () => {
     expect(output).toEqual(['snapshot-before-handler', 'live-after-handler']);
   });
 
+  it('lists replays and emits replay events', async () => {
+    const socket = createFakeSocket();
+    const events: BackendEvent[] = [];
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    backend.onEvent((event) => events.push(event));
+    await connectAndHandshake(backend, socket);
+
+    await backend.listReplays('alpha:ws-1', true);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
+    expect(command).toEqual({ type: 'list_replays', workspaceId: 'alpha:ws-1', includeDismissed: true });
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'replay_list',
+        replays: [
+          {
+            replayId: 'replay-1',
+            sessionId: 'sess-1',
+            sessionName: 'ghost',
+            cwd: '/tmp/ws-1',
+            workspaceId: 'alpha:ws-1',
+            projectName: 'alpha',
+            workspaceName: 'ws-1',
+            startedAt: 1,
+            endedAt: 2,
+            status: 'closed',
+            durationMs: 1,
+            eventCount: 1,
+            checkpointCount: 1,
+            lastSeq: 1,
+          },
+        ],
+      })
+    );
+    await Bun.sleep(0);
+
+    expect(events).toContainEqual({
+      type: 'replays',
+      replays: [expect.objectContaining({ replayId: 'replay-1', workspaceId: 'alpha:ws-1' })],
+    });
+  });
+
+  it('round-trips replay ansi and replay dismissal commands', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const ansiPromise = backend.getReplayAnsi('replay-1', 50);
+    await Bun.sleep(0);
+    expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
+      type: 'get_replay_ansi',
+      replayId: 'replay-1',
+      atMs: 50,
+    });
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'replay_ansi',
+        replayId: 'replay-1',
+        data: cryptoAdapter.encodeBase64(new Uint8Array([1, 2, 3])),
+        encoding: 'base64',
+      })
+    );
+    await expect(ansiPromise).resolves.toEqual(new Uint8Array([1, 2, 3]));
+
+    const dismissPromise = backend.dismissReplay('replay-1');
+    await Bun.sleep(0);
+    expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
+      type: 'dismiss_replay',
+      replayId: 'replay-1',
+    });
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'replay_dismissed', replayId: 'replay-1' }));
+    await expect(dismissPromise).resolves.toBeUndefined();
+
+    const undismissPromise = backend.undismissReplay('replay-1');
+    await Bun.sleep(0);
+    expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
+      type: 'undismiss_replay',
+      replayId: 'replay-1',
+    });
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'replay_undismissed', replayId: 'replay-1' }));
+    await expect(undismissPromise).resolves.toBeUndefined();
+  });
+
   it('preserves script phase banner and output ordering during running scripts', async () => {
     const socket = createFakeSocket();
     const events: BackendEvent[] = [];

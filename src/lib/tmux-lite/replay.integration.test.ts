@@ -5,7 +5,16 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { decodeRouterMessages, encodeRouterMessage } from "./protocol";
 import { findPngRasterizer, readPngDimensions, writeReplayScreenshot } from "./replay/screenshot.js";
-import { listReplayCheckpoints, listReplayInfos, readReplayEvents, readReplayManifest } from "./replay/store.js";
+import {
+  deleteReplay,
+  dismissReplay,
+  listReplayCheckpoints,
+  listReplayInfos,
+  readReplayEvents,
+  readReplayManifest,
+  undismissReplay,
+} from "./replay/store.js";
+import { getReplayTextOffline, listReplaysOffline, screenshotReplayOffline } from './replay/service.js';
 
 const SERVER_SCRIPT = join(import.meta.dir, "server.ts");
 
@@ -306,5 +315,75 @@ describe("tmux-lite replay capture", () => {
     } finally {
       rmSync(checkpointsDir, { recursive: true, force: true });
     }
+  }, 10000);
+
+  test.if(findPngRasterizer() !== null)('keeps replay history available after tmux-lite shutdown', async () => {
+    serverProc = await startServer(replayRoot);
+
+    const response = await sendRouterCommand({
+      type: 'new',
+      name: 'replay-offline-history',
+      cwd: join(import.meta.dir, '../../..'),
+      command: '/bin/sh',
+      args: ['-lc', "printf 'offline replay works'; exit 0"],
+    });
+
+    expect(response.type).toBe('session');
+    await waitFor(() => listReplayInfos().some((info) => info.sessionName === 'replay-offline-history' && info.status === 'closed'));
+
+    const replay = listReplayInfos().find((info) => info.sessionName === 'replay-offline-history');
+    expect(replay).toBeDefined();
+
+    await sendRouterCommand({ type: 'kill-server' });
+    await Bun.sleep(200);
+    serverProc = null;
+
+    const offlineList = listReplaysOffline();
+    expect(offlineList.some((info) => info.replayId === replay!.replayId)).toBe(true);
+
+    const offlineText = await getReplayTextOffline(replay!.replayId);
+    expect(offlineText).toContain('offline replay works');
+
+    const screenshotPath = await screenshotReplayOffline(replay!.replayId, {
+      outputPath: join(tmpdir(), `offline-replay-${Date.now()}.png`),
+    });
+    try {
+      expect(existsSync(screenshotPath)).toBe(true);
+      expect(statSync(screenshotPath).size).toBeGreaterThan(0);
+    } finally {
+      rmSync(screenshotPath, { force: true });
+    }
+  }, 10000);
+
+  test('dismisses, restores, and deletes replay lifecycle from durable store', async () => {
+    serverProc = await startServer(replayRoot);
+
+    const response = await sendRouterCommand({
+      type: 'new',
+      name: 'replay-dismiss-lifecycle',
+      cwd: join(import.meta.dir, '../../..'),
+      command: '/bin/sh',
+      args: ['-lc', "printf 'dismiss me'; exit 0"],
+    });
+
+    expect(response.type).toBe('session');
+    await waitFor(() => listReplayInfos().some((info) => info.sessionName === 'replay-dismiss-lifecycle' && info.status === 'closed'));
+
+    const replay = listReplayInfos().find((info) => info.sessionName === 'replay-dismiss-lifecycle');
+    expect(replay).toBeDefined();
+
+    dismissReplay(replay!.replayId, 'integration-test');
+    expect(listReplaysOffline().some((info) => info.replayId === replay!.replayId)).toBe(false);
+
+    const hidden = listReplaysOffline({ includeDismissed: true }).find((info) => info.replayId === replay!.replayId);
+    expect(hidden?.dismissedBy).toBe('integration-test');
+    expect(hidden?.dismissedAt).toBeDefined();
+
+    undismissReplay(replay!.replayId);
+    expect(listReplaysOffline().some((info) => info.replayId === replay!.replayId)).toBe(true);
+
+    deleteReplay(replay!.replayId);
+    expect(listReplaysOffline({ includeDismissed: true }).some((info) => info.replayId === replay!.replayId)).toBe(false);
+    expect(readReplayManifest(replay!.replayId)).toBeNull();
   }, 10000);
 });

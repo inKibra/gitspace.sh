@@ -44,6 +44,7 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   listProjectsCalls = 0
   listWorkspacesCalls = 0
   listSessionsCalls: Array<string | undefined> = []
+  listReplaysCalls: Array<{ workspaceId?: string; includeDismissed?: boolean }> = []
   attachCalls: AttachSessionParams[] = []
   detachCalls = 0
   killCalls: string[] = []
@@ -57,6 +58,9 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   bundleApplyCalls: Array<{ projectName: string; workspaceId: string; submission: BundleRefreshSubmission }> = []
   bundleConfigStateCalls: Array<{ projectName: string; workspaceId: string }> = []
   bundleConfigUpdateCalls: Array<{ projectName: string; workspaceId: string; submission: BundleConfigSubmission }> = []
+  replayAnsiCalls: Array<{ replayId: string; atMs?: number }> = []
+  dismissReplayCalls: string[] = []
+  undismissReplayCalls: string[] = []
   ptyWrites: Uint8Array[] = []
   ptyResizes: Array<{ cols: number; rows: number }> = []
 
@@ -123,6 +127,10 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
 
   async listSessions(workspaceId?: string): Promise<void> {
     this.listSessionsCalls.push(workspaceId)
+  }
+
+  async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
+    this.listReplaysCalls.push({ workspaceId, includeDismissed })
   }
 
   async createProject(_params: CreateProjectParams): Promise<void> {}
@@ -217,6 +225,19 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
 
   async sendReviewRequest(): Promise<never> {
     throw new Error('not implemented')
+  }
+
+  async getReplayAnsi(replayId: string, atMs?: number): Promise<Uint8Array> {
+    this.replayAnsiCalls.push({ replayId, atMs })
+    return new Uint8Array([1, 2, 3])
+  }
+
+  async dismissReplay(replayId: string): Promise<void> {
+    this.dismissReplayCalls.push(replayId)
+  }
+
+  async undismissReplay(replayId: string): Promise<void> {
+    this.undismissReplayCalls.push(replayId)
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
@@ -452,6 +473,7 @@ describe('useRemoteSessionClient', () => {
       result.current.requestProjects()
       result.current.selectProject('alpha')
       result.current.requestSessions('workspace-1')
+      result.current.requestReplays('workspace-1', true)
       result.current.attachSession({ workspaceId: 'workspace-1', sessionName: 'debug' })
       result.current.detachSession()
       result.current.killSession('session-1')
@@ -476,14 +498,17 @@ describe('useRemoteSessionClient', () => {
           holdWhenIdleMs: 12000,
         },
       })
+      await result.current.getReplayAnsi('replay-1', 50)
+      await result.current.dismissReplay('replay-1')
+      await result.current.undismissReplay('replay-1')
       await Bun.sleep(0)
     })
 
     const activeBackend = backends[1]
-    expect(result.current.selectedProjectName).toBe('alpha')
     expect(activeBackend.listProjectsCalls).toBe(1)
     expect(activeBackend.listWorkspacesCalls).toBe(1)
-    expect(activeBackend.listSessionsCalls).toEqual(['workspace-1'])
+    expect(activeBackend.listSessionsCalls).toEqual([undefined, 'workspace-1'])
+    expect(activeBackend.listReplaysCalls).toEqual([{ workspaceId: 'workspace-1', includeDismissed: true }])
     expect(activeBackend.attachCalls).toEqual([
       { workspaceId: 'workspace-1', sessionName: 'debug' },
     ])
@@ -495,6 +520,9 @@ describe('useRemoteSessionClient', () => {
     expect(activeBackend.markInboxReadCalls).toEqual(['item-2'])
     expect(activeBackend.getNotificationConfigCalls).toBe(1)
     expect(activeBackend.updateNotificationConfigCalls).toHaveLength(1)
+    expect(activeBackend.replayAnsiCalls).toEqual([{ replayId: 'replay-1', atMs: 50 }])
+    expect(activeBackend.dismissReplayCalls).toEqual(['replay-1'])
+    expect(activeBackend.undismissReplayCalls).toEqual(['replay-1'])
 
     await act(async () => {
       result.current.disconnect()

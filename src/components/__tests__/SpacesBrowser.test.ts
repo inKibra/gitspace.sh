@@ -169,6 +169,28 @@ describe('useSpacesBrowser tree building', () => {
     }
   });
 
+  it('shows orphaned replay section when project has replay history without workspace', () => {
+    const orphanedReplay = makeReplay({
+      replayId: 'replay-orphaned',
+      workspaceId: 'missing-workspace',
+      workspaceName: 'deleted-workspace',
+    });
+    const props = makeProps({ workspaces: [], replays: [orphanedReplay], showProjectHeaders: true });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    const types = result.current.items.map((item) => item.type);
+    expect(types).toContain('project');
+    expect(types).toContain('orphaned-replay-section');
+
+    const orphanedSection = result.current.items.find((item) => item.type === 'orphaned-replay-section');
+    expect(orphanedSection).toBeDefined();
+    if (orphanedSection && orphanedSection.type === 'orphaned-replay-section') {
+      expect(orphanedSection.projectName).toBe('proj');
+      expect(orphanedSection.count).toBe(1);
+      expect(orphanedSection.expanded).toBe(false);
+    }
+  });
+
   it('includes process items when workspace has processes configured', () => {
     const ws = makeWorkspace({
       sessionCount: 0,
@@ -382,6 +404,23 @@ describe('useSpacesBrowser activateSelected', () => {
     await act(async () => { await result.current.activateSelected(); });
 
     expect(onOpenReplay).toHaveBeenCalledWith({ replayId: 'replay-1', workspaceId: 'ws-1' });
+  });
+
+  it('opens orphaned replay when orphaned section is expanded', async () => {
+    const replay = makeReplay({ replayId: 'replay-orphaned', workspaceId: 'missing-workspace', workspaceName: 'deleted-ws' });
+    const onOpenReplay = mock(async () => {});
+    const props = makeProps({ workspaces: [], replays: [replay], onOpenReplay, showProjectHeaders: true });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    const orphanedIndex = result.current.items.findIndex((item) => item.type === 'orphaned-replay-section');
+    act(() => { result.current.selectIndex(orphanedIndex); });
+    await act(async () => { await result.current.activateSelected(); });
+
+    const replayIndex = result.current.items.findIndex((item) => item.type === 'replay');
+    act(() => { result.current.selectIndex(replayIndex); });
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onOpenReplay).toHaveBeenCalledWith({ replayId: 'replay-orphaned', workspaceId: 'missing-workspace' });
   });
 
   it('calls onEditProcesses when edit-processes item is activated', async () => {
