@@ -825,6 +825,17 @@ export class RemoteSessionHandler {
       await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to restore replays');
       return;
     }
+
+    const manifest = readReplayManifest(replayId);
+    if (!manifest) {
+      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`);
+      return;
+    }
+    if (!canAccessReplayForSession(session.accessType, session.grantedSessionId, manifest)) {
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay');
+      return;
+    }
+
     undismissReplayOffline(replayId);
     await this.sendMessage(session, sendResponse, { type: 'replay_undismissed', replayId });
   }

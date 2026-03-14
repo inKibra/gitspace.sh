@@ -37,11 +37,11 @@ function formatAge(timestamp: number): string {
 
 function formatReplayTime(timeMs: number): string {
   const totalSeconds = Math.max(0, timeMs) / 1000;
-  if (totalSeconds < 60) {
+  if (totalSeconds < 59.95) {
     return `${totalSeconds.toFixed(1)}s`;
   }
 
-  const wholeSeconds = Math.floor(totalSeconds);
+  const wholeSeconds = Math.round(totalSeconds);
   const seconds = wholeSeconds % 60;
   const minutes = Math.floor(wholeSeconds / 60) % 60;
   const hours = Math.floor(wholeSeconds / 3600);
