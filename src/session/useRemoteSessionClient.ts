@@ -218,10 +218,8 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [engine, engine.state]);
 
   // backendStatus reflects the raw underlying connection state, NOT overlaid
-  // with isReconnecting. This is what the reconnect useEffect watches via
-  // [backendStatus], so that setIsReconnecting(true) inside the effect doesn't
-  // change backendStatus → doesn't re-trigger the effect cleanup → doesn't
-  // abort the in-flight reconnect loop.
+  // with isReconnecting. Used only for detecting the established→disconnected
+  // transition that should fire the reconnect loop.
   const backendStatus = useMemo<RemoteSessionConnectionStatus>(() => {
     if (!activeBackendState) {
       return 'disconnected';
@@ -230,13 +228,21 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [activeBackendState, mapConnectionStatus]);
 
   // status is the value exposed to consumers — overlays 'reconnecting' on top
-  // of backendStatus, but is NOT used as the useEffect dependency.
+  // of backendStatus.
   const status = useMemo<RemoteSessionConnectionStatus>(() => {
     if (isReconnecting) {
       return 'reconnecting';
     }
     return backendStatus;
   }, [backendStatus, isReconnecting]);
+
+  // reconnectTrigger is a monotonically increasing counter that increments
+  // exactly when we detect a genuine established→disconnected transition with
+  // a session to restore. The reconnect loop effect watches ONLY this counter
+  // so it is never re-triggered by status changes that happen DURING the loop
+  // (e.g. backendStatus flipping to 'connecting' when connectBackend fires).
+  const [reconnectTrigger, setReconnectTrigger] = useState(0);
+  const prevBackendStatusRef = useRef<RemoteSessionConnectionStatus>('disconnected');
 
   const withActiveBackend = useCallback(
     async <T>(fn: (backendKey: BackendKey) => Promise<T>): Promise<T | null> => {
@@ -476,17 +482,37 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [activeBackendState?.projects, selectProject, selectedProjectName]);
 
   // -------------------------------------------------------------------------
+  // Detect established → disconnected transition and fire reconnect trigger.
+  //
+  // This effect watches backendStatus for the specific transition that should
+  // start a reconnect. It increments reconnectTrigger (a counter), which is
+  // what the reconnect loop effect depends on — NOT backendStatus directly.
+  // This breaks the dependency cycle: the loop can change backendStatus (e.g.
+  // to 'connecting') without re-triggering its own cleanup.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const prev = prevBackendStatusRef.current;
+    prevBackendStatusRef.current = backendStatus;
+
+    // Only fire on the established → disconnected transition with a live session.
+    if (
+      prev === 'established' &&
+      backendStatus === 'disconnected' &&
+      connectParamsRef.current &&
+      lastAttachedSessionIdRef.current
+    ) {
+      setReconnectTrigger((t) => t + 1);
+    }
+  }, [backendStatus]);
+
+  // -------------------------------------------------------------------------
   // Automatic reconnection on unexpected disconnect
   // -------------------------------------------------------------------------
   useEffect(() => {
-    // Only trigger when:
-    //   1. We are now disconnected (not reconnecting/connecting)
-    //   2. We have saved connect params (i.e. connect() was called before)
-    //   3. We had an active tmux session at the time of disconnect
-    //      (lastAttachedSessionIdRef is cleared on explicit detach, so this
-    //       prevents re-attach when the user is in browsing mode)
+    // Guard: only run when the trigger is non-zero and we still have the
+    // required context (params/session may have been cleared by disconnect()).
     if (
-      backendStatus !== 'disconnected' ||
+      reconnectTrigger === 0 ||
       !connectParamsRef.current ||
       !lastAttachedSessionIdRef.current
     ) {
@@ -594,13 +620,12 @@ export function useRemoteSessionClient<ConnectParams>(
 
     void run();
 
-    // Abort the loop if backendStatus changes again or the component unmounts
-    // before the loop finishes.
+    // Abort the loop if the component unmounts or a new trigger fires.
     return () => {
       abort.aborted = true;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendStatus]);
+  }, [reconnectTrigger]);
 
   const killSession = useCallback((sessionId: string) => {
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
