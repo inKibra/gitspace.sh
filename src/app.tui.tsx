@@ -373,7 +373,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     startProcess: startLocalProcess,
     stopProcess: stopLocalProcess,
     requestEvents: requestLocalEvents,
-    getReplayText: getLocalReplayText,
     events: localEvents,
     liveEventIds: localLiveEventIds,
     savedEventFilters: localSavedEventFilters,

@@ -136,6 +136,7 @@ function resolveXtermColor(mode: number, value: number, defaultColor: string): s
 
 export interface StyledSpan {
   text: string;
+  cells: number;
   fg: string;
   bg: string | null;
   bold: boolean;
@@ -184,6 +185,11 @@ export function extractStyledRows(
         continue;
       }
 
+      const width = cell.getWidth();
+      if (width === 0) {
+        continue;
+      }
+
       const char = cell.getChars() || ' ';
       const inverse = cell.isInverse() !== 0;
 
@@ -200,6 +206,7 @@ export function extractStyledRows(
 
       const span: StyledSpan = {
         text: char,
+        cells: width,
         fg,
         bg,
         bold: cell.isBold() !== 0,
@@ -212,6 +219,7 @@ export function extractStyledRows(
       const key = spanStyleKey(span);
       if (currentSpan && key === currentKey) {
         currentSpan.text += char;
+        currentSpan.cells += width;
       } else {
         currentSpan = { ...span };
         currentKey = key;
@@ -303,7 +311,7 @@ export function renderStyledRowsSvg(
     let colX = paddingX;
 
     for (const span of row) {
-      const spanWidth = span.text.length * cellWidth;
+      const spanWidth = span.cells * cellWidth;
 
       // Background rect for non-default backgrounds
       if (span.bg !== null) {
@@ -338,14 +346,14 @@ export function renderStyledRowsSvg(
 
       // Explicit underline and strikethrough lines (SVG text-decoration is unreliable in sips)
       if (span.underline && trimmedText.length > 0) {
-        const lineX2 = (colX + trimmedText.length * cellWidth).toFixed(1);
+        const lineX2 = (colX + span.cells * cellWidth).toFixed(1);
         const opacity = span.dim ? dimOpacity : 1;
         decorationLines.push(
           `<line x1="${colX.toFixed(1)}" y1="${rowY + underlineY}" x2="${lineX2}" y2="${rowY + underlineY}" stroke="${span.fg}" stroke-width="1" opacity="${opacity}" />`,
         );
       }
       if (span.strikethrough && trimmedText.length > 0) {
-        const lineX2 = (colX + trimmedText.length * cellWidth).toFixed(1);
+        const lineX2 = (colX + span.cells * cellWidth).toFixed(1);
         const opacity = span.dim ? dimOpacity : 1;
         decorationLines.push(
           `<line x1="${colX.toFixed(1)}" y1="${rowY + strikeY}" x2="${lineX2}" y2="${rowY + strikeY}" stroke="${span.fg}" stroke-width="1" opacity="${opacity}" />`,

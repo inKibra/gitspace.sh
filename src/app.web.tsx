@@ -642,6 +642,14 @@ export default function App() {
     terminal.requestReplays(undefined, showDismissedReplays);
   }, [terminal, showDismissedReplays]);
 
+  const toggleShowDismissedReplayFilter = useCallback(() => {
+    setShowDismissedReplays((value) => {
+      const next = !value;
+      terminal.requestReplays(undefined, next);
+      return next;
+    });
+  }, [terminal]);
+
   const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
     const replay = terminal.replays.find((item) => item.replayId === replayId);
     if (!replay) {
@@ -1130,7 +1138,7 @@ export default function App() {
           void toggleReplayDismissed(selected.replay);
         }
       } else if (command === 'toggle-hidden') {
-        setShowDismissedReplays((value) => !value);
+        toggleShowDismissedReplayFilter();
       } else if (command === 'open-inbox') {
         terminal.requestInbox();
         setShowInbox(true);
@@ -1175,13 +1183,13 @@ export default function App() {
         void toggleReplayDismissed(activeReplay);
       } else if (e.key === 'h') {
         e.preventDefault();
-        setShowDismissedReplays((value) => !value);
+        toggleShowDismissedReplayFilter();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeReplay, toggleReplayDismissed, view]);
+  }, [activeReplay, toggleReplayDismissed, toggleShowDismissedReplayFilter, view]);
 
   // Attached terminal mode keyboard handler (Shift+Esc to detach)
   useEffect(() => {
@@ -1436,7 +1444,7 @@ export default function App() {
                 Replay history: <span className="text-[#e6edf3]">{showDismissedReplays ? 'showing dismissed' : 'hiding dismissed'}</span>
               </div>
               <button
-                onClick={() => setShowDismissedReplays((value) => !value)}
+                onClick={toggleShowDismissedReplayFilter}
                 className="px-3 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[36px] border border-[#30363d]"
               >
                 {showDismissedReplays ? 'Hide Dismissed' : 'Show Dismissed'}

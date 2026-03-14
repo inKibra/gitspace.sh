@@ -44,7 +44,7 @@ export interface ReplayTerminalProps {
   /** Load replay as ANSI bytes (styled, for Ghostty rendering) */
   loadReplayAnsi: (replayId: string) => Promise<Buffer>;
   onBack: () => void;
-  onDismiss?: (replayId: string) => void;
+  onDismiss?: (replayId: string) => void | Promise<void>;
 }
 
 export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: ReplayTerminalProps) {
@@ -85,8 +85,8 @@ export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: Re
     return () => { process.removeListener('SIGWINCH', handleResize); };
   }, []);
 
-  const handleDismiss = useCallback(() => {
-    onDismiss?.(replay.replayId);
+  const handleDismiss = useCallback(async () => {
+    await onDismiss?.(replay.replayId);
     onBack();
   }, [onDismiss, onBack, replay.replayId]);
 
@@ -99,7 +99,7 @@ export function ReplayTerminal({ replay, loadReplayAnsi, onBack, onDismiss }: Re
       setReloadKey((k) => k + 1);
     }
     if (key.raw === 'd' && onDismiss) {
-      handleDismiss();
+      void handleDismiss();
     }
   });
 

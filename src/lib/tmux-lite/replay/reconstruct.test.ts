@@ -254,6 +254,7 @@ describe('replay reconstruction', () => {
     const buffer = styledRowsToAnsi([
       [{
         text: 'hello 你好 😀',
+        cells: 'hello 你好 😀'.length,
         fg: '#ffffff',
         bg: null,
         bold: false,

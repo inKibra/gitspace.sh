@@ -54,7 +54,10 @@ export function listReplaysOffline(filter: ReplayListFilter = {}): ReplayInfo[] 
 }
 
 export function resolveReplayOffline(ref: string, filter: ReplayListFilter = {}): ReplayInfo {
-  const all = listReplayInfos({ ...filter, includeDismissed: true });
+  const all = listReplayInfos({
+    ...filter,
+    includeDismissed: filter.includeDismissed ?? false,
+  });
 
   const exactMatches = all.filter(
     (r) => r.replayId === ref || r.sessionId === ref || r.sessionName === ref,

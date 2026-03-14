@@ -141,7 +141,7 @@ describe('useSpacesBrowser tree building', () => {
     expect(types).toContain('new-session');
   });
 
-  it('shows replay-section row when expanded workspace has ghosts', () => {
+  it('shows replay-section row when expanded workspace has ghosts', async () => {
     const ws = makeWorkspace();
     const replay = makeReplay();
     const props = makeProps({ workspaces: [ws], replays: [replay] });
@@ -160,7 +160,7 @@ describe('useSpacesBrowser tree building', () => {
     // expand the section via activateSelected
     const sectionIndex = result.current.items.findIndex((item) => item.type === 'replay-section');
     act(() => { result.current.selectIndex(sectionIndex); });
-    act(() => { void result.current.activateSelected(); });
+    await act(async () => { await result.current.activateSelected(); });
 
     const replayItem = result.current.items.find((item) => item.type === 'replay');
     expect(replayItem).toBeDefined();
@@ -396,7 +396,7 @@ describe('useSpacesBrowser activateSelected', () => {
     // Expand the replay section first
     const sectionIndex = result.current.items.findIndex((item) => item.type === 'replay-section');
     act(() => { result.current.selectIndex(sectionIndex); });
-    act(() => { void result.current.activateSelected(); });
+    await act(async () => { await result.current.activateSelected(); });
 
     const replayIndex = result.current.items.findIndex((item) => item.type === 'replay');
     act(() => { result.current.selectIndex(replayIndex); });
