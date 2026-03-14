@@ -667,17 +667,32 @@ async function startTerminalSession(
             }
           }
 
+          // If stop() was called while we were awaiting connect/attach,
+          // discard the new backend and bail out cleanly.
+          if (stopping) {
+            await newBackend.disconnect().catch(() => {});
+            reconnecting = false;
+            return;
+          }
+
           // Swap backend and wire stdin/resize to the new one.
           const oldUnsub = unsubEvents;
           currentBackend = newBackend;
 
+          // Unsubscribe the old listener before discarding the reference so
+          // the old backend can't fire spurious events after the swap.
+          oldUnsub();
+
           // Rewire the new backend's events.
           unsubEvents = newBackend.onEvent(handleBackendEvent);
 
-          // Remove old unsub from handlers and add new one.
+          // Replace the old unsub in the cleanup handlers with the new one.
           const idx = handlers.indexOf(oldUnsub);
-          if (idx !== -1) handlers.splice(idx, 1);
-          handlers.push(unsubEvents);
+          if (idx !== -1) {
+            handlers.splice(idx, 1, unsubEvents);
+          } else {
+            handlers.push(unsubEvents);
+          }
 
           logger.log('Reconnected!');
           logger.log('');

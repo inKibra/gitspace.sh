@@ -306,7 +306,6 @@ export async function connectMachineRelay(
     // -----------------------------------------------------------------------
 
     let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-    let heartbeatStaleTimer: ReturnType<typeof setTimeout> | null = null;
 
     /** Start the application-level heartbeat after successful registration. */
     const startHeartbeat = (ws: WebSocket) => {
@@ -341,10 +340,6 @@ export async function connectMachineRelay(
         clearInterval(heartbeatInterval);
         heartbeatInterval = null;
       }
-      if (heartbeatStaleTimer !== null) {
-        clearTimeout(heartbeatStaleTimer);
-        heartbeatStaleTimer = null;
-      }
     };
 
     // -----------------------------------------------------------------------
@@ -358,10 +353,12 @@ export async function connectMachineRelay(
 
       ws.onopen = () => {
         console.log('[serve] WebSocket connected, waiting for relay identity...');
-        // Reset attempt counter now that the TCP connection is established.
-        // We do NOT reset it on `registered` so that registration failures
-        // still count towards the backoff.
-        reconnectAttempts = 0;
+        // Do NOT reset reconnectAttempts here. Resetting on open would mask
+        // repeated registration failures (the relay keeps accepting the TCP
+        // connection but rejecting the register_machine) and would prevent
+        // the backoff from growing. The counter is reset only on a successful
+        // `registered` response so every failure between open and registered
+        // is correctly counted towards the backoff.
       };
 
       ws.onclose = (event) => {

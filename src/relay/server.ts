@@ -856,7 +856,11 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   const STALE_WARN_THRESHOLD_MS = 90_000;   // 3 missed pings
   const STALE_CLOSE_THRESHOLD_MS = 150_000; // 5 missed pings (grace period)
 
-  setInterval(() => {
+  // Bind the watchdog to this specific server instance by scoping the check
+  // to machines whose WebSocket belongs to this server.  The interval handle
+  // is cleared when server.stop() is called so that multiple relay instances
+  // in the same process (e.g. in tests) don't accumulate watchdog timers.
+  const staleWatchdog = setInterval(() => {
     const now = Date.now();
     for (const machine of getAllMachines()) {
       if (!machine.ws) continue; // already offline
@@ -883,6 +887,14 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
       }
     }
   }, STALE_CHECK_INTERVAL_MS);
+
+  // Wrap server.stop() to also clear the watchdog so multiple server
+  // instances in the same process (tests) don't leak timers.
+  const originalStop = server.stop.bind(server);
+  server.stop = (closeActiveConnections?: boolean) => {
+    clearInterval(staleWatchdog);
+    return originalStop(closeActiveConnections);
+  };
 
   return server;
 }
