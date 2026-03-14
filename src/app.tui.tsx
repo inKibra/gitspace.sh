@@ -301,6 +301,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const [activeRemoteIdentity, setActiveRemoteIdentity] = useState<Identity | null>(null);
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
   const [showDismissedReplays, setShowDismissedReplays] = useState(false);
+  const activeReplayDismissedRef = useRef(false);
 
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
@@ -2136,8 +2137,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   const handleReplayDismiss = useCallback((replayId: string) => {
     try {
-      if (activeReplay?.dismissedAt) {
+      if (activeReplayDismissedRef.current) {
         undismissReplayOffline(replayId);
+        activeReplayDismissedRef.current = false;
         setActiveReplay((current) => current && current.replayId === replayId
           ? {
             ...current,
@@ -2149,6 +2151,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       }
 
       dismissReplayOffline(replayId);
+      activeReplayDismissedRef.current = true;
       return true;
     } catch (error) {
       flow.showMessage({
@@ -2160,7 +2163,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     } finally {
       void requestLocalReplays(undefined, showDismissedReplays);
     }
-  }, [activeReplay?.dismissedAt, flow, requestLocalReplays, showDismissedReplays]);
+  }, [flow, requestLocalReplays, showDismissedReplays]);
+
+  useEffect(() => {
+    activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
+  }, [activeReplay?.dismissedAt]);
 
   if (state.view === 'replay' && activeReplay) {
     return (
