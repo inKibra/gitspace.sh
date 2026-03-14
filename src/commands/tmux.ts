@@ -432,6 +432,7 @@ export async function screenshotTmuxReplay(
   const writtenPath = await screenshotReplayOffline(replay.replayId, {
     outputPath,
     atMs: options.atMs,
+    scrollbackLines: options.scrollbackLines,
     includeScrollback: options.includeScrollback,
   });
 

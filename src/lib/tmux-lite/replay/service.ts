@@ -21,6 +21,8 @@ import {
   type ReplayListFilter,
 } from './store.js';
 import type { ReplayInfo, TerminalSnapshot } from './types.js';
+import { SpacesError } from '../../../types/errors.js';
+import { logger } from '../../../utils/logger.js';
 
 export type { ReplayInfo, TerminalSnapshot, ReplayListFilter, StyledRow, StyledSpan };
 
@@ -39,6 +41,7 @@ export interface OfflineReplaySnapshotOptions {
 export interface OfflineReplayScreenshotOptions {
   outputPath: string;
   atMs?: number;
+  scrollbackLines?: number;
   includeScrollback?: boolean;
 }
 
@@ -60,7 +63,8 @@ export function resolveReplayOffline(ref: string, filter: ReplayListFilter = {})
     return exactMatches[0];
   }
   if (exactMatches.length > 1) {
-    throw new Error(`Replay reference is ambiguous: ${ref}`);
+    logger.error(`[replay.service] Replay reference is ambiguous: ${ref}`);
+    throw new SpacesError(`Replay reference is ambiguous: ${ref}`, 'USER_ERROR', 1);
   }
 
   const prefixMatches = all.filter((r) => r.replayId.startsWith(ref));
@@ -68,10 +72,12 @@ export function resolveReplayOffline(ref: string, filter: ReplayListFilter = {})
     return prefixMatches[0];
   }
   if (prefixMatches.length > 1) {
-    throw new Error(`Replay reference matches multiple replay IDs: ${ref}`);
+    logger.error(`[replay.service] Replay reference matches multiple replay IDs: ${ref}`);
+    throw new SpacesError(`Replay reference matches multiple replay IDs: ${ref}`, 'USER_ERROR', 1);
   }
 
-  throw new Error(`Replay not found: ${ref}`);
+  logger.error(`[replay.service] Replay not found: ${ref}`);
+  throw new SpacesError(`Replay not found: ${ref}`, 'USER_ERROR', 1);
 }
 
 // ============================================================================

@@ -1932,12 +1932,20 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
               handleDeleteWorkspace(workspace);
             }
           } else if (selected?.type === 'replay') {
-            if (selected.replay.dismissedAt) {
-              undismissReplayOffline(selected.replay.replayId);
-            } else {
-              dismissReplayOffline(selected.replay.replayId);
+            try {
+              if (selected.replay.dismissedAt) {
+                undismissReplayOffline(selected.replay.replayId);
+              } else {
+                dismissReplayOffline(selected.replay.replayId);
+              }
+              void requestLocalReplays(undefined, showDismissedReplays);
+            } catch (error) {
+              flow.showMessage({
+                title: 'Replay Update Failed',
+                message: error instanceof Error ? error.message : String(error),
+                variant: 'error',
+              });
             }
-            void requestLocalReplays(undefined, showDismissedReplays);
           }
         } else if (command === 'kill') {
           // Kill session or stop running process
@@ -1969,7 +1977,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             });
           }
         } else if (command === 'toggle-hidden') {
-          setShowDismissedReplays((value) => !value);
+          setShowDismissedReplays((value) => {
+            const next = !value;
+            void requestLocalReplays(undefined, next);
+            return next;
+          });
         } else if (command === 'back') {
           dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' });
         }

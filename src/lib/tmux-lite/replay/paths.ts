@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { getGitspaceDir } from '../../../core/config.js';
+import { SpacesError } from '../../../types/errors.js';
+import { logger } from '../../../utils/logger.js';
 import { getReplayDir as getTmuxLiteReplayDir } from '../protocol.js';
 
 const VALID_REPLAY_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -18,13 +20,15 @@ function getConfiguredReplayRootDir(): string {
 
 export function assertValidReplayId(replayId: string): void {
   if (!replayId || !VALID_REPLAY_ID_PATTERN.test(replayId)) {
-    throw new Error(`Invalid replay ID: ${replayId}`);
+    logger.error(`[replay.paths] Invalid replay ID: ${String(replayId)}`);
+    throw new SpacesError(`Invalid replay ID: ${replayId}`, 'USER_ERROR', 1);
   }
 }
 
 export function assertValidCheckpointId(checkpointId: string): void {
   if (!checkpointId || !VALID_REPLAY_ID_PATTERN.test(checkpointId)) {
-    throw new Error(`Invalid checkpoint ID: ${checkpointId}`);
+    logger.error(`[replay.paths] Invalid checkpoint ID: ${String(checkpointId)}`);
+    throw new SpacesError(`Invalid checkpoint ID: ${checkpointId}`, 'USER_ERROR', 1);
   }
 }
 

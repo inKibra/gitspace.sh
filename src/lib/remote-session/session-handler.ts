@@ -150,8 +150,11 @@ export function filterReplaysForSessionAccess<T extends ReplaySessionAccessTarge
   grantedSessionId: string | undefined,
   replays: T[],
 ): T[] {
-  if (accessType !== 'view') {
+  if (accessType === 'full') {
     return replays;
+  }
+  if (accessType !== 'view') {
+    return [];
   }
   if (!grantedSessionId) {
     return [];

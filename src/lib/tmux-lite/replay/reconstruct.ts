@@ -1,5 +1,7 @@
 import { Terminal as XTerminal } from '@xterm/headless';
 import { listReplayCheckpoints, readReplayCheckpoint, readReplayEvents, readReplayManifest } from './store.js';
+import { SpacesError } from '../../../types/errors.js';
+import { logger } from '../../../utils/logger.js';
 
 function getDefaultTargetTime(
   manifest: { status: string; stats: { durationMs: number } },
@@ -42,7 +44,8 @@ export async function reconstructReplayAt(
 ): Promise<ReconstructedTerminalState> {
   const manifest = readReplayManifest(replayId);
   if (!manifest) {
-    throw new Error(`Replay manifest not found: ${replayId}`);
+    logger.error(`[replay.reconstruct] Replay manifest not found: ${replayId}`);
+    throw new SpacesError(`Replay manifest not found: ${replayId}`, 'USER_ERROR', 1);
   }
 
   const checkpoints = listReplayCheckpoints(replayId);
@@ -57,8 +60,8 @@ export async function reconstructReplayAt(
     : null;
 
   const xterm = new XTerminal({
-    cols: checkpoint?.terminal.cols ?? manifest.initialTerminal.cols,
-    rows: checkpoint?.terminal.rows ?? manifest.initialTerminal.rows,
+    cols: checkpointRecord?.checkpoint.terminal.cols ?? manifest.initialTerminal.cols,
+    rows: checkpointRecord?.checkpoint.terminal.rows ?? manifest.initialTerminal.rows,
     scrollback: 10_000,
     allowProposedApi: true,
   });

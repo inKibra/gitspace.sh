@@ -163,6 +163,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onApplied: async () => {
       remote.requestWorkspaces();
       remote.requestSessions();
+      remote.requestReplays();
     },
   });
 
@@ -215,6 +216,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       setShowScriptTerminal(false);
       remote.requestWorkspaces();
       remote.requestSessions();
+      remote.requestReplays();
     },
     onDeleteError: async ({ message }) => {
       setShowScriptTerminal(false);
@@ -304,6 +306,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     remote.requestProjects();
     remote.requestWorkspaces();
     remote.requestSessions();
+    remote.requestReplays();
     remote.requestNotificationConfig();
   }, [remote.mode, remote.status]);
 
@@ -495,7 +498,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
-    replays: [],
+    replays: remote.replays,
     onRequestSessions: () => remote.requestSessions(),
     onAttachSession: handleAttachSession,
     onOpenReplay: handleOpenReplay,
@@ -507,7 +510,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,
-    onRefreshSessions: () => remote.requestSessions(),
+    onRefreshSessions: () => {
+      remote.requestSessions();
+      remote.requestReplays();
+    },
     onBack,
     machineName: machine.label || machine.machineId,
   });
