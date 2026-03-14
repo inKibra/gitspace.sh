@@ -295,6 +295,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Events view state
   const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
+  const [activeRemoteIdentity, setActiveRemoteIdentity] = useState<Identity | null>(null);
 
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
@@ -1134,11 +1135,24 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     error: remoteMachines.error,
     publicKey: undefined,
     onConnect: async (machine) => {
+      setActiveRemoteIdentity(remoteMachines.identity ?? remoteIdentity ?? null);
       dispatch({ type: 'SET_MACHINE', machine });
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onRefresh: remoteMachines.refreshMachines,
   });
+
+  useEffect(() => {
+    if (
+      isRemoteMode &&
+      state.view === 'projects' &&
+      state.selectedMachine &&
+      state.selectedMachine.machineId !== 'local' &&
+      remoteMachines.identity
+    ) {
+      setActiveRemoteIdentity(remoteMachines.identity);
+    }
+  }, [isRemoteMode, remoteMachines.identity, state.selectedMachine, state.view]);
 
   // Inbox hook
   const inboxProps = useInbox({
@@ -2014,7 +2028,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     state.selectedMachine &&
     state.selectedMachine.machineId !== 'local'
   ) {
-    if (!relayConfig || !remoteMachines.identity) {
+    const remoteScreenIdentity = activeRemoteIdentity ?? remoteMachines.identity ?? remoteIdentity ?? null;
+
+    if (!relayConfig || !remoteScreenIdentity) {
       return (
         <Fragment>
           <Toaster position="top-right" />
@@ -2032,8 +2048,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         <RemoteMachineScreen
           machine={state.selectedMachine}
           relayUrl={relayConfig.url}
-          identity={remoteMachines.identity}
+          identity={remoteScreenIdentity}
           onBack={() => {
+            setActiveRemoteIdentity(null);
             dispatch({ type: 'SET_MACHINE', machine: null });
             dispatch({ type: 'SET_VIEW', view: 'machines' });
           }}

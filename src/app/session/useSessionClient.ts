@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import type { UseRemoteSessionClientOptions, UseRemoteSessionClientReturn, RemoteSessionConnectionStatus } from '../../session/useRemoteSessionClient.js'
 import { useRemoteSessionClient } from '../../session/useRemoteSessionClient.js'
 import type { SessionClientConnectionStatus } from './types.js'
@@ -28,8 +29,8 @@ export function useSessionClient<ConnectParams>(
   const { createBackend, mapConnectionStatus = defaultStatusMapper } = options
   const client = useRemoteSessionClient<ConnectParams>({ createBackend })
 
-  return {
+  return useMemo(() => ({
     ...client,
     status: mapConnectionStatus(client.status),
-  }
+  }), [client, mapConnectionStatus])
 }

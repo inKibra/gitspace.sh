@@ -229,6 +229,42 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
 }
 
 describe('useRemoteSessionClient', () => {
+  it('keeps connect and disconnect stable across backend state updates', async () => {
+    const backends: FakeRemoteBackend[] = []
+    const createBackend = ({ machineId }: { machineId: string }) => {
+      const backendKey = buildRemoteBackendKey('wss://relay.test/ws', machineId)
+      const backend = new FakeRemoteBackend(backendKey, machineId)
+      backends.push(backend)
+      return { backendKey, backend }
+    }
+
+    const { result } = renderHook(() =>
+      useRemoteSessionClient<{ machineId: string }>({
+        createBackend,
+      })
+    )
+
+    const initialConnect = result.current.connect
+    const initialDisconnect = result.current.disconnect
+
+    await act(async () => {
+      await result.current.connect({ machineId: 'machine-a' })
+    })
+
+    expect(result.current.connect).toBe(initialConnect)
+    expect(result.current.disconnect).toBe(initialDisconnect)
+
+    act(() => {
+      backends[0].emit({
+        type: 'projects',
+        projects: [{ name: 'demo', repository: 'owner/demo', workspaceCount: 0, isCurrent: false }],
+      })
+    })
+
+    expect(result.current.connect).toBe(initialConnect)
+    expect(result.current.disconnect).toBe(initialDisconnect)
+  })
+
   it('connects through session engine and forwards PTY I/O', async () => {
     const backends: FakeRemoteBackend[] = []
     const receivedOutput: string[] = []

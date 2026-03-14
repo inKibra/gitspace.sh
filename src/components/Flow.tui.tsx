@@ -115,10 +115,10 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
         <Modal title="Keyboard Shortcuts" width={50} height={state.shortcuts.length + 6}>
           <box flexDirection="column" flexGrow={1}>
             {state.shortcuts.map((shortcut, idx) => (
-              <text key={idx} fg={COLORS.text} height={1}>
+              <box key={idx} flexDirection="row" height={1}>
                 <text fg={COLORS.selected}>{shortcut.key.padEnd(12)}</text>
-                {shortcut.description}
-              </text>
+                <text fg={COLORS.text}>{shortcut.description}</text>
+              </box>
             ))}
           </box>
           <text fg={COLORS.textDim} height={1} marginTop={1}>

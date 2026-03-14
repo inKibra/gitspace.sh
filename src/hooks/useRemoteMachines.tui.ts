@@ -152,29 +152,42 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
     await directory.refreshMachines();
   }, [directory, isRemoteMode]);
 
-  if (!isRemoteMode) {
+  return useMemo(() => {
+    if (!isRemoteMode) {
+      return {
+        status: 'connected' as const,
+        error: null,
+        identity: null,
+        machines: [localMachine],
+        connect,
+        disconnect,
+        refreshMachines,
+        isRemoteMode,
+        isLocal,
+      };
+    }
+
     return {
-      status: 'connected',
-      error: null,
-      identity: null,
-      machines: [localMachine],
+      status: directory.status,
+      error: directory.error,
+      identity: directory.identity,
+      machines: directory.machines.length > 0 ? directory.machines : [localMachine],
       connect,
       disconnect,
       refreshMachines,
       isRemoteMode,
       isLocal,
     };
-  }
-
-  return {
-    status: directory.status,
-    error: directory.error,
-    identity: directory.identity,
-    machines: directory.machines.length > 0 ? directory.machines : [localMachine],
+  }, [
+    directory.error,
+    directory.identity,
+    directory.machines,
+    directory.status,
+    localMachine,
     connect,
     disconnect,
     refreshMachines,
     isRemoteMode,
     isLocal,
-  };
+  ]);
 }
