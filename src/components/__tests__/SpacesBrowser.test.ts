@@ -10,6 +10,7 @@ import { act, renderHook } from '@testing-library/react';
 import { Window } from 'happy-dom';
 import {
   useSpacesBrowser,
+  type ReplayInfo,
   type WorkspaceInfo,
   type SessionInfo,
   type UseSpacesBrowserProps,
@@ -66,8 +67,10 @@ function makeProps(overrides: Partial<UseSpacesBrowserProps> = {}): UseSpacesBro
   return {
     workspaces: [],
     sessions: [],
+    replays: [],
     onRequestSessions: mock(() => {}),
     onAttachSession: mock(async () => {}),
+    onOpenReplay: mock(async () => {}),
     onStartProcess: mock(() => {}),
     onStartProcessAttach: mock(() => {}),
     onStopProcess: mock(() => {}),
@@ -75,6 +78,26 @@ function makeProps(overrides: Partial<UseSpacesBrowserProps> = {}): UseSpacesBro
     onRefresh: mock(async () => {}),
     onBack: mock(() => {}),
     showProjectHeaders: false,
+    ...overrides,
+  };
+}
+
+function makeReplay(overrides: Partial<ReplayInfo> = {}): ReplayInfo {
+  return {
+    replayId: 'replay-1',
+    sessionId: 'sess-1',
+    sessionName: 'ghost-session',
+    cwd: '/home/user/gitspace/proj/workspaces/my-workspace',
+    workspaceId: 'ws-1',
+    projectName: 'proj',
+    workspaceName: 'my-workspace',
+    startedAt: Date.now() - 120000,
+    endedAt: Date.now() - 60000,
+    status: 'closed',
+    durationMs: 60000,
+    eventCount: 20,
+    checkpointCount: 2,
+    lastSeq: 20,
     ...overrides,
   };
 }
@@ -116,6 +139,34 @@ describe('useSpacesBrowser tree building', () => {
     expect(types).toContain('events');
     expect(types).toContain('bundle-config');
     expect(types).toContain('new-session');
+  });
+
+  it('shows replay-section row when expanded workspace has ghosts', () => {
+    const ws = makeWorkspace();
+    const replay = makeReplay();
+    const props = makeProps({ workspaces: [ws], replays: [replay] });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    // replay-section should appear but replays are collapsed by default
+    const sectionItem = result.current.items.find((item) => item.type === 'replay-section');
+    expect(sectionItem).toBeDefined();
+    if (sectionItem && sectionItem.type === 'replay-section') {
+      expect(sectionItem.count).toBe(1);
+      expect(sectionItem.expanded).toBe(false);
+    }
+
+    // expand the section via activateSelected
+    const sectionIndex = result.current.items.findIndex((item) => item.type === 'replay-section');
+    act(() => { result.current.selectIndex(sectionIndex); });
+    act(() => { void result.current.activateSelected(); });
+
+    const replayItem = result.current.items.find((item) => item.type === 'replay');
+    expect(replayItem).toBeDefined();
+    if (replayItem && replayItem.type === 'replay') {
+      expect(replayItem.replay.replayId).toBe('replay-1');
+    }
   });
 
   it('includes process items when workspace has processes configured', () => {
@@ -309,6 +360,28 @@ describe('useSpacesBrowser activateSelected', () => {
     await act(async () => { await result.current.activateSelected(); });
 
     expect(onOpenEvents).toHaveBeenCalledWith('ws-1');
+  });
+
+  it('opens replay when replay item is activated', async () => {
+    const ws = makeWorkspace();
+    const replay = makeReplay();
+    const onOpenReplay = mock(async () => {});
+    const props = makeProps({ workspaces: [ws], replays: [replay], onOpenReplay });
+    const { result } = renderHook(() => useSpacesBrowser(props));
+
+    act(() => { result.current.toggleWorkspace('ws-1'); });
+
+    // Expand the replay section first
+    const sectionIndex = result.current.items.findIndex((item) => item.type === 'replay-section');
+    act(() => { result.current.selectIndex(sectionIndex); });
+    act(() => { void result.current.activateSelected(); });
+
+    const replayIndex = result.current.items.findIndex((item) => item.type === 'replay');
+    act(() => { result.current.selectIndex(replayIndex); });
+
+    await act(async () => { await result.current.activateSelected(); });
+
+    expect(onOpenReplay).toHaveBeenCalledWith({ replayId: 'replay-1', workspaceId: 'ws-1' });
   });
 
   it('calls onEditProcesses when edit-processes item is activated', async () => {

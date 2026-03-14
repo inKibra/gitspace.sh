@@ -27,6 +27,12 @@ import {
   markInboxRead,
   type Session,
 } from "../tmux-lite/cli";
+import {
+  listReplaysOffline,
+  getReplayAnsiBufferOffline,
+  dismissReplayOffline,
+  undismissReplayOffline,
+} from '../tmux-lite/replay/service.js';
 
 // Import project loading
 import { listProjectSummaries } from "../../core/project-catalog";
@@ -237,6 +243,22 @@ export class RemoteSessionHandler {
 
       case "list_sessions":
         await this.handleListSessions(session, msg.workspaceId, sendResponse);
+        break;
+
+      case 'list_replays':
+        await this.handleListReplays(session, msg.workspaceId, msg.includeDismissed, sendResponse);
+        break;
+
+      case 'get_replay_ansi':
+        await this.handleGetReplayAnsi(session, msg.replayId, msg.atMs, sendResponse);
+        break;
+
+      case 'dismiss_replay':
+        await this.handleDismissReplay(session, msg.replayId, sendResponse);
+        break;
+
+      case 'undismiss_replay':
+        await this.handleUndismissReplay(session, msg.replayId, sendResponse);
         break;
 
       case "attach_session":
@@ -662,6 +684,60 @@ export class RemoteSessionHandler {
       type: "session_list",
       sessions,
     });
+  }
+
+  private async handleListReplays(
+    session: RemoteClientSession,
+    workspaceId: string | undefined,
+    includeDismissed: boolean | undefined,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    const replays = listReplaysOffline({ workspaceId, includeDismissed: includeDismissed ?? false });
+    await this.sendMessage(session, sendResponse, {
+      type: 'replay_list',
+      replays,
+    });
+  }
+
+  private async handleGetReplayAnsi(
+    session: RemoteClientSession,
+    replayId: string,
+    atMs: number | undefined,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    const ansi = await getReplayAnsiBufferOffline(replayId, atMs);
+    await this.sendMessage(session, sendResponse, {
+      type: 'replay_ansi',
+      replayId,
+      data: Buffer.from(ansi).toString('base64'),
+      encoding: 'base64',
+    });
+  }
+
+  private async handleDismissReplay(
+    session: RemoteClientSession,
+    replayId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    if (!canManage(session.accessType)) {
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to dismiss replays');
+      return;
+    }
+    dismissReplayOffline(replayId);
+    await this.sendMessage(session, sendResponse, { type: 'replay_dismissed', replayId });
+  }
+
+  private async handleUndismissReplay(
+    session: RemoteClientSession,
+    replayId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    if (!canManage(session.accessType)) {
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to restore replays');
+      return;
+    }
+    undismissReplayOffline(replayId);
+    await this.sendMessage(session, sendResponse, { type: 'replay_undismissed', replayId });
   }
 
   private async handleCancelPendingAttach(

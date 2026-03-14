@@ -45,6 +45,19 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
   if (selectedItem?.type === 'session') {
     return '[↑↓] Navigate  [Enter] Attach  [x] Kill  [r] Refresh  [q] Back';
   }
+  if (selectedItem?.type === 'replay-section') {
+    return selectedItem.expanded
+      ? '[↑↓] Navigate  [Enter] Collapse  [h] Hidden  [r] Refresh  [q] Back'
+      : '[↑↓] Navigate  [Enter] Expand History  [h] Hidden  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'orphaned-replay-section') {
+    return selectedItem.expanded
+      ? '[↑↓] Navigate  [Enter] Collapse  [h] Hidden  [r] Refresh  [q] Back'
+      : '[↑↓] Navigate  [Enter] Expand Orphaned History  [h] Hidden  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'replay') {
+    return '[↑↓] Navigate  [Enter] Open  [d] Dismiss  [h] Hidden  [r] Refresh  [q] Back';
+  }
   if (selectedItem?.type === 'process') {
     return selectedItem.status === 'running'
       ? '[↑↓] Navigate  [Enter] View  [x] Stop  [r] Refresh  [q] Back'
@@ -175,6 +188,48 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
                 <text fg={textColor}> {displayName}</text>
                 {session.processTitle && <text fg={COLORS.sessionAttached}>{processInfo}</text>}
                 <text fg={COLORS.textDim}> {timeInfo}</text>
+              </box>
+            );
+          }
+
+          if (item.type === 'replay-section') {
+            const textColor = isSelected ? COLORS.selected : '#8B949E';
+            const prefix = isSelected ? '>' : ' ';
+            const arrow = item.expanded ? '▾' : '▸';
+            return (
+              <box key={`replay-section-${item.workspaceId}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}   {arrow} </text>
+                <text fg={textColor}>History</text>
+                <text fg={COLORS.textDim}> ({item.count})</text>
+              </box>
+            );
+          }
+
+          if (item.type === 'orphaned-replay-section') {
+            const textColor = isSelected ? COLORS.selected : '#D29922';
+            const prefix = isSelected ? '>' : ' ';
+            const arrow = item.expanded ? '▾' : '▸';
+            return (
+              <box key={`orphaned-replay-section-${item.projectName}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}   {arrow} </text>
+                <text fg={textColor}>Orphaned History</text>
+                <text fg={COLORS.textDim}> ({item.count})</text>
+              </box>
+            );
+          }
+
+          if (item.type === 'replay') {
+            const replay = item.replay;
+            const textColor = isSelected ? COLORS.selected : replay.status === 'crashed' ? '#FF8888' : '#6CB6FF';
+            const prefix = isSelected ? '>' : ' ';
+            const statusLabel = replay.status === 'crashed' ? 'crashed' : 'replay';
+            const timeInfo = replay.endedAt ? formatTime(replay.endedAt) : formatTime(replay.startedAt);
+            const dismissedMark = replay.dismissedAt ? ' [hidden]' : '';
+
+            return (
+              <box key={`replay-${replay.replayId}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}     ↺ {replay.sessionName}</text>
+                <text fg={COLORS.textDim}> ({statusLabel}, {timeInfo}{dismissedMark})</text>
               </box>
             );
           }

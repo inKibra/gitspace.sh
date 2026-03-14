@@ -293,6 +293,72 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'replay-section') {
+            const arrow = item.expanded ? '▾' : '▸';
+            return (
+              <div
+                key={`replay-section-${item.workspaceId}`}
+                ref={isSelected ? selectedRowRef : null}
+                onClick={(e) => { e.stopPropagation(); void activateIndex(index); }}
+                onKeyDown={(e) => { if (!isActivateKey(e.key)) return; e.preventDefault(); e.stopPropagation(); void activateIndex(index); }}
+                role="button"
+                tabIndex={0}
+                className={`pl-8 sm:pl-10 pr-4 py-2 cursor-pointer border-b border-[#30363d] flex items-center gap-2 min-h-[36px] ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22]'}`}
+              >
+                <span className="text-[#6e7681] text-xs">{arrow}</span>
+                <span className="text-[#8b949e] text-xs font-medium">History</span>
+                <span className="text-[#6e7681] text-xs">({item.count})</span>
+              </div>
+            );
+          }
+
+          if (item.type === 'orphaned-replay-section') {
+            const arrow = item.expanded ? '▾' : '▸';
+            return (
+              <div
+                key={`orphaned-replay-section-${item.projectName}`}
+                ref={isSelected ? selectedRowRef : null}
+                onClick={(e) => { e.stopPropagation(); void activateIndex(index); }}
+                onKeyDown={(e) => { if (!isActivateKey(e.key)) return; e.preventDefault(); e.stopPropagation(); void activateIndex(index); }}
+                role="button"
+                tabIndex={0}
+                className={`pl-8 sm:pl-10 pr-4 py-2 cursor-pointer border-b border-[#30363d] flex items-center gap-2 min-h-[36px] ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22]'}`}
+              >
+                <span className="text-[#d29922] text-xs">{arrow}</span>
+                <span className="text-[#d29922] text-xs font-medium">Orphaned History</span>
+                <span className="text-[#6e7681] text-xs">({item.count})</span>
+              </div>
+            );
+          }
+
+          if (item.type === 'replay') {
+            const replay = item.replay;
+            const tone = replay.status === 'crashed' ? 'text-[#ff7b72]' : 'text-[#79c0ff]';
+            const dismissed = replay.dismissedAt ? ' opacity-50' : '';
+            return (
+              <div
+                key={`replay-${replay.replayId}`}
+                ref={isSelected ? selectedRowRef : null}
+                onClick={(e) => { e.stopPropagation(); void activateIndex(index); }}
+                onKeyDown={(e) => { if (!isActivateKey(e.key)) return; e.preventDefault(); e.stopPropagation(); void activateIndex(index); }}
+                role="button"
+                tabIndex={0}
+                className={`pl-12 sm:pl-14 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[48px] gap-3${dismissed} ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}`}
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <span className={`${tone} flex-shrink-0 text-xs`}>↺</span>
+                  <div className="min-w-0 flex-1">
+                    <span className="text-[#8b949e] truncate block text-sm">{replay.sessionName}</span>
+                    <span className={`text-xs truncate block ${tone}`}>{replay.status === 'crashed' ? 'crashed' : 'replay'}</span>
+                  </div>
+                </div>
+                <div className="text-xs text-[#6e7681] hidden sm:block shrink-0">
+                  {formatTime(replay.endedAt ?? replay.startedAt)}
+                </div>
+              </div>
+            );
+          }
+
           if (item.type === 'process') {
             const statusIcon = item.status === 'running' ? '▶' : item.status === 'failed' ? '✗' : '■';
             const statusColor = item.status === 'running' ? 'text-[#3fb950]' : item.status === 'failed' ? 'text-[#f85149]' : 'text-[#8b949e]';
@@ -580,6 +646,27 @@ function getFooterHint(selectedItem: TreeItem | null, hasVisibleActions: boolean
     return {
       desktop: ['Enter Attach', 'Kill Session', 'i Inbox', '? Help'],
       mobile: 'Tap to attach • Use Kill to end a session',
+    };
+  }
+
+  if (selectedItem?.type === 'replay-section') {
+    return {
+      desktop: [selectedItem.expanded ? 'Enter Collapse' : 'Enter Expand', 'r Refresh', '? Help'],
+      mobile: selectedItem.expanded ? 'Tap to collapse history' : 'Tap to expand history',
+    };
+  }
+
+  if (selectedItem?.type === 'orphaned-replay-section') {
+    return {
+      desktop: [selectedItem.expanded ? 'Enter Collapse' : 'Enter Expand', 'h Hidden', 'r Refresh', '? Help'],
+      mobile: selectedItem.expanded ? 'Tap to collapse orphaned history' : 'Tap to expand orphaned history',
+    };
+  }
+
+  if (selectedItem?.type === 'replay') {
+    return {
+      desktop: ['Enter Open', 'd Dismiss', 'h Hidden', 'r Refresh', '? Help'],
+      mobile: 'Tap to open replay • Press d to dismiss',
     };
   }
 

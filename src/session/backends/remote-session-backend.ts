@@ -27,6 +27,7 @@ import {
   type ListLinearIssuesRequest,
   type ListProjectsRequest,
   type ListGithubReposRequest,
+  type ListReplaysRequest,
   type ListRemoteBranchesRequest,
   type ListSessionsRequest,
   type ListWorkspacesRequest,
@@ -43,11 +44,17 @@ import {
   type ProjectDeletedResponse,
   type RemoteBranchListResponse,
   type ScriptOutputResponse,
+  type ReplayAnsiResponse,
+  type ReplayDismissedResponse,
+  type ReplayUndismissedResponse,
   type SessionCtrl,
   type StartProcessRequest,
   type StopProcessRequest,
   type UpdateNotificationConfigRequest,
   type WorkspaceCreatedResponse,
+  type GetReplayAnsiRequest,
+  type DismissReplayRequest,
+  type UndismissReplayRequest,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
@@ -202,6 +209,10 @@ export interface RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHe
 const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'workspace_list',
   'session_list',
+  'replay_list',
+  'replay_ansi',
+  'replay_dismissed',
+  'replay_undismissed',
   'attached',
   'detached',
   'session_exited',
@@ -470,6 +481,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
+  private pendingReplayAnsi:
+    | {
+        replayId: string;
+        resolve: (data: Uint8Array) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingDismissReplay:
+    | {
+        replayId: string;
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
+  private pendingUndismissReplay:
+    | {
+        replayId: string;
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
@@ -670,6 +705,101 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async listSessions(workspaceId?: string): Promise<void> {
     const command: ListSessionsRequest = { type: 'list_sessions', workspaceId };
     await this.sendCommand(command);
+  }
+
+  async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
+    const command: ListReplaysRequest = {
+      type: 'list_replays',
+      workspaceId,
+      includeDismissed,
+    };
+    await this.sendCommand(command);
+  }
+
+  async getReplayAnsi(replayId: string, atMs?: number): Promise<Uint8Array> {
+    if (this.pendingReplayAnsi) {
+      throw new Error('Replay ANSI request already in progress');
+    }
+
+    const command: GetReplayAnsiRequest = { type: 'get_replay_ansi', replayId, atMs };
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingReplayAnsi;
+        if (!pending || pending.replayId !== replayId) {
+          return;
+        }
+        this.pendingReplayAnsi = null;
+        pending.reject(new Error(`Timed out waiting for replay ANSI (${replayId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingReplayAnsi = { replayId, resolve, reject, timeout };
+
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingReplayAnsi;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingReplayAnsi = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async dismissReplay(replayId: string): Promise<void> {
+    if (this.pendingDismissReplay) {
+      throw new Error('Replay dismiss request already in progress');
+    }
+    const command: DismissReplayRequest = { type: 'dismiss_replay', replayId };
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingDismissReplay;
+        if (!pending || pending.replayId !== replayId) {
+          return;
+        }
+        this.pendingDismissReplay = null;
+        pending.reject(new Error(`Timed out dismissing replay (${replayId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingDismissReplay = { replayId, resolve, reject, timeout };
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingDismissReplay;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingDismissReplay = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async undismissReplay(replayId: string): Promise<void> {
+    if (this.pendingUndismissReplay) {
+      throw new Error('Replay restore request already in progress');
+    }
+    const command: UndismissReplayRequest = { type: 'undismiss_replay', replayId };
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingUndismissReplay;
+        if (!pending || pending.replayId !== replayId) {
+          return;
+        }
+        this.pendingUndismissReplay = null;
+        pending.reject(new Error(`Timed out restoring replay (${replayId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingUndismissReplay = { replayId, resolve, reject, timeout };
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingUndismissReplay;
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingUndismissReplay = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {
@@ -1585,6 +1715,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'session_list':
         this.emit({ type: 'sessions', sessions: message.sessions });
         return;
+      case 'replay_list':
+        this.emit({ type: 'replays', replays: message.replays });
+        return;
+      case 'replay_ansi':
+        this.resolveReplayAnsi(message);
+        return;
+      case 'replay_dismissed':
+        this.resolveDismissReplay(message);
+        return;
+      case 'replay_undismissed':
+        this.resolveUndismissReplay(message);
+        return;
       case 'attached':
         this.mode = 'attached';
         this.attachedSessionId = message.sessionId;
@@ -1687,6 +1829,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingCancelProject(message.message, message.projectName);
         this.rejectPendingWorkspaceCreate(message.message, message.workspaceId, message.projectName);
         this.rejectPendingProjectDelete(message.message, message.projectName);
+        this.rejectPendingReplayAnsi(message.message, undefined, true);
+        this.rejectPendingDismissReplay(message.message, undefined, true);
+        this.rejectPendingUndismissReplay(message.message, undefined, true);
         if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
@@ -1985,6 +2130,75 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
     clearTimeout(pending.timeout);
     this.pendingDeleteProject = null;
+    pending.reject(new Error(message));
+  }
+
+  private resolveReplayAnsi(message: ReplayAnsiResponse): void {
+    const pending = this.pendingReplayAnsi;
+    if (!pending || pending.replayId !== message.replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingReplayAnsi = null;
+    pending.resolve(this.crypto.decodeBase64(message.data));
+  }
+
+  private rejectPendingReplayAnsi(message: string, replayId?: string, force = false): void {
+    const pending = this.pendingReplayAnsi;
+    if (!pending) {
+      return;
+    }
+    if (!force && replayId && pending.replayId !== replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingReplayAnsi = null;
+    pending.reject(new Error(message));
+  }
+
+  private resolveDismissReplay(message: ReplayDismissedResponse): void {
+    const pending = this.pendingDismissReplay;
+    if (!pending || pending.replayId !== message.replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingDismissReplay = null;
+    pending.resolve();
+  }
+
+  private rejectPendingDismissReplay(message: string, replayId?: string, force = false): void {
+    const pending = this.pendingDismissReplay;
+    if (!pending) {
+      return;
+    }
+    if (!force && replayId && pending.replayId !== replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingDismissReplay = null;
+    pending.reject(new Error(message));
+  }
+
+  private resolveUndismissReplay(message: ReplayUndismissedResponse): void {
+    const pending = this.pendingUndismissReplay;
+    if (!pending || pending.replayId !== message.replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingUndismissReplay = null;
+    pending.resolve();
+  }
+
+  private rejectPendingUndismissReplay(message: string, replayId?: string, force = false): void {
+    const pending = this.pendingUndismissReplay;
+    if (!pending) {
+      return;
+    }
+    if (!force && replayId && pending.replayId !== replayId) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingUndismissReplay = null;
     pending.reject(new Error(message));
   }
 
@@ -2317,6 +2531,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingCancelProject('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceCreate('Remote session disconnected', undefined, undefined, true);
     this.rejectPendingProjectDelete('Remote session disconnected', undefined, true);
+    this.rejectPendingReplayAnsi('Remote session disconnected', undefined, true);
+    this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
+    this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
     this.rejectAllPendingReviewRequests('Remote session disconnected');
     this.connectPromise = null;

@@ -34,7 +34,7 @@ export function registerMachineCommands(parent: Command): void {
     }));
 
   // --------------------------------------------------------------------------
-  // gssh machine tmux [start|stop|status|list|new|attach|kill]
+  // gssh machine tmux [start|stop|status|list|new|attach|kill|replay]
   // --------------------------------------------------------------------------
   registerMachineTmuxCommands(cmd);
 }
@@ -157,5 +157,80 @@ function registerMachineTmuxCommands(machine: Command): void {
     .action(withErrorHandler(async (id) => {
       const { killTmux } = await import('../../commands/tmux.js');
       await killTmux(id);
+    }, { skipSetupCheck: true }));
+
+  const replay = tmux
+    .command('replay')
+    .description('Inspect saved tmux-lite replays');
+  configureTmuxSandbox(replay);
+
+  replay
+    .command('list')
+    .description('List captured replays')
+    .option('--all', 'Include dismissed replays')
+    .action(withErrorHandler(async (options) => {
+      const { listTmuxReplays } = await import('../../commands/tmux.js');
+      listTmuxReplays({ all: options.all });
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('text')
+    .description('Print replay terminal text')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .option('--at-ms <number>', 'Replay time offset in milliseconds', (value: string) => parseInt(value, 10))
+    .option('--scrollback-lines <number>', 'Scrollback lines to include', (value: string) => parseInt(value, 10))
+    .option('--include-scrollback', 'Include scrollback lines before the visible screen')
+    .action(withErrorHandler(async (replayRef, options) => {
+      const { showTmuxReplayText } = await import('../../commands/tmux.js');
+      await showTmuxReplayText(replayRef, {
+        atMs: options.atMs,
+        scrollbackLines: options.scrollbackLines,
+        includeScrollback: options.includeScrollback,
+      });
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('screenshot')
+    .description('Render a replay frame to PNG')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .option('--at-ms <number>', 'Replay time offset in milliseconds', (value: string) => parseInt(value, 10))
+    .option('--scrollback-lines <number>', 'Scrollback lines to include', (value: string) => parseInt(value, 10))
+    .option('--include-scrollback', 'Include scrollback lines before the visible screen')
+    .option('-o, --output <path>', 'Write PNG to this path')
+    .action(withErrorHandler(async (replayRef, options) => {
+      const { screenshotTmuxReplay } = await import('../../commands/tmux.js');
+      await screenshotTmuxReplay(replayRef, {
+        output: options.output,
+        atMs: options.atMs,
+        scrollbackLines: options.scrollbackLines,
+        includeScrollback: options.includeScrollback,
+      });
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('dismiss')
+    .description('Soft-hide a replay from default listing')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .action(withErrorHandler(async (replayRef) => {
+      const { dismissTmuxReplay } = await import('../../commands/tmux.js');
+      dismissTmuxReplay(replayRef);
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('undismiss')
+    .description('Restore a dismissed replay')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .action(withErrorHandler(async (replayRef) => {
+      const { undismissTmuxReplay } = await import('../../commands/tmux.js');
+      undismissTmuxReplay(replayRef);
+    }, { skipSetupCheck: true }));
+
+  replay
+    .command('delete')
+    .description('Permanently delete a replay from disk')
+    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
+    .action(withErrorHandler(async (replayRef) => {
+      const { deleteTmuxReplay } = await import('../../commands/tmux.js');
+      deleteTmuxReplay(replayRef);
     }, { skipSetupCheck: true }));
 }

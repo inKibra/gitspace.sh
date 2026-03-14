@@ -20,6 +20,7 @@ export type SessionUiCommand =
   | 'open-inbox'
   | 'bundle'
   | 'copy'
+  | 'toggle-hidden'
 
 function normalizeCommandKey(input: SessionCommandKeyInput): string | null {
   const key = input.key?.toLowerCase()
@@ -90,6 +91,7 @@ export function resolveSessionBrowserCommand(input: SessionCommandKeyInput): Ses
   if (key === '?') return 'help'
   if (key === 'x') return 'kill'
   if (key === 'd') return 'delete'
+  if (key === 'h') return 'toggle-hidden'
   if (key === 'i') return 'open-inbox'
   if (key === 'b') return 'bundle'
   return null

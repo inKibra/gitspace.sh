@@ -155,6 +155,10 @@ export async function removeWorkspace(
 		logger.info(`Killed ${result.sessionsKilled} active session(s)`)
 	}
 
+	if ((result.replaysDeleted ?? 0) > 0) {
+		logger.info(`Deleted ${result.replaysDeleted} replay artifact(s)`)
+	}
+
 	if (result.branchDeleted) {
 		logger.success(`Deleted branch: ${result.branch}`)
 	} else if (result.branch && !options.keepBranch) {
@@ -267,6 +271,10 @@ export async function removeProject(
 
 	if (result.sessionsKilled > 0) {
 		logger.info(`Killed ${result.sessionsKilled} active session(s)`)
+	}
+
+	if ((result.replaysDeleted ?? 0) > 0) {
+		logger.info(`Deleted ${result.replaysDeleted} replay artifact(s)`)
 	}
 
 	if (result.workspacesDeleted > 0) {
