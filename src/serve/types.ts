@@ -147,7 +147,7 @@ export type ServeEvent =
   | { type: "client_disconnected"; connectionId: string; reason: string }
   | { type: "relay_connected" }
   | { type: "relay_disconnected"; code: number; reason: string }
-  | { type: "relay_reconnecting"; attempt: number }
+  | { type: "relay_reconnecting"; attempt: number; nextRetryMs?: number }
   | { type: "error"; connectionId?: string; error: Error };
 
 /** Event handler for serve events */

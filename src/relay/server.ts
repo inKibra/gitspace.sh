@@ -135,6 +135,8 @@ import {
   getMachine,
   setMachineConnection,
   getRegistryStats,
+  updateMachineHeartbeat,
+  markMachineStaleWarned,
 } from "./registries";
 import {
   parseMessage,
@@ -695,6 +697,16 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     },
 
     websocket: {
+      // Explicit idle/ping configuration so behaviour is deterministic
+      // regardless of Bun version defaults.
+      //
+      // idleTimeout is set higher than our application-level heartbeat
+      // threshold (HEARTBEAT_STALE_MS = 90 s on the machine side) so that
+      // the app-level check fires first and the WebSocket-level timeout is
+      // merely a safety net for connections that send no data at all.
+      idleTimeout: 180, // seconds
+      sendPings: true,  // Bun sends WS-level ping frames automatically
+
       open(ws) {
         const { role, connectionId } = ws.data;
         console.log(`[ws] ${role} ${connectionId} connected`);
@@ -734,6 +746,10 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
           rawMsg = JSON.parse(msgStr);
           if (rawMsg && typeof rawMsg === "object" && (rawMsg as { type?: string }).type === "ping") {
             ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+            // Update heartbeat timestamp for stale-connection detection.
+            if (ws.data.role === "machine" && ws.data.machineId) {
+              updateMachineHeartbeat(ws.data.machineId);
+            }
             return;
           }
         } catch {
@@ -821,6 +837,53 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   });
 
   console.log(`[relay] Listening on ${bind}:${port}${hostname ? ` (serving ${hostname})` : ""}`);
+
+  // -------------------------------------------------------------------------
+  // Stale machine connection detection
+  //
+  // The machine daemon sends a ping every 30 s (HEARTBEAT_INTERVAL_MS).
+  // We check every 30 s as well. Thresholds:
+  //
+  //   > 90 s (3 missed pings)  → "stale warning" — log and note; keep open.
+  //   > 150 s (5 missed pings) → force-close the WebSocket so the machine's
+  //                               reconnect loop kicks in and re-registers.
+  //
+  // This handles the case where a network partition silently kills the
+  // connection without either side sending a TCP RST.
+  // -------------------------------------------------------------------------
+
+  const STALE_CHECK_INTERVAL_MS = 30_000;
+  const STALE_WARN_THRESHOLD_MS = 90_000;   // 3 missed pings
+  const STALE_CLOSE_THRESHOLD_MS = 150_000; // 5 missed pings (grace period)
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const machine of getAllMachines()) {
+      if (!machine.ws) continue; // already offline
+
+      const elapsed = now - machine.lastHeartbeatAt;
+
+      if (elapsed >= STALE_CLOSE_THRESHOLD_MS) {
+        // Grace period expired – force-close so the machine reconnects.
+        console.log(
+          `[relay] Machine ${machine.machineId} has been silent for ${Math.round(elapsed / 1000)}s – force-closing stale connection.`,
+        );
+        try {
+          machine.ws.close(4000, "Heartbeat timeout");
+        } catch {
+          // Socket may already be closed
+        }
+        // The close handler will mark the machine offline and notify clients.
+      } else if (elapsed >= STALE_WARN_THRESHOLD_MS && !machine.staleWarned) {
+        markMachineStaleWarned(machine.machineId);
+        console.log(
+          `[relay] Machine ${machine.machineId} may be stale (no heartbeat for ${Math.round(elapsed / 1000)}s). ` +
+          `Will force-close in ${Math.round((STALE_CLOSE_THRESHOLD_MS - elapsed) / 1000)}s if no heartbeat received.`,
+        );
+      }
+    }
+  }, STALE_CHECK_INTERVAL_MS);
+
   return server;
 }
 

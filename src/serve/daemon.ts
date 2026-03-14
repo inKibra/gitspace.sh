@@ -138,6 +138,10 @@ export interface StatusResponse {
   relay: {
     url: string;
     status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
+    /** Number of reconnect attempts since last successful connection */
+    reconnectAttempt?: number;
+    /** Timestamp (ms) of next reconnect attempt */
+    nextRetryAt?: number;
   };
   clients: number;
   hosting?: {
@@ -181,6 +185,10 @@ export interface DaemonState {
   relay: {
     url: string;
     status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
+    /** Number of reconnect attempts since last successful connection (0 when connected) */
+    reconnectAttempt?: number;
+    /** Timestamp (ms) of the next scheduled reconnect attempt */
+    nextRetryAt?: number;
   };
   clients: number;
   hosting?: {
@@ -237,7 +245,12 @@ export function startStatusServer(): void {
                 version: state.version,
                 pid: process.pid,
                 uptime: Math.floor((Date.now() - state.startTime) / 1000),
-                relay: state.relay,
+                relay: {
+                  url: state.relay.url,
+                  status: state.relay.status,
+                  reconnectAttempt: state.relay.reconnectAttempt,
+                  nextRetryAt: state.relay.nextRetryAt,
+                },
                 clients: state.clients,
                 hosting: state.hosting,
               };
