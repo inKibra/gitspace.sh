@@ -357,8 +357,6 @@ export async function connectToRemote(
       identity,
       deviceCertificate,
       tmuxSessionId: attached.sessionId,
-      cols: terminalSize.cols,
-      rows: terminalSize.rows,
     };
 
     await startTerminalSession(backend, reconnectCtx);
@@ -498,8 +496,9 @@ interface ReconnectContext {
   deviceCertificate: string;
   /** tmux-lite session ID to re-attach to after reconnect */
   tmuxSessionId: string;
-  cols: number;
-  rows: number;
+  // cols/rows are intentionally omitted: the reconnect loop reads live
+  // process.stdout values so it always uses the current terminal size,
+  // not the (possibly stale) size captured at initial attach time.
 }
 
 /** Build a fresh RemoteSessionBackend + WebSocket */
@@ -606,7 +605,10 @@ async function startTerminalSession(
       }
       reconnecting = true;
 
-      const { relayUrl, machineId, identity, deviceCertificate, tmuxSessionId, cols, rows } = reconnectCtx;
+      const { relayUrl, machineId, identity, deviceCertificate, tmuxSessionId } = reconnectCtx;
+      // Read current terminal size at reconnect time (not the stale size from
+      // initial attach, which may differ if the user resized the window).
+      const { cols, rows } = getTerminalSize();
 
       for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
         if (stopping) break;
@@ -630,29 +632,40 @@ async function startTerminalSession(
             process.stdout.write(Buffer.from(data));
           });
 
-          await newBackend.connect();
-
-          // Re-attach to the same tmux-lite session.
-          const attachWait = waitForBackendEvent(
-            newBackend,
-            (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-            30000,
-            'attach confirmation'
-          );
-
+          let attachSucceeded = false;
           try {
-            await newBackend.attachSession({
-              sessionId: tmuxSessionId,
-              cols,
-              rows,
-            });
-          } catch (attachErr) {
-            attachWait.cancel();
-            await newBackend.disconnect().catch(() => {});
-            throw attachErr;
-          }
+            await newBackend.connect();
 
-          await attachWait.promise;
+            // Re-attach to the same tmux-lite session.
+            const attachWait = waitForBackendEvent(
+              newBackend,
+              (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+              30000,
+              'attach confirmation'
+            );
+
+            try {
+              await newBackend.attachSession({
+                sessionId: tmuxSessionId,
+                cols,
+                rows,
+              });
+            } catch (attachErr) {
+              attachWait.cancel();
+              throw attachErr;
+            }
+
+            // This can also throw (timeout or command_error) — caught below.
+            await attachWait.promise;
+
+            attachSucceeded = true;
+          } finally {
+            // Disconnect the new backend if anything above failed so we don't
+            // leak open WebSocket connections across retry attempts.
+            if (!attachSucceeded) {
+              await newBackend.disconnect().catch(() => {});
+            }
+          }
 
           // Swap backend and wire stdin/resize to the new one.
           const oldUnsub = unsubEvents;

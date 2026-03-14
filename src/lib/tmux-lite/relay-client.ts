@@ -83,6 +83,13 @@ export class RelayClient {
   private events: RelayClientEvents;
   private state: ConnectionState = "disconnected";
   private reconnectAttempts = 0;
+  /**
+   * True after the first successful handshake completes. Never reset to false.
+   * Used to distinguish the initial connect from subsequent reconnects, since
+   * `reconnectAttempts` is reset to 0 in `onopen` (before the handshake
+   * finishes), making it an unreliable reconnect indicator at handshake time.
+   */
+  private hasEverConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readKey: Buffer | null = null;
   private writeKey: Buffer | null = null;
@@ -457,15 +464,16 @@ export class RelayClient {
           this.writeKey = Buffer.from(result.sessionKeys.sendKey);
           this.readKey = Buffer.from(result.sessionKeys.receiveKey);
 
-          const isReconnect = this.reconnectAttempts > 0;
+          const isReconnect = this.hasEverConnected;
           const previousTmuxSessionId = isReconnect ? this.activeTmuxSessionId : null;
 
           console.log(
             isReconnect
-              ? `[relay-client] Reconnected successfully (attempt ${this.reconnectAttempts}).${previousTmuxSessionId ? ` Will re-attach to session ${previousTmuxSessionId}.` : ""}`
+              ? `[relay-client] Reconnected successfully.${previousTmuxSessionId ? ` Will re-attach to session ${previousTmuxSessionId}.` : ""}`
               : "[relay-client] Handshake complete, session established",
           );
 
+          this.hasEverConnected = true;
           this.reconnectAttempts = 0;
           this.setState("connected");
           this.events.onConnect?.();
