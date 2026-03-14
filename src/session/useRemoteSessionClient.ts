@@ -494,9 +494,14 @@ export function useRemoteSessionClient<ConnectParams>(
     const prev = prevBackendStatusRef.current;
     prevBackendStatusRef.current = backendStatus;
 
-    // Only fire on the established → disconnected transition with a live session.
+    // Fire on any "was connected" → disconnected transition with a live session.
+    // 'error' is included because a WebSocket onerror fires before onclose,
+    // so the engine may briefly enter 'error' before settling on 'disconnected'.
+    // 'connecting' is excluded — a failure before establishing means there was
+    // no session to restore.
+    const wasConnected = prev === 'established' || prev === 'error';
     if (
-      prev === 'established' &&
+      wasConnected &&
       backendStatus === 'disconnected' &&
       connectParamsRef.current &&
       lastAttachedSessionIdRef.current

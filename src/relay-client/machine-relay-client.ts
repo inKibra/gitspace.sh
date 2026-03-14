@@ -321,15 +321,17 @@ export async function connectMachineRelay(
           return;
         }
 
-        // Check if the connection has gone silent.
+        // Send the ping first so the stale check on the *next* tick accounts
+        // for the full HEARTBEAT_STALE_MS window rather than adding an extra
+        // HEARTBEAT_INTERVAL_MS of latency to detection.
+        ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+
+        // Check if the connection has gone silent (no pong in HEARTBEAT_STALE_MS).
         if (Date.now() - lastPongAt > HEARTBEAT_STALE_MS) {
-          console.log('[serve] Heartbeat stale – no pong received within', HEARTBEAT_STALE_MS, 'ms. Forcing reconnect.');
+          logger.log(`[serve] Heartbeat stale – no pong received within ${HEARTBEAT_STALE_MS}ms. Forcing reconnect.`);
           stopHeartbeat();
           ws.close(4001, 'Heartbeat timeout');
-          return;
         }
-
-        ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
       }, HEARTBEAT_INTERVAL_MS);
 
       // Store updater so the message handler can reset the stale clock.
