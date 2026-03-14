@@ -150,6 +150,7 @@ export async function ensureServeOwnerBindingForStartup(
         'Re-run with `gssh machine serve start --takeover` to clear the persisted relay control state and bind it to the recovered identity.',
       ].filter((line): line is string => line !== null).join('\n');
 
+      logger.error(`[serve] owner binding mismatch during startup.\n${mismatchMessage}`);
       throw new SpacesError(
         mismatchMessage,
         'USER_ERROR',
@@ -1035,6 +1036,17 @@ export async function serveStart(options: {
       options.relayPubkey ??= relayIdentity.publicKey;
     }
 
+    if (options.takeover && !options.yes && !usingUnlockMode) {
+      const userRootAuth = await resolveUserRootAuthorizationConfig({
+        yes: options.yes,
+        devicePasswordContext,
+      });
+      await ensureServeOwnerBindingForStartup(userRootAuth.ownerUserRootId, {
+        takeover: true,
+        yes: false,
+      });
+    }
+
     logger.log('Starting serve daemon...');
 
     // Build args for background process
@@ -1056,9 +1068,6 @@ export async function serveStart(options: {
     }
     if (options.takeover) {
       serveArgs.push('--takeover');
-      if (!options.yes) {
-        serveArgs.push('--yes');
-      }
     }
     if (!usingUnlockMode) {
       serveArgs.push('--password-stdin');

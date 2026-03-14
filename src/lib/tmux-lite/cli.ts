@@ -58,17 +58,22 @@ const TERM_RESET = "\x1bc";
 
 const SERVER_SCRIPT = `${import.meta.dir}/server.ts`;
 
-function getOptionValue(args: string[], optionName: string): string | undefined {
+function parseOptionValue(args: string[], optionName: string): { value?: string; consumedNextArg: boolean; invalid: boolean } {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === optionName) {
-      return args[index + 1];
+      const next = args[index + 1];
+      if (!next || next.trim().length === 0 || next.startsWith("-")) {
+        return { consumedNextArg: false, invalid: true };
+      }
+      return { value: next, consumedNextArg: true, invalid: false };
     }
     if (arg?.startsWith(`${optionName}=`)) {
-      return arg.slice(optionName.length + 1);
+      const value = arg.slice(optionName.length + 1);
+      return { value, consumedNextArg: false, invalid: value.trim().length === 0 };
     }
   }
-  return undefined;
+  return { consumedNextArg: false, invalid: false };
 }
 
 function stripOption(args: string[], optionName: string): string[] {
@@ -76,7 +81,9 @@ function stripOption(args: string[], optionName: string): string[] {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === optionName) {
-      index += 1;
+      if (parseOptionValue(args.slice(index, index + 2), optionName).consumedNextArg) {
+        index += 1;
+      }
       continue;
     }
     if (arg?.startsWith(`${optionName}=`)) {
@@ -87,32 +94,44 @@ function stripOption(args: string[], optionName: string): string[] {
   return stripped;
 }
 
-// CLI args
-const rawArgs = process.argv.slice(2);
-const isTestMode = rawArgs.includes("--test");
-const sandboxName = getOptionValue(rawArgs, "--sandbox");
-if (sandboxName) {
-  applyTmuxLiteSandboxEnvironment(sandboxName);
+function parseCliContext(rawArgs: string[]) {
+  const isTestMode = rawArgs.includes("--test");
+  const sandboxOption = parseOptionValue(rawArgs, "--sandbox");
+  if (sandboxOption.invalid) {
+    throw new Error("--sandbox requires a non-empty value");
+  }
+  const args = stripOption(rawArgs.filter(arg => arg !== "--test"), "--sandbox");
+  return {
+    args,
+    cmd: args[0] || "list",
+    isTestMode,
+    sandboxName: sandboxOption.value,
+  };
 }
-if (isTestMode) {
-  applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
-}
-const args = stripOption(rawArgs.filter(arg => arg !== "--test"), "--sandbox");
-const cmd = args[0] || "list";
 
-const getServerCommand = (): string[] => {
+function initializeCliEnvironment(context: { sandboxName?: string; isTestMode: boolean }): void {
+  if (context.sandboxName) {
+    applyTmuxLiteSandboxEnvironment(context.sandboxName);
+  }
+  if (context.isTestMode) {
+    applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
+  }
+}
+
+const getServerCommand = (options: { testMode?: boolean } = {}): string[] => {
   // Detect if we're running as a compiled binary (not bun)
   const isCompiled = !process.execPath.endsWith('bun');
+  const testMode = options.testMode === true;
 
   if (isCompiled) {
     // Use the binary with internal flag
-    return isTestMode
+    return testMode
       ? [process.execPath, '--internal-tmux-server', '--test']
       : [process.execPath, '--internal-tmux-server'];
   }
 
   // Dev mode: use bun run
-  return isTestMode
+  return testMode
     ? ['bun', 'run', SERVER_SCRIPT, '--test']
     : ['bun', 'run', SERVER_SCRIPT];
 };
@@ -673,6 +692,10 @@ function handleAttachResult(result: AttachResult): void {
 
 // Main
 async function main() {
+  const context = parseCliContext(process.argv.slice(2));
+  initializeCliEnvironment(context);
+  const { args, cmd, isTestMode } = context;
+
   // Start server if not running
   if (!(await isServerRunning())) {
     if (cmd === "kill-server") {
@@ -681,7 +704,7 @@ async function main() {
     }
     console.log("Starting server...");
     spawn({
-      cmd: getServerCommand(),
+      cmd: getServerCommand({ testMode: isTestMode }),
       // Use "ignore" so server doesn't inherit CLI's stdout/stderr
       // This allows CLI to exit cleanly when piped
       stdout: "ignore",
@@ -876,6 +899,7 @@ const NON_INTERACTIVE_COMMANDS = new Set([
 if (import.meta.main) {
   main()
     .then(() => {
+      const { cmd } = parseCliContext(process.argv.slice(2));
       // Force exit after non-interactive commands complete
       // Some socket references may keep the event loop alive otherwise
       if (NON_INTERACTIVE_COMMANDS.has(cmd)) {

@@ -175,6 +175,16 @@ function clearRouterSocketState(socket: object): void {
 }
 
 function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean } = {}): void {
+  clearAttachTimer(session);
+  session.attachPending = false;
+  session.attaching = false;
+  session.attachBuffer = [];
+  session.info.attached = false;
+  session.clientWriter = null;
+  if (session.client) {
+    try { session.client.end(); } catch {}
+    session.client = null;
+  }
   stopListener(session.listener);
   safeUnlink(session.info.socketPath);
   if (options.removeFromMap !== false) {
@@ -1196,6 +1206,20 @@ function getShellInitScript(shell: string, hooks?: SessionCreateHooks): string |
   return `${scriptParts.join('\n')}\n`;
 }
 
+function cleanupFailedSessionCreation(
+  sessionName: string,
+  proc: Bun.Subprocess,
+  xterm: XTerminal,
+  disposeDsr: () => void,
+  socketPath: string
+): void {
+  try { disposeDsr(); } catch {}
+  try { proc.kill(9); } catch {}
+  try { xterm.dispose(); } catch {}
+  safeUnlink(socketPath);
+  console.warn(`[${sessionName}] cleaned up failed session startup`);
+}
+
 // ============================================================================
 // Main Session Creation
 // ============================================================================
@@ -1325,10 +1349,16 @@ function createSession(
   const socketHandlers = createSessionSocketHandlers(id, sessionName, proc, startAttach);
 
   // Create session socket
-  const listener = Bun.listen({
-    unix: socketPath,
-    socket: socketHandlers,
-  });
+  let listener;
+  try {
+    listener = Bun.listen({
+      unix: socketPath,
+      socket: socketHandlers,
+    });
+  } catch (error) {
+    cleanupFailedSessionCreation(sessionName, proc, xterm, disposeDsr, socketPath);
+    throw error;
+  }
 
   // Store session data
   sessions.set(id, {
@@ -1512,9 +1542,6 @@ routerListener = Bun.listen({
     drain(socket) {
       const socketState = getRouterSocketState(socket);
       socketState.writer?.flush?.();
-    },
-    close(socket) {
-      clearRouterSocketState(socket);
     }
   }
 });

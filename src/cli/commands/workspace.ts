@@ -10,9 +10,9 @@
 
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
+import { configureTmuxSandbox } from '../tmux-sandbox.js';
 import { useExplicitContext, getWorkspacePath } from '../workspace-context.js';
 import { SpacesError } from '../../types/errors.js';
-import { applyTmuxLiteSandboxEnvironment } from '../../lib/tmux-lite/protocol.js';
 
 // ============================================================================
 // Helpers
@@ -28,16 +28,6 @@ function requireProjectAndWorkspace(command: Command): Command {
   return command
     .requiredOption('--project <name>', 'Project name (required)')
     .requiredOption('--workspace <name>', 'Workspace name (required)');
-}
-
-function configureTmuxSandbox(command: Command): void {
-  command.option('--sandbox <name>', 'Use an isolated tmux-lite runtime sandbox');
-  command.hook('preAction', (_command, actionCommand) => {
-    const sandbox = actionCommand.opts().sandbox ?? actionCommand.parent?.opts().sandbox;
-    if (sandbox) {
-      applyTmuxLiteSandboxEnvironment(sandbox);
-    }
-  });
 }
 
 // ============================================================================

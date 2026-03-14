@@ -12,6 +12,7 @@ export const TMUX_LITE_SANDBOX_ENV = "TMUX_LITE_SANDBOX";
 const DEFAULT_ROUTER_SOCKET = "/tmp/tmux-lite.sock";
 const DEFAULT_PID_FILE = "/tmp/tmux-lite.pid";
 const DEFAULT_SESSION_DIR = "/tmp";
+const MAX_UNIX_SOCKET_PATH_LENGTH = 108;
 
 export interface TmuxLitePaths {
   routerSocket: string;
@@ -21,6 +22,12 @@ export interface TmuxLitePaths {
 
 function normalizeSessionDir(dir: string): string {
   return dir.endsWith("/") ? dir.slice(0, -1) : dir;
+}
+
+function assertUnixSocketPathLength(path: string): void {
+  if (path.length > MAX_UNIX_SOCKET_PATH_LENGTH) {
+    throw new Error(`tmux-lite socket path exceeds ${MAX_UNIX_SOCKET_PATH_LENGTH} bytes: ${path}`);
+  }
 }
 
 export function normalizeTmuxLiteSandboxName(name: string): string {
@@ -42,8 +49,10 @@ export function getTmuxLiteSandbox(): string | undefined {
 export function getTmuxLitePathsForSandbox(sandbox: string): TmuxLitePaths {
   const normalized = normalizeTmuxLiteSandboxName(sandbox);
   const base = `/tmp/tmux-lite-${normalized}`;
+  const routerSocket = `${base}.sock`;
+  assertUnixSocketPathLength(routerSocket);
   return {
-    routerSocket: `${base}.sock`,
+    routerSocket,
     pidFile: `${base}.pid`,
     sessionDir: base,
   };
@@ -126,7 +135,9 @@ export function getSessionSocketPath(id: string): string {
     throw new Error(`Invalid session ID: ${id}`);
   }
   const normalizedDir = getSessionDir();
-  return `${normalizedDir}/tmux-lite-${id}.sock`;
+  const socketPath = `${normalizedDir}/tmux-lite-${id}.sock`;
+  assertUnixSocketPathLength(socketPath);
+  return socketPath;
 }
 
 const ROUTER_FRAME_HEADER_BYTES = 4;

@@ -8,17 +8,7 @@
 
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
-import { applyTmuxLiteSandboxEnvironment } from '../../lib/tmux-lite/protocol.js';
-
-function configureTmuxSandbox(command: Command): void {
-  command.option('--sandbox <name>', 'Use an isolated tmux-lite runtime sandbox');
-  command.hook('preAction', (_command, actionCommand) => {
-    const sandbox = actionCommand.opts().sandbox ?? actionCommand.parent?.opts().sandbox;
-    if (sandbox) {
-      applyTmuxLiteSandboxEnvironment(sandbox);
-    }
-  });
-}
+import { configureTmuxSandbox } from '../tmux-sandbox.js';
 
 export function registerMachineCommands(parent: Command): void {
   const cmd = parent
