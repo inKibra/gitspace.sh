@@ -32,5 +32,9 @@ export type ConnectionParams = WebRemoteSessionConnectParams
 export function useTerminal() {
   return useSessionClient<ConnectionParams>({
     createBackend: createWebRemoteSessionBackend,
+    // Strip the pre-opened WebSocket before saving params for reconnection.
+    // On reconnect, createWebRemoteSessionBackend will open a fresh socket
+    // from relayUrl instead of reusing the dead closed one.
+    toReconnectParams: (params) => ({ ...params, ws: undefined }),
   })
 }

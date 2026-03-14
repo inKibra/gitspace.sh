@@ -4,6 +4,7 @@ export type SessionClientConnectionStatus =
   | 'disconnected'
   | 'connecting'
   | 'established'
+  | 'reconnecting'
   | 'error'
 
 export type SessionClientMode = 'browsing' | 'attached'

@@ -45,6 +45,7 @@ export type RemoteSessionConnectionStatus =
   | 'disconnected'
   | 'connecting'
   | 'established'
+  | 'reconnecting'
   | 'error';
 
 export interface RemoteSessionPtyBackend extends SessionBackend {
@@ -61,6 +62,12 @@ export interface UseRemoteSessionClientOptions<ConnectParams> {
   mapConnectionStatus?: (
     status: BackendSessionState['status']
   ) => RemoteSessionConnectionStatus;
+  /**
+   * Optional transform applied to ConnectParams before storing them for
+   * reconnection. Use this to strip transport-specific state (e.g. a
+   * pre-opened WebSocket) that would be dead on subsequent attempts.
+   */
+  toReconnectParams?: (params: ConnectParams) => ConnectParams;
 }
 
 export interface UseRemoteSessionClientReturn<ConnectParams> {
@@ -160,7 +167,7 @@ function defaultStatusMapper(
 export function useRemoteSessionClient<ConnectParams>(
   options: UseRemoteSessionClientOptions<ConnectParams>
 ): UseRemoteSessionClientReturn<ConnectParams> {
-  const { createBackend, mapConnectionStatus = defaultStatusMapper } = options;
+  const { createBackend, mapConnectionStatus = defaultStatusMapper, toReconnectParams } = options;
   const engine = useSessionEngine();
   const registerBackend = engine.registerBackend;
   const setActiveBackend = engine.setActiveBackend;
@@ -173,6 +180,30 @@ export function useRemoteSessionClient<ConnectParams>(
   const backendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
 
+  // -------------------------------------------------------------------------
+  // Reconnection state
+  //
+  // When the backend transitions established→disconnected while a session is
+  // attached, we automatically reconnect and re-attach to the same tmux-lite
+  // session (terminal state is preserved server-side by xterm-headless).
+  //
+  // Key design choices:
+  //   - connectParamsRef stores a reconnect-safe copy of params (transient
+  //     transport objects like a pre-opened WebSocket are stripped via
+  //     toReconnectParams so every retry gets a fresh socket)
+  //   - lastAttachedSessionIdRef is only populated from the 'attached' event
+  //     and cleared on explicit detach — so reconnect only fires when the user
+  //     was actually in attached mode when the drop happened
+  //   - lastModeRef preserves the mode across the gap so the UI doesn't flash
+  //     back to browsing while the reconnect loop is in flight
+  //   - abort ref prevents races between concurrent connect() calls and loops
+  // -------------------------------------------------------------------------
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const connectParamsRef = useRef<ConnectParams | null>(null);
+  const lastAttachedSessionIdRef = useRef<string | null>(null);
+  const lastModeRef = useRef<'browsing' | 'attached'>('browsing');
+  const reconnectAbortRef = useRef<{ aborted: boolean }>({ aborted: false });
+
   const activeBackendState = useMemo(() => {
     const backendKey = activeBackendKeyRef.current;
     if (!backendKey) {
@@ -182,11 +213,14 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [engine, engine.state]);
 
   const status = useMemo<RemoteSessionConnectionStatus>(() => {
+    if (isReconnecting) {
+      return 'reconnecting';
+    }
     if (!activeBackendState) {
       return 'disconnected';
     }
     return mapConnectionStatus(activeBackendState.status);
-  }, [activeBackendState, mapConnectionStatus]);
+  }, [activeBackendState, isReconnecting, mapConnectionStatus]);
 
   const withActiveBackend = useCallback(
     async <T>(fn: (backendKey: BackendKey) => Promise<T>): Promise<T | null> => {
@@ -201,6 +235,11 @@ export function useRemoteSessionClient<ConnectParams>(
 
   const connect = useCallback(
     async (params: ConnectParams) => {
+      // Cancel any in-flight reconnect loop before starting fresh.
+      reconnectAbortRef.current.aborted = true;
+      reconnectAbortRef.current = { aborted: false };
+      setIsReconnecting(false);
+
       const previousBackendKey = activeBackendKeyRef.current;
       if (previousBackendKey) {
         await disconnectBackend(previousBackendKey);
@@ -216,6 +255,9 @@ export function useRemoteSessionClient<ConnectParams>(
 
       backendRef.current = backend;
       activeBackendKeyRef.current = backendKey;
+      // Save reconnect-safe params (strip dead transports like a closed WebSocket).
+      connectParamsRef.current = toReconnectParams ? toReconnectParams(params) : params;
+      lastAttachedSessionIdRef.current = null;
 
       registerBackend(backend);
       setActiveBackend(backendKey);
@@ -226,13 +268,21 @@ export function useRemoteSessionClient<ConnectParams>(
         await unregisterBackend(backendKey);
         activeBackendKeyRef.current = null;
         backendRef.current = null;
+        connectParamsRef.current = null;
         throw error;
       }
     },
-    [connectBackend, createBackend, disconnectBackend, registerBackend, setActiveBackend, unregisterBackend]
+    [connectBackend, createBackend, disconnectBackend, registerBackend, setActiveBackend, toReconnectParams, unregisterBackend]
   );
 
   const disconnect = useCallback(() => {
+    // Cancel any in-flight reconnect loop — this is an intentional disconnect.
+    reconnectAbortRef.current.aborted = true;
+    reconnectAbortRef.current = { aborted: false };
+    setIsReconnecting(false);
+    connectParamsRef.current = null;
+    lastAttachedSessionIdRef.current = null;
+
     const backendKey = activeBackendKeyRef.current;
     if (!backendKey) {
       return;
@@ -347,6 +397,9 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [engine, withActiveBackend]);
 
   const detachSession = useCallback(() => {
+    // Clear the saved session ID — an explicit detach means we should NOT
+    // re-attach to this session if the connection drops later in browsing mode.
+    lastAttachedSessionIdRef.current = null;
     void withActiveBackend((backendKey) => engine.detachSession(backendKey));
   }, [engine, withActiveBackend]);
 
@@ -369,6 +422,23 @@ export function useRemoteSessionClient<ConnectParams>(
     [requestSessions, requestWorkspaces]
   );
 
+  // Track the most recently attached session ID so reconnect can re-attach.
+  // Only update when we have a real session ID; cleared on explicit detach above.
+  useEffect(() => {
+    const attachedId = activeBackendState?.attachedSessionId;
+    if (attachedId) {
+      lastAttachedSessionIdRef.current = attachedId;
+    }
+  }, [activeBackendState?.attachedSessionId]);
+
+  // Preserve last-known mode so UI doesn't flash to browsing during reconnect.
+  useEffect(() => {
+    const mode = activeBackendState?.mode;
+    if (mode) {
+      lastModeRef.current = mode;
+    }
+  }, [activeBackendState?.mode]);
+
   useEffect(() => {
     const projects = activeBackendState?.projects ?? [];
 
@@ -388,6 +458,120 @@ export function useRemoteSessionClient<ConnectParams>(
       selectProject(preferredProjectName);
     }
   }, [activeBackendState?.projects, selectProject, selectedProjectName]);
+
+  // -------------------------------------------------------------------------
+  // Automatic reconnection on unexpected disconnect
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    // Only trigger when:
+    //   1. We are now disconnected (not reconnecting/connecting)
+    //   2. We have saved connect params (i.e. connect() was called before)
+    //   3. We had an active tmux session at the time of disconnect
+    //      (lastAttachedSessionIdRef is cleared on explicit detach, so this
+    //       prevents re-attach when the user is in browsing mode)
+    if (
+      status !== 'disconnected' ||
+      !connectParamsRef.current ||
+      !lastAttachedSessionIdRef.current
+    ) {
+      return;
+    }
+
+    const params = connectParamsRef.current;
+    const sessionId = lastAttachedSessionIdRef.current;
+    const abort = reconnectAbortRef.current;
+
+    const MAX_RECONNECT_ATTEMPTS = 10;
+    const BASE_DELAY_MS = 1_000;
+    const MAX_DELAY_MS = 30_000;
+
+    setIsReconnecting(true);
+
+    const run = async () => {
+      for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+        if (abort.aborted) return;
+
+        const delay = attempt === 1
+          ? 0
+          : Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 2) + Math.random() * 1_000, MAX_DELAY_MS);
+
+        if (delay > 0) {
+          logger.log(`[session] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})...`);
+          await new Promise<void>((r) => setTimeout(r, delay));
+        } else {
+          logger.log(`[session] Reconnecting... (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})`);
+        }
+
+        if (abort.aborted) return;
+
+        try {
+          // Tear down the old (disconnected) backend.
+          const oldBackendKey = activeBackendKeyRef.current;
+          if (oldBackendKey) {
+            await disconnectBackend(oldBackendKey);
+            await unregisterBackend(oldBackendKey);
+            activeBackendKeyRef.current = null;
+            backendRef.current = null;
+          }
+
+          if (abort.aborted) return;
+
+          // Build and connect a fresh backend with the saved (reconnect-safe) params.
+          const { backendKey, backend } = createBackend(params);
+          if (backend.setPtyOutputHandler) {
+            backend.setPtyOutputHandler(writeCallbackRef.current);
+          }
+
+          backendRef.current = backend;
+          activeBackendKeyRef.current = backendKey;
+          registerBackend(backend);
+          setActiveBackend(backendKey);
+
+          await connectBackend(backendKey);
+
+          if (abort.aborted) {
+            await disconnectBackend(backendKey);
+            await unregisterBackend(backendKey);
+            activeBackendKeyRef.current = null;
+            backendRef.current = null;
+            return;
+          }
+
+          // Re-attach to the same tmux-lite session (terminal state preserved).
+          await backend.attachSession({ sessionId });
+
+          if (!abort.aborted) {
+            logger.log(`[session] Reconnected and re-attached to session ${sessionId}`);
+            setIsReconnecting(false);
+          }
+          return;
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          logger.log(`[session] Reconnect attempt ${attempt} failed: ${detail}`);
+
+          // Clean up failed backend before next attempt.
+          const failedKey = activeBackendKeyRef.current;
+          if (failedKey) {
+            await disconnectBackend(failedKey).catch(() => {});
+            await unregisterBackend(failedKey).catch(() => {});
+            activeBackendKeyRef.current = null;
+            backendRef.current = null;
+          }
+        }
+      }
+
+      // All attempts exhausted.
+      if (!abort.aborted) {
+        logger.log('[session] Reconnect failed after all attempts.');
+        setIsReconnecting(false);
+        connectParamsRef.current = null;
+        lastAttachedSessionIdRef.current = null;
+      }
+    };
+
+    void run();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   const killSession = useCallback((sessionId: string) => {
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
@@ -592,7 +776,9 @@ export function useRemoteSessionClient<ConnectParams>(
 
   return useMemo(() => ({
     status,
-    mode: activeBackendState?.mode ?? 'browsing',
+    // During reconnect, preserve the last known mode so the UI doesn't flash
+    // back to the browsing state while the reconnect loop is in flight.
+    mode: isReconnecting ? lastModeRef.current : (activeBackendState?.mode ?? 'browsing'),
 
     projects: activeBackendState?.projects ?? [],
     workspaces: activeBackendState?.workspaces ?? [],
@@ -663,6 +849,7 @@ export function useRemoteSessionClient<ConnectParams>(
     sessionBackend: backendRef.current as SessionBackend | null,
   }), [
     status,
+    isReconnecting,
     activeBackendState,
     selectedProjectName,
     connect,

@@ -1107,6 +1107,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     if (remote.status === 'connecting') {
       return 'Connecting to remote machine...';
     }
+    if (remote.status === 'reconnecting') {
+      return 'Connection lost. Reconnecting...';
+    }
     if (remote.status === 'error') {
       return 'Connection failed';
     }
@@ -1189,7 +1192,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     );
   }
 
-  if (remote.status !== 'established') {
+  if (remote.status !== 'established' && remote.status !== 'reconnecting') {
     return (
       <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
         <text fg={remote.status === 'error' ? COLORS.error : COLORS.loading}>{statusMessage}</text>
