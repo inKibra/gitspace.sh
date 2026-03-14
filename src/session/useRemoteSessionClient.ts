@@ -521,7 +521,13 @@ export function useRemoteSessionClient<ConnectParams>(
 
     const params = connectParamsRef.current;
     const sessionId = lastAttachedSessionIdRef.current;
-    const abort = reconnectAbortRef.current;
+
+    // Create a fresh abort sentinel for this invocation. The cleanup from the
+    // previous run may have set the old object to aborted; assigning a new one
+    // here ensures each reconnect cycle starts clean even when reconnectTrigger
+    // increments multiple times in succession.
+    const abort = { aborted: false };
+    reconnectAbortRef.current = abort;
 
     const MAX_RECONNECT_ATTEMPTS = 10;
     const BASE_DELAY_MS = 1_000;
