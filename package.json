@@ -13,6 +13,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun src/index.ts",
+    "check:lockfile-sync": "bun scripts/check-lockfile-sync.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "build:web": "cd web && bun install && bun run build",

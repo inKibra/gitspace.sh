@@ -41,10 +41,10 @@
         "typescript": "^5.9.3",
       },
       "optionalDependencies": {
-        "@gitspace/darwin-arm64": "0.2.0-rc.32",
-        "@gitspace/darwin-x64": "0.2.0-rc.32",
-        "@gitspace/linux-arm64": "0.2.0-rc.32",
-        "@gitspace/linux-x64": "0.2.0-rc.32",
+        "@gitspace/darwin-arm64": "0.2.0-rc.34",
+        "@gitspace/darwin-x64": "0.2.0-rc.34",
+        "@gitspace/linux-arm64": "0.2.0-rc.34",
+        "@gitspace/linux-x64": "0.2.0-rc.34",
       },
     },
   },
@@ -67,13 +67,13 @@
 
     "@fly/sprites": ["@fly/sprites@0.0.1-rc37", "", {}, "sha512-yzjJ8bsBl1XoECSols0iFvvmlqiog22ODO8F3Z+8mao44ZaMYiOVjRTuSd2g+rE0OFuj0u/ctlpPTHfVdpgWKA=="],
 
-    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.32", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-VQgsN8Qktf+8KriLKXpfbYJoHkcXFtLzN+Sz3/SWJocd3HZebYrDxBUjTM+iwdtMzwpxoDmE1RS4hIqZJ5BmMg=="],
+    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.34", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-HJqcg0/pc59Q3lzdCrU3R26SFBVM5jCzb9Fw6AOmP1reJRGWSjFmY7D92WtAu7cl81QONIFm5IPeSnNbIZKJvg=="],
 
-    "@gitspace/darwin-x64": ["@gitspace/darwin-x64@0.2.0-rc.32", "", { "os": "darwin", "cpu": "x64", "bin": { "gssh-darwin-x64": "bin/gssh" } }, "sha512-0qOGHOPki43Ry2jd1+1WESsiQHCGp0ph9nPIaQSK+ZDhEvzH0N1kZiIj5KsDkV60At4eGbSyV81ymnNTfJeXGA=="],
+    "@gitspace/darwin-x64": ["@gitspace/darwin-x64@0.2.0-rc.34", "", { "os": "darwin", "cpu": "x64", "bin": { "gssh-darwin-x64": "bin/gssh" } }, "sha512-/SvD0u8FU0F2rUqWtT9UZYEFJWykQ539w10Pu1bgS6usQWWgj5ReZEJlGFUlOlcqTBZlVnA/ujtU+rSBJEwaeg=="],
 
-    "@gitspace/linux-arm64": ["@gitspace/linux-arm64@0.2.0-rc.32", "", { "os": "linux", "cpu": "arm64", "bin": { "gssh-linux-arm64": "bin/gssh" } }, "sha512-RKwon3jH0TNOu3XPsPvHa1LSdhJWHVPwvgBfklMiiLLXs7AMExGZ9UFrg9woAbWwWyYxg0k6pxUeMeL+V7TG4Q=="],
+    "@gitspace/linux-arm64": ["@gitspace/linux-arm64@0.2.0-rc.34", "", { "os": "linux", "cpu": "arm64", "bin": { "gssh-linux-arm64": "bin/gssh" } }, "sha512-6J73fsWCeEQV47zYsOCSkE+TA4o9z9eG5kBCTUso/0KyQP3a36Tf6is30rtkBk7JRy0+Go29LawsRWCmVJmlZQ=="],
 
-    "@gitspace/linux-x64": ["@gitspace/linux-x64@0.2.0-rc.32", "", { "os": "linux", "cpu": "x64", "bin": { "gssh-linux-x64": "bin/gssh" } }, "sha512-v2PH2mRWMIkUpPYQWbPjzUSqVpKTARu+Boo+lTrhvXSCl7zIQBFivhqBBylDW7TyGN37UkL+raw2BCDyVUr0vw=="],
+    "@gitspace/linux-x64": ["@gitspace/linux-x64@0.2.0-rc.34", "", { "os": "linux", "cpu": "x64", "bin": { "gssh-linux-x64": "bin/gssh" } }, "sha512-6cFFik7Zt6p73+fv9R2BCqNfO61yy+ZhxCahyHR0KpeQZjGy8e1YWhCV4tHo3xWIkY6yKrAoYiu4pEyGenqhgA=="],
 
     "@graphql-typed-document-node/core": ["@graphql-typed-document-node/core@3.2.0", "", { "peerDependencies": { "graphql": "^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0" } }, "sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ=="],
 
