@@ -8,16 +8,114 @@ export const PROTOCOL_VERSION = 1;
 /** Package version - should match package.json */
 export const PACKAGE_VERSION = "1.0.0";
 
+export const TMUX_LITE_SANDBOX_ENV = "TMUX_LITE_SANDBOX";
 const DEFAULT_ROUTER_SOCKET = "/tmp/tmux-lite.sock";
 const DEFAULT_PID_FILE = "/tmp/tmux-lite.pid";
 const DEFAULT_SESSION_DIR = "/tmp";
+const MAX_UNIX_SOCKET_PATH_LENGTH = 108;
+
+export interface TmuxLitePaths {
+  routerSocket: string;
+  pidFile: string;
+  sessionDir: string;
+}
+
+function normalizeSessionDir(dir: string): string {
+  return dir.endsWith("/") ? dir.slice(0, -1) : dir;
+}
+
+function assertUnixSocketPathLength(path: string): void {
+  const pathBytes = Buffer.byteLength(path);
+  if (pathBytes > MAX_UNIX_SOCKET_PATH_LENGTH) {
+    throw new Error(`tmux-lite socket path exceeds ${MAX_UNIX_SOCKET_PATH_LENGTH} bytes (${pathBytes}): ${path}`);
+  }
+}
+
+export function normalizeTmuxLiteSandboxName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(trimmed)) {
+    throw new Error(`Invalid tmux-lite sandbox name: ${name}`);
+  }
+  return trimmed;
+}
+
+export function getTmuxLiteSandbox(): string | undefined {
+  const raw = process.env[TMUX_LITE_SANDBOX_ENV]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  return normalizeTmuxLiteSandboxName(raw);
+}
+
+export function getTmuxLitePathsForSandbox(sandbox: string): TmuxLitePaths {
+  const normalized = normalizeTmuxLiteSandboxName(sandbox);
+  const base = `/tmp/tmux-lite-${normalized}`;
+  const routerSocket = `${base}.sock`;
+  assertUnixSocketPathLength(routerSocket);
+  return {
+    routerSocket,
+    pidFile: `${base}.pid`,
+    sessionDir: base,
+  };
+}
+
+export function getTmuxLitePaths(): TmuxLitePaths {
+  const explicitSessionDir = process.env.TMUX_LITE_SESSION_DIR?.trim();
+  const explicitRouterSocket = process.env.TMUX_LITE_SOCKET?.trim();
+  const explicitPidFile = process.env.TMUX_LITE_PID_FILE?.trim();
+  const sandbox = getTmuxLiteSandbox();
+
+  if (sandbox) {
+    const sandboxPaths = getTmuxLitePathsForSandbox(sandbox);
+    const routerSocket = explicitRouterSocket || sandboxPaths.routerSocket;
+    assertUnixSocketPathLength(routerSocket);
+    return {
+      routerSocket,
+      pidFile: explicitPidFile || sandboxPaths.pidFile,
+      sessionDir: normalizeSessionDir(explicitSessionDir || sandboxPaths.sessionDir),
+    };
+  }
+
+  const sessionDir = normalizeSessionDir(explicitSessionDir || DEFAULT_SESSION_DIR);
+  const routerSocket = explicitRouterSocket || DEFAULT_ROUTER_SOCKET;
+  assertUnixSocketPathLength(routerSocket);
+  return {
+    routerSocket,
+    pidFile: explicitPidFile || DEFAULT_PID_FILE,
+    sessionDir,
+  };
+}
+
+export function applyTmuxLiteSandboxEnvironment(
+  sandbox: string,
+  options: { preserveExplicit?: boolean } = {}
+): TmuxLitePaths {
+  const normalized = normalizeTmuxLiteSandboxName(sandbox);
+  const paths = getTmuxLitePathsForSandbox(normalized);
+  const preserveExplicit = options.preserveExplicit === true;
+  process.env[TMUX_LITE_SANDBOX_ENV] = normalized;
+  if (!preserveExplicit || !process.env.TMUX_LITE_SOCKET?.trim()) {
+    process.env.TMUX_LITE_SOCKET = paths.routerSocket;
+  }
+  if (!preserveExplicit || !process.env.TMUX_LITE_PID_FILE?.trim()) {
+    process.env.TMUX_LITE_PID_FILE = paths.pidFile;
+  }
+  if (!preserveExplicit || !process.env.TMUX_LITE_SESSION_DIR?.trim()) {
+    process.env.TMUX_LITE_SESSION_DIR = paths.sessionDir;
+  }
+  return paths;
+}
 
 export function getRouterSocket(): string {
-  return process.env.TMUX_LITE_SOCKET || DEFAULT_ROUTER_SOCKET;
+  return getTmuxLitePaths().routerSocket;
 }
 
 export function getPidFile(): string {
-  return process.env.TMUX_LITE_PID_FILE || DEFAULT_PID_FILE;
+  return getTmuxLitePaths().pidFile;
+}
+
+export function getSessionDir(): string {
+  return getTmuxLitePaths().sessionDir;
 }
 
 /**
@@ -41,9 +139,10 @@ export function getSessionSocketPath(id: string): string {
   if (!isValidSessionId(id)) {
     throw new Error(`Invalid session ID: ${id}`);
   }
-  const dir = process.env.TMUX_LITE_SESSION_DIR || DEFAULT_SESSION_DIR;
-  const normalizedDir = dir.endsWith("/") ? dir.slice(0, -1) : dir;
-  return `${normalizedDir}/tmux-lite-${id}.sock`;
+  const normalizedDir = getSessionDir();
+  const socketPath = `${normalizedDir}/tmux-lite-${id}.sock`;
+  assertUnixSocketPathLength(socketPath);
+  return socketPath;
 }
 
 const ROUTER_FRAME_HEADER_BYTES = 4;

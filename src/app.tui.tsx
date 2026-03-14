@@ -2607,6 +2607,7 @@ export async function launchTUI(
 ): Promise<void> {
   await initializeSecretRuntime({
     ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
+    preloadSecrets: false,
   });
 
   const requestedKeyboardMode = resolveRequestedKeyboardMode();

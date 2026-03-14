@@ -25,7 +25,7 @@ const WEB_DIST = join(ROOT, "web/dist");
 const EMBEDDED_ASSETS_PATH = join(ROOT, "src/relay/embedded-assets.generated.js");
 const VERSION_PATH = join(ROOT, "src/version.generated.ts");
 const CLOUD_BOOTSTRAP_ENTRY = join(ROOT, "src/cloud/bootstrap-entry.ts");
-const CLOUD_BOOTSTRAP_BUNDLE_PATH = join(ROOT, "src/cloud/bootstrap-bundle.generated.ts");
+const CLOUD_BOOTSTRAP_BUNDLE_PATH = join(ROOT, "src/cloud/bootstrap-bundle.generated.js");
 const DIST_DIR = join(ROOT, "dist");
 const NPM_DIR = join(ROOT, "npm");
 
@@ -77,7 +77,7 @@ function restoreCloudBootstrapStub() {
 export const CLOUD_BOOTSTRAP_BUNDLE_BASE64 = '';
 export const CLOUD_BOOTSTRAP_BUNDLE_FILENAME = 'gssh-cloud-bootstrap.mjs';
 
-export function getCloudBootstrapBundleSource(): string | null {
+export function getCloudBootstrapBundleSource() {
   if (!CLOUD_BOOTSTRAP_BUNDLE_BASE64) {
     return null;
   }
@@ -127,7 +127,7 @@ async function generateCloudBootstrapBundle() {
 export const CLOUD_BOOTSTRAP_BUNDLE_BASE64 = '${base64}';
 export const CLOUD_BOOTSTRAP_BUNDLE_FILENAME = 'gssh-cloud-bootstrap.mjs';
 
-export function getCloudBootstrapBundleSource(): string | null {
+export function getCloudBootstrapBundleSource() {
   if (!CLOUD_BOOTSTRAP_BUNDLE_BASE64) {
     return null;
   }

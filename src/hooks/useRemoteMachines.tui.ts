@@ -76,6 +76,17 @@ async function resolveIdentity(options: UseRemoteMachinesOptions): Promise<Ident
 export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRemoteMachinesReturn {
   const { relayConfig, onError } = options;
   const isRemoteMode = !!relayConfig;
+  const hasUnlockedMachineIdentity = useMemo(() => {
+    if (options.identity) {
+      return true;
+    }
+
+    const password = options.identityPassword || process.env.GITSPACE_IDENTITY_PASSWORD;
+    return !!password && keypairExists();
+  }, [options.identity, options.identityPassword]);
+  const shouldAutoConnect = isRemoteMode
+    && relayConfig?.autoConnected === true
+    && hasUnlockedMachineIdentity;
 
   const localMachine = useMemo<MachineInfo>(
     () => ({
@@ -93,7 +104,7 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
 
   const directory = useMachineDirectory<NodeRelaySocket, Identity>({
     enabled: isRemoteMode,
-    autoConnect: isRemoteMode,
+    autoConnect: shouldAutoConnect,
     socketAdapter: nodeRelaySocketAdapter,
     mapMachines: (remoteMachines) => [localMachine, ...remoteMachines],
     resolveClientConfig: async () => {

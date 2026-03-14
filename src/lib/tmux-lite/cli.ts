@@ -17,6 +17,7 @@ import { existsSync, readFileSync, unlinkSync } from "fs";
 import { select } from "@inquirer/prompts";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import {
+  applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
   getPidFile,
   PROTOCOL_VERSION,
@@ -57,30 +58,80 @@ const TERM_RESET = "\x1bc";
 
 const SERVER_SCRIPT = `${import.meta.dir}/server.ts`;
 
-// CLI args
-const rawArgs = process.argv.slice(2);
-const isTestMode = rawArgs.includes("--test");
-const args = rawArgs.filter(arg => arg !== "--test");
-const cmd = args[0] || "list";
-
-if (isTestMode) {
-  process.env.TMUX_LITE_SOCKET = "/tmp/tmux-lite-test.sock";
-  process.env.TMUX_LITE_SESSION_DIR = "/tmp/tmux-lite-test";
+function parseOptionValue(args: string[], optionName: string): { value?: string; consumedNextArg: boolean; invalid: boolean } {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === optionName) {
+      const next = args[index + 1];
+      if (!next || next.trim().length === 0 || next.startsWith("-")) {
+        return { consumedNextArg: false, invalid: true };
+      }
+      return { value: next, consumedNextArg: true, invalid: false };
+    }
+    if (arg?.startsWith(`${optionName}=`)) {
+      const value = arg.slice(optionName.length + 1);
+      return { value, consumedNextArg: false, invalid: value.trim().length === 0 };
+    }
+  }
+  return { consumedNextArg: false, invalid: false };
 }
 
-const getServerCommand = (): string[] => {
+function stripOption(args: string[], optionName: string): string[] {
+  const stripped: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === optionName) {
+      if (parseOptionValue(args.slice(index, index + 2), optionName).consumedNextArg) {
+        index += 1;
+      }
+      continue;
+    }
+    if (arg?.startsWith(`${optionName}=`)) {
+      continue;
+    }
+    stripped.push(arg);
+  }
+  return stripped;
+}
+
+function parseCliContext(rawArgs: string[]) {
+  const isTestMode = rawArgs.includes("--test");
+  const sandboxOption = parseOptionValue(rawArgs, "--sandbox");
+  if (sandboxOption.invalid) {
+    throw new Error("--sandbox requires a non-empty value");
+  }
+  const args = stripOption(rawArgs.filter(arg => arg !== "--test"), "--sandbox");
+  return {
+    args,
+    cmd: args[0] || "list",
+    isTestMode,
+    sandboxName: sandboxOption.value,
+  };
+}
+
+function initializeCliEnvironment(context: { sandboxName?: string; isTestMode: boolean }): void {
+  if (context.sandboxName) {
+    applyTmuxLiteSandboxEnvironment(context.sandboxName);
+  }
+  if (context.isTestMode) {
+    applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
+  }
+}
+
+const getServerCommand = (options: { testMode?: boolean } = {}): string[] => {
   // Detect if we're running as a compiled binary (not bun)
   const isCompiled = !process.execPath.endsWith('bun');
+  const testMode = options.testMode === true;
 
   if (isCompiled) {
     // Use the binary with internal flag
-    return isTestMode
+    return testMode
       ? [process.execPath, '--internal-tmux-server', '--test']
       : [process.execPath, '--internal-tmux-server'];
   }
 
   // Dev mode: use bun run
-  return isTestMode
+  return testMode
     ? ['bun', 'run', SERVER_SCRIPT, '--test']
     : ['bun', 'run', SERVER_SCRIPT];
 };
@@ -119,6 +170,7 @@ export async function ensureServer(): Promise<void> {
     cmd: getServerCommand(),
     stdout: "ignore",
     stderr: "ignore",
+    env: process.env as Record<string, string>,
   });
 
   for (let i = 0; i < 30; i++) {
@@ -640,6 +692,10 @@ function handleAttachResult(result: AttachResult): void {
 
 // Main
 async function main() {
+  const context = parseCliContext(process.argv.slice(2));
+  initializeCliEnvironment(context);
+  const { args, cmd, isTestMode } = context;
+
   // Start server if not running
   if (!(await isServerRunning())) {
     if (cmd === "kill-server") {
@@ -648,11 +704,12 @@ async function main() {
     }
     console.log("Starting server...");
     spawn({
-      cmd: getServerCommand(),
+      cmd: getServerCommand({ testMode: isTestMode }),
       // Use "ignore" so server doesn't inherit CLI's stdout/stderr
       // This allows CLI to exit cleanly when piped
       stdout: "ignore",
       stderr: "ignore",
+      env: process.env as Record<string, string>,
     });
     await Bun.sleep(300);
     if (!(await isServerRunning())) {
@@ -842,6 +899,7 @@ const NON_INTERACTIVE_COMMANDS = new Set([
 if (import.meta.main) {
   main()
     .then(() => {
+      const { cmd } = parseCliContext(process.argv.slice(2));
       // Force exit after non-interactive commands complete
       // Some socket references may keep the event loop alive otherwise
       if (NON_INTERACTIVE_COMMANDS.has(cmd)) {

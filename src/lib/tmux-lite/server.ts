@@ -14,6 +14,7 @@ import { installDsrCprResponder } from "./terminal-queries";
 import { getNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
+  applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
   getSessionSocketPath,
   getPidFile,
@@ -45,9 +46,7 @@ const SERIALIZE_SCROLLBACK_LINES = 10_000;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
-  process.env.TMUX_LITE_SOCKET = "/tmp/tmux-lite-test.sock";
-  process.env.TMUX_LITE_SESSION_DIR = "/tmp/tmux-lite-test";
-  process.env.TMUX_LITE_PID_FILE = "/tmp/tmux-lite-test.pid";
+  applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
 }
 
 const ROUTER_SOCKET = getRouterSocket();
@@ -93,9 +92,11 @@ writeFileSync(PID_FILE, String(process.pid));
 
 interface SessionData {
   info: Session;
+  listener: any;
   ptyTerminal: Bun.Terminal;
   xterm: XTerminal;
   serialize: SerializeAddon;
+  idleState: IdleDetectionState;
   proc: Bun.Subprocess;
   client: any;
   clientWriter: any;
@@ -113,6 +114,25 @@ interface SessionData {
 
 const sessions = new Map<string, SessionData>();
 const inbox: InboxItem[] = [];
+let routerListener: any = null;
+let shuttingDown = false;
+
+function stopListener(listener: any): void {
+  if (!listener || typeof listener.stop !== "function") {
+    return;
+  }
+  try {
+    listener.stop(true);
+  } catch {
+    try {
+      listener.stop();
+    } catch {}
+  }
+}
+
+function safeUnlink(path: string): void {
+  try { unlinkSync(path); } catch {}
+}
 
 function writeToClient(session: SessionData, data: Buffer): void {
   if (!session.client) return;
@@ -153,6 +173,51 @@ function getRouterSocketState(socket: object): RouterSocketState {
 
 function clearRouterSocketState(socket: object): void {
   routerSocketStates.delete(socket);
+}
+
+function clearIdleTimer(session: SessionData): void {
+  if (session.idleState.idleTimer) {
+    clearTimeout(session.idleState.idleTimer);
+    session.idleState.idleTimer = null;
+  }
+}
+
+function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean } = {}): void {
+  clearIdleTimer(session);
+  session.idleState.outputSinceIdle = 0;
+  clearAttachTimer(session);
+  session.attachPending = false;
+  session.attaching = false;
+  session.attachBuffer = [];
+  session.info.attached = false;
+  session.clientWriter = null;
+  if (session.client) {
+    try { session.client.end(); } catch {}
+    session.client = null;
+  }
+  stopListener(session.listener);
+  safeUnlink(session.info.socketPath);
+  if (options.removeFromMap !== false) {
+    sessions.delete(session.info.id);
+  }
+}
+
+function shutdownServer(): void {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+
+  for (const session of sessions.values()) {
+    try { session.xterm.dispose(); } catch {}
+    cleanupSessionResources(session, { removeFromMap: false });
+    try { session.proc.kill(9); } catch {}
+  }
+  sessions.clear();
+
+  stopListener(routerListener);
+  safeUnlink(PID_FILE);
+  safeUnlink(ROUTER_SOCKET);
 }
 
 // How long after last interaction before we consider the user "inactive"
@@ -746,6 +811,9 @@ function handleProcessExit(
 ): (code: number) => void {
   return (code) => {
     const session = sessions.get(id);
+    if (!session) {
+      return;
+    }
 
     // Clean up parser hooks
     try { disposeDsr(); } catch {}
@@ -766,18 +834,15 @@ function handleProcessExit(
     ));
 
     // Update session info with exit code
-    if (session) {
-      session.info.exitCode = code;
-    }
+    session.info.exitCode = code;
 
-    if (session?.client) {
+    if (session.client) {
       writeToClient(session, encodeControl({ type: "exited", code }));
-      session.client.end();
+      try { session.client.end(); } catch {}
     }
 
     xterm.dispose();
-    try { unlinkSync(socketPath); } catch {}
-    sessions.delete(id);
+    cleanupSessionResources(session);
     console.log(`[${sessionName}] exited (${code})`);
   };
 }
@@ -1151,6 +1216,20 @@ function getShellInitScript(shell: string, hooks?: SessionCreateHooks): string |
   return `${scriptParts.join('\n')}\n`;
 }
 
+function cleanupFailedSessionCreation(
+  sessionName: string,
+  proc: Bun.Subprocess,
+  xterm: XTerminal,
+  disposeDsr: () => void,
+  socketPath: string
+): void {
+  try { disposeDsr(); } catch {}
+  try { proc.kill(9); } catch {}
+  try { xterm.dispose(); } catch {}
+  safeUnlink(socketPath);
+  console.warn(`[${sessionName}] cleaned up failed session startup`);
+}
+
 // ============================================================================
 // Main Session Creation
 // ============================================================================
@@ -1172,6 +1251,7 @@ function createSession(
   if (!existsSync(socketDir)) {
     mkdirSync(socketDir, { recursive: true });
   }
+  safeUnlink(socketPath);
 
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
@@ -1279,17 +1359,25 @@ function createSession(
   const socketHandlers = createSessionSocketHandlers(id, sessionName, proc, startAttach);
 
   // Create session socket
-  Bun.listen({
-    unix: socketPath,
-    socket: socketHandlers,
-  });
+  let listener;
+  try {
+    listener = Bun.listen({
+      unix: socketPath,
+      socket: socketHandlers,
+    });
+  } catch (error) {
+    cleanupFailedSessionCreation(sessionName, proc, xterm, disposeDsr, socketPath);
+    throw error;
+  }
 
   // Store session data
   sessions.set(id, {
     info,
+    listener,
     ptyTerminal,
     xterm,
     serialize,
+    idleState,
     proc,
     client: null,
     clientWriter: null,
@@ -1298,26 +1386,30 @@ function createSession(
     attaching: false,
     attachBuffer: [],
     attachPending: false,
-    attachTimer: null,
-    processTitle: '',
-    lastInteraction: 0,  // No interaction yet
-    lastDetached: 0,  // Never detached yet
-    lastAttached: 0,  // Never attached yet (will be set on first attach)
-  });
+      attachTimer: null,
+      processTitle: '',
+      lastInteraction: 0,  // No interaction yet
+      lastDetached: 0,  // Never detached yet
+      lastAttached: 0,  // Never attached yet (will be set on first attach)
+    });
 
   console.log(`[${sessionName}] created (pid ${proc.pid})`);
   return info;
 }
 
 // Router server
-Bun.listen({
+routerListener = Bun.listen({
   unix: ROUTER_SOCKET,
   socket: {
     open(socket) {
       const socketState = getRouterSocketState(socket);
       socketState.writer = createBufferedSocketWriter(socket as any);
     },
-    data(socket, data) {
+    close(socket) {
+      clearRouterSocketState(socket);
+    },
+
+    async data(socket, data) {
       const socketState = getRouterSocketState(socket);
       const combined = Buffer.concat([socketState.buffer, Buffer.from(data)]);
       let decoded;
@@ -1394,18 +1486,12 @@ Bun.listen({
 
           case "kill-server":
             console.log("Shutting down...");
-            for (const [id, s] of sessions) {
-              s.xterm.dispose();
-              s.proc.kill(9);  // Use SIGKILL - shells ignore SIGTERM
-            }
-            // Clean up PID file
-            try { unlinkSync(PID_FILE); } catch {}
             res = { type: "ok" };
             if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
             else socket.write(encodeRouterMessage(res));
             // Clean up socket file after sending response, before exit
             setTimeout(() => {
-              try { unlinkSync(ROUTER_SOCKET); } catch {}
+              shutdownServer();
               process.exit(0);
             }, 100);
             return;
@@ -1467,30 +1553,20 @@ Bun.listen({
     drain(socket) {
       const socketState = getRouterSocketState(socket);
       socketState.writer?.flush?.();
-    },
-    close(socket) {
-      clearRouterSocketState(socket);
     }
   }
 });
 
-// Handle unexpected termination - kill all session processes
-function cleanupAndExit(signal: string) {
-  console.log(`\nReceived ${signal}, cleaning up sessions...`);
-  for (const [id, s] of sessions) {
-    try {
-      s.xterm.dispose();
-      s.proc.kill(9);
-    } catch {}
-  }
-  // Clean up PID file
-  try { unlinkSync(PID_FILE); } catch {}
-  process.exit(0);
-}
-
-process.on('SIGTERM', () => cleanupAndExit('SIGTERM'));
-process.on('SIGINT', () => cleanupAndExit('SIGINT'));
-process.on('SIGHUP', () => cleanupAndExit('SIGHUP'));
-
 console.log("tmux-lite server running (xterm-headless)");
 console.log(`Socket: ${ROUTER_SOCKET}\n`);
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    shutdownServer();
+    process.exit(0);
+  });
+}
+
+process.on("exit", () => {
+  shutdownServer();
+});

@@ -8,6 +8,7 @@
 
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
+import { configureTmuxSandbox } from '../tmux-sandbox.js';
 
 export function registerMachineCommands(parent: Command): void {
   const cmd = parent
@@ -58,6 +59,7 @@ function registerMachineServeCommands(machine: Command): void {
     .option('--unlock-token <token>', 'One-time token to request unlock grant from relay')
     .option('--workspace-id <id>', 'Cloud workspace id for unlock-token flow')
     .option('--ignore-keychain-and-skip-secrets', 'Skip keychain preload and skip secret-dependent scripts')
+    .option('--takeover', 'Clear persisted relay control state so the current identity can take ownership')
     .option('-y, --yes', 'Auto-confirm prompts')
     .option('--password-stdin', 'Read password from stdin')
     .option('--foreground', "Run in foreground (don't daemonize)")
@@ -94,6 +96,7 @@ function registerMachineTmuxCommands(machine: Command): void {
   const tmux = machine
     .command('tmux')
     .description('Manage tmux-lite terminal session daemon');
+  configureTmuxSandbox(tmux);
 
   tmux
     .command('start')

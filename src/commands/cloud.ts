@@ -32,7 +32,7 @@ import {
   upsertCloudWorkspace,
 } from '../relay/control/store.js';
 import { SpritesProvider } from '../relay/control/sprites-provider.js';
-import { getCloudBootstrapBundleSource, CLOUD_BOOTSTRAP_BUNDLE_FILENAME } from '../cloud/bootstrap-bundle.generated.js';
+import { getCloudBootstrapBundleSource, CLOUD_BOOTSTRAP_BUNDLE_FILENAME } from '../cloud/bootstrap-bundle.js';
 import { ensureWorkspaceIdentity, getWorkspaceIdentity } from '../relay/control/workspace-identity.js';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites.js';
 import { registerRootInvite } from '../relay/auth/store.js';

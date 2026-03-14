@@ -10,6 +10,7 @@
 
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
+import { configureTmuxSandbox } from '../tmux-sandbox.js';
 import { useExplicitContext, getWorkspacePath } from '../workspace-context.js';
 import { SpacesError } from '../../types/errors.js';
 
@@ -264,6 +265,7 @@ function registerWorkspaceSessionCommands(workspace: Command): void {
   const session = workspace
     .command('session')
     .description('Manage terminal sessions in a workspace');
+  configureTmuxSandbox(session);
 
   // gssh workspace session list --project <p> --workspace <w>
   requireProjectAndWorkspace(

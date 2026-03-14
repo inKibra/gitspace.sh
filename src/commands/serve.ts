@@ -86,7 +86,9 @@ import {
   bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
+  getControlOwnerIdentityId,
   getVaultMeta,
+  resetControlStore,
   setVaultMeta,
 } from '../relay/control/store.js';
 import {
@@ -124,6 +126,67 @@ interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
 }
 
+export async function ensureServeOwnerBindingForStartup(
+  ownerUserRootId: string,
+  options: { takeover?: boolean; yes?: boolean } = {}
+): Promise<{ tookOver: boolean }> {
+  ensureControlStore();
+
+  const currentVaultOwner = getVaultMeta('owner_user_root_id');
+  const currentControlOwner = getControlOwnerIdentityId();
+
+  const needsTakeover = (currentVaultOwner && currentVaultOwner !== ownerUserRootId)
+    || (currentControlOwner && currentControlOwner !== ownerUserRootId);
+
+  if (needsTakeover) {
+    if (!options.takeover) {
+      const mismatchMessage = [
+        'Persisted relay control state belongs to a different identity.',
+        '',
+        `  Current user: ${ownerUserRootId.slice(0, 8)}...`,
+        currentControlOwner ? `  Control owner: ${currentControlOwner.slice(0, 8)}...` : null,
+        currentVaultOwner ? `  Vault owner:   ${currentVaultOwner.slice(0, 8)}...` : null,
+        '',
+        'Re-run with `gssh machine serve start --takeover` to clear the persisted relay control state and bind it to the recovered identity.',
+      ].filter((line): line is string => line !== null).join('\n');
+
+      logger.error(`[serve] owner binding mismatch during startup.\n${mismatchMessage}`);
+      throw new SpacesError(
+        mismatchMessage,
+        'USER_ERROR',
+        1,
+      );
+    }
+
+    if (!options.yes) {
+      const confirmed = await promptConfirm(
+        'Persisted relay control state belongs to a different identity. Clear it and rebind this machine to the current recovered identity?',
+        false,
+      );
+      if (!confirmed) {
+        throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+      }
+    }
+
+    logger.warning('Clearing persisted relay control state and rebinding machine serve ownership to the current identity.');
+    resetControlStore();
+    ensureControlStore();
+    bindControlOwner(ownerUserRootId);
+    setVaultMeta('owner_user_root_id', ownerUserRootId);
+    return { tookOver: true };
+  }
+
+  if (!currentControlOwner) {
+    bindControlOwner(ownerUserRootId);
+  }
+
+  if (!currentVaultOwner) {
+    setVaultMeta('owner_user_root_id', ownerUserRootId);
+  }
+
+  return { tookOver: false };
+}
+
 function resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken: string | undefined): string {
   if (!enrollmentToken) {
     throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
@@ -153,21 +216,6 @@ async function resolveUserRootAuthorizationConfig(options: {
       'USER_ERROR',
       1,
     );
-  }
-
-  ensureControlStore();
-
-  const existingOwner = getVaultMeta('owner_user_root_id');
-  if (existingOwner && existingOwner !== userRoot.id) {
-    throw new SpacesError(
-      `Relay owner mismatch: store is bound to ${existingOwner}, current user root is ${userRoot.id}`,
-      'USER_ERROR',
-      1,
-    );
-  }
-
-  if (!existingOwner) {
-    setVaultMeta('owner_user_root_id', userRoot.id);
   }
 
   return {
@@ -914,6 +962,7 @@ export async function serveStart(options: {
   passwordStdin?: boolean;
   foreground?: boolean;
   ignoreKeychainAndSkipSecrets?: boolean;
+  takeover?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
@@ -987,6 +1036,17 @@ export async function serveStart(options: {
       options.relayPubkey ??= relayIdentity.publicKey;
     }
 
+    if (options.takeover && !options.yes && !usingUnlockMode) {
+      const userRootAuth = await resolveUserRootAuthorizationConfig({
+        yes: options.yes,
+        devicePasswordContext,
+      });
+      await ensureServeOwnerBindingForStartup(userRootAuth.ownerUserRootId, {
+        takeover: true,
+        yes: false,
+      });
+    }
+
     logger.log('Starting serve daemon...');
 
     // Build args for background process
@@ -1005,6 +1065,9 @@ export async function serveStart(options: {
     }
     if (options.yes) {
       serveArgs.push('--yes');
+    }
+    if (options.takeover) {
+      serveArgs.push('--takeover');
     }
     if (!usingUnlockMode) {
       serveArgs.push('--password-stdin');
@@ -1154,8 +1217,10 @@ export async function serveStart(options: {
         devicePasswordContext,
       });
       ownerUserRootId = userRootAuth.ownerUserRootId;
-      ensureControlStore();
-      bindControlOwner(ownerUserRootId);
+      await ensureServeOwnerBindingForStartup(ownerUserRootId, {
+        takeover: options.takeover,
+        yes: options.yes,
+      });
     } catch (error) {
       stopStatusServer();
       cleanupServeFiles();
