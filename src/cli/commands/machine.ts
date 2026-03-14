@@ -44,7 +44,7 @@ export function registerMachineCommands(parent: Command): void {
     }));
 
   // --------------------------------------------------------------------------
-  // gssh machine tmux [start|stop|status|list|new|attach|kill|replay]
+  // gssh machine tmux [start|stop|status|list|new|attach|kill]
   // --------------------------------------------------------------------------
   registerMachineTmuxCommands(cmd);
 }
@@ -167,52 +167,5 @@ function registerMachineTmuxCommands(machine: Command): void {
     .action(withErrorHandler(async (id) => {
       const { killTmux } = await import('../../commands/tmux.js');
       await killTmux(id);
-    }, { skipSetupCheck: true }));
-
-  const replay = tmux
-    .command('replay')
-    .description('Inspect saved tmux-lite replays');
-  configureTmuxSandbox(replay);
-
-  replay
-    .command('list')
-    .description('List captured replays')
-    .action(withErrorHandler(async () => {
-      const { listTmuxReplays } = await import('../../commands/tmux.js');
-      await listTmuxReplays();
-    }, { skipSetupCheck: true }));
-
-  replay
-    .command('text')
-    .description('Print replay terminal text')
-    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
-    .option('--at-ms <number>', 'Replay time offset in milliseconds', (value: string) => parseInt(value, 10))
-    .option('--scrollback-lines <number>', 'Scrollback lines to include', (value: string) => parseInt(value, 10))
-    .option('--include-scrollback', 'Include scrollback lines before the visible screen')
-    .action(withErrorHandler(async (replayRef, options) => {
-      const { showTmuxReplayText } = await import('../../commands/tmux.js');
-      await showTmuxReplayText(replayRef, {
-        atMs: options.atMs,
-        scrollbackLines: options.scrollbackLines,
-        includeScrollback: options.includeScrollback,
-      });
-    }, { skipSetupCheck: true }));
-
-  replay
-    .command('screenshot')
-    .description('Render a replay frame to PNG')
-    .argument('<replay>', 'Replay ID, replay ID prefix, session ID, or session name')
-    .option('--at-ms <number>', 'Replay time offset in milliseconds', (value: string) => parseInt(value, 10))
-    .option('--scrollback-lines <number>', 'Scrollback lines to include', (value: string) => parseInt(value, 10))
-    .option('--include-scrollback', 'Include scrollback lines before the visible screen')
-    .option('-o, --output <path>', 'Write PNG to this path')
-    .action(withErrorHandler(async (replayRef, options) => {
-      const { screenshotTmuxReplay } = await import('../../commands/tmux.js');
-      await screenshotTmuxReplay(replayRef, {
-        output: options.output,
-        atMs: options.atMs,
-        scrollbackLines: options.scrollbackLines,
-        includeScrollback: options.includeScrollback,
-      });
     }, { skipSetupCheck: true }));
 }

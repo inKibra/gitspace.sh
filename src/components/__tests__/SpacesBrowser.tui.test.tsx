@@ -30,7 +30,6 @@ function makeTuiProps(overrides: Partial<UseSpacesBrowserReturn> = {}): UseSpace
     activateSelected: mock(async () => {}),
     activateIndex: mock(async () => {}),
     attachSession: mock(async () => {}),
-    openReplay: mock(async () => {}),
     startProcessAttach: mock(() => {}),
     startProcess: mock(() => {}),
     stopProcess: mock(() => {}),
@@ -89,31 +88,6 @@ function makeNewSessionItem(): TreeItemWithState {
   };
 }
 
-function makeReplayItem(): TreeItemWithState {
-  return {
-    type: 'replay',
-    replay: {
-      replayId: 'replay-1',
-      sessionId: 'sess-ghost',
-      sessionName: 'ghost-session',
-      cwd: '/workspaces/my-workspace',
-      workspaceId: 'ws-1',
-      projectName: 'proj',
-      workspaceName: 'my-workspace',
-      startedAt: Date.now() - 120000,
-      endedAt: Date.now() - 60000,
-      status: 'closed',
-      durationMs: 60000,
-      eventCount: 20,
-      checkpointCount: 2,
-      lastSeq: 20,
-    },
-    workspaceId: 'ws-1',
-    isSelected: false,
-    index: 2,
-  };
-}
-
 // ============================================================================
 // Cleanup
 // ============================================================================
@@ -136,7 +110,6 @@ describe('SpacesBrowserTUI renderer', () => {
     const items: TreeItemWithState[] = [
       makeWorkspaceItem(),
       makeSessionItem(),
-      makeReplayItem(),
       makeNewSessionItem(),
     ];
 
@@ -155,7 +128,6 @@ describe('SpacesBrowserTUI renderer', () => {
     expect(frame).toContain('test-machine');
     // Should contain workspace name
     expect(frame).toContain('my-workspace');
-    expect(frame).toContain('ghost-session');
     // Should contain new session action
     expect(frame).toContain('New Session');
   });

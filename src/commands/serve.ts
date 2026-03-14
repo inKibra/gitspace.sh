@@ -1054,6 +1054,12 @@ export async function serveStart(options: {
     if (options.yes) {
       serveArgs.push('--yes');
     }
+    if (options.takeover) {
+      serveArgs.push('--takeover');
+      if (!options.yes) {
+        serveArgs.push('--yes');
+      }
+    }
     if (!usingUnlockMode) {
       serveArgs.push('--password-stdin');
     }

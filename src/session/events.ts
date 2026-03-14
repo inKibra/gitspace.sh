@@ -8,14 +8,12 @@ import type {
 import type { NotificationConfig } from '../notifications/types.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEvent, SavedEventFilter } from '../types/events.js';
-import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 
 export type BackendEvent =
   | { type: 'status'; status: 'disconnected' | 'connecting' | 'connected' | 'error'; error?: string }
   | { type: 'projects'; projects: ProjectInfo[] }
   | { type: 'workspaces'; workspaces: WorkspaceInfo[]; savedEventFilters?: SavedEventFilter[] }
   | { type: 'sessions'; sessions: SessionInfo[] }
-  | { type: 'replays'; replays: ReplayInfo[] }
   | { type: 'inbox'; items: InboxItem[]; unreadCount: number }
   | {
       type: 'script_output';

@@ -27,9 +27,6 @@ import {
   type Session,
   type SessionEvent,
   type InboxItem,
-  type ReplayInfo,
-  type ReplayStatus,
-  type TerminalSnapshot,
   type SessionCreateHooks,
   encodeRouterMessage,
   decodeRouterMessages,
@@ -41,7 +38,7 @@ import {
 } from "./protocol";
 
 // Re-export types
-export type { Session, InboxItem, Command, Response, ReplayInfo, ReplayStatus, TerminalSnapshot };
+export type { Session, InboxItem, Command, Response };
 
 // Re-export constants
 export { PROTOCOL_VERSION, PACKAGE_VERSION, getRouterSocket, getPidFile };
@@ -315,70 +312,6 @@ export async function listSessions(): Promise<Session[]> {
   const res = await send({ type: "list" });
   if (res.type === "sessions") return res.sessions;
   throw new Error("Unexpected response");
-}
-
-export async function listReplays(options: {
-  workspaceId?: string;
-  sessionId?: string;
-  status?: ReplayStatus[];
-} = {}): Promise<ReplayInfo[]> {
-  await ensureServer();
-  const res = await send({ type: "list-replays", ...options });
-  if (res.type === "replays") return res.replays;
-  if (res.type === "error") throw new Error(res.message);
-  throw new Error("Unexpected response");
-}
-
-export async function getReplaySnapshot(
-  replayId: string,
-  options: {
-    atMs?: number;
-    scrollbackLines?: number;
-  } = {}
-): Promise<TerminalSnapshot> {
-  await ensureServer();
-  const res = await send({ type: "replay-snapshot", replayId, ...options });
-  if (res.type === "replay-snapshot") return res.snapshot;
-  if (res.type === "error") throw new Error(res.message);
-  throw new Error("Unexpected response");
-}
-
-export async function getReplayText(
-  replayId: string,
-  options: {
-    atMs?: number;
-    scrollbackLines?: number;
-    includeScrollback?: boolean;
-    trimTrailingBlankRows?: boolean;
-  } = {}
-): Promise<string> {
-  await ensureServer();
-  const res = await send({ type: "replay-text", replayId, ...options });
-  if (res.type === "replay-text") return res.text;
-  if (res.type === "error") throw new Error(res.message);
-  throw new Error("Unexpected response");
-}
-
-export async function getReplayMarkdown(
-  replayId: string,
-  options: {
-    atMs?: number;
-    scrollbackLines?: number;
-    includeScrollback?: boolean;
-    trimTrailingBlankRows?: boolean;
-  } = {}
-): Promise<string> {
-  await ensureServer();
-  const res = await send({ type: "replay-markdown", replayId, ...options });
-  if (res.type === "replay-markdown") return res.markdown;
-  if (res.type === "error") throw new Error(res.message);
-  throw new Error("Unexpected response");
-}
-
-export async function createCheckpoint(id: string): Promise<void> {
-  await ensureServer();
-  const res = await send({ type: "create-checkpoint", id });
-  if (res.type === "error") throw new Error(res.message);
 }
 
 export async function createSession(

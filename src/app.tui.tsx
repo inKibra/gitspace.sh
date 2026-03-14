@@ -18,7 +18,6 @@ import { Toaster } from '@opentui-ui/toast/react';
 import { SessionTerminal } from './components/SessionTerminal.tui.js';
 import { RemoteMachineScreen } from './components/RemoteMachineScreen.tui.js';
 import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
-import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
 
 // Shared components and hooks
@@ -33,7 +32,6 @@ import {
   isFlowWizard,
   type MachineInfo,
   type ProjectInfo,
-  type ReplayInfo,
 } from './components/index.js';
 import { FlowTUI } from './components/Flow.tui.js';
 import { MachineListTUI } from './components/MachineList.tui.js';
@@ -298,7 +296,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   // Events view state
   const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
   const [activeRemoteIdentity, setActiveRemoteIdentity] = useState<Identity | null>(null);
-  const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
 
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
@@ -336,7 +333,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     listLinearIssues: listLocalLinearIssues,
     requestWorkspaces: requestLocalWorkspaces,
     requestSessions: requestLocalSessions,
-    requestReplays: requestLocalReplays,
     createProject: createLocalProject,
     prepareProjectCreation: prepareLocalProjectCreation,
     finalizeProjectCreation: finalizeLocalProjectCreation,
@@ -357,7 +353,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     projects: localProjects,
     workspaces: localWorkspaces,
     sessions: localSessions,
-    replays: localReplays,
     inbox: localInbox,
     inboxUnreadCount: localInboxUnreadCount,
     attachedSessionId: localAttachedSessionId,
@@ -371,7 +366,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     startProcess: startLocalProcess,
     stopProcess: stopLocalProcess,
     requestEvents: requestLocalEvents,
-    getReplayText: getLocalReplayText,
     events: localEvents,
     liveEventIds: localLiveEventIds,
     savedEventFilters: localSavedEventFilters,
@@ -540,9 +534,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     await Promise.all([
       requestLocalWorkspaces(),
       requestLocalSessions(),
-      requestLocalReplays(),
     ]);
-  }, [isLocalMachineContext, requestLocalReplays, requestLocalSessions, requestLocalWorkspaces]);
+  }, [isLocalMachineContext, requestLocalSessions, requestLocalWorkspaces]);
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
@@ -637,12 +630,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[tui] Failed to refresh sessions after project select:', message);
     });
-    void requestLocalReplays().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[tui] Failed to refresh replays after project select:', message);
-    });
     dispatch({ type: 'SET_PANEL_FOCUS', focus: 'workspaces' });
-  }, [requestLocalProjects, requestLocalReplays, requestLocalSessions, requestLocalWorkspaces]);
+  }, [requestLocalProjects, requestLocalSessions, requestLocalWorkspaces]);
 
   // Delete project
   const handleDeleteProject = useCallback((project: ProjectInfo) => {
@@ -1042,10 +1031,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       )
     : [];
 
-  const replayInfos = currentProject
-    ? localReplays.filter((replay) => replay.projectName === currentProject)
-    : [];
-
   const inboxItems = localInbox as InboxItem[];
   const inboxUnreadCount = localInboxUnreadCount;
 
@@ -1123,32 +1108,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     dispatch({ type: 'SET_VIEW', view: 'events' });
   }, [localWorkspaces, requestLocalEvents]);
 
-  const handleOpenReplay = useCallback(async ({ replayId }: { replayId: string; workspaceId: string }) => {
-    const replay = localReplays.find((item) => item.replayId === replayId);
-    if (!replay) {
-      flow.showMessage({
-        title: 'Replay Missing',
-        message: 'That replay is no longer available.',
-        variant: 'error',
-      });
-      return;
-    }
-
-    setActiveReplay(replay);
-    dispatch({ type: 'SET_VIEW', view: 'replay' });
-  }, [flow, localReplays]);
-
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
     sessions: sessionInfos,
-    replays: replayInfos,
-    onRequestSessions: () => {
-      void requestLocalSessions();
-      void requestLocalReplays();
-    },
+    onRequestSessions: () => {}, // Sessions already loaded
     onAttachSession: handleAttachSession,
-    onOpenReplay: handleOpenReplay,
     onEditProcesses: handleEditProcesses,
     onManageBundleConfig: handleManageBundleConfig,
     onStartProcess: handleStartProcess,
@@ -1157,9 +1122,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onRefresh: refreshWorkspaces,
-    onRefreshSessions: async () => {
-      await Promise.all([requestLocalSessions(), requestLocalReplays()]);
-    },
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,
     machineName: currentProject || undefined,
@@ -1501,7 +1463,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
 
     // Don't handle keys when in terminal view (Terminal component handles input)
-    if (state.view === 'terminal' || state.view === 'replay') {
+    if (state.view === 'terminal') {
       return;
     }
 
@@ -2105,23 +2067,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         <EventsTui {...eventsProps} />
         <FlowTUI flow={flow} />
         <StatusBar hint="[Esc/q] Back  [j/k] Navigate" rightHint={keyboardModeHint} />
-      </Fragment>
-    );
-  }
-
-  if (state.view === 'replay' && activeReplay) {
-    return (
-      <Fragment>
-        <Toaster position="top-right" />
-        <ReplayTerminal
-          replay={activeReplay}
-          loadReplayText={(replayId) => getLocalReplayText(replayId, undefined, 200, true, false)}
-          onBack={() => {
-            setActiveReplay(null);
-            dispatch({ type: 'SET_VIEW', view: 'projects' });
-          }}
-        />
-        <FlowTUI flow={flow} />
       </Fragment>
     );
   }

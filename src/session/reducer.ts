@@ -6,17 +6,16 @@ import type {
 } from './types.js';
 
 function createBackendState(descriptor: BackendDescriptor): BackendSessionState {
-    return {
-      descriptor,
-      status: 'disconnected',
-      error: null,
-      commandError: null,
-      projects: [],
-      workspaces: [],
-      sessions: [],
-      replays: [],
-      inbox: [],
-      inboxUnreadCount: 0,
+  return {
+    descriptor,
+    status: 'disconnected',
+    error: null,
+    commandError: null,
+    projects: [],
+    workspaces: [],
+    sessions: [],
+    inbox: [],
+    inboxUnreadCount: 0,
     notificationConfig: null,
     mode: 'browsing',
     attachedSessionId: null,
@@ -166,21 +165,6 @@ export function sessionEngineReducer(
           [action.backendKey]: {
             ...backend,
             sessions: action.sessions,
-          },
-        },
-      };
-    }
-
-    case 'SET_REPLAYS': {
-      const backend = state.backends[action.backendKey];
-      if (!backend) return state;
-      return {
-        ...state,
-        backends: {
-          ...state.backends,
-          [action.backendKey]: {
-            ...backend,
-            replays: action.replays,
           },
         },
       };

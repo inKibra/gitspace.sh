@@ -17,7 +17,6 @@ export interface TmuxLitePaths {
   routerSocket: string;
   pidFile: string;
   sessionDir: string;
-  replayDir: string;
 }
 
 function normalizeSessionDir(dir: string): string {
@@ -47,13 +46,11 @@ export function getTmuxLitePathsForSandbox(sandbox: string): TmuxLitePaths {
     routerSocket: `${base}.sock`,
     pidFile: `${base}.pid`,
     sessionDir: base,
-    replayDir: `${base}/replays`,
   };
 }
 
 export function getTmuxLitePaths(): TmuxLitePaths {
   const explicitSessionDir = process.env.TMUX_LITE_SESSION_DIR?.trim();
-  const explicitReplayDir = process.env.TMUX_LITE_REPLAY_DIR?.trim();
   const explicitRouterSocket = process.env.TMUX_LITE_SOCKET?.trim();
   const explicitPidFile = process.env.TMUX_LITE_PID_FILE?.trim();
   const sandbox = getTmuxLiteSandbox();
@@ -64,7 +61,6 @@ export function getTmuxLitePaths(): TmuxLitePaths {
       routerSocket: explicitRouterSocket || sandboxPaths.routerSocket,
       pidFile: explicitPidFile || sandboxPaths.pidFile,
       sessionDir: normalizeSessionDir(explicitSessionDir || sandboxPaths.sessionDir),
-      replayDir: explicitReplayDir || sandboxPaths.replayDir,
     };
   }
 
@@ -73,7 +69,6 @@ export function getTmuxLitePaths(): TmuxLitePaths {
     routerSocket: explicitRouterSocket || DEFAULT_ROUTER_SOCKET,
     pidFile: explicitPidFile || DEFAULT_PID_FILE,
     sessionDir,
-    replayDir: explicitReplayDir || `${sessionDir}/tmux-lite-replays`,
   };
 }
 
@@ -94,9 +89,6 @@ export function applyTmuxLiteSandboxEnvironment(
   if (!preserveExplicit || !process.env.TMUX_LITE_SESSION_DIR?.trim()) {
     process.env.TMUX_LITE_SESSION_DIR = paths.sessionDir;
   }
-  if (!preserveExplicit || !process.env.TMUX_LITE_REPLAY_DIR?.trim()) {
-    process.env.TMUX_LITE_REPLAY_DIR = paths.replayDir;
-  }
   return paths;
 }
 
@@ -110,10 +102,6 @@ export function getPidFile(): string {
 
 export function getSessionDir(): string {
   return getTmuxLitePaths().sessionDir;
-}
-
-export function getReplayDir(): string {
-  return getTmuxLitePaths().replayDir;
 }
 
 /**
@@ -193,29 +181,8 @@ export interface SessionCreateHooks {
   };
 }
 
-export type { ReplayInfo, ReplayStatus, TerminalSnapshot } from './replay/types.js';
-
 export type Command =
   | { type: "list" }
-  | { type: "list-replays"; workspaceId?: string; sessionId?: string; status?: import('./replay/types.js').ReplayStatus[] }
-  | { type: "replay-snapshot"; replayId: string; atMs?: number; scrollbackLines?: number }
-  | {
-      type: "replay-text";
-      replayId: string;
-      atMs?: number;
-      scrollbackLines?: number;
-      includeScrollback?: boolean;
-      trimTrailingBlankRows?: boolean;
-    }
-  | {
-      type: "replay-markdown";
-      replayId: string;
-      atMs?: number;
-      scrollbackLines?: number;
-      includeScrollback?: boolean;
-      trimTrailingBlankRows?: boolean;
-    }
-  | { type: "create-checkpoint"; id: string }
   | {
       type: "new";
       name?: string;
@@ -236,10 +203,6 @@ export type Command =
 
 export type Response =
   | { type: "sessions"; sessions: Session[] }
-  | { type: "replays"; replays: import('./replay/types.js').ReplayInfo[] }
-  | { type: "replay-snapshot"; snapshot: import('./replay/types.js').TerminalSnapshot }
-  | { type: "replay-text"; text: string }
-  | { type: "replay-markdown"; markdown: string }
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }

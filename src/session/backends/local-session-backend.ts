@@ -6,17 +6,12 @@ import type {
 } from '../../lib/tmux-lite/protocol.js';
 import {
   listSessions,
-  listReplays,
   ensureServer,
   createSession,
   killSession,
-  createCheckpoint,
   getInbox,
   clearInbox,
   markInboxRead,
-  getReplaySnapshot,
-  getReplayText,
-  getReplayMarkdown,
 } from '../../lib/tmux-lite/cli.js';
 import {
   encodeControl,
@@ -100,21 +95,15 @@ import { resolveWorkspaceRef } from '../../lib/events/paths.js';
 import { loadSavedEventFilters } from '../../lib/events/filters.js';
 import { readProjectConfig } from '../../core/config.js';
 import { existsSync } from 'fs';
-import type { TerminalSnapshot } from '../backend.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
-  listReplays: typeof listReplays;
   ensureServer: typeof ensureServer;
   createSession: typeof createSession;
   killSession: typeof killSession;
-  createCheckpoint: typeof createCheckpoint;
   getInbox: typeof getInbox;
   clearInbox: typeof clearInbox;
   markInboxRead: typeof markInboxRead;
-  getReplaySnapshot: typeof getReplaySnapshot;
-  getReplayText: typeof getReplayText;
-  getReplayMarkdown: typeof getReplayMarkdown;
   getNotificationConfig: typeof getNotificationConfig;
   updateNotificationConfig: typeof updateNotificationConfig;
   listProjectSummaries: typeof listProjectSummaries;
@@ -362,17 +351,12 @@ function buildDeps(
 ): LocalSessionBackendDependencies {
   return {
     listSessions,
-    listReplays,
     ensureServer,
     createSession,
     killSession,
-    createCheckpoint,
     getInbox,
     clearInbox,
     markInboxRead,
-    getReplaySnapshot,
-    getReplayText,
-    getReplayMarkdown,
     getNotificationConfig,
     updateNotificationConfig,
     listProjectSummaries,
@@ -550,49 +534,6 @@ export class LocalSessionBackend implements SessionBackend {
       });
 
     this.emit({ type: 'sessions', sessions: filtered });
-  }
-
-  async listReplays(workspaceId?: string): Promise<void> {
-    const replays = await this.deps.listReplays({ workspaceId });
-    this.emit({ type: 'replays', replays });
-  }
-
-  async createCheckpoint(sessionId: string): Promise<void> {
-    await this.deps.createCheckpoint(sessionId);
-  }
-
-  async getReplaySnapshot(replayId: string, atMs?: number, scrollbackLines?: number): Promise<TerminalSnapshot> {
-    return this.deps.getReplaySnapshot(replayId, { atMs, scrollbackLines });
-  }
-
-  async getReplayText(
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-    includeScrollback?: boolean,
-    trimTrailingBlankRows?: boolean,
-  ): Promise<string> {
-    return this.deps.getReplayText(replayId, {
-      atMs,
-      scrollbackLines,
-      includeScrollback,
-      trimTrailingBlankRows,
-    });
-  }
-
-  async getReplayMarkdown(
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-    includeScrollback?: boolean,
-    trimTrailingBlankRows?: boolean,
-  ): Promise<string> {
-    return this.deps.getReplayMarkdown(replayId, {
-      atMs,
-      scrollbackLines,
-      includeScrollback,
-      trimTrailingBlankRows,
-    });
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {

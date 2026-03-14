@@ -20,7 +20,6 @@ const TMUX_ENV_KEYS = [
   "TMUX_LITE_SOCKET",
   "TMUX_LITE_SESSION_DIR",
   "TMUX_LITE_PID_FILE",
-  "TMUX_LITE_REPLAY_DIR",
 ] as const;
 
 function captureTmuxEnv(): Record<(typeof TMUX_ENV_KEYS)[number], string | undefined> {

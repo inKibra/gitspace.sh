@@ -31,7 +31,6 @@ export type {
   WorkspaceProcessPort,
   WorkspaceInfo,
   SessionInfo,
-  ReplayInfo,
   TreeItem,
   TreeItemWithState,
   UseSpacesBrowserProps,

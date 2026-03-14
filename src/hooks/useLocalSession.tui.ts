@@ -249,12 +249,6 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     });
   }, [backendKey, runWithBackend]);
 
-  const requestReplays = useCallback(async (workspaceId?: string) => {
-    await runWithBackend(async (sessionEngine) => {
-      await sessionEngine.listReplays(backendKey, workspaceId);
-    }, { strict: true });
-  }, [backendKey, runWithBackend]);
-
   const createProject = useCallback(async (params: CreateProjectParams) => {
     await runWithBackend(async (sessionEngine) => {
       await sessionEngine.createProject(backendKey, params);
@@ -497,77 +491,6 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     });
   }, [backendKey, runWithBackend]);
 
-  const createCheckpoint = useCallback(async (sessionId: string) => {
-    await runWithBackend(async (sessionEngine) => {
-      await sessionEngine.createCheckpoint(backendKey, sessionId);
-    }, { strict: true });
-  }, [backendKey, runWithBackend]);
-
-  const getReplaySnapshot = useCallback(async (replayId: string, atMs?: number, scrollbackLines?: number) => {
-    let snapshot = null;
-    await runWithBackend(async (sessionEngine) => {
-      snapshot = await sessionEngine.getReplaySnapshot(backendKey, replayId, atMs, scrollbackLines);
-    }, { strict: true });
-
-    if (!snapshot) {
-      throw new SpacesError('Replay snapshot unavailable', 'SYSTEM_ERROR', 2);
-    }
-
-    return snapshot;
-  }, [backendKey, runWithBackend]);
-
-  const getReplayText = useCallback(async (
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-    includeScrollback?: boolean,
-    trimTrailingBlankRows?: boolean,
-  ) => {
-    let text: string | null = null;
-    await runWithBackend(async (sessionEngine) => {
-      text = await sessionEngine.getReplayText(
-        backendKey,
-        replayId,
-        atMs,
-        scrollbackLines,
-        includeScrollback,
-        trimTrailingBlankRows,
-      );
-    }, { strict: true });
-
-    if (text === null) {
-      throw new SpacesError('Replay text unavailable', 'SYSTEM_ERROR', 2);
-    }
-
-    return text;
-  }, [backendKey, runWithBackend]);
-
-  const getReplayMarkdown = useCallback(async (
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-    includeScrollback?: boolean,
-    trimTrailingBlankRows?: boolean,
-  ) => {
-    let markdown: string | null = null;
-    await runWithBackend(async (sessionEngine) => {
-      markdown = await sessionEngine.getReplayMarkdown(
-        backendKey,
-        replayId,
-        atMs,
-        scrollbackLines,
-        includeScrollback,
-        trimTrailingBlankRows,
-      );
-    }, { strict: true });
-
-    if (markdown === null) {
-      throw new SpacesError('Replay markdown unavailable', 'SYSTEM_ERROR', 2);
-    }
-
-    return markdown;
-  }, [backendKey, runWithBackend]);
-
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     writeCallbackRef.current = fn;
     backendRef.current?.setPtyOutputHandler(fn);
@@ -579,7 +502,6 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     projects: localState?.projects ?? [],
     workspaces: localState?.workspaces ?? [],
     sessions: localState?.sessions ?? [],
-    replays: localState?.replays ?? [],
     inbox: localState?.inbox ?? [],
     inboxUnreadCount: localState?.inboxUnreadCount ?? 0,
     notificationConfig: localState?.notificationConfig ?? null,
@@ -596,7 +518,6 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     listLinearIssues,
     requestWorkspaces,
     requestSessions,
-    requestReplays,
     createProject,
     prepareProjectCreation,
     finalizeProjectCreation,
@@ -620,10 +541,6 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     startProcess,
     stopProcess,
     requestEvents,
-    createCheckpoint,
-    getReplaySnapshot,
-    getReplayText,
-    getReplayMarkdown,
     send,
     resize,
     setWriteCallback,
