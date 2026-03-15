@@ -606,10 +606,42 @@ export function useRemoteSessionClient<ConnectParams>(
           // gets the correct size immediately rather than waiting for the next
           // browser resize event (which may never come if dimensions haven't changed).
           const dims = lastDimensionsRef.current;
+
+          // Wait for the 'attached' confirmation event before declaring success,
+          // mirroring what connect.ts does with waitForBackendEvent. Without this,
+          // the reconnect declares success immediately even if the session no longer
+          // exists on the machine (e.g. after a machine restart), leaving the UI
+          // stuck in a connected-but-unattached state with no further recovery.
+          const attachConfirmed = await new Promise<boolean>((resolve) => {
+            const timeoutId = setTimeout(() => {
+              unsub();
+              resolve(false);
+            }, 30_000);
+
+            const unsub = backend.onEvent((event) => {
+              if (event.type === 'attached') {
+                clearTimeout(timeoutId);
+                unsub();
+                resolve(true);
+              } else if (
+                event.type === 'error' ||
+                (event.type === 'status' && event.status === 'disconnected')
+              ) {
+                clearTimeout(timeoutId);
+                unsub();
+                resolve(false);
+              }
+            });
+          });
+
           await backend.attachSession({
             sessionId,
             ...(dims ? { cols: dims.cols, rows: dims.rows } : {}),
           });
+
+          if (!attachConfirmed) {
+            throw new Error('Session attachment timed out or was rejected — session may no longer exist');
+          }
 
           if (!abort.aborted) {
             logger.log(`[session] Reconnected and re-attached to session ${sessionId}`);
