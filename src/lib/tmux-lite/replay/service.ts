@@ -279,15 +279,12 @@ export function getReplayFrameOffline(
   }
 
   const checkpoints = listReplayCheckpoints(replayId);
-  // Use manifest durationMs + checkpoint times to determine latest time
-  // without reading the full events file
-  const latestCheckpointTime = checkpoints.length > 0
-    ? checkpoints[checkpoints.length - 1]?.t ?? 0
-    : 0;
-  const latestTimeMs = Math.max(manifest.stats.durationMs, latestCheckpointTime);
+  // When no target is specified, use a very large time so readReplayEventSlice
+  // includes all events. We avoid reading the full events file just to compute
+  // the exact latest time — the event slice reader will stop at EOF naturally.
   const targetMs = target.atMs === undefined
-    ? latestTimeMs
-    : Math.max(0, Math.min(target.atMs, latestTimeMs));
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(0, target.atMs);
   const targetSeq = target.atSeq;
 
   // Find the nearest prior checkpoint
