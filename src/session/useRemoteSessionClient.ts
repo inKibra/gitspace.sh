@@ -203,6 +203,11 @@ export function useRemoteSessionClient<ConnectParams>(
   //     can pass the current terminal size to attachSession
   // -------------------------------------------------------------------------
   const [isReconnecting, setIsReconnecting] = useState(false);
+  // Mirror of isReconnecting as a ref so the transition detector can check it
+  // without adding isReconnecting to its dependency array (which would cause
+  // the detector to run on every isReconnecting toggle rather than only on
+  // backendStatus changes).
+  const isReconnectingRef = useRef(false);
   const connectParamsRef = useRef<ConnectParams | null>(null);
   const lastAttachedSessionIdRef = useRef<string | null>(null);
   const lastModeRef = useRef<'browsing' | 'attached'>('browsing');
@@ -260,6 +265,7 @@ export function useRemoteSessionClient<ConnectParams>(
       // Cancel any in-flight reconnect loop before starting fresh.
       reconnectAbortRef.current.aborted = true;
       reconnectAbortRef.current = { aborted: false };
+      isReconnectingRef.current = false;
       setIsReconnecting(false);
 
       const previousBackendKey = activeBackendKeyRef.current;
@@ -301,6 +307,7 @@ export function useRemoteSessionClient<ConnectParams>(
     // Cancel any in-flight reconnect loop — this is an intentional disconnect.
     reconnectAbortRef.current.aborted = true;
     reconnectAbortRef.current = { aborted: false };
+    isReconnectingRef.current = false;
     setIsReconnecting(false);
     connectParamsRef.current = null;
     lastAttachedSessionIdRef.current = null;
@@ -494,15 +501,18 @@ export function useRemoteSessionClient<ConnectParams>(
     const prev = prevBackendStatusRef.current;
     prevBackendStatusRef.current = backendStatus;
 
-    // Fire on any "was connected" → disconnected transition with a live session.
-    // 'error' is included because a WebSocket onerror fires before onclose,
-    // so the engine may briefly enter 'error' before settling on 'disconnected'.
-    // 'connecting' is excluded — a failure before establishing means there was
-    // no session to restore.
+    // Fire on any "was connected" → disconnected transition with a live session,
+    // but NOT while a reconnect loop is already running. Without this guard,
+    // a failed attach inside the loop (connectBackend succeeds → attachSession
+    // fails → disconnectBackend) would look like a fresh established→disconnected
+    // transition and re-trigger the counter, resetting the attempt limit.
+    // 'error' is included because onerror fires before onclose.
+    // 'connecting' is excluded — pre-connect failures have no session to restore.
     const wasConnected = prev === 'established' || prev === 'error';
     if (
       wasConnected &&
       backendStatus === 'disconnected' &&
+      !isReconnectingRef.current &&
       connectParamsRef.current &&
       lastAttachedSessionIdRef.current
     ) {
@@ -538,6 +548,7 @@ export function useRemoteSessionClient<ConnectParams>(
     const BASE_DELAY_MS = 1_000;
     const MAX_DELAY_MS = 30_000;
 
+    isReconnectingRef.current = true;
     setIsReconnecting(true);
 
     const run = async () => {
@@ -602,6 +613,7 @@ export function useRemoteSessionClient<ConnectParams>(
 
           if (!abort.aborted) {
             logger.log(`[session] Reconnected and re-attached to session ${sessionId}`);
+            isReconnectingRef.current = false;
             setIsReconnecting(false);
           }
           return;
@@ -623,6 +635,7 @@ export function useRemoteSessionClient<ConnectParams>(
       // All attempts exhausted.
       if (!abort.aborted) {
         logger.log('[session] Reconnect failed after all attempts.');
+        isReconnectingRef.current = false;
         setIsReconnecting(false);
         connectParamsRef.current = null;
         lastAttachedSessionIdRef.current = null;
@@ -834,6 +847,7 @@ export function useRemoteSessionClient<ConnectParams>(
       // Abort any in-flight reconnect loop so async callbacks don't call
       // React state setters or create new backends after unmount.
       reconnectAbortRef.current.aborted = true;
+      isReconnectingRef.current = false;
 
       const backendKey = activeBackendKeyRef.current;
       if (!backendKey) {
