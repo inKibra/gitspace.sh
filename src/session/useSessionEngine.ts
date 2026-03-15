@@ -392,6 +392,8 @@ export function useSessionEngine() {
   const cancelPendingReplayRequests = useCallback((backendKey: BackendKey) => {
     void withBackend(backendKey, async (backend) => {
       backend.cancelPendingReplayRequests?.();
+    }).catch(() => {
+      // Best-effort cleanup; backend may already be disconnected.
     });
   }, [withBackend]);
 

@@ -125,24 +125,25 @@ export function applyReplayFrame(
 ): string | null {
   const checkpointId = frame.checkpoint?.checkpointId ?? null;
   const sameCheckpoint = checkpointId !== null && checkpointId === previousCheckpointId;
+  const lastEventSeq = frame.events.length > 0 ? frame.events[frame.events.length - 1]!.seq : 0;
+  const isForward = sameCheckpoint && lastEventSeq > fromSeq;
 
-  if (!sameCheckpoint) {
-    // Different checkpoint (or no previous) — reset and write full checkpoint
+  if (sameCheckpoint && isForward) {
+    // Same checkpoint, forward step — only apply events after our current position
+    for (const event of frame.events) {
+      if (event.seq <= fromSeq) {
+        continue;
+      }
+      applyFrameEvent(event, write);
+    }
+  } else {
+    // Different checkpoint, backward step, or first load — reset and replay from checkpoint
     write(TERMINAL_RESET);
     if (frame.checkpoint) {
       const checkpointBytes = decodeBase64(frame.checkpoint.ansi);
       write(checkpointBytes);
     }
-    // Apply all events
     for (const event of frame.events) {
-      applyFrameEvent(event, write);
-    }
-  } else {
-    // Same checkpoint — only apply events after our current position
-    for (const event of frame.events) {
-      if (event.seq <= fromSeq) {
-        continue;
-      }
       applyFrameEvent(event, write);
     }
   }

@@ -135,7 +135,6 @@ export interface SessionBackend {
   attachSession(params: AttachSessionParams): Promise<void>;
   detachSession(): Promise<void>;
   cancelPendingScripts?(): Promise<void>;
-  cancelPendingReplayRequests?(): void;
 
   killSession(sessionId: string): Promise<void>;
   deleteWorkspace(

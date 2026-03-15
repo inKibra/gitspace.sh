@@ -279,8 +279,12 @@ export function getReplayFrameOffline(
   }
 
   const checkpoints = listReplayCheckpoints(replayId);
-  const events = readReplayEvents(replayId);
-  const latestTimeMs = getLatestReplayTime(manifest.stats.durationMs, checkpoints, events);
+  // Use manifest durationMs + checkpoint times to determine latest time
+  // without reading the full events file
+  const latestCheckpointTime = checkpoints.length > 0
+    ? checkpoints[checkpoints.length - 1]?.t ?? 0
+    : 0;
+  const latestTimeMs = Math.max(manifest.stats.durationMs, latestCheckpointTime);
   const targetMs = target.atMs === undefined
     ? latestTimeMs
     : Math.max(0, Math.min(target.atMs, latestTimeMs));

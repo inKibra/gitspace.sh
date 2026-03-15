@@ -775,7 +775,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   cancelPendingReplayRequests(): void {
     if (this.pendingReplayFrame) {
       clearTimeout(this.pendingReplayFrame.timeout);
-      this.pendingReplayFrame.reject(new Error('Replay ANSI request cancelled'));
+      this.pendingReplayFrame.reject(new Error('Replay frame request cancelled'));
       this.pendingReplayFrame = null;
     }
     if (this.pendingReplayTimeline) {
@@ -785,10 +785,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
+  private cancelPendingReplayFrame(): void {
+    if (this.pendingReplayFrame) {
+      clearTimeout(this.pendingReplayFrame.timeout);
+      this.pendingReplayFrame.reject(new Error('Replay frame request cancelled'));
+      this.pendingReplayFrame = null;
+    }
+  }
+
   async getReplayFrame(replayId: string, target?: ReplayFrameTarget): Promise<import('../backend.js').ReplayFrame> {
     if (this.pendingReplayFrame) {
-      // Cancel stale in-flight request so we can start a fresh one
-      this.cancelPendingReplayRequests();
+      // Cancel only the stale frame request, not timeline
+      this.cancelPendingReplayFrame();
     }
 
     const command: GetReplayFrameRequest = {
@@ -807,16 +815,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         pending.reject(new Error(`Timed out waiting for replay frame (${replayId})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
-      this.pendingReplayFrame = { replayId, resolve, reject, timeout };
+      const pendingEntry = { replayId, resolve, reject, timeout };
+      this.pendingReplayFrame = pendingEntry;
 
       void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingReplayFrame;
-        if (!pending) {
+        // Guard against stale send failures cancelling a newer request
+        if (this.pendingReplayFrame !== pendingEntry) {
           return;
         }
-        clearTimeout(pending.timeout);
+        clearTimeout(pendingEntry.timeout);
         this.pendingReplayFrame = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        pendingEntry.reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
   }
