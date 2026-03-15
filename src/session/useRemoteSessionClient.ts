@@ -607,31 +607,33 @@ export function useRemoteSessionClient<ConnectParams>(
           // browser resize event (which may never come if dimensions haven't changed).
           const dims = lastDimensionsRef.current;
 
-          // Wait for the 'attached' confirmation event before declaring success,
-          // mirroring what connect.ts does with waitForBackendEvent. Without this,
-          // the reconnect declares success immediately even if the session no longer
-          // exists on the machine (e.g. after a machine restart), leaving the UI
-          // stuck in a connected-but-unattached state with no further recovery.
-          const attachConfirmed = await new Promise<boolean>((resolve) => {
-            const timeoutId = setTimeout(() => {
-              unsub();
-              resolve(false);
-            }, 30_000);
+          // Subscribe to the attached confirmation BEFORE sending the command
+          // so we can't miss the event. This mirrors connect.ts: subscribe → send
+          // → await. Awaiting before calling attachSession would deadlock because
+          // the 'attached' event can only fire after the command is sent.
+          let resolveAttach!: (ok: boolean) => void;
+          const attachConfirmed = new Promise<boolean>((resolve) => {
+            resolveAttach = resolve;
+          });
 
-            const unsub = backend.onEvent((event) => {
-              if (event.type === 'attached') {
-                clearTimeout(timeoutId);
-                unsub();
-                resolve(true);
-              } else if (
-                event.type === 'error' ||
-                (event.type === 'status' && event.status === 'disconnected')
-              ) {
-                clearTimeout(timeoutId);
-                unsub();
-                resolve(false);
-              }
-            });
+          const attachTimeoutId = setTimeout(() => {
+            unsubAttach();
+            resolveAttach(false);
+          }, 30_000);
+
+          const unsubAttach = backend.onEvent((event) => {
+            if (event.type === 'attached') {
+              clearTimeout(attachTimeoutId);
+              unsubAttach();
+              resolveAttach(true);
+            } else if (
+              event.type === 'error' ||
+              (event.type === 'status' && event.status === 'disconnected')
+            ) {
+              clearTimeout(attachTimeoutId);
+              unsubAttach();
+              resolveAttach(false);
+            }
           });
 
           await backend.attachSession({
@@ -639,7 +641,7 @@ export function useRemoteSessionClient<ConnectParams>(
             ...(dims ? { cols: dims.cols, rows: dims.rows } : {}),
           });
 
-          if (!attachConfirmed) {
+          if (!await attachConfirmed) {
             throw new Error('Session attachment timed out or was rejected — session may no longer exist');
           }
 
