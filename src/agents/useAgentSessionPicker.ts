@@ -19,9 +19,9 @@ export interface OpenPickerOptions {
 
 export interface UseAgentSessionPickerOptions {
   flow: UseFlowReturn;
-  loadWorkspaceSessions: (workspaceId: string) => Promise<AgentSessionInfo[]>;
-  createSession: (workspaceId: string, title?: string) => Promise<AgentSessionInfo[]>;
-  abortSession: (workspaceId: string, sessionId: string) => Promise<AgentSessionInfo[]>;
+  loadWorkspaceSessions: (workspaceId: string, workspaceName?: string) => Promise<AgentSessionInfo[]>;
+  createSession: (workspaceId: string, workspaceName: string, title?: string) => Promise<AgentSessionInfo[]>;
+  abortSession: (workspaceId: string, sessionId: string, workspaceName?: string) => Promise<AgentSessionInfo[]>;
   onOpenSession?: (session: AgentSessionInfo) => Promise<void> | void;
   /** Persisted last-selected session ID for the workspace */
   persistedSessionId?: string | null;
@@ -51,7 +51,7 @@ export function useAgentSessionPicker(options: UseAgentSessionPickerOptions) {
     pickerOptions?: OpenPickerOptions,
   ) => {
     const openSelector = async (sessions?: AgentSessionInfo[]) => {
-      const resolvedSessions = sessions ?? await loadWorkspaceSessions(workspaceId);
+      const resolvedSessions = sessions ?? await loadWorkspaceSessions(workspaceId, workspaceLabel);
 
       // Check if the persisted session still exists in the current list
       const resumeSession = persistedSessionId
@@ -120,7 +120,7 @@ export function useAgentSessionPicker(options: UseAgentSessionPickerOptions) {
               placeholder: 'Investigate auth regression',
               defaultValue: '',
               onSubmit: async (value) => {
-                const updated = await createSession(workspaceId, value.trim() || undefined);
+                const updated = await createSession(workspaceId, workspaceLabel, value.trim() || undefined);
                 await openSelector(updated);
               },
             });
@@ -135,7 +135,7 @@ export function useAgentSessionPicker(options: UseAgentSessionPickerOptions) {
               cancelLabel: 'Cancel',
               variant: 'warning',
               onConfirm: async () => {
-                const updated = await abortSession(workspaceId, selection.session.id);
+                const updated = await abortSession(workspaceId, selection.session.id, workspaceLabel);
                 await openSelector(updated);
               },
             });
@@ -156,7 +156,7 @@ export function useAgentSessionPicker(options: UseAgentSessionPickerOptions) {
         title: 'Loading Agent Sessions',
         message: `Fetching OpenCode sessions for ${workspaceLabel}...`,
       });
-      const sessions = await loadWorkspaceSessions(workspaceId);
+      const sessions = await loadWorkspaceSessions(workspaceId, workspaceLabel);
       await openSelector(sessions);
     } catch (error) {
       flow.showMessage({

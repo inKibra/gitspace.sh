@@ -3,6 +3,16 @@ import { OpenCodeRelayClient } from './opencode-relay-client.js';
 import type { OpenCodeBridgeBackend, SessionBackend } from '../session/backend.js';
 import type { SessionStatus } from './opencode-event-types.js';
 
+/** Workspace-scoped title prefix, e.g. "[my-feature] " */
+function workspacePrefix(workspaceName: string): string {
+  return `[${workspaceName}] `;
+}
+
+/** Strip the workspace prefix from a session title for display */
+function stripPrefix(title: string, prefix: string): string {
+  return title.startsWith(prefix) ? title.slice(prefix.length) : title;
+}
+
 export interface AgentSessionInfo {
   id: string;
   workspaceId: string;
@@ -38,7 +48,7 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     });
   }, [options.bridge]);
 
-  const loadWorkspaceSessions = useCallback(async (workspaceId: string) => {
+  const loadWorkspaceSessions = useCallback(async (workspaceId: string, workspaceName?: string) => {
     setLoadingWorkspaceId(workspaceId);
     setActiveWorkspaceId(workspaceId);
     setError(null);
@@ -51,13 +61,26 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
       const workspaceAgentState = agentSnapshot[workspaceId];
       const statusMap = workspaceAgentState?.statuses ?? {};
 
-      const mapped: AgentSessionInfo[] = raw.map((session) => ({
-        id: String(session.id),
-        workspaceId,
-        title: normalizeTitle(session.title, String(session.id)),
-        updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : undefined,
-        status: statusMap[String(session.id)],
-      }));
+      // Filter to only sessions belonging to this workspace (by title prefix)
+      // and strip the prefix for display
+      const prefix = workspaceName ? workspacePrefix(workspaceName) : null;
+
+      const mapped: AgentSessionInfo[] = raw
+        .filter((session) => {
+          if (!prefix) return true;
+          const title = normalizeTitle(session.title, '');
+          return title.startsWith(prefix);
+        })
+        .map((session) => {
+          const rawTitle = normalizeTitle(session.title, String(session.id));
+          return {
+            id: String(session.id),
+            workspaceId,
+            title: prefix ? stripPrefix(rawTitle, prefix) : rawTitle,
+            updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : undefined,
+            status: statusMap[String(session.id)],
+          };
+        });
 
       setSessionsByWorkspace((current) => ({
         ...current,
@@ -73,17 +96,19 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     }
   }, [createClient, options.backend]);
 
-  const createSession = useCallback(async (workspaceId: string, title?: string) => {
+  const createSession = useCallback(async (workspaceId: string, workspaceName: string, title?: string) => {
     const client = createClient(workspaceId);
-    await client.createSession(title);
-    return loadWorkspaceSessions(workspaceId);
+    // Prefix the title with the workspace name so sessions are scoped per-workspace
+    const prefixedTitle = `${workspacePrefix(workspaceName)}${title || 'New Session'}`;
+    await client.createSession(prefixedTitle);
+    return loadWorkspaceSessions(workspaceId, workspaceName);
   }, [createClient, loadWorkspaceSessions]);
 
-  const abortSession = useCallback(async (workspaceId: string, sessionId: string) => {
+  const abortSession = useCallback(async (workspaceId: string, sessionId: string, workspaceName?: string) => {
     const client = createClient(workspaceId);
     await client.abortSession(sessionId);
     // Refresh list after abort
-    return loadWorkspaceSessions(workspaceId);
+    return loadWorkspaceSessions(workspaceId, workspaceName);
   }, [createClient, loadWorkspaceSessions]);
 
   const sessions = useMemo(() => {
