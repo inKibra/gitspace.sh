@@ -297,18 +297,18 @@ export function ReplayTerminalWeb({
       return;
     }
 
-    setCurrentStepIndex((index) => {
-      if (index >= timeline.steps.length - 1) {
-        // Restarting from the end — invalidate and reset checkpoint tracking
-        invalidatePendingFrameLoad();
-        currentCheckpointIdRef.current = null;
-        currentSeqRef.current = 0;
-        return 0;
-      }
-      return Math.max(0, index);
-    });
+    const atEnd = currentStepIndex >= timeline.steps.length - 1;
+    if (atEnd) {
+      // Restarting from the end — invalidate and reset checkpoint tracking
+      invalidatePendingFrameLoad();
+      currentCheckpointIdRef.current = null;
+      currentSeqRef.current = 0;
+      setCurrentStepIndex(0);
+    } else {
+      setCurrentStepIndex((index) => Math.max(0, index));
+    }
     setIsPlaying(true);
-  }, [invalidatePendingFrameLoad, isPlaying, timeline]);
+  }, [currentStepIndex, invalidatePendingFrameLoad, isPlaying, timeline]);
 
   const jumpToBoundary = useCallback((direction: 'start' | 'end') => {
     if (!timeline || timeline.steps.length === 0) {
