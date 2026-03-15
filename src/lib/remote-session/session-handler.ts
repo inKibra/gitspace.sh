@@ -791,12 +791,12 @@ export class RemoteSessionHandler {
   ): Promise<void> {
     const manifest = readReplayManifest(replayId);
     if (!manifest) {
-      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`);
+      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`, { requestId });
       return;
     }
 
     if (!canAccessReplayForSession(session.accessType, session.grantedSessionId, manifest)) {
-      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay');
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay', { requestId });
       return;
     }
 
@@ -1972,7 +1972,7 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void,
     code: string,
     message: string,
-    options?: { workspaceId?: string; projectName?: string }
+    options?: { workspaceId?: string; projectName?: string; requestId?: string }
   ): Promise<void> {
     await this.sendMessage(session, sendResponse, {
       type: "error",
@@ -1980,6 +1980,7 @@ export class RemoteSessionHandler {
       message,
       workspaceId: options?.workspaceId,
       projectName: options?.projectName,
+      requestId: options?.requestId,
     });
   }
 

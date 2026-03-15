@@ -292,11 +292,16 @@ export function ReplayTerminalWeb({
       return;
     }
 
-    // When restarting from the end, invalidate so the old frame load is discarded
-    invalidatePendingFrameLoad();
-    currentCheckpointIdRef.current = null;
-    currentSeqRef.current = 0;
-    setCurrentStepIndex((index) => index >= timeline.steps.length - 1 ? 0 : Math.max(0, index));
+    setCurrentStepIndex((index) => {
+      if (index >= timeline.steps.length - 1) {
+        // Restarting from the end — invalidate and reset checkpoint tracking
+        invalidatePendingFrameLoad();
+        currentCheckpointIdRef.current = null;
+        currentSeqRef.current = 0;
+        return 0;
+      }
+      return Math.max(0, index);
+    });
     setIsPlaying(true);
   }, [invalidatePendingFrameLoad, isPlaying, timeline]);
 

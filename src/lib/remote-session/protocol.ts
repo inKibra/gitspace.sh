@@ -437,6 +437,7 @@ export interface ErrorResponse {
   message: string;
   workspaceId?: string;
   projectName?: string;
+  requestId?: string;
 }
 
 /** Project information */

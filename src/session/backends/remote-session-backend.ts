@@ -2093,7 +2093,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingCancelProject(message.message, message.projectName);
         this.rejectPendingWorkspaceCreate(message.message, message.workspaceId, message.projectName);
         this.rejectPendingProjectDelete(message.message, message.projectName);
-        this.rejectPendingReplayFrame(message.message, undefined, true);
+        this.rejectPendingReplayFrame(message.message, { requestId: message.requestId, force: !message.requestId });
         this.rejectPendingReplayTimeline(message.message, undefined, true);
         this.rejectPendingDismissReplay(message.message, undefined, true);
         this.rejectPendingUndismissReplay(message.message, undefined, true);
@@ -2536,13 +2536,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.resolve(message.timeline);
   }
 
-  private rejectPendingReplayFrame(message: string, replayId?: string, force = false): void {
+  private rejectPendingReplayFrame(message: string, options?: { replayId?: string; requestId?: string; force?: boolean }): void {
     const pending = this.pendingReplayFrame;
     if (!pending) {
       return;
     }
-    if (!force && replayId && pending.replayId !== replayId) {
-      return;
+    const force = options?.force ?? false;
+    if (!force) {
+      // If requestId is provided, match on that (most precise)
+      if (options?.requestId && pending.requestId !== options.requestId) {
+        return;
+      }
+      // Otherwise fall back to replayId match
+      if (!options?.requestId && options?.replayId && pending.replayId !== options.replayId) {
+        return;
+      }
     }
     clearTimeout(pending.timeout);
     this.pendingReplayFrame = null;
@@ -2937,7 +2945,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingCancelProject('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceCreate('Remote session disconnected', undefined, undefined, true);
     this.rejectPendingProjectDelete('Remote session disconnected', undefined, true);
-    this.rejectPendingReplayFrame('Remote session disconnected', undefined, true);
+    this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);
