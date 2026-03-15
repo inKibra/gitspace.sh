@@ -160,6 +160,9 @@ jobs:
       - name: Regenerate bun.lock for released version
         run: bun install --lockfile-only --ignore-scripts
 
+      - name: Patch lockfile with all platform packages
+        run: bun scripts/patch-lockfile-platforms.ts
+
       - name: Validate lockfile sync
         run: bun run check:lockfile-sync
 
