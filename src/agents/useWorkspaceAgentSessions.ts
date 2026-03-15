@@ -39,6 +39,9 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     if (!method) {
       throw new Error('Agent backend unavailable');
     }
+    if (typeof method === 'function') {
+      return method.bind(options.backend) as NonNullable<SessionBackend[T]>;
+    }
     return method as NonNullable<SessionBackend[T]>;
   }, [options.backend]);
 
