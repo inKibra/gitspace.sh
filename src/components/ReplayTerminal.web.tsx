@@ -133,6 +133,7 @@ export function ReplayTerminalWeb({
       const message = loadError instanceof Error ? loadError.message : String(loadError);
       setError(message);
       setErroredTargetKey(targetKey(target));
+      setIsPlaying(false);
 
       if (!hasContentRef.current) {
         feedTerminal(`\x1b[2J\x1b[H\x1b[31mFailed to load replay\x1b[0m\r\n\r\n${message}`);
