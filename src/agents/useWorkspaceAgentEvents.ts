@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { SessionBackend } from '../session/backend.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../serve/agent-event-manager.js';
 import type { Permission, SessionStatus } from './opencode-event-types.js';
@@ -323,7 +323,10 @@ export function useWorkspaceAgentEvents({
     await backend.respondToAgentPermission(workspaceId, agentSessionId, permissionId, response);
   }, [backend]);
 
-  const { total, byWorkspace } = countPendingPermissions(workspaceStates);
+  const { total, byWorkspace } = useMemo(
+    () => countPendingPermissions(workspaceStates),
+    [workspaceStates],
+  );
 
   return {
     workspaceStates,
