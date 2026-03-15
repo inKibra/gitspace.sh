@@ -906,6 +906,18 @@ export default function App() {
     },
   });
 
+  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
+  const agentSessionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
+      counts[wid] = sessions.length;
+    }
+    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
+      counts[wid] = Object.keys(sessions).length;
+    }
+    return counts;
+  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: filteredWorkspaces,
@@ -934,16 +946,7 @@ export default function App() {
       const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
       await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
     },
-    agentSessionCounts: (() => {
-      const counts: Record<string, number> = {};
-      for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
-        counts[wid] = sessions.length;
-      }
-      for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-        counts[wid] = Object.keys(sessions).length;
-      }
-      return counts;
-    })(),
+    agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },
     onRefreshSessions: () => { terminal.requestSessions(); refreshReplayList(); },

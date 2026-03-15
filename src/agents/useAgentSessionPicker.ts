@@ -88,6 +88,8 @@ export function useAgentSessionPicker(options: UseAgentSessionPickerOptions) {
       });
 
       for (const session of resolvedSessions) {
+        // Skip the resume session — it's already shown as a special entry at the top
+        if (resumeSession && session.id === resumeSession.id) continue;
         const badge = statusBadge(session);
         options2.push({
           label: session.title,

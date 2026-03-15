@@ -610,7 +610,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onPersistSession: agentSessionPref.persist,
     onOpenSession: async (session) => {
       agentSessionPref.persist(session.id);
-      const runtime = await remote.getOpenCodeRuntimeInfo(session.workspaceId);
       const bridge = await ensureOpenCodeLocalBridge({
         workspaceId: session.workspaceId,
         backend: {
@@ -626,6 +625,18 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       });
     },
   });
+
+  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
+  const agentSessionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
+      counts[wid] = sessions.length;
+    }
+    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
+      counts[wid] = Object.keys(sessions).length;
+    }
+    return counts;
+  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
@@ -645,16 +656,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       const workspace = remote.workspaces.find((item) => item.id === workspaceId);
       await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
     },
-    agentSessionCounts: (() => {
-      const counts: Record<string, number> = {};
-      for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
-        counts[wid] = sessions.length;
-      }
-      for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-        counts[wid] = Object.keys(sessions).length;
-      }
-      return counts;
-    })(),
+    agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,

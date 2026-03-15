@@ -49,14 +49,6 @@ export interface OpenCodeBridgeStreamClose {
   requestId: string;
 }
 
-export interface OpenCodeBridgeBackend {
-  requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse>;
-  subscribeOpenCode(
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void
-  ): Promise<() => Promise<void>>;
-}
-
 export function encodeBridgeBody(body: Uint8Array | ArrayBuffer | string | undefined): string | undefined {
   if (body === undefined) {
     return undefined;

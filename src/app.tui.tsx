@@ -1302,6 +1302,19 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     },
   });
 
+  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
+  const agentSessionCounts = useMemo(() => {
+    // Start with explicit session load counts, then overlay live counts from agent events
+    const counts: Record<string, number> = {};
+    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
+      counts[wid] = sessions.length;
+    }
+    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
+      counts[wid] = Object.keys(sessions).length;
+    }
+    return counts;
+  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
@@ -1325,17 +1338,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       const workspace = workspaceInfos.find((item) => item.id === workspaceId);
       await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
     },
-    agentSessionCounts: (() => {
-      // Start with explicit session load counts, then overlay live counts from agent events
-      const counts: Record<string, number> = {};
-      for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
-        counts[wid] = sessions.length;
-      }
-      for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-        counts[wid] = Object.keys(sessions).length;
-      }
-      return counts;
-    })(),
+    agentSessionCounts: agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: refreshWorkspaces,
     onRefreshSessions: async () => {
