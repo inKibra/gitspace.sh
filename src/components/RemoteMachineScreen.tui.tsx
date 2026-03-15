@@ -44,8 +44,6 @@ import { useAgentSessionPicker } from '../agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
-import { buildOpenCodeAttachUrlCommand } from '../agents/opencode-attach.js';
-import { ensureOpenCodeLocalBridge } from '../agents/opencode-local-bridge.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -575,12 +573,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const remoteBackend = remote.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
-    bridge: remote.hasOpenCodeBridge
-      ? {
-          requestOpenCode: remote.requestOpenCode,
-          subscribeOpenCode: remote.subscribeOpenCode,
-        }
-      : null,
     backend: remoteBackend,
   });
 
@@ -610,19 +602,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onPersistSession: agentSessionPref.persist,
     onOpenSession: async (session) => {
       agentSessionPref.persist(session.id);
-      const bridge = await ensureOpenCodeLocalBridge({
-        workspaceId: session.workspaceId,
-        backend: {
-          requestOpenCode: remote.requestOpenCode,
-          subscribeOpenCode: remote.subscribeOpenCode,
-        },
-      });
-      const commandSpec = buildOpenCodeAttachUrlCommand(bridge.baseUrl, session.id);
-      await attachController.attach({
-        workspaceId: session.workspaceId,
-        command: commandSpec.command,
-        args: commandSpec.args,
-      });
+      if (!remoteBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await remoteBackend.attachAgentSession(session.workspaceId, session.id);
     },
   });
 

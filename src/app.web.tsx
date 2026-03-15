@@ -28,7 +28,6 @@ import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
-import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
 import { buildOpenCodeWebProxyUrl } from './agents/opencode-web.js';
 
 // Import shared components and hooks
@@ -845,12 +844,6 @@ export default function App() {
   const webBackend = terminal.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
-    bridge: terminal.hasOpenCodeBridge
-      ? {
-          requestOpenCode: terminal.requestOpenCode,
-          subscribeOpenCode: terminal.subscribeOpenCode,
-        }
-      : null,
     backend: webBackend,
   });
 
@@ -897,12 +890,11 @@ export default function App() {
         return;
       }
 
-      const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
-      await attachController.attach({
-        workspaceId: session.workspaceId,
-        command: commandSpec.command,
-        args: commandSpec.args,
-      });
+      if (!webBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await webBackend.attachAgentSession(session.workspaceId, session.id);
+      setView('terminal');
     },
   });
 

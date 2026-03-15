@@ -94,6 +94,7 @@ import {
 } from '../../agents/opencode-runtime.js';
 import { buildOpenCodeUrl } from '../../agents/opencode-bridge.js';
 import { consumeSseStream } from '../../agents/opencode-sse.js';
+import { defaultOpenCodeCoordinator, type AgentWorkspaceTarget } from '../../agents/opencode-coordinator.js';
 
 /**
  * Session state for a connected client
@@ -222,6 +223,7 @@ export class RemoteSessionHandler {
    */
   async initialize(): Promise<void> {
     try {
+      await this.openCodeRuntimeManager.initialize();
       this.tmuxLiteAvailable = await isServerRunning();
       if (!this.tmuxLiteAvailable) {
         // Try to start the server
@@ -646,6 +648,14 @@ export class RemoteSessionHandler {
         await this.handleGetOpenCodeRuntime(session, msg.workspaceId, sendResponse);
         break;
 
+      case 'attach_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to attach agent sessions');
+          return;
+        }
+        await this.handleAttachAgentSession(session, msg.workspaceId, msg.agentSessionId, msg.viewOnly, sendResponse);
+        break;
+
       default: {
         // Exhaustiveness check - log unknown message types
         const unknownMsg = msg as { type: string };
@@ -672,7 +682,7 @@ export class RemoteSessionHandler {
           // Note: Session cwd is set once at creation time and does NOT change
           // as users navigate within the shell. This is intentional - we want to
           // show sessions that were *created for* this workspace.
-          const workspaceSessions = sessions.filter(s => s.cwd === workspace.path);
+          const workspaceSessions = sessions.filter((s) => s.cwd === workspace.path && !(s.hidden || s.kind === 'agent'));
           workspace.sessionCount = workspaceSessions.length;
 
           // Load process config for the workspace
@@ -724,6 +734,7 @@ export class RemoteSessionHandler {
         const workspacePathMap = new Map(workspaces.map(w => [w.path, w]));
 
         sessions = allSessions
+          .filter((s) => !(s.hidden || s.kind === 'agent'))
           .filter(s => {
             if (!workspaceId) return true;
             // Try process session name first
@@ -1799,6 +1810,20 @@ export class RemoteSessionHandler {
     return `${session.connectionId}:${requestId}`;
   }
 
+  private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTarget> {
+    const workspaces = await scanWorkspaces();
+    const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+    return {
+      workspaceId: toCanonicalWorkspaceId(workspace),
+      workspaceName: workspace.id,
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    };
+  }
+
   private async ensureOpenCodeRuntime(workspaceId: string): Promise<{
     workspaceId: string;
     workspacePath: string;
@@ -1827,6 +1852,35 @@ export class RemoteSessionHandler {
       password: runtime.password,
       authHeader: createOpenCodeBasicAuthHeader(runtime),
     };
+  }
+
+  private async handleAttachAgentSession(
+    session: RemoteClientSession,
+    workspaceId: string,
+    agentSessionId: string,
+    viewOnly: boolean | undefined,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const terminalSession = await defaultOpenCodeCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+
+      session.state = 'attached';
+      session.attachedSessionId = terminalSession.id;
+      session.sessionSocketPath = terminalSession.socketPath;
+      session.viewOnly = viewOnly ?? false;
+
+      await this.sendMessage(session, sendResponse, {
+        type: 'attached',
+        sessionId: terminalSession.id,
+        sessionName: terminalSession.name,
+        cols: 80,
+        rows: 24,
+      });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      await this.sendError(session, sendResponse, 'ATTACH_FAILED', `Failed to attach agent session: ${detail}`);
+    }
   }
 
   private async handleOpenCodeRequest(

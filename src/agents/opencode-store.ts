@@ -16,6 +16,8 @@ export interface StoredWorkspaceAgentSession {
   updatedAt?: string;
   lastSeenAt?: string;
   lastKnownStatus?: string;
+  terminalSessionId?: string;
+  terminalSessionName?: string;
 }
 
 export interface StoredWorkspaceAgentSessionHistory {
@@ -54,7 +56,7 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
   await rename(tempPath, filePath);
 }

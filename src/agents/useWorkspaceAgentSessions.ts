@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { OpenCodeRelayClient } from './opencode-relay-client.js';
-import type { OpenCodeBridgeBackend, SessionBackend } from '../session/backend.js';
+import type { SessionBackend } from '../session/backend.js';
 import type { SessionStatus } from './opencode-event-types.js';
 
 export interface AgentSessionInfo {
@@ -8,18 +7,25 @@ export interface AgentSessionInfo {
   workspaceId: string;
   title: string;
   updatedAt?: string;
-  /** Current status from AgentEventManager snapshot, if available */
   status?: SessionStatus;
 }
 
 export interface UseWorkspaceAgentSessionsOptions {
-  bridge: Pick<OpenCodeBridgeBackend, 'requestOpenCode' | 'subscribeOpenCode'> | null;
-  /** Full backend for status merging and abort */
   backend?: SessionBackend | null;
 }
 
-function normalizeTitle(value: unknown, fallback: string): string {
-  return typeof value === 'string' && value.trim().length > 0 ? value : fallback;
+function mapSessions(
+  workspaceId: string,
+  sessions: Array<{ id: string; title: string; updatedAt?: string }>,
+  statusMap: Record<string, SessionStatus>,
+): AgentSessionInfo[] {
+  return sessions.map((session) => ({
+    id: session.id,
+    workspaceId,
+    title: session.title,
+    updatedAt: session.updatedAt,
+    status: statusMap[session.id],
+  }));
 }
 
 export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOptions) {
@@ -28,41 +34,47 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const createClient = useCallback((workspaceId: string) => {
-    if (!options.bridge) {
-      throw new Error('OpenCode bridge unavailable');
+  const requireAgentMethod = useCallback(<T extends keyof SessionBackend>(name: T): NonNullable<SessionBackend[T]> => {
+    const method = options.backend?.[name];
+    if (!method) {
+      throw new Error('Agent backend unavailable');
     }
-    return new OpenCodeRelayClient({
-      workspaceId,
-      backend: options.bridge,
-    });
-  }, [options.bridge]);
+    return method as NonNullable<SessionBackend[T]>;
+  }, [options.backend]);
+
+  const getStatusMap = useCallback((workspaceId: string) => {
+    const snapshot = options.backend?.getAgentStateSnapshot() ?? {};
+    return snapshot[workspaceId]?.statuses ?? {};
+  }, [options.backend]);
 
   const loadWorkspaceSessions = useCallback(async (workspaceId: string) => {
+    const getKnownAgentSessions = requireAgentMethod('getKnownAgentSessions');
+    const listAgentSessions = requireAgentMethod('listAgentSessions');
     setLoadingWorkspaceId(workspaceId);
     setActiveWorkspaceId(workspaceId);
     setError(null);
+
     try {
-      const client = createClient(workspaceId);
-      const raw = await client.listSessions() as Array<Record<string, unknown>>;
+      const known = await getKnownAgentSessions(workspaceId);
+      const knownMapped = mapSessions(workspaceId, known, getStatusMap(workspaceId));
 
-      // Merge status from AgentEventManager snapshot if available
-      const agentSnapshot = options.backend?.getAgentStateSnapshot() ?? {};
-      const workspaceAgentState = agentSnapshot[workspaceId];
-      const statusMap = workspaceAgentState?.statuses ?? {};
+      if (knownMapped.length > 0) {
+        setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: knownMapped }));
+        void listAgentSessions(workspaceId)
+          .then((live) => {
+            setSessionsByWorkspace((current) => ({
+              ...current,
+              [workspaceId]: mapSessions(workspaceId, live, getStatusMap(workspaceId)),
+            }));
+          })
+          .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+          .finally(() => setLoadingWorkspaceId((current) => (current === workspaceId ? null : current)));
+        return knownMapped;
+      }
 
-      const mapped: AgentSessionInfo[] = raw.map((session) => ({
-        id: String(session.id),
-        workspaceId,
-        title: normalizeTitle(session.title, String(session.id)),
-        updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : undefined,
-        status: statusMap[String(session.id)],
-      }));
-
-      setSessionsByWorkspace((current) => ({
-        ...current,
-        [workspaceId]: mapped,
-      }));
+      const live = await listAgentSessions(workspaceId);
+      const mapped = mapSessions(workspaceId, live, getStatusMap(workspaceId));
+      setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
       return mapped;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -71,20 +83,25 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     } finally {
       setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
     }
-  }, [createClient, options.backend]);
+  }, [getStatusMap, requireAgentMethod]);
 
   const createSession = useCallback(async (workspaceId: string, title?: string) => {
-    const client = createClient(workspaceId);
-    await client.createSession(title);
-    return loadWorkspaceSessions(workspaceId);
-  }, [createClient, loadWorkspaceSessions]);
+    const createAgentSession = requireAgentMethod('createAgentSession');
+    const sessions = await createAgentSession(workspaceId, title);
+    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId));
+    setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
+    return mapped;
+  }, [getStatusMap, requireAgentMethod]);
 
   const abortSession = useCallback(async (workspaceId: string, sessionId: string) => {
-    const client = createClient(workspaceId);
-    await client.abortSession(sessionId);
-    // Refresh list after abort
-    return loadWorkspaceSessions(workspaceId);
-  }, [createClient, loadWorkspaceSessions]);
+    const abortAgentSession = requireAgentMethod('abortAgentSession');
+    const listAgentSessions = requireAgentMethod('listAgentSessions');
+    await abortAgentSession(workspaceId, sessionId);
+    const sessions = await listAgentSessions(workspaceId);
+    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId));
+    setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
+    return mapped;
+  }, [getStatusMap, requireAgentMethod]);
 
   const sessions = useMemo(() => {
     if (!activeWorkspaceId) {

@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import { LocalSessionBackend, type LocalSessionBackendDependencies } from '../backends/local-session-backend';
 import type { BackendEvent } from '../events';
 import type { NotificationConfig } from '../../notifications/types';
+import type { OpenCodeCoordinator } from '../../agents/opencode-coordinator';
 
 const notificationConfig: NotificationConfig = {
   enabled: true,
@@ -1258,5 +1259,130 @@ describe('LocalSessionBackend', () => {
 
     expect(dismissCalls).toEqual(['replay-1']);
     expect(undismissCalls).toEqual(['replay-1']);
+  });
+
+  it('hides agent tmux sessions from workspace counts and normal session list', async () => {
+    const events: BackendEvent[] = [];
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      scanWorkspaces: async () => [
+        {
+          id: 'ws-1',
+          name: 'ws-1',
+          path: '/tmp/ws-1',
+          projectName: 'alpha',
+          branch: 'main',
+          sessionCount: 0,
+          isStale: false,
+        },
+      ],
+      listSessions: async () => [
+        {
+          id: 'shell-1',
+          name: 'alpha:ws-1:1',
+          socketPath: '/tmp/socket-shell',
+          pid: 123,
+          attached: false,
+          cwd: '/tmp/ws-1',
+          createdAt: 1,
+          kind: 'shell',
+          hidden: false,
+        },
+        {
+          id: 'agent-pty-1',
+          name: 'agent:ws-1:abcd1234',
+          socketPath: '/tmp/socket-agent',
+          pid: 456,
+          attached: false,
+          cwd: '/tmp/ws-1',
+          createdAt: 2,
+          kind: 'agent',
+          hidden: true,
+          metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
+        },
+      ],
+    };
+
+    const backend = new LocalSessionBackend({ deps });
+    backend.onEvent((event) => events.push(event));
+
+    await backend.listWorkspaces();
+    await backend.listSessions();
+
+    expect(events).toContainEqual({
+      type: 'workspaces',
+      workspaces: [expect.objectContaining({ id: 'alpha:ws-1', sessionCount: 1 })],
+    });
+    expect(events).toContainEqual({
+      type: 'sessions',
+      sessions: [expect.objectContaining({ id: 'shell-1' })],
+    });
+  });
+
+  it('attaches agent sessions through the shared tmux session from the coordinator', async () => {
+    const ensureAgentTerminalSession = mock(async () => ({
+      id: 'tmux-agent-1',
+      name: 'agent:ws-1:abcd1234',
+      socketPath: '/tmp/socket-agent',
+      pid: 999,
+      attached: false,
+      cwd: '/tmp/ws-1',
+      createdAt: 10,
+      kind: 'agent' as const,
+      hidden: true,
+      metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
+    }));
+    const deps: Partial<LocalSessionBackendDependencies> = {
+      ensureServer: async () => {},
+      scanWorkspaces: async () => [
+        {
+          id: 'ws-1',
+          name: 'ws-1',
+          path: '/tmp/ws-1',
+          projectName: 'alpha',
+          branch: 'main',
+          sessionCount: 0,
+          isStale: false,
+        },
+      ],
+      listSessions: async () => [
+        {
+          id: 'tmux-agent-1',
+          name: 'agent:ws-1:abcd1234',
+          socketPath: '/tmp/socket-agent',
+          pid: 999,
+          attached: false,
+          cwd: '/tmp/ws-1',
+          createdAt: 10,
+          kind: 'agent',
+          hidden: true,
+          metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
+        },
+      ],
+      connectSessionSocket: async (_socketPath, handlers) => ({
+        sendControl: (control) => {
+          if (control.type === 'attach-init') {
+            handlers.onControl({ type: 'attached' });
+          }
+        },
+        sendPty: () => {},
+        close: () => handlers.onClose(),
+      }),
+    };
+    const coordinator = {
+      ensureRuntime: mock(async () => { throw new Error('not used'); }),
+      getKnownAgentSessions: mock(async () => []),
+      refreshAgentSessions: mock(async () => []),
+      createAgentSession: mock(async () => []),
+      abortAgentSession: mock(async () => true),
+      ensureAgentTerminalSession,
+    } satisfies OpenCodeCoordinator;
+
+    const backend = new LocalSessionBackend({ deps, openCodeCoordinator: coordinator });
+    await backend.attachAgentSession('alpha:ws-1', 'agent-ses-1');
+
+    expect(ensureAgentTerminalSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'alpha:ws-1', workspacePath: '/tmp/ws-1' }),
+      'agent-ses-1',
+    );
   });
 });

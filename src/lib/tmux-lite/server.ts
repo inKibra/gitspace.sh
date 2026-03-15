@@ -1570,6 +1570,9 @@ function createSession(
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    metadata?: Record<string, string>;
   }
 ): Session {
   const id = genId();
@@ -1679,6 +1682,9 @@ function createSession(
     attached: false,
     cwd,
     createdAt: Date.now(),
+    kind: options?.kind ?? 'shell',
+    hidden: options?.hidden ?? false,
+    metadata: options?.metadata,
   };
 
   // Create attach handler
@@ -1858,6 +1864,9 @@ routerListener = Bun.listen({
                 command: cmd.command,
                 args: cmd.args,
                 env: cmd.env,
+                kind: cmd.kind,
+                hidden: cmd.hidden,
+                metadata: cmd.metadata,
               });
               res = { type: "session", session };
             } catch (e) {

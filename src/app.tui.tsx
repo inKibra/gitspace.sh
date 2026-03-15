@@ -123,7 +123,6 @@ import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
-import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -1258,12 +1257,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const localBackend = localSession.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
-    bridge: localSession.hasOpenCodeBridge
-      ? {
-          requestOpenCode: localSession.requestOpenCode,
-          subscribeOpenCode: localSession.subscribeOpenCode,
-        }
-      : null,
     backend: localBackend,
   });
 
@@ -1293,13 +1286,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onPersistSession: agentSessionPref.persist,
     onOpenSession: async (session) => {
       agentSessionPref.persist(session.id);
-      const runtime = await localSession.getOpenCodeRuntimeInfo(session.workspaceId);
-      const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
-      await attachLocal({
-        workspaceId: session.workspaceId,
-        command: commandSpec.command,
-        args: commandSpec.args,
-      });
+      if (!localBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await localBackend.attachAgentSession(session.workspaceId, session.id);
+      dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
   });
 

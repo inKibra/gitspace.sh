@@ -408,6 +408,9 @@ export async function createSession(
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    metadata?: Record<string, string>;
   }
 ): Promise<Session> {
   await ensureServer();
@@ -419,6 +422,9 @@ export async function createSession(
     command: options?.command,
     args: options?.args,
     env: options?.env,
+    kind: options?.kind,
+    hidden: options?.hidden,
+    metadata: options?.metadata,
   });
   if (res.type === "session") return res.session;
   if (res.type === "error") throw new Error(res.message);

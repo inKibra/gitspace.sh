@@ -152,10 +152,6 @@ export function useAgentSessionPicker(options: UseAgentSessionPickerOptions) {
     };
 
     try {
-      flow.showLoading({
-        title: 'Loading Agent Sessions',
-        message: `Fetching OpenCode sessions for ${workspaceLabel}...`,
-      });
       const sessions = await loadWorkspaceSessions(workspaceId);
       await openSelector(sessions);
     } catch (error) {

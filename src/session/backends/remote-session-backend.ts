@@ -4,6 +4,7 @@ import {
   parseRemoteMessage,
   type ApplyBundleRefreshRequest,
   type AttachSessionRequest,
+  type AttachAgentSessionRequest,
   type CancelProjectCreationRequest,
   type CreateProjectRequest,
   type CreateWorkspaceRequest,
@@ -107,6 +108,22 @@ import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/rem
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30000;
+
+function normalizeOpenCodeTime(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString();
+  return undefined;
+}
+
+function normalizeOpenCodeSessionRecord(value: Record<string, unknown>): { id: string; title: string; directory?: string; updatedAt?: string } {
+  const time = (value.time && typeof value.time === 'object') ? value.time as Record<string, unknown> : undefined;
+  return {
+    id: String(value.id),
+    title: typeof value.title === 'string' && value.title.trim().length > 0 ? value.title : String(value.id),
+    directory: typeof value.directory === 'string' ? value.directory : undefined,
+    updatedAt: normalizeOpenCodeTime(value.updatedAt ?? time?.updated),
+  };
+}
 
 function normalizeExpectedProjectName(projectName: string | undefined, repository: string): string {
 	const candidate = projectName?.trim() || extractRepoName(repository);
@@ -1333,6 +1350,60 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       command: params.command,
       args: params.args,
       env: params.env,
+    };
+    await this.sendCommand(command);
+  }
+
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    const workspace = this.agentStateCache[workspaceId];
+    return workspace?.sessions.map((session) => ({ id: session.id, title: session.title })) ?? [];
+  }
+
+  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    const runtime = await this.getOpenCodeRuntimeInfo(workspaceId);
+    const response = await this.requestOpenCode({
+      workspaceId,
+      method: 'GET',
+      path: '/session',
+    });
+    const raw = JSON.parse(Buffer.from(response.bodyBase64 ?? '', 'base64').toString('utf8')) as Array<Record<string, unknown>>;
+    return raw
+      .map(normalizeOpenCodeSessionRecord)
+      .filter((session) => session.directory === runtime.workspacePath)
+      .map((session) => ({ id: session.id, title: session.title, updatedAt: session.updatedAt }));
+  }
+
+  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    await this.requestOpenCode({
+      workspaceId,
+      method: 'POST',
+      path: '/session',
+      headers: { 'content-type': 'application/json' },
+      bodyBase64: Buffer.from(JSON.stringify({ title })).toString('base64'),
+    });
+    return this.listAgentSessions(workspaceId);
+  }
+
+  async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+    const response = await this.requestOpenCode({
+      workspaceId,
+      method: 'POST',
+      path: `/session/${encodeURIComponent(agentSessionId)}/abort`,
+    });
+    try {
+      return JSON.parse(Buffer.from(response.bodyBase64 ?? '', 'base64').toString('utf8')) as boolean;
+    } catch {
+      return response.status >= 200 && response.status < 300;
+    }
+  }
+
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+    this.viewOnly = options.viewOnly ?? false;
+    const command: AttachAgentSessionRequest = {
+      type: 'attach_agent_session',
+      workspaceId,
+      agentSessionId,
+      viewOnly: options.viewOnly,
     };
     await this.sendCommand(command);
   }

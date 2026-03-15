@@ -122,6 +122,7 @@ import { consumeSseStream } from '../../agents/opencode-sse.js';
 import { createOpenCodeBasicAuthHeader, defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
 import { defaultAgentEventManager, type AgentStateUpdateDelta, type WorkspaceAgentState } from '../../serve/agent-event-manager.js';
 import { OpenCodeClient } from '../../agents/opencode-client.js';
+import { defaultOpenCodeCoordinator, type AgentWorkspaceTarget, type OpenCodeCoordinator } from '../../agents/opencode-coordinator.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -183,6 +184,7 @@ export interface LocalSessionSocketConnection {
 export interface LocalSessionBackendOptions {
   descriptor?: BackendDescriptor;
   deps?: Partial<LocalSessionBackendDependencies>;
+  openCodeCoordinator?: OpenCodeCoordinator;
 }
 
 const DEFAULT_DESCRIPTOR: BackendDescriptor = {
@@ -443,10 +445,12 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
   private pendingUtf8Bytes = new Uint8Array(0);
   private viewOnly = false;
   private pendingAttachAbortController: AbortController | null = null;
+  private readonly openCodeCoordinator: OpenCodeCoordinator;
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
     this.deps = buildDeps(options.deps);
+    this.openCodeCoordinator = options.openCodeCoordinator ?? defaultOpenCodeCoordinator;
   }
 
   onEvent(handler: (event: BackendEvent) => void): () => void {
@@ -471,6 +475,8 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
   async connect(): Promise<void> {
     await this.deps.ensureServer();
+    await defaultOpenCodeRuntimeManager.initialize();
+    await defaultAgentEventManager.initialize();
     this.connected = true;
     this.emit({ type: 'status', status: 'connected' });
   }
@@ -519,6 +525,9 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
     const counts = new Map<string, number>();
     for (const session of sessions) {
+      if (session.hidden || session.kind === 'agent') {
+        continue;
+      }
       const current = counts.get(session.cwd) ?? 0;
       counts.set(session.cwd, current + 1);
     }
@@ -553,6 +562,7 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     const workspaceByPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
 
     const filtered = sessions
+      .filter((session) => !(session.hidden || session.kind === 'agent'))
       .map((session) => {
         const parsed = parseProcessSessionName(session.name);
         let workspace = workspaceByPath.get(session.cwd);
@@ -1490,6 +1500,20 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     };
   }
 
+  private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTarget> {
+    const workspaces = await this.deps.scanWorkspaces();
+    const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
+    if (!workspace) {
+      throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
+    }
+    return {
+      workspaceId: toCanonicalWorkspaceId(workspace),
+      workspaceName: workspace.id,
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    };
+  }
+
   private emitPtyData(data: Uint8Array): void {
     if (!this.ptyOutputHandler) {
       this.pendingPtyChunks.push(data);
@@ -1552,6 +1576,31 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
         }),
     });
     return client.respondToPermission(agentSessionId, permissionId, response);
+  }
+
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    return this.openCodeCoordinator.getKnownAgentSessions(workspaceId);
+  }
+
+  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.openCodeCoordinator.refreshAgentSessions(target);
+  }
+
+  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.openCodeCoordinator.createAgentSession(target, title);
+  }
+
+  async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.openCodeCoordinator.abortAgentSession(target, agentSessionId);
+  }
+
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const terminalSession = await this.openCodeCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+    await this.attachSession({ sessionId: terminalSession.id, viewOnly: options.viewOnly });
   }
 
   // ============================================================================

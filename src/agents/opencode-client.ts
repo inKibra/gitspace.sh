@@ -3,8 +3,13 @@ import type { SessionStatus } from './opencode-event-types.js';
 export interface OpenCodeSessionRecord {
   id: string;
   title?: string;
+  directory?: string;
   createdAt?: string;
   updatedAt?: string;
+  time?: {
+    created?: number;
+    updated?: number;
+  };
 }
 
 export interface OpenCodeProviderRecord {

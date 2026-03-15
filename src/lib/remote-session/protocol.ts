@@ -112,6 +112,16 @@ export interface AttachSessionRequest {
   viewOnly?: boolean;
 }
 
+/** Attach to a shared agent PTY for an existing OpenCode session. */
+export interface AttachAgentSessionRequest {
+  type: 'attach_agent_session';
+  workspaceId: string;
+  agentSessionId: string;
+  cols?: number;
+  rows?: number;
+  viewOnly?: boolean;
+}
+
 /** Cancel a currently running attach workflow (typically stuck scripts). */
 export interface CancelPendingAttachRequest {
   type: 'cancel_pending_attach';
@@ -712,6 +722,7 @@ export type ClientToMachineMessage =
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
+  | AttachAgentSessionRequest
   | CancelPendingAttachRequest
   | ListProjectsRequest
   | ListGithubReposRequest
@@ -833,6 +844,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
+  | AttachAgentSessionRequest
   | CancelPendingAttachRequest
   | ListGithubReposRequest
   | ListRemoteBranchesRequest
@@ -859,6 +871,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     'dismiss_replay',
     'undismiss_replay',
     "attach_session",
+    'attach_agent_session',
     'cancel_pending_attach',
     "list_github_repos",
     "list_remote_branches",

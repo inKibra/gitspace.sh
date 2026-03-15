@@ -18,6 +18,7 @@ import {
   type SessionStatus,
   type Permission,
 } from '../agents/opencode-event-types.js';
+import { deleteStoredSession, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
 
 // ============================================================================
 // Shared agent state types (used by both machine and client)
@@ -68,6 +69,7 @@ export class AgentEventManager {
   private readonly textAccumulators = new Map<string, string>();
   /** Track previously-seen status to detect busy→idle transitions */
   private readonly previousStatuses = new Map<string, SessionStatus>();
+  private readonly workspacePaths = new Map<string, string>();
 
   constructor(runtimeManager: OpenCodeRuntimeManager) {
     this.runtimeManager = runtimeManager;
@@ -127,6 +129,7 @@ export class AgentEventManager {
 
   private async subscribeWorkspace(info: OpenCodeRuntimeInfo): Promise<void> {
     const { workspaceId } = info;
+    this.workspacePaths.set(workspaceId, info.workspacePath);
 
     // Abort any previous subscription for this workspace
     this.eventAbortControllers.get(workspaceId)?.abort();
@@ -156,14 +159,27 @@ export class AgentEventManager {
     const state = this.getOrCreateState(info.workspaceId);
 
     if (sessionsResp.ok) {
-      const sessions = (await sessionsResp.json()) as Array<{ id: string; title?: string }>;
-      state.sessions = sessions.map((s) => ({ id: s.id, title: s.title ?? s.id }));
+      const sessions = (await sessionsResp.json()) as Array<{ id: string; title?: string; directory?: string; time?: { updated?: number } }>;
+      const filtered = sessions.filter((session) => session.directory === info.workspacePath);
+      state.sessions = filtered.map((s) => ({ id: s.id, title: s.title ?? s.id }));
+      void replaceStoredSessions(
+        info.workspaceId,
+        filtered.map((session) => ({
+          id: session.id,
+          title: session.title ?? session.id,
+          rawTitle: session.title,
+          updatedAt: typeof session.time?.updated === 'number' ? new Date(session.time.updated).toISOString() : undefined,
+        })),
+      );
     }
 
     if (statusesResp.ok) {
       const statuses = (await statusesResp.json()) as Record<string, SessionStatus>;
-      state.statuses = statuses;
-      for (const [sessionId, status] of Object.entries(statuses)) {
+      const allowedSessionIds = new Set(state.sessions.map((session) => session.id));
+      state.statuses = Object.fromEntries(
+        Object.entries(statuses).filter(([sessionId]) => allowedSessionIds.has(sessionId)),
+      );
+      for (const [sessionId, status] of Object.entries(state.statuses)) {
         this.previousStatuses.set(`${info.workspaceId}:${sessionId}`, status);
       }
     }
@@ -214,6 +230,7 @@ export class AgentEventManager {
     this.eventAbortControllers.get(workspaceId)?.abort();
     this.eventAbortControllers.delete(workspaceId);
     this.workspaceStates.delete(workspaceId);
+    this.workspacePaths.delete(workspaceId);
   }
 
   private handleOpenCodeEvent(workspaceId: string, event: NonNullable<ReturnType<typeof parseOpenCodeEvent>>): void {
@@ -226,11 +243,23 @@ export class AgentEventManager {
       case 'session.status': {
         const props = raw.properties as { sessionID: string; status: SessionStatus };
         const { sessionID, status } = props;
+        if (!state.sessions.some((session) => session.id === sessionID)) {
+          break;
+        }
         const prevKey = `${workspaceId}:${sessionID}`;
         const prev = this.previousStatuses.get(prevKey);
         state.statuses[sessionID] = status;
         this.previousStatuses.set(prevKey, status);
         this.emit({ type: 'agent_session_status', workspaceId, sessionId: sessionID, status });
+        const existingSession = state.sessions.find((session) => session.id === sessionID);
+        if (existingSession) {
+          void upsertStoredSession(workspaceId, {
+            id: sessionID,
+            title: existingSession.title,
+            rawTitle: existingSession.title,
+            lastKnownStatus: status.type,
+          });
+        }
 
         // Reset text accumulator on new busy turn so each turn gets a fresh preview
         if (status.type === 'busy') {
@@ -250,6 +279,9 @@ export class AgentEventManager {
       case 'permission.updated': {
         const permission = raw.properties as unknown as Permission;
         const sessionID = permission.sessionID;
+        if (!state.sessions.some((session) => session.id === sessionID)) {
+          break;
+        }
         if (!state.pendingPermissions[sessionID]) {
           state.pendingPermissions[sessionID] = [];
         }
@@ -268,6 +300,9 @@ export class AgentEventManager {
       case 'permission.replied': {
         const props = raw.properties as { sessionID: string; permissionID: string; response: string };
         const { sessionID, permissionID } = props;
+        if (!state.sessions.some((sessionItem) => sessionItem.id === sessionID)) {
+          break;
+        }
         if (state.pendingPermissions[sessionID]) {
           state.pendingPermissions[sessionID] = state.pendingPermissions[sessionID].filter(
             (p) => p.id !== permissionID,
@@ -280,29 +315,40 @@ export class AgentEventManager {
       case 'session.error': {
         const props = raw.properties as { sessionID?: string; error?: { data?: { message?: string } } };
         if (!props.sessionID) break;
+        if (!state.sessions.some((session) => session.id === props.sessionID)) {
+          break;
+        }
         const errorMsg = props.error?.data?.message ?? 'Unknown error';
         this.emit({ type: 'agent_session_error', workspaceId, sessionId: props.sessionID, errorMessage: errorMsg });
         break;
       }
 
       case 'session.created': {
-        const props = raw.properties as { info: { id: string; title?: string } };
+        const props = raw.properties as { info: { id: string; title?: string; directory?: string } };
+        if (props.info.directory && props.info.directory !== this.workspacePaths.get(workspaceId)) {
+          break;
+        }
         const { id, title } = props.info;
         const titleOrId = title ?? id;
         if (!state.sessions.some((s) => s.id === id)) {
           state.sessions.push({ id, title: titleOrId });
         }
         this.emit({ type: 'agent_session_created', workspaceId, sessionId: id, title: titleOrId });
+        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title });
         break;
       }
 
       case 'session.updated': {
-        const props = raw.properties as { info: { id: string; title?: string } };
+        const props = raw.properties as { info: { id: string; title?: string; directory?: string } };
+        if (props.info.directory && props.info.directory !== this.workspacePaths.get(workspaceId)) {
+          break;
+        }
         const { id, title } = props.info;
         const titleOrId = title ?? id;
         const idx = state.sessions.findIndex((s) => s.id === id);
         if (idx !== -1) state.sessions[idx] = { id, title: titleOrId };
         this.emit({ type: 'agent_session_updated', workspaceId, sessionId: id, title: titleOrId });
+        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title });
         break;
       }
 
@@ -316,6 +362,7 @@ export class AgentEventManager {
         this.previousStatuses.delete(`${workspaceId}:${id}`);
         this.textAccumulators.delete(`${workspaceId}:${id}`);
         this.emit({ type: 'agent_session_deleted', workspaceId, sessionId: id });
+        void deleteStoredSession(workspaceId, id);
         break;
       }
 
@@ -326,6 +373,9 @@ export class AgentEventManager {
         };
         const { part, delta } = props;
         if (part.type !== 'text' || !delta) break;
+        if (!state.sessions.some((session) => session.id === part.sessionID)) {
+          break;
+        }
         const accKey = `${workspaceId}:${part.sessionID}`;
         const current = this.textAccumulators.get(accKey) ?? '';
         const updated = (current + delta).slice(-LAST_MESSAGE_MAX_CHARS);

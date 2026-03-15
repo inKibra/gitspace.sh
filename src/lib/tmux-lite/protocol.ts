@@ -209,6 +209,8 @@ export interface SessionCreateHooks {
   };
 }
 
+export type SessionKind = 'shell' | 'agent';
+
 export type { ReplayInfo, ReplayStatus, TerminalSnapshot } from './replay/types.js';
 
 export type Command =
@@ -240,6 +242,9 @@ export type Command =
       command?: string;
       args?: string[];
       env?: Record<string, string>;
+      kind?: SessionKind;
+      hidden?: boolean;
+      metadata?: Record<string, string>;
     }
   | { type: "attach"; id: string; force?: boolean }
   | { type: "kill"; id: string }
@@ -274,6 +279,9 @@ export interface Session {
   createdAt: number;
   exitCode?: number;  // undefined = running, number = exited
   processTitle?: string;  // Title set by running process (e.g., vim, npm run dev)
+  kind?: SessionKind;
+  hidden?: boolean;
+  metadata?: Record<string, string>;
 }
 
 // Inbox item - things that need attention
