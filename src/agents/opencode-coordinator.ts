@@ -65,6 +65,7 @@ function normalizeOpenCodeSession(target: AgentWorkspaceTarget, session: OpenCod
 
 function toSummaries(workspaceId: string, sessions: Record<string, StoredWorkspaceAgentSession>): AgentSessionSummary[] {
   return Object.values(sessions)
+    .filter((session) => session.managed === true)
     .sort((a, b) => (b.updatedAt ?? b.lastSeenAt ?? '').localeCompare(a.updatedAt ?? a.lastSeenAt ?? ''))
     .map((session) => ({
       id: session.id,
@@ -94,20 +95,36 @@ export class OpenCodeCoordinator {
     const runtime = await this.ensureRuntime(target);
     const client = createClient(runtime);
     const sessions = await client.listSessions();
-    const filtered = sessions.filter((session) => session.directory === target.workspacePath);
+    const history = await readStoredSessionHistory(target.workspaceId);
+    const managedIds = new Set(
+      Object.values(history.sessions)
+        .filter((session) => session.managed === true)
+        .map((session) => session.id),
+    );
+    const filtered = sessions.filter(
+      (session) => session.directory === target.workspacePath && managedIds.has(String(session.id)),
+    );
     await replaceStoredSessions(
       target.workspaceId,
-      filtered.map((session) => normalizeOpenCodeSession(target, session)),
+      filtered.map((session) => ({
+        ...normalizeOpenCodeSession(target, session),
+        managed: true,
+        terminalSessionId: history.sessions[String(session.id)]?.terminalSessionId,
+        terminalSessionName: history.sessions[String(session.id)]?.terminalSessionName,
+      })),
     );
-    const history = await readStoredSessionHistory(target.workspaceId);
-    return toSummaries(target.workspaceId, history.sessions);
+    const refreshedHistory = await readStoredSessionHistory(target.workspaceId);
+    return toSummaries(target.workspaceId, refreshedHistory.sessions);
   }
 
   async createAgentSession(target: AgentWorkspaceTarget, title?: string): Promise<AgentSessionSummary[]> {
     const runtime = await this.ensureRuntime(target);
     const client = createClient(runtime);
     const created = await client.createSession({ title });
-    await upsertStoredSession(target.workspaceId, normalizeOpenCodeSession(target, created));
+    await upsertStoredSession(target.workspaceId, {
+      ...normalizeOpenCodeSession(target, created),
+      managed: true,
+    });
     return this.refreshAgentSessions(target);
   }
 
@@ -136,6 +153,7 @@ export class OpenCodeCoordinator {
         title: record?.title ?? agentSessionId,
         terminalSessionId: existing.id,
         terminalSessionName: existing.name,
+        managed: true,
       });
       return existing;
     }
@@ -165,6 +183,7 @@ export class OpenCodeCoordinator {
       title: record?.title ?? agentSessionId,
       terminalSessionId: session.id,
       terminalSessionName: session.name,
+      managed: true,
     });
     return session;
   }

@@ -18,6 +18,7 @@ export interface StoredWorkspaceAgentSession {
   lastKnownStatus?: string;
   terminalSessionId?: string;
   terminalSessionName?: string;
+  managed?: boolean;
 }
 
 export interface StoredWorkspaceAgentSessionHistory {

@@ -18,7 +18,7 @@ import {
   type SessionStatus,
   type Permission,
 } from '../agents/opencode-event-types.js';
-import { deleteStoredSession, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
+import { deleteStoredSession, readStoredSessionHistory, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
 
 // ============================================================================
 // Shared agent state types (used by both machine and client)
@@ -70,6 +70,7 @@ export class AgentEventManager {
   /** Track previously-seen status to detect busy→idle transitions */
   private readonly previousStatuses = new Map<string, SessionStatus>();
   private readonly workspacePaths = new Map<string, string>();
+  private readonly managedSessionIds = new Map<string, Set<string>>();
 
   constructor(runtimeManager: OpenCodeRuntimeManager) {
     this.runtimeManager = runtimeManager;
@@ -130,6 +131,15 @@ export class AgentEventManager {
   private async subscribeWorkspace(info: OpenCodeRuntimeInfo): Promise<void> {
     const { workspaceId } = info;
     this.workspacePaths.set(workspaceId, info.workspacePath);
+    const history = await readStoredSessionHistory(workspaceId);
+    this.managedSessionIds.set(
+      workspaceId,
+      new Set(
+        Object.values(history.sessions)
+          .filter((session) => session.managed === true)
+          .map((session) => session.id),
+      ),
+    );
 
     // Abort any previous subscription for this workspace
     this.eventAbortControllers.get(workspaceId)?.abort();
@@ -160,7 +170,10 @@ export class AgentEventManager {
 
     if (sessionsResp.ok) {
       const sessions = (await sessionsResp.json()) as Array<{ id: string; title?: string; directory?: string; time?: { updated?: number } }>;
-      const filtered = sessions.filter((session) => session.directory === info.workspacePath);
+      const managedIds = this.managedSessionIds.get(info.workspaceId) ?? new Set<string>();
+      const filtered = sessions.filter(
+        (session) => session.directory === info.workspacePath && managedIds.has(session.id),
+      );
       state.sessions = filtered.map((s) => ({ id: s.id, title: s.title ?? s.id }));
       void replaceStoredSessions(
         info.workspaceId,
@@ -169,6 +182,7 @@ export class AgentEventManager {
           title: session.title ?? session.id,
           rawTitle: session.title,
           updatedAt: typeof session.time?.updated === 'number' ? new Date(session.time.updated).toISOString() : undefined,
+          managed: true,
         })),
       );
     }
@@ -231,6 +245,7 @@ export class AgentEventManager {
     this.eventAbortControllers.delete(workspaceId);
     this.workspaceStates.delete(workspaceId);
     this.workspacePaths.delete(workspaceId);
+    this.managedSessionIds.delete(workspaceId);
   }
 
   private handleOpenCodeEvent(workspaceId: string, event: NonNullable<ReturnType<typeof parseOpenCodeEvent>>): void {
@@ -328,13 +343,17 @@ export class AgentEventManager {
         if (props.info.directory && props.info.directory !== this.workspacePaths.get(workspaceId)) {
           break;
         }
+        const managedIds = this.managedSessionIds.get(workspaceId) ?? new Set<string>();
+        if (!managedIds.has(props.info.id)) {
+          break;
+        }
         const { id, title } = props.info;
         const titleOrId = title ?? id;
         if (!state.sessions.some((s) => s.id === id)) {
           state.sessions.push({ id, title: titleOrId });
         }
         this.emit({ type: 'agent_session_created', workspaceId, sessionId: id, title: titleOrId });
-        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title });
+        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title, managed: true });
         break;
       }
 
@@ -343,18 +362,23 @@ export class AgentEventManager {
         if (props.info.directory && props.info.directory !== this.workspacePaths.get(workspaceId)) {
           break;
         }
+        const managedIds = this.managedSessionIds.get(workspaceId) ?? new Set<string>();
+        if (!managedIds.has(props.info.id)) {
+          break;
+        }
         const { id, title } = props.info;
         const titleOrId = title ?? id;
         const idx = state.sessions.findIndex((s) => s.id === id);
         if (idx !== -1) state.sessions[idx] = { id, title: titleOrId };
         this.emit({ type: 'agent_session_updated', workspaceId, sessionId: id, title: titleOrId });
-        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title });
+        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title, managed: true });
         break;
       }
 
       case 'session.deleted': {
         const props = raw.properties as { info: { id: string } };
         const { id } = props.info;
+        this.managedSessionIds.get(workspaceId)?.delete(id);
         state.sessions = state.sessions.filter((s) => s.id !== id);
         delete state.statuses[id];
         delete state.pendingPermissions[id];
