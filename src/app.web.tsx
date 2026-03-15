@@ -842,7 +842,7 @@ export default function App() {
     return terminal.getReplayTimeline(replayId);
   }, [terminal]);
 
-  const webBackend = terminal as unknown as import('./session/backend.js').SessionBackend | null;
+  const webBackend = terminal.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
     bridge: terminal.hasOpenCodeBridge

@@ -572,7 +572,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
   }, [bundleConfigFlow, remote.selectedProjectName, remote.workspaces]);
 
-  const remoteBackend = remote as unknown as import('../session/backend.js').SessionBackend | null;
+  const remoteBackend = remote.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
     bridge: remote.hasOpenCodeBridge

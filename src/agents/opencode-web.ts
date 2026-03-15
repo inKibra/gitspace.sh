@@ -1,7 +1,13 @@
 import { buildAuthenticatedOpenCodeUrl, type OpenCodeRuntimeInfo } from './opencode-runtime.js';
 
 export function encodeWorkspacePathForRoute(workspacePath: string): string {
-  return Buffer.from(workspacePath, 'utf8').toString('base64url');
+  // Isomorphic: Buffer for Bun/Node, TextEncoder+btoa for browser
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(workspacePath, 'utf8').toString('base64url');
+  }
+  const bytes = new TextEncoder().encode(workspacePath);
+  const binary = String.fromCharCode(...bytes);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 export function buildOpenCodeWebUrl(runtime: OpenCodeRuntimeInfo, sessionId?: string): string {

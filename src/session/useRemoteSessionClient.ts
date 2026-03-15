@@ -156,6 +156,8 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
     handler: (event: OpenCodeBridgeStreamEvent) => void,
   ) => Promise<() => Promise<void>>;
   getOpenCodeRuntimeInfo: (workspaceId: string) => Promise<OpenCodeRuntimeInfo>;
+  /** The underlying SessionBackend for agent hooks that need the full interface */
+  sessionBackend: SessionBackend | null;
 }
 
 function defaultStatusMapper(
@@ -697,6 +699,8 @@ export function useRemoteSessionClient<ConnectParams>(
     requestOpenCode,
     subscribeOpenCode,
     getOpenCodeRuntimeInfo,
+    /** Expose the underlying SessionBackend for agent hooks that need the full interface */
+    sessionBackend: backendRef.current as SessionBackend | null,
   }), [
     status,
     activeBackendState,
