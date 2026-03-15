@@ -223,6 +223,27 @@ async function logApiFailure(context: string, response: Response): Promise<void>
   logger.error(`${context}: ${response.status} ${response.statusText}${bodyPreview}`);
 }
 
+async function throwIfInvalidDeviceFingerprint(response: Response): Promise<void> {
+  if (response.status !== 401) {
+    return;
+  }
+
+  const body = (await response.clone().text().catch(() => '')).trim();
+  if (!body.includes('Invalid device fingerprint')) {
+    return;
+  }
+
+  throw new SpacesError(
+    [
+      'Authentication is bound to a different machine identity.',
+      '',
+      'Run `gssh user auth login` again to register the current device fingerprint with gitspace.sh.',
+    ].join('\n'),
+    'USER_ERROR',
+    1,
+  );
+}
+
 export function getTunnelTokenKey(subdomain: string): string {
   return `TUNNEL_TOKEN_${normalizeSubdomain(subdomain)}`;
 }
@@ -301,6 +322,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
   try {
     const res = await fetch(`${API_BASE}/subdomains`, { headers });
     if (!res.ok) {
+      await throwIfInvalidDeviceFingerprint(res);
       report.subdomain = errorCheck(
         `Could not list subdomains (${res.status} ${res.statusText}).`,
         'gssh user host status',
@@ -449,6 +471,7 @@ export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
   const res = await fetch(`${API_BASE}/subdomains`, { headers });
 
   if (!res.ok) {
+    await throwIfInvalidDeviceFingerprint(res);
     await logApiFailure('Failed to list subdomains', res);
     throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
   }
@@ -733,6 +756,7 @@ export async function hostList(): Promise<void> {
   const res = await fetch(`${API_BASE}/subdomains`, { headers });
 
   if (!res.ok) {
+    await throwIfInvalidDeviceFingerprint(res);
     throw new SpacesError(
       `Failed to list subdomains: ${res.statusText}`,
       'SYSTEM_ERROR'
@@ -817,6 +841,7 @@ export async function hostStatus(): Promise<void> {
     const res = await fetch(`${API_BASE}/subdomains`, { headers });
 
     if (!res.ok) {
+      await throwIfInvalidDeviceFingerprint(res);
       logger.log('Could not fetch subdomains');
       return;
     }

@@ -34,6 +34,7 @@ import {
   dismissReplayOffline,
   undismissReplayOffline,
 } from '../tmux-lite/replay/service.js';
+import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
 
 // Import project loading
@@ -801,12 +802,52 @@ export class RemoteSessionHandler {
     }
 
     const frame = getReplayFrameOffline(replayId, { atMs, atSeq });
-    await this.sendMessage(session, sendResponse, {
-      type: 'replay_frame',
+
+    const maxPayloadBytes = 900_000;
+    const buildPayload = (
+      events: ReplayFrame['events'],
+      chunkIndex: number,
+      totalChunks: number,
+      checkpoint: ReplayFrame['checkpoint'] | null,
+    ) => ({
+      type: 'replay_frame' as const,
       replayId,
       requestId,
-      frame,
+      frame: {
+        replayId,
+        checkpoint,
+        events,
+      },
+      chunkIndex,
+      totalChunks,
     });
+
+    const chunks: ReplayFrame['events'][] = [];
+    let chunk: ReplayFrame['events'] = [];
+    for (const event of frame.events) {
+      chunk.push(event);
+      const checkpoint = chunks.length === 0 ? frame.checkpoint : null;
+      const payloadSize = Buffer.byteLength(JSON.stringify(buildPayload(chunk, 0, 1, checkpoint)));
+      if (payloadSize > maxPayloadBytes) {
+        if (chunk.length === 1) {
+          chunks.push(chunk);
+          chunk = [];
+          continue;
+        }
+        const last = chunk.pop();
+        chunks.push(chunk);
+        chunk = last ? [last] : [];
+      }
+    }
+
+    if (chunk.length > 0 || chunks.length === 0) {
+      chunks.push(chunk);
+    }
+
+    const totalChunks = chunks.length;
+    for (let i = 0; i < totalChunks; i += 1) {
+      await this.sendMessage(session, sendResponse, buildPayload(chunks[i] ?? [], i, totalChunks, i === 0 ? frame.checkpoint : null));
+    }
   }
 
   private async handleGetReplayTimeline(

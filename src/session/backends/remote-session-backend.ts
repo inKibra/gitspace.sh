@@ -160,6 +160,14 @@ interface PendingEventsChunk {
   receivedAtMs: number;
 }
 
+interface PendingReplayFrameChunk {
+  replayId: string;
+  totalChunks: number;
+  checkpoint: import('../backend.js').ReplayFrame['checkpoint'] | null;
+  chunks: Map<number, import('../backend.js').ReplayFrame['events']>;
+  receivedAtMs: number;
+}
+
 export interface RemoteSessionSocketHandlers {
   onOpen: () => void;
   onClose: (info?: { code?: number; reason?: string }) => void;
@@ -550,6 +558,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
   private pendingEventChunks = new Map<string, PendingEventsChunk>();
+  private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
   private pendingOpenCodeRequests = new Map<string, {
     resolve: (response: OpenCodeBridgeResponse) => void;
     reject: (error: Error) => void;
@@ -2516,6 +2525,51 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private resolveReplayFrame(message: ReplayFrameResponse): void {
+    const totalChunks = message.totalChunks ?? 1;
+    const chunkIndex = message.chunkIndex ?? 0;
+    if (totalChunks > 1) {
+      this.prunePendingReplayFrameChunks();
+      const pendingChunk = this.pendingReplayFrameChunks.get(message.requestId) ?? {
+        replayId: message.replayId,
+        totalChunks,
+        checkpoint: null,
+        chunks: new Map<number, import('../backend.js').ReplayFrame['events']>(),
+        receivedAtMs: Date.now(),
+      };
+      pendingChunk.replayId = message.replayId;
+      pendingChunk.totalChunks = totalChunks;
+      pendingChunk.receivedAtMs = Date.now();
+      if (message.frame.checkpoint) {
+        pendingChunk.checkpoint = message.frame.checkpoint;
+      }
+      pendingChunk.chunks.set(chunkIndex, message.frame.events);
+      this.pendingReplayFrameChunks.set(message.requestId, pendingChunk);
+
+      if (pendingChunk.chunks.size < pendingChunk.totalChunks) {
+        return;
+      }
+
+      const mergedEvents: import('../backend.js').ReplayFrame['events'] = [];
+      for (let idx = 0; idx < pendingChunk.totalChunks; idx += 1) {
+        const chunk = pendingChunk.chunks.get(idx);
+        if (!chunk) {
+          return;
+        }
+        mergedEvents.push(...chunk);
+      }
+      this.pendingReplayFrameChunks.delete(message.requestId);
+      message = {
+        ...message,
+        totalChunks: 1,
+        chunkIndex: 0,
+        frame: {
+          replayId: message.replayId,
+          checkpoint: pendingChunk.checkpoint,
+          events: mergedEvents,
+        },
+      };
+    }
+
     const pending = this.pendingReplayFrame;
     if (!pending || pending.requestId !== message.requestId) {
       // Stale response for a cancelled or superseded request — discard
@@ -2621,6 +2675,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     for (const [requestId, pending] of this.pendingEventChunks) {
       if (nowMs - pending.receivedAtMs > ttlMs) {
         this.pendingEventChunks.delete(requestId);
+      }
+    }
+  }
+
+  private prunePendingReplayFrameChunks(nowMs = Date.now()): void {
+    const ttlMs = 30_000;
+    for (const [requestId, pending] of this.pendingReplayFrameChunks) {
+      if (nowMs - pending.receivedAtMs > ttlMs) {
+        this.pendingReplayFrameChunks.delete(requestId);
       }
     }
   }

@@ -388,6 +388,8 @@ export interface ReplayFrameResponse {
   replayId: string;
   requestId: string;
   frame: import('../tmux-lite/replay/types.js').ReplayFrame;
+  chunkIndex?: number;
+  totalChunks?: number;
 }
 
 /** Response with replay timeline metadata */

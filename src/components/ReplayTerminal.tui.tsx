@@ -104,10 +104,20 @@ export function ReplayTerminal({
   const currentSeqRef = useRef(0);
   const hasContentRef = useRef(false);
   const onCleanupRef = useRef(onCleanup);
+  const loadReplayFrameRef = useRef(loadReplayFrame);
+  const loadReplayTimelineRef = useRef(loadReplayTimeline);
 
   useEffect(() => {
     onCleanupRef.current = onCleanup;
   }, [onCleanup]);
+
+  useEffect(() => {
+    loadReplayFrameRef.current = loadReplayFrame;
+  }, [loadReplayFrame]);
+
+  useEffect(() => {
+    loadReplayTimelineRef.current = loadReplayTimeline;
+  }, [loadReplayTimeline]);
 
   const feedTerminal = useCallback((data: string | Uint8Array) => {
     const terminal = terminalRef.current;
@@ -139,7 +149,7 @@ export function ReplayTerminal({
     setError(null);
 
     try {
-      const frame = await loadReplayFrame(replay.replayId, target);
+      const frame = await loadReplayFrameRef.current(replay.replayId, target);
       if (frameRequestIdRef.current !== requestId) {
         return;
       }
@@ -179,7 +189,7 @@ export function ReplayTerminal({
         setFrameLoading(false);
       }
     }
-  }, [feedTerminal, loadReplayFrame, replay.replayId]);
+  }, [feedTerminal, replay.replayId]);
 
   useEffect(() => {
     if (!terminalMounted) {
@@ -205,7 +215,7 @@ export function ReplayTerminal({
       let nextTimeline: ReplayTimeline | null = null;
 
       try {
-        nextTimeline = await loadReplayTimeline(replay.replayId);
+        nextTimeline = await loadReplayTimelineRef.current(replay.replayId);
       } catch (timelineError) {
         if (cancelled) {
           return;
@@ -239,7 +249,7 @@ export function ReplayTerminal({
       frameRequestIdRef.current += 1;
       onCleanupRef.current?.();
     };
-  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, reloadKey, replay.replayId, terminalMounted]);
+  }, [latestFallbackTarget, loadFrame, reloadKey, replay.replayId, terminalMounted]);
 
   useEffect(() => {
     if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || currentTargetKey === erroredTargetKey) {

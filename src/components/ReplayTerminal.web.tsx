@@ -60,6 +60,8 @@ export function ReplayTerminalWeb({
   const currentCheckpointIdRef = useRef<string | null>(null);
   const currentSeqRef = useRef(0);
   const onCleanupRef = useRef(onCleanup);
+  const loadReplayFrameRef = useRef(loadReplayFrame);
+  const loadReplayTimelineRef = useRef(loadReplayTimeline);
 
   useEffect(() => {
     writerRef.current = writer;
@@ -68,6 +70,14 @@ export function ReplayTerminalWeb({
   useEffect(() => {
     onCleanupRef.current = onCleanup;
   }, [onCleanup]);
+
+  useEffect(() => {
+    loadReplayFrameRef.current = loadReplayFrame;
+  }, [loadReplayFrame]);
+
+  useEffect(() => {
+    loadReplayTimelineRef.current = loadReplayTimeline;
+  }, [loadReplayTimeline]);
 
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     setWriter(() => fn);
@@ -103,7 +113,7 @@ export function ReplayTerminalWeb({
     setError(null);
 
     try {
-      const frame = await loadReplayFrame(replay.replayId, target);
+      const frame = await loadReplayFrameRef.current(replay.replayId, target);
       if (frameRequestIdRef.current !== requestId) {
         return;
       }
@@ -143,7 +153,7 @@ export function ReplayTerminalWeb({
         setFrameLoading(false);
       }
     }
-  }, [feedTerminal, loadReplayFrame, replay.replayId]);
+  }, [feedTerminal, replay.replayId]);
 
   useEffect(() => {
     if (!writer) {
@@ -169,7 +179,7 @@ export function ReplayTerminalWeb({
       let nextTimeline: ReplayTimeline | null = null;
 
       try {
-        nextTimeline = await loadReplayTimeline(replay.replayId);
+        nextTimeline = await loadReplayTimelineRef.current(replay.replayId);
       } catch (timelineError) {
         if (cancelled) {
           return;
@@ -203,7 +213,7 @@ export function ReplayTerminalWeb({
       frameRequestIdRef.current += 1;
       onCleanupRef.current?.();
     };
-  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, reloadKey, replay.replayId, writer]);
+  }, [latestFallbackTarget, loadFrame, reloadKey, replay.replayId, writer]);
 
   useEffect(() => {
     if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || currentTargetKey === erroredTargetKey) {
