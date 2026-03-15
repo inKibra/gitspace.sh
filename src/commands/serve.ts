@@ -129,9 +129,14 @@ interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
 }
 
+interface CurrentServeRelayBinding {
+  publicKey: string;
+  fingerprint: string;
+}
+
 export async function ensureServeOwnerBindingForStartup(
   ownerUserRootId: string,
-  options: { takeover?: boolean; yes?: boolean } = {}
+  options: { takeover?: boolean; yes?: boolean; currentRelay?: CurrentServeRelayBinding } = {}
 ): Promise<{ tookOver: boolean }> {
   ensureControlStore();
 
@@ -141,9 +146,19 @@ export async function ensureServeOwnerBindingForStartup(
   const hasPinnedRelayIdentity = Boolean(
     controlMeta.relayIdentityId || controlMeta.relaySigningPublicKey || controlMeta.relayFingerprint,
   );
+  const currentRelayIdentityId = options.currentRelay ? computeIdentityId(options.currentRelay.publicKey) : undefined;
+  const relayMismatch = Boolean(
+    options.currentRelay
+      && (
+        (controlMeta.relayIdentityId && controlMeta.relayIdentityId !== currentRelayIdentityId)
+        || (controlMeta.relaySigningPublicKey && controlMeta.relaySigningPublicKey !== options.currentRelay.publicKey)
+        || (controlMeta.relayFingerprint && controlMeta.relayFingerprint !== options.currentRelay.fingerprint)
+      ),
+  );
 
   const needsTakeover = (currentVaultOwner && currentVaultOwner !== ownerUserRootId)
-    || (currentControlOwner && currentControlOwner !== ownerUserRootId);
+    || (currentControlOwner && currentControlOwner !== ownerUserRootId)
+    || relayMismatch;
 
   const shouldForceResetForTakeover = Boolean(
     options.takeover
@@ -159,6 +174,8 @@ export async function ensureServeOwnerBindingForStartup(
         `  Current user: ${ownerUserRootId.slice(0, 8)}...`,
         currentControlOwner ? `  Control owner: ${currentControlOwner.slice(0, 8)}...` : null,
         currentVaultOwner ? `  Vault owner:   ${currentVaultOwner.slice(0, 8)}...` : null,
+        relayMismatch ? `  Pinned relay:  ${controlMeta.relayFingerprint ?? controlMeta.relayIdentityId}` : null,
+        relayMismatch ? `  Current relay: ${options.currentRelay?.fingerprint}` : null,
         '',
         'Re-run with `gssh machine serve start --takeover` to clear the persisted relay control state and bind it to the recovered identity.',
       ].filter((line): line is string => line !== null).join('\n');
@@ -1039,6 +1056,10 @@ export async function serveStart(options: {
     }
 
     if (!usingUnlockMode) {
+      const userRootAuth = await resolveUserRootAuthorizationConfig({
+        yes: options.yes,
+        devicePasswordContext,
+      });
       const relayIdentity = await fetchRelayIdentity(options.relay);
       const trustResult = await verifyRelayTrust(
         options.relay,
@@ -1053,16 +1074,11 @@ export async function serveStart(options: {
       }
 
       options.relayPubkey ??= relayIdentity.publicKey;
-    }
 
-    if (options.takeover && !options.yes && !usingUnlockMode) {
-      const userRootAuth = await resolveUserRootAuthorizationConfig({
-        yes: options.yes,
-        devicePasswordContext,
-      });
       await ensureServeOwnerBindingForStartup(userRootAuth.ownerUserRootId, {
-        takeover: true,
-        yes: false,
+        takeover: options.takeover,
+        yes: options.yes,
+        currentRelay: relayIdentity,
       });
     }
 
@@ -1284,6 +1300,34 @@ export async function serveStart(options: {
   } catch (error) {
     await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
     throw error;
+  }
+
+  if (!usingUnlockMode) {
+    try {
+      const relayIdentity = await fetchRelayIdentity(effectiveRelayUrl);
+      const trustResult = await verifyRelayTrust(
+        effectiveRelayUrl,
+        relayIdentity.publicKey,
+        relayIdentity.fingerprint,
+        relayIdentity.label,
+        options.relayPubkey,
+        Boolean(options.yes),
+      );
+      if (!trustResult.trusted) {
+        await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+        throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
+      }
+
+      options.relayPubkey ??= relayIdentity.publicKey;
+      await ensureServeOwnerBindingForStartup(ownerUserRootId, {
+        takeover: options.takeover,
+        yes: options.yes,
+        currentRelay: relayIdentity,
+      });
+    } catch (error) {
+      await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+      throw error;
+    }
   }
 
   // Initialize daemon state
