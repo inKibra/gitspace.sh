@@ -834,8 +834,8 @@ export default function App() {
     }
   }, [activeReplay?.replayId, flow, refreshReplayList, terminal]);
 
-  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return terminal.getReplayAnsi(replayId, target);
+  const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return terminal.getReplayFrame(replayId, target);
   }, [terminal]);
 
   const loadReplayTimeline = useCallback((replayId: string) => {
@@ -1584,7 +1584,7 @@ export default function App() {
         <ReplayTerminalWeb
           replay={activeReplay}
           machineLabel={selectedMachine?.label || selectedMachine?.machineId}
-          loadReplayAnsi={loadReplayAnsi}
+          loadReplayFrame={loadReplayFrame}
           loadReplayTimeline={loadReplayTimeline}
           onBack={() => {
             setView('terminal');
@@ -1596,6 +1596,7 @@ export default function App() {
               const replay = terminal.replays.find((item) => item.replayId === replayId) ?? activeReplay;
               return toggleReplayDismissed(replay);
             }}
+          onCleanup={terminal.cancelPendingReplayRequests}
         />
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />

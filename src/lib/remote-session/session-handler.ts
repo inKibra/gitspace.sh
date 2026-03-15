@@ -29,7 +29,7 @@ import {
 } from "../tmux-lite/cli";
 import {
   listReplaysOffline,
-  getReplayAnsiBufferOffline,
+  getReplayFrameOffline,
   getReplayTimelineOffline,
   dismissReplayOffline,
   undismissReplayOffline,
@@ -291,8 +291,8 @@ export class RemoteSessionHandler {
         await this.handleListReplays(session, msg.workspaceId, msg.includeDismissed, sendResponse);
         break;
 
-      case 'get_replay_ansi':
-        await this.handleGetReplayAnsi(session, msg.replayId, msg.atMs, msg.atSeq, sendResponse);
+      case 'get_replay_frame':
+        await this.handleGetReplayFrame(session, msg.replayId, msg.atMs, msg.atSeq, sendResponse);
         break;
 
       case 'get_replay_timeline':
@@ -781,7 +781,7 @@ export class RemoteSessionHandler {
     });
   }
 
-  private async handleGetReplayAnsi(
+  private async handleGetReplayFrame(
     session: RemoteClientSession,
     replayId: string,
     atMs: number | undefined,
@@ -799,12 +799,11 @@ export class RemoteSessionHandler {
       return;
     }
 
-    const ansi = await getReplayAnsiBufferOffline(replayId, { atMs, atSeq });
+    const frame = getReplayFrameOffline(replayId, { atMs, atSeq });
     await this.sendMessage(session, sendResponse, {
-      type: 'replay_ansi',
+      type: 'replay_frame',
       replayId,
-      data: Buffer.from(ansi).toString('base64'),
-      encoding: 'base64',
+      frame,
     });
   }
 

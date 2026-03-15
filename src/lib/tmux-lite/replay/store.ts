@@ -404,6 +404,67 @@ export function readReplayEvents(replayId: string): ReplayEvent[] {
   return events;
 }
 
+/**
+ * Read a slice of replay events that affect terminal rendering (output + resize only).
+ * Skips events with seq <= fromSeq and stops at the target boundary.
+ * Returns early without reading the rest of the file.
+ */
+export function readReplayEventSlice(
+  replayId: string,
+  fromSeq: number,
+  targetMs?: number,
+  targetSeq?: number,
+): import('./types.js').ReplayFrameEvent[] {
+  assertValidReplayId(replayId);
+  const raw = readTextFile(getReplayEventsPath(replayId));
+  if (!raw) {
+    return [];
+  }
+
+  const result: import('./types.js').ReplayFrameEvent[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+
+    let value: Record<string, unknown>;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const seq = value.seq as number;
+    const t = value.t as number;
+    if (typeof seq !== 'number' || typeof t !== 'number') {
+      continue;
+    }
+
+    // Skip events at or before the checkpoint
+    if (seq <= fromSeq) {
+      continue;
+    }
+
+    // Stop at target boundary
+    if (targetMs !== undefined && t > targetMs) {
+      break;
+    }
+    if (targetMs !== undefined && targetSeq !== undefined && t === targetMs && seq > targetSeq) {
+      break;
+    }
+
+    const type = value.type as string;
+    if (type === 'output' && typeof value.data === 'string') {
+      result.push({ seq, t, type: 'output', data: value.data });
+    } else if (type === 'resize' && typeof value.cols === 'number' && typeof value.rows === 'number') {
+      result.push({ seq, t, type: 'resize', cols: value.cols, rows: value.rows });
+    }
+    // Skip input, marker, title, process-title, exit — they don't affect terminal rendering
+  }
+
+  return result;
+}
+
 function getReplayCheckpointAnsiGzPath(replayId: string, checkpointId: string): string {
   return getReplayCheckpointAnsiPath(replayId, checkpointId) + '.gz';
 }

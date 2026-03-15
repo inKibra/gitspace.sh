@@ -422,23 +422,27 @@ describe('RemoteSessionBackend', () => {
 
     await connectAndHandshake(backend, socket);
 
-    const ansiPromise = backend.getReplayAnsi('replay-1', { atMs: 50, atSeq: 2 });
+    const mockFrame = {
+      replayId: 'replay-1',
+      checkpoint: null,
+      events: [{ seq: 2, t: 50, type: 'output' as const, data: 'dGVzdA==' }],
+    };
+    const framePromise = backend.getReplayFrame('replay-1', { atMs: 50, atSeq: 2 });
     await Bun.sleep(0);
     expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
-      type: 'get_replay_ansi',
+      type: 'get_replay_frame',
       replayId: 'replay-1',
       atMs: 50,
       atSeq: 2,
     });
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'replay_ansi',
+        type: 'replay_frame',
         replayId: 'replay-1',
-        data: cryptoAdapter.encodeBase64(new Uint8Array([1, 2, 3])),
-        encoding: 'base64',
+        frame: mockFrame,
       })
     );
-    await expect(ansiPromise).resolves.toEqual(new Uint8Array([1, 2, 3]));
+    await expect(framePromise).resolves.toEqual(mockFrame);
 
     const dismissPromise = backend.dismissReplay('replay-1');
     await Bun.sleep(0);

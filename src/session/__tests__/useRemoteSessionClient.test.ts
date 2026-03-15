@@ -231,9 +231,13 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     throw new Error('not implemented')
   }
 
-  async getReplayAnsi(replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> {
+  async getReplayFrame(replayId: string, target?: ReplayFrameTarget): Promise<import('../backend.js').ReplayFrame> {
     this.replayAnsiCalls.push({ replayId, target })
-    return new Uint8Array([1, 2, 3])
+    return {
+      replayId,
+      checkpoint: null,
+      events: [{ seq: 1, t: 10, type: 'output' as const, data: 'dGVzdA==' }],
+    }
   }
 
   async getReplayTimeline(replayId: string): Promise<ReplayTimeline> {
@@ -519,7 +523,7 @@ describe('useRemoteSessionClient', () => {
           holdWhenIdleMs: 12000,
         },
       })
-      await result.current.getReplayAnsi('replay-1', { atMs: 50 })
+      await result.current.getReplayFrame('replay-1', { atMs: 50 })
       await result.current.getReplayTimeline('replay-1')
       await result.current.dismissReplay('replay-1')
       await result.current.undismissReplay('replay-1')

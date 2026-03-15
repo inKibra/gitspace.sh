@@ -173,6 +173,30 @@ export interface ReplayTimeline {
   checkpointSteps: ReplayTimelineStep[];
 }
 
+export interface ReplayFrameEvent {
+  seq: number;
+  t: number;
+  type: 'output' | 'resize';
+  data?: string;   // base64 for output
+  cols?: number;
+  rows?: number;
+}
+
+export interface ReplayFrameCheckpoint {
+  checkpointId: string;
+  seq: number;
+  t: number;
+  cols: number;
+  rows: number;
+  ansi: string;  // base64-encoded checkpoint ANSI (xterm serialization)
+}
+
+export interface ReplayFrame {
+  replayId: string;
+  checkpoint: ReplayFrameCheckpoint | null;
+  events: ReplayFrameEvent[];
+}
+
 export interface TerminalSnapshot {
   version: typeof REPLAY_FORMAT_VERSION;
   replayId: string;

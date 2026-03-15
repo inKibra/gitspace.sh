@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../lib/tmux-lite/replay/index.js';
+import type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../lib/tmux-lite/replay/index.js';
 import { SessionTerminal } from './SessionTerminal.web';
 import {
   PLAYBACK_SPEEDS,
@@ -10,38 +10,40 @@ import {
   clamp,
   targetKey,
   toFrameTarget,
+  applyReplayFrame,
+  frameCheckpointId,
+  frameLastSeq,
 } from './replay-utils.js';
 
 function encodeAnsi(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
 
-const LOADING_REPLAY_ANSI = encodeAnsi('\x1b[2J\x1b[H\x1b[2;37mLoading replay...\x1b[0m');
-const EMPTY_REPLAY_ANSI = encodeAnsi('\x1b[2J\x1b[H\x1b[2;37m(empty replay)\x1b[0m');
-
 export interface ReplayTerminalWebProps {
   replay: ReplayInfo;
   machineLabel?: string;
-  loadReplayAnsi: (replayId: string, target?: ReplayFrameTarget) => Promise<Uint8Array>;
+  loadReplayFrame: (replayId: string, target?: ReplayFrameTarget) => Promise<ReplayFrame>;
   loadReplayTimeline: (replayId: string) => Promise<ReplayTimeline>;
   onBack: () => void;
   onDismiss?: (replayId: string) => boolean | void | Promise<boolean | void>;
+  onCleanup?: () => void;
 }
 
 export function ReplayTerminalWeb({
   replay,
   machineLabel,
-  loadReplayAnsi,
+  loadReplayFrame,
   loadReplayTimeline,
   onBack,
   onDismiss,
+  onCleanup,
 }: ReplayTerminalWebProps) {
   const latestFallbackTarget = useMemo<ReplayFrameTarget>(() => ({
     atMs: replay.durationMs,
     atSeq: replay.lastSeq,
   }), [replay.durationMs, replay.lastSeq]);
 
-  const [content, setContent] = useState<Uint8Array | null>(null);
+  const hasContentRef = useRef(false);
   const [writer, setWriter] = useState<((data: Uint8Array) => void) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -52,22 +54,29 @@ export function ReplayTerminalWeb({
   const [frameLoading, setFrameLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeedIndex, setPlaybackSpeedIndex] = useState(DEFAULT_PLAYBACK_SPEED_INDEX);
-  const contentRef = useRef<Uint8Array | null>(null);
   const frameRequestIdRef = useRef(0);
+  const writerRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const currentCheckpointIdRef = useRef<string | null>(null);
+  const currentSeqRef = useRef(0);
 
   useEffect(() => {
-    contentRef.current = content;
-  }, [content]);
-
-  useEffect(() => {
-    if (!writer || !content) {
-      return;
-    }
-    writer(content);
-  }, [content, writer]);
+    writerRef.current = writer;
+  }, [writer]);
 
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     setWriter(() => fn);
+  }, []);
+
+  const feedTerminal = useCallback((data: string | Uint8Array) => {
+    const w = writerRef.current;
+    if (!w) {
+      return;
+    }
+    if (typeof data === 'string') {
+      w(encodeAnsi(data));
+    } else {
+      w(data);
+    }
   }, []);
 
   const currentStep = timeline && currentStepIndex >= 0
@@ -82,24 +91,32 @@ export function ReplayTerminalWeb({
 
   const loadFrame = useCallback(async (
     target: ReplayFrameTarget,
-    options: { preserveContent: boolean },
   ): Promise<void> => {
     const requestId = ++frameRequestIdRef.current;
     setFrameLoading(true);
     setError(null);
 
-    if (!options.preserveContent && !contentRef.current) {
-      setContent(LOADING_REPLAY_ANSI);
-    }
-
     try {
-      const bytes = await loadReplayAnsi(replay.replayId, target);
+      const frame = await loadReplayFrame(replay.replayId, target);
       if (frameRequestIdRef.current !== requestId) {
         return;
       }
 
-      setContent(bytes.length > 0 ? new Uint8Array(bytes) : EMPTY_REPLAY_ANSI);
+      if (frame.events.length === 0 && !frame.checkpoint) {
+        feedTerminal('\x1b[2J\x1b[H\x1b[2;37m(empty replay)\x1b[0m');
+      } else {
+        applyReplayFrame(
+          frame,
+          feedTerminal,
+          currentCheckpointIdRef.current,
+          currentSeqRef.current,
+        );
+      }
+
+      currentCheckpointIdRef.current = frameCheckpointId(frame);
+      currentSeqRef.current = frameLastSeq(frame);
       setLoadedTargetKey(targetKey(target));
+      hasContentRef.current = true;
       setError(null);
     } catch (loadError) {
       if (frameRequestIdRef.current !== requestId) {
@@ -109,26 +126,32 @@ export function ReplayTerminalWeb({
       const message = loadError instanceof Error ? loadError.message : String(loadError);
       setError(message);
 
-      if (!contentRef.current || !options.preserveContent) {
-        setContent(encodeAnsi(`\x1b[2J\x1b[H\x1b[31mFailed to load replay\x1b[0m\r\n\r\n${message}`));
+      if (!hasContentRef.current) {
+        feedTerminal(`\x1b[2J\x1b[H\x1b[31mFailed to load replay\x1b[0m\r\n\r\n${message}`);
       }
     } finally {
       if (frameRequestIdRef.current === requestId) {
         setFrameLoading(false);
       }
     }
-  }, [loadReplayAnsi, replay.replayId]);
+  }, [feedTerminal, loadReplayFrame, replay.replayId]);
 
   useEffect(() => {
+    if (!writer) {
+      return;
+    }
+
     let cancelled = false;
     frameRequestIdRef.current += 1;
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
     setIsPlaying(false);
     setPlaybackSpeedIndex(DEFAULT_PLAYBACK_SPEED_INDEX);
     setTimeline(null);
     setCurrentStepIndex(-1);
     setLoadedTargetKey(null);
     setError(null);
-    setContent(null);
+    hasContentRef.current = false;
     setTimelineLoading(true);
     setFrameLoading(true);
 
@@ -155,7 +178,7 @@ export function ReplayTerminalWeb({
         ? nextTimeline.steps[initialStepIndex] ?? null
         : null;
 
-      await loadFrame(toFrameTarget(initialStep, latestFallbackTarget), { preserveContent: false });
+      await loadFrame(toFrameTarget(initialStep, latestFallbackTarget));
       if (cancelled) {
         return;
       }
@@ -168,16 +191,17 @@ export function ReplayTerminalWeb({
     return () => {
       cancelled = true;
       frameRequestIdRef.current += 1;
+      onCleanup?.();
     };
-  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, reloadKey, replay.replayId]);
+  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, onCleanup, reloadKey, replay.replayId, writer]);
 
   useEffect(() => {
-    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey) {
+    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading) {
       return;
     }
 
-    void loadFrame(currentTarget, { preserveContent: true });
-  }, [currentStepIndex, currentTarget, currentTargetKey, loadFrame, loadedTargetKey, timeline]);
+    void loadFrame(currentTarget);
+  }, [currentStepIndex, currentTarget, currentTargetKey, frameLoading, loadFrame, loadedTargetKey, timeline]);
 
   useEffect(() => {
     if (!isPlaying) {
@@ -267,6 +291,9 @@ export function ReplayTerminalWeb({
     }
 
     setIsPlaying(false);
+    // Reset checkpoint tracking on jump so we get a full frame
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
     setCurrentStepIndex(direction === 'start' ? 0 : timeline.steps.length - 1);
   }, [timeline]);
 

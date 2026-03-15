@@ -21,7 +21,7 @@ import {
   listReplaysOffline,
   getReplaySnapshotOffline,
   getReplayTextOffline,
-  getReplayAnsiBufferOffline,
+  getReplayFrameOffline,
   getReplayTimelineOffline,
   dismissReplayOffline,
   undismissReplayOffline,
@@ -138,7 +138,7 @@ export interface LocalSessionBackendDependencies {
   getReplaySnapshot: typeof getReplaySnapshotOffline;
   getReplayText: typeof getReplayTextOffline;
   getReplayMarkdown: typeof getReplayMarkdown;
-  getReplayAnsi: typeof getReplayAnsiBufferOffline;
+  getReplayFrame: typeof getReplayFrameOffline;
   getReplayTimeline: typeof getReplayTimelineOffline;
   dismissReplay: typeof dismissReplayOffline;
   undismissReplay: typeof undismissReplayOffline;
@@ -400,7 +400,7 @@ function buildDeps(
     getReplaySnapshot: getReplaySnapshotOffline,
     getReplayText: getReplayTextOffline,
     getReplayMarkdown,
-    getReplayAnsi: getReplayAnsiBufferOffline,
+    getReplayFrame: getReplayFrameOffline,
     getReplayTimeline: getReplayTimelineOffline,
     dismissReplay: dismissReplayOffline,
     undismissReplay: undismissReplayOffline,
@@ -626,8 +626,8 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     });
   }
 
-  async getReplayAnsi(replayId: string, target?: import('../backend.js').ReplayFrameTarget): Promise<Uint8Array> {
-    return this.deps.getReplayAnsi(replayId, target);
+  async getReplayFrame(replayId: string, target?: import('../backend.js').ReplayFrameTarget): Promise<import('../backend.js').ReplayFrame> {
+    return this.deps.getReplayFrame(replayId, target);
   }
 
   async getReplayTimeline(replayId: string): Promise<import('../backend.js').ReplayTimeline> {
