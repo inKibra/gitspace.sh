@@ -775,11 +775,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   cancelPendingReplayRequests(): void {
-    if (this.pendingReplayFrame) {
-      clearTimeout(this.pendingReplayFrame.timeout);
-      this.pendingReplayFrame.reject(new Error('Replay frame request cancelled'));
-      this.pendingReplayFrame = null;
-    }
+    this.cancelPendingReplayFrame();
     if (this.pendingReplayTimeline) {
       clearTimeout(this.pendingReplayTimeline.timeout);
       this.pendingReplayTimeline.reject(new Error('Replay timeline request cancelled'));
