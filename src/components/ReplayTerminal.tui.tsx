@@ -232,12 +232,12 @@ export function ReplayTerminal({
   }, [latestFallbackTarget, loadFrame, loadReplayTimeline, onCleanup, reloadKey, replay.replayId, terminalMounted]);
 
   useEffect(() => {
-    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading) {
+    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || error) {
       return;
     }
 
     void loadFrame(currentTarget);
-  }, [currentStepIndex, currentTarget, currentTargetKey, frameLoading, loadFrame, loadedTargetKey, timeline]);
+  }, [currentStepIndex, currentTarget, currentTargetKey, error, frameLoading, loadFrame, loadedTargetKey, timeline]);
 
   useEffect(() => {
     const handleResize = () => setTermSize(getTerminalSize());
