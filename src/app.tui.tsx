@@ -166,6 +166,7 @@ function getInitialInputValueForStep(step: OnboardingStep): string {
   if (step.type === 'input') {
     return step.defaultValue || '';
   }
+  // SecretStep intentionally has no defaultValue — secrets shouldn't be pre-filled
   return '';
 }
 

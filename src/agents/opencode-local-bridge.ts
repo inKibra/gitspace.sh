@@ -11,6 +11,7 @@ export interface OpenCodeLocalBridgeHandle {
 interface BridgeEntry {
   handle: OpenCodeLocalBridgeHandle;
   server: ReturnType<typeof Bun.serve>;
+  backend: OpenCodeBridgeBackend;
 }
 
 const bridgeEntries = new Map<string, BridgeEntry>();
@@ -45,7 +46,12 @@ export async function ensureOpenCodeLocalBridge(options: {
 }): Promise<OpenCodeLocalBridgeHandle> {
   const existing = bridgeEntries.get(options.workspaceId);
   if (existing) {
-    return existing.handle;
+    // Invalidate if the backend instance changed (e.g., reconnect to different machine)
+    if (existing.backend === options.backend) {
+      return existing.handle;
+    }
+    // Stop the stale bridge so a new one can be created with the fresh backend
+    await existing.handle.stop();
   }
 
   let lastError: unknown = null;
@@ -126,7 +132,7 @@ export async function ensureOpenCodeLocalBridge(options: {
           bridgeEntries.delete(options.workspaceId);
         },
       };
-      bridgeEntries.set(options.workspaceId, { handle, server });
+      bridgeEntries.set(options.workspaceId, { handle, server, backend: options.backend });
       return handle;
     } catch (error) {
       lastError = error;

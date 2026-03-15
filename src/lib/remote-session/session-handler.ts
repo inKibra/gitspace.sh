@@ -1892,15 +1892,14 @@ export class RemoteSessionHandler {
         }
       })();
     } catch (error) {
+      // Send error to client BEFORE aborting so the condition isn't short-circuited
+      await this.sendMessage(session, sendResponse, {
+        type: 'opencode_stream_error',
+        requestId: msg.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
       controller.abort();
       this.openCodeStreams.delete(streamKey);
-      if (!controller.signal.aborted) {
-        await this.sendMessage(session, sendResponse, {
-          type: 'opencode_stream_error',
-          requestId: msg.requestId,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
     }
   }
 

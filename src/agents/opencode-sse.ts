@@ -53,6 +53,8 @@ export async function consumeSseStream(
     }
 
     buffer += decoder.decode(value, { stream: true });
+    // Normalize \r\n to \n (SSE spec allows both line endings)
+    buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
     while (true) {
       const boundary = buffer.indexOf('\n\n');

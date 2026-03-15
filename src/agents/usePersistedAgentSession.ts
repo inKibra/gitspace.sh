@@ -56,18 +56,30 @@ export function usePersistedAgentSession(
     return readFromLocalStorage(workspaceId);
   });
 
-  // Async init from backend for TUI disk persistence.
-  // If localStorage already had a value (web), this is a no-op.
+  // Reset state when workspaceId changes — the useState initializer only runs once,
+  // so subsequent workspace switches need an explicit sync.
   useEffect(() => {
-    if (!workspaceId || !backend) return;
-    // Skip async load if localStorage already provided a value
+    if (!workspaceId) {
+      setLastSessionId(null);
+      return;
+    }
+    // Re-read from localStorage for the new workspace
     const fromLs = readFromLocalStorage(workspaceId);
-    if (fromLs !== null) return;
+    if (fromLs !== null) {
+      setLastSessionId(fromLs);
+      return;
+    }
+
+    // Async init from backend for TUI disk persistence.
+    if (!backend) {
+      setLastSessionId(null);
+      return;
+    }
 
     let cancelled = false;
     void backend.getAgentSessionPreference(workspaceId).then((pref) => {
-      if (!cancelled && pref) {
-        setLastSessionId(pref);
+      if (!cancelled) {
+        setLastSessionId(pref ?? null);
       }
     });
     return () => { cancelled = true; };
