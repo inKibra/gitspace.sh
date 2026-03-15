@@ -100,7 +100,7 @@ import type {
   OpenCodeBridgeStreamEvent,
   OpenCodeBridgeStreamOpen,
 } from '../../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../../agents/opencode-runtime.js';
+import type { OpenCodeRuntimeInfo } from '../../agents/opencode-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../serve/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
 

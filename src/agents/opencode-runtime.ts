@@ -1,3 +1,7 @@
+// Bun global is available at runtime but not in the web tsc build which
+// traverses this file via type-only import chains. Declare it so tsc is happy.
+declare const Bun: any;
+
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';

@@ -13,7 +13,7 @@ import type {
   OpenCodeBridgeStreamEvent,
   OpenCodeBridgeStreamOpen,
 } from '../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../agents/opencode-runtime.js';
+import type { OpenCodeRuntimeInfo } from '../agents/opencode-types.js';
 import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
