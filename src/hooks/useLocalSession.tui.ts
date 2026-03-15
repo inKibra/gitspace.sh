@@ -15,7 +15,7 @@ import {
 } from '../session/index.js';
 import type { NotificationConfig } from '../notifications/types.js';
 import type { OpenCodeBridgeRequest, OpenCodeBridgeResponse, OpenCodeBridgeStreamEvent, OpenCodeBridgeStreamOpen } from '../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../agents/opencode-runtime.js';
+import type { OpenCodeRuntimeInfo } from '../agents/opencode-types.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../types/bundle-config.js';

@@ -10,7 +10,7 @@ import type {
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
 import type { OpenCodeBridgeRequest, OpenCodeBridgeResponse, OpenCodeBridgeStreamEvent, OpenCodeBridgeStreamOpen } from '../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../agents/opencode-runtime.js';
+import type { OpenCodeRuntimeInfo } from '../agents/opencode-types.js';
 import type {
   AttachSessionParams,
   BackendKey,

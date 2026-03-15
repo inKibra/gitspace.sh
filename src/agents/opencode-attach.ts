@@ -1,4 +1,4 @@
-import { buildAuthenticatedOpenCodeUrl, type OpenCodeRuntimeInfo } from './opencode-runtime.js';
+import { buildAuthenticatedOpenCodeUrl, type OpenCodeRuntimeInfo } from './opencode-types.js';
 
 export function buildOpenCodeAttachUrlCommand(url: string, sessionId?: string): {
   command: string;

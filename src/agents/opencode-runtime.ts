@@ -1,30 +1,15 @@
+// Bun global is available at runtime but not in the web tsc build which
+// traverses this file via type-only import chains. Declare it so tsc is happy.
+declare const Bun: any;
+
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';
 
-export interface OpenCodeRuntimeTarget {
-  workspaceId: string;
-  workspacePath: string;
-  projectName?: string;
-}
-
-export interface OpenCodeRuntimeInfo {
-  workspaceId: string;
-  workspacePath: string;
-  hostname: string;
-  port: number;
-  baseUrl: string;
-  username: string;
-  password: string;
-  startedAt: string;
-}
-
-export function buildAuthenticatedOpenCodeUrl(info: Pick<OpenCodeRuntimeInfo, 'hostname' | 'port' | 'username' | 'password'>): string {
-  const url = new URL(`http://${info.hostname}:${info.port}`);
-  url.username = info.username;
-  url.password = info.password;
-  return url.toString();
-}
+// Re-export shared types/helpers so existing importers don't break
+export type { OpenCodeRuntimeTarget, OpenCodeRuntimeInfo } from './opencode-types.js';
+export { buildAuthenticatedOpenCodeUrl } from './opencode-types.js';
+import type { OpenCodeRuntimeTarget, OpenCodeRuntimeInfo } from './opencode-types.js';
 
 interface RuntimeEntry {
   info: OpenCodeRuntimeInfo;

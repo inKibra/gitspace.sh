@@ -1,4 +1,4 @@
-import { buildAuthenticatedOpenCodeUrl, type OpenCodeRuntimeInfo } from './opencode-runtime.js';
+import { buildAuthenticatedOpenCodeUrl, type OpenCodeRuntimeInfo } from './opencode-types.js';
 
 export function encodeWorkspacePathForRoute(workspacePath: string): string {
   // Isomorphic: Buffer for Bun/Node, TextEncoder+btoa for browser
