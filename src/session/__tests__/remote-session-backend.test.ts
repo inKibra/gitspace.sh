@@ -429,16 +429,20 @@ describe('RemoteSessionBackend', () => {
     };
     const framePromise = backend.getReplayFrame('replay-1', { atMs: 50, atSeq: 2 });
     await Bun.sleep(0);
-    expect(decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1])).toEqual({
+    const sentCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]) as Record<string, unknown>;
+    expect(sentCommand).toEqual({
       type: 'get_replay_frame',
       replayId: 'replay-1',
+      requestId: expect.any(String),
       atMs: 50,
       atSeq: 2,
     });
+    const requestId = sentCommand.requestId as string;
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
         type: 'replay_frame',
         replayId: 'replay-1',
+        requestId,
         frame: mockFrame,
       })
     );

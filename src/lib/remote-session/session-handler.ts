@@ -292,7 +292,7 @@ export class RemoteSessionHandler {
         break;
 
       case 'get_replay_frame':
-        await this.handleGetReplayFrame(session, msg.replayId, msg.atMs, msg.atSeq, sendResponse);
+        await this.handleGetReplayFrame(session, msg.replayId, msg.requestId, msg.atMs, msg.atSeq, sendResponse);
         break;
 
       case 'get_replay_timeline':
@@ -784,6 +784,7 @@ export class RemoteSessionHandler {
   private async handleGetReplayFrame(
     session: RemoteClientSession,
     replayId: string,
+    requestId: string,
     atMs: number | undefined,
     atSeq: number | undefined,
     sendResponse: (data: Uint8Array) => void,
@@ -803,6 +804,7 @@ export class RemoteSessionHandler {
     await this.sendMessage(session, sendResponse, {
       type: 'replay_frame',
       replayId,
+      requestId,
       frame,
     });
   }

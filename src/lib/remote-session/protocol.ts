@@ -73,6 +73,7 @@ export interface ListReplaysRequest {
 export interface GetReplayFrameRequest {
   type: 'get_replay_frame';
   replayId: string;
+  requestId: string;
   atMs?: number;
   atSeq?: number;
 }
@@ -385,6 +386,7 @@ export interface ReplayListResponse {
 export interface ReplayFrameResponse {
   type: 'replay_frame';
   replayId: string;
+  requestId: string;
   frame: import('../tmux-lite/replay/types.js').ReplayFrame;
 }
 

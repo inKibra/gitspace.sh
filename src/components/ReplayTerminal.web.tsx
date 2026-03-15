@@ -259,17 +259,24 @@ export function ReplayTerminalWeb({
     timelineLoading,
   ]);
 
+  /** Invalidate any in-flight frame load so its completion is discarded. */
+  const invalidatePendingFrameLoad = useCallback(() => {
+    frameRequestIdRef.current += 1;
+    setFrameLoading(false);
+  }, []);
+
   const stepReplay = useCallback((direction: -1 | 1, count = 1) => {
     if (!timeline || timeline.steps.length === 0) {
       return;
     }
 
+    invalidatePendingFrameLoad();
     setIsPlaying(false);
     setCurrentStepIndex((index) => {
       const resolvedIndex = index < 0 ? timeline.steps.length - 1 : index;
       return clamp(resolvedIndex + (direction * count), 0, timeline.steps.length - 1);
     });
-  }, [timeline]);
+  }, [invalidatePendingFrameLoad, timeline]);
 
   const adjustPlaybackSpeed = useCallback((direction: -1 | 1, count = 1) => {
     setPlaybackSpeedIndex((index) => clamp(index + (direction * count), 0, PLAYBACK_SPEEDS.length - 1));
@@ -285,21 +292,26 @@ export function ReplayTerminalWeb({
       return;
     }
 
+    // When restarting from the end, invalidate so the old frame load is discarded
+    invalidatePendingFrameLoad();
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
     setCurrentStepIndex((index) => index >= timeline.steps.length - 1 ? 0 : Math.max(0, index));
     setIsPlaying(true);
-  }, [isPlaying, timeline]);
+  }, [invalidatePendingFrameLoad, isPlaying, timeline]);
 
   const jumpToBoundary = useCallback((direction: 'start' | 'end') => {
     if (!timeline || timeline.steps.length === 0) {
       return;
     }
 
+    invalidatePendingFrameLoad();
     setIsPlaying(false);
     // Reset checkpoint tracking on jump so we get a full frame
     currentCheckpointIdRef.current = null;
     currentSeqRef.current = 0;
     setCurrentStepIndex(direction === 'start' ? 0 : timeline.steps.length - 1);
-  }, [timeline]);
+  }, [invalidatePendingFrameLoad, timeline]);
 
   const handleDismiss = useCallback(async () => {
     const shouldGoBack = await onDismiss?.(replay.replayId);

@@ -512,9 +512,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
+  private replayFrameRequestSeq = 0;
   private pendingReplayFrame:
     | {
         replayId: string;
+        requestId: string;
         resolve: (frame: import('../backend.js').ReplayFrame) => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
@@ -799,23 +801,25 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       this.cancelPendingReplayFrame();
     }
 
+    const requestId = `rf-${++this.replayFrameRequestSeq}-${Date.now().toString(36)}`;
     const command: GetReplayFrameRequest = {
       type: 'get_replay_frame',
       replayId,
+      requestId,
       atMs: target?.atMs,
       atSeq: target?.atSeq,
     };
     return new Promise<import('../backend.js').ReplayFrame>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const pending = this.pendingReplayFrame;
-        if (!pending || pending.replayId !== replayId) {
+        if (!pending || pending.requestId !== requestId) {
           return;
         }
         this.pendingReplayFrame = null;
         pending.reject(new Error(`Timed out waiting for replay frame (${replayId})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
-      const pendingEntry = { replayId, resolve, reject, timeout };
+      const pendingEntry = { replayId, requestId, resolve, reject, timeout };
       this.pendingReplayFrame = pendingEntry;
 
       void this.sendCommand(command).catch((error) => {
@@ -2517,7 +2521,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private resolveReplayFrame(message: ReplayFrameResponse): void {
     const pending = this.pendingReplayFrame;
-    if (!pending || pending.replayId !== message.replayId) {
+    if (!pending || pending.requestId !== message.requestId) {
+      // Stale response for a cancelled or superseded request — discard
       return;
     }
     clearTimeout(pending.timeout);
