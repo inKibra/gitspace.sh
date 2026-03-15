@@ -410,6 +410,7 @@ export async function createSession(
     env?: Record<string, string>;
     kind?: import('./protocol.js').SessionKind;
     hidden?: boolean;
+    recordReplay?: boolean;
     metadata?: Record<string, string>;
   }
 ): Promise<Session> {
@@ -424,6 +425,7 @@ export async function createSession(
     env: options?.env,
     kind: options?.kind,
     hidden: options?.hidden,
+    recordReplay: options?.recordReplay,
     metadata: options?.metadata,
   });
   if (res.type === "session") return res.session;

@@ -172,6 +172,10 @@ export function filterReplaysForSessionAccess<T extends ReplaySessionAccessTarge
   return replays.filter((replay) => replay.sessionId === grantedSessionId);
 }
 
+function isAgentReplay(replay: { sessionName: string }): boolean {
+  return replay.sessionName.startsWith('agent:');
+}
+
 const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
   'create_thread',
   'add_reply',
@@ -786,7 +790,7 @@ export class RemoteSessionHandler {
       session.accessType,
       session.grantedSessionId,
       listReplaysOffline({ workspaceId, includeDismissed: includeDismissed ?? false }),
-    );
+    ).filter((replay) => !isAgentReplay(replay));
     await this.sendMessage(session, sendResponse, {
       type: 'replay_list',
       replays,

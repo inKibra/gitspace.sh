@@ -386,4 +386,28 @@ describe("tmux-lite replay capture", () => {
     expect(listReplaysOffline({ includeDismissed: true }).some((info) => info.replayId === replay!.replayId)).toBe(false);
     expect(readReplayManifest(replay!.replayId)).toBeNull();
   }, 10000);
+
+  test('does not record replays when recordReplay is false', async () => {
+    serverProc = await startServer(replayRoot);
+
+    const response = await sendRouterCommand({
+      type: 'new',
+      name: 'agent:no-replay',
+      cwd: join(import.meta.dir, '../../..'),
+      command: '/bin/sh',
+      args: ['-lc', 'printf no-replay-test; sleep 1'],
+      kind: 'agent',
+      hidden: true,
+      recordReplay: false,
+      metadata: { workspaceId: 'demo:ws-1', agentSessionId: 'agent-1' },
+    });
+
+    expect(response.type).toBe('session');
+    await Bun.sleep(1500);
+    expect(listReplayInfos()).toEqual([]);
+
+    const replayListResponse = await sendRouterCommand({ type: 'list-replays' });
+    expect(replayListResponse.type).toBe('replays');
+    expect(replayListResponse.replays).toEqual([]);
+  }, 10000);
 });

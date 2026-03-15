@@ -749,6 +749,10 @@ function markReplayCrashed(session: SessionData, endedAt = Date.now()): void {
 }
 
 function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
+  const session = sessions.get(item.sessionId);
+  if (session?.info.kind === 'agent') {
+    return;
+  }
   // Check if this notification type is enabled in config
   if (!isNotificationTypeEnabled(item.type)) {
     return;
@@ -1572,6 +1576,7 @@ function createSession(
     env?: Record<string, string>;
     kind?: import('./protocol.js').SessionKind;
     hidden?: boolean;
+    recordReplay?: boolean;
     metadata?: Record<string, string>;
   }
 ): Session {
@@ -1586,7 +1591,7 @@ function createSession(
 
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const replay = createReplayRuntime(id, sessionName, cwd, cols, rows);
+  const replay = options?.recordReplay === false ? null : createReplayRuntime(id, sessionName, cwd, cols, rows);
 
   // Create xterm-headless for proper terminal state tracking
   const xterm = new XTerminal({
@@ -1866,6 +1871,7 @@ routerListener = Bun.listen({
                 env: cmd.env,
                 kind: cmd.kind,
                 hidden: cmd.hidden,
+                recordReplay: cmd.recordReplay,
                 metadata: cmd.metadata,
               });
               res = { type: "session", session };

@@ -1205,6 +1205,22 @@ describe('LocalSessionBackend', () => {
                 checkpointCount: 1,
                 lastSeq: 1,
               },
+              {
+                replayId: 'replay-agent',
+                sessionId: 'sess-agent',
+                sessionName: 'agent:ws-1:abcd1234',
+                cwd: '/tmp/ws-1',
+                workspaceId: 'ws-1',
+                projectName: 'alpha',
+                workspaceName: 'ws-1',
+                startedAt: 5,
+                endedAt: 6,
+                status: 'closed',
+                durationMs: 1,
+                eventCount: 1,
+                checkpointCount: 1,
+                lastSeq: 1,
+              },
             ];
       },
     };
@@ -1233,6 +1249,7 @@ describe('LocalSessionBackend', () => {
         expect.objectContaining({ replayId: 'replay-hidden', dismissedAt: 10 }),
       ],
     });
+    expect(JSON.stringify(replayEvents)).not.toContain('replay-agent');
   });
 
   it('returns replay frame and delegates dismiss / undismiss', async () => {

@@ -79,7 +79,13 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
     return '[↑↓] Navigate  [Enter] Edit Bundle Config  [b] Bundle  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'agents') {
-    return '[↑↓] Navigate  [Enter] Agent Sessions  [r] Refresh  [q] Back';
+    return '[↑↓] Navigate  [Enter] Refresh Agents  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'agent-session') {
+    return '[↑↓] Navigate  [Enter] Open Agent Session  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'new-agent-session') {
+    return '[↑↓] Navigate  [Enter] New Agent Session  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'events') {
     return '[↑↓] Navigate  [Enter] Open Events  [r] Refresh  [q] Back';
@@ -295,6 +301,29 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             return (
               <text key={`agents-${item.workspaceId}`} fg={textColor} height={1}>
                 {prefix}   ✦ Agent Sessions{count}{permBadge}
+              </text>
+            );
+          }
+
+          if (item.type === 'agent-session') {
+            const textColor = isSelected ? COLORS.selected : '#C678DD';
+            const prefix = isSelected ? '>' : ' ';
+            const status = item.session.status?.type ? ` (${item.session.status.type})` : '';
+            const timeInfo = item.session.updatedAt ? formatTime(new Date(item.session.updatedAt).getTime()) : '';
+            return (
+              <box key={`agent-session-${item.workspaceId}-${item.session.id}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}     ✦ {item.session.title}</text>
+                {status && <text fg={COLORS.textDim}>{status}</text>}
+                {timeInfo && <text fg={COLORS.textDim}> {timeInfo}</text>}
+              </box>
+            );
+          }
+
+          if (item.type === 'new-agent-session') {
+            const textColor = isSelected ? COLORS.selected : '#C678DD';
+            return (
+              <text key={`new-agent-${item.workspaceId}`} fg={textColor} height={1}>
+                {isSelected ? '>' : ' '}     + New Agent Session
               </text>
             );
           }

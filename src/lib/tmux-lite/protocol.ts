@@ -244,6 +244,7 @@ export type Command =
       env?: Record<string, string>;
       kind?: SessionKind;
       hidden?: boolean;
+      recordReplay?: boolean;
       metadata?: Record<string, string>;
     }
   | { type: "attach"; id: string; force?: boolean }

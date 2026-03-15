@@ -637,9 +637,26 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onProcessDisabled: handleProcessDisabled,
     onOpenAgents: async (workspaceId) => {
       setAgentPickerWorkspaceId(workspaceId);
-      const workspace = remote.workspaces.find((item) => item.id === workspaceId);
-      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
+    onOpenAgentSession: async (workspaceId, agentSessionId) => {
+      agentSessionPref.persist(agentSessionId);
+      if (!remoteBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
+    },
+    onCreateAgentSession: async (workspaceId) => {
+      const sessions = await workspaceAgentSessions.createSession(workspaceId);
+      const created = sessions[0];
+      if (!created) return;
+      agentSessionPref.persist(created.id);
+      if (!remoteBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await remoteBackend.attachAgentSession(workspaceId, created.id);
+    },
+    agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
     agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onOpenEvents: handleOpenEvents,

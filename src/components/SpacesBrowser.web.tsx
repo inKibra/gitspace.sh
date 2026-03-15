@@ -504,6 +504,52 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             );
           }
 
+          if (item.type === 'agent-session') {
+            return (
+              <div
+                key={`agent-session-${item.workspaceId}-${item.session.id}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center justify-between
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
+                  <div className="text-xs text-[#8b949e] truncate">
+                    agent session{item.session.status?.type ? ` • ${item.session.status.type}` : ''}
+                  </div>
+                </div>
+                {item.session.updatedAt && (
+                  <div className="text-xs text-[#6e7681] ml-3 shrink-0 hidden sm:block">
+                    {formatTime(new Date(item.session.updatedAt).getTime())}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          if (item.type === 'new-agent-session') {
+            return (
+              <div
+                key={`new-agent-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#c678dd] text-sm">+ New Agent Session</span>
+              </div>
+            );
+          }
+
           if (item.type === 'events') {
             return (
               <SimpleTreeRow

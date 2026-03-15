@@ -8,6 +8,7 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
+import type { SessionStatus } from '../agents/opencode-event-types.js';
 
 export type { ReplayInfo };
 
@@ -55,11 +56,21 @@ export interface SessionInfo {
   exitCode?: number;
 }
 
+export interface AgentSessionInfo {
+  id: string;
+  workspaceId: string;
+  title: string;
+  updatedAt?: string;
+  status?: SessionStatus;
+}
+
 /** Tree item types for flattened list */
 export type TreeItem =
   | { type: 'project'; name: string; workspaceCount: number }
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
   | { type: 'agents'; workspaceId: string; count?: number; pendingPermissions?: number }
+  | { type: 'agent-session'; session: AgentSessionInfo; workspaceId: string }
+  | { type: 'new-agent-session'; workspaceId: string }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
   | { type: 'replay-section'; workspaceId: string; count: number; expanded: boolean }
   | { type: 'orphaned-replay-section'; projectName: string; count: number; expanded: boolean }
@@ -92,6 +103,9 @@ export interface UseSpacesBrowserProps {
   onProcessDisabled?: (params: { workspaceId: string; processName: string }) => void;
   onOpenEvents: (workspaceId: string) => void;
   onOpenAgents?: (workspaceId: string) => void | Promise<void>;
+  onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
+  agentSessionsByWorkspace?: Record<string, AgentSessionInfo[]>;
   agentSessionCounts?: Record<string, number>;
   /** Pending permission count per workspace, from useWorkspaceAgentEvents */
   pendingPermissionsByWorkspace?: Record<string, number>;
@@ -183,6 +197,7 @@ function buildTree(
   expandedReplaySections: Set<string>,
   agentSessionCounts: Record<string, number>,
   showProjectHeaders: boolean = true,
+  agentSessionsByWorkspace: Record<string, AgentSessionInfo[]> = {},
   pendingPermissionsByWorkspace: Record<string, number> = {},
 ): TreeItem[] {
   const items: TreeItem[] = [];
@@ -353,6 +368,21 @@ function buildTree(
           pendingPermissions: pendingPermissionsByWorkspace[ws.id] ?? 0,
         });
 
+        const agentSessions = [...(agentSessionsByWorkspace[ws.id] ?? [])].sort((a, b) =>
+          (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
+        );
+        for (const session of agentSessions) {
+          items.push({
+            type: 'agent-session',
+            session,
+            workspaceId: ws.id,
+          });
+        }
+        items.push({
+          type: 'new-agent-session',
+          workspaceId: ws.id,
+        });
+
         // Events action
         items.push({
           type: 'events',
@@ -418,7 +448,10 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     onProcessDisabled,
     onOpenEvents,
     onOpenAgents,
+    onOpenAgentSession,
+    onCreateAgentSession,
     agentSessionCounts = {},
+    agentSessionsByWorkspace = {},
     pendingPermissionsByWorkspace = {},
     onEditProcesses,
     onManageBundleConfig,
@@ -437,8 +470,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   // Build tree
   const tree = useMemo(
-    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, pendingPermissionsByWorkspace),
-    [workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, pendingPermissionsByWorkspace]
+    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace),
+    [workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace]
   );
 
   // Add selection state
@@ -496,10 +529,11 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
         next.add(workspaceId);
         // Request a full sessions refresh when expanding.
         onRequestSessions();
+        void onOpenAgents?.(workspaceId);
       }
       return next;
     });
-  }, [onRequestSessions]);
+  }, [onOpenAgents, onRequestSessions]);
 
   const toggleReplaySection = useCallback((workspaceId: string) => {
     setExpandedReplaySections(prev => {
@@ -565,12 +599,16 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       onManageBundleConfig?.({ workspaceId: item.workspaceId });
     } else if (item.type === 'agents') {
       await onOpenAgents?.(item.workspaceId);
+    } else if (item.type === 'agent-session') {
+      await onOpenAgentSession?.(item.workspaceId, item.session.id);
+    } else if (item.type === 'new-agent-session') {
+      await onCreateAgentSession?.(item.workspaceId);
     } else if (item.type === 'events') {
       onOpenEvents(item.workspaceId);
     } else if (item.type === 'new-session') {
       await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [toggleWorkspace, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenAgents, onOpenEvents]);
+  }, [toggleWorkspace, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenAgents, onOpenAgentSession, onCreateAgentSession, onOpenEvents]);
 
   const activateSelected = useCallback(async () => {
     await activateItem(selectedItem);

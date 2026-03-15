@@ -1329,9 +1329,28 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onOpenEvents: handleOpenEvents,
     onOpenAgents: async (workspaceId) => {
       setAgentPickerWorkspaceId(workspaceId);
-      const workspace = workspaceInfos.find((item) => item.id === workspaceId);
-      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
+    onOpenAgentSession: async (workspaceId, agentSessionId) => {
+      agentSessionPref.persist(agentSessionId);
+      if (!localBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await localBackend.attachAgentSession(workspaceId, agentSessionId);
+      dispatch({ type: 'SET_VIEW', view: 'terminal' });
+    },
+    onCreateAgentSession: async (workspaceId) => {
+      const sessions = await workspaceAgentSessions.createSession(workspaceId);
+      const created = sessions[0];
+      if (!created) return;
+      agentSessionPref.persist(created.id);
+      if (!localBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await localBackend.attachAgentSession(workspaceId, created.id);
+      dispatch({ type: 'SET_VIEW', view: 'terminal' });
+    },
+    agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
     agentSessionCounts: agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: refreshWorkspaces,

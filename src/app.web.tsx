@@ -936,9 +936,60 @@ export default function App() {
     },
     onOpenAgents: async (workspaceId) => {
       setAgentPickerWorkspaceId(workspaceId);
-      const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
-      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
+    onOpenAgentSession: async (workspaceId, agentSessionId) => {
+      agentSessionPref.persist(agentSessionId);
+      const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
+      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
+        setActiveAgentView({
+          machineId: selectedMachine.machineId,
+          workspaceId,
+          title: workspaceAgentSessions.sessionsByWorkspace[workspaceId]?.find((session) => session.id === agentSessionId)?.title ?? 'Agent Session',
+          url: buildOpenCodeWebProxyUrl({
+            machineId: selectedMachine.machineId,
+            workspaceId,
+            workspacePath: runtime.workspacePath,
+            sessionId: agentSessionId,
+          }),
+        });
+        setView('agent');
+        return;
+      }
+      if (!webBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await webBackend.attachAgentSession(workspaceId, agentSessionId);
+      setView('terminal');
+    },
+    onCreateAgentSession: async (workspaceId) => {
+      const sessions = await workspaceAgentSessions.createSession(workspaceId);
+      const created = sessions[0];
+      if (!created) return;
+      agentSessionPref.persist(created.id);
+      const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
+      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
+        setActiveAgentView({
+          machineId: selectedMachine.machineId,
+          workspaceId,
+          title: created.title,
+          url: buildOpenCodeWebProxyUrl({
+            machineId: selectedMachine.machineId,
+            workspaceId,
+            workspacePath: runtime.workspacePath,
+            sessionId: created.id,
+          }),
+        });
+        setView('agent');
+        return;
+      }
+      if (!webBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await webBackend.attachAgentSession(workspaceId, created.id);
+      setView('terminal');
+    },
+    agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
     agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },

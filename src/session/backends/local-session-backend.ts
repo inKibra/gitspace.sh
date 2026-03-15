@@ -288,6 +288,10 @@ function toExitedSessionError(session: TmuxSession): Error {
   return new SpacesError(`Session has already exited: ${session.name}${suffix}`, 'USER_ERROR', 1);
 }
 
+function isAgentReplay(replay: { sessionName: string }): boolean {
+  return replay.sessionName.startsWith('agent:');
+}
+
 function scriptFailureCodeForPhase(phase: 'pre' | 'setup' | 'select'): string {
   if (phase === 'setup') {
     return 'SETUP_SCRIPT_FAILED';
@@ -595,7 +599,7 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
   async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
     const replays = await this.deps.listReplays({ workspaceId, includeDismissed });
-    this.emit({ type: 'replays', replays });
+    this.emit({ type: 'replays', replays: replays.filter((replay) => !isAgentReplay(replay)) });
   }
 
   async createCheckpoint(sessionId: string): Promise<void> {

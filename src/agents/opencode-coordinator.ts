@@ -104,6 +104,9 @@ export class OpenCodeCoordinator {
     const filtered = sessions.filter(
       (session) => session.directory === target.workspacePath && managedIds.has(String(session.id)),
     );
+    if (filtered.length === 0 && managedIds.size > 0) {
+      return toSummaries(target.workspaceId, history.sessions);
+    }
     await replaceStoredSessions(
       target.workspaceId,
       filtered.map((session) => ({
@@ -171,6 +174,7 @@ export class OpenCodeCoordinator {
         },
         kind: AGENT_TMUX_SESSION_KIND,
         hidden: true,
+        recordReplay: false,
         metadata: {
           workspaceId: target.workspaceId,
           agentSessionId,
