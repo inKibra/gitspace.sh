@@ -92,6 +92,7 @@ export function ReplayTerminal({
   const [timeline, setTimeline] = useState<ReplayTimeline | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
   const [loadedTargetKey, setLoadedTargetKey] = useState<string | null>(null);
+  const [erroredTargetKey, setErroredTargetKey] = useState<string | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(true);
   const [frameLoading, setFrameLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -152,6 +153,7 @@ export function ReplayTerminal({
       currentCheckpointIdRef.current = frameCheckpointId(frame);
       currentSeqRef.current = frameLastSeq(frame);
       setLoadedTargetKey(targetKey(target));
+      setErroredTargetKey(null);
       hasContentRef.current = true;
       setError(null);
     } catch (loadError) {
@@ -161,6 +163,7 @@ export function ReplayTerminal({
 
       const message = loadError instanceof Error ? loadError.message : String(loadError);
       setError(message);
+      setErroredTargetKey(targetKey(target));
 
       if (!hasContentRef.current) {
         feedTerminal(`\x1b[2J\x1b[H\x1b[31mFailed to load replay\x1b[0m\r\n\r\n${message}`);
@@ -186,6 +189,7 @@ export function ReplayTerminal({
     setTimeline(null);
     setCurrentStepIndex(-1);
     setLoadedTargetKey(null);
+    setErroredTargetKey(null);
     setError(null);
     hasContentRef.current = false;
     setTimelineLoading(true);
@@ -232,12 +236,12 @@ export function ReplayTerminal({
   }, [latestFallbackTarget, loadFrame, loadReplayTimeline, onCleanup, reloadKey, replay.replayId, terminalMounted]);
 
   useEffect(() => {
-    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || error) {
+    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || currentTargetKey === erroredTargetKey) {
       return;
     }
 
     void loadFrame(currentTarget);
-  }, [currentStepIndex, currentTarget, currentTargetKey, error, frameLoading, loadFrame, loadedTargetKey, timeline]);
+  }, [currentStepIndex, currentTarget, currentTargetKey, erroredTargetKey, frameLoading, loadFrame, loadedTargetKey, timeline]);
 
   useEffect(() => {
     const handleResize = () => setTermSize(getTerminalSize());
