@@ -38,16 +38,35 @@ function readJsonFile<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf-8')) as T;
 }
 
+function sleep(ms: number): void {
+  execSync(`sleep ${ms / 1000}`, { timeout: ms + 5_000 });
+}
+
+const MAX_RETRIES = 5;
+const INITIAL_DELAY_MS = 2_000;
+
 function fetchIntegrity(name: string, version: string): string {
-  try {
-    return execSync(`npm view ${name}@${version} dist.integrity`, {
-      encoding: 'utf-8',
-      timeout: 30_000,
-    }).trim();
-  } catch {
-    console.error(`✗ Failed to fetch integrity for ${name}@${version} from npm`);
-    process.exit(1);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = INITIAL_DELAY_MS * 2 ** (attempt - 1);
+      console.log(`  ↻ Retry ${attempt}/${MAX_RETRIES - 1} for ${name}@${version} in ${delay / 1000}s…`);
+      sleep(delay);
+    }
+    try {
+      const result = execSync(`npm view ${name}@${version} dist.integrity`, {
+        encoding: 'utf-8',
+        timeout: 30_000,
+      }).trim();
+      if (result.length > 0) return result;
+      lastError = new Error('npm returned empty integrity');
+    } catch (e) {
+      lastError = e;
+    }
   }
+  console.error(`✗ Failed to fetch integrity for ${name}@${version} after ${MAX_RETRIES} attempts`);
+  console.error(lastError);
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +83,8 @@ for (const [name, version] of Object.entries(optionalDeps)) {
 
   const meta = PLATFORM_META[name];
   if (!meta) {
-    console.log(`⚠ No known platform metadata for ${name}, skipping`);
-    continue;
+    console.error(`✗ No platform metadata for ${name} — add it to PLATFORM_META in this script`);
+    process.exit(1);
   }
 
   // Quick check: does the correct descriptor already exist?
