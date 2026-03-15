@@ -27,7 +27,6 @@ import { useLifecycleController } from './app/session/useLifecycleController.js'
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
 import { buildOpenCodeWebProxyUrl } from './agents/opencode-web.js';
 
 // Import shared components and hooks
@@ -864,40 +863,6 @@ export default function App() {
   const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
   const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, webBackend);
 
-  const agentSessionPicker = useAgentSessionPicker({
-    flow,
-    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
-    createSession: workspaceAgentSessions.createSession,
-    abortSession: workspaceAgentSessions.abortSession,
-    persistedSessionId: agentSessionPref.lastSessionId,
-    onPersistSession: agentSessionPref.persist,
-    onOpenSession: async (session) => {
-      agentSessionPref.persist(session.id);
-      const runtime = await terminal.getOpenCodeRuntimeInfo(session.workspaceId);
-      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
-        setActiveAgentView({
-          machineId: selectedMachine.machineId,
-          workspaceId: session.workspaceId,
-          title: session.title,
-          url: buildOpenCodeWebProxyUrl({
-            machineId: selectedMachine.machineId,
-            workspaceId: session.workspaceId,
-            workspacePath: runtime.workspacePath,
-            sessionId: session.id,
-          }),
-        });
-        setView('agent');
-        return;
-      }
-
-      if (!webBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await webBackend.attachAgentSession(session.workspaceId, session.id);
-      setView('terminal');
-    },
-  });
-
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -963,31 +928,39 @@ export default function App() {
       setView('terminal');
     },
     onCreateAgentSession: async (workspaceId) => {
-      const sessions = await workspaceAgentSessions.createSession(workspaceId);
-      const created = sessions[0];
-      if (!created) return;
-      agentSessionPref.persist(created.id);
-      const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
-      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
-        setActiveAgentView({
-          machineId: selectedMachine.machineId,
-          workspaceId,
-          title: created.title,
-          url: buildOpenCodeWebProxyUrl({
-            machineId: selectedMachine.machineId,
-            workspaceId,
-            workspacePath: runtime.workspacePath,
-            sessionId: created.id,
-          }),
-        });
-        setView('agent');
-        return;
-      }
-      if (!webBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await webBackend.attachAgentSession(workspaceId, created.id);
-      setView('terminal');
+      flow.showInput({
+        title: 'New Agent Session',
+        label: 'Session name:',
+        placeholder: 'Investigate auth bug',
+        validation: (value) => value.trim() ? null : 'Session name is required',
+        onSubmit: async (value) => {
+          const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
+          const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
+          if (!created) return;
+          agentSessionPref.persist(created.id);
+          const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
+          if ('serviceWorker' in navigator && selectedMachine?.machineId) {
+            setActiveAgentView({
+              machineId: selectedMachine.machineId,
+              workspaceId,
+              title: created.title,
+              url: buildOpenCodeWebProxyUrl({
+                machineId: selectedMachine.machineId,
+                workspaceId,
+                workspacePath: runtime.workspacePath,
+                sessionId: created.id,
+              }),
+            });
+            setView('agent');
+            return;
+          }
+          if (!webBackend?.attachAgentSession) {
+            throw new Error('Agent attach unavailable');
+          }
+          await webBackend.attachAgentSession(workspaceId, created.id);
+          setView('terminal');
+        },
+      });
     },
     agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
     agentSessionCounts,
@@ -1107,11 +1080,29 @@ export default function App() {
             },
           });
         } else {
-          const workspace = terminal.workspaces.find((w) => w.id === workspaceId);
           setAgentPickerWorkspaceId(workspaceId);
-          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
-            preselectSessionId: agentSessionId,
-          });
+          agentSessionPref.persist(agentSessionId);
+          const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
+          if ('serviceWorker' in navigator && selectedMachine?.machineId) {
+            setActiveAgentView({
+              machineId: selectedMachine.machineId,
+              workspaceId,
+              title: workspaceAgentSessions.sessionsByWorkspace[workspaceId]?.find((session) => session.id === agentSessionId)?.title ?? 'Agent Session',
+              url: buildOpenCodeWebProxyUrl({
+                machineId: selectedMachine.machineId,
+                workspaceId,
+                workspacePath: runtime.workspacePath,
+                sessionId: agentSessionId,
+              }),
+            });
+            setView('agent');
+          } else {
+            if (!webBackend?.attachAgentSession) {
+              throw new Error('Agent attach unavailable');
+            }
+            await webBackend.attachAgentSession(workspaceId, agentSessionId);
+            setView('terminal');
+          }
         }
         return;
       }

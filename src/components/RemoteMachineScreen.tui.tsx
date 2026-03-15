@@ -40,7 +40,6 @@ import { writeCrashLog } from '../utils/crash-log.js';
 import { logger } from '../utils/logger.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.js';
-import { useAgentSessionPicker } from '../agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
@@ -593,22 +592,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
   const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, remoteBackend);
 
-  const agentSessionPicker = useAgentSessionPicker({
-    flow,
-    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
-    createSession: workspaceAgentSessions.createSession,
-    abortSession: workspaceAgentSessions.abortSession,
-    persistedSessionId: agentSessionPref.lastSessionId,
-    onPersistSession: agentSessionPref.persist,
-    onOpenSession: async (session) => {
-      agentSessionPref.persist(session.id);
-      if (!remoteBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await remoteBackend.attachAgentSession(session.workspaceId, session.id);
-    },
-  });
-
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -647,14 +630,22 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
     },
     onCreateAgentSession: async (workspaceId) => {
-      const sessions = await workspaceAgentSessions.createSession(workspaceId);
-      const created = sessions[0];
-      if (!created) return;
-      agentSessionPref.persist(created.id);
-      if (!remoteBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await remoteBackend.attachAgentSession(workspaceId, created.id);
+      flow.showInput({
+        title: 'New Agent Session',
+        label: 'Session name:',
+        placeholder: 'Investigate auth bug',
+        validation: (value) => value.trim() ? null : 'Session name is required',
+        onSubmit: async (value) => {
+          const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
+          const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
+          if (!created) return;
+          agentSessionPref.persist(created.id);
+          if (!remoteBackend?.attachAgentSession) {
+            throw new Error('Agent attach unavailable');
+          }
+          await remoteBackend.attachAgentSession(workspaceId, created.id);
+        },
+      });
     },
     agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
     agentSessionCounts,
@@ -736,11 +727,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
             },
           });
         } else {
-          const workspace = remote.workspaces.find((w) => w.id === workspaceId);
           setAgentPickerWorkspaceId(workspaceId);
-          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
-            preselectSessionId: agentSessionId,
-          });
+          agentSessionPref.persist(agentSessionId);
+          if (!remoteBackend?.attachAgentSession) {
+            throw new Error('Agent attach unavailable');
+          }
+          await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
         }
         return;
       }

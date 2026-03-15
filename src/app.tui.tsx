@@ -119,7 +119,6 @@ import {
   forceDisableKittyKeyboard,
 } from './tui/kitty-keyboard.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
@@ -1277,23 +1276,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
   const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, localBackend);
 
-  const agentSessionPicker = useAgentSessionPicker({
-    flow,
-    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
-    createSession: workspaceAgentSessions.createSession,
-    abortSession: workspaceAgentSessions.abortSession,
-    persistedSessionId: agentSessionPref.lastSessionId,
-    onPersistSession: agentSessionPref.persist,
-    onOpenSession: async (session) => {
-      agentSessionPref.persist(session.id);
-      if (!localBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await localBackend.attachAgentSession(session.workspaceId, session.id);
-      dispatch({ type: 'SET_VIEW', view: 'terminal' });
-    },
-  });
-
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
     // Merge explicit session load counts with live event counts, taking the higher value
@@ -1340,15 +1322,23 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
     onCreateAgentSession: async (workspaceId) => {
-      const sessions = await workspaceAgentSessions.createSession(workspaceId);
-      const created = sessions[0];
-      if (!created) return;
-      agentSessionPref.persist(created.id);
-      if (!localBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await localBackend.attachAgentSession(workspaceId, created.id);
-      dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      flow.showInput({
+        title: 'New Agent Session',
+        label: 'Session name:',
+        placeholder: 'Investigate auth bug',
+        validation: (value) => value.trim() ? null : 'Session name is required',
+        onSubmit: async (value) => {
+          const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
+          const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
+          if (!created) return;
+          agentSessionPref.persist(created.id);
+          if (!localBackend?.attachAgentSession) {
+            throw new Error('Agent attach unavailable');
+          }
+          await localBackend.attachAgentSession(workspaceId, created.id);
+          dispatch({ type: 'SET_VIEW', view: 'terminal' });
+        },
+      });
     },
     agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
     agentSessionCounts: agentSessionCounts,
@@ -1430,12 +1420,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             },
           });
         } else {
-          // Open agent session picker pre-selected on this session
-          const workspace = workspaceInfos.find((w) => w.id === workspaceId);
           setAgentPickerWorkspaceId(workspaceId);
-          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
-            preselectSessionId: agentSessionId,
-          });
+          agentSessionPref.persist(agentSessionId);
+          if (!localBackend?.attachAgentSession) {
+            throw new Error('Agent attach unavailable');
+          }
+          await localBackend.attachAgentSession(workspaceId, agentSessionId);
+          dispatch({ type: 'SET_VIEW', view: 'terminal' });
         }
         return;
       }
