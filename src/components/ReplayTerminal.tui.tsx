@@ -103,6 +103,11 @@ export function ReplayTerminal({
   const currentCheckpointIdRef = useRef<string | null>(null);
   const currentSeqRef = useRef(0);
   const hasContentRef = useRef(false);
+  const onCleanupRef = useRef(onCleanup);
+
+  useEffect(() => {
+    onCleanupRef.current = onCleanup;
+  }, [onCleanup]);
 
   const feedTerminal = useCallback((data: string | Uint8Array) => {
     const terminal = terminalRef.current;
@@ -231,9 +236,9 @@ export function ReplayTerminal({
     return () => {
       cancelled = true;
       frameRequestIdRef.current += 1;
-      onCleanup?.();
+      onCleanupRef.current?.();
     };
-  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, onCleanup, reloadKey, replay.replayId, terminalMounted]);
+  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, reloadKey, replay.replayId, terminalMounted]);
 
   useEffect(() => {
     if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || currentTargetKey === erroredTargetKey) {

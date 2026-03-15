@@ -59,10 +59,15 @@ export function ReplayTerminalWeb({
   const writerRef = useRef<((data: Uint8Array) => void) | null>(null);
   const currentCheckpointIdRef = useRef<string | null>(null);
   const currentSeqRef = useRef(0);
+  const onCleanupRef = useRef(onCleanup);
 
   useEffect(() => {
     writerRef.current = writer;
   }, [writer]);
+
+  useEffect(() => {
+    onCleanupRef.current = onCleanup;
+  }, [onCleanup]);
 
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     setWriter(() => fn);
@@ -195,9 +200,9 @@ export function ReplayTerminalWeb({
     return () => {
       cancelled = true;
       frameRequestIdRef.current += 1;
-      onCleanup?.();
+      onCleanupRef.current?.();
     };
-  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, onCleanup, reloadKey, replay.replayId, writer]);
+  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, reloadKey, replay.replayId, writer]);
 
   useEffect(() => {
     if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || currentTargetKey === erroredTargetKey) {
