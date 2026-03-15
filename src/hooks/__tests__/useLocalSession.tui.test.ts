@@ -13,6 +13,7 @@ import type {
 import type { NotificationConfig } from '../../notifications/types.js'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js'
+import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager.js'
 import { SpacesError } from '../../types/errors.js'
 import {
   useLocalSession,
@@ -173,6 +174,12 @@ class FakeLocalBackend implements SessionBackend {
   async sendReviewRequest(): Promise<never> {
     throw new Error('not implemented')
   }
+
+  subscribeAgentState(_handler: (delta: AgentStateUpdateDelta) => void): () => void { return () => {}; }
+  getAgentStateSnapshot(): Record<string, never> { return {}; }
+  async respondToAgentPermission(): Promise<boolean> { return false; }
+  async getAgentSessionPreference(_workspaceId: string): Promise<null> { return null; }
+  async setAgentSessionPreference(_workspaceId: string, _sessionId: string): Promise<void> {}
 
   async writePtyData(data: Uint8Array): Promise<void> {
     this.writeCalls.push(new Uint8Array(data))

@@ -16,6 +16,8 @@ import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType, type S
 import { RemoteSessionHandler, type RemoteClientSession } from "../lib/remote-session/index.js";
 import { STREAM_ID, canWrite, type ServeOptions, type ClientSession, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
 import { createBufferedSocketWriter } from "../utils/bun-socket-writer.js";
+import { serializeRemoteMessage } from "../lib/remote-session/protocol.js";
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from "./agent-event-manager.js";
 
 // ============================================================================
 // ClientSessionManager Class
@@ -611,6 +613,7 @@ export class ClientSessionManager {
 
     // Cleanup handshake state
     this.handshakeHandler.cleanup(connectionId);
+    this.remoteSessionHandler.cleanupConnection(connectionId);
 
     // Remove send callback
     this.sendCallbacks.delete(connectionId);
@@ -620,6 +623,54 @@ export class ClientSessionManager {
     this.sessions.delete(connectionId);
 
     this.emit({ type: "client_disconnected", connectionId, reason });
+  }
+
+  /**
+   * Send a full agent state snapshot to a specific authenticated client.
+   * Called when a new client completes the handshake.
+   */
+  async sendAgentStateSnapshot(connectionId: string, workspaces: Record<string, WorkspaceAgentState>): Promise<void> {
+    const session = this.sessions.get(connectionId);
+    if (!session?.sessionKeys || session.state !== 'browsing') return;
+    try {
+      const msg = serializeRemoteMessage({
+        type: 'agent_state_snapshot',
+        workspaces: Object.values(workspaces),
+      });
+      const data = new TextEncoder().encode(msg);
+      const frame = await createFrame(0, data, session.sessionKeys.sendKey);
+      const sendToClient = this.createSendCallback(connectionId);
+      sendToClient(Buffer.from(frame));
+    } catch {
+      // Non-fatal — client can request a refresh
+    }
+  }
+
+  /**
+   * Broadcast an agent state delta to all authenticated browsing clients.
+   * Called by AgentEventManager whenever state changes.
+   */
+  async broadcastAgentStateUpdate(delta: AgentStateUpdateDelta): Promise<void> {
+    const msg = serializeRemoteMessage({ type: 'agent_state_update', delta });
+    const data = new TextEncoder().encode(msg);
+    const promises: Promise<void>[] = [];
+
+    for (const [connectionId, session] of this.sessions) {
+      if (session.state !== 'browsing' || !session.sessionKeys) continue;
+      promises.push(
+        (async () => {
+          try {
+            const frame = await createFrame(0, data, session.sessionKeys!.sendKey);
+            const sendToClient = this.createSendCallback(connectionId);
+            sendToClient(Buffer.from(frame));
+          } catch {
+            // Non-fatal — skip this client
+          }
+        })(),
+      );
+    }
+
+    await Promise.allSettled(promises);
   }
 
   /**

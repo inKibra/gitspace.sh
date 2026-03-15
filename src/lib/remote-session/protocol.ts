@@ -17,6 +17,13 @@
 
 // Re-export InboxItem from tmux-lite protocol
 export type { InboxItem } from "../tmux-lite/protocol.js";
+
+// Re-export agent state types from AgentEventManager
+export type {
+  AgentStateUpdateDelta,
+  WorkspaceAgentState,
+  AgentSessionSummary,
+} from '../../serve/agent-event-manager.js';
 export type { ReviewOperation, ReviewResult } from "../../types/review.js";
 export type {
   BundleRefreshPlan,
@@ -132,6 +139,36 @@ export interface StopProcessRequest {
   type: "stop_process";
   workspaceId: string;
   processName: string;
+}
+
+export interface OpenCodeRequest {
+  type: 'opencode_request';
+  requestId: string;
+  workspaceId: string;
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  path: string;
+  query?: Record<string, string | number | boolean>;
+  headers?: Record<string, string>;
+  bodyBase64?: string;
+}
+
+export interface OpenCodeStreamOpenRequest {
+  type: 'opencode_stream_open';
+  requestId: string;
+  workspaceId: string;
+  path: string;
+  query?: Record<string, string | number | boolean>;
+  headers?: Record<string, string>;
+}
+
+export interface OpenCodeStreamCloseRequest {
+  type: 'opencode_stream_close';
+  requestId: string;
+}
+
+export interface GetOpenCodeRuntimeRequest {
+  type: 'get_opencode_runtime';
+  workspaceId: string;
 }
 
 /** Request list of projects on the machine */
@@ -596,6 +633,67 @@ export interface ProcessStoppedResponse {
   processName: string;
 }
 
+export interface OpenCodeResponse {
+  type: 'opencode_response';
+  requestId: string;
+  status: number;
+  headers?: Record<string, string>;
+  bodyBase64?: string;
+}
+
+export interface OpenCodeStreamOpenedResponse {
+  type: 'opencode_stream_opened';
+  requestId: string;
+}
+
+export interface OpenCodeStreamEventResponse {
+  type: 'opencode_stream_event';
+  requestId: string;
+  event?: string;
+  data: string;
+  id?: string;
+}
+
+export interface OpenCodeStreamClosedResponse {
+  type: 'opencode_stream_closed';
+  requestId: string;
+}
+
+export interface OpenCodeStreamErrorResponse {
+  type: 'opencode_stream_error';
+  requestId: string;
+  message: string;
+}
+
+export interface OpenCodeRuntimeResponse {
+  type: 'opencode_runtime';
+  workspaceId: string;
+  workspacePath: string;
+  hostname: string;
+  port: number;
+  baseUrl: string;
+  username: string;
+  password: string;
+}
+
+/**
+ * Machine pushes a full snapshot of all workspace agent states on client connect.
+ * This is an unsolicited push from the machine, not a response to a request.
+ */
+export interface AgentStateSnapshotPush {
+  type: 'agent_state_snapshot';
+  workspaces: import('../../serve/agent-event-manager.js').WorkspaceAgentState[];
+}
+
+/**
+ * Machine pushes an incremental agent state delta to all connected clients.
+ * This is an unsolicited push from the machine, not a response to a request.
+ */
+export interface AgentStateUpdatePush {
+  type: 'agent_state_update';
+  delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta;
+}
+
 // ============================================================================
 // Union Types
 // ============================================================================
@@ -635,7 +733,11 @@ export type ClientToMachineMessage =
   | ReviewRequest
   | GetEventsRequest
   | StartProcessRequest
-  | StopProcessRequest;
+  | StopProcessRequest
+  | OpenCodeRequest
+  | OpenCodeStreamOpenRequest
+  | OpenCodeStreamCloseRequest
+  | GetOpenCodeRuntimeRequest;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
@@ -674,7 +776,15 @@ export type MachineToClientMessage =
   | ReviewResponse
   | EventsListResponse
   | ProcessStartedResponse
-  | ProcessStoppedResponse;
+  | ProcessStoppedResponse
+  | OpenCodeResponse
+  | OpenCodeStreamOpenedResponse
+  | OpenCodeStreamEventResponse
+  | OpenCodeStreamClosedResponse
+  | OpenCodeStreamErrorResponse
+  | OpenCodeRuntimeResponse
+  | AgentStateSnapshotPush
+  | AgentStateUpdatePush;
 
 /** All remote session messages */
 export type RemoteSessionMessage =
@@ -731,7 +841,11 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | DeleteProjectRequest
   | GetBundleConfigStateRequest
   | ApplyBundleConfigUpdateRequest
-  | GetEventsRequest {
+  | GetEventsRequest
+  | OpenCodeRequest
+  | OpenCodeStreamOpenRequest
+  | OpenCodeStreamCloseRequest
+  | GetOpenCodeRuntimeRequest {
   return [
     "list_workspaces",
     "list_sessions",
@@ -754,5 +868,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     'get_bundle_config_state',
     'apply_bundle_config_update',
     "get_events",
+    'opencode_request',
+    'opencode_stream_open',
+    'opencode_stream_close',
+    'get_opencode_runtime',
   ].includes(msg.type);
 }

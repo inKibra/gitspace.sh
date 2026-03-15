@@ -281,12 +281,21 @@ export interface InboxItem {
   id: string;
   sessionId: string;
   sessionName: string;
-  type: 'bell' | 'exit' | 'title' | 'idle' | 'osc';
+  type: 'bell' | 'exit' | 'title' | 'idle' | 'osc'
+      | 'agent_permission' | 'agent_idle' | 'agent_error';
   timestamp: number;
   exitCode?: number;
   context: string;  // The actual message/output
   processTitle?: string;  // What process was running (e.g., "claude", "npm run dev")
   read: boolean;
+  /** Present only for agent_* item types — carries routing metadata for the app layer */
+  agentAction?: {
+    workspaceId: string;
+    agentSessionId: string;    // OpenCode session ID
+    permissionId?: string;     // only for agent_permission
+    permissionTitle?: string;
+    messagePreview?: string;   // for agent_idle
+  };
 }
 
 // ============================================================================

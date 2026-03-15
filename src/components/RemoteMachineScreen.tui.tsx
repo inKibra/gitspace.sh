@@ -39,6 +39,13 @@ import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import { writeCrashLog } from '../utils/crash-log.js';
 import { logger } from '../utils/logger.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
+import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.js';
+import { useAgentSessionPicker } from '../agents/useAgentSessionPicker.js';
+import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
+import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
+import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
+import { buildOpenCodeAttachUrlCommand } from '../agents/opencode-attach.js';
+import { ensureOpenCodeLocalBridge } from '../agents/opencode-local-bridge.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -565,6 +572,73 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
   }, [bundleConfigFlow, remote.selectedProjectName, remote.workspaces]);
 
+  const remoteBackend = remote.sessionBackend;
+
+  const workspaceAgentSessions = useWorkspaceAgentSessions({
+    bridge: remote.hasOpenCodeBridge
+      ? {
+          requestOpenCode: remote.requestOpenCode,
+          subscribeOpenCode: remote.subscribeOpenCode,
+        }
+      : null,
+    backend: remoteBackend,
+  });
+
+  // Agent event subscription — machine-side push state
+  const [agentInboxItems, setAgentInboxItems] = useState<import('../lib/tmux-lite/protocol.js').InboxItem[]>([]);
+
+  const agentEvents = useWorkspaceAgentEvents({
+    backend: remoteBackend,
+    onNotification: (notification) => {
+      const workspace = remote.workspaces.find((w) => w.id === notification.workspaceId);
+      const projectName = workspace?.projectName ?? 'unknown';
+      const workspaceName = workspace?.name ?? notification.workspaceId;
+      const item = agentNotificationToInboxItem(notification, projectName, workspaceName);
+      setAgentInboxItems((prev) => [item, ...prev.slice(0, 49)]);
+    },
+  });
+
+  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
+  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, remoteBackend);
+
+  const agentSessionPicker = useAgentSessionPicker({
+    flow,
+    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
+    createSession: workspaceAgentSessions.createSession,
+    abortSession: workspaceAgentSessions.abortSession,
+    persistedSessionId: agentSessionPref.lastSessionId,
+    onPersistSession: agentSessionPref.persist,
+    onOpenSession: async (session) => {
+      agentSessionPref.persist(session.id);
+      const bridge = await ensureOpenCodeLocalBridge({
+        workspaceId: session.workspaceId,
+        backend: {
+          requestOpenCode: remote.requestOpenCode,
+          subscribeOpenCode: remote.subscribeOpenCode,
+        },
+      });
+      const commandSpec = buildOpenCodeAttachUrlCommand(bridge.baseUrl, session.id);
+      await attachController.attach({
+        workspaceId: session.workspaceId,
+        command: commandSpec.command,
+        args: commandSpec.args,
+      });
+    },
+  });
+
+  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
+  const agentSessionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
+      counts[wid] = sessions.length;
+    }
+    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
+      const eventCount = Object.keys(sessions).length;
+      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
+    }
+    return counts;
+  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
@@ -578,6 +652,13 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
     onProcessDisabled: handleProcessDisabled,
+    onOpenAgents: async (workspaceId) => {
+      setAgentPickerWorkspaceId(workspaceId);
+      const workspace = remote.workspaces.find((item) => item.id === workspaceId);
+      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+    },
+    agentSessionCounts,
+    pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onOpenEvents: handleOpenEvents,
     onRefresh: remote.requestWorkspaces,
     onRefreshSessions: () => {
@@ -606,20 +687,63 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     return null;
   }, [spacesBrowserProps.selectedItem]);
 
+  const allInboxItems = useMemo(
+    () => [...remote.inbox, ...agentInboxItems],
+    [remote.inbox, agentInboxItems],
+  );
+
   const inboxProps = useInbox({
-    items: remote.inbox,
-    unreadCount: remote.inboxUnreadCount,
+    items: allInboxItems,
+    unreadCount: remote.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
     onClearItem: async (id) => {
-      remote.clearInboxItem(id);
+      const isAgent = agentInboxItems.some((i) => i.id === id);
+      if (isAgent) {
+        setAgentInboxItems((prev) => prev.filter((i) => i.id !== id));
+      } else {
+        remote.clearInboxItem(id);
+      }
     },
     onClearAll: async () => {
+      setAgentInboxItems([]);
       remote.clearInboxItem();
     },
     onMarkRead: async (id) => {
-      remote.markInboxItemRead(id);
+      const isAgent = agentInboxItems.some((i) => i.id === id);
+      if (isAgent) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === id ? { ...i, read: true } : i));
+      } else {
+        remote.markInboxItemRead(id);
+      }
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
+      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
+      if (agentItem?.agentAction) {
+        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+        if (permissionId) {
+          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+            options: [
+              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
+              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
+              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
+            ],
+            onSelect: async (choice) => {
+              if (choice === 'allow' || choice === 'deny') {
+                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+              }
+              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+            },
+          });
+        } else {
+          const workspace = remote.workspaces.find((w) => w.id === workspaceId);
+          setAgentPickerWorkspaceId(workspaceId);
+          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
+            preselectSessionId: agentSessionId,
+          });
+        }
+        return;
+      }
       await handleAttachSession({ sessionId });
     },
     onClose: () => {

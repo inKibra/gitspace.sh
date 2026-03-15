@@ -180,6 +180,7 @@ describe('onboarding', () => {
       expect(result.completed).toBe(false);
       expect(result.cancelledAt).toBe('welcome');
     });
+
   });
 
   describe('runOnboarding with previous values', () => {

@@ -86,6 +86,13 @@ import { readProjectConfig } from "../../core/config.js";
 import { existsSync } from "fs";
 
 import { logger } from "../../utils/logger.js";
+import {
+  createOpenCodeBasicAuthHeader,
+  defaultOpenCodeRuntimeManager,
+  type OpenCodeRuntimeManager,
+} from '../../agents/opencode-runtime.js';
+import { buildOpenCodeUrl } from '../../agents/opencode-bridge.js';
+import { consumeSseStream } from '../../agents/opencode-sse.js';
 
 /**
  * Session state for a connected client
@@ -188,6 +195,7 @@ function matchesWorkspaceIdToken(parsedWorkspaceId: string, workspaceId: string)
 export interface RemoteSessionHandlerOptions {
   processHostDomain?: string;
   onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
+  openCodeRuntimeManager?: OpenCodeRuntimeManager;
 }
 
 /**
@@ -199,10 +207,13 @@ export class RemoteSessionHandler {
   private pendingAttachRuns = new Map<string, AbortController>();
   private processHostDomain?: string;
   private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
+  private openCodeRuntimeManager: OpenCodeRuntimeManager;
+  private openCodeStreams = new Map<string, AbortController>();
 
   constructor(options: RemoteSessionHandlerOptions = {}) {
     this.processHostDomain = options.processHostDomain;
     this.onProcessesChanged = options.onProcessesChanged;
+    this.openCodeRuntimeManager = options.openCodeRuntimeManager ?? defaultOpenCodeRuntimeManager;
   }
 
   /**
@@ -600,6 +611,38 @@ export class RemoteSessionHandler {
           return;
         }
         await this.handleStopProcess(session, msg.workspaceId, msg.processName, sendResponse);
+        break;
+
+      case 'opencode_request':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to proxy OpenCode requests');
+          return;
+        }
+        await this.handleOpenCodeRequest(session, msg, sendResponse);
+        break;
+
+      case 'opencode_stream_open':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to proxy OpenCode streams');
+          return;
+        }
+        await this.handleOpenCodeStreamOpen(session, msg, sendResponse);
+        break;
+
+      case 'opencode_stream_close':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to proxy OpenCode streams');
+          return;
+        }
+        await this.handleOpenCodeStreamClose(session, msg.requestId, sendResponse);
+        break;
+
+      case 'get_opencode_runtime':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to access OpenCode runtime info');
+          return;
+        }
+        await this.handleGetOpenCodeRuntime(session, msg.workspaceId, sendResponse);
         break;
 
       default: {
@@ -1707,6 +1750,205 @@ export class RemoteSessionHandler {
     };
   }
 
+  private buildOpenCodeStreamKey(session: RemoteClientSession, requestId: string): string {
+    return `${session.connectionId}:${requestId}`;
+  }
+
+  private async ensureOpenCodeRuntime(workspaceId: string): Promise<{
+    workspaceId: string;
+    workspacePath: string;
+    baseUrl: string;
+    username: string;
+    password: string;
+    authHeader: string;
+  }> {
+    const workspaces = await scanWorkspaces();
+    const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+
+    const runtime = await this.openCodeRuntimeManager.ensureWorkspaceRuntime({
+      workspaceId: toCanonicalWorkspaceId(workspace),
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    });
+
+    return {
+      workspaceId: runtime.workspaceId,
+      workspacePath: runtime.workspacePath,
+      baseUrl: runtime.baseUrl,
+      username: runtime.username,
+      password: runtime.password,
+      authHeader: createOpenCodeBasicAuthHeader(runtime),
+    };
+  }
+
+  private async handleOpenCodeRequest(
+    session: RemoteClientSession,
+    msg: Extract<ClientToMachineMessage, { type: 'opencode_request' }>,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const runtime = await this.ensureOpenCodeRuntime(msg.workspaceId);
+      const url = buildOpenCodeUrl(runtime.baseUrl, msg.path, msg.query);
+      const response = await fetch(url, {
+        method: msg.method,
+        headers: {
+          ...(msg.headers ?? {}),
+          authorization: runtime.authHeader,
+        },
+        body: msg.bodyBase64 ? Buffer.from(msg.bodyBase64, 'base64') : undefined,
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      const bodyBuffer = Buffer.from(await response.arrayBuffer());
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+      await this.sendMessage(session, sendResponse, {
+        type: 'opencode_response',
+        requestId: msg.requestId,
+        status: response.status,
+        headers: responseHeaders,
+        bodyBase64: bodyBuffer.length > 0 ? bodyBuffer.toString('base64') : undefined,
+      });
+    } catch (error) {
+      await this.sendMessage(session, sendResponse, {
+        type: 'opencode_response',
+        requestId: msg.requestId,
+        status: 502,
+        bodyBase64: Buffer.from(JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+        })).toString('base64'),
+      });
+    }
+  }
+
+  private async handleOpenCodeStreamOpen(
+    session: RemoteClientSession,
+    msg: Extract<ClientToMachineMessage, { type: 'opencode_stream_open' }>,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    const streamKey = this.buildOpenCodeStreamKey(session, msg.requestId);
+    this.openCodeStreams.get(streamKey)?.abort();
+
+    const controller = new AbortController();
+    this.openCodeStreams.set(streamKey, controller);
+
+    try {
+      const runtime = await this.ensureOpenCodeRuntime(msg.workspaceId);
+      const url = buildOpenCodeUrl(runtime.baseUrl, msg.path, msg.query);
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          ...(msg.headers ?? {}),
+          authorization: runtime.authHeader,
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`OpenCode stream failed (${response.status})`);
+      }
+
+      const responseBody = response.body;
+
+      await this.sendMessage(session, sendResponse, {
+        type: 'opencode_stream_opened',
+        requestId: msg.requestId,
+      });
+
+      // Detach stream consumption so it does not block the message-processing
+      // loop for this client. Subsequent messages (resize, new requests, etc.)
+      // can still be handled while the SSE stream is live.
+      void (async () => {
+        try {
+          await consumeSseStream(responseBody, async (parsed) => {
+            await this.sendMessage(session, sendResponse, {
+              type: 'opencode_stream_event',
+              requestId: msg.requestId,
+              event: parsed.event,
+              data: parsed.data,
+              id: parsed.id,
+            });
+          });
+
+          await this.sendMessage(session, sendResponse, {
+            type: 'opencode_stream_closed',
+            requestId: msg.requestId,
+          });
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            await this.sendMessage(session, sendResponse, {
+              type: 'opencode_stream_error',
+              requestId: msg.requestId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        } finally {
+          // Only delete if this controller is still the registered one (not replaced by a reopen)
+          if (this.openCodeStreams.get(streamKey) === controller) {
+            this.openCodeStreams.delete(streamKey);
+          }
+        }
+      })();
+    } catch (error) {
+      // Send error to client BEFORE aborting so the condition isn't short-circuited
+      await this.sendMessage(session, sendResponse, {
+        type: 'opencode_stream_error',
+        requestId: msg.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      controller.abort();
+      if (this.openCodeStreams.get(streamKey) === controller) {
+        this.openCodeStreams.delete(streamKey);
+      }
+    }
+  }
+
+  private async handleOpenCodeStreamClose(
+    session: RemoteClientSession,
+    requestId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    const streamKey = this.buildOpenCodeStreamKey(session, requestId);
+    const controller = this.openCodeStreams.get(streamKey);
+    if (controller) {
+      controller.abort();
+      this.openCodeStreams.delete(streamKey);
+    }
+
+    await this.sendMessage(session, sendResponse, {
+      type: 'opencode_stream_closed',
+      requestId,
+    });
+  }
+
+  private async handleGetOpenCodeRuntime(
+    session: RemoteClientSession,
+    workspaceId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const runtime = await this.ensureOpenCodeRuntime(workspaceId);
+      await this.sendMessage(session, sendResponse, {
+        type: 'opencode_runtime',
+        workspaceId: runtime.workspaceId,
+        workspacePath: runtime.workspacePath,
+        hostname: new URL(runtime.baseUrl).hostname,
+        port: Number(new URL(runtime.baseUrl).port),
+        baseUrl: runtime.baseUrl,
+        username: runtime.username,
+        password: runtime.password,
+      });
+    } catch (error) {
+      await this.sendError(session, sendResponse, 'OPENCODE_RUNTIME_FAILED', error instanceof Error ? error.message : String(error), { workspaceId });
+    }
+  }
+
   /**
    * Send an encrypted message to client
    */
@@ -1966,7 +2208,22 @@ export class RemoteSessionHandler {
   /**
    * Cleanup
    */
+  cleanupConnection(connectionId: string): void {
+    for (const [key, controller] of this.openCodeStreams) {
+      if (!key.startsWith(`${connectionId}:`)) {
+        continue;
+      }
+      controller.abort();
+      this.openCodeStreams.delete(key);
+    }
+  }
+
   async cleanup(): Promise<void> {
+    for (const controller of this.openCodeStreams.values()) {
+      controller.abort();
+    }
+    this.openCodeStreams.clear();
+
     // Clean up process schedulers
     for (const timer of this.processSchedulers.values()) {
       clearInterval(timer);

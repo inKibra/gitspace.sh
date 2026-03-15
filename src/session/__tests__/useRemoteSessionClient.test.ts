@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
 import type { NotificationConfig } from '../../notifications/types.js'
+import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager.js'
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -253,6 +254,12 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   async undismissReplay(replayId: string): Promise<void> {
     this.undismissReplayCalls.push(replayId)
   }
+
+  subscribeAgentState(_handler: (delta: AgentStateUpdateDelta) => void): () => void { return () => {}; }
+  getAgentStateSnapshot(): Record<string, never> { return {}; }
+  async respondToAgentPermission(): Promise<boolean> { return false; }
+  async getAgentSessionPreference(_workspaceId: string): Promise<null> { return null; }
+  async setAgentSessionPreference(_workspaceId: string, _sessionId: string): Promise<void> {}
 
   async writePtyData(data: Uint8Array): Promise<void> {
     this.ptyWrites.push(new Uint8Array(data))

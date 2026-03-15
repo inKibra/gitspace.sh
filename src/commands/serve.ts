@@ -34,6 +34,7 @@ import {
 } from '../core/identity.js';
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
+import { defaultAgentEventManager } from '../serve/agent-event-manager.js';
 import type { ServeEventHandler } from '../serve/types.js';
 import type { Identity, StoredIdentity } from '../types/identity.js';
 import {
@@ -1323,6 +1324,14 @@ export async function serveStart(options: {
     throw error;
   }
 
+  // Initialize AgentEventManager — subscribes to already-running OpenCode runtimes
+  void defaultAgentEventManager.initialize();
+
+  // Broadcast agent state changes to all connected authenticated clients
+  defaultAgentEventManager.subscribe((delta) => {
+    void sessionManager.broadcastAgentStateUpdate(delta);
+  });
+
   // Event handler - update daemon state
   const eventHandler: ServeEventHandler = (event) => {
     switch (event.type) {
@@ -1335,7 +1344,15 @@ export async function serveStart(options: {
       case 'relay_reconnecting':
         updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'reconnecting' } });
         break;
-      case 'client_authenticated':
+      case 'client_authenticated': {
+        updateDaemonState({ clients: sessionManager.establishedSessionCount });
+        // Push full agent state snapshot to newly authenticated client
+        const snapshot = defaultAgentEventManager.getSnapshot();
+        if (Object.keys(snapshot).length > 0) {
+          void sessionManager.sendAgentStateSnapshot(event.connectionId, snapshot);
+        }
+        break;
+      }
       case 'client_disconnected':
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
         break;

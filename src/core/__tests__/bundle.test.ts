@@ -206,4 +206,5 @@ describe('validateBundle', () => {
       })
     ).toThrow(/Bundle configKey alias collision/);
   });
+
 });

@@ -26,6 +26,10 @@ import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js'
 import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
+import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
+import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
+import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
+import { buildOpenCodeWebProxyUrl } from './agents/opencode-web.js';
 
 // Import shared components and hooks
 import {
@@ -44,6 +48,9 @@ import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
 import { InboxWeb } from "./components/Inbox.web.js";
+import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
+import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
+import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
@@ -60,7 +67,7 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 
-type View = "machines" | "terminal" | "review" | 'replay';
+type View = "machines" | "terminal" | "review" | "replay" | "agent";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
@@ -124,6 +131,14 @@ export default function App() {
     workspaceId: string;
     workspaceLabel?: string;
   } | null>(null);
+  const [activeAgentView, setActiveAgentView] = useState<{
+    machineId: string;
+    workspaceId: string;
+    title: string;
+    url: string;
+  } | null>(null);
+  const activeAgentViewRef = useRef<typeof activeAgentView>(null);
+  const selectedMachineRef = useRef<MachineInfo | null>(null);
 
   // Identity state (resolved by IdentityGate before relay connection)
   const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
@@ -135,6 +150,117 @@ export default function App() {
   const terminal = useTerminal();
   const activeNotificationConfig =
     terminal.notificationConfig ?? localNotificationConfig ?? DEFAULT_NOTIFICATION_CONFIG;
+
+  useEffect(() => {
+    activeAgentViewRef.current = activeAgentView;
+  }, [activeAgentView]);
+
+  useEffect(() => {
+    selectedMachineRef.current = selectedMachine;
+  }, [selectedMachine]);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) {
+      return;
+    }
+
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      const data = event.data as {
+        type?: string;
+        mode?: 'request' | 'stream';
+        machineId?: string;
+        workspaceId?: string;
+        method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+        path?: string;
+        query?: Record<string, string>;
+        headers?: Record<string, string>;
+        bodyBase64?: string;
+      } | null;
+      const port = event.ports?.[0];
+      if (!data || data.type !== 'gitspace-agent-proxy-request' || !port) {
+        return;
+      }
+
+      const agentView = activeAgentViewRef.current;
+      const machine = selectedMachineRef.current;
+
+      if (
+        !agentView ||
+        !machine ||
+        data.machineId !== agentView.machineId ||
+        data.machineId !== machine.machineId ||
+        data.workspaceId !== agentView.workspaceId
+      ) {
+        port.postMessage({ ok: false, status: 409, error: 'Active agent session is unavailable' });
+        return;
+      }
+
+      if (data.mode === 'stream') {
+        let closed = false;
+        const unsubscribePromise = terminal.subscribeOpenCode(
+          {
+            workspaceId: data.workspaceId!,
+            path: data.path!,
+            query: data.query,
+            headers: data.headers,
+          },
+          (streamEvent) => {
+            if (closed) {
+              return;
+            }
+            port.postMessage({
+              type: 'stream-event',
+              event: streamEvent.event,
+              data: streamEvent.data,
+              id: streamEvent.id,
+            });
+          },
+        );
+
+        unsubscribePromise
+          .then(() => {
+            if (!closed) {
+              port.postMessage({ type: 'stream-open' });
+            }
+          })
+          .catch((error) => {
+            port.postMessage({ type: 'stream-error', message: error instanceof Error ? error.message : String(error) });
+          });
+
+        port.onmessage = async (messageEvent) => {
+          if (messageEvent.data?.type !== 'stream-close' || closed) {
+            return;
+          }
+          closed = true;
+          try {
+            const unsubscribe = await unsubscribePromise;
+            await unsubscribe();
+          } finally {
+            port.postMessage({ type: 'stream-close' });
+          }
+        };
+        return;
+      }
+
+      void terminal.requestOpenCode({
+        workspaceId: data.workspaceId!,
+        method: data.method!,
+        path: data.path!,
+        query: data.query,
+        headers: data.headers,
+        bodyBase64: data.bodyBase64,
+      }).then((response) => {
+        port.postMessage({ ok: true, ...response });
+      }).catch((error) => {
+        port.postMessage({ ok: false, status: 502, error: error instanceof Error ? error.message : String(error) });
+      });
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
+    };
+  }, [terminal]);
 
   // Visual viewport hook for keyboard detection
   const keyboardVisible = useVisualViewport();
@@ -716,6 +842,83 @@ export default function App() {
     return terminal.getReplayTimeline(replayId);
   }, [terminal]);
 
+  const webBackend = terminal.sessionBackend;
+
+  const workspaceAgentSessions = useWorkspaceAgentSessions({
+    bridge: terminal.hasOpenCodeBridge
+      ? {
+          requestOpenCode: terminal.requestOpenCode,
+          subscribeOpenCode: terminal.subscribeOpenCode,
+        }
+      : null,
+    backend: webBackend,
+  });
+
+  // Agent event subscription — machine-side push state
+  const [agentInboxItems, setAgentInboxItems] = useState<import('./lib/tmux-lite/protocol.js').InboxItem[]>([]);
+
+  const agentEvents = useWorkspaceAgentEvents({
+    backend: webBackend,
+    onNotification: (notification) => {
+      const workspace = terminal.workspaces.find((w) => w.id === notification.workspaceId);
+      const projectName = workspace?.projectName ?? 'unknown';
+      const workspaceName = workspace?.name ?? notification.workspaceId;
+      const item = agentNotificationToInboxItem(notification, projectName, workspaceName);
+      setAgentInboxItems((prev) => [item, ...prev.slice(0, 49)]);
+    },
+  });
+
+  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
+  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, webBackend);
+
+  const agentSessionPicker = useAgentSessionPicker({
+    flow,
+    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
+    createSession: workspaceAgentSessions.createSession,
+    abortSession: workspaceAgentSessions.abortSession,
+    persistedSessionId: agentSessionPref.lastSessionId,
+    onPersistSession: agentSessionPref.persist,
+    onOpenSession: async (session) => {
+      agentSessionPref.persist(session.id);
+      const runtime = await terminal.getOpenCodeRuntimeInfo(session.workspaceId);
+      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
+        setActiveAgentView({
+          machineId: selectedMachine.machineId,
+          workspaceId: session.workspaceId,
+          title: session.title,
+          url: buildOpenCodeWebProxyUrl({
+            machineId: selectedMachine.machineId,
+            workspaceId: session.workspaceId,
+            workspacePath: runtime.workspacePath,
+            sessionId: session.id,
+          }),
+        });
+        setView('agent');
+        return;
+      }
+
+      const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
+      await attachController.attach({
+        workspaceId: session.workspaceId,
+        command: commandSpec.command,
+        args: commandSpec.args,
+      });
+    },
+  });
+
+  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
+  const agentSessionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
+      counts[wid] = sessions.length;
+    }
+    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
+      const eventCount = Object.keys(sessions).length;
+      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
+    }
+    return counts;
+  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: filteredWorkspaces,
@@ -739,6 +942,13 @@ export default function App() {
         terminal.requestEvents(workspace.path, undefined, undefined, undefined);
       }
     },
+    onOpenAgents: async (workspaceId) => {
+      setAgentPickerWorkspaceId(workspaceId);
+      const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
+      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+    },
+    agentSessionCounts,
+    pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },
     onRefreshSessions: () => { terminal.requestSessions(); refreshReplayList(); },
     onBack: handleBackToMachines,
@@ -806,15 +1016,62 @@ export default function App() {
     onRefresh: () => terminal.requestProjects(),
   });
 
-  // Inbox hook
+  // Inbox hook — merges PTY inbox with agent notifications
+  const allWebInboxItems = useMemo(
+    () => [...terminal.inbox, ...agentInboxItems],
+    [terminal.inbox, agentInboxItems],
+  );
+
   const inboxProps = useInbox({
-    items: terminal.inbox,
-    unreadCount: terminal.inboxUnreadCount,
-    onClearItem: async (id) => terminal.clearInboxItem(id),
-    onClearAll: async () => terminal.clearInboxItem(),
-    onMarkRead: async (id) => terminal.markInboxItemRead(id),
+    items: allWebInboxItems,
+    unreadCount: terminal.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
+    onClearItem: async (id) => {
+      if (agentInboxItems.some((i) => i.id === id)) {
+        setAgentInboxItems((prev) => prev.filter((i) => i.id !== id));
+      } else {
+        terminal.clearInboxItem(id);
+      }
+    },
+    onClearAll: async () => {
+      setAgentInboxItems([]);
+      terminal.clearInboxItem();
+    },
+    onMarkRead: async (id) => {
+      if (agentInboxItems.some((i) => i.id === id)) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === id ? { ...i, read: true } : i));
+      } else {
+        terminal.markInboxItemRead(id);
+      }
+    },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
+      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
+      if (agentItem?.agentAction) {
+        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+        if (permissionId) {
+          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+            options: [
+              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
+              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
+              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
+            ],
+            onSelect: async (choice) => {
+              if (choice === 'allow' || choice === 'deny') {
+                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+              }
+              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+            },
+          });
+        } else {
+          const workspace = terminal.workspaces.find((w) => w.id === workspaceId);
+          setAgentPickerWorkspaceId(workspaceId);
+          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
+            preselectSessionId: agentSessionId,
+          });
+        }
+        return;
+      }
       await attachController.attach({ sessionId });
     },
     onClose: () => setShowInbox(false),
@@ -1465,6 +1722,55 @@ export default function App() {
           </div>
         </div>
         <FlowWeb flow={flow} />
+        <Toaster theme="dark" position="top-right" richColors />
+      </>
+    );
+  }
+
+  if (view === 'agent' && activeAgentView) {
+    return (
+      <>
+        <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
+          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
+              <button
+                onClick={() => {
+                  setView('terminal');
+                  setActiveAgentView(null);
+                }}
+                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+              >
+                ← <span className="hidden sm:inline ml-1">Sessions</span>
+              </button>
+              <div className="text-sm text-[#8b949e] truncate">
+                <span className="text-[#c678dd]">✦</span>{' '}
+                <span className="text-[#e6edf3]">{activeAgentView.title}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={() => window.open(activeAgentView.url, '_blank', 'noopener,noreferrer')}
+                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+              >
+                Open in Tab
+              </button>
+              <button
+                onClick={handleDisconnect}
+                className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 bg-[#0d1117]">
+            <iframe
+              src={activeAgentView.url}
+              title={activeAgentView.title}
+              className="w-full h-full border-0"
+              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
+            />
+          </div>
+        </div>
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );
