@@ -124,7 +124,9 @@ export function applyReplayFrame(
   fromSeq: number,
 ): string | null {
   const checkpointId = frame.checkpoint?.checkpointId ?? null;
-  const sameCheckpoint = checkpointId !== null && checkpointId === previousCheckpointId;
+  // Two null checkpoints count as "same" only if we've already applied events (fromSeq > 0),
+  // otherwise it's a fresh load that needs a terminal reset.
+  const sameCheckpoint = checkpointId === previousCheckpointId && (checkpointId !== null || fromSeq > 0);
   const lastEventSeq = frame.events.length > 0 ? frame.events[frame.events.length - 1]!.seq : 0;
   const isForward = sameCheckpoint && lastEventSeq > fromSeq;
 
