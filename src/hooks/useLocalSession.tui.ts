@@ -667,5 +667,7 @@ export function useLocalSession(options: UseLocalSessionOptions = {}) {
     getOpenCodeRuntimeInfo,
     requestOpenCode,
     subscribeOpenCode,
+    /** Expose the underlying SessionBackend for agent hooks that need the full interface */
+    sessionBackend: backendRef.current as import('../session/backend.js').SessionBackend | null,
   };
 }

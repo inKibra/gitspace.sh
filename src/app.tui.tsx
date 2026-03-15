@@ -1255,7 +1255,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     return Promise.resolve(getReplayTimelineOffline(replayId));
   }, []);
 
-  const localBackend = localSession as unknown as import('./session/backend.js').SessionBackend | null;
+  const localBackend = localSession.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
     bridge: localSession.hasOpenCodeBridge
@@ -1305,13 +1305,15 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
-    // Start with explicit session load counts, then overlay live counts from agent events
+    // Merge explicit session load counts with live event counts, taking the higher value
+    // (event state may be incomplete if it only received updates for a subset of sessions)
     const counts: Record<string, number> = {};
     for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
       counts[wid] = sessions.length;
     }
     for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-      counts[wid] = Object.keys(sessions).length;
+      const eventCount = Object.keys(sessions).length;
+      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
     }
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);

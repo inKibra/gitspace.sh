@@ -23,7 +23,9 @@ export function parseSseEvent(rawEvent: string): ParsedSseEvent | null {
       continue;
     }
     if (line.startsWith('data:')) {
-      dataLines.push(line.slice(5).trimStart());
+      // SSE spec: strip exactly one leading space after the colon, not all whitespace
+      const value = line.slice(5);
+      dataLines.push(value.startsWith(' ') ? value.slice(1) : value);
     }
   }
 

@@ -913,7 +913,8 @@ export default function App() {
       counts[wid] = sessions.length;
     }
     for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-      counts[wid] = Object.keys(sessions).length;
+      const eventCount = Object.keys(sessions).length;
+      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
     }
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);

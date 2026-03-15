@@ -1799,6 +1799,7 @@ export class RemoteSessionHandler {
           authorization: runtime.authHeader,
         },
         body: msg.bodyBase64 ? Buffer.from(msg.bodyBase64, 'base64') : undefined,
+        signal: AbortSignal.timeout(30_000),
       });
 
       const bodyBuffer = Buffer.from(await response.arrayBuffer());
@@ -1888,7 +1889,10 @@ export class RemoteSessionHandler {
             });
           }
         } finally {
-          this.openCodeStreams.delete(streamKey);
+          // Only delete if this controller is still the registered one (not replaced by a reopen)
+          if (this.openCodeStreams.get(streamKey) === controller) {
+            this.openCodeStreams.delete(streamKey);
+          }
         }
       })();
     } catch (error) {
@@ -1899,7 +1903,9 @@ export class RemoteSessionHandler {
         message: error instanceof Error ? error.message : String(error),
       });
       controller.abort();
-      this.openCodeStreams.delete(streamKey);
+      if (this.openCodeStreams.get(streamKey) === controller) {
+        this.openCodeStreams.delete(streamKey);
+      }
     }
   }
 
