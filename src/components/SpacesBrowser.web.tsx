@@ -489,7 +489,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
                 `}
               >
-                <span className="text-[#c678dd]">✦ Agent Sessions</span>
+                <span className="text-[#c678dd]">{item.expanded ? '▾' : '▸'} ✦ Agent Sessions</span>
                 <div className="flex items-center gap-1">
                   {(item.pendingPermissions ?? 0) > 0 && (
                     <span className="text-xs px-2 py-0.5 rounded bg-[#d29922] text-[#0d1117] font-medium">

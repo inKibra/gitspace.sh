@@ -68,7 +68,7 @@ export interface AgentSessionInfo {
 export type TreeItem =
   | { type: 'project'; name: string; workspaceCount: number }
   | { type: 'workspace'; workspace: WorkspaceInfo; expanded: boolean }
-  | { type: 'agents'; workspaceId: string; count?: number; pendingPermissions?: number }
+  | { type: 'agents'; workspaceId: string; count?: number; pendingPermissions?: number; expanded: boolean }
   | { type: 'agent-session'; session: AgentSessionInfo; workspaceId: string }
   | { type: 'new-agent-session'; workspaceId: string }
   | { type: 'session'; session: SessionInfo; workspaceId: string }
@@ -129,6 +129,7 @@ export interface UseSpacesBrowserReturn {
   selectedIndex: number;
   selectedItem: TreeItem | null;
   expandedWorkspaces: Set<string>;
+  expandedAgentSections: Set<string>;
   machineName: string | null;
 
   // Computed flags
@@ -139,6 +140,7 @@ export interface UseSpacesBrowserReturn {
   moveDown: () => void;
   selectIndex: (index: number) => void;
   toggleWorkspace: (workspaceId: string) => void;
+  toggleAgentSection: (workspaceId: string) => void;
   activateSelected: () => Promise<void>;
   activateIndex: (index: number) => Promise<void>;
   /** Direct attach - bypasses state timing issues on mobile */
@@ -194,6 +196,7 @@ function buildTree(
   sessions: SessionInfo[],
   replays: ReplayInfo[],
   expandedWorkspaces: Set<string>,
+  expandedAgentSections: Set<string>,
   expandedReplaySections: Set<string>,
   agentSessionCounts: Record<string, number>,
   showProjectHeaders: boolean = true,
@@ -361,27 +364,31 @@ function buildTree(
           workspaceId: ws.id,
         });
 
+        const agentExpanded = expandedAgentSections.has(ws.id);
         items.push({
           type: 'agents',
           workspaceId: ws.id,
           count: agentSessionCounts[ws.id] ?? 0,
           pendingPermissions: pendingPermissionsByWorkspace[ws.id] ?? 0,
+          expanded: agentExpanded,
         });
 
-        const agentSessions = [...(agentSessionsByWorkspace[ws.id] ?? [])].sort((a, b) =>
-          (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
-        );
-        for (const session of agentSessions) {
+        if (agentExpanded) {
+          const agentSessions = [...(agentSessionsByWorkspace[ws.id] ?? [])].sort((a, b) =>
+            (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
+          );
+          for (const session of agentSessions) {
+            items.push({
+              type: 'agent-session',
+              session,
+              workspaceId: ws.id,
+            });
+          }
           items.push({
-            type: 'agent-session',
-            session,
+            type: 'new-agent-session',
             workspaceId: ws.id,
           });
         }
-        items.push({
-          type: 'new-agent-session',
-          workspaceId: ws.id,
-        });
 
         // Events action
         items.push({
@@ -466,12 +473,13 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   // Local UI state
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(new Set());
+  const [expandedAgentSections, setExpandedAgentSections] = useState<Set<string>>(new Set());
   const [expandedReplaySections, setExpandedReplaySections] = useState<Set<string>>(new Set());
 
   // Build tree
   const tree = useMemo(
-    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace),
-    [workspaces, sessions, replays, expandedWorkspaces, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace]
+    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedAgentSections, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace),
+    [workspaces, sessions, replays, expandedWorkspaces, expandedAgentSections, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace]
   );
 
   // Add selection state
@@ -547,6 +555,19 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     });
   }, []);
 
+  const toggleAgentSection = useCallback((workspaceId: string) => {
+    setExpandedAgentSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(workspaceId)) {
+        next.delete(workspaceId);
+      } else {
+        next.add(workspaceId);
+        void onOpenAgents?.(workspaceId);
+      }
+      return next;
+    });
+  }, [onOpenAgents]);
+
   const activateItem = useCallback(async (item: TreeItem | null) => {
     if (!item) return;
 
@@ -598,7 +619,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     } else if (item.type === 'bundle-config') {
       onManageBundleConfig?.({ workspaceId: item.workspaceId });
     } else if (item.type === 'agents') {
-      await onOpenAgents?.(item.workspaceId);
+      toggleAgentSection(item.workspaceId);
     } else if (item.type === 'agent-session') {
       await onOpenAgentSession?.(item.workspaceId, item.session.id);
     } else if (item.type === 'new-agent-session') {
@@ -608,7 +629,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     } else if (item.type === 'new-session') {
       await onAttachSession({ workspaceId: item.workspaceId });
     }
-  }, [toggleWorkspace, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenAgents, onOpenAgentSession, onCreateAgentSession, onOpenEvents]);
+  }, [toggleWorkspace, toggleAgentSection, toggleReplaySection, onAttachSession, onOpenReplay, onStartProcessAttach, findSessionForProcess, onProcessDisabled, onEditProcesses, onManageBundleConfig, onOpenAgentSession, onCreateAgentSession, onOpenEvents]);
 
   const activateSelected = useCallback(async () => {
     await activateItem(selectedItem);
@@ -657,6 +678,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     selectedIndex,
     selectedItem,
     expandedWorkspaces,
+    expandedAgentSections,
     machineName: machineName ?? null,
 
     // Computed flags
@@ -667,6 +689,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     moveDown,
     selectIndex,
     toggleWorkspace,
+    toggleAgentSection,
     activateSelected,
     activateIndex,
     attachSession: async (params) => {

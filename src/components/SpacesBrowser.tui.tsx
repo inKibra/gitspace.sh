@@ -79,7 +79,9 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
     return '[↑↓] Navigate  [Enter] Edit Bundle Config  [b] Bundle  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'agents') {
-    return '[↑↓] Navigate  [Enter] Refresh Agents  [r] Refresh  [q] Back';
+    return selectedItem.expanded
+      ? '[↑↓] Navigate  [Enter] Collapse Agents  [r] Refresh  [q] Back'
+      : '[↑↓] Navigate  [Enter] Expand Agents  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'agent-session') {
     return '[↑↓] Navigate  [Enter] Open Agent Session  [r] Refresh  [q] Back';
@@ -296,11 +298,12 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           if (item.type === 'agents') {
             const textColor = isSelected ? COLORS.selected : '#C678DD';
             const prefix = isSelected ? '>' : ' ';
+            const arrow = item.expanded ? '▾' : '▸';
             const count = (item.count ?? 0) > 0 ? ` (${item.count})` : '';
             const permBadge = (item.pendingPermissions ?? 0) > 0 ? ` ⚡${item.pendingPermissions}` : '';
             return (
               <text key={`agents-${item.workspaceId}`} fg={textColor} height={1}>
-                {prefix}   ✦ Agent Sessions{count}{permBadge}
+                {prefix}   {arrow} ✦ Agent Sessions{count}{permBadge}
               </text>
             );
           }
