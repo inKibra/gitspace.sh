@@ -119,11 +119,13 @@ import {
   type OpenCodeBridgeStreamOpen,
 } from '../../agents/opencode-bridge.js';
 import { consumeSseStream } from '../../agents/opencode-sse.js';
+import { isAgentTerminalSessionName } from '../../agents/opencode-attach.js';
 import { createOpenCodeBasicAuthHeader, defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
 import { defaultAgentEventManager, type AgentStateUpdateDelta, type WorkspaceAgentState } from '../../serve/agent-event-manager.js';
 import { OpenCodeClient } from '../../agents/opencode-client.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { readStoredSessionHistory } from '../../agents/opencode-store.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -471,6 +473,8 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
   async connect(): Promise<void> {
     await this.deps.ensureServer();
+    await defaultOpenCodeRuntimeManager.initialize();
+    await defaultAgentEventManager.initialize();
     this.connected = true;
     this.emit({ type: 'status', status: 'connected' });
   }
@@ -519,6 +523,9 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
     const counts = new Map<string, number>();
     for (const session of sessions) {
+      if (isAgentTerminalSessionName(session.name)) {
+        continue;
+      }
       const current = counts.get(session.cwd) ?? 0;
       counts.set(session.cwd, current + 1);
     }
@@ -553,6 +560,7 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     const workspaceByPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
 
     const filtered = sessions
+      .filter((session) => !isAgentTerminalSessionName(session.name))
       .map((session) => {
         const parsed = parseProcessSessionName(session.name);
         let workspace = workspaceByPath.get(session.cwd);
@@ -1529,6 +1537,15 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
   getAgentStateSnapshot(): Record<string, WorkspaceAgentState> {
     return defaultAgentEventManager.getSnapshot();
+  }
+
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+    const history = await readStoredSessionHistory(workspaceId);
+    return Object.values(history.sessions).map((session) => ({
+      id: session.id,
+      title: session.title,
+      updatedAt: session.updatedAt ?? session.lastSeenAt,
+    }));
   }
 
   async respondToAgentPermission(

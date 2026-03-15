@@ -123,7 +123,7 @@ import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
-import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
+import { buildAgentTerminalSessionName, buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -1297,8 +1297,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
       await attachLocal({
         workspaceId: session.workspaceId,
+        sessionName: buildAgentTerminalSessionName(session.id),
         command: commandSpec.command,
         args: commandSpec.args,
+        env: {
+          OPENCODE_SERVER_USERNAME: runtime.username,
+          OPENCODE_SERVER_PASSWORD: runtime.password,
+        },
       });
     },
   });

@@ -44,7 +44,7 @@ import { useAgentSessionPicker } from '../agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
-import { buildOpenCodeAttachUrlCommand } from '../agents/opencode-attach.js';
+import { buildAgentTerminalSessionName, buildOpenCodeAttachUrlCommand } from '../agents/opencode-attach.js';
 import { ensureOpenCodeLocalBridge } from '../agents/opencode-local-bridge.js';
 
 const COLORS = {
@@ -620,6 +620,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       const commandSpec = buildOpenCodeAttachUrlCommand(bridge.baseUrl, session.id);
       await attachController.attach({
         workspaceId: session.workspaceId,
+        sessionName: buildAgentTerminalSessionName(session.id),
         command: commandSpec.command,
         args: commandSpec.args,
       });

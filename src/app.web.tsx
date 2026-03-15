@@ -28,7 +28,7 @@ import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
-import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
+import { buildAgentTerminalSessionName, buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
 import { buildOpenCodeWebProxyUrl } from './agents/opencode-web.js';
 
 // Import shared components and hooks
@@ -900,8 +900,13 @@ export default function App() {
       const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
       await attachController.attach({
         workspaceId: session.workspaceId,
+        sessionName: buildAgentTerminalSessionName(session.id),
         command: commandSpec.command,
         args: commandSpec.args,
+        env: {
+          OPENCODE_SERVER_USERNAME: runtime.username,
+          OPENCODE_SERVER_PASSWORD: runtime.password,
+        },
       });
     },
   });

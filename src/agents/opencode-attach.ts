@@ -1,5 +1,16 @@
 import type { OpenCodeRuntimeInfo } from './opencode-types.js';
 
+export const AGENT_TMUX_SESSION_PREFIX = '__agent__-';
+
+export function buildAgentTerminalSessionName(agentSessionId: string): string {
+  return `${AGENT_TMUX_SESSION_PREFIX}${agentSessionId}`;
+}
+
+export function isAgentTerminalSessionName(name: string): boolean {
+  const suffix = name.split(':').pop() ?? name;
+  return suffix.startsWith(AGENT_TMUX_SESSION_PREFIX);
+}
+
 export function buildOpenCodeAttachUrlCommand(url: string, sessionId?: string): {
   command: string;
   args: string[];
@@ -25,7 +36,7 @@ export function buildOpenCodeAttachCommand(runtime: OpenCodeRuntimeInfo, session
   args: string[];
 } {
   const url = `http://${runtime.hostname}:${runtime.port}`;
-  const args = ['attach', url, '--username', runtime.username, '--password', runtime.password];
+  const args = ['attach', url, '--password', runtime.password];
   if (sessionId) {
     args.push('--session', sessionId);
   }

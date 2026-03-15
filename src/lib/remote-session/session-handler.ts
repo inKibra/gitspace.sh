@@ -92,6 +92,7 @@ import {
   type OpenCodeRuntimeManager,
 } from '../../agents/opencode-runtime.js';
 import { buildOpenCodeUrl } from '../../agents/opencode-bridge.js';
+import { isAgentTerminalSessionName } from '../../agents/opencode-attach.js';
 import { consumeSseStream } from '../../agents/opencode-sse.js';
 
 /**
@@ -221,6 +222,7 @@ export class RemoteSessionHandler {
    */
   async initialize(): Promise<void> {
     try {
+      await this.openCodeRuntimeManager.initialize();
       this.tmuxLiteAvailable = await isServerRunning();
       if (!this.tmuxLiteAvailable) {
         // Try to start the server
@@ -671,7 +673,7 @@ export class RemoteSessionHandler {
           // Note: Session cwd is set once at creation time and does NOT change
           // as users navigate within the shell. This is intentional - we want to
           // show sessions that were *created for* this workspace.
-          const workspaceSessions = sessions.filter(s => s.cwd === workspace.path);
+          const workspaceSessions = sessions.filter((s) => s.cwd === workspace.path && !isAgentTerminalSessionName(s.name));
           workspace.sessionCount = workspaceSessions.length;
 
           // Load process config for the workspace
@@ -723,6 +725,7 @@ export class RemoteSessionHandler {
         const workspacePathMap = new Map(workspaces.map(w => [w.path, w]));
 
         sessions = allSessions
+          .filter((s) => !isAgentTerminalSessionName(s.name))
           .filter(s => {
             if (!workspaceId) return true;
             // Try process session name first

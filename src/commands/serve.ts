@@ -35,6 +35,7 @@ import {
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
 import { defaultAgentEventManager } from '../serve/agent-event-manager.js';
+import { defaultOpenCodeRuntimeManager } from '../agents/opencode-runtime.js';
 import type { ServeEventHandler } from '../serve/types.js';
 import type { Identity, StoredIdentity } from '../types/identity.js';
 import {
@@ -1324,8 +1325,9 @@ export async function serveStart(options: {
     throw error;
   }
 
-  // Initialize AgentEventManager — subscribes to already-running OpenCode runtimes
-  void defaultAgentEventManager.initialize();
+  // Recover persisted OpenCode runtimes, then subscribe to them for agent state updates
+  await defaultOpenCodeRuntimeManager.initialize();
+  await defaultAgentEventManager.initialize();
 
   // Broadcast agent state changes to all connected authenticated clients
   defaultAgentEventManager.subscribe((delta) => {

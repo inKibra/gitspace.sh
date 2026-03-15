@@ -18,6 +18,7 @@ import {
   type SessionStatus,
   type Permission,
 } from '../agents/opencode-event-types.js';
+import { deleteStoredSession, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
 
 // ============================================================================
 // Shared agent state types (used by both machine and client)
@@ -167,6 +168,16 @@ export class AgentEventManager {
         this.previousStatuses.set(`${info.workspaceId}:${sessionId}`, status);
       }
     }
+
+    void replaceStoredSessions(
+      info.workspaceId,
+      state.sessions.map((session) => ({
+        id: session.id,
+        title: session.title,
+        rawTitle: session.title,
+        lastKnownStatus: state.statuses[session.id]?.type,
+      })),
+    );
   }
 
   private async runSseLoop(info: OpenCodeRuntimeInfo, controller: AbortController): Promise<void> {
@@ -231,6 +242,15 @@ export class AgentEventManager {
         state.statuses[sessionID] = status;
         this.previousStatuses.set(prevKey, status);
         this.emit({ type: 'agent_session_status', workspaceId, sessionId: sessionID, status });
+        const knownSession = state.sessions.find((session) => session.id === sessionID);
+        if (knownSession) {
+          void upsertStoredSession(workspaceId, {
+            id: sessionID,
+            title: knownSession.title,
+            rawTitle: knownSession.title,
+            lastKnownStatus: status.type,
+          });
+        }
 
         // Reset text accumulator on new busy turn so each turn gets a fresh preview
         if (status.type === 'busy') {
@@ -293,6 +313,11 @@ export class AgentEventManager {
           state.sessions.push({ id, title: titleOrId });
         }
         this.emit({ type: 'agent_session_created', workspaceId, sessionId: id, title: titleOrId });
+        void upsertStoredSession(workspaceId, {
+          id,
+          title: titleOrId,
+          rawTitle: titleOrId,
+        });
         break;
       }
 
@@ -303,6 +328,11 @@ export class AgentEventManager {
         const idx = state.sessions.findIndex((s) => s.id === id);
         if (idx !== -1) state.sessions[idx] = { id, title: titleOrId };
         this.emit({ type: 'agent_session_updated', workspaceId, sessionId: id, title: titleOrId });
+        void upsertStoredSession(workspaceId, {
+          id,
+          title: titleOrId,
+          rawTitle: titleOrId,
+        });
         break;
       }
 
@@ -316,6 +346,7 @@ export class AgentEventManager {
         this.previousStatuses.delete(`${workspaceId}:${id}`);
         this.textAccumulators.delete(`${workspaceId}:${id}`);
         this.emit({ type: 'agent_session_deleted', workspaceId, sessionId: id });
+        void deleteStoredSession(workspaceId, id);
         break;
       }
 

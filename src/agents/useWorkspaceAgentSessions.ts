@@ -32,6 +32,20 @@ function normalizeTitle(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim().length > 0 ? value : fallback;
 }
 
+function mapKnownSessions(
+  workspaceId: string,
+  sessions: Array<{ id: string; title: string; updatedAt?: string }>,
+  statusMap: Record<string, SessionStatus>,
+): AgentSessionInfo[] {
+  return sessions.map((session) => ({
+    id: session.id,
+    workspaceId,
+    title: session.title,
+    updatedAt: session.updatedAt,
+    status: statusMap[session.id],
+  }));
+}
+
 export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOptions) {
   const [sessionsByWorkspace, setSessionsByWorkspace] = useState<Record<string, AgentSessionInfo[]>>({});
   const [loadingWorkspaceId, setLoadingWorkspaceId] = useState<string | null>(null);
@@ -48,45 +62,78 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     });
   }, [options.bridge]);
 
+  const getKnownWorkspaceSessions = useCallback(async (workspaceId: string): Promise<AgentSessionInfo[]> => {
+    const agentSnapshot = options.backend?.getAgentStateSnapshot() ?? {};
+    const workspaceAgentState = agentSnapshot[workspaceId];
+    const statusMap = workspaceAgentState?.statuses ?? {};
+
+    if (workspaceAgentState?.sessions?.length) {
+      return mapKnownSessions(workspaceId, workspaceAgentState.sessions, statusMap);
+    }
+
+    const backendWithKnownSessions = options.backend as (SessionBackend & {
+      getKnownAgentSessions?: (workspaceId: string) => Promise<Array<{ id: string; title: string; updatedAt?: string }>>;
+    }) | null | undefined;
+
+    if (backendWithKnownSessions?.getKnownAgentSessions) {
+      const known = await backendWithKnownSessions.getKnownAgentSessions(workspaceId);
+      return mapKnownSessions(workspaceId, known, statusMap);
+    }
+
+    return [];
+  }, [options.backend]);
+
+  const refreshWorkspaceSessions = useCallback(async (workspaceId: string, workspaceName?: string) => {
+    const client = createClient(workspaceId);
+    const raw = await client.listSessions() as Array<Record<string, unknown>>;
+
+    const agentSnapshot = options.backend?.getAgentStateSnapshot() ?? {};
+    const workspaceAgentState = agentSnapshot[workspaceId];
+    const statusMap = workspaceAgentState?.statuses ?? {};
+    const prefix = workspaceName ? workspacePrefix(workspaceName) : null;
+
+    const mapped: AgentSessionInfo[] = raw
+      .filter((session) => {
+        if (!prefix) return true;
+        const title = normalizeTitle(session.title, '');
+        return title.startsWith(prefix);
+      })
+      .map((session) => {
+        const rawTitle = normalizeTitle(session.title, String(session.id));
+        return {
+          id: String(session.id),
+          workspaceId,
+          title: prefix ? stripPrefix(rawTitle, prefix) : rawTitle,
+          updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : undefined,
+          status: statusMap[String(session.id)],
+        };
+      });
+
+    setSessionsByWorkspace((current) => ({
+      ...current,
+      [workspaceId]: mapped,
+    }));
+    return mapped;
+  }, [createClient, options.backend]);
+
   const loadWorkspaceSessions = useCallback(async (workspaceId: string, workspaceName?: string) => {
     setLoadingWorkspaceId(workspaceId);
     setActiveWorkspaceId(workspaceId);
     setError(null);
     try {
-      const client = createClient(workspaceId);
-      const raw = await client.listSessions() as Array<Record<string, unknown>>;
+      const known = await getKnownWorkspaceSessions(workspaceId);
+      if (known.length > 0) {
+        setSessionsByWorkspace((current) => ({
+          ...current,
+          [workspaceId]: known,
+        }));
+        void refreshWorkspaceSessions(workspaceId, workspaceName)
+          .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+          .finally(() => setLoadingWorkspaceId((current) => (current === workspaceId ? null : current)));
+        return known;
+      }
 
-      // Merge status from AgentEventManager snapshot if available
-      const agentSnapshot = options.backend?.getAgentStateSnapshot() ?? {};
-      const workspaceAgentState = agentSnapshot[workspaceId];
-      const statusMap = workspaceAgentState?.statuses ?? {};
-
-      // Filter to only sessions belonging to this workspace (by title prefix)
-      // and strip the prefix for display
-      const prefix = workspaceName ? workspacePrefix(workspaceName) : null;
-
-      const mapped: AgentSessionInfo[] = raw
-        .filter((session) => {
-          if (!prefix) return true;
-          const title = normalizeTitle(session.title, '');
-          return title.startsWith(prefix);
-        })
-        .map((session) => {
-          const rawTitle = normalizeTitle(session.title, String(session.id));
-          return {
-            id: String(session.id),
-            workspaceId,
-            title: prefix ? stripPrefix(rawTitle, prefix) : rawTitle,
-            updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : undefined,
-            status: statusMap[String(session.id)],
-          };
-        });
-
-      setSessionsByWorkspace((current) => ({
-        ...current,
-        [workspaceId]: mapped,
-      }));
-      return mapped;
+      return await refreshWorkspaceSessions(workspaceId, workspaceName);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -94,7 +141,7 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     } finally {
       setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
     }
-  }, [createClient, options.backend]);
+  }, [getKnownWorkspaceSessions, refreshWorkspaceSessions]);
 
   const createSession = useCallback(async (workspaceId: string, workspaceName: string, title?: string) => {
     const client = createClient(workspaceId);

@@ -2999,6 +2999,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     return this.agentStateCache;
   }
 
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string }>> {
+    const workspace = this.agentStateCache[workspaceId];
+    return workspace?.sessions.map((session) => ({ id: session.id, title: session.title })) ?? [];
+  }
+
   async respondToAgentPermission(
     workspaceId: string,
     agentSessionId: string,
