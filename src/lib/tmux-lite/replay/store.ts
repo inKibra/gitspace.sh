@@ -406,8 +406,8 @@ export function readReplayEvents(replayId: string): ReplayEvent[] {
 
 /**
  * Read a slice of replay events that affect terminal rendering (output + resize only).
- * Skips events with seq <= fromSeq and stops at the target boundary.
- * Returns early without reading the rest of the file.
+ * Skips events with seq <= fromSeq and stops iterating at the target boundary.
+ * Note: the full events file is read into memory; the early exit only applies to parsing.
  */
 export function readReplayEventSlice(
   replayId: string,
