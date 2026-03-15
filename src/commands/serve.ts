@@ -87,6 +87,7 @@ import {
   bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
+  readControlMeta,
   getControlOwnerIdentityId,
   getVaultMeta,
   resetControlStore,
@@ -135,11 +136,21 @@ export async function ensureServeOwnerBindingForStartup(
 
   const currentVaultOwner = getVaultMeta('owner_user_root_id');
   const currentControlOwner = getControlOwnerIdentityId();
+  const controlMeta = readControlMeta();
+  const hasPinnedRelayIdentity = Boolean(
+    controlMeta.relayIdentityId || controlMeta.relaySigningPublicKey || controlMeta.relayFingerprint,
+  );
 
   const needsTakeover = (currentVaultOwner && currentVaultOwner !== ownerUserRootId)
     || (currentControlOwner && currentControlOwner !== ownerUserRootId);
 
-  if (needsTakeover) {
+  const shouldForceResetForTakeover = Boolean(
+    options.takeover
+    && !needsTakeover
+    && (currentVaultOwner || currentControlOwner || hasPinnedRelayIdentity),
+  );
+
+  if (needsTakeover || shouldForceResetForTakeover) {
     if (!options.takeover) {
       const mismatchMessage = [
         'Persisted relay control state belongs to a different identity.',
@@ -161,7 +172,9 @@ export async function ensureServeOwnerBindingForStartup(
 
     if (!options.yes) {
       const confirmed = await promptConfirm(
-        'Persisted relay control state belongs to a different identity. Clear it and rebind this machine to the current recovered identity?',
+        needsTakeover
+          ? 'Persisted relay control state belongs to a different identity. Clear it and rebind this machine to the current recovered identity?'
+          : 'Clear persisted relay control state and relay identity pins before starting machine serve?',
         false,
       );
       if (!confirmed) {
@@ -169,7 +182,11 @@ export async function ensureServeOwnerBindingForStartup(
       }
     }
 
-    logger.warning('Clearing persisted relay control state and rebinding machine serve ownership to the current identity.');
+    logger.warning(
+      needsTakeover
+        ? 'Clearing persisted relay control state and rebinding machine serve ownership to the current identity.'
+        : 'Clearing persisted relay control state and relay identity pins before machine serve startup.',
+    );
     resetControlStore();
     ensureControlStore();
     bindControlOwner(ownerUserRootId);
