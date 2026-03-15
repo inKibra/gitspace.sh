@@ -9,7 +9,7 @@
  */
 
 import { readFileSync, writeFileSync } from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -39,7 +39,7 @@ function readJsonFile<T>(path: string): T {
 }
 
 function sleep(ms: number): void {
-  execSync(`sleep ${ms / 1000}`, { timeout: ms + 5_000 });
+  execFileSync('sleep', [`${ms / 1000}`], { timeout: ms + 5_000 });
 }
 
 const MAX_RETRIES = 5;
@@ -54,10 +54,11 @@ function fetchIntegrity(name: string, version: string): string {
       sleep(delay);
     }
     try {
-      const result = execSync(`npm view ${name}@${version} dist.integrity`, {
-        encoding: 'utf-8',
-        timeout: 30_000,
-      }).trim();
+      const result = execFileSync(
+        'npm',
+        ['view', `${name}@${version}`, 'dist.integrity'],
+        { encoding: 'utf-8', timeout: 30_000 },
+      ).trim();
       if (result.length > 0) return result;
       lastError = new Error('npm returned empty integrity');
     } catch (e) {
@@ -103,6 +104,7 @@ for (const [name, version] of Object.entries(optionalDeps)) {
   let replaced = false;
   let insertIndex = -1;
   let inPackages = false;
+  let packagesEndIndex = -1;
 
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].trimStart().startsWith('"packages"')) {
@@ -110,6 +112,12 @@ for (const [name, version] of Object.entries(optionalDeps)) {
       continue;
     }
     if (!inPackages) continue;
+
+    // Detect the closing brace of the packages object
+    if (/^\s*\}/.test(lines[i])) {
+      packagesEndIndex = i;
+      break;
+    }
 
     const lineMatch = lines[i].match(/^\s+"([^"]+)":\s*\[/);
     if (lineMatch) {
@@ -122,15 +130,19 @@ for (const [name, version] of Object.entries(optionalDeps)) {
       }
       if (entryName > name && insertIndex === -1) {
         insertIndex = i;
-        // Don't break – the exact entry might appear later (shouldn't, but safe)
       }
     }
   }
 
   if (!replaced) {
+    // Fall back to appending before the closing brace of packages
     if (insertIndex === -1) {
-      console.error(`✗ Could not find insertion point in bun.lock for ${name}`);
-      process.exit(1);
+      if (packagesEndIndex !== -1) {
+        insertIndex = packagesEndIndex;
+      } else {
+        console.error(`✗ Could not find insertion point in bun.lock for ${name}`);
+        process.exit(1);
+      }
     }
     // Insert the entry followed by a blank line (matches bun.lock formatting)
     lines.splice(insertIndex, 0, newEntry, '');
