@@ -6,6 +6,7 @@ import type {
   ReplayFrame,
   ReplayFrameEvent,
   ReplayFrameTarget,
+  ReplayTimeline,
   ReplayTimelineStep,
 } from '../lib/tmux-lite/replay/index.js';
 
@@ -15,7 +16,6 @@ import type {
 
 export const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4] as const;
 export const DEFAULT_PLAYBACK_SPEED_INDEX = 2;
-export const FAST_SCRUB_STEP_COUNT = 5;
 
 // ============================================================================
 // Formatting
@@ -72,6 +72,53 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+export function findCheckpointStepIndex(
+  timeline: ReplayTimeline,
+  currentSeq: number,
+  direction: -1 | 1,
+): number {
+  if (timeline.steps.length === 0) {
+    return -1;
+  }
+
+  const checkpoint = direction < 0
+    ? [...timeline.checkpointSteps].reverse().find((step) => step.seq < currentSeq)
+    : timeline.checkpointSteps.find((step) => step.seq > currentSeq);
+
+  if (!checkpoint) {
+    return direction < 0 ? 0 : timeline.steps.length - 1;
+  }
+
+  const stepIndex = timeline.steps.findIndex(
+    (step) => step.seq >= checkpoint.seq && step.timeMs >= checkpoint.timeMs,
+  );
+
+  return stepIndex >= 0 ? stepIndex : (direction < 0 ? 0 : timeline.steps.length - 1);
+}
+
+export function getCheckpointPosition(
+  timeline: ReplayTimeline | null,
+  currentSeq: number,
+): { current: number; total: number } | null {
+  if (!timeline || timeline.checkpointSteps.length === 0) {
+    return null;
+  }
+
+  let current = 0;
+  for (const checkpoint of timeline.checkpointSteps) {
+    if (checkpoint.seq <= currentSeq) {
+      current += 1;
+    } else {
+      break;
+    }
+  }
+
+  return {
+    current,
+    total: timeline.checkpointSteps.length,
+  };
+}
+
 // ============================================================================
 // Replay frame application
 // ============================================================================
@@ -83,15 +130,20 @@ const TERMINAL_RESET = '\x1bc\x1b[2J\x1b[H';
  * Works in both Node.js (Buffer) and browser (atob) environments.
  */
 function decodeBase64(data: string): Uint8Array {
+  if (typeof atob === 'function') {
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
   if (typeof Buffer !== 'undefined') {
-    return Buffer.from(data, 'base64');
+    return new Uint8Array(Buffer.from(data, 'base64'));
   }
-  const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
+
+  throw new Error('No base64 decoder available');
 }
 
 /**
@@ -143,7 +195,9 @@ export function applyReplayFrame(
     write(TERMINAL_RESET);
     if (frame.checkpoint) {
       const checkpointBytes = decodeBase64(frame.checkpoint.ansi);
-      write(checkpointBytes);
+      if (checkpointBytes.byteLength > 0) {
+        write(checkpointBytes);
+      }
     }
     for (const event of frame.events) {
       applyFrameEvent(event, write);
@@ -158,7 +212,10 @@ function applyFrameEvent(
   write: (data: string | Uint8Array) => void,
 ): void {
   if (event.type === 'output' && event.data) {
-    write(decodeBase64(event.data));
+    const bytes = decodeBase64(event.data);
+    if (bytes.byteLength > 0) {
+      write(bytes);
+    }
   } else if (event.type === 'resize' && event.cols !== undefined && event.rows !== undefined) {
     write(resizeSequence(event.cols, event.rows));
   }

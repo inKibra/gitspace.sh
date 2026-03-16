@@ -187,10 +187,11 @@ describe('ReplayTerminal TUI', () => {
       mockInput.pressArrow('right', { shift: true });
     });
     await renderAndFlush(renderOnce);
-    expect(captureCharFrame()).toContain('frame:1200:3');
+    expect(captureCharFrame()).toContain('frame:500:2');
+    expect(captureCharFrame()).toContain('ckpt 2/2');
   });
 
-  it('plays in real time and lets arrows adjust playback speed while playing', async () => {
+  it('plays in real time and lets up/down adjust playback speed while playing', async () => {
     jest.useFakeTimers();
 
     const loadReplayFrame = mock(async (_replayId: string, target?: ReplayFrameTarget) => makeFrame(target));
@@ -227,7 +228,7 @@ describe('ReplayTerminal TUI', () => {
     expect(captureCharFrame()).toContain('frame:200:1');
 
     await act(async () => {
-      mockInput.pressArrow('right');
+      mockInput.pressArrow('up');
     });
     await renderAndFlush(renderOnce);
     expect(captureCharFrame()).toContain('1.5x');

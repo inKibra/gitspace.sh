@@ -47,6 +47,18 @@ const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
 const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before sending scroll
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 
+function isReplayDebugEnabled(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem('gssh:debug:replay') === '1'
+      || new URLSearchParams(window.location.search).has('debugReplay');
+  } catch {
+    return false;
+  }
+}
+
 function configureMobileHelperTextarea(textarea: HTMLTextAreaElement): void {
   textarea.setAttribute('autocorrect', 'on');
   textarea.setAttribute('autocomplete', 'on');
@@ -393,8 +405,36 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         setWriteCallback((data: Uint8Array) => {
           const wasScrolledUp = term.viewportY > 0;
           const viewportBefore = term.viewportY;
+          const chunk = new Uint8Array(data);
 
-          term.write(new TextDecoder().decode(data));
+          if (chunk.byteLength === 0) {
+            return;
+          }
+
+          try {
+            if (isReplayDebugEnabled()) {
+              console.debug('[session-terminal:web] write chunk', {
+                byteLength: chunk.byteLength,
+                preview: Array.from(chunk.slice(0, 16)),
+                viewportY: term.viewportY,
+                cols: term.cols,
+                rows: term.rows,
+              });
+            }
+
+            term.write(new TextDecoder().decode(chunk));
+          } catch (error) {
+            console.error('[session-terminal:web] term.write failed', {
+              byteLength: chunk.byteLength,
+              byteOffset: chunk.byteOffset,
+              preview: Array.from(chunk.slice(0, 32)),
+              viewportY: term.viewportY,
+              cols: term.cols,
+              rows: term.rows,
+              error,
+            });
+            throw error;
+          }
 
           if (wasScrolledUp && term.viewportY === 0) {
             requestAnimationFrame(() => {

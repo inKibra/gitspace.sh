@@ -5,7 +5,6 @@ import { SessionTerminal } from './SessionTerminal.web';
 import {
   PLAYBACK_SPEEDS,
   DEFAULT_PLAYBACK_SPEED_INDEX,
-  FAST_SCRUB_STEP_COUNT,
   formatReplayTime,
   clamp,
   targetKey,
@@ -13,10 +12,35 @@ import {
   applyReplayFrame,
   frameCheckpointId,
   frameLastSeq,
+  findCheckpointStepIndex,
+  getCheckpointPosition,
 } from './replay-utils.js';
 
 function encodeAnsi(text: string): Uint8Array {
   return new TextEncoder().encode(text);
+}
+
+function isReplayDebugEnabled(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem('gssh:debug:replay') === '1'
+      || new URLSearchParams(window.location.search).has('debugReplay');
+  } catch {
+    return false;
+  }
+}
+
+function replayDebug(message: string, details?: Record<string, unknown>): void {
+  if (!isReplayDebugEnabled()) {
+    return;
+  }
+  if (details) {
+    console.debug(`[replay:web] ${message}`, details);
+  } else {
+    console.debug(`[replay:web] ${message}`);
+  }
 }
 
 export interface ReplayTerminalWebProps {
@@ -65,6 +89,7 @@ export function ReplayTerminalWeb({
 
   useEffect(() => {
     writerRef.current = writer;
+    replayDebug('writer-updated', { writerReady: Boolean(writer) });
   }, [writer]);
 
   useEffect(() => {
@@ -112,21 +137,64 @@ export function ReplayTerminalWeb({
     setFrameLoading(true);
     setError(null);
 
+    replayDebug('loadFrame:start', {
+      replayId: replay.replayId,
+      requestId,
+      target,
+      writerReady: Boolean(writerRef.current),
+      previousCheckpointId: currentCheckpointIdRef.current,
+      previousSeq: currentSeqRef.current,
+    });
+
     try {
       const frame = await loadReplayFrameRef.current(replay.replayId, target);
       if (frameRequestIdRef.current !== requestId) {
+        replayDebug('loadFrame:stale-response-discarded', {
+          replayId: replay.replayId,
+          requestId,
+          target,
+        });
         return;
       }
+
+      replayDebug('loadFrame:frame-received', {
+        replayId: replay.replayId,
+        requestId,
+        checkpointId: frame.checkpoint?.checkpointId ?? null,
+        checkpointSeq: frame.checkpoint?.seq ?? null,
+        checkpointAnsiChars: frame.checkpoint?.ansi.length ?? 0,
+        events: frame.events.length,
+        firstEventSeq: frame.events[0]?.seq ?? null,
+        lastEventSeq: frame.events.length > 0 ? frame.events[frame.events.length - 1]?.seq ?? null : null,
+      });
 
       if (frame.events.length === 0 && !frame.checkpoint) {
         feedTerminal('\x1b[2J\x1b[H\x1b[2;37m(empty replay)\x1b[0m');
       } else {
-        applyReplayFrame(
-          frame,
-          feedTerminal,
-          currentCheckpointIdRef.current,
-          currentSeqRef.current,
-        );
+        try {
+          applyReplayFrame(
+            frame,
+            feedTerminal,
+            currentCheckpointIdRef.current,
+            currentSeqRef.current,
+          );
+        } catch (error) {
+          console.error('[replay:web] applyReplayFrame failed', {
+            replayId: replay.replayId,
+            requestId,
+            target,
+            previousCheckpointId: currentCheckpointIdRef.current,
+            previousSeq: currentSeqRef.current,
+            frameCheckpointId: frame.checkpoint?.checkpointId ?? null,
+            frameCheckpointSeq: frame.checkpoint?.seq ?? null,
+            frameEvents: frame.events.length,
+            firstEventSeq: frame.events[0]?.seq ?? null,
+            lastEventSeq: frame.events.length > 0 ? frame.events[frame.events.length - 1]?.seq ?? null : null,
+            writerReady: Boolean(writerRef.current),
+            error,
+          });
+          throw error;
+        }
       }
 
       currentCheckpointIdRef.current = frameCheckpointId(frame);
@@ -141,6 +209,15 @@ export function ReplayTerminalWeb({
       }
 
       const message = loadError instanceof Error ? loadError.message : String(loadError);
+      console.error('[replay:web] loadFrame failed', {
+        replayId: replay.replayId,
+        requestId,
+        target,
+        previousCheckpointId: currentCheckpointIdRef.current,
+        previousSeq: currentSeqRef.current,
+        writerReady: Boolean(writerRef.current),
+        error: loadError,
+      });
       setError(message);
       setErroredTargetKey(targetKey(target));
       setIsPlaying(false);
@@ -294,6 +371,23 @@ export function ReplayTerminalWeb({
     });
   }, [invalidatePendingFrameLoad, timeline]);
 
+  const jumpCheckpoint = useCallback((direction: -1 | 1) => {
+    if (!timeline || timeline.steps.length === 0) {
+      return;
+    }
+
+    invalidatePendingFrameLoad();
+    setIsPlaying(false);
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
+
+    const currentSeq = currentTarget.atSeq ?? replay.lastSeq;
+    const nextIndex = findCheckpointStepIndex(timeline, currentSeq, direction);
+    if (nextIndex >= 0) {
+      setCurrentStepIndex(nextIndex);
+    }
+  }, [currentTarget.atSeq, invalidatePendingFrameLoad, replay.lastSeq, timeline]);
+
   const adjustPlaybackSpeed = useCallback((direction: -1 | 1, count = 1) => {
     setPlaybackSpeedIndex((index) => clamp(index + (direction * count), 0, PLAYBACK_SPEEDS.length - 1));
   }, []);
@@ -386,9 +480,17 @@ export function ReplayTerminalWeb({
       if (event.key === 'ArrowLeft') {
         event.preventDefault();
         if (isPlaying) {
-          adjustPlaybackSpeed(-1, event.shiftKey ? 2 : 1);
+          if (event.shiftKey) {
+            jumpCheckpoint(-1);
+          } else {
+            adjustPlaybackSpeed(-1, 1);
+          }
         } else {
-          stepReplay(-1, event.shiftKey ? FAST_SCRUB_STEP_COUNT : 1);
+          if (event.shiftKey) {
+            jumpCheckpoint(-1);
+          } else {
+            stepReplay(-1, 1);
+          }
         }
         return;
       }
@@ -396,16 +498,36 @@ export function ReplayTerminalWeb({
       if (event.key === 'ArrowRight') {
         event.preventDefault();
         if (isPlaying) {
-          adjustPlaybackSpeed(1, event.shiftKey ? 2 : 1);
+          if (event.shiftKey) {
+            jumpCheckpoint(1);
+          } else {
+            adjustPlaybackSpeed(1, 1);
+          }
         } else {
-          stepReplay(1, event.shiftKey ? FAST_SCRUB_STEP_COUNT : 1);
+          if (event.shiftKey) {
+            jumpCheckpoint(1);
+          } else {
+            stepReplay(1, 1);
+          }
         }
+        return;
+      }
+
+      if (event.key === 'ArrowUp' && isPlaying) {
+        event.preventDefault();
+        adjustPlaybackSpeed(1, 1);
+        return;
+      }
+
+      if (event.key === 'ArrowDown' && isPlaying) {
+        event.preventDefault();
+        adjustPlaybackSpeed(-1, 1);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [adjustPlaybackSpeed, handleDismiss, isPlaying, jumpToBoundary, onBack, onDismiss, stepReplay, togglePlayback]);
+  }, [adjustPlaybackSpeed, handleDismiss, isPlaying, jumpCheckpoint, jumpToBoundary, onBack, onDismiss, stepReplay, togglePlayback]);
 
   const totalTimeMs = timeline?.latestTimeMs ?? replay.durationMs;
   const activeTimeMs = currentTarget.atMs ?? totalTimeMs;
@@ -413,13 +535,14 @@ export function ReplayTerminalWeb({
   const visibleStepIndex = timeline && currentStepIndex >= 0
     ? clamp(currentStepIndex, 0, Math.max(0, timeline.steps.length - 1))
     : totalSteps;
+  const checkpointPosition = getCheckpointPosition(timeline, currentTarget.atSeq ?? replay.lastSeq);
   const speedLabel = `${playbackSpeed.toFixed(playbackSpeed < 1 ? 2 : 1)}x`;
   const activeTimeLabel = formatReplayTime(activeTimeMs);
   const totalTimeLabel = formatReplayTime(totalTimeMs);
   const stepLabel = `${visibleStepIndex}/${totalSteps}`;
   const transportHint = isPlaying
-    ? '[Space] Pause  [←/→] Speed  [Shift+←/→] More'
-    : '[Space] Play  [←/→] Step  [Shift+←/→] Skip';
+    ? '[Space] Pause  [↑/↓] Speed  [Shift+←/→] Checkpoint'
+    : '[Space] Play  [←/→] Event  [Shift+←/→] Checkpoint';
 
   return (
     <div className="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden">
@@ -446,6 +569,7 @@ export function ReplayTerminalWeb({
                 <span>{totalTimeLabel}</span>
               </span>
               <span className="inline-flex min-w-[7ch] justify-end">{stepLabel}</span>
+              {checkpointPosition && <span className="inline-flex min-w-[10ch] justify-end">ckpt {checkpointPosition.current}/{checkpointPosition.total}</span>}
               <span className={`inline-flex min-w-[9ch] justify-end ${isPlaying ? 'text-[#3fb950]' : 'text-[#8b949e]'}`}>
                 {isPlaying ? '[playing]' : '[paused]'}
               </span>

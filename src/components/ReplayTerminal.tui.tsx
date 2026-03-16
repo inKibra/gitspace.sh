@@ -10,7 +10,6 @@ import type { ReplayInfo } from './SpacesBrowser.js';
 import {
   PLAYBACK_SPEEDS,
   DEFAULT_PLAYBACK_SPEED_INDEX,
-  FAST_SCRUB_STEP_COUNT,
   formatReplayTime,
   clamp,
   targetKey,
@@ -18,6 +17,8 @@ import {
   applyReplayFrame,
   frameCheckpointId,
   frameLastSeq,
+  findCheckpointStepIndex,
+  getCheckpointPosition,
 } from './replay-utils.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
@@ -343,6 +344,23 @@ export function ReplayTerminal({
     });
   }, [invalidatePendingFrameLoad, timeline]);
 
+  const jumpCheckpoint = useCallback((direction: -1 | 1) => {
+    if (!timeline || timeline.steps.length === 0) {
+      return;
+    }
+
+    invalidatePendingFrameLoad();
+    setIsPlaying(false);
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
+
+    const currentSeq = currentTarget.atSeq ?? replay.lastSeq;
+    const nextIndex = findCheckpointStepIndex(timeline, currentSeq, direction);
+    if (nextIndex >= 0) {
+      setCurrentStepIndex(nextIndex);
+    }
+  }, [currentTarget.atSeq, invalidatePendingFrameLoad, replay.lastSeq, timeline]);
+
   const adjustPlaybackSpeed = useCallback((direction: -1 | 1, count = 1) => {
     setPlaybackSpeedIndex((index) => clamp(index + (direction * count), 0, PLAYBACK_SPEEDS.length - 1));
   }, []);
@@ -410,18 +428,42 @@ export function ReplayTerminal({
     }
     if (key.name === 'left') {
       if (isPlaying) {
-        adjustPlaybackSpeed(-1, key.shift ? 2 : 1);
+        if (key.shift) {
+          jumpCheckpoint(-1);
+        } else {
+          adjustPlaybackSpeed(-1, 1);
+        }
       } else {
-        stepReplay(-1, key.shift ? FAST_SCRUB_STEP_COUNT : 1);
+        if (key.shift) {
+          jumpCheckpoint(-1);
+        } else {
+          stepReplay(-1, 1);
+        }
       }
       return;
     }
     if (key.name === 'right') {
       if (isPlaying) {
-        adjustPlaybackSpeed(1, key.shift ? 2 : 1);
+        if (key.shift) {
+          jumpCheckpoint(1);
+        } else {
+          adjustPlaybackSpeed(1, 1);
+        }
       } else {
-        stepReplay(1, key.shift ? FAST_SCRUB_STEP_COUNT : 1);
+        if (key.shift) {
+          jumpCheckpoint(1);
+        } else {
+          stepReplay(1, 1);
+        }
       }
+      return;
+    }
+    if (key.name === 'up' && isPlaying) {
+      adjustPlaybackSpeed(1, 1);
+      return;
+    }
+    if (key.name === 'down' && isPlaying) {
+      adjustPlaybackSpeed(-1, 1);
     }
   });
 
@@ -447,9 +489,10 @@ export function ReplayTerminal({
   const visibleStepIndex = timeline && currentStepIndex >= 0
     ? clamp(currentStepIndex, 0, Math.max(0, timeline.steps.length - 1))
     : totalSteps;
+  const checkpointPosition = getCheckpointPosition(timeline, currentTarget.atSeq ?? replay.lastSeq);
   const transportHint = isPlaying
-    ? '[Space] Pause  [←/→] Speed  [Shift+←/→] More  [Home/End] Jump'
-    : '[Space] Play  [←/→] Step  [Shift+←/→] Skip  [Home/End] Jump';
+    ? '[Space] Pause  [↑/↓] Speed  [Shift+←/→] Checkpoint  [Home/End] Jump'
+    : '[Space] Play  [←/→] Event  [Shift+←/→] Checkpoint  [Home/End] Jump';
   const speedLabel = `${playbackSpeed.toFixed(playbackSpeed < 1 ? 2 : 1)}x`;
   const timeWidth = Math.max(formatReplayTime(totalTimeMs).length, formatReplayTime(0).length);
   const timeLabel = `${padLabel(formatReplayTime(activeTimeMs), timeWidth)}/${formatReplayTime(totalTimeMs)}`;
@@ -474,6 +517,7 @@ export function ReplayTerminal({
           <text fg={COLORS.textDim}> ({statusLabel.state}){statusLabel.age}</text>
           <text fg={COLORS.textDim}>  {timeLabel}</text>
           <text fg={COLORS.textDim}>  {stepLabel}</text>
+          {checkpointPosition && <text fg={COLORS.textDim}>  ckpt {checkpointPosition.current}/{checkpointPosition.total}</text>}
           <text fg={isPlaying ? COLORS.playing : COLORS.textMuted}>  {isPlaying ? '[playing]' : '[paused]'}</text>
           <text fg={COLORS.loading}>  {paddedSpeedLabel}</text>
           {(timelineLoading || frameLoading) && <text fg={COLORS.loading}> [loading]</text>}

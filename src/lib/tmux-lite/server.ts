@@ -66,6 +66,7 @@ const SERVER_START_TIME = Date.now();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
 const REPLAY_CHECKPOINT_BYTE_INTERVAL = 128 * 1024;
+const REPLAY_CHECKPOINT_OUTPUT_EVENT_INTERVAL = 256;
 
 // Load notification config (with fallback to defaults)
 let notificationConfig: NotificationConfig;
@@ -122,6 +123,7 @@ interface ReplayRuntime {
   checkpointCount: number;
   lastCheckpointAt: number;
   bytesSinceCheckpoint: number;
+  outputEventsSinceCheckpoint: number;
 }
 
 interface SessionData {
@@ -551,6 +553,7 @@ function createReplayRuntime(
       checkpointCount: 0,
       lastCheckpointAt: startedAt,
       bytesSinceCheckpoint: 0,
+      outputEventsSinceCheckpoint: 0,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -687,6 +690,7 @@ function writeReplayCheckpointNow(session: SessionData): void {
     replay.checkpointCount++;
     replay.lastCheckpointAt = Date.now();
     replay.bytesSinceCheckpoint = 0;
+    replay.outputEventsSinceCheckpoint = 0;
     syncReplayManifest(session);
   } catch (error) {
     disableReplay(session, error);
@@ -701,7 +705,10 @@ function scheduleReplayCheckpoint(session: SessionData, force = false): void {
 
   const now = Date.now();
   if (!force) {
-    if (replay.bytesSinceCheckpoint < REPLAY_CHECKPOINT_BYTE_INTERVAL) {
+    if (
+      replay.bytesSinceCheckpoint < REPLAY_CHECKPOINT_BYTE_INTERVAL
+      && replay.outputEventsSinceCheckpoint < REPLAY_CHECKPOINT_OUTPUT_EVENT_INTERVAL
+    ) {
       return;
     }
     if (now - replay.lastCheckpointAt < REPLAY_CHECKPOINT_MIN_INTERVAL_MS) {
@@ -996,11 +1003,16 @@ function createPtyDataHandler(
     const session = sessions.get(id);
     if (!session) return;
 
-    recordReplayEvent(session, {
-      type: "output",
-      encoding: "base64",
-      data: data.toString("base64"),
-    });
+    if (data.length > 0) {
+      recordReplayEvent(session, {
+        type: "output",
+        encoding: "base64",
+        data: data.toString("base64"),
+      });
+      if (session.replay) {
+        session.replay.outputEventsSinceCheckpoint += 1;
+      }
+    }
     if (session.replay) {
       session.replay.bytesSinceCheckpoint += data.length;
       scheduleReplayCheckpoint(session);
