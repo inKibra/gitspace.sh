@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const OPENCODE_PATH = spawnSync('which', ['opencode'], { encoding: 'utf8' }).stdout.trim();
@@ -25,6 +25,7 @@ describe.if(shouldRun)('real opencode integration', () => {
   test('uses opencode serve, keeps attach alive, and skips replay recording for agent PTYs', async () => {
     const resultFile = join(root, 'result.json');
     const scriptFile = join(root, 'run-opencode-real-test.ts');
+    const sandboxName = `real-opencode-${basename(root)}`;
     const script = `
       import { applyTmuxLiteSandboxEnvironment } from '${import.meta.dir.replace('/src/agents/__tests__', '/src/lib/tmux-lite/protocol.ts')}';
       import { LocalSessionBackend } from '${import.meta.dir.replace('/src/agents/__tests__', '/src/session/backends/local-session-backend.ts')}';
@@ -34,8 +35,21 @@ describe.if(shouldRun)('real opencode integration', () => {
       import { spawnSync } from 'node:child_process';
       import { writeFileSync } from 'node:fs';
 
+      async function waitForAgentSession() {
+        const started = Date.now();
+        while (Date.now() - started < 10000) {
+          const sessions = await listSessions();
+          const agent = sessions.find((session) => session.kind === 'agent');
+          if (agent) {
+            return { sessions, agent };
+          }
+          await Bun.sleep(200);
+        }
+        return { sessions: await listSessions(), agent: undefined };
+      }
+
       process.env.HOME = ${JSON.stringify(root)};
-      applyTmuxLiteSandboxEnvironment('real-opencode-test');
+      applyTmuxLiteSandboxEnvironment(${JSON.stringify(sandboxName)});
 
       const backend = new LocalSessionBackend({
         deps: {
@@ -60,10 +74,7 @@ describe.if(shouldRun)('real opencode integration', () => {
           : '';
 
         await backend.attachAgentSession('demo:ws-1', created[0].id);
-        await Bun.sleep(4000);
-
-        const sessions = await listSessions();
-        const agent = sessions.find((session) => session.kind === 'agent');
+        const { sessions, agent } = await waitForAgentSession();
         const replays = listReplaysOffline({ workspaceId: 'demo:ws-1', includeDismissed: true });
 
         writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({
@@ -100,9 +111,6 @@ describe.if(shouldRun)('real opencode integration', () => {
       timeout: 60_000,
     });
 
-    if (result.status !== 0) {
-      throw new Error(`integration subprocess failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-    }
     const payload = JSON.parse(readFileSync(resultFile, 'utf8')) as {
       created: Array<{ id: string; title: string }>;
       runtime: { username: string; pid?: number } | null;
@@ -111,6 +119,10 @@ describe.if(shouldRun)('real opencode integration', () => {
       replays: Array<{ sessionName: string }>;
       error?: string;
     };
+
+    if (result.status !== 0) {
+      throw new Error(`integration subprocess failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}\npayload:\n${JSON.stringify(payload, null, 2)}`);
+    }
 
     expect(payload.error).toBeUndefined();
 

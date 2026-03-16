@@ -6,7 +6,7 @@
  */
 
 import type { UseSpacesBrowserReturn, TreeItem } from './SpacesBrowser.js';
-import { formatTime } from './SpacesBrowser.js';
+import { formatTime, getAgentSessionDisplayLabel, getAgentSessionDisplayState } from './SpacesBrowser.js';
 
 // ============================================================================
 // Colors
@@ -311,18 +311,19 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           if (item.type === 'agent-session') {
             const textColor = isSelected ? COLORS.selected : '#C678DD';
             const prefix = isSelected ? '>' : ' ';
-            const signal = item.session.pendingPermissionCount && item.session.pendingPermissionCount > 0
-              ? ` ⚡${item.session.pendingPermissionCount}`
-              : item.session.status?.type === 'busy'
-                ? ' ●'
-                : item.session.status?.type === 'retry'
-                  ? ' ↻'
-                  : '';
+            const state = getAgentSessionDisplayState(item.session);
+            const label = getAgentSessionDisplayLabel(item.session);
+            const signal =
+              state === 'needs-permission' ? '⚡'
+              : state === 'error' ? '!'
+              : state === 'running' ? '●'
+              : state === 'retrying' ? '↻'
+              : '◦';
             const timeInfo = item.session.updatedAt ? formatTime(new Date(item.session.updatedAt).getTime()) : '';
             return (
               <box key={`agent-session-${item.workspaceId}-${item.session.id}`} flexDirection="row" height={1}>
                 <text fg={textColor}>{prefix}     ✦ {item.session.title}</text>
-                {signal && <text fg={COLORS.textDim}>{signal}</text>}
+                <text fg={COLORS.textDim}> {signal} {label}</text>
                 {timeInfo && <text fg={COLORS.textDim}> {timeInfo}</text>}
               </box>
             );

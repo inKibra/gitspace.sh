@@ -772,6 +772,7 @@ export default function App() {
           ...session,
           status: live.status,
           pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+          errorMessage: live.errorMessage,
         };
       });
     }

@@ -9,6 +9,7 @@ export interface AgentSessionInfo {
   updatedAt?: string;
   status?: SessionStatus;
   pendingPermissionCount?: number;
+  errorMessage?: string;
 }
 
 export interface UseWorkspaceAgentSessionsOptions {

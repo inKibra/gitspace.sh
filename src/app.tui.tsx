@@ -1308,6 +1308,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           ...session,
           status: live.status,
           pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+          errorMessage: live.errorMessage,
         };
       });
     }

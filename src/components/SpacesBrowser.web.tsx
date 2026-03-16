@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, type KeyboardEvent, type RefObject } from 'react';
 import type { TreeItem, UseSpacesBrowserReturn } from './SpacesBrowser.js';
-import { formatTime } from './SpacesBrowser.js';
+import { formatTime, getAgentSessionDisplayLabel, getAgentSessionDisplayState } from './SpacesBrowser.js';
 import type { WorkspaceInfo } from '../lib/remote-session/protocol.js';
 
 function isActivateKey(key: string): boolean {
@@ -505,13 +505,14 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
           }
 
           if (item.type === 'agent-session') {
-            const signal = item.session.pendingPermissionCount && item.session.pendingPermissionCount > 0
-              ? `⚡${item.session.pendingPermissionCount}`
-              : item.session.status?.type === 'busy'
-                ? '● busy'
-                : item.session.status?.type === 'retry'
-                  ? '↻ retry'
-                  : '';
+            const state = getAgentSessionDisplayState(item.session);
+            const label = getAgentSessionDisplayLabel(item.session);
+            const signal =
+              state === 'needs-permission' ? `⚡ ${label}`
+              : state === 'error' ? `! ${label}`
+              : state === 'running' ? `● ${label}`
+              : state === 'retrying' ? `↻ ${label}`
+              : `◦ ${label}`;
             return (
               <div
                 key={`agent-session-${item.workspaceId}-${item.session.id}`}
@@ -525,9 +526,9 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 `}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}{signal ? ` ${signal}` : ''}</div>
+                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
                   <div className="text-xs text-[#8b949e] truncate">
-                    agent session
+                    {signal}
                   </div>
                 </div>
                 {item.session.updatedAt && (

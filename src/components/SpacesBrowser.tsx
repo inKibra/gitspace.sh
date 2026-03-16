@@ -63,6 +63,47 @@ export interface AgentSessionInfo {
   updatedAt?: string;
   status?: SessionStatus;
   pendingPermissionCount?: number;
+  errorMessage?: string;
+}
+
+export type AgentSessionDisplayState =
+  | 'needs-permission'
+  | 'error'
+  | 'running'
+  | 'retrying'
+  | 'waiting';
+
+export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSessionDisplayState {
+  if ((session.pendingPermissionCount ?? 0) > 0) {
+    return 'needs-permission';
+  }
+  if (session.errorMessage) {
+    return 'error';
+  }
+  if (session.status?.type === 'busy') {
+    return 'running';
+  }
+  if (session.status?.type === 'retry') {
+    return 'retrying';
+  }
+  return 'waiting';
+}
+
+export function getAgentSessionDisplayLabel(session: AgentSessionInfo): string {
+  const state = getAgentSessionDisplayState(session);
+  switch (state) {
+    case 'needs-permission':
+      return `needs permission${(session.pendingPermissionCount ?? 0) > 1 ? ` (${session.pendingPermissionCount})` : ''}`;
+    case 'error':
+      return 'error';
+    case 'running':
+      return 'running';
+    case 'retrying':
+      return 'retrying';
+    case 'waiting':
+    default:
+      return 'waiting';
+  }
 }
 
 /** Tree item types for flattened list */

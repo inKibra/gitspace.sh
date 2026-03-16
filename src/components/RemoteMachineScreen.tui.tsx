@@ -622,6 +622,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           ...session,
           status: live.status,
           pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+          errorMessage: live.errorMessage,
         };
       });
     }
