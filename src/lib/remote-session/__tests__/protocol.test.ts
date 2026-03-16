@@ -247,11 +247,16 @@ describe('ClientToMachineMessage type coverage', () => {
     { type: 'get_events', workspacePath: '/tmp' },
     { type: 'start_process', workspaceId: 'w1', processName: 'web' },
     { type: 'stop_process', workspaceId: 'w1', processName: 'web' },
+    { type: 'list_agent_sessions', requestId: 'req-1', workspaceId: 'w1', mode: 'live' },
+    { type: 'create_agent_session', requestId: 'req-2', workspaceId: 'w1', title: 'Investigate auth' },
+    { type: 'abort_agent_session', requestId: 'req-3', workspaceId: 'w1', agentSessionId: 'agent-1' },
+    { type: 'respond_agent_permission', requestId: 'req-4', workspaceId: 'w1', agentSessionId: 'agent-1', permissionId: 'perm-1', response: 'allow' },
+    { type: 'get_replay_frame', requestId: 'req-5', replayId: 'r1', atMs: 1000 },
   ];
 
-  it('should include all 24 client message types', () => {
+  it('should include all 29 client message types', () => {
     const types = new Set(clientMessages.map(m => m.type));
-    expect(types.size).toBe(24);
+    expect(types.size).toBe(29);
   });
 
   it('should all parse successfully via round-trip', () => {
@@ -298,11 +303,16 @@ describe('MachineToClientMessage type coverage', () => {
     { type: 'events_list', workspaceId: 'w1', events: [], liveEventIds: [] },
     { type: 'process_started', workspaceId: 'w1', processName: 'web' },
     { type: 'process_stopped', workspaceId: 'w1', processName: 'web' },
+    { type: 'agent_sessions', requestId: 'req-1', workspaceId: 'w1', sessions: [] },
+    { type: 'agent_bool', requestId: 'req-2', workspaceId: 'w1', ok: true },
+    { type: 'agent_state_snapshot', workspaces: [] },
+    { type: 'agent_state_update', delta: { type: 'agent_state_snapshot', workspaces: {} } },
+    { type: 'replay_frame', requestId: 'req-3', replayId: 'r1', frame: { replayId: 'r1', checkpoint: null, events: [] }, chunkIndex: 0, totalChunks: 1 },
   ];
 
-  it('should include all 28 machine message types', () => {
+  it('should include all 33 machine message types', () => {
     const types = new Set(machineMessages.map(m => m.type));
-    expect(types.size).toBe(28);
+    expect(types.size).toBe(33);
   });
 
   it('should all parse successfully via round-trip', () => {
