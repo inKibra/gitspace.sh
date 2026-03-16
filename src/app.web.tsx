@@ -27,6 +27,7 @@ import { useLifecycleController } from './app/session/useLifecycleController.js'
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
+import { openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
 // Import shared components and hooks
 import {
@@ -817,33 +818,37 @@ export default function App() {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      persistAgentSessionSelection(workspaceId, agentSessionId);
       if (!webBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
-      setIsViewOnlySession(false);
-      await webBackend.attachAgentSession(workspaceId, agentSessionId);
-      setView('terminal');
+      await openAgentSession({
+        workspaceId,
+        agentSessionId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
+        afterAttach: async () => {
+          setView('terminal');
+        },
+      });
     },
     onCreateAgentSession: async (workspaceId) => {
-      flow.showInput({
-        title: 'New Agent Session',
-        label: 'Session name:',
-        placeholder: 'Investigate auth bug',
-        validation: (value) => value.trim() ? null : 'Session name is required',
-        onSubmit: async (value) => {
-          const previousIds = new Set((workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? []).map((session) => session.id));
-          const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
-          const created = sessions.find((session) => !previousIds.has(session.id))
-            ?? [...sessions].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
-          if (!created) return;
-          persistAgentSessionSelection(workspaceId, created.id);
-          if (!webBackend?.attachAgentSession) {
-            throw new Error('Agent attach unavailable');
-          }
-          setIsViewOnlySession(false);
-          await webBackend.attachAgentSession(workspaceId, created.id);
-          setView('terminal');
+      if (!webBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      promptCreateAgentSession({
+        flow,
+        workspaceId,
+        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
+        createAgentSession: workspaceAgentSessions.createSession,
+        attachOptions: {
+          workspaceId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
+          afterAttach: async () => {
+            setView('terminal');
+          },
         },
       });
     },

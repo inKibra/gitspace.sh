@@ -121,6 +121,7 @@ import {
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
+import { openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -1383,33 +1384,37 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      persistAgentSessionSelection(workspaceId, agentSessionId);
       if (!localBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
-      setIsViewOnlySession(false);
-      await localBackend.attachAgentSession(workspaceId, agentSessionId);
-      dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      await openAgentSession({
+        workspaceId,
+        agentSessionId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+        afterAttach: async () => {
+          dispatch({ type: 'SET_VIEW', view: 'terminal' });
+        },
+      });
     },
     onCreateAgentSession: async (workspaceId) => {
-      flow.showInput({
-        title: 'New Agent Session',
-        label: 'Session name:',
-        placeholder: 'Investigate auth bug',
-        validation: (value) => value.trim() ? null : 'Session name is required',
-        onSubmit: async (value) => {
-          const previousIds = new Set((workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? []).map((session) => session.id));
-          const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
-          const created = sessions.find((session) => !previousIds.has(session.id))
-            ?? [...sessions].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
-          if (!created) return;
-          persistAgentSessionSelection(workspaceId, created.id);
-          if (!localBackend?.attachAgentSession) {
-            throw new Error('Agent attach unavailable');
-          }
-          setIsViewOnlySession(false);
-          await localBackend.attachAgentSession(workspaceId, created.id);
-          dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      if (!localBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      promptCreateAgentSession({
+        flow,
+        workspaceId,
+        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
+        createAgentSession: workspaceAgentSessions.createSession,
+        attachOptions: {
+          workspaceId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+          afterAttach: async () => {
+            dispatch({ type: 'SET_VIEW', view: 'terminal' });
+          },
         },
       });
     },

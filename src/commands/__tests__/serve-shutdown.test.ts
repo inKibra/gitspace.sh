@@ -67,7 +67,7 @@ describe('performServeShutdown', () => {
         throw new Error(`EXIT:${code}`);
       }) as unknown as (code: number) => never;
 
-      expect(() => performServeShutdown({ cleanup: sessionCleanup }, { isDaemon: true, cleanup, exit })).toThrow('EXIT:0');
+      await expect(performServeShutdown({ cleanup: sessionCleanup }, { isDaemon: true, cleanup, exit })).rejects.toThrow('EXIT:0');
 
       expect(cleanup).toHaveBeenCalledTimes(1);
       expect(sessionCleanup).toHaveBeenCalledTimes(1);

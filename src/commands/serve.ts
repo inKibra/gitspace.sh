@@ -940,15 +940,41 @@ async function connectToRelay(
 /**
  * Set up shutdown handlers
  */
-export function performServeShutdown(
+export async function performServeShutdown(
   sessionManager: Pick<ClientSessionManager, 'cleanup'>,
-  options: { isDaemon?: boolean; cleanup?: () => void; exit?: (code: number) => never } = {}
-): never {
+  options: {
+    isDaemon?: boolean;
+    cleanup?: () => void | Promise<void>;
+    exit?: (code: number) => never;
+    timeoutMs?: number;
+  } = {}
+): Promise<never> {
   logger.log('');
   logger.info('Shutting down...');
 
-  options.cleanup?.();
-  sessionManager.cleanup();
+  const timeoutMs = options.timeoutMs ?? 3_000;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const cleanupPromise = Promise.resolve(options.cleanup?.()).then(() => sessionManager.cleanup());
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      resolve();
+    }, timeoutMs);
+  });
+
+  await Promise.race([cleanupPromise, timeoutPromise]).catch((error) => {
+    logger.error(`Shutdown cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+  }).finally(() => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  });
+
+  if (timedOut) {
+    logger.warning(`Shutdown cleanup timed out after ${timeoutMs}ms; forcing exit.`);
+  }
 
   if (options.isDaemon) {
     stopStatusServer();
@@ -964,7 +990,16 @@ function setupShutdownHandlers(
   isDaemon: boolean = false,
   cleanup?: () => void
 ): void {
-  const shutdown = () => performServeShutdown(sessionManager, { isDaemon, cleanup });
+  let shutdownPromise: Promise<never> | null = null;
+  const shutdown = () => {
+    if (shutdownPromise) {
+      return;
+    }
+    shutdownPromise = performServeShutdown(sessionManager, { isDaemon, cleanup }).catch((error) => {
+      logger.error(`Shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    });
+  };
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
