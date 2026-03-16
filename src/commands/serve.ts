@@ -1011,6 +1011,7 @@ export async function serveStart(options: {
   }
 
   const usingUnlockMode = Boolean(options.unlockToken);
+  const skipOwnerBindingCheck = process.env.GITSPACE_SKIP_OWNER_BINDING_CHECK === '1';
 
   let password: string | null = null;
   let identity: Identity | null = null;
@@ -1125,7 +1126,10 @@ export async function serveStart(options: {
       stdin: 'pipe',
       stdout: Bun.file(logFile),
       stderr: Bun.file(logFile),
-      env: process.env,
+      env: {
+        ...process.env,
+        GITSPACE_SKIP_OWNER_BINDING_CHECK: '1',
+      },
     });
 
     // Send password via stdin (non-unlock mode)
@@ -1318,11 +1322,13 @@ export async function serveStart(options: {
       }
 
       options.relayPubkey ??= relayIdentity.publicKey;
-      await ensureServeOwnerBindingForStartup(ownerUserRootId, {
-        takeover: options.takeover,
-        yes: options.yes,
-        currentRelay: relayIdentity,
-      });
+      if (!skipOwnerBindingCheck) {
+        await ensureServeOwnerBindingForStartup(ownerUserRootId, {
+          takeover: options.takeover,
+          yes: options.yes,
+          currentRelay: relayIdentity,
+        });
+      }
     } catch (error) {
       await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
       throw error;
