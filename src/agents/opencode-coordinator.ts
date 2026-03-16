@@ -89,8 +89,8 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
     && session.metadata?.agentSessionId === agentSessionId;
 }
 
-function isTopLevelWorkspaceSession(target: AgentWorkspaceTarget, session: OpenCodeSessionRecord): boolean {
-  return session.directory === normalizeWorkspacePath(target.workspacePath) && !session.parentID;
+function isTopLevelWorkspaceSession(normalizedWorkspacePath: string, session: OpenCodeSessionRecord): boolean {
+  return session.directory === normalizedWorkspacePath && !session.parentID;
 }
 
 export class OpenCodeCoordinator {
@@ -110,10 +110,8 @@ export class OpenCodeCoordinator {
     const client = createClient(runtime);
     const sessions = await client.listSessions();
     const history = await readStoredSessionHistory(target.workspaceId);
-    const filtered = sessions.filter((session) => isTopLevelWorkspaceSession(target, session));
-    if (filtered.length === 0 && Object.keys(history.sessions).length > 0) {
-      return toSummaries(target.workspaceId, history.sessions);
-    }
+    const normalizedWorkspacePath = normalizeWorkspacePath(target.workspacePath);
+    const filtered = sessions.filter((session) => isTopLevelWorkspaceSession(normalizedWorkspacePath, session));
     await replaceStoredSessions(
       target.workspaceId,
       filtered.map((session) => ({
