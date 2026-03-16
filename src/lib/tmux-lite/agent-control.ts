@@ -9,7 +9,10 @@ export function ensureAgentControlInitialized(): Promise<void> {
     initializePromise = (async () => {
       await defaultOpenCodeRuntimeManager.initialize();
       await defaultAgentEventManager.initialize();
-    })();
+    })().catch((error) => {
+      initializePromise = null;
+      throw error;
+    });
   }
   return initializePromise;
 }

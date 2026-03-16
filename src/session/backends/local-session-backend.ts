@@ -514,9 +514,11 @@ export class LocalSessionBackend implements SessionBackend {
           }
         },
       });
-    } catch {
+    } catch (error) {
       this.agentStateCache = {};
       this.stopAgentWatch = null;
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({ type: 'error', message: `Failed to initialize agent state watch: ${message}` });
     }
     this.connected = true;
     this.emit({ type: 'status', status: 'connected' });

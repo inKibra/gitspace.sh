@@ -70,6 +70,7 @@ export class AgentEventManager {
   /** Track previously-seen status to detect busy→idle transitions */
   private readonly previousStatuses = new Map<string, SessionStatus>();
   private readonly workspacePaths = new Map<string, string>();
+  private readonly persistedWriteChains = new Map<string, Promise<void>>();
 
   constructor(runtimeManager: OpenCodeRuntimeManager) {
     this.runtimeManager = runtimeManager;
@@ -118,6 +119,18 @@ export class AgentEventManager {
     }
   }
 
+  private queuePersistedWrite(workspaceId: string, operation: () => Promise<void>): void {
+    const previous = this.persistedWriteChains.get(workspaceId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(operation)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[agent-event-manager] failed to persist session history for ${workspaceId}: ${message}`);
+      });
+    this.persistedWriteChains.set(workspaceId, next);
+  }
+
   private getOrCreateState(workspaceId: string): WorkspaceAgentState {
     let state = this.workspaceStates.get(workspaceId);
     if (!state) {
@@ -164,15 +177,18 @@ export class AgentEventManager {
         (session) => session.directory === info.workspacePath && !session.parentID,
       );
       state.sessions = filtered.map((s) => ({ id: s.id, title: s.title ?? s.id }));
-      void replaceStoredSessions(
+      this.queuePersistedWrite(
         info.workspaceId,
-        filtered.map((session) => ({
-          id: session.id,
-          title: session.title ?? session.id,
-          rawTitle: session.title,
-          parentID: session.parentID,
-          updatedAt: typeof session.time?.updated === 'number' ? new Date(session.time.updated).toISOString() : undefined,
-        })),
+        () => replaceStoredSessions(
+          info.workspaceId,
+          filtered.map((session) => ({
+            id: session.id,
+            title: session.title ?? session.id,
+            rawTitle: session.title,
+            parentID: session.parentID,
+            updatedAt: typeof session.time?.updated === 'number' ? new Date(session.time.updated).toISOString() : undefined,
+          })),
+        ),
       );
     }
 
@@ -256,12 +272,12 @@ export class AgentEventManager {
         this.emit({ type: 'agent_session_status', workspaceId, sessionId: sessionID, status });
         const existingSession = state.sessions.find((session) => session.id === sessionID);
         if (existingSession) {
-          void upsertStoredSession(workspaceId, {
+          this.queuePersistedWrite(workspaceId, () => upsertStoredSession(workspaceId, {
             id: sessionID,
             title: existingSession.title,
             rawTitle: existingSession.title,
             lastKnownStatus: status.type,
-          });
+          }));
         }
 
         // Reset text accumulator on new busy turn so each turn gets a fresh preview
@@ -340,7 +356,7 @@ export class AgentEventManager {
           state.sessions.push({ id, title: titleOrId });
         }
         this.emit({ type: 'agent_session_created', workspaceId, sessionId: id, title: titleOrId });
-        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title, parentID: props.info.parentID });
+        this.queuePersistedWrite(workspaceId, () => upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title, parentID: props.info.parentID }));
         break;
       }
 
@@ -358,7 +374,7 @@ export class AgentEventManager {
         if (idx !== -1) state.sessions[idx] = { id, title: titleOrId };
         if (idx === -1) state.sessions.push({ id, title: titleOrId });
         this.emit({ type: 'agent_session_updated', workspaceId, sessionId: id, title: titleOrId });
-        void upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title, parentID: props.info.parentID });
+        this.queuePersistedWrite(workspaceId, () => upsertStoredSession(workspaceId, { id, title: titleOrId, rawTitle: title, parentID: props.info.parentID }));
         break;
       }
 
@@ -372,7 +388,7 @@ export class AgentEventManager {
         this.previousStatuses.delete(`${workspaceId}:${id}`);
         this.textAccumulators.delete(`${workspaceId}:${id}`);
         this.emit({ type: 'agent_session_deleted', workspaceId, sessionId: id });
-        void deleteStoredSession(workspaceId, id);
+        this.queuePersistedWrite(workspaceId, () => deleteStoredSession(workspaceId, id));
         break;
       }
 

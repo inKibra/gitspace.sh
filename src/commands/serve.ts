@@ -1386,18 +1386,85 @@ export async function serveStart(options: {
     throw error;
   }
 
-  let currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((workspace) => [workspace.workspaceId, workspace]));
-  const stopAgentWatch = await watchAgentState({
-    onSnapshot: (workspaces) => {
-      currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
-    },
-    onUpdate: (delta) => {
-      void sessionManager.broadcastAgentStateUpdate(delta);
-    },
-    onError: (error) => {
-      logger.error(`[serve] tmux-lite agent watch failed: ${error.message}`);
-    },
-  });
+  const applyAgentDelta = (delta: import('../serve/agent-event-manager.js').AgentStateUpdateDelta): void => {
+    if (delta.type === 'agent_state_snapshot') {
+      currentAgentSnapshot = { ...delta.workspaces };
+      return;
+    }
+    if (!('workspaceId' in delta)) {
+      return;
+    }
+    const state = currentAgentSnapshot[delta.workspaceId] ?? {
+      workspaceId: delta.workspaceId,
+      sessions: [],
+      statuses: {},
+      pendingPermissions: {},
+      lastMessages: {},
+    };
+    currentAgentSnapshot[delta.workspaceId] = state;
+    switch (delta.type) {
+      case 'agent_session_status':
+        state.statuses[delta.sessionId] = delta.status;
+        break;
+      case 'agent_permission_added':
+        if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
+        state.pendingPermissions[delta.sessionId].push(delta.permission);
+        break;
+      case 'agent_permission_removed':
+        if (state.pendingPermissions[delta.sessionId]) {
+          state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
+            (permission) => permission.id !== delta.permissionId,
+          );
+        }
+        break;
+      case 'agent_session_error':
+        break;
+      case 'agent_last_message':
+        state.lastMessages[delta.sessionId] = delta.preview;
+        break;
+      case 'agent_session_created':
+        if (!state.sessions.some((session) => session.id === delta.sessionId)) {
+          state.sessions.push({ id: delta.sessionId, title: delta.title });
+        }
+        break;
+      case 'agent_session_updated': {
+        const index = state.sessions.findIndex((session) => session.id === delta.sessionId);
+        if (index === -1) {
+          state.sessions.push({ id: delta.sessionId, title: delta.title });
+        } else {
+          state.sessions[index] = { id: delta.sessionId, title: delta.title };
+        }
+        break;
+      }
+      case 'agent_session_deleted':
+        state.sessions = state.sessions.filter((session) => session.id !== delta.sessionId);
+        delete state.statuses[delta.sessionId];
+        delete state.pendingPermissions[delta.sessionId];
+        delete state.lastMessages[delta.sessionId];
+        break;
+    }
+  };
+
+  let currentAgentSnapshot: Record<string, import('../serve/agent-event-manager.js').WorkspaceAgentState> = {};
+  let stopAgentWatch: (() => void) | null = null;
+  try {
+    currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((workspace) => [workspace.workspaceId, workspace]));
+    stopAgentWatch = await watchAgentState({
+      onSnapshot: (workspaces) => {
+        currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
+      },
+      onUpdate: (delta) => {
+        applyAgentDelta(delta);
+        void sessionManager.broadcastAgentStateUpdate(delta);
+      },
+      onError: (error) => {
+        logger.error(`[serve] tmux-lite agent watch failed: ${error.message}`);
+      },
+    });
+  } catch (error) {
+    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+    throw error;
+  }
 
   // Event handler - update daemon state
   const eventHandler: ServeEventHandler = (event) => {
@@ -1413,13 +1480,9 @@ export async function serveStart(options: {
         break;
       case 'client_authenticated': {
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        void getAgentState().then((workspaces) => {
-          const snapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
-          currentAgentSnapshot = snapshot;
-          if (Object.keys(snapshot).length > 0) {
-            void sessionManager.sendAgentStateSnapshot(event.connectionId, snapshot);
-          }
-        }).catch(() => undefined);
+        if (Object.keys(currentAgentSnapshot).length > 0) {
+          void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
+        }
         break;
       }
       case 'client_disconnected':
@@ -1495,7 +1558,10 @@ export async function serveStart(options: {
   }
 
   // Set up shutdown handlers with daemon cleanup
-  setupShutdownHandlers(sessionManager, true, () => stopServeProcessHosting(processHostManager, processHostRefreshTimer));
+  setupShutdownHandlers(sessionManager, true, () => {
+    stopAgentWatch?.();
+    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
+  });
 
   // Keep process alive
   await new Promise(() => {});

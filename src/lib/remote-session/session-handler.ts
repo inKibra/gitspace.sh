@@ -615,7 +615,10 @@ export class RemoteSessionHandler {
 
       case 'list_agent_sessions':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to list agent sessions');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to list agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
         await this.handleListAgentSessions(session, msg.requestId, msg.workspaceId, msg.mode, sendResponse);
@@ -623,7 +626,10 @@ export class RemoteSessionHandler {
 
       case 'create_agent_session':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to create agent sessions');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to create agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
         await this.handleCreateAgentSession(session, msg.requestId, msg.workspaceId, msg.title, sendResponse);
@@ -631,7 +637,10 @@ export class RemoteSessionHandler {
 
       case 'abort_agent_session':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to abort agent sessions');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to abort agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
         await this.handleAbortAgentSession(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
@@ -639,7 +648,10 @@ export class RemoteSessionHandler {
 
       case 'respond_agent_permission':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to respond to agent permissions');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to respond to agent permissions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
         await this.handleRespondAgentPermission(
@@ -1843,7 +1855,7 @@ export class RemoteSessionHandler {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_SESSIONS_FAILED', detail, { workspaceId });
+      await this.sendError(_session, sendResponse, 'AGENT_SESSIONS_FAILED', detail, { workspaceId, requestId });
     }
   }
 
@@ -1865,7 +1877,7 @@ export class RemoteSessionHandler {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_CREATE_FAILED', detail, { workspaceId });
+      await this.sendError(_session, sendResponse, 'AGENT_CREATE_FAILED', detail, { workspaceId, requestId });
     }
   }
 
@@ -1887,7 +1899,7 @@ export class RemoteSessionHandler {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_ABORT_FAILED', detail, { workspaceId });
+      await this.sendError(_session, sendResponse, 'AGENT_ABORT_FAILED', detail, { workspaceId, requestId });
     }
   }
 
@@ -1911,7 +1923,7 @@ export class RemoteSessionHandler {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_PERMISSION_FAILED', detail, { workspaceId });
+      await this.sendError(_session, sendResponse, 'AGENT_PERMISSION_FAILED', detail, { workspaceId, requestId });
     }
   }
 
@@ -2204,7 +2216,14 @@ export class RemoteSessionHandler {
   /**
    * Cleanup
    */
-  cleanupConnection(_connectionId: string): void {}
+  cleanupConnection(connectionId: string): void {
+    const pending = this.pendingAttachRuns.get(connectionId);
+    if (!pending) {
+      return;
+    }
+    pending.abort();
+    this.pendingAttachRuns.delete(connectionId);
+  }
 
   async cleanup(): Promise<void> {
     // Clean up process schedulers

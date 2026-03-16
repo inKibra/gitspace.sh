@@ -514,6 +514,7 @@ export async function watchAgentState(handlers: {
   await ensureServer();
   return new Promise<() => void>((resolve, reject) => {
     let started = false;
+    let closedByCaller = false;
     let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
     let buffer: Buffer = Buffer.alloc(0);
 
@@ -549,6 +550,7 @@ export async function watchAgentState(handlers: {
                 if (!started) {
                   started = true;
                   resolve(() => {
+                    closedByCaller = true;
                     try { sock.end(); } catch {}
                   });
                 }
@@ -571,6 +573,10 @@ export async function watchAgentState(handlers: {
           close() {
             if (!started) {
               reject(new Error('Connection closed before watch started'));
+              return;
+            }
+            if (!closedByCaller) {
+              handlers.onError?.(new Error('Agent watch connection closed'));
             }
           },
           error(_, error) {

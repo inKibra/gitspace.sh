@@ -243,12 +243,19 @@ function broadcastAgentStateDelta(delta: import('../../serve/agent-event-manager
   }
 }
 
-const agentControlReady = ensureAgentControlInitialized();
-void agentControlReady.then(() => {
-  subscribeAgentControl((delta) => {
-    broadcastAgentStateDelta(delta);
-  });
-}).catch((error) => {
+let agentControlSubscribed = false;
+
+async function getAgentControlReady(): Promise<void> {
+  await ensureAgentControlInitialized();
+  if (!agentControlSubscribed) {
+    subscribeAgentControl((delta) => {
+      broadcastAgentStateDelta(delta);
+    });
+    agentControlSubscribed = true;
+  }
+}
+
+void getAgentControlReady().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[server] failed to initialize agent control: ${message}`);
 });
@@ -1948,7 +1955,7 @@ routerListener = Bun.listen({
 
           case 'agent-state':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               res = { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -1958,7 +1965,7 @@ routerListener = Bun.listen({
 
           case 'agent-watch':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               socketState.watchesAgentState = true;
               agentStateWatchers.add(socket);
               res = { type: 'agent-watch-started' };
@@ -1970,7 +1977,7 @@ routerListener = Bun.listen({
 
           case 'agent-sessions':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               const sessions = cmd.mode === 'known'
                 ? await getKnownAgentSessions(cmd.target)
                 : await listLiveAgentSessions(cmd.target);
@@ -1983,7 +1990,7 @@ routerListener = Bun.listen({
 
           case 'agent-create':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               const sessions = await createAgentSession(cmd.target, cmd.title);
               res = { type: 'agent-sessions', sessions };
             } catch (e) {
@@ -1994,7 +2001,7 @@ routerListener = Bun.listen({
 
           case 'agent-abort':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               const ok = await abortAgentSession(cmd.target, cmd.agentSessionId);
               res = { type: 'agent-bool', ok };
             } catch (e) {
@@ -2005,7 +2012,7 @@ routerListener = Bun.listen({
 
           case 'agent-attach':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
               res = { type: 'session', session };
             } catch (e) {
@@ -2016,7 +2023,7 @@ routerListener = Bun.listen({
 
           case 'agent-permission':
             try {
-              await agentControlReady;
+              await getAgentControlReady();
               const ok = await respondToAgentPermission(
                 cmd.target,
                 cmd.agentSessionId,

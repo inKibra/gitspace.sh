@@ -2052,8 +2052,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingReplayTimeline(message.message, undefined, true);
         this.rejectPendingDismissReplay(message.message, undefined, true);
         this.rejectPendingUndismissReplay(message.message, undefined, true);
-        this.rejectPendingAgentSessions(message.message, message.workspaceId);
-        this.rejectPendingAgentBooleans(message.message, message.workspaceId);
+        this.rejectPendingAgentSessions(message.message, message.workspaceId, message.requestId);
+        this.rejectPendingAgentBooleans(message.message, message.workspaceId, message.requestId);
         if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
@@ -2237,24 +2237,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.reject(new Error(message));
   }
 
-  private rejectPendingAgentSessions(message: string, workspaceId?: string): void {
-    for (const [requestId, pending] of this.pendingAgentSessions) {
+  private rejectPendingAgentSessions(message: string, workspaceId?: string, requestId?: string): void {
+    for (const [pendingRequestId, pending] of this.pendingAgentSessions) {
+      if (requestId && pendingRequestId !== requestId) {
+        continue;
+      }
       if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
         continue;
       }
       clearTimeout(pending.timeout);
-      this.pendingAgentSessions.delete(requestId);
+      this.pendingAgentSessions.delete(pendingRequestId);
       pending.reject(new Error(message));
     }
   }
 
-  private rejectPendingAgentBooleans(message: string, workspaceId?: string): void {
-    for (const [requestId, pending] of this.pendingAgentBooleans) {
+  private rejectPendingAgentBooleans(message: string, workspaceId?: string, requestId?: string): void {
+    for (const [pendingRequestId, pending] of this.pendingAgentBooleans) {
+      if (requestId && pendingRequestId !== requestId) {
+        continue;
+      }
       if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
         continue;
       }
       clearTimeout(pending.timeout);
-      this.pendingAgentBooleans.delete(requestId);
+      this.pendingAgentBooleans.delete(pendingRequestId);
       pending.reject(new Error(message));
     }
   }
