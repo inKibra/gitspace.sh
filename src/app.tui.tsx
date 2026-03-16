@@ -21,6 +21,7 @@ import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
 import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
 import {
+  getReplayAnsiBufferOffline,
   getReplayFrameOffline,
   getReplayTimelineOffline,
   dismissReplayOffline,
@@ -1246,7 +1247,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [activeReplay?.dismissedAt]);
 
   const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return Promise.resolve().then(() => getReplayFrameOffline(replayId, target));
+    return Promise.resolve(getReplayFrameOffline(replayId, target));
   }, []);
 
   const loadReplayTimeline = useCallback((replayId: string) => {
@@ -1565,12 +1566,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       });
     },
     onMarkRead: async (itemId) => {
-      if (agentInboxItems.some((i) => i.id === itemId)) {
-        setAgentInboxItems((prev) => prev.map((i) => i.id === itemId ? { ...i, read: true } : i));
-      } else {
-        await markLocalInboxRead(itemId);
-        await refreshInbox();
-      }
+      await markLocalInboxRead(itemId);
+      await refreshInbox();
     },
     pollIntervalMs: 5000,
     onRefreshInbox: refreshInbox,
