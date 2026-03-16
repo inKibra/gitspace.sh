@@ -1,34 +1,41 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';
+import {
+  buildAuthenticatedOpenCodeUrl,
+  createOpenCodeBasicAuthHeader,
+  type OpenCodeRuntimeInfo,
+  type OpenCodeRuntimeTarget,
+} from './opencode-runtime-shared.js';
 
-export interface OpenCodeRuntimeTarget {
-  workspaceId: string;
-  workspacePath: string;
-  projectName?: string;
-}
-
-export interface OpenCodeRuntimeInfo {
-  workspaceId: string;
-  workspacePath: string;
-  hostname: string;
-  port: number;
-  baseUrl: string;
-  username: string;
-  password: string;
-  startedAt: string;
-}
-
-export function buildAuthenticatedOpenCodeUrl(info: Pick<OpenCodeRuntimeInfo, 'hostname' | 'port' | 'username' | 'password'>): string {
-  const url = new URL(`http://${info.hostname}:${info.port}`);
-  url.username = info.username;
-  url.password = info.password;
-  return url.toString();
-}
+export type { OpenCodeRuntimeInfo, OpenCodeRuntimeTarget } from './opencode-runtime-shared.js';
 
 interface RuntimeEntry {
   info: OpenCodeRuntimeInfo;
-  process: ReturnType<typeof Bun.spawn>;
+  process: OpenCodeRuntimeProcess;
+}
+
+interface OpenCodeRuntimeProcess {
+  exitCode: number | null;
+  kill(): void;
+}
+
+interface BunSpawnAPI {
+  spawn(options: {
+    cmd: string[];
+    cwd: string;
+    env: Record<string, string | undefined>;
+    stdout: 'ignore';
+    stderr: 'ignore';
+  }): OpenCodeRuntimeProcess;
+}
+
+function getBunSpawn(): BunSpawnAPI['spawn'] {
+  const bun = (globalThis as typeof globalThis & { Bun?: BunSpawnAPI }).Bun;
+  if (!bun) {
+    throw new Error('OpenCode runtime requires Bun.spawn');
+  }
+  return bun.spawn.bind(bun);
 }
 
 function hashToPort(workspaceId: string): number {
@@ -40,15 +47,11 @@ function createPassword(): string {
   return randomBytes(24).toString('base64url');
 }
 
-function buildBasicAuth(username: string, password: string): string {
-  return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
-}
-
 async function checkHealth(info: OpenCodeRuntimeInfo): Promise<boolean> {
   try {
     const response = await fetch(`${info.baseUrl}/global/health`, {
       headers: {
-        authorization: buildBasicAuth(info.username, info.password),
+        authorization: createOpenCodeBasicAuthHeader(info),
       },
     });
     return response.ok;
@@ -138,7 +141,8 @@ export class OpenCodeRuntimeManager {
         continue;
       }
 
-      const child = Bun.spawn({
+      const spawn = getBunSpawn();
+      const child = spawn({
         cmd: ['opencode', 'web', '--hostname', '127.0.0.1', '--port', String(port)],
         cwd: target.workspacePath,
         env: {
@@ -194,6 +198,4 @@ export class OpenCodeRuntimeManager {
 
 export const defaultOpenCodeRuntimeManager = new OpenCodeRuntimeManager();
 
-export function createOpenCodeBasicAuthHeader(info: Pick<OpenCodeRuntimeInfo, 'username' | 'password'>): string {
-  return buildBasicAuth(info.username, info.password);
-}
+export { buildAuthenticatedOpenCodeUrl, createOpenCodeBasicAuthHeader };

@@ -2999,6 +2999,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.pendingEventChunks.clear();
+    this.pendingReplayFrameChunks.clear();
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
     this.rejectPendingGithubRepoList('Remote session disconnected');
     this.rejectPendingRemoteBranches('Remote session disconnected', undefined, true);
