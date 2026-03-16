@@ -1565,8 +1565,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       });
     },
     onMarkRead: async (itemId) => {
-      await markLocalInboxRead(itemId);
-      await refreshInbox();
+      if (agentInboxItems.some((i) => i.id === itemId)) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === itemId ? { ...i, read: true } : i));
+      } else {
+        await markLocalInboxRead(itemId);
+        await refreshInbox();
+      }
     },
     pollIntervalMs: 5000,
     onRefreshInbox: refreshInbox,
