@@ -174,7 +174,7 @@ export function applyReplayFrame(
   write: (data: string | Uint8Array) => void,
   previousCheckpointId: string | null,
   fromSeq: number,
-): string | null {
+): void {
   const checkpointId = frame.checkpoint?.checkpointId ?? null;
   // Two null checkpoints count as "same" only if we've already applied events (fromSeq > 0),
   // otherwise it's a fresh load that needs a terminal reset.
@@ -204,8 +204,6 @@ export function applyReplayFrame(
       applyFrameEvent(event, write);
     }
   }
-
-  return checkpointId;
 }
 
 function applyFrameEvent(

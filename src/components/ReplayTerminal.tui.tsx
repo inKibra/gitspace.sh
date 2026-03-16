@@ -359,12 +359,12 @@ export function ReplayTerminal({
     currentCheckpointIdRef.current = null;
     currentSeqRef.current = 0;
 
-    const currentSeq = currentTarget.atSeq ?? replay.lastSeq;
+    const currentSeq = timeline.steps[currentStepIndexRef.current]?.seq ?? replay.lastSeq;
     const nextIndex = findCheckpointStepIndex(timeline, currentSeq, direction);
     if (nextIndex >= 0) {
       setCurrentStepIndex(nextIndex);
     }
-  }, [currentTarget.atSeq, invalidatePendingFrameLoad, replay.lastSeq, timeline]);
+  }, [invalidatePendingFrameLoad, replay.lastSeq, timeline]);
 
   const adjustPlaybackSpeed = useCallback((direction: -1 | 1, count = 1) => {
     setPlaybackSpeedIndex((index) => clamp(index + (direction * count), 0, PLAYBACK_SPEEDS.length - 1));
