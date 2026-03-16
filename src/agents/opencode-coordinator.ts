@@ -92,6 +92,8 @@ function isTopLevelWorkspaceSession(target: AgentWorkspaceTarget, session: OpenC
 }
 
 export class OpenCodeCoordinator {
+  private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
+
   async ensureRuntime(target: AgentWorkspaceTarget): Promise<OpenCodeRuntimeInfo> {
     return defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime(target);
   }
@@ -140,6 +142,20 @@ export class OpenCodeCoordinator {
   }
 
   async ensureAgentTerminalSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
+    const key = `${target.workspaceId}:${agentSessionId}`;
+    const inFlight = this.inflightTerminalSessions.get(key);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId).finally(() => {
+      this.inflightTerminalSessions.delete(key);
+    });
+    this.inflightTerminalSessions.set(key, ensurePromise);
+    return ensurePromise;
+  }
+
+  private async ensureAgentTerminalSessionInternal(target: AgentWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
     const history = await readStoredSessionHistory(target.workspaceId);
     const record = history.sessions[agentSessionId];
     const sessions = await listTmuxSessions();
