@@ -1331,12 +1331,22 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     const workspaceIds = new Set([
       ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
       ...Object.keys(agentEvents.workspaceStates),
+      ...Object.keys(localBackend?.getAgentStateSnapshot() ?? {}),
     ]);
 
     for (const workspaceId of workspaceIds) {
       const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
       const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
-      merged[workspaceId] = baseSessions.map((session) => {
+      const snapshotSessions = (localBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
+        id: session.id,
+        workspaceId,
+        title: session.title,
+        updatedAt: undefined,
+      }));
+      const combined = new Map<string, (typeof baseSessions)[number]>();
+      for (const session of snapshotSessions) combined.set(session.id, session);
+      for (const session of baseSessions) combined.set(session.id, session);
+      merged[workspaceId] = Array.from(combined.values()).map((session) => {
         const live = liveStates[session.id];
         if (!live) return session;
         return {
@@ -1349,7 +1359,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
 
     return merged;
-  }, [agentEvents.workspaceStates, workspaceAgentSessions.sessionsByWorkspace]);
+  }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({

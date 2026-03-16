@@ -613,12 +613,22 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     const workspaceIds = new Set([
       ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
       ...Object.keys(agentEvents.workspaceStates),
+      ...Object.keys(remoteBackend?.getAgentStateSnapshot() ?? {}),
     ]);
 
     for (const workspaceId of workspaceIds) {
       const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
       const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
-      merged[workspaceId] = baseSessions.map((session) => {
+      const snapshotSessions = (remoteBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
+        id: session.id,
+        workspaceId,
+        title: session.title,
+        updatedAt: undefined,
+      }));
+      const combined = new Map<string, (typeof baseSessions)[number]>();
+      for (const session of snapshotSessions) combined.set(session.id, session);
+      for (const session of baseSessions) combined.set(session.id, session);
+      merged[workspaceId] = Array.from(combined.values()).map((session) => {
         const live = liveStates[session.id];
         if (!live) return session;
         return {
@@ -631,7 +641,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
 
     return merged;
-  }, [agentEvents.workspaceStates, workspaceAgentSessions.sessionsByWorkspace]);
+  }, [agentEvents.workspaceStates, remoteBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
