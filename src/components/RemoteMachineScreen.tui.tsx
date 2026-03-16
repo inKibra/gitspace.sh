@@ -605,6 +605,30 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
 
+  const agentSessionsByWorkspace = useMemo(() => {
+    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
+    const workspaceIds = new Set([
+      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
+      ...Object.keys(agentEvents.workspaceStates),
+    ]);
+
+    for (const workspaceId of workspaceIds) {
+      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
+      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
+      merged[workspaceId] = baseSessions.map((session) => {
+        const live = liveStates[session.id];
+        if (!live) return session;
+        return {
+          ...session,
+          status: live.status,
+          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+        };
+      });
+    }
+
+    return merged;
+  }, [agentEvents.workspaceStates, workspaceAgentSessions.sessionsByWorkspace]);
+
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
     sessions: remote.sessions,
@@ -647,7 +671,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         },
       });
     },
-    agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
+    agentSessionsByWorkspace,
     agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onOpenEvents: handleOpenEvents,

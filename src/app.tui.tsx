@@ -1291,6 +1291,30 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
 
+  const agentSessionsByWorkspace = useMemo(() => {
+    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
+    const workspaceIds = new Set([
+      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
+      ...Object.keys(agentEvents.workspaceStates),
+    ]);
+
+    for (const workspaceId of workspaceIds) {
+      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
+      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
+      merged[workspaceId] = baseSessions.map((session) => {
+        const live = liveStates[session.id];
+        if (!live) return session;
+        return {
+          ...session,
+          status: live.status,
+          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+        };
+      });
+    }
+
+    return merged;
+  }, [agentEvents.workspaceStates, workspaceAgentSessions.sessionsByWorkspace]);
+
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
@@ -1340,7 +1364,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         },
       });
     },
-    agentSessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
+    agentSessionsByWorkspace,
     agentSessionCounts: agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: refreshWorkspaces,

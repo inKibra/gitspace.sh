@@ -525,9 +525,9 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 `}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
+                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}{signal ? ` ${signal}` : ''}</div>
                   <div className="text-xs text-[#8b949e] truncate">
-                    agent session{signal ? ` • ${signal}` : ''}
+                    agent session
                   </div>
                 </div>
                 {item.session.updatedAt && (
