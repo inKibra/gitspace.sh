@@ -194,6 +194,7 @@ export function applyReplayFrame(
     // Different checkpoint, backward step, or first load — reset and replay from checkpoint
     write(TERMINAL_RESET);
     if (frame.checkpoint) {
+      write(resizeSequence(frame.checkpoint.cols, frame.checkpoint.rows));
       const checkpointBytes = decodeBase64(frame.checkpoint.ansi);
       if (checkpointBytes.byteLength > 0) {
         write(checkpointBytes);
