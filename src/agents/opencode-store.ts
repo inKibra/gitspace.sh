@@ -69,14 +69,15 @@ async function withWorkspaceWriteLock<T>(workspaceId: string, operation: () => P
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  workspaceWriteQueues.set(workspaceId, previous.catch(() => undefined).then(() => current));
+  const queued = previous.catch(() => undefined).then(() => current);
+  workspaceWriteQueues.set(workspaceId, queued);
 
   await previous.catch(() => undefined);
   try {
     return await operation();
   } finally {
     release();
-    if (workspaceWriteQueues.get(workspaceId) === current) {
+    if (workspaceWriteQueues.get(workspaceId) === queued) {
       workspaceWriteQueues.delete(workspaceId);
     }
   }
