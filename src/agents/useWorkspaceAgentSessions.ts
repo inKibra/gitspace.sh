@@ -8,6 +8,7 @@ export interface AgentSessionInfo {
   title: string;
   updatedAt?: string;
   status?: SessionStatus;
+  pendingPermissionCount?: number;
 }
 
 export interface UseWorkspaceAgentSessionsOptions {
@@ -18,6 +19,7 @@ function mapSessions(
   workspaceId: string,
   sessions: Array<{ id: string; title: string; updatedAt?: string }>,
   statusMap: Record<string, SessionStatus>,
+  pendingPermissionMap: Record<string, unknown[]>,
 ): AgentSessionInfo[] {
   return sessions.map((session) => ({
     id: session.id,
@@ -25,6 +27,7 @@ function mapSessions(
     title: session.title,
     updatedAt: session.updatedAt,
     status: statusMap[session.id],
+    pendingPermissionCount: pendingPermissionMap[session.id]?.length ?? 0,
   }));
 }
 
@@ -50,6 +53,11 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     return snapshot[workspaceId]?.statuses ?? {};
   }, [options.backend]);
 
+  const getPendingPermissionMap = useCallback((workspaceId: string) => {
+    const snapshot = options.backend?.getAgentStateSnapshot() ?? {};
+    return snapshot[workspaceId]?.pendingPermissions ?? {};
+  }, [options.backend]);
+
   const loadWorkspaceSessions = useCallback(async (workspaceId: string) => {
     const getKnownAgentSessions = requireAgentMethod('getKnownAgentSessions');
     const listAgentSessions = requireAgentMethod('listAgentSessions');
@@ -59,7 +67,7 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
 
     try {
       const known = await getKnownAgentSessions(workspaceId);
-      const knownMapped = mapSessions(workspaceId, known, getStatusMap(workspaceId));
+      const knownMapped = mapSessions(workspaceId, known, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
 
       if (knownMapped.length > 0) {
         setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: knownMapped }));
@@ -67,7 +75,7 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
           .then((live) => {
             setSessionsByWorkspace((current) => ({
               ...current,
-              [workspaceId]: mapSessions(workspaceId, live, getStatusMap(workspaceId)),
+              [workspaceId]: mapSessions(workspaceId, live, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId)),
             }));
           })
           .catch((err) => setError(err instanceof Error ? err.message : String(err)))
@@ -76,7 +84,7 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
       }
 
       const live = await listAgentSessions(workspaceId);
-      const mapped = mapSessions(workspaceId, live, getStatusMap(workspaceId));
+      const mapped = mapSessions(workspaceId, live, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
       setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
       return mapped;
     } catch (err) {
@@ -86,25 +94,25 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     } finally {
       setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
     }
-  }, [getStatusMap, requireAgentMethod]);
+  }, [getPendingPermissionMap, getStatusMap, requireAgentMethod]);
 
   const createSession = useCallback(async (workspaceId: string, title?: string) => {
     const createAgentSession = requireAgentMethod('createAgentSession');
     const sessions = await createAgentSession(workspaceId, title);
-    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId));
+    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
     setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
     return mapped;
-  }, [getStatusMap, requireAgentMethod]);
+  }, [getPendingPermissionMap, getStatusMap, requireAgentMethod]);
 
   const abortSession = useCallback(async (workspaceId: string, sessionId: string) => {
     const abortAgentSession = requireAgentMethod('abortAgentSession');
     const listAgentSessions = requireAgentMethod('listAgentSessions');
     await abortAgentSession(workspaceId, sessionId);
     const sessions = await listAgentSessions(workspaceId);
-    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId));
+    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
     setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
     return mapped;
-  }, [getStatusMap, requireAgentMethod]);
+  }, [getPendingPermissionMap, getStatusMap, requireAgentMethod]);
 
   const sessions = useMemo(() => {
     if (!activeWorkspaceId) {

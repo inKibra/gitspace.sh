@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -24,6 +24,7 @@ describe.if(shouldRun)('real opencode integration', () => {
 
   test('uses opencode serve, keeps attach alive, and skips replay recording for agent PTYs', async () => {
     const resultFile = join(root, 'result.json');
+    const scriptFile = join(root, 'run-opencode-real-test.ts');
     const script = `
       import { applyTmuxLiteSandboxEnvironment } from '${import.meta.dir.replace('/src/agents/__tests__', '/src/lib/tmux-lite/protocol.ts')}';
       import { LocalSessionBackend } from '${import.meta.dir.replace('/src/agents/__tests__', '/src/session/backends/local-session-backend.ts')}';
@@ -91,8 +92,9 @@ describe.if(shouldRun)('real opencode integration', () => {
         process.exit(process.exitCode ?? 0);
       }
     `;
+    writeFileSync(scriptFile, script);
 
-    const result = spawnSync('bun', ['-e', script], {
+    const result = spawnSync('bun', [scriptFile], {
       cwd: '/Users/bradleat/gitspace/gitspace.sh/workspaces/machine-setup',
       encoding: 'utf8',
       timeout: 60_000,

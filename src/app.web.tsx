@@ -27,7 +27,6 @@ import { useLifecycleController } from './app/session/useLifecycleController.js'
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { buildOpenCodeWebProxyUrl } from './agents/opencode-web.js';
 
 // Import shared components and hooks
 import {
@@ -65,7 +64,7 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 
-type View = "machines" | "terminal" | "review" | "replay" | "agent";
+type View = "machines" | "terminal" | "review" | "replay";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
@@ -129,15 +128,6 @@ export default function App() {
     workspaceId: string;
     workspaceLabel?: string;
   } | null>(null);
-  const [activeAgentView, setActiveAgentView] = useState<{
-    machineId: string;
-    workspaceId: string;
-    title: string;
-    url: string;
-  } | null>(null);
-  const activeAgentViewRef = useRef<typeof activeAgentView>(null);
-  const selectedMachineRef = useRef<MachineInfo | null>(null);
-
   // Identity state (resolved by IdentityGate before relay connection)
   const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
 
@@ -148,117 +138,6 @@ export default function App() {
   const terminal = useTerminal();
   const activeNotificationConfig =
     terminal.notificationConfig ?? localNotificationConfig ?? DEFAULT_NOTIFICATION_CONFIG;
-
-  useEffect(() => {
-    activeAgentViewRef.current = activeAgentView;
-  }, [activeAgentView]);
-
-  useEffect(() => {
-    selectedMachineRef.current = selectedMachine;
-  }, [selectedMachine]);
-
-  useEffect(() => {
-    if (!('serviceWorker' in navigator)) {
-      return;
-    }
-
-    const handleServiceWorkerMessage = (event: MessageEvent) => {
-      const data = event.data as {
-        type?: string;
-        mode?: 'request' | 'stream';
-        machineId?: string;
-        workspaceId?: string;
-        method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
-        path?: string;
-        query?: Record<string, string>;
-        headers?: Record<string, string>;
-        bodyBase64?: string;
-      } | null;
-      const port = event.ports?.[0];
-      if (!data || data.type !== 'gitspace-agent-proxy-request' || !port) {
-        return;
-      }
-
-      const agentView = activeAgentViewRef.current;
-      const machine = selectedMachineRef.current;
-
-      if (
-        !agentView ||
-        !machine ||
-        data.machineId !== agentView.machineId ||
-        data.machineId !== machine.machineId ||
-        data.workspaceId !== agentView.workspaceId
-      ) {
-        port.postMessage({ ok: false, status: 409, error: 'Active agent session is unavailable' });
-        return;
-      }
-
-      if (data.mode === 'stream') {
-        let closed = false;
-        const unsubscribePromise = terminal.subscribeOpenCode(
-          {
-            workspaceId: data.workspaceId!,
-            path: data.path!,
-            query: data.query,
-            headers: data.headers,
-          },
-          (streamEvent) => {
-            if (closed) {
-              return;
-            }
-            port.postMessage({
-              type: 'stream-event',
-              event: streamEvent.event,
-              data: streamEvent.data,
-              id: streamEvent.id,
-            });
-          },
-        );
-
-        unsubscribePromise
-          .then(() => {
-            if (!closed) {
-              port.postMessage({ type: 'stream-open' });
-            }
-          })
-          .catch((error) => {
-            port.postMessage({ type: 'stream-error', message: error instanceof Error ? error.message : String(error) });
-          });
-
-        port.onmessage = async (messageEvent) => {
-          if (messageEvent.data?.type !== 'stream-close' || closed) {
-            return;
-          }
-          closed = true;
-          try {
-            const unsubscribe = await unsubscribePromise;
-            await unsubscribe();
-          } finally {
-            port.postMessage({ type: 'stream-close' });
-          }
-        };
-        return;
-      }
-
-      void terminal.requestOpenCode({
-        workspaceId: data.workspaceId!,
-        method: data.method!,
-        path: data.path!,
-        query: data.query,
-        headers: data.headers,
-        bodyBase64: data.bodyBase64,
-      }).then((response) => {
-        port.postMessage({ ok: true, ...response });
-      }).catch((error) => {
-        port.postMessage({ ok: false, status: 502, error: error instanceof Error ? error.message : String(error) });
-      });
-    };
-
-    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
-    return () => {
-      navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
-    };
-  }, [terminal]);
 
   // Visual viewport hook for keyboard detection
   const keyboardVisible = useVisualViewport();
@@ -905,22 +784,6 @@ export default function App() {
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
       agentSessionPref.persist(agentSessionId);
-      const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
-      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
-        setActiveAgentView({
-          machineId: selectedMachine.machineId,
-          workspaceId,
-          title: workspaceAgentSessions.sessionsByWorkspace[workspaceId]?.find((session) => session.id === agentSessionId)?.title ?? 'Agent Session',
-          url: buildOpenCodeWebProxyUrl({
-            machineId: selectedMachine.machineId,
-            workspaceId,
-            workspacePath: runtime.workspacePath,
-            sessionId: agentSessionId,
-          }),
-        });
-        setView('agent');
-        return;
-      }
       if (!webBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
@@ -938,22 +801,6 @@ export default function App() {
           const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
           if (!created) return;
           agentSessionPref.persist(created.id);
-          const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
-          if ('serviceWorker' in navigator && selectedMachine?.machineId) {
-            setActiveAgentView({
-              machineId: selectedMachine.machineId,
-              workspaceId,
-              title: created.title,
-              url: buildOpenCodeWebProxyUrl({
-                machineId: selectedMachine.machineId,
-                workspaceId,
-                workspacePath: runtime.workspacePath,
-                sessionId: created.id,
-              }),
-            });
-            setView('agent');
-            return;
-          }
           if (!webBackend?.attachAgentSession) {
             throw new Error('Agent attach unavailable');
           }
@@ -1082,27 +929,11 @@ export default function App() {
         } else {
           setAgentPickerWorkspaceId(workspaceId);
           agentSessionPref.persist(agentSessionId);
-          const runtime = await terminal.getOpenCodeRuntimeInfo(workspaceId);
-          if ('serviceWorker' in navigator && selectedMachine?.machineId) {
-            setActiveAgentView({
-              machineId: selectedMachine.machineId,
-              workspaceId,
-              title: workspaceAgentSessions.sessionsByWorkspace[workspaceId]?.find((session) => session.id === agentSessionId)?.title ?? 'Agent Session',
-              url: buildOpenCodeWebProxyUrl({
-                machineId: selectedMachine.machineId,
-                workspaceId,
-                workspacePath: runtime.workspacePath,
-                sessionId: agentSessionId,
-              }),
-            });
-            setView('agent');
-          } else {
-            if (!webBackend?.attachAgentSession) {
-              throw new Error('Agent attach unavailable');
-            }
-            await webBackend.attachAgentSession(workspaceId, agentSessionId);
-            setView('terminal');
+          if (!webBackend?.attachAgentSession) {
+            throw new Error('Agent attach unavailable');
           }
+          await webBackend.attachAgentSession(workspaceId, agentSessionId);
+          setView('terminal');
         }
         return;
       }
@@ -1792,55 +1623,6 @@ export default function App() {
           </div>
         </div>
         <FlowWeb flow={flow} />
-        <Toaster theme="dark" position="top-right" richColors />
-      </>
-    );
-  }
-
-  if (view === 'agent' && activeAgentView) {
-    return (
-      <>
-        <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-              <button
-                onClick={() => {
-                  setView('terminal');
-                  setActiveAgentView(null);
-                }}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
-              >
-                ← <span className="hidden sm:inline ml-1">Sessions</span>
-              </button>
-              <div className="text-sm text-[#8b949e] truncate">
-                <span className="text-[#c678dd]">✦</span>{' '}
-                <span className="text-[#e6edf3]">{activeAgentView.title}</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <button
-                onClick={() => window.open(activeAgentView.url, '_blank', 'noopener,noreferrer')}
-                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
-              >
-                Open in Tab
-              </button>
-              <button
-                onClick={handleDisconnect}
-                className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
-              >
-                Disconnect
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 bg-[#0d1117]">
-            <iframe
-              src={activeAgentView.url}
-              title={activeAgentView.title}
-              className="w-full h-full border-0"
-              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
-            />
-          </div>
-        </div>
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );

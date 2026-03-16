@@ -505,6 +505,13 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
           }
 
           if (item.type === 'agent-session') {
+            const signal = item.session.pendingPermissionCount && item.session.pendingPermissionCount > 0
+              ? `⚡${item.session.pendingPermissionCount}`
+              : item.session.status?.type === 'busy'
+                ? '● busy'
+                : item.session.status?.type === 'retry'
+                  ? '↻ retry'
+                  : '';
             return (
               <div
                 key={`agent-session-${item.workspaceId}-${item.session.id}`}
@@ -520,7 +527,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 <div className="min-w-0 flex-1">
                   <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
                   <div className="text-xs text-[#8b949e] truncate">
-                    agent session{item.session.status?.type ? ` • ${item.session.status.type}` : ''}
+                    agent session{signal ? ` • ${signal}` : ''}
                   </div>
                 </div>
                 {item.session.updatedAt && (

@@ -311,12 +311,18 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           if (item.type === 'agent-session') {
             const textColor = isSelected ? COLORS.selected : '#C678DD';
             const prefix = isSelected ? '>' : ' ';
-            const status = item.session.status?.type ? ` (${item.session.status.type})` : '';
+            const signal = item.session.pendingPermissionCount && item.session.pendingPermissionCount > 0
+              ? ` ⚡${item.session.pendingPermissionCount}`
+              : item.session.status?.type === 'busy'
+                ? ' ●'
+                : item.session.status?.type === 'retry'
+                  ? ' ↻'
+                  : '';
             const timeInfo = item.session.updatedAt ? formatTime(new Date(item.session.updatedAt).getTime()) : '';
             return (
               <box key={`agent-session-${item.workspaceId}-${item.session.id}`} flexDirection="row" height={1}>
                 <text fg={textColor}>{prefix}     ✦ {item.session.title}</text>
-                {status && <text fg={COLORS.textDim}>{status}</text>}
+                {signal && <text fg={COLORS.textDim}>{signal}</text>}
                 {timeInfo && <text fg={COLORS.textDim}> {timeInfo}</text>}
               </box>
             );

@@ -4,7 +4,11 @@ import "./index.css";
 import App from "../src/app.web";
 
 if ('serviceWorker' in navigator) {
-  void navigator.serviceWorker.register('/service-worker.js');
+  void navigator.serviceWorker.getRegistrations().then((registrations) => {
+    for (const registration of registrations) {
+      void registration.unregister()
+    }
+  })
 }
 
 createRoot(document.getElementById("root")!).render(

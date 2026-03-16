@@ -62,6 +62,7 @@ export interface AgentSessionInfo {
   title: string;
   updatedAt?: string;
   status?: SessionStatus;
+  pendingPermissionCount?: number;
 }
 
 /** Tree item types for flattened list */
