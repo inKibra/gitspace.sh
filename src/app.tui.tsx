@@ -1276,6 +1276,41 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
   const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, localBackend);
 
+  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
+    const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
+    if (agentItem?.agentAction) {
+      const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
+      if (permissionId) {
+        flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+          title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+          options: [
+            { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
+            { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
+            { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
+          ],
+          onSelect: async (choice) => {
+            if (choice === 'allow' || choice === 'deny') {
+              await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+            }
+            setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+          },
+        });
+      } else {
+        setAgentPickerWorkspaceId(workspaceId);
+        agentSessionPref.persist(agentSessionId);
+        if (!localBackend?.attachAgentSession) {
+          throw new Error('Agent attach unavailable');
+        }
+        await localBackend.attachAgentSession(workspaceId, agentSessionId);
+        dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      }
+      return;
+    }
+    dispatch({ type: 'SET_VIEW', view: 'projects' });
+    await handleAttachSession({ sessionId });
+  }, [agentEvents, agentInboxItems, agentSessionPref, dispatch, flow, handleAttachSession, localBackend]);
+
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
     // Merge explicit session load counts with live event counts, taking the higher value
@@ -1423,41 +1458,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await markLocalInboxRead(id);
       await refreshInbox();
     },
-    onAttachSession: async (sessionId) => {
-      // Check if this is an agent notification item
-      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-      if (agentItem?.agentAction) {
-        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-        dispatch({ type: 'SET_VIEW', view: 'projects' });
-        if (permissionId) {
-          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-            options: [
-              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-            ],
-            onSelect: async (choice) => {
-              if (choice === 'allow' || choice === 'deny') {
-                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-              }
-              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
-            },
-          });
-        } else {
-          setAgentPickerWorkspaceId(workspaceId);
-          agentSessionPref.persist(agentSessionId);
-          if (!localBackend?.attachAgentSession) {
-            throw new Error('Agent attach unavailable');
-          }
-          await localBackend.attachAgentSession(workspaceId, agentSessionId);
-          dispatch({ type: 'SET_VIEW', view: 'terminal' });
-        }
-        return;
-      }
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
-      await handleAttachSession({ sessionId });
-    },
+    onAttachSession: attachFromInboxSessionId,
     onClose: () => {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
@@ -1555,7 +1556,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     config: notificationConfig,
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
-      void handleAttachSession({ sessionId }).catch((error) => {
+      void attachFromInboxSessionId(sessionId).catch((error) => {
         flow.showMessage({
           title: 'Attach Failed',
           message: error instanceof Error ? error.message : String(error),

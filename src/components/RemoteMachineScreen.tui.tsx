@@ -43,6 +43,9 @@ import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.j
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
 import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
+import { toast } from '@opentui-ui/toast';
+import { DEFAULT_NOTIFICATION_CONFIG, useNotifications, type ToastNotification } from '../notifications/index.js';
+import { useUserActivity } from '../hooks/index.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -708,6 +711,38 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     [remote.inbox, agentInboxItems],
   );
 
+  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
+    const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
+    if (agentItem?.agentAction) {
+      const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+      if (permissionId) {
+        flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+          title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+          options: [
+            { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
+            { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
+            { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
+          ],
+          onSelect: async (choice) => {
+            if (choice === 'allow' || choice === 'deny') {
+              await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+            }
+            setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+          },
+        });
+      } else {
+        setAgentPickerWorkspaceId(workspaceId);
+        agentSessionPref.persist(agentSessionId);
+        if (!remoteBackend?.attachAgentSession) {
+          throw new Error('Agent attach unavailable');
+        }
+        await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
+      }
+      return;
+    }
+    await handleAttachSession({ sessionId });
+  }, [agentEvents, agentInboxItems, agentSessionPref, flow, handleAttachSession, remoteBackend]);
+
   const inboxProps = useInbox({
     items: allInboxItems,
     unreadCount: remote.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
@@ -733,39 +768,54 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-      if (agentItem?.agentAction) {
-        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-        if (permissionId) {
-          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-            options: [
-              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-            ],
-            onSelect: async (choice) => {
-              if (choice === 'allow' || choice === 'deny') {
-                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-              }
-              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
-            },
-          });
-        } else {
-          setAgentPickerWorkspaceId(workspaceId);
-          agentSessionPref.persist(agentSessionId);
-          if (!remoteBackend?.attachAgentSession) {
-            throw new Error('Agent attach unavailable');
-          }
-          await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
-        }
-        return;
-      }
-      await handleAttachSession({ sessionId });
+      await attachFromInboxSessionId(sessionId);
     },
     onClose: () => {
       setShowInbox(false);
     },
+  });
+
+  const holdWhenIdleMs = (remote.notificationConfig ?? DEFAULT_NOTIFICATION_CONFIG).toast.holdWhenIdleMs ?? 15000;
+  const { isUserActive, markActivity: handleTerminalActivity } = useUserActivity({
+    isActivityTracked: remote.mode === 'attached',
+    holdWhenIdleMs,
+  });
+
+  const handleShowToast = useCallback((notification: ToastNotification) => {
+    const description = notification.preview
+      ? `${notification.preview} · [Shift+Tab to attach]`
+      : '[Shift+Tab to attach]';
+    toast.info(`${notification.icon} ${notification.title}`, {
+      description,
+      duration: 8000,
+    });
+  }, []);
+
+  const notifications = useNotifications({
+    items: allInboxItems,
+    config: remote.notificationConfig ?? DEFAULT_NOTIFICATION_CONFIG,
+    onShowToast: handleShowToast,
+    onAttachSession: (sessionId) => {
+      void attachFromInboxSessionId(sessionId).catch((error) => {
+        flow.showMessage({
+          title: 'Attach Failed',
+          message: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+      });
+    },
+    onMarkRead: async (id) => {
+      const isAgent = agentInboxItems.some((i) => i.id === id);
+      if (isAgent) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === id ? { ...i, read: true } : i));
+      } else {
+        remote.markInboxItemRead(id);
+      }
+    },
+    pollIntervalMs: 5000,
+    onRefreshInbox: async () => remote.requestInbox(),
+    isUserActive,
+    currentSessionId: remote.attachedSessionId ?? undefined,
   });
 
   useEffect(() => {
@@ -1061,6 +1111,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           onResize={remote.resize}
           onDetach={remote.detachSession}
           setWriteCallback={remote.setWriteCallback}
+          interceptShiftTab={!!notifications.activeToast}
+          onActivity={handleTerminalActivity}
           readOnly={isViewOnlySession}
         />
       </Fragment>

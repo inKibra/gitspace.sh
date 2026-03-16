@@ -910,6 +910,39 @@ export default function App() {
     [terminal.inbox, agentInboxItems],
   );
 
+  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
+    const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
+    if (agentItem?.agentAction) {
+      const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+      if (permissionId) {
+        flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+          title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+          options: [
+            { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
+            { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
+            { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
+          ],
+          onSelect: async (choice) => {
+            if (choice === 'allow' || choice === 'deny') {
+              await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+            }
+            setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+          },
+        });
+      } else {
+        setAgentPickerWorkspaceId(workspaceId);
+        agentSessionPref.persist(agentSessionId);
+        if (!webBackend?.attachAgentSession) {
+          throw new Error('Agent attach unavailable');
+        }
+        await webBackend.attachAgentSession(workspaceId, agentSessionId);
+        setView('terminal');
+      }
+      return;
+    }
+    await attachController.attach({ sessionId });
+  }, [agentEvents, agentInboxItems, agentSessionPref, attachController, flow, webBackend]);
+
   const inboxProps = useInbox({
     items: allWebInboxItems,
     unreadCount: terminal.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
@@ -933,36 +966,7 @@ export default function App() {
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-      if (agentItem?.agentAction) {
-        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-        if (permissionId) {
-          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-            options: [
-              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-            ],
-            onSelect: async (choice) => {
-              if (choice === 'allow' || choice === 'deny') {
-                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-              }
-              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
-            },
-          });
-        } else {
-          setAgentPickerWorkspaceId(workspaceId);
-          agentSessionPref.persist(agentSessionId);
-          if (!webBackend?.attachAgentSession) {
-            throw new Error('Agent attach unavailable');
-          }
-          await webBackend.attachAgentSession(workspaceId, agentSessionId);
-          setView('terminal');
-        }
-        return;
-      }
-      await attachController.attach({ sessionId });
+      await attachFromInboxSessionId(sessionId);
     },
     onClose: () => setShowInbox(false),
   });
@@ -1050,21 +1054,25 @@ export default function App() {
       action: {
         label: "Attach",
         onClick: () => {
-          void attachController.attach({ sessionId: notification.sessionId });
+          void attachFromInboxSessionId(notification.sessionId);
         },
       },
     });
-  }, [attachController]);
+  }, [attachFromInboxSessionId]);
 
   const notifications = useNotifications({
-    items: terminal.inbox,
+    items: allWebInboxItems,
     config: activeNotificationConfig,
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
-      void attachController.attach({ sessionId });
+      void attachFromInboxSessionId(sessionId);
     },
     onMarkRead: async (itemId) => {
-      terminal.markInboxItemRead(itemId);
+      if (agentInboxItems.some((i) => i.id === itemId)) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === itemId ? { ...i, read: true } : i));
+      } else {
+        terminal.markInboxItemRead(itemId);
+      }
     },
     pollIntervalMs: 5000,
     onRefreshInbox: async () => {

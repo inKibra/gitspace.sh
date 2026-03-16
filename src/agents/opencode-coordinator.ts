@@ -129,7 +129,8 @@ export class OpenCodeCoordinator {
     await upsertStoredSession(target.workspaceId, {
       ...normalizeOpenCodeSession(target, created),
     });
-    return this.refreshAgentSessions(target);
+    const refreshed = await this.refreshAgentSessions(target);
+    return refreshed.length > 0 ? refreshed : this.getKnownAgentSessions(target.workspaceId);
   }
 
   async abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
