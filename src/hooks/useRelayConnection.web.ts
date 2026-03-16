@@ -62,6 +62,9 @@ export function useRelayConnection(options?: UseRelayConnectionOptions) {
     await machineDirectory.connect();
   }, [machineDirectory.connect]);
 
+  const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const relayUrl = `${wsProtocol}//${location.host}/ws`;
+
   return {
     status: machineDirectory.status,
     machines: machineDirectory.machines,
@@ -69,6 +72,8 @@ export function useRelayConnection(options?: UseRelayConnectionOptions) {
     identity: machineDirectory.identity,
     publicKey: machineDirectory.context?.publicKey ?? null,
     deviceCertificate: machineDirectory.context?.deviceCertificate ?? null,
+    /** Relay WebSocket URL — include this in terminal.connect() for reconnection */
+    relayUrl,
     connect,
     disconnect: machineDirectory.disconnect,
     refreshMachines: machineDirectory.refreshMachines,

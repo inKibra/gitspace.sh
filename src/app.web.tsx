@@ -499,12 +499,14 @@ export default function App() {
     setShowScriptTerminal(false);
     setScriptWorkspaceName('workspace');
 
-    // Connect to the machine using existing WebSocket (no new connection needed)
+    // Connect to the machine using existing WebSocket (no new connection needed).
+    // relayUrl is saved so reconnect can open a fresh WebSocket automatically.
     await terminal.connect({
       ws,
       identity,
       machineId: machine.machineId,
       deviceCertificate,
+      relayUrl: relay.relayUrl,
     });
   };
 
@@ -1676,8 +1678,10 @@ export default function App() {
     );
   }
 
-  // ========== Terminal View (attached mode) ==========
-  if (view === "terminal" && terminal.status === "established" && terminal.mode === "attached") {
+  // ========== Terminal View (attached mode or reconnecting while attached) ==========
+  if (view === "terminal" && (terminal.status === "established" || terminal.status === "reconnecting") && terminal.mode === "attached") {
+    const isReconnecting = terminal.status !== 'established';
+
     // Handler for sending data from mobile controls (already processed)
     const handleSendData = (data: string) => {
       if (data === PAGE_UP && terminalRef.current?.pageUp()) {
@@ -1792,8 +1796,8 @@ export default function App() {
               </button>
             </div>
           </div>
-          <div className={getTerminalContainerClass()}>
-          <SessionTerminal
+          <div className={`${getTerminalContainerClass()} relative`}>
+            <SessionTerminal
               ref={terminalRef}
               onData={handleKeyboardData}
               setWriteCallback={terminal.setWriteCallback}
@@ -1801,8 +1805,16 @@ export default function App() {
               allowTapFocus={inputMode || !showMobileControls}
               allowTouchScroll={!inputMode}
               onActivity={handleTerminalActivity}
-              readOnly={isViewOnlySession}
+              readOnly={isViewOnlySession || terminal.status === 'reconnecting'}
             />
+            {isReconnecting && (
+              <div className="absolute inset-0 flex items-center justify-center bg-[#0d1117]/80">
+                <div className="text-center">
+                  <div className="text-[#e6edf3] text-base mb-1 animate-pulse">Reconnecting...</div>
+                  <div className="text-[#8b949e] text-sm">Your session is preserved</div>
+                </div>
+              </div>
+            )}
           </div>
           {/* Mobile controls toolbar - show in input mode */}
           {showMobileControls && inputMode && (
@@ -1832,6 +1844,7 @@ export default function App() {
     const statusMessage = {
       disconnected: "Disconnected",
       connecting: "Connecting to relay...",
+      reconnecting: "Connection lost. Reconnecting...",
       connected: "Connected, authenticating...",
       handshaking: "Establishing secure connection...",
       established: "Connected!",

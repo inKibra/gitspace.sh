@@ -1107,6 +1107,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     if (remote.status === 'connecting') {
       return 'Connecting to remote machine...';
     }
+    if (remote.status === 'reconnecting') {
+      return 'Connection lost. Reconnecting...';
+    }
     if (remote.status === 'error') {
       return 'Connection failed';
     }
@@ -1115,6 +1118,17 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
     return '';
   }, [remote.status]);
+
+  // Reconnecting while attached: the old backend has been torn down so
+  // attachedSessionId is null, but lastModeRef preserves 'attached'. Show
+  // the reconnecting status message instead of falling through to the browser.
+  if (remote.status === 'reconnecting' && remote.mode === 'attached' && !remote.attachedSessionId) {
+    return (
+      <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
+        <text fg={COLORS.loading}>{statusMessage}</text>
+      </box>
+    );
+  }
 
   if (remote.mode === 'attached' && remote.attachedSessionId) {
     return (
@@ -1134,7 +1148,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     );
   }
 
-  if (showScriptTerminal && remote.status === 'established' && remote.mode === 'browsing') {
+  if (showScriptTerminal && (remote.status === 'established' || remote.status === 'reconnecting') && remote.mode === 'browsing') {
     const isRunning = remote.scriptState?.isRunning ?? true;
     const scriptHint = isRunning
       ? '[Running scripts... c: cancel + attach anyway]'
@@ -1189,7 +1203,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     );
   }
 
-  if (remote.status !== 'established') {
+  if (remote.status !== 'established' && remote.status !== 'reconnecting') {
     return (
       <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
         <text fg={remote.status === 'error' ? COLORS.error : COLORS.loading}>{statusMessage}</text>

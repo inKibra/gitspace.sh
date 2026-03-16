@@ -1510,14 +1510,42 @@ export async function serveStart(options: {
   const eventHandler: ServeEventHandler = (event) => {
     switch (event.type) {
       case 'relay_connected':
-        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
+        updateDaemonState({
+          relay: {
+            url: effectiveRelayUrl,
+            status: 'connected',
+            reconnectAttempt: 0,
+            nextRetryAt: undefined,
+          },
+        });
         break;
       case 'relay_disconnected':
-        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'disconnected' } });
+        updateDaemonState({
+          relay: {
+            url: effectiveRelayUrl,
+            status: 'disconnected',
+            reconnectAttempt: undefined,
+            nextRetryAt: undefined,
+          },
+        });
         break;
-      case 'relay_reconnecting':
-        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'reconnecting' } });
+      case 'relay_reconnecting': {
+        const nextRetryAt = event.nextRetryMs !== undefined
+          ? Date.now() + event.nextRetryMs
+          : undefined;
+        logger.log(
+          `[serve] Relay reconnecting (attempt ${event.attempt})${nextRetryAt ? `, next retry in ${Math.round((nextRetryAt - Date.now()) / 1000)}s` : ''}`,
+        );
+        updateDaemonState({
+          relay: {
+            url: effectiveRelayUrl,
+            status: 'reconnecting',
+            reconnectAttempt: event.attempt,
+            nextRetryAt,
+          },
+        });
         break;
+      }
       case 'client_authenticated': {
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
         if (Object.keys(currentAgentSnapshot).length > 0) {
@@ -1558,8 +1586,6 @@ export async function serveStart(options: {
         relayFingerprint: trustedRelayIdentity.relayFingerprint,
       });
     }
-
-    updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
     const originalError = error;
     try {
@@ -1688,11 +1714,23 @@ export async function serveStatus(): Promise<void> {
     const statusIcon = status.relay.status === 'connected' ? '\x1b[32m●\x1b[0m' : '\x1b[33m●\x1b[0m';
     const relayStatus = status.relay.status === 'connected' ? 'connected' : status.relay.status;
 
+    const relayStatusLine = (() => {
+      if (status.relay.status === 'reconnecting' && status.relay.reconnectAttempt !== undefined) {
+        const attempt = status.relay.reconnectAttempt;
+        const nextRetryAt = status.relay.nextRetryAt;
+        const countdown = nextRetryAt
+          ? ` (next retry in ${Math.max(0, Math.round((nextRetryAt - Date.now()) / 1000))}s)`
+          : '';
+        return `${relayStatus} — attempt ${attempt}${countdown}`;
+      }
+      return relayStatus;
+    })();
+
     const lines = [
       `Status:   ${statusIcon} running (pid ${status.pid})`,
       `Version:  ${status.version}`,
       `Relay:    ${status.relay.url}`,
-      `          ${relayStatus}`,
+      `          ${relayStatusLine}`,
       `Clients:  ${status.clients} active`,
       `Uptime:   ${formatUptime(status.uptime)}`,
     ];

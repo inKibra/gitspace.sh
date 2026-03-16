@@ -45,6 +45,7 @@ export type RemoteSessionConnectionStatus =
   | 'disconnected'
   | 'connecting'
   | 'established'
+  | 'reconnecting'
   | 'error';
 
 export interface RemoteSessionPtyBackend extends SessionBackend {
@@ -61,6 +62,12 @@ export interface UseRemoteSessionClientOptions<ConnectParams> {
   mapConnectionStatus?: (
     status: BackendSessionState['status']
   ) => RemoteSessionConnectionStatus;
+  /**
+   * Optional transform applied to ConnectParams before storing them for
+   * reconnection. Use this to strip transport-specific state (e.g. a
+   * pre-opened WebSocket) that would be dead on subsequent attempts.
+   */
+  toReconnectParams?: (params: ConnectParams) => ConnectParams;
 }
 
 export interface UseRemoteSessionClientReturn<ConnectParams> {
@@ -160,7 +167,7 @@ function defaultStatusMapper(
 export function useRemoteSessionClient<ConnectParams>(
   options: UseRemoteSessionClientOptions<ConnectParams>
 ): UseRemoteSessionClientReturn<ConnectParams> {
-  const { createBackend, mapConnectionStatus = defaultStatusMapper } = options;
+  const { createBackend, mapConnectionStatus = defaultStatusMapper, toReconnectParams } = options;
   const engine = useSessionEngine();
   const registerBackend = engine.registerBackend;
   const setActiveBackend = engine.setActiveBackend;
@@ -173,6 +180,40 @@ export function useRemoteSessionClient<ConnectParams>(
   const backendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
 
+  // -------------------------------------------------------------------------
+  // Reconnection state
+  //
+  // When the backend transitions established→disconnected while a session is
+  // attached, we automatically reconnect and re-attach to the same tmux-lite
+  // session (terminal state is preserved server-side by xterm-headless).
+  //
+  // Key design choices:
+  //   - connectParamsRef stores a reconnect-safe copy of params (transient
+  //     transport objects like a pre-opened WebSocket are stripped via
+  //     toReconnectParams so every retry gets a fresh socket)
+  //   - lastAttachedSessionIdRef is only populated from the 'attached' event
+  //     and cleared on explicit detach — so reconnect only fires when the user
+  //     was actually in attached mode when the drop happened
+  //   - lastModeRef preserves the mode across the gap so the UI doesn't flash
+  //     back to browsing while the reconnect loop is in flight
+  //   - abort ref prevents races between concurrent connect() calls and loops,
+  //     and is aborted on component unmount so the async loop never outlives
+  //     the component
+  //   - lastDimensionsRef tracks the most recent PTY cols/rows so reconnect
+  //     can pass the current terminal size to attachSession
+  // -------------------------------------------------------------------------
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  // Mirror of isReconnecting as a ref so the transition detector can check it
+  // without adding isReconnecting to its dependency array (which would cause
+  // the detector to run on every isReconnecting toggle rather than only on
+  // backendStatus changes).
+  const isReconnectingRef = useRef(false);
+  const connectParamsRef = useRef<ConnectParams | null>(null);
+  const lastAttachedSessionIdRef = useRef<string | null>(null);
+  const lastModeRef = useRef<'browsing' | 'attached'>('browsing');
+  const reconnectAbortRef = useRef<{ aborted: boolean }>({ aborted: false });
+  const lastDimensionsRef = useRef<{ cols: number; rows: number } | null>(null);
+
   const activeBackendState = useMemo(() => {
     const backendKey = activeBackendKeyRef.current;
     if (!backendKey) {
@@ -181,12 +222,32 @@ export function useRemoteSessionClient<ConnectParams>(
     return engine.getBackendState(backendKey);
   }, [engine, engine.state]);
 
-  const status = useMemo<RemoteSessionConnectionStatus>(() => {
+  // backendStatus reflects the raw underlying connection state, NOT overlaid
+  // with isReconnecting. Used only for detecting the established→disconnected
+  // transition that should fire the reconnect loop.
+  const backendStatus = useMemo<RemoteSessionConnectionStatus>(() => {
     if (!activeBackendState) {
       return 'disconnected';
     }
     return mapConnectionStatus(activeBackendState.status);
   }, [activeBackendState, mapConnectionStatus]);
+
+  // status is the value exposed to consumers — overlays 'reconnecting' on top
+  // of backendStatus.
+  const status = useMemo<RemoteSessionConnectionStatus>(() => {
+    if (isReconnecting) {
+      return 'reconnecting';
+    }
+    return backendStatus;
+  }, [backendStatus, isReconnecting]);
+
+  // reconnectTrigger is a monotonically increasing counter that increments
+  // exactly when we detect a genuine established→disconnected transition with
+  // a session to restore. The reconnect loop effect watches ONLY this counter
+  // so it is never re-triggered by status changes that happen DURING the loop
+  // (e.g. backendStatus flipping to 'connecting' when connectBackend fires).
+  const [reconnectTrigger, setReconnectTrigger] = useState(0);
+  const prevBackendStatusRef = useRef<RemoteSessionConnectionStatus>('disconnected');
 
   const withActiveBackend = useCallback(
     async <T>(fn: (backendKey: BackendKey) => Promise<T>): Promise<T | null> => {
@@ -201,6 +262,12 @@ export function useRemoteSessionClient<ConnectParams>(
 
   const connect = useCallback(
     async (params: ConnectParams) => {
+      // Cancel any in-flight reconnect loop before starting fresh.
+      reconnectAbortRef.current.aborted = true;
+      reconnectAbortRef.current = { aborted: false };
+      isReconnectingRef.current = false;
+      setIsReconnecting(false);
+
       const previousBackendKey = activeBackendKeyRef.current;
       if (previousBackendKey) {
         await disconnectBackend(previousBackendKey);
@@ -216,6 +283,9 @@ export function useRemoteSessionClient<ConnectParams>(
 
       backendRef.current = backend;
       activeBackendKeyRef.current = backendKey;
+      // Save reconnect-safe params (strip dead transports like a closed WebSocket).
+      connectParamsRef.current = toReconnectParams ? toReconnectParams(params) : params;
+      lastAttachedSessionIdRef.current = null;
 
       registerBackend(backend);
       setActiveBackend(backendKey);
@@ -226,13 +296,22 @@ export function useRemoteSessionClient<ConnectParams>(
         await unregisterBackend(backendKey);
         activeBackendKeyRef.current = null;
         backendRef.current = null;
+        connectParamsRef.current = null;
         throw error;
       }
     },
-    [connectBackend, createBackend, disconnectBackend, registerBackend, setActiveBackend, unregisterBackend]
+    [connectBackend, createBackend, disconnectBackend, registerBackend, setActiveBackend, toReconnectParams, unregisterBackend]
   );
 
   const disconnect = useCallback(() => {
+    // Cancel any in-flight reconnect loop — this is an intentional disconnect.
+    reconnectAbortRef.current.aborted = true;
+    reconnectAbortRef.current = { aborted: false };
+    isReconnectingRef.current = false;
+    setIsReconnecting(false);
+    connectParamsRef.current = null;
+    lastAttachedSessionIdRef.current = null;
+
     const backendKey = activeBackendKeyRef.current;
     if (!backendKey) {
       return;
@@ -347,6 +426,14 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [engine, withActiveBackend]);
 
   const detachSession = useCallback(() => {
+    reconnectAbortRef.current.aborted = true;
+    reconnectAbortRef.current = { aborted: false };
+    isReconnectingRef.current = false;
+    setIsReconnecting(false);
+
+    // Clear the saved session ID — an explicit detach means we should NOT
+    // re-attach to this session if the connection drops later in browsing mode.
+    lastAttachedSessionIdRef.current = null;
     void withActiveBackend((backendKey) => engine.detachSession(backendKey));
   }, [engine, withActiveBackend]);
 
@@ -369,6 +456,23 @@ export function useRemoteSessionClient<ConnectParams>(
     [requestSessions, requestWorkspaces]
   );
 
+  // Track the most recently attached session ID so reconnect can re-attach.
+  // Only update when we have a real session ID; cleared on explicit detach above.
+  useEffect(() => {
+    const attachedId = activeBackendState?.attachedSessionId;
+    if (attachedId) {
+      lastAttachedSessionIdRef.current = attachedId;
+    }
+  }, [activeBackendState?.attachedSessionId]);
+
+  // Preserve last-known mode so UI doesn't flash to browsing during reconnect.
+  useEffect(() => {
+    const mode = activeBackendState?.mode;
+    if (mode) {
+      lastModeRef.current = mode;
+    }
+  }, [activeBackendState?.mode]);
+
   useEffect(() => {
     const projects = activeBackendState?.projects ?? [];
 
@@ -388,6 +492,208 @@ export function useRemoteSessionClient<ConnectParams>(
       selectProject(preferredProjectName);
     }
   }, [activeBackendState?.projects, selectProject, selectedProjectName]);
+
+  // -------------------------------------------------------------------------
+  // Detect established → disconnected transition and fire reconnect trigger.
+  //
+  // This effect watches backendStatus for the specific transition that should
+  // start a reconnect. It increments reconnectTrigger (a counter), which is
+  // what the reconnect loop effect depends on — NOT backendStatus directly.
+  // This breaks the dependency cycle: the loop can change backendStatus (e.g.
+  // to 'connecting') without re-triggering its own cleanup.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const prev = prevBackendStatusRef.current;
+    prevBackendStatusRef.current = backendStatus;
+
+    // Fire on any "was connected" → disconnected transition with a live session,
+    // but NOT while a reconnect loop is already running. Without this guard,
+    // a failed attach inside the loop (connectBackend succeeds → attachSession
+    // fails → disconnectBackend) would look like a fresh established→disconnected
+    // transition and re-trigger the counter, resetting the attempt limit.
+    // 'error' is included because onerror fires before onclose.
+    // 'connecting' is excluded — pre-connect failures have no session to restore.
+    const wasConnected = prev === 'established' || prev === 'error';
+    if (
+      wasConnected &&
+      backendStatus === 'disconnected' &&
+      !isReconnectingRef.current &&
+      connectParamsRef.current &&
+      lastAttachedSessionIdRef.current
+    ) {
+      setReconnectTrigger((t) => t + 1);
+    }
+  }, [backendStatus]);
+
+  // -------------------------------------------------------------------------
+  // Automatic reconnection on unexpected disconnect
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    // Guard: only run when the trigger is non-zero and we still have the
+    // required context (params/session may have been cleared by disconnect()).
+    if (
+      reconnectTrigger === 0 ||
+      !connectParamsRef.current ||
+      !lastAttachedSessionIdRef.current
+    ) {
+      return;
+    }
+
+    const params = connectParamsRef.current;
+    const sessionId = lastAttachedSessionIdRef.current;
+
+    // Create a fresh abort sentinel for this invocation. The cleanup from the
+    // previous run may have set the old object to aborted; assigning a new one
+    // here ensures each reconnect cycle starts clean even when reconnectTrigger
+    // increments multiple times in succession.
+    const abort = { aborted: false };
+    reconnectAbortRef.current = abort;
+
+    const MAX_RECONNECT_ATTEMPTS = 10;
+    const BASE_DELAY_MS = 1_000;
+    const MAX_DELAY_MS = 30_000;
+
+    isReconnectingRef.current = true;
+    setIsReconnecting(true);
+
+    const run = async () => {
+      for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+        if (abort.aborted) return;
+
+        const delay = attempt === 1
+          ? 0
+          : Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 2) + Math.random() * 1_000, MAX_DELAY_MS);
+
+        if (delay > 0) {
+          logger.log(`[session] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})...`);
+          await new Promise<void>((r) => setTimeout(r, delay));
+        } else {
+          logger.log(`[session] Reconnecting... (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})`);
+        }
+
+        if (abort.aborted) return;
+
+        try {
+          // Tear down the old (disconnected) backend.
+          const oldBackendKey = activeBackendKeyRef.current;
+          if (oldBackendKey) {
+            await disconnectBackend(oldBackendKey);
+            await unregisterBackend(oldBackendKey);
+            activeBackendKeyRef.current = null;
+            backendRef.current = null;
+          }
+
+          if (abort.aborted) return;
+
+          // Build and connect a fresh backend with the saved (reconnect-safe) params.
+          const { backendKey, backend } = createBackend(params);
+          if (backend.setPtyOutputHandler) {
+            backend.setPtyOutputHandler(writeCallbackRef.current);
+          }
+
+          backendRef.current = backend;
+          activeBackendKeyRef.current = backendKey;
+          registerBackend(backend);
+          setActiveBackend(backendKey);
+
+          await connectBackend(backendKey);
+
+          if (abort.aborted) {
+            await disconnectBackend(backendKey);
+            await unregisterBackend(backendKey);
+            activeBackendKeyRef.current = null;
+            backendRef.current = null;
+            return;
+          }
+
+          // Re-attach to the same tmux-lite session (terminal state preserved).
+          // Pass the last known terminal dimensions so the server-side PTY
+          // gets the correct size immediately rather than waiting for the next
+          // browser resize event (which may never come if dimensions haven't changed).
+          const dims = lastDimensionsRef.current;
+
+          // Subscribe to the attached confirmation BEFORE sending the command
+          // so we can't miss the event. This mirrors connect.ts: subscribe → send
+          // → await. Awaiting before calling attachSession would deadlock because
+          // the 'attached' event can only fire after the command is sent.
+          let resolveAttach!: (ok: boolean) => void;
+          const attachConfirmed = new Promise<boolean>((resolve) => {
+            resolveAttach = resolve;
+          });
+
+          const attachTimeoutId = setTimeout(() => {
+            unsubAttach();
+            resolveAttach(false);
+          }, 30_000);
+
+          const unsubAttach = backend.onEvent((event) => {
+            if (event.type === 'attached') {
+              clearTimeout(attachTimeoutId);
+              unsubAttach();
+              resolveAttach(true);
+            } else if (
+              event.type === 'error' ||
+              event.type === 'command_error' ||
+              (event.type === 'status' && event.status === 'disconnected')
+            ) {
+              clearTimeout(attachTimeoutId);
+              unsubAttach();
+              resolveAttach(false);
+            }
+          });
+
+          if (abort.aborted || lastAttachedSessionIdRef.current !== sessionId) {
+            throw new Error('Reconnect cancelled before re-attach');
+          }
+
+          await backend.attachSession({
+            sessionId,
+            ...(dims ? { cols: dims.cols, rows: dims.rows } : {}),
+          });
+
+          if (!await attachConfirmed) {
+            throw new Error('Session attachment timed out or was rejected — session may no longer exist');
+          }
+
+          if (!abort.aborted) {
+            logger.log(`[session] Reconnected and re-attached to session ${sessionId}`);
+            isReconnectingRef.current = false;
+            setIsReconnecting(false);
+          }
+          return;
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          logger.log(`[session] Reconnect attempt ${attempt} failed: ${detail}`);
+
+          // Clean up failed backend before next attempt.
+          const failedKey = activeBackendKeyRef.current;
+          if (failedKey) {
+            await disconnectBackend(failedKey).catch(() => {});
+            await unregisterBackend(failedKey).catch(() => {});
+            activeBackendKeyRef.current = null;
+            backendRef.current = null;
+          }
+        }
+      }
+
+      // All attempts exhausted.
+      if (!abort.aborted) {
+        logger.log('[session] Reconnect failed after all attempts.');
+        isReconnectingRef.current = false;
+        setIsReconnecting(false);
+        connectParamsRef.current = null;
+        lastAttachedSessionIdRef.current = null;
+      }
+    };
+
+    void run();
+
+    // Abort the loop if the component unmounts or a new trigger fires.
+    return () => {
+      abort.aborted = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconnectTrigger]);
 
   const killSession = useCallback((sessionId: string) => {
     void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
@@ -471,6 +777,9 @@ export function useRemoteSessionClient<ConnectParams>(
   }, []);
 
   const resize = useCallback((cols: number, rows: number) => {
+    // Track dimensions so the reconnect path can pass the current terminal
+    // size to attachSession instead of relying on a subsequent resize event.
+    lastDimensionsRef.current = { cols, rows };
     const backend = backendRef.current;
     if (!backend || !backend.resizePty) {
       return;
@@ -579,6 +888,11 @@ export function useRemoteSessionClient<ConnectParams>(
 
   useEffect(() => {
     return () => {
+      // Abort any in-flight reconnect loop so async callbacks don't call
+      // React state setters or create new backends after unmount.
+      reconnectAbortRef.current.aborted = true;
+      isReconnectingRef.current = false;
+
       const backendKey = activeBackendKeyRef.current;
       if (!backendKey) {
         return;
@@ -592,7 +906,9 @@ export function useRemoteSessionClient<ConnectParams>(
 
   return useMemo(() => ({
     status,
-    mode: activeBackendState?.mode ?? 'browsing',
+    // During reconnect, preserve the last known mode so the UI doesn't flash
+    // back to the browsing state while the reconnect loop is in flight.
+    mode: isReconnecting ? lastModeRef.current : (activeBackendState?.mode ?? 'browsing'),
 
     projects: activeBackendState?.projects ?? [],
     workspaces: activeBackendState?.workspaces ?? [],
@@ -663,6 +979,7 @@ export function useRemoteSessionClient<ConnectParams>(
     sessionBackend: backendRef.current as SessionBackend | null,
   }), [
     status,
+    isReconnecting,
     activeBackendState,
     selectedProjectName,
     connect,

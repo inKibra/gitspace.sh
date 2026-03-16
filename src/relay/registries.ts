@@ -29,6 +29,17 @@ export interface MachineRegistration {
   registeredAt: number;
   /** When machine last connected */
   lastConnectedAt: number;
+  /**
+   * Timestamp (ms) of the last application-level heartbeat received from this
+   * machine. Updated on registration and on each heartbeat message.
+   * Used by the stale-connection detector.
+   */
+  lastHeartbeatAt: number;
+  /**
+   * Whether the connection has been marked as potentially stale (first warning
+   * threshold crossed) but the grace period has not expired yet.
+   */
+  staleWarned: boolean;
 }
 
 // ============================================================================
@@ -77,6 +88,8 @@ export function registerMachine(
 
     existing.ws = ws;
     existing.lastConnectedAt = now;
+    existing.lastHeartbeatAt = now;
+    existing.staleWarned = false;
     if (label) existing.label = label;
     return { success: true, registration: existing };
   }
@@ -90,6 +103,8 @@ export function registerMachine(
     ws,
     registeredAt: now,
     lastConnectedAt: now,
+    lastHeartbeatAt: now,
+    staleWarned: false,
   };
 
   machines.set(machineId, registration);
@@ -129,6 +144,30 @@ export function setMachineConnection(
 /** Unregister a machine */
 export function unregisterMachine(machineId: string): boolean {
   return machines.delete(machineId);
+}
+
+/**
+ * Record a heartbeat (application-level ping/pong) from a machine.
+ * Also clears the stale-warned flag if the machine had been marked stale.
+ */
+export function updateMachineHeartbeat(machineId: string): void {
+  const machine = machines.get(machineId);
+  if (machine) {
+    machine.lastHeartbeatAt = Date.now();
+    machine.staleWarned = false;
+  }
+}
+
+/**
+ * Mark a machine as having received the first stale warning.
+ * Called when the machine crosses the "stale" threshold but is still within
+ * the grace period before a forced disconnect.
+ */
+export function markMachineStaleWarned(machineId: string): void {
+  const machine = machines.get(machineId);
+  if (machine) {
+    machine.staleWarned = true;
+  }
 }
 
 /** Get all registered machines */

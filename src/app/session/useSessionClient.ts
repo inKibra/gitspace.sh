@@ -5,6 +5,7 @@ import type { SessionClientConnectionStatus } from './types.js'
 
 export interface UseSessionClientOptions<ConnectParams> {
   createBackend: UseRemoteSessionClientOptions<ConnectParams>['createBackend']
+  toReconnectParams?: UseRemoteSessionClientOptions<ConnectParams>['toReconnectParams']
   mapConnectionStatus?: (
     status: RemoteSessionConnectionStatus
   ) => SessionClientConnectionStatus
@@ -26,8 +27,8 @@ function defaultStatusMapper(
 export function useSessionClient<ConnectParams>(
   options: UseSessionClientOptions<ConnectParams>
 ): UseSessionClientReturn<ConnectParams> {
-  const { createBackend, mapConnectionStatus = defaultStatusMapper } = options
-  const client = useRemoteSessionClient<ConnectParams>({ createBackend })
+  const { createBackend, toReconnectParams, mapConnectionStatus = defaultStatusMapper } = options
+  const client = useRemoteSessionClient<ConnectParams>({ createBackend, toReconnectParams })
 
   return useMemo(() => ({
     ...client,
