@@ -58,6 +58,7 @@ export function ReplayTerminalWeb({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeedIndex, setPlaybackSpeedIndex] = useState(DEFAULT_PLAYBACK_SPEED_INDEX);
   const frameRequestIdRef = useRef(0);
+  const currentStepIndexRef = useRef(currentStepIndex);
   const writerRef = useRef<((data: Uint8Array) => void) | null>(null);
   const currentCheckpointIdRef = useRef<string | null>(null);
   const currentSeqRef = useRef(0);
@@ -81,6 +82,10 @@ export function ReplayTerminalWeb({
   useEffect(() => {
     loadReplayTimelineRef.current = loadReplayTimeline;
   }, [loadReplayTimeline]);
+
+  useEffect(() => {
+    currentStepIndexRef.current = currentStepIndex;
+  }, [currentStepIndex]);
 
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     setWriter(() => fn);
@@ -380,7 +385,7 @@ export function ReplayTerminalWeb({
       return;
     }
 
-    const atEnd = currentStepIndex >= timeline.steps.length - 1;
+    const atEnd = currentStepIndexRef.current >= timeline.steps.length - 1;
     if (atEnd) {
       // Restarting from the end — invalidate and reset checkpoint tracking
       invalidatePendingFrameLoad();
@@ -391,7 +396,7 @@ export function ReplayTerminalWeb({
       setCurrentStepIndex((index) => Math.max(0, index));
     }
     setIsPlaying(true);
-  }, [currentStepIndex, invalidatePendingFrameLoad, isPlaying, timeline]);
+  }, [invalidatePendingFrameLoad, isPlaying, timeline]);
 
   const jumpToBoundary = useCallback((direction: 'start' | 'end') => {
     if (!timeline || timeline.steps.length === 0) {
