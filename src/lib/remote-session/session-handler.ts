@@ -829,7 +829,8 @@ export class RemoteSessionHandler {
     let chunkSizeBytes = basePayloadSize(frame.checkpoint);
     for (const [index, event] of frame.events.entries()) {
       const eventSizeBytes = eventJsonSizes[index] ?? 0;
-      const candidateSize = chunkSizeBytes + eventSizeBytes + (chunk.length > 0 ? 1 : 0);
+      const hasEventsBeforePush = chunk.length > 0;
+      const candidateSize = chunkSizeBytes + eventSizeBytes + (hasEventsBeforePush ? 1 : 0);
       if (candidateSize > maxPayloadBytes && chunk.length > 0) {
         chunks.push(chunk);
         chunk = [];
@@ -837,7 +838,7 @@ export class RemoteSessionHandler {
       }
 
       chunk.push(event);
-      chunkSizeBytes += eventSizeBytes + (chunk.length > 1 ? 1 : 0);
+      chunkSizeBytes += eventSizeBytes + (hasEventsBeforePush ? 1 : 0);
     }
 
     if (chunk.length > 0 || chunks.length === 0) {
