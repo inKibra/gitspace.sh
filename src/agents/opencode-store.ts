@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { dirname, join } from 'node:path';
 import type { OpenCodeRuntimeInfo } from './opencode-types.js';
 import { logger } from '../utils/logger.js';
+import { getGitspaceDir } from '../core/config.js';
 
 const workspaceWriteQueues = new Map<string, Promise<void>>();
 
@@ -31,7 +32,7 @@ export interface StoredWorkspaceAgentSessionHistory {
 }
 
 function getGitspaceHome(): string {
-  return join(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', 'gitspace');
+  return getGitspaceDir();
 }
 
 function getOpenCodeRoot(): string {

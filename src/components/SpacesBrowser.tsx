@@ -571,18 +571,21 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   }, [tree.length]);
 
   const toggleWorkspace = useCallback((workspaceId: string) => {
+    let expanded = false;
     setExpandedWorkspaces(prev => {
       const next = new Set(prev);
       if (next.has(workspaceId)) {
         next.delete(workspaceId);
       } else {
         next.add(workspaceId);
-        // Request a full sessions refresh when expanding.
-        onRequestSessions();
-        void onOpenAgents?.(workspaceId);
+        expanded = true;
       }
       return next;
     });
+    if (expanded) {
+      onRequestSessions();
+      void onOpenAgents?.(workspaceId);
+    }
   }, [onOpenAgents, onRequestSessions]);
 
   const toggleReplaySection = useCallback((workspaceId: string) => {
