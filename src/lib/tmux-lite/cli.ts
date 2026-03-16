@@ -24,6 +24,8 @@ import {
   PACKAGE_VERSION,
   type Command,
   type Response,
+  type AgentWorkspaceTargetPayload,
+  type AgentSessionSummaryPayload,
   type Session,
   type SessionEvent,
   type InboxItem,
@@ -437,6 +439,156 @@ export async function killSession(id: string): Promise<void> {
   await ensureServer();
   const res = await send({ type: "kill", id });
   if (res.type === "error") throw new Error(res.message);
+}
+
+export async function getAgentState(): Promise<import('../../serve/agent-event-manager.js').WorkspaceAgentState[]> {
+  await ensureServer();
+  const res = await send({ type: 'agent-state' });
+  if (res.type === 'agent-state') return res.workspaces;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function listAgentSessions(
+  target: AgentWorkspaceTargetPayload,
+  mode: 'known' | 'live' = 'live',
+): Promise<AgentSessionSummaryPayload[]> {
+  await ensureServer();
+  const res = await send({ type: 'agent-sessions', target, mode });
+  if (res.type === 'agent-sessions') return res.sessions;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function createAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  title?: string,
+): Promise<AgentSessionSummaryPayload[]> {
+  await ensureServer();
+  const res = await send({ type: 'agent-create', target, title });
+  if (res.type === 'agent-sessions') return res.sessions;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function abortAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+): Promise<boolean> {
+  await ensureServer();
+  const res = await send({ type: 'agent-abort', target, agentSessionId });
+  if (res.type === 'agent-bool') return res.ok;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function attachAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+): Promise<Session> {
+  await ensureServer();
+  const res = await send({ type: 'agent-attach', target, agentSessionId });
+  if (res.type === 'session') return res.session;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function respondToAgentPermission(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+  permissionId: string,
+  response: 'allow' | 'deny',
+): Promise<boolean> {
+  await ensureServer();
+  const res = await send({ type: 'agent-permission', target, agentSessionId, permissionId, response });
+  if (res.type === 'agent-bool') return res.ok;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function watchAgentState(handlers: {
+  onSnapshot?: (workspaces: import('../../serve/agent-event-manager.js').WorkspaceAgentState[]) => void;
+  onUpdate?: (delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta) => void;
+  onError?: (error: Error) => void;
+}): Promise<() => void> {
+  await ensureServer();
+  return new Promise<() => void>((resolve, reject) => {
+    let started = false;
+    let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
+    let buffer: Buffer = Buffer.alloc(0);
+
+    const fail = (error: Error) => {
+      if (!started) {
+        try { socketRef?.end(); } catch {}
+        reject(error);
+        return;
+      }
+      handlers.onError?.(error);
+    };
+
+    try {
+      void Bun.connect({
+        unix: getRouterSocket(),
+        socket: {
+          open(sock) {
+            const writer = createBufferedSocketWriter(sock);
+            writer.write(encodeRouterMessage({ type: 'agent-watch' }));
+          },
+          data(sock, data) {
+            buffer = Buffer.concat([buffer, Buffer.from(data)]);
+            let decoded;
+            try {
+              decoded = decodeRouterMessages(buffer);
+            } catch (error) {
+              fail(error instanceof Error ? error : new Error('Invalid response'));
+              return;
+            }
+            buffer = decoded.remaining as Buffer;
+            for (const message of decoded.messages) {
+              if (message.type === 'agent-watch-started') {
+                if (!started) {
+                  started = true;
+                  resolve(() => {
+                    try { sock.end(); } catch {}
+                  });
+                }
+                continue;
+              }
+              if (message.type === 'agent-state' && 'workspaces' in message) {
+                handlers.onSnapshot?.(message.workspaces);
+                continue;
+              }
+              if (message.type === 'agent-state-update') {
+                handlers.onUpdate?.(message.delta);
+                continue;
+              }
+              if (message.type === 'error') {
+                fail(new Error(message.message));
+                return;
+              }
+            }
+          },
+          close() {
+            if (!started) {
+              reject(new Error('Connection closed before watch started'));
+            }
+          },
+          error(_, error) {
+            fail(error instanceof Error ? error : new Error(String(error)));
+          },
+          connectError(_, error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          },
+        },
+      }).then((socket) => {
+        socketRef = socket;
+      }).catch((error) => {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
 export async function killServer(): Promise<void> {

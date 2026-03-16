@@ -16,6 +16,13 @@ import {
   getReplaySnapshot,
   getReplayText,
   getReplayMarkdown,
+  getAgentState,
+  watchAgentState,
+  listAgentSessions as listTmuxAgentSessions,
+  createAgentSession as createTmuxAgentSession,
+  abortAgentSession as abortTmuxAgentSession,
+  attachAgentSession as attachTmuxAgentSession,
+  respondToAgentPermission as respondToTmuxAgentPermission,
 } from '../../lib/tmux-lite/cli.js';
 import {
   listReplaysOffline,
@@ -79,7 +86,6 @@ import type {
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
-  OpenCodeBridgeBackend,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
@@ -110,19 +116,8 @@ import { loadSavedEventFilters } from '../../lib/events/filters.js';
 import { readProjectConfig } from '../../core/config.js';
 import { existsSync } from 'fs';
 import type { TerminalSnapshot } from '../backend.js';
-import {
-  buildOpenCodeUrl,
-  decodeBridgeBody,
-  type OpenCodeBridgeRequest,
-  type OpenCodeBridgeResponse,
-  type OpenCodeBridgeStreamEvent,
-  type OpenCodeBridgeStreamOpen,
-} from '../../agents/opencode-bridge.js';
-import { consumeSseStream } from '../../agents/opencode-sse.js';
-import { createOpenCodeBasicAuthHeader, defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
-import { defaultAgentEventManager, type AgentStateUpdateDelta, type WorkspaceAgentState } from '../../serve/agent-event-manager.js';
-import { OpenCodeClient } from '../../agents/opencode-client.js';
-import { defaultOpenCodeCoordinator, type AgentWorkspaceTarget, type OpenCodeCoordinator } from '../../agents/opencode-coordinator.js';
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../serve/agent-event-manager.js';
+import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -184,7 +179,17 @@ export interface LocalSessionSocketConnection {
 export interface LocalSessionBackendOptions {
   descriptor?: BackendDescriptor;
   deps?: Partial<LocalSessionBackendDependencies>;
-  openCodeCoordinator?: OpenCodeCoordinator;
+  agentControl?: Partial<LocalAgentControl>;
+}
+
+interface LocalAgentControl {
+  getState: typeof getAgentState;
+  watchState: typeof watchAgentState;
+  listSessions: typeof listTmuxAgentSessions;
+  createSession: typeof createTmuxAgentSession;
+  abortSession: typeof abortTmuxAgentSession;
+  attachSession: typeof attachTmuxAgentSession;
+  respondToPermission: typeof respondToTmuxAgentPermission;
 }
 
 const DEFAULT_DESCRIPTOR: BackendDescriptor = {
@@ -434,7 +439,7 @@ function buildDeps(
   };
 }
 
-export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBackend {
+export class LocalSessionBackend implements SessionBackend {
   readonly descriptor: BackendDescriptor;
   private readonly deps: LocalSessionBackendDependencies;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
@@ -449,12 +454,23 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
   private pendingUtf8Bytes = new Uint8Array(0);
   private viewOnly = false;
   private pendingAttachAbortController: AbortController | null = null;
-  private readonly openCodeCoordinator: OpenCodeCoordinator;
+  private agentStateCache: Record<string, WorkspaceAgentState> = {};
+  private readonly agentStateHandlers = new Set<(delta: AgentStateUpdateDelta) => void>();
+  private stopAgentWatch: (() => void) | null = null;
+  private readonly agentControl: LocalAgentControl;
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
     this.deps = buildDeps(options.deps);
-    this.openCodeCoordinator = options.openCodeCoordinator ?? defaultOpenCodeCoordinator;
+    this.agentControl = {
+      getState: options.agentControl?.getState ?? getAgentState,
+      watchState: options.agentControl?.watchState ?? watchAgentState,
+      listSessions: options.agentControl?.listSessions ?? listTmuxAgentSessions,
+      createSession: options.agentControl?.createSession ?? createTmuxAgentSession,
+      abortSession: options.agentControl?.abortSession ?? abortTmuxAgentSession,
+      attachSession: options.agentControl?.attachSession ?? attachTmuxAgentSession,
+      respondToPermission: options.agentControl?.respondToPermission ?? respondToTmuxAgentPermission,
+    };
   }
 
   onEvent(handler: (event: BackendEvent) => void): () => void {
@@ -479,8 +495,29 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
   async connect(): Promise<void> {
     await this.deps.ensureServer();
-    await defaultOpenCodeRuntimeManager.initialize();
-    await defaultAgentEventManager.initialize();
+    try {
+      const snapshot = await this.agentControl.getState();
+      this.agentStateCache = Object.fromEntries(snapshot.map((workspace) => [workspace.workspaceId, workspace]));
+      this.stopAgentWatch?.();
+      this.stopAgentWatch = await this.agentControl.watchState({
+        onSnapshot: (workspaces) => {
+          this.agentStateCache = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
+          const delta: AgentStateUpdateDelta = { type: 'agent_state_snapshot', workspaces: this.agentStateCache };
+          for (const handler of this.agentStateHandlers) {
+            handler(delta);
+          }
+        },
+        onUpdate: (delta) => {
+          this.applyAgentStateDelta(delta);
+          for (const handler of this.agentStateHandlers) {
+            handler(delta);
+          }
+        },
+      });
+    } catch {
+      this.agentStateCache = {};
+      this.stopAgentWatch = null;
+    }
     this.connected = true;
     this.emit({ type: 'status', status: 'connected' });
   }
@@ -488,6 +525,8 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
   async disconnect(): Promise<void> {
     this.pendingAttachAbortController?.abort();
     this.pendingAttachAbortController = null;
+    this.stopAgentWatch?.();
+    this.stopAgentWatch = null;
 
     await this.closeSessionSocket(false);
     this.connected = false;
@@ -654,107 +693,6 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
 
   async undismissReplay(replayId: string): Promise<void> {
     this.deps.undismissReplay(replayId);
-  }
-
-  async requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse> {
-    const workspaces = await this.deps.scanWorkspaces();
-    const workspace = workspaces.find((item) => matchesWorkspaceId(item, request.workspaceId));
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${request.workspaceId}`);
-    }
-
-    const runtime = await defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime({
-      workspaceId: toCanonicalWorkspaceId(workspace),
-      workspacePath: workspace.path,
-      projectName: workspace.projectName,
-    });
-
-    const response = await fetch(buildOpenCodeUrl(runtime.baseUrl, request.path, request.query), {
-      method: request.method,
-      headers: {
-        ...(request.headers ?? {}),
-        authorization: createOpenCodeBasicAuthHeader(runtime),
-      },
-      body: request.bodyBase64 ? Buffer.from(request.bodyBase64, 'base64') : undefined,
-    });
-
-    const headers: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
-
-    const body = Buffer.from(await response.arrayBuffer());
-    return {
-      requestId: crypto.randomUUID(),
-      status: response.status,
-      headers,
-      bodyBase64: body.length > 0 ? body.toString('base64') : undefined,
-    };
-  }
-
-  async getOpenCodeRuntimeInfo(workspaceId: string) {
-    const workspaces = await this.deps.scanWorkspaces();
-    const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${workspaceId}`);
-    }
-
-    return defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime({
-      workspaceId: toCanonicalWorkspaceId(workspace),
-      workspacePath: workspace.path,
-      projectName: workspace.projectName,
-    });
-  }
-
-  async subscribeOpenCode(
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void,
-  ): Promise<() => Promise<void>> {
-    const workspaces = await this.deps.scanWorkspaces();
-    const workspace = workspaces.find((item) => matchesWorkspaceId(item, request.workspaceId));
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${request.workspaceId}`);
-    }
-
-    const runtime = await defaultOpenCodeRuntimeManager.ensureWorkspaceRuntime({
-      workspaceId: toCanonicalWorkspaceId(workspace),
-      workspacePath: workspace.path,
-      projectName: workspace.projectName,
-    });
-
-    const controller = new AbortController();
-    const streamRequestId = crypto.randomUUID();
-    const response = await fetch(buildOpenCodeUrl(runtime.baseUrl, request.path, request.query), {
-      method: 'GET',
-      headers: {
-        accept: 'text/event-stream',
-        ...(request.headers ?? {}),
-        authorization: createOpenCodeBasicAuthHeader(runtime),
-      },
-      signal: controller.signal,
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(`Failed to open OpenCode stream (${response.status})`);
-    }
-
-    void consumeSseStream(response.body, async (event) => {
-      handler({
-        requestId: streamRequestId,
-        event: event.event,
-        data: event.data,
-        id: event.id,
-      });
-    }).catch((error) => {
-      this.emit({
-        type: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      });
-    });
-
-    return async () => {
-      controller.abort();
-    };
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {
@@ -1504,7 +1442,7 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     };
   }
 
-  private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTarget> {
+  private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTargetPayload> {
     const workspaces = await this.deps.scanWorkspaces();
     const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
     if (!workspace) {
@@ -1547,16 +1485,82 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     }
   }
 
+  private applyAgentStateDelta(delta: AgentStateUpdateDelta): void {
+    if (delta.type === 'agent_state_snapshot') {
+      this.agentStateCache = { ...delta.workspaces };
+      return;
+    }
+    if (!('workspaceId' in delta)) {
+      return;
+    }
+
+    const state = this.agentStateCache[delta.workspaceId] ?? {
+      workspaceId: delta.workspaceId,
+      sessions: [],
+      statuses: {},
+      pendingPermissions: {},
+      lastMessages: {},
+    };
+    this.agentStateCache[delta.workspaceId] = state;
+
+    if ('sessionId' in delta) {
+      switch (delta.type) {
+        case 'agent_session_status':
+          state.statuses[delta.sessionId] = delta.status;
+          break;
+        case 'agent_permission_added':
+          if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
+          state.pendingPermissions[delta.sessionId].push(delta.permission);
+          break;
+        case 'agent_permission_removed':
+          if (state.pendingPermissions[delta.sessionId]) {
+            state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
+              (permission) => permission.id !== delta.permissionId,
+            );
+          }
+          break;
+        case 'agent_last_message':
+          state.lastMessages[delta.sessionId] = delta.preview;
+          break;
+        case 'agent_session_created':
+          if (!state.sessions.some((session) => session.id === delta.sessionId)) {
+            state.sessions.push({ id: delta.sessionId, title: delta.title });
+          }
+          break;
+        case 'agent_session_updated': {
+          const index = state.sessions.findIndex((session) => session.id === delta.sessionId);
+          if (index === -1) {
+            state.sessions.push({ id: delta.sessionId, title: delta.title });
+          } else {
+            state.sessions[index] = { id: delta.sessionId, title: delta.title };
+          }
+          break;
+        }
+        case 'agent_session_deleted':
+          state.sessions = state.sessions.filter((session) => session.id !== delta.sessionId);
+          delete state.statuses[delta.sessionId];
+          delete state.pendingPermissions[delta.sessionId];
+          delete state.lastMessages[delta.sessionId];
+          break;
+        case 'agent_session_error':
+          break;
+      }
+    }
+  }
+
   // ============================================================================
-  // Agent state — backed by defaultAgentEventManager
+  // Agent state — backed by tmux-lite agent control
   // ============================================================================
 
   subscribeAgentState(handler: (delta: AgentStateUpdateDelta) => void): () => void {
-    return defaultAgentEventManager.subscribe(handler);
+    this.agentStateHandlers.add(handler);
+    return () => {
+      this.agentStateHandlers.delete(handler);
+    };
   }
 
   getAgentStateSnapshot(): Record<string, WorkspaceAgentState> {
-    return defaultAgentEventManager.getSnapshot();
+    return this.agentStateCache;
   }
 
   async respondToAgentPermission(
@@ -1565,45 +1569,33 @@ export class LocalSessionBackend implements SessionBackend, OpenCodeBridgeBacken
     permissionId: string,
     response: 'allow' | 'deny',
   ): Promise<boolean> {
-    // We don't need the workspace path here — we just need the runtime
-    const runtime = await defaultOpenCodeRuntimeManager.getWorkspaceRuntime(workspaceId);
-    if (!runtime) return false;
-    const client = new OpenCodeClient({
-      baseUrl: runtime.baseUrl,
-      fetch: (input, init) =>
-        fetch(input as RequestInfo, {
-          ...init,
-          headers: {
-            ...(init?.headers ?? {}),
-            authorization: createOpenCodeBasicAuthHeader(runtime),
-          },
-        }),
-    });
-    return client.respondToPermission(agentSessionId, permissionId, response);
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.agentControl.respondToPermission(target, agentSessionId, permissionId, response);
   }
 
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
-    return this.openCodeCoordinator.getKnownAgentSessions(workspaceId);
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.agentControl.listSessions(target, 'known');
   }
 
   async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.openCodeCoordinator.refreshAgentSessions(target);
+    return this.agentControl.listSessions(target, 'live');
   }
 
   async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.openCodeCoordinator.createAgentSession(target, title);
+    return this.agentControl.createSession(target, title);
   }
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.openCodeCoordinator.abortAgentSession(target, agentSessionId);
+    return this.agentControl.abortSession(target, agentSessionId);
   }
 
   async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const terminalSession = await this.openCodeCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+    const terminalSession = await this.agentControl.attachSession(target, agentSessionId);
     await this.attachSession({ sessionId: terminalSession.id, viewOnly: options.viewOnly });
   }
 

@@ -2,7 +2,6 @@ import { describe, expect, it, mock } from 'bun:test';
 import { LocalSessionBackend, type LocalSessionBackendDependencies } from '../backends/local-session-backend';
 import type { BackendEvent } from '../events';
 import type { NotificationConfig } from '../../notifications/types';
-import type { OpenCodeCoordinator } from '../../agents/opencode-coordinator';
 
 const notificationConfig: NotificationConfig = {
   enabled: true,
@@ -1385,16 +1384,18 @@ describe('LocalSessionBackend', () => {
         close: () => handlers.onClose(),
       }),
     };
-    const coordinator = {
-      ensureRuntime: mock(async () => { throw new Error('not used'); }),
-      getKnownAgentSessions: mock(async () => []),
-      refreshAgentSessions: mock(async () => []),
-      createAgentSession: mock(async () => []),
-      abortAgentSession: mock(async () => true),
-      ensureAgentTerminalSession,
-    } satisfies OpenCodeCoordinator;
-
-    const backend = new LocalSessionBackend({ deps, openCodeCoordinator: coordinator });
+    const backend = new LocalSessionBackend({
+      deps,
+      agentControl: {
+        getState: mock(async () => []),
+        watchState: mock(async () => () => {}),
+        listSessions: mock(async () => []),
+        createSession: mock(async () => []),
+        abortSession: mock(async () => true),
+        attachSession: ensureAgentTerminalSession,
+        respondToPermission: mock(async () => true),
+      },
+    });
     await backend.attachAgentSession('alpha:ws-1', 'agent-ses-1');
 
     expect(ensureAgentTerminalSession).toHaveBeenCalledWith(

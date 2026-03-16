@@ -5,6 +5,10 @@ import {
   type ApplyBundleRefreshRequest,
   type AttachSessionRequest,
   type AttachAgentSessionRequest,
+  type ListAgentSessionsRequest,
+  type CreateAgentSessionRequest,
+  type AbortAgentSessionRequest,
+  type RespondAgentPermissionRequest,
   type CancelProjectCreationRequest,
   type CreateProjectRequest,
   type CreateWorkspaceRequest,
@@ -53,14 +57,8 @@ import {
   type SessionCtrl,
   type StartProcessRequest,
   type StopProcessRequest,
-  type OpenCodeRequest,
-  type OpenCodeResponse,
-  type OpenCodeStreamCloseRequest,
-  type OpenCodeStreamEventResponse,
-  type OpenCodeStreamOpenRequest,
-  type OpenCodeStreamOpenedResponse,
-  type OpenCodeStreamClosedResponse,
-  type OpenCodeStreamErrorResponse,
+  type AgentSessionsResponse,
+  type AgentBoolResponse,
   type UpdateNotificationConfigRequest,
   type WorkspaceCreatedResponse,
   type GetReplayFrameRequest,
@@ -91,61 +89,15 @@ import type {
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
-  OpenCodeBridgeBackend,
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
-import type {
-  OpenCodeBridgeRequest,
-  OpenCodeBridgeResponse,
-  OpenCodeBridgeStreamEvent,
-  OpenCodeBridgeStreamOpen,
-} from '../../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../../agents/opencode-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../serve/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30000;
-
-function normalizeOpenCodeTime(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString();
-  return undefined;
-}
-
-function decodeBase64Utf8(base64: string): string {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(base64, 'base64').toString('utf8');
-  }
-  const binary = atob(base64);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-function encodeBase64Utf8(text: string): string {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(text).toString('base64');
-  }
-  const bytes = new TextEncoder().encode(text);
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-function normalizeOpenCodeSessionRecord(value: Record<string, unknown>): { id: string; title: string; directory?: string; parentID?: string; updatedAt?: string } {
-  const time = (value.time && typeof value.time === 'object') ? value.time as Record<string, unknown> : undefined;
-  return {
-    id: String(value.id),
-    title: typeof value.title === 'string' && value.title.trim().length > 0 ? value.title : String(value.id),
-    directory: typeof value.directory === 'string' ? value.directory : undefined,
-    parentID: typeof value.parentID === 'string' ? value.parentID : undefined,
-    updatedAt: normalizeOpenCodeTime(value.updatedAt ?? time?.updated),
-  };
-}
 
 function normalizeExpectedProjectName(projectName: string | undefined, repository: string): string {
 	const candidate = projectName?.trim() || extractRepoName(repository);
@@ -312,12 +264,8 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'events_list',
   'process_started',
   'process_stopped',
-  'opencode_response',
-  'opencode_stream_opened',
-  'opencode_stream_event',
-  'opencode_stream_closed',
-  'opencode_stream_error',
-  'opencode_runtime',
+  'agent_sessions',
+  'agent_bool',
   'agent_state_snapshot',
   'agent_state_update',
 ]);
@@ -429,7 +377,7 @@ function toWorkspaceDeleteErrorCode(code: string | undefined): WorkspaceDeleteEr
 }
 
 export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServerAuth>
-  implements SessionBackend, OpenCodeBridgeBackend {
+  implements SessionBackend {
   readonly descriptor: BackendDescriptor;
 
   private readonly socket: TSocket;
@@ -598,20 +546,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private pendingUtf8Bytes = new Uint8Array(0);
   private pendingEventChunks = new Map<string, PendingEventsChunk>();
   private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
-  private pendingOpenCodeRequests = new Map<string, {
-    resolve: (response: OpenCodeBridgeResponse) => void;
-    reject: (error: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }>();
-  private openCodeStreamHandlers = new Map<string, (event: OpenCodeBridgeStreamEvent) => void>();
-  private pendingOpenCodeRuntimeInfo = new Map<string, {
+  private pendingAgentSessions = new Map<string, {
     workspaceId: string;
-    resolve: (info: OpenCodeRuntimeInfo) => void;
+    resolve: (sessions: Array<{ id: string; title: string; updatedAt?: string }>) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  private pendingOpenCodeStreamOpen = new Map<string, {
-    resolve: () => void;
+  private pendingAgentBooleans = new Map<string, {
+    workspaceId: string;
+    resolve: (ok: boolean) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
@@ -968,125 +911,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
-  async requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse> {
-    const requestId = crypto.randomUUID();
-    const command: OpenCodeRequest = {
-      type: 'opencode_request',
-      requestId,
-      ...request,
-    };
-
-    return new Promise<OpenCodeBridgeResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingOpenCodeRequests.get(requestId);
-        if (!pending) {
-          return;
-        }
-        this.pendingOpenCodeRequests.delete(requestId);
-        reject(new Error(`Timed out waiting for OpenCode response (${request.path})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingOpenCodeRequests.set(requestId, { resolve, reject, timeout });
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingOpenCodeRequests.get(requestId);
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingOpenCodeRequests.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
-  }
-
-  async getOpenCodeRuntimeInfo(workspaceId: string): Promise<OpenCodeRuntimeInfo> {
-    const requestId = crypto.randomUUID();
-    const command = {
-      type: 'get_opencode_runtime' as const,
-      workspaceId,
-    };
-
-    return new Promise<OpenCodeRuntimeInfo>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingOpenCodeRuntimeInfo.get(requestId);
-        if (!pending) {
-          return;
-        }
-        this.pendingOpenCodeRuntimeInfo.delete(requestId);
-        reject(new Error(`Timed out waiting for OpenCode runtime info (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingOpenCodeRuntimeInfo.set(requestId, {
-        workspaceId,
-        resolve,
-        reject,
-        timeout,
-      });
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingOpenCodeRuntimeInfo.get(requestId);
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingOpenCodeRuntimeInfo.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
-  }
-
-  async subscribeOpenCode(
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void,
-  ): Promise<() => Promise<void>> {
-    const requestId = crypto.randomUUID();
-    const command: OpenCodeStreamOpenRequest = {
-      type: 'opencode_stream_open',
-      requestId,
-      ...request,
-    };
-
-    return new Promise<() => Promise<void>>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingOpenCodeStreamOpen.get(requestId);
-        if (!pending) {
-          return;
-        }
-        this.pendingOpenCodeStreamOpen.delete(requestId);
-        this.openCodeStreamHandlers.delete(requestId);
-        reject(new Error(`Timed out opening OpenCode stream (${request.path})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.openCodeStreamHandlers.set(requestId, handler);
-      this.pendingOpenCodeStreamOpen.set(requestId, {
-        resolve: () => {
-          resolve(async () => {
-            const closeCommand: OpenCodeStreamCloseRequest = {
-              type: 'opencode_stream_close',
-              requestId,
-            };
-            this.openCodeStreamHandlers.delete(requestId);
-            await this.sendCommand(closeCommand);
-          });
-        },
-        reject,
-        timeout,
-      });
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingOpenCodeStreamOpen.get(requestId);
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingOpenCodeStreamOpen.delete(requestId);
-        this.openCodeStreamHandlers.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
-  }
-
   async createProject(params: CreateProjectParams): Promise<void> {
     if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
       throw new Error('Project creation request already in progress');
@@ -1377,46 +1201,87 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
-    const workspace = this.agentStateCache[workspaceId];
-    return workspace?.sessions.map((session) => ({ id: session.id, title: session.title })) ?? [];
+    const requestId = crypto.randomUUID();
+    const command: ListAgentSessionsRequest = { type: 'list_agent_sessions', requestId, workspaceId, mode: 'known' };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentSessions.get(requestId);
+        if (!pending) return;
+        this.pendingAgentSessions.delete(requestId);
+        reject(new Error(`Timed out waiting for known agent sessions (${workspaceId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentSessions.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentSessions.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentSessions.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
   }
 
   async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
-    const runtime = await this.getOpenCodeRuntimeInfo(workspaceId);
-    const response = await this.requestOpenCode({
-      workspaceId,
-      method: 'GET',
-      path: '/session',
+    const requestId = crypto.randomUUID();
+    const command: ListAgentSessionsRequest = { type: 'list_agent_sessions', requestId, workspaceId, mode: 'live' };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentSessions.get(requestId);
+        if (!pending) return;
+        this.pendingAgentSessions.delete(requestId);
+        reject(new Error(`Timed out waiting for agent sessions (${workspaceId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentSessions.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentSessions.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentSessions.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
-    const raw = JSON.parse(decodeBase64Utf8(response.bodyBase64 ?? '')) as Array<Record<string, unknown>>;
-    return raw
-      .map(normalizeOpenCodeSessionRecord)
-      .filter((session) => session.directory === runtime.workspacePath && !session.parentID)
-      .map((session) => ({ id: session.id, title: session.title, updatedAt: session.updatedAt }));
   }
 
   async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
-    await this.requestOpenCode({
-      workspaceId,
-      method: 'POST',
-      path: '/session',
-      headers: { 'content-type': 'application/json' },
-      bodyBase64: encodeBase64Utf8(JSON.stringify({ title })),
+    const requestId = crypto.randomUUID();
+    const command: CreateAgentSessionRequest = { type: 'create_agent_session', requestId, workspaceId, title };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentSessions.get(requestId);
+        if (!pending) return;
+        this.pendingAgentSessions.delete(requestId);
+        reject(new Error(`Timed out creating agent session (${workspaceId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentSessions.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentSessions.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentSessions.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
-    return this.listAgentSessions(workspaceId);
   }
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
-    const response = await this.requestOpenCode({
-      workspaceId,
-      method: 'POST',
-      path: `/session/${encodeURIComponent(agentSessionId)}/abort`,
+    const requestId = crypto.randomUUID();
+    const command: AbortAgentSessionRequest = { type: 'abort_agent_session', requestId, workspaceId, agentSessionId };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentBooleans.get(requestId);
+        if (!pending) return;
+        this.pendingAgentBooleans.delete(requestId);
+        reject(new Error(`Timed out aborting agent session (${workspaceId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentBooleans.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentBooleans.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentBooleans.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
-    try {
-      return JSON.parse(decodeBase64Utf8(response.bodyBase64 ?? '')) as boolean;
-    } catch {
-      return response.status >= 200 && response.status < 300;
-    }
   }
 
   async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
@@ -2161,29 +2026,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           processName: message.processName,
         });
         return;
-      case 'opencode_response':
-        this.resolveOpenCodeRequest(message);
-        return;
-      case 'opencode_stream_opened':
-        this.resolveOpenCodeStreamOpened(message);
-        return;
-      case 'opencode_stream_event':
-        this.handleOpenCodeStreamEvent(message);
-        return;
-      case 'opencode_stream_closed':
-        this.handleOpenCodeStreamClosed(message);
-        return;
-      case 'opencode_stream_error':
-        this.handleOpenCodeStreamError(message);
-        return;
-      case 'opencode_runtime':
-        this.resolveOpenCodeRuntimeInfo(message);
-        return;
       case 'agent_state_snapshot':
         this.handleAgentStateSnapshot(message as unknown as AgentStateSnapshotPush);
         return;
       case 'agent_state_update':
         this.handleAgentStateUpdate(message as unknown as AgentStateUpdatePush);
+        return;
+      case 'agent_sessions':
+        this.resolveAgentSessions(message as AgentSessionsResponse);
+        return;
+      case 'agent_bool':
+        this.resolveAgentBoolean(message as AgentBoolResponse);
         return;
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
@@ -2199,9 +2052,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingReplayTimeline(message.message, undefined, true);
         this.rejectPendingDismissReplay(message.message, undefined, true);
         this.rejectPendingUndismissReplay(message.message, undefined, true);
-        this.rejectPendingOpenCodeRuntimeInfo(message.message, message.workspaceId);
-        this.rejectPendingOpenCodeRequests(message.message);
-        this.rejectPendingOpenCodeStreams(message.message);
+        this.rejectPendingAgentSessions(message.message, message.workspaceId);
+        this.rejectPendingAgentBooleans(message.message, message.workspaceId);
         if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
@@ -2241,6 +2093,26 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     clearTimeout(pending.timeout);
     this.pendingGithubRepos = null;
     pending.resolve(message.repos);
+  }
+
+  private resolveAgentSessions(message: AgentSessionsResponse): void {
+    const pending = this.pendingAgentSessions.get(message.requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingAgentSessions.delete(message.requestId);
+    pending.resolve(message.sessions);
+  }
+
+  private resolveAgentBoolean(message: AgentBoolResponse): void {
+    const pending = this.pendingAgentBooleans.get(message.requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingAgentBooleans.delete(message.requestId);
+    pending.resolve(message.ok);
   }
 
   private resolveRemoteBranchList(message: RemoteBranchListResponse): void {
@@ -2365,116 +2237,24 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.reject(new Error(message));
   }
 
-  private resolveOpenCodeRequest(message: OpenCodeResponse): void {
-    const pending = this.pendingOpenCodeRequests.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingOpenCodeRequests.delete(message.requestId);
-    pending.resolve({
-      requestId: message.requestId,
-      status: message.status,
-      headers: message.headers,
-      bodyBase64: message.bodyBase64,
-    });
-  }
-
-  private resolveOpenCodeStreamOpened(message: OpenCodeStreamOpenedResponse): void {
-    const pending = this.pendingOpenCodeStreamOpen.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingOpenCodeStreamOpen.delete(message.requestId);
-    pending.resolve();
-  }
-
-  private handleOpenCodeStreamEvent(message: OpenCodeStreamEventResponse): void {
-    const handler = this.openCodeStreamHandlers.get(message.requestId);
-    if (!handler) {
-      return;
-    }
-
-    handler({
-      requestId: message.requestId,
-      event: message.event,
-      data: message.data,
-      id: message.id,
-    });
-  }
-
-  private handleOpenCodeStreamClosed(message: OpenCodeStreamClosedResponse): void {
-    const pending = this.pendingOpenCodeStreamOpen.get(message.requestId);
-    if (pending) {
-      clearTimeout(pending.timeout);
-      this.pendingOpenCodeStreamOpen.delete(message.requestId);
-      pending.reject(new Error('OpenCode stream closed before opening'));
-    }
-    this.openCodeStreamHandlers.delete(message.requestId);
-  }
-
-  private handleOpenCodeStreamError(message: OpenCodeStreamErrorResponse): void {
-    const pending = this.pendingOpenCodeStreamOpen.get(message.requestId);
-    if (pending) {
-      clearTimeout(pending.timeout);
-      this.pendingOpenCodeStreamOpen.delete(message.requestId);
-      this.openCodeStreamHandlers.delete(message.requestId);
-      pending.reject(new Error(message.message));
-      return;
-    }
-
-    this.openCodeStreamHandlers.delete(message.requestId);
-    this.emit({ type: 'error', message: message.message });
-  }
-
-  private resolveOpenCodeRuntimeInfo(message: Extract<MachineToClientMessage, { type: 'opencode_runtime' }>): void {
-    for (const [requestId, pending] of this.pendingOpenCodeRuntimeInfo) {
-      if (!workspaceIdsMatch(pending.workspaceId, message.workspaceId)) {
-        continue;
-      }
-      clearTimeout(pending.timeout);
-      this.pendingOpenCodeRuntimeInfo.delete(requestId);
-      pending.resolve({
-        workspaceId: message.workspaceId,
-        workspacePath: message.workspacePath,
-        hostname: message.hostname,
-        port: message.port,
-        baseUrl: message.baseUrl,
-        username: message.username,
-        password: message.password,
-        startedAt: new Date().toISOString(),
-      });
-      return;
-    }
-  }
-
-  private rejectPendingOpenCodeRequests(message: string): void {
-    for (const [requestId, pending] of this.pendingOpenCodeRequests) {
-      clearTimeout(pending.timeout);
-      this.pendingOpenCodeRequests.delete(requestId);
-      pending.reject(new Error(message));
-    }
-  }
-
-  private rejectPendingOpenCodeRuntimeInfo(message: string, workspaceId?: string): void {
-    for (const [requestId, pending] of this.pendingOpenCodeRuntimeInfo) {
+  private rejectPendingAgentSessions(message: string, workspaceId?: string): void {
+    for (const [requestId, pending] of this.pendingAgentSessions) {
       if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
         continue;
       }
       clearTimeout(pending.timeout);
-      this.pendingOpenCodeRuntimeInfo.delete(requestId);
+      this.pendingAgentSessions.delete(requestId);
       pending.reject(new Error(message));
     }
   }
 
-  private rejectPendingOpenCodeStreams(message: string): void {
-    for (const [requestId, pending] of this.pendingOpenCodeStreamOpen) {
+  private rejectPendingAgentBooleans(message: string, workspaceId?: string): void {
+    for (const [requestId, pending] of this.pendingAgentBooleans) {
+      if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
+        continue;
+      }
       clearTimeout(pending.timeout);
-      this.pendingOpenCodeStreamOpen.delete(requestId);
-      this.openCodeStreamHandlers.delete(requestId);
+      this.pendingAgentBooleans.delete(requestId);
       pending.reject(new Error(message));
     }
   }
@@ -3107,9 +2887,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
-    this.rejectPendingOpenCodeRuntimeInfo('Remote session disconnected');
-    this.rejectPendingOpenCodeRequests('Remote session disconnected');
-    this.rejectPendingOpenCodeStreams('Remote session disconnected');
+    this.rejectPendingAgentSessions('Remote session disconnected');
+    this.rejectPendingAgentBooleans('Remote session disconnected');
     this.rejectAllPendingReviewRequests('Remote session disconnected');
     this.connectPromise = null;
     this.connectResolve = null;
@@ -3198,23 +2977,35 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     permissionId: string,
     response: 'allow' | 'deny',
   ): Promise<boolean> {
-    // Tunnel the permission response through the existing opencode_request bridge
-    const resp = await this.requestOpenCode({
+    const requestId = crypto.randomUUID();
+    const command: RespondAgentPermissionRequest = {
+      type: 'respond_agent_permission',
+      requestId,
       workspaceId,
-      method: 'POST',
-      path: `/session/${encodeURIComponent(agentSessionId)}/permissions/${encodeURIComponent(permissionId)}`,
-      headers: { 'content-type': 'application/json' },
-      bodyBase64: encodeBase64Utf8(JSON.stringify({ response })),
+      agentSessionId,
+      permissionId,
+      response,
+    };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentBooleans.get(requestId);
+        if (!pending) return;
+        this.pendingAgentBooleans.delete(requestId);
+        reject(new Error(`Timed out responding to agent permission (${workspaceId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentBooleans.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentBooleans.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentBooleans.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
-    try {
-      return JSON.parse(decodeBase64Utf8(resp.bodyBase64 ?? '')) as boolean;
-    } catch {
-      return resp.status >= 200 && resp.status < 300;
-    }
   }
 
   // ============================================================================
-  // Agent session preferences — stored via requestOpenCode (relay-tunneled)
+  // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,
   // not on the remote machine, since they're UI state, not workspace state.
   // ============================================================================

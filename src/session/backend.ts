@@ -8,13 +8,6 @@ import type {
   TerminalSnapshot,
 } from '../lib/tmux-lite/replay/index.js';
 import type {
-  OpenCodeBridgeRequest,
-  OpenCodeBridgeResponse,
-  OpenCodeBridgeStreamEvent,
-  OpenCodeBridgeStreamOpen,
-} from '../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../agents/opencode-types.js';
-import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
@@ -221,15 +214,6 @@ export interface SessionBackend {
   getAgentSessionPreference(workspaceId: string): Promise<string | null>;
   /** Persist the selected agent session ID for a workspace. */
   setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void>;
-}
-
-export interface OpenCodeBridgeBackend {
-  getOpenCodeRuntimeInfo?(workspaceId: string): Promise<OpenCodeRuntimeInfo>;
-  requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse>;
-  subscribeOpenCode(
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void,
-  ): Promise<() => Promise<void>>;
 }
 
 export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };

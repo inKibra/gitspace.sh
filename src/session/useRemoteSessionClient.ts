@@ -9,8 +9,6 @@ import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
-import type { OpenCodeBridgeRequest, OpenCodeBridgeResponse, OpenCodeBridgeStreamEvent, OpenCodeBridgeStreamOpen } from '../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../agents/opencode-types.js';
 import type {
   AttachSessionParams,
   BackendKey,
@@ -20,7 +18,6 @@ import type {
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
-  OpenCodeBridgeBackend,
   SessionBackend,
 } from './backend.js';
 import type { ScriptRuntimeState, BackendSessionState } from './types.js';
@@ -54,9 +51,6 @@ export interface RemoteSessionPtyBackend extends SessionBackend {
   setPtyOutputHandler?: (handler: ((data: Uint8Array) => void) | null) => void;
   writePtyData?: (data: Uint8Array) => Promise<void>;
   resizePty?: (cols: number, rows: number) => Promise<void>;
-  getOpenCodeRuntimeInfo?: OpenCodeBridgeBackend['getOpenCodeRuntimeInfo'];
-  requestOpenCode?: OpenCodeBridgeBackend['requestOpenCode'];
-  subscribeOpenCode?: OpenCodeBridgeBackend['subscribeOpenCode'];
 }
 
 export interface UseRemoteSessionClientOptions<ConnectParams> {
@@ -150,13 +144,6 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   getReplayTimeline: (replayId: string) => Promise<ReplayTimeline>;
   dismissReplay: (replayId: string) => Promise<void>;
   undismissReplay: (replayId: string) => Promise<void>;
-  hasOpenCodeBridge: boolean;
-  requestOpenCode: (request: Omit<OpenCodeBridgeRequest, 'requestId'>) => Promise<OpenCodeBridgeResponse>;
-  subscribeOpenCode: (
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void,
-  ) => Promise<() => Promise<void>>;
-  getOpenCodeRuntimeInfo: (workspaceId: string) => Promise<OpenCodeRuntimeInfo>;
   /** The underlying SessionBackend for agent hooks that need the full interface */
   sessionBackend: SessionBackend | null;
 }
@@ -590,35 +577,6 @@ export function useRemoteSessionClient<ConnectParams>(
     await engine.undismissReplay(backendKey, replayId);
   }, [engine]);
 
-  const requestOpenCode = useCallback(async (
-    request: Omit<OpenCodeBridgeRequest, 'requestId'>,
-  ): Promise<OpenCodeBridgeResponse> => {
-    const backend = backendRef.current;
-    if (!backend?.requestOpenCode) {
-      throw new Error('OpenCode bridge unavailable for current backend');
-    }
-    return backend.requestOpenCode(request);
-  }, []);
-
-  const subscribeOpenCode = useCallback(async (
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void,
-  ): Promise<() => Promise<void>> => {
-    const backend = backendRef.current;
-    if (!backend?.subscribeOpenCode) {
-      throw new Error('OpenCode bridge unavailable for current backend');
-    }
-    return backend.subscribeOpenCode(request, handler);
-  }, []);
-
-  const getOpenCodeRuntimeInfo = useCallback(async (workspaceId: string): Promise<OpenCodeRuntimeInfo> => {
-    const backend = backendRef.current;
-    if (!backend?.getOpenCodeRuntimeInfo) {
-      throw new Error('OpenCode runtime info unavailable for current backend');
-    }
-    return backend.getOpenCodeRuntimeInfo(workspaceId);
-  }, []);
-
   useEffect(() => {
     return () => {
       const backendKey = activeBackendKeyRef.current;
@@ -701,10 +659,6 @@ export function useRemoteSessionClient<ConnectParams>(
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
-    hasOpenCodeBridge: Boolean(backendRef.current?.requestOpenCode && backendRef.current?.subscribeOpenCode),
-    requestOpenCode,
-    subscribeOpenCode,
-    getOpenCodeRuntimeInfo,
     /** Expose the underlying SessionBackend for agent hooks that need the full interface */
     sessionBackend: backendRef.current as SessionBackend | null,
   }), [
@@ -753,8 +707,5 @@ export function useRemoteSessionClient<ConnectParams>(
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
-    requestOpenCode,
-    subscribeOpenCode,
-    getOpenCodeRuntimeInfo,
   ]);
 }

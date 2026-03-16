@@ -34,8 +34,6 @@ import {
 } from '../core/identity.js';
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
-import { defaultAgentEventManager } from '../serve/agent-event-manager.js';
-import { defaultOpenCodeRuntimeManager } from '../agents/opencode-runtime.js';
 import type { ServeEventHandler } from '../serve/types.js';
 import type { Identity, StoredIdentity } from '../types/identity.js';
 import {
@@ -71,7 +69,7 @@ import {
   type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
-import { listSessions } from '../lib/tmux-lite/cli.js';
+import { getAgentState, listSessions, watchAgentState } from '../lib/tmux-lite/cli.js';
 import { loadProcessesConfig } from '../lib/processes/config.js';
 import { parseProcessSessionName } from '../lib/processes/names.js';
 import { resolveWorkspaceRef } from '../lib/events/paths.js';
@@ -1386,12 +1384,17 @@ export async function serveStart(options: {
     throw error;
   }
 
-  await defaultOpenCodeRuntimeManager.initialize();
-  await defaultAgentEventManager.initialize();
-
-  // Broadcast agent state changes to all connected authenticated clients
-  defaultAgentEventManager.subscribe((delta) => {
-    void sessionManager.broadcastAgentStateUpdate(delta);
+  let currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((workspace) => [workspace.workspaceId, workspace]));
+  const stopAgentWatch = await watchAgentState({
+    onSnapshot: (workspaces) => {
+      currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
+    },
+    onUpdate: (delta) => {
+      void sessionManager.broadcastAgentStateUpdate(delta);
+    },
+    onError: (error) => {
+      logger.error(`[serve] tmux-lite agent watch failed: ${error.message}`);
+    },
   });
 
   // Event handler - update daemon state
@@ -1408,11 +1411,13 @@ export async function serveStart(options: {
         break;
       case 'client_authenticated': {
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        // Push full agent state snapshot to newly authenticated client
-        const snapshot = defaultAgentEventManager.getSnapshot();
-        if (Object.keys(snapshot).length > 0) {
-          void sessionManager.sendAgentStateSnapshot(event.connectionId, snapshot);
-        }
+        void getAgentState().then((workspaces) => {
+          const snapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
+          currentAgentSnapshot = snapshot;
+          if (Object.keys(snapshot).length > 0) {
+            void sessionManager.sendAgentStateSnapshot(event.connectionId, snapshot);
+          }
+        }).catch(() => undefined);
         break;
       }
       case 'client_disconnected':
