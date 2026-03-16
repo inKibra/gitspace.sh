@@ -22,6 +22,33 @@ interface PromptCreateAgentSessionOptions {
   attachOptions: Omit<AttachAgentSessionOptions, 'agentSessionId'>;
 }
 
+interface AgentInboxItemLike {
+  sessionId?: string;
+  agentAction?: {
+    workspaceId: string;
+    agentSessionId: string;
+    permissionId?: string;
+    permissionTitle?: string;
+  };
+}
+
+interface HandleAgentInboxSessionOptions {
+  sessionId: string;
+  agentInboxItems: AgentInboxItemLike[];
+  flow: Pick<UseFlowReturn, 'showSelect'>;
+  respondToPermission: (
+    workspaceId: string,
+    agentSessionId: string,
+    permissionId: string,
+    response: 'allow' | 'deny',
+  ) => Promise<void>;
+  markAgentInboxItemRead: (sessionId: string) => void;
+  openAgentSession: (workspaceId: string, agentSessionId: string) => Promise<void>;
+  attachRegularSession: (sessionId: string) => Promise<void>;
+  beforeAgentAction?: () => void | Promise<void>;
+  beforeRegularAttach?: () => void | Promise<void>;
+}
+
 export function findCreatedAgentSession(
   previousIds: Set<string>,
   sessions: AgentSessionSummaryLike[],
@@ -57,4 +84,35 @@ export function promptCreateAgentSession(options: PromptCreateAgentSessionOption
       });
     },
   });
+}
+
+export async function handleInboxSessionSelection(options: HandleAgentInboxSessionOptions): Promise<void> {
+  const agentItem = options.agentInboxItems.find((item) => item.sessionId === options.sessionId && item.agentAction);
+  if (agentItem?.agentAction) {
+    const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
+    await options.beforeAgentAction?.();
+    if (permissionId) {
+      options.flow.showSelect<'allow' | 'deny' | 'dismiss'>({
+        title: `Permission: ${permissionTitle ?? 'Action requested'}`,
+        options: [
+          { label: 'Allow', value: 'allow', description: 'Grant the agent permission to proceed' },
+          { label: 'Deny', value: 'deny', description: 'Deny the agent and stop this action' },
+          { label: 'Dismiss', value: 'dismiss', description: 'Close without responding (agent keeps waiting)' },
+        ],
+        onSelect: async (choice) => {
+          if (choice === 'allow' || choice === 'deny') {
+            await options.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
+          }
+          options.markAgentInboxItemRead(options.sessionId);
+        },
+      });
+      return;
+    }
+
+    await options.openAgentSession(workspaceId, agentSessionId);
+    return;
+  }
+
+  await options.beforeRegularAttach?.();
+  await options.attachRegularSession(options.sessionId);
 }

@@ -121,7 +121,7 @@ import {
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
-import { openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
+import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -1278,38 +1278,39 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [localBackend]);
 
   const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
-    const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-    if (agentItem?.agentAction) {
-      const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
-      if (permissionId) {
-        flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-          title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-          options: [
-            { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-            { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-            { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-          ],
-          onSelect: async (choice) => {
-            if (choice === 'allow' || choice === 'deny') {
-              await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-            }
-            setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
+    if (!localBackend?.attachAgentSession) {
+      throw new Error('Agent attach unavailable');
+    }
+    await handleInboxSessionSelection({
+      sessionId,
+      agentInboxItems,
+      flow,
+      respondToPermission: agentEvents.respondToPermission,
+      markAgentInboxItemRead: (id) => {
+        setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
+      },
+      openAgentSession: async (workspaceId, agentSessionId) => {
+        await openAgentSession({
+          workspaceId,
+          agentSessionId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: localBackend.attachAgentSession!.bind(localBackend),
+          afterAttach: async () => {
+            dispatch({ type: 'SET_VIEW', view: 'terminal' });
           },
         });
-      } else {
-        persistAgentSessionSelection(workspaceId, agentSessionId);
-        if (!localBackend?.attachAgentSession) {
-          throw new Error('Agent attach unavailable');
-        }
-        setIsViewOnlySession(false);
-        await localBackend.attachAgentSession(workspaceId, agentSessionId);
-        dispatch({ type: 'SET_VIEW', view: 'terminal' });
-      }
-      return;
-    }
-    dispatch({ type: 'SET_VIEW', view: 'projects' });
-    await handleAttachSession({ sessionId });
+      },
+      attachRegularSession: async (id) => {
+        await handleAttachSession({ sessionId: id });
+      },
+      beforeAgentAction: async () => {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      },
+      beforeRegularAttach: async () => {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      },
+    });
   }, [agentEvents, agentInboxItems, dispatch, flow, handleAttachSession, localBackend, persistAgentSessionSelection]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
