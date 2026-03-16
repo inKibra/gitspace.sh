@@ -601,16 +601,20 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
   }, []);
 
   const toggleAgentSection = useCallback((workspaceId: string) => {
+    let expanded = false;
     setExpandedAgentSections((prev) => {
       const next = new Set(prev);
       if (next.has(workspaceId)) {
         next.delete(workspaceId);
       } else {
         next.add(workspaceId);
-        void onOpenAgents?.(workspaceId);
+        expanded = true;
       }
       return next;
     });
+    if (expanded) {
+      void onOpenAgents?.(workspaceId);
+    }
   }, [onOpenAgents]);
 
   const activateItem = useCallback(async (item: TreeItem | null) => {
