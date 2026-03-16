@@ -46,7 +46,6 @@ import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
 import { InboxWeb } from "./components/Inbox.web.js";
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
@@ -739,8 +738,11 @@ export default function App() {
     },
   });
 
-  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
-  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, webBackend);
+  const [, setAgentPickerWorkspaceId] = useState('');
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    setAgentPickerWorkspaceId(workspaceId);
+    void webBackend?.setAgentSessionPreference(workspaceId, sessionId);
+  }, [webBackend]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
@@ -808,10 +810,11 @@ export default function App() {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      agentSessionPref.persist(agentSessionId);
+      persistAgentSessionSelection(workspaceId, agentSessionId);
       if (!webBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
+      setIsViewOnlySession(false);
       await webBackend.attachAgentSession(workspaceId, agentSessionId);
       setView('terminal');
     },
@@ -822,13 +825,16 @@ export default function App() {
         placeholder: 'Investigate auth bug',
         validation: (value) => value.trim() ? null : 'Session name is required',
         onSubmit: async (value) => {
+          const previousIds = new Set((workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? []).map((session) => session.id));
           const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
-          const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
+          const created = sessions.find((session) => !previousIds.has(session.id))
+            ?? [...sessions].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
           if (!created) return;
-          agentSessionPref.persist(created.id);
+          persistAgentSessionSelection(workspaceId, created.id);
           if (!webBackend?.attachAgentSession) {
             throw new Error('Agent attach unavailable');
           }
+          setIsViewOnlySession(false);
           await webBackend.attachAgentSession(workspaceId, created.id);
           setView('terminal');
         },
@@ -930,18 +936,18 @@ export default function App() {
           },
         });
       } else {
-        setAgentPickerWorkspaceId(workspaceId);
-        agentSessionPref.persist(agentSessionId);
+        persistAgentSessionSelection(workspaceId, agentSessionId);
         if (!webBackend?.attachAgentSession) {
           throw new Error('Agent attach unavailable');
         }
+        setIsViewOnlySession(false);
         await webBackend.attachAgentSession(workspaceId, agentSessionId);
         setView('terminal');
       }
       return;
     }
     await attachController.attach({ sessionId });
-  }, [agentEvents, agentInboxItems, agentSessionPref, attachController, flow, webBackend]);
+  }, [agentEvents, agentInboxItems, attachController, flow, persistAgentSessionSelection, webBackend]);
 
   const inboxProps = useInbox({
     items: allWebInboxItems,

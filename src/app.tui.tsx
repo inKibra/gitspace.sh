@@ -121,7 +121,6 @@ import {
 } from './tui/kitty-keyboard.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 
 // Types
@@ -1274,8 +1273,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Per-workspace agent session persistence — use spacesBrowser's selected workspace if available
   // Fallback to empty string when no workspace is focused (hook is always called, ID may be empty)
-  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
-  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, localBackend);
+  const [, setAgentPickerWorkspaceId] = useState('');
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    setAgentPickerWorkspaceId(workspaceId);
+    void localBackend?.setAgentSessionPreference(workspaceId, sessionId);
+  }, [localBackend]);
 
   const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
     const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
@@ -1298,11 +1300,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           },
         });
       } else {
-        setAgentPickerWorkspaceId(workspaceId);
-        agentSessionPref.persist(agentSessionId);
+        persistAgentSessionSelection(workspaceId, agentSessionId);
         if (!localBackend?.attachAgentSession) {
           throw new Error('Agent attach unavailable');
         }
+        setIsViewOnlySession(false);
         await localBackend.attachAgentSession(workspaceId, agentSessionId);
         dispatch({ type: 'SET_VIEW', view: 'terminal' });
       }
@@ -1310,7 +1312,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
     dispatch({ type: 'SET_VIEW', view: 'projects' });
     await handleAttachSession({ sessionId });
-  }, [agentEvents, agentInboxItems, agentSessionPref, dispatch, flow, handleAttachSession, localBackend]);
+  }, [agentEvents, agentInboxItems, dispatch, flow, handleAttachSession, localBackend, persistAgentSessionSelection]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
@@ -1375,10 +1377,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      agentSessionPref.persist(agentSessionId);
+      persistAgentSessionSelection(workspaceId, agentSessionId);
       if (!localBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
+      setIsViewOnlySession(false);
       await localBackend.attachAgentSession(workspaceId, agentSessionId);
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
@@ -1389,13 +1392,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         placeholder: 'Investigate auth bug',
         validation: (value) => value.trim() ? null : 'Session name is required',
         onSubmit: async (value) => {
+          const previousIds = new Set((workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? []).map((session) => session.id));
           const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
-          const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
+          const created = sessions.find((session) => !previousIds.has(session.id))
+            ?? [...sessions].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
           if (!created) return;
-          agentSessionPref.persist(created.id);
+          persistAgentSessionSelection(workspaceId, created.id);
           if (!localBackend?.attachAgentSession) {
             throw new Error('Agent attach unavailable');
           }
+          setIsViewOnlySession(false);
           await localBackend.attachAgentSession(workspaceId, created.id);
           dispatch({ type: 'SET_VIEW', view: 'terminal' });
         },

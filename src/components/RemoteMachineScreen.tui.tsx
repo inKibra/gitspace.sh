@@ -41,7 +41,6 @@ import { logger } from '../utils/logger.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
-import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
 import { toast } from '@opentui-ui/toast';
 import { DEFAULT_NOTIFICATION_CONFIG, useNotifications, type ToastNotification } from '../notifications/index.js';
@@ -592,8 +591,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
   });
 
-  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
-  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, remoteBackend);
+  const [, setAgentPickerWorkspaceId] = useState('');
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    setAgentPickerWorkspaceId(workspaceId);
+    void remoteBackend?.setAgentSessionPreference(workspaceId, sessionId);
+  }, [remoteBackend]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
@@ -651,10 +653,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      agentSessionPref.persist(agentSessionId);
+      persistAgentSessionSelection(workspaceId, agentSessionId);
       if (!remoteBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
+      setIsViewOnlySession(false);
       await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
     },
     onCreateAgentSession: async (workspaceId) => {
@@ -664,13 +667,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         placeholder: 'Investigate auth bug',
         validation: (value) => value.trim() ? null : 'Session name is required',
         onSubmit: async (value) => {
+          const previousIds = new Set((workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? []).map((session) => session.id));
           const sessions = await workspaceAgentSessions.createSession(workspaceId, value.trim());
-          const created = sessions.find((session) => session.title === value.trim()) ?? sessions[0];
+          const created = sessions.find((session) => !previousIds.has(session.id))
+            ?? [...sessions].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
           if (!created) return;
-          agentSessionPref.persist(created.id);
+          persistAgentSessionSelection(workspaceId, created.id);
           if (!remoteBackend?.attachAgentSession) {
             throw new Error('Agent attach unavailable');
           }
+          setIsViewOnlySession(false);
           await remoteBackend.attachAgentSession(workspaceId, created.id);
         },
       });
@@ -731,17 +737,17 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           },
         });
       } else {
-        setAgentPickerWorkspaceId(workspaceId);
-        agentSessionPref.persist(agentSessionId);
+        persistAgentSessionSelection(workspaceId, agentSessionId);
         if (!remoteBackend?.attachAgentSession) {
           throw new Error('Agent attach unavailable');
         }
+        setIsViewOnlySession(false);
         await remoteBackend.attachAgentSession(workspaceId, agentSessionId);
       }
       return;
     }
     await handleAttachSession({ sessionId });
-  }, [agentEvents, agentInboxItems, agentSessionPref, flow, handleAttachSession, remoteBackend]);
+  }, [agentEvents, agentInboxItems, flow, handleAttachSession, persistAgentSessionSelection, remoteBackend]);
 
   const inboxProps = useInbox({
     items: allInboxItems,

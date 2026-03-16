@@ -106,7 +106,7 @@ describe.if(shouldRun)('real opencode integration', () => {
     writeFileSync(scriptFile, script);
 
     const result = spawnSync('bun', [scriptFile], {
-      cwd: '/Users/bradleat/gitspace/gitspace.sh/workspaces/machine-setup',
+      cwd: process.cwd(),
       encoding: 'utf8',
       timeout: 60_000,
     });

@@ -4,7 +4,6 @@ declare const Bun: any;
 
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';
 import {
@@ -56,52 +55,6 @@ function createPassword(): string {
   return randomBytes(24).toString('base64url');
 }
 
-function extractManagedPort(command: string): number | null {
-  const match = command.match(/opencode\s+(?:serve|web)\b.*?--port\s+(\d+)/);
-  if (!match) {
-    return null;
-  }
-  const port = Number.parseInt(match[1] ?? '', 10);
-  return Number.isFinite(port) ? port : null;
-}
-
-function listManagedOpenCodeProcesses(): Array<{ pid: number; command: string; port: number }> {
-  const result = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' });
-  if (result.status !== 0 || !result.stdout) {
-    return [];
-  }
-  return result.stdout
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const match = line.match(/^(\d+)\s+(.*)$/);
-      if (!match) return null;
-      const pid = Number.parseInt(match[1] ?? '', 10);
-      const command = match[2] ?? '';
-      const port = extractManagedPort(command);
-      if (!Number.isFinite(pid) || port === null) {
-        return null;
-      }
-      if (!command.includes('opencode serve') && !command.includes('opencode web')) {
-        return null;
-      }
-      if (port < 41000 || port >= 51000) {
-        return null;
-      }
-      return { pid, command, port };
-    })
-    .filter((item): item is { pid: number; command: string; port: number } => item !== null);
-}
-
-function killProcess(pid: number): void {
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    // ignore stale pids
-  }
-}
-
 function normalizeWorkspacePath(path: string): string {
   try {
     return realpathSync(path);
@@ -139,6 +92,7 @@ export class OpenCodeRuntimeManager {
   private readonly runtimeStartedHandlers = new Set<(info: OpenCodeRuntimeInfo) => void>();
   private readonly runtimeStoppedHandlers = new Set<(workspaceId: string) => void>();
   private initializePromise: Promise<void> | null = null;
+  private readonly inflightEnsures = new Map<string, Promise<OpenCodeRuntimeInfo>>();
 
   /** Register a callback for when a runtime is successfully started. Returns unsubscribe. */
   onRuntimeStarted(handler: (info: OpenCodeRuntimeInfo) => void): () => void {
@@ -178,7 +132,6 @@ export class OpenCodeRuntimeManager {
 
   private async loadPersistedRuntimes(): Promise<void> {
     const runtimes = await listStoredRuntimes();
-    const livePorts = new Set<number>();
     for (const runtime of runtimes) {
       if (!existsSync(runtime.workspacePath)) {
         await deleteStoredRuntime(runtime.workspaceId);
@@ -192,14 +145,7 @@ export class OpenCodeRuntimeManager {
         info: runtime,
         pid: runtime.pid,
       });
-      livePorts.add(runtime.port);
       this.emitRuntimeStarted(runtime);
-    }
-
-    for (const processInfo of listManagedOpenCodeProcesses()) {
-      if (!livePorts.has(processInfo.port)) {
-        killProcess(processInfo.pid);
-      }
     }
   }
 
@@ -210,6 +156,19 @@ export class OpenCodeRuntimeManager {
   }
 
   async ensureWorkspaceRuntime(target: OpenCodeRuntimeTarget): Promise<OpenCodeRuntimeInfo> {
+    const inFlight = this.inflightEnsures.get(target.workspaceId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const ensurePromise = this.ensureWorkspaceRuntimeInternal(target).finally(() => {
+      this.inflightEnsures.delete(target.workspaceId);
+    });
+    this.inflightEnsures.set(target.workspaceId, ensurePromise);
+    return ensurePromise;
+  }
+
+  private async ensureWorkspaceRuntimeInternal(target: OpenCodeRuntimeTarget): Promise<OpenCodeRuntimeInfo> {
     await this.initialize();
     const normalizedWorkspacePath = normalizeWorkspacePath(target.workspacePath);
     const existing = this.entries.get(target.workspaceId);
@@ -256,6 +215,7 @@ export class OpenCodeRuntimeManager {
         env: {
           ...process.env,
           ...(target.projectName ? (await prepareWorkspaceIntegrations(target.projectName, normalizedWorkspacePath)).env : {}),
+          OPENCODE_SERVER_USERNAME: username,
           OPENCODE_SERVER_PASSWORD: password,
         },
         stdout: 'ignore',
