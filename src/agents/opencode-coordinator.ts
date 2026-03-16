@@ -46,7 +46,8 @@ function parseIsoTime(value: unknown): string | undefined {
     return value;
   }
   if (typeof value === 'number' && Number.isFinite(value)) {
-    return new Date(value).toISOString();
+    const normalized = value < 1_000_000_000_000 ? value * 1000 : value;
+    return new Date(normalized).toISOString();
   }
   return undefined;
 }
