@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../lib/tmux-lite/replay/index.js';
 import { SessionTerminal } from './SessionTerminal.web';
+import { replayDebug } from './replay-debug.web.js';
 import {
   PLAYBACK_SPEEDS,
   DEFAULT_PLAYBACK_SPEED_INDEX,
@@ -18,29 +19,6 @@ import {
 
 function encodeAnsi(text: string): Uint8Array {
   return new TextEncoder().encode(text);
-}
-
-function isReplayDebugEnabled(): boolean {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem('gssh:debug:replay') === '1'
-      || new URLSearchParams(window.location.search).has('debugReplay');
-  } catch {
-    return false;
-  }
-}
-
-function replayDebug(message: string, details?: Record<string, unknown>): void {
-  if (!isReplayDebugEnabled()) {
-    return;
-  }
-  if (details) {
-    console.debug(`[replay:web] ${message}`, details);
-  } else {
-    console.debug(`[replay:web] ${message}`);
-  }
 }
 
 export interface ReplayTerminalWebProps {

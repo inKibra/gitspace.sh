@@ -5,6 +5,7 @@ import {
   type PageDirection,
 } from './session-terminal-page-navigation.js';
 import { isIOSDevice } from '../utils/device.web.js';
+import { isReplayDebugEnabled } from './replay-debug.web.js';
 
 interface Props {
   onData: (data: Uint8Array) => void;
@@ -46,18 +47,6 @@ interface TerminalViewportLike {
 const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
 const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before sending scroll
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
-
-function isReplayDebugEnabled(): boolean {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem('gssh:debug:replay') === '1'
-      || new URLSearchParams(window.location.search).has('debugReplay');
-  } catch {
-    return false;
-  }
-}
 
 function configureMobileHelperTextarea(textarea: HTMLTextAreaElement): void {
   textarea.setAttribute('autocorrect', 'on');
