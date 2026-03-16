@@ -21,7 +21,6 @@ import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
 import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
 import {
-  getReplayAnsiBufferOffline,
   getReplayFrameOffline,
   getReplayTimelineOffline,
   dismissReplayOffline,
@@ -1273,9 +1272,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Per-workspace agent session persistence — use spacesBrowser's selected workspace if available
   // Fallback to empty string when no workspace is focused (hook is always called, ID may be empty)
-  const [, setAgentPickerWorkspaceId] = useState('');
   const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
-    setAgentPickerWorkspaceId(workspaceId);
     void localBackend?.setAgentSessionPreference(workspaceId, sessionId);
   }, [localBackend]);
 
@@ -1373,7 +1370,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onOpenAgents: async (workspaceId) => {
-      setAgentPickerWorkspaceId(workspaceId);
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {

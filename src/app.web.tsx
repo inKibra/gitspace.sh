@@ -738,9 +738,7 @@ export default function App() {
     },
   });
 
-  const [, setAgentPickerWorkspaceId] = useState('');
   const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
-    setAgentPickerWorkspaceId(workspaceId);
     void webBackend?.setAgentSessionPreference(workspaceId, sessionId);
   }, [webBackend]);
 
@@ -806,7 +804,6 @@ export default function App() {
       }
     },
     onOpenAgents: async (workspaceId) => {
-      setAgentPickerWorkspaceId(workspaceId);
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {

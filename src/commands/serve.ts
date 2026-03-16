@@ -1314,7 +1314,6 @@ export async function serveStart(options: {
         Boolean(options.yes),
       );
       if (!trustResult.trusted) {
-        await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
         throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
       }
 

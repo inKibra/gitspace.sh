@@ -591,9 +591,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
   });
 
-  const [, setAgentPickerWorkspaceId] = useState('');
   const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
-    setAgentPickerWorkspaceId(workspaceId);
     void remoteBackend?.setAgentSessionPreference(workspaceId, sessionId);
   }, [remoteBackend]);
 
@@ -649,7 +647,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onStopProcess: handleStopProcess,
     onProcessDisabled: handleProcessDisabled,
     onOpenAgents: async (workspaceId) => {
-      setAgentPickerWorkspaceId(workspaceId);
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
