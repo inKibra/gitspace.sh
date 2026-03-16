@@ -264,6 +264,9 @@ export class OpenCodeRuntimeManager {
       ...entry.info,
       pid: entry.pid,
       lastSeenAt: new Date().toISOString(),
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[opencode-runtime] failed to persist runtime ${workspaceId}: ${message}`);
     });
 
     return entry.info;
