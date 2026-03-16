@@ -1524,6 +1524,8 @@ export async function serveStart(options: {
           relay: {
             url: effectiveRelayUrl,
             status: 'disconnected',
+            reconnectAttempt: undefined,
+            nextRetryAt: undefined,
           },
         });
         break;
@@ -1584,8 +1586,6 @@ export async function serveStart(options: {
         relayFingerprint: trustedRelayIdentity.relayFingerprint,
       });
     }
-
-    updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
     const originalError = error;
     try {

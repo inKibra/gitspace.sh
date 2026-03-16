@@ -426,6 +426,11 @@ export function useRemoteSessionClient<ConnectParams>(
   }, [engine, withActiveBackend]);
 
   const detachSession = useCallback(() => {
+    reconnectAbortRef.current.aborted = true;
+    reconnectAbortRef.current = { aborted: false };
+    isReconnectingRef.current = false;
+    setIsReconnecting(false);
+
     // Clear the saved session ID — an explicit detach means we should NOT
     // re-attach to this session if the connection drops later in browsing mode.
     lastAttachedSessionIdRef.current = null;
@@ -628,6 +633,7 @@ export function useRemoteSessionClient<ConnectParams>(
               resolveAttach(true);
             } else if (
               event.type === 'error' ||
+              event.type === 'command_error' ||
               (event.type === 'status' && event.status === 'disconnected')
             ) {
               clearTimeout(attachTimeoutId);
@@ -635,6 +641,10 @@ export function useRemoteSessionClient<ConnectParams>(
               resolveAttach(false);
             }
           });
+
+          if (abort.aborted || lastAttachedSessionIdRef.current !== sessionId) {
+            throw new Error('Reconnect cancelled before re-attach');
+          }
 
           await backend.attachSession({
             sessionId,

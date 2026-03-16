@@ -59,6 +59,8 @@ try {
   // Not running as compiled binary - use filesystem
 }
 
+const machineSocketServerIds = new WeakMap<ServerWebSocket<WebSocketData>, string>();
+
 /**
  * Check if we have embedded assets available
  */
@@ -515,6 +517,7 @@ interface RelayServerState {
   pendingChallenges: Map<string, { nonce: Uint8Array; timestamp: number }>;
   preAuthorizedMachines: Set<string>;
   signRelayMessage: <T extends object>(msg: T) => T;
+  serverInstanceId: string;
   /** Owner user root ID (set after vault initialization or unlock) */
   ownerUserRootId: string | null;
   ownerSyncState: OwnerSyncRuntimeState;
@@ -587,6 +590,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     timestamp: number;
   }
   const pendingChallenges = new Map<string, PendingChallenge>();
+  const serverInstanceId = randomBytes(8).toString("hex");
 
   /**
    * Sign a message with the relay's private key
@@ -610,6 +614,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     pendingChallenges,
     preAuthorizedMachines,
     signRelayMessage,
+    serverInstanceId,
     ownerUserRootId,
     ownerSyncState: createOwnerSyncRuntimeState(),
   };
@@ -858,13 +863,15 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   const STALE_CLOSE_THRESHOLD_MS = 150_000; // 5 missed pings (grace period)
 
   // Bind the watchdog to this specific server instance by scoping the check
-  // to machines whose WebSocket belongs to this server.  The interval handle
-  // is cleared when server.stop() is called so that multiple relay instances
-  // in the same process (e.g. in tests) don't accumulate watchdog timers.
+  // to machine sockets that were registered through this server. The interval
+  // handle is cleared when server.stop() is called so multiple relay instances
+  // in the same process do not accumulate watchdog timers or close each
+  // other's connections.
   const staleWatchdog = setInterval(() => {
     const now = Date.now();
     for (const machine of getAllMachines()) {
       if (!machine.ws) continue; // already offline
+      if (machineSocketServerIds.get(machine.ws) !== serverInstanceId) continue;
 
       const elapsed = now - machine.lastHeartbeatAt;
 
@@ -1285,6 +1292,8 @@ async function handleProtocolMessage(
         ws.send(serializeMessage(createErrorMessage("FORBIDDEN", result.error)));
         return;
       }
+
+      machineSocketServerIds.set(ws, state.serverInstanceId);
 
       // Dual-write to persistent registry (SQLite-backed, survives restarts)
       const persistOwner = resolvedOwnerUserRootId;

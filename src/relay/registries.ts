@@ -30,8 +30,8 @@ export interface MachineRegistration {
   /** When machine last connected */
   lastConnectedAt: number;
   /**
-   * Timestamp (ms) of the last application-level heartbeat (ping/pong)
-   * received from this machine.  Updated on registration and on each pong.
+   * Timestamp (ms) of the last application-level heartbeat received from this
+   * machine. Updated on registration and on each heartbeat message.
    * Used by the stale-connection detector.
    */
   lastHeartbeatAt: number;

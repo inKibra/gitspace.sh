@@ -307,6 +307,7 @@ export async function connectMachineRelay(
     // -----------------------------------------------------------------------
 
     let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    let markHeartbeatAcked: (() => void) | null = null;
 
     /** Start the application-level heartbeat after successful registration. */
     const startHeartbeat = (ws: WebSocket) => {
@@ -326,16 +327,17 @@ export async function connectMachineRelay(
         // HEARTBEAT_INTERVAL_MS of latency to detection.
         ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
 
-        // Check if the connection has gone silent (no pong in HEARTBEAT_STALE_MS).
-        if (Date.now() - lastPongAt > HEARTBEAT_STALE_MS) {
-          logger.log(`[serve] Heartbeat stale – no pong received within ${HEARTBEAT_STALE_MS}ms. Forcing reconnect.`);
+        // Check if the connection has gone silent (no heartbeat ack in HEARTBEAT_STALE_MS).
+        if (Date.now() - lastPongAt >= HEARTBEAT_STALE_MS) {
+          logger.log(`[serve] Heartbeat stale – no heartbeat ack received within ${HEARTBEAT_STALE_MS}ms. Forcing reconnect.`);
           stopHeartbeat();
           ws.close(4001, 'Heartbeat timeout');
         }
       }, HEARTBEAT_INTERVAL_MS);
 
-      // Store updater so the message handler can reset the stale clock.
-      (ws as any).__updateLastPongAt = () => { lastPongAt = Date.now(); };
+      markHeartbeatAcked = () => {
+        lastPongAt = Date.now();
+      };
     };
 
     const stopHeartbeat = () => {
@@ -343,6 +345,7 @@ export async function connectMachineRelay(
         clearInterval(heartbeatInterval);
         heartbeatInterval = null;
       }
+      markHeartbeatAcked = null;
     };
 
     // -----------------------------------------------------------------------
@@ -438,10 +441,7 @@ export async function connectMachineRelay(
 
           // Handle pong responses from relay heartbeat.
           if (msg.type === 'pong') {
-            // Update the last-pong timestamp tracked inside startHeartbeat.
-            if (typeof (ws as any).__updateLastPongAt === 'function') {
-              (ws as any).__updateLastPongAt();
-            }
+            markHeartbeatAcked?.();
             return;
           }
 
