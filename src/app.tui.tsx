@@ -1248,7 +1248,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [activeReplay?.dismissedAt]);
 
   const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return Promise.resolve(getReplayFrameOffline(replayId, target));
+    return Promise.resolve().then(() => getReplayFrameOffline(replayId, target));
   }, []);
 
   const loadReplayTimeline = useCallback((replayId: string) => {
