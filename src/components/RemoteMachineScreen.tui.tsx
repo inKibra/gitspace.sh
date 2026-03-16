@@ -749,6 +749,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       attachRegularSession: async (id) => {
         await handleAttachSession({ sessionId: id });
       },
+      beforeAgentAction: async () => {
+        setShowInbox(false);
+      },
+      beforeRegularAttach: async () => {
+        setShowInbox(false);
+      },
     });
   }, [agentEvents, agentInboxItems, flow, handleAttachSession, persistAgentSessionSelection, remoteBackend]);
 
