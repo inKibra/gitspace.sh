@@ -115,12 +115,34 @@ function normalizeOpenCodeTime(value: unknown): string | undefined {
   return undefined;
 }
 
-function normalizeOpenCodeSessionRecord(value: Record<string, unknown>): { id: string; title: string; directory?: string; updatedAt?: string } {
+function decodeBase64Utf8(base64: string): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(base64, 'base64').toString('utf8');
+  }
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function encodeBase64Utf8(text: string): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(text).toString('base64');
+  }
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function normalizeOpenCodeSessionRecord(value: Record<string, unknown>): { id: string; title: string; directory?: string; parentID?: string; updatedAt?: string } {
   const time = (value.time && typeof value.time === 'object') ? value.time as Record<string, unknown> : undefined;
   return {
     id: String(value.id),
     title: typeof value.title === 'string' && value.title.trim().length > 0 ? value.title : String(value.id),
     directory: typeof value.directory === 'string' ? value.directory : undefined,
+    parentID: typeof value.parentID === 'string' ? value.parentID : undefined,
     updatedAt: normalizeOpenCodeTime(value.updatedAt ?? time?.updated),
   };
 }
@@ -1366,10 +1388,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       method: 'GET',
       path: '/session',
     });
-    const raw = JSON.parse(Buffer.from(response.bodyBase64 ?? '', 'base64').toString('utf8')) as Array<Record<string, unknown>>;
+    const raw = JSON.parse(decodeBase64Utf8(response.bodyBase64 ?? '')) as Array<Record<string, unknown>>;
     return raw
       .map(normalizeOpenCodeSessionRecord)
-      .filter((session) => session.directory === runtime.workspacePath)
+      .filter((session) => session.directory === runtime.workspacePath && !session.parentID)
       .map((session) => ({ id: session.id, title: session.title, updatedAt: session.updatedAt }));
   }
 
@@ -1379,7 +1401,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       method: 'POST',
       path: '/session',
       headers: { 'content-type': 'application/json' },
-      bodyBase64: Buffer.from(JSON.stringify({ title })).toString('base64'),
+      bodyBase64: encodeBase64Utf8(JSON.stringify({ title })),
     });
     return this.listAgentSessions(workspaceId);
   }
@@ -1391,7 +1413,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       path: `/session/${encodeURIComponent(agentSessionId)}/abort`,
     });
     try {
-      return JSON.parse(Buffer.from(response.bodyBase64 ?? '', 'base64').toString('utf8')) as boolean;
+      return JSON.parse(decodeBase64Utf8(response.bodyBase64 ?? '')) as boolean;
     } catch {
       return response.status >= 200 && response.status < 300;
     }
@@ -3182,10 +3204,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       method: 'POST',
       path: `/session/${encodeURIComponent(agentSessionId)}/permissions/${encodeURIComponent(permissionId)}`,
       headers: { 'content-type': 'application/json' },
-      bodyBase64: Buffer.from(JSON.stringify({ response })).toString('base64'),
+      bodyBase64: encodeBase64Utf8(JSON.stringify({ response })),
     });
     try {
-      return JSON.parse(Buffer.from(resp.bodyBase64 ?? '', 'base64').toString('utf8')) as boolean;
+      return JSON.parse(decodeBase64Utf8(resp.bodyBase64 ?? '')) as boolean;
     } catch {
       return resp.status >= 200 && resp.status < 300;
     }

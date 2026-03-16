@@ -57,15 +57,21 @@ function normalizeOpenCodeSession(target: AgentWorkspaceTarget, session: OpenCod
     id: String(session.id),
     title: typeof session.title === 'string' && session.title.trim().length > 0 ? session.title : String(session.id),
     rawTitle: typeof session.title === 'string' ? session.title : undefined,
+    parentID: session.parentID,
     createdAt,
     updatedAt,
     lastSeenAt: new Date().toISOString(),
   };
 }
 
+function isLikelySubagentTitle(title: string | undefined): boolean {
+  return Boolean(title && /\(@[^)]+subagent\)/i.test(title));
+}
+
 function toSummaries(workspaceId: string, sessions: Record<string, StoredWorkspaceAgentSession>): AgentSessionSummary[] {
   return Object.values(sessions)
-    .filter((session) => session.managed === true)
+    .filter((session) => !session.parentID)
+    .filter((session) => !isLikelySubagentTitle(session.rawTitle ?? session.title))
     .sort((a, b) => (b.updatedAt ?? b.lastSeenAt ?? '').localeCompare(a.updatedAt ?? a.lastSeenAt ?? ''))
     .map((session) => ({
       id: session.id,
@@ -79,6 +85,10 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
   return session.kind === AGENT_TMUX_SESSION_KIND
     && session.metadata?.workspaceId === workspaceId
     && session.metadata?.agentSessionId === agentSessionId;
+}
+
+function isTopLevelWorkspaceSession(target: AgentWorkspaceTarget, session: OpenCodeSessionRecord): boolean {
+  return session.directory === target.workspacePath && !session.parentID;
 }
 
 export class OpenCodeCoordinator {
@@ -96,22 +106,14 @@ export class OpenCodeCoordinator {
     const client = createClient(runtime);
     const sessions = await client.listSessions();
     const history = await readStoredSessionHistory(target.workspaceId);
-    const managedIds = new Set(
-      Object.values(history.sessions)
-        .filter((session) => session.managed === true)
-        .map((session) => session.id),
-    );
-    const filtered = sessions.filter(
-      (session) => session.directory === target.workspacePath && managedIds.has(String(session.id)),
-    );
-    if (filtered.length === 0 && managedIds.size > 0) {
+    const filtered = sessions.filter((session) => isTopLevelWorkspaceSession(target, session));
+    if (filtered.length === 0 && Object.keys(history.sessions).length > 0) {
       return toSummaries(target.workspaceId, history.sessions);
     }
     await replaceStoredSessions(
       target.workspaceId,
       filtered.map((session) => ({
         ...normalizeOpenCodeSession(target, session),
-        managed: true,
         terminalSessionId: history.sessions[String(session.id)]?.terminalSessionId,
         terminalSessionName: history.sessions[String(session.id)]?.terminalSessionName,
       })),
@@ -126,7 +128,6 @@ export class OpenCodeCoordinator {
     const created = await client.createSession({ title });
     await upsertStoredSession(target.workspaceId, {
       ...normalizeOpenCodeSession(target, created),
-      managed: true,
     });
     return this.refreshAgentSessions(target);
   }
@@ -156,7 +157,6 @@ export class OpenCodeCoordinator {
         title: record?.title ?? agentSessionId,
         terminalSessionId: existing.id,
         terminalSessionName: existing.name,
-        managed: true,
       });
       return existing;
     }
@@ -187,7 +187,6 @@ export class OpenCodeCoordinator {
       title: record?.title ?? agentSessionId,
       terminalSessionId: session.id,
       terminalSessionName: session.name,
-      managed: true,
     });
     return session;
   }

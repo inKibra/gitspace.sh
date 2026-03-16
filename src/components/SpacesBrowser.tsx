@@ -374,6 +374,10 @@ function buildTree(
         });
 
         if (agentExpanded) {
+          items.push({
+            type: 'new-agent-session',
+            workspaceId: ws.id,
+          });
           const agentSessions = [...(agentSessionsByWorkspace[ws.id] ?? [])].sort((a, b) =>
             (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
           );
@@ -384,10 +388,6 @@ function buildTree(
               workspaceId: ws.id,
             });
           }
-          items.push({
-            type: 'new-agent-session',
-            workspaceId: ws.id,
-          });
         }
 
         // Events action

@@ -4,6 +4,7 @@ export interface OpenCodeSessionRecord {
   id: string;
   title?: string;
   directory?: string;
+  parentID?: string;
   createdAt?: string;
   updatedAt?: string;
   time?: {

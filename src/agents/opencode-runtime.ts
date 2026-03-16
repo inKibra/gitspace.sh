@@ -3,7 +3,7 @@
 declare const Bun: any;
 
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';
@@ -99,6 +99,14 @@ function killProcess(pid: number): void {
     process.kill(pid, 'SIGTERM');
   } catch {
     // ignore stale pids
+  }
+}
+
+function normalizeWorkspacePath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
   }
 }
 
@@ -203,6 +211,7 @@ export class OpenCodeRuntimeManager {
 
   async ensureWorkspaceRuntime(target: OpenCodeRuntimeTarget): Promise<OpenCodeRuntimeInfo> {
     await this.initialize();
+    const normalizedWorkspacePath = normalizeWorkspacePath(target.workspacePath);
     const existing = this.entries.get(target.workspaceId);
     if (existing) {
       const processRunning = existing.process ? existing.process.exitCode === null : true;
@@ -227,7 +236,7 @@ export class OpenCodeRuntimeManager {
       const port = hashToPort(`${target.workspaceId}:${attempt}`);
       const info: OpenCodeRuntimeInfo = {
         workspaceId: target.workspaceId,
-        workspacePath: target.workspacePath,
+        workspacePath: normalizedWorkspacePath,
         hostname: '127.0.0.1',
         port,
         baseUrl: `http://127.0.0.1:${port}`,
@@ -243,10 +252,10 @@ export class OpenCodeRuntimeManager {
       const spawn = getBunSpawn();
       const child = spawn({
         cmd: ['opencode', 'serve', '--hostname', '127.0.0.1', '--port', String(port)],
-        cwd: target.workspacePath,
+        cwd: normalizedWorkspacePath,
         env: {
           ...process.env,
-          ...(target.projectName ? (await prepareWorkspaceIntegrations(target.projectName, target.workspacePath)).env : {}),
+          ...(target.projectName ? (await prepareWorkspaceIntegrations(target.projectName, normalizedWorkspacePath)).env : {}),
           OPENCODE_SERVER_PASSWORD: password,
         },
         stdout: 'ignore',

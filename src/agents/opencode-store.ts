@@ -12,6 +12,7 @@ export interface StoredWorkspaceAgentSession {
   id: string;
   title: string;
   rawTitle?: string;
+  parentID?: string;
   createdAt?: string;
   updatedAt?: string;
   lastSeenAt?: string;
