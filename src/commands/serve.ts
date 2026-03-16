@@ -30,7 +30,6 @@ import {
   readMachineIdentity,
   getPublicKeyWithoutPassword,
   writeRelayConfig,
-  clearRelayConfig,
 } from '../core/identity.js';
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
@@ -941,28 +940,31 @@ async function connectToRelay(
 /**
  * Set up shutdown handlers
  */
+export function performServeShutdown(
+  sessionManager: Pick<ClientSessionManager, 'cleanup'>,
+  options: { isDaemon?: boolean; cleanup?: () => void; exit?: (code: number) => never } = {}
+): never {
+  logger.log('');
+  logger.info('Shutting down...');
+
+  options.cleanup?.();
+  sessionManager.cleanup();
+
+  if (options.isDaemon) {
+    stopStatusServer();
+    cleanupServeFiles();
+  }
+
+  const exit = options.exit ?? process.exit;
+  return exit(0);
+}
+
 function setupShutdownHandlers(
   sessionManager: ClientSessionManager,
   isDaemon: boolean = false,
   cleanup?: () => void
 ): void {
-  const shutdown = () => {
-    logger.log('');
-    logger.info('Shutting down...');
-
-    cleanup?.();
-
-    clearRelayConfig();
-    sessionManager.cleanup();
-
-    // Clean up daemon files if in daemon mode
-    if (isDaemon) {
-      stopStatusServer();
-      cleanupServeFiles();
-    }
-
-    process.exit(0);
-  };
+  const shutdown = () => performServeShutdown(sessionManager, { isDaemon, cleanup });
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
