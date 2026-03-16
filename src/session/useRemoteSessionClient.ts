@@ -100,6 +100,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   attachSession: (params: AttachSessionParams) => void;
   detachSession: () => void;
   cancelPendingScripts: () => void;
+  cancelPendingReplayRequests: () => void;
   selectProject: (projectName: string | null) => void;
 
   killSession: (sessionId: string) => void;
@@ -145,7 +146,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   startProcess: (workspaceId: string, processName: string, instance?: number) => Promise<void>;
   stopProcess: (workspaceId: string, processName: string) => Promise<void>;
   requestEvents: (workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) => void;
-  getReplayAnsi: (replayId: string, target?: ReplayFrameTarget) => Promise<Uint8Array>;
+  getReplayFrame: (replayId: string, target?: ReplayFrameTarget) => Promise<import('../lib/tmux-lite/replay/types.js').ReplayFrame>;
   getReplayTimeline: (replayId: string) => Promise<ReplayTimeline>;
   dismissReplay: (replayId: string) => Promise<void>;
   undismissReplay: (replayId: string) => Promise<void>;
@@ -366,6 +367,10 @@ export function useRemoteSessionClient<ConnectParams>(
     void withActiveBackend((backendKey) => engine.cancelPendingScripts(backendKey));
   }, [engine, withActiveBackend]);
 
+  const cancelPendingReplayRequests = useCallback(() => {
+    void withActiveBackend(async (backendKey) => engine.cancelPendingReplayRequests(backendKey));
+  }, [engine, withActiveBackend]);
+
   const selectProject = useCallback(
     (projectName: string | null) => {
       setSelectedProjectName(projectName);
@@ -553,12 +558,12 @@ export function useRemoteSessionClient<ConnectParams>(
     );
   }, [engine, withActiveBackend]);
 
-  const getReplayAnsi = useCallback(async (replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> => {
+  const getReplayFrame = useCallback(async (replayId: string, target?: ReplayFrameTarget): Promise<import('../lib/tmux-lite/replay/types.js').ReplayFrame> => {
     const backendKey = activeBackendKeyRef.current;
     if (!backendKey) {
-      throw createMissingBackendError(`getReplayAnsi(${replayId})`);
+      throw createMissingBackendError(`getReplayFrame(${replayId})`);
     }
-    return engine.getReplayAnsi(backendKey, replayId, target);
+    return engine.getReplayFrame(backendKey, replayId, target);
   }, [engine]);
 
   const getReplayTimeline = useCallback(async (replayId: string): Promise<ReplayTimeline> => {
@@ -658,6 +663,7 @@ export function useRemoteSessionClient<ConnectParams>(
     attachSession,
     detachSession,
     cancelPendingScripts,
+    cancelPendingReplayRequests,
     selectProject,
 
     killSession,
@@ -691,7 +697,7 @@ export function useRemoteSessionClient<ConnectParams>(
     startProcess,
     stopProcess,
     requestEvents,
-    getReplayAnsi,
+    getReplayFrame,
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
@@ -723,6 +729,7 @@ export function useRemoteSessionClient<ConnectParams>(
     attachSession,
     detachSession,
     cancelPendingScripts,
+    cancelPendingReplayRequests,
     selectProject,
     killSession,
     deleteWorkspace,
@@ -742,7 +749,7 @@ export function useRemoteSessionClient<ConnectParams>(
     startProcess,
     stopProcess,
     requestEvents,
-    getReplayAnsi,
+    getReplayFrame,
     getReplayTimeline,
     dismissReplay,
     undismissReplay,

@@ -283,7 +283,12 @@ export function bindControlRelayIdentity(
 
     if (!sameIdentityId || !sameSigningKey || !sameFingerprint) {
       throw new SpacesError(
-        `Control relay identity mismatch. Pinned relay '${currentRelayFingerprint ?? currentRelayIdentityId}', current relay '${input.relayFingerprint}'.`,
+        [
+          `Control relay identity mismatch. Pinned relay '${currentRelayFingerprint ?? currentRelayIdentityId}', current relay '${input.relayFingerprint}'.`,
+          '',
+          'This relay pin is stored in ~/gitspace/.relay/control/control.db, not the trusted relay list.',
+          'If this relay change is expected, re-run `gssh machine serve start --takeover` to clear persisted control state and re-bind to the current relay.',
+        ].join('\n'),
         'USER_ERROR',
         1
       );

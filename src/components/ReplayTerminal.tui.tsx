@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { extend, useKeyboard } from '@opentui/react';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
 import type {
+  ReplayFrame,
   ReplayFrameTarget,
   ReplayTimeline,
 } from '../lib/tmux-lite/replay/index.js';
@@ -9,11 +10,15 @@ import type { ReplayInfo } from './SpacesBrowser.js';
 import {
   PLAYBACK_SPEEDS,
   DEFAULT_PLAYBACK_SPEED_INDEX,
-  FAST_SCRUB_STEP_COUNT,
   formatReplayTime,
   clamp,
   targetKey,
   toFrameTarget,
+  applyReplayFrame,
+  frameCheckpointId,
+  frameLastSeq,
+  findCheckpointStepIndex,
+  getCheckpointPosition,
 } from './replay-utils.js';
 
 extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
@@ -29,8 +34,7 @@ const COLORS = {
   playing: '#3fb950',
 };
 
-const LOADING_REPLAY_BUFFER = Buffer.from('\x1b[2J\x1b[H\x1b[2;37mLoading replay...\x1b[0m');
-const EMPTY_REPLAY_BUFFER = Buffer.from('\x1b[2J\x1b[H\x1b[2;37m(empty replay)\x1b[0m');
+const INITIAL_ANSI = Buffer.from('\x1b[2J\x1b[H\x1b[2;37mLoading replay...\x1b[0m');
 
 function formatAge(timestamp: number): string {
   const age = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
@@ -63,41 +67,75 @@ function padLabel(value: string, width: number): string {
 
 export interface ReplayTerminalProps {
   replay: ReplayInfo;
-  loadReplayAnsi: (replayId: string, target?: ReplayFrameTarget) => Promise<Buffer>;
+  loadReplayFrame: (replayId: string, target?: ReplayFrameTarget) => Promise<ReplayFrame>;
   loadReplayTimeline: (replayId: string) => Promise<ReplayTimeline>;
   onBack: () => void;
   onDismiss?: (replayId: string) => boolean | void | Promise<boolean | void>;
+  onCleanup?: () => void;
 }
 
 export function ReplayTerminal({
   replay,
-  loadReplayAnsi,
+  loadReplayFrame,
   loadReplayTimeline,
   onBack,
   onDismiss,
+  onCleanup,
 }: ReplayTerminalProps) {
   const latestFallbackTarget = useMemo<ReplayFrameTarget>(() => ({
     atMs: replay.durationMs,
     atSeq: replay.lastSeq,
   }), [replay.durationMs, replay.lastSeq]);
 
-  const [content, setContent] = useState<Buffer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [termSize, setTermSize] = useState(getTerminalSize);
   const [timeline, setTimeline] = useState<ReplayTimeline | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
   const [loadedTargetKey, setLoadedTargetKey] = useState<string | null>(null);
+  const [erroredTargetKey, setErroredTargetKey] = useState<string | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(true);
   const [frameLoading, setFrameLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeedIndex, setPlaybackSpeedIndex] = useState(DEFAULT_PLAYBACK_SPEED_INDEX);
-  const contentRef = useRef<Buffer | null>(null);
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  const terminalRef = useRef<GhosttyTerminalRenderable | null>(null);
   const frameRequestIdRef = useRef(0);
+  const currentStepIndexRef = useRef(currentStepIndex);
+  const currentCheckpointIdRef = useRef<string | null>(null);
+  const currentSeqRef = useRef(0);
+  const hasContentRef = useRef(false);
+  const onCleanupRef = useRef(onCleanup);
+  const loadReplayFrameRef = useRef(loadReplayFrame);
+  const loadReplayTimelineRef = useRef(loadReplayTimeline);
 
   useEffect(() => {
-    contentRef.current = content;
-  }, [content]);
+    onCleanupRef.current = onCleanup;
+  }, [onCleanup]);
+
+  useEffect(() => {
+    loadReplayFrameRef.current = loadReplayFrame;
+  }, [loadReplayFrame]);
+
+  useEffect(() => {
+    loadReplayTimelineRef.current = loadReplayTimeline;
+  }, [loadReplayTimeline]);
+
+  useEffect(() => {
+    currentStepIndexRef.current = currentStepIndex;
+  }, [currentStepIndex]);
+
+  const feedTerminal = useCallback((data: string | Uint8Array) => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+    if (typeof data === 'string') {
+      terminal.feed(Buffer.from(data, 'utf-8'));
+    } else {
+      terminal.feed(Buffer.from(data));
+    }
+  }, []);
 
   const currentStep = timeline && currentStepIndex >= 0
     ? timeline.steps[currentStepIndex] ?? null
@@ -111,24 +149,33 @@ export function ReplayTerminal({
 
   const loadFrame = useCallback(async (
     target: ReplayFrameTarget,
-    options: { preserveContent: boolean },
   ): Promise<void> => {
     const requestId = ++frameRequestIdRef.current;
     setFrameLoading(true);
     setError(null);
 
-    if (!options.preserveContent && !contentRef.current) {
-      setContent(LOADING_REPLAY_BUFFER);
-    }
-
     try {
-      const bytes = await loadReplayAnsi(replay.replayId, target);
+      const frame = await loadReplayFrameRef.current(replay.replayId, target);
       if (frameRequestIdRef.current !== requestId) {
         return;
       }
 
-      setContent(bytes.length > 0 ? Buffer.from(bytes) : EMPTY_REPLAY_BUFFER);
+      if (frame.events.length === 0 && !frame.checkpoint) {
+        feedTerminal('\x1b[2J\x1b[H\x1b[2;37m(empty replay)\x1b[0m');
+      } else {
+        applyReplayFrame(
+          frame,
+          feedTerminal,
+          currentCheckpointIdRef.current,
+          currentSeqRef.current,
+        );
+      }
+
+      currentCheckpointIdRef.current = frameCheckpointId(frame);
+      currentSeqRef.current = frameLastSeq(frame);
       setLoadedTargetKey(targetKey(target));
+      setErroredTargetKey(null);
+      hasContentRef.current = true;
       setError(null);
     } catch (loadError) {
       if (frameRequestIdRef.current !== requestId) {
@@ -137,27 +184,36 @@ export function ReplayTerminal({
 
       const message = loadError instanceof Error ? loadError.message : String(loadError);
       setError(message);
+      setErroredTargetKey(targetKey(target));
+      setIsPlaying(false);
 
-      if (!contentRef.current || !options.preserveContent) {
-        setContent(Buffer.from(`\x1b[2J\x1b[H\x1b[31mFailed to load replay\x1b[0m\r\n\r\n${message}`));
+      if (!hasContentRef.current) {
+        feedTerminal(`\x1b[2J\x1b[H\x1b[31mFailed to load replay\x1b[0m\r\n\r\n${message}`);
       }
     } finally {
       if (frameRequestIdRef.current === requestId) {
         setFrameLoading(false);
       }
     }
-  }, [loadReplayAnsi, replay.replayId]);
+  }, [feedTerminal, replay.replayId]);
 
   useEffect(() => {
+    if (!terminalMounted) {
+      return;
+    }
+
     let cancelled = false;
     frameRequestIdRef.current += 1;
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
     setIsPlaying(false);
     setPlaybackSpeedIndex(DEFAULT_PLAYBACK_SPEED_INDEX);
     setTimeline(null);
     setCurrentStepIndex(-1);
     setLoadedTargetKey(null);
+    setErroredTargetKey(null);
     setError(null);
-    setContent(null);
+    hasContentRef.current = false;
     setTimelineLoading(true);
     setFrameLoading(true);
 
@@ -165,7 +221,7 @@ export function ReplayTerminal({
       let nextTimeline: ReplayTimeline | null = null;
 
       try {
-        nextTimeline = await loadReplayTimeline(replay.replayId);
+        nextTimeline = await loadReplayTimelineRef.current(replay.replayId);
       } catch (timelineError) {
         if (cancelled) {
           return;
@@ -184,7 +240,7 @@ export function ReplayTerminal({
         ? nextTimeline.steps[initialStepIndex] ?? null
         : null;
 
-      await loadFrame(toFrameTarget(initialStep, latestFallbackTarget), { preserveContent: false });
+      await loadFrame(toFrameTarget(initialStep, latestFallbackTarget));
       if (cancelled) {
         return;
       }
@@ -197,16 +253,17 @@ export function ReplayTerminal({
     return () => {
       cancelled = true;
       frameRequestIdRef.current += 1;
+      onCleanupRef.current?.();
     };
-  }, [latestFallbackTarget, loadFrame, loadReplayTimeline, reloadKey, replay.replayId]);
+  }, [latestFallbackTarget, loadFrame, reloadKey, replay.replayId, terminalMounted]);
 
   useEffect(() => {
-    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey) {
+    if (!timeline || currentStepIndex < 0 || currentTargetKey === loadedTargetKey || frameLoading || currentTargetKey === erroredTargetKey) {
       return;
     }
 
-    void loadFrame(currentTarget, { preserveContent: true });
-  }, [currentStepIndex, currentTarget, currentTargetKey, loadFrame, loadedTargetKey, timeline]);
+    void loadFrame(currentTarget);
+  }, [currentStepIndex, currentTarget, currentTargetKey, erroredTargetKey, frameLoading, loadFrame, loadedTargetKey, timeline]);
 
   useEffect(() => {
     const handleResize = () => setTermSize(getTerminalSize());
@@ -273,17 +330,41 @@ export function ReplayTerminal({
     }
   }, [onDismiss, onBack, replay.replayId]);
 
+  /** Invalidate any in-flight frame load so its completion is discarded. */
+  const invalidatePendingFrameLoad = useCallback(() => {
+    frameRequestIdRef.current += 1;
+    setFrameLoading(false);
+  }, []);
+
   const stepReplay = useCallback((direction: -1 | 1, count = 1) => {
     if (!timeline || timeline.steps.length === 0) {
       return;
     }
 
+    invalidatePendingFrameLoad();
     setIsPlaying(false);
     setCurrentStepIndex((index) => {
       const resolvedIndex = index < 0 ? timeline.steps.length - 1 : index;
       return clamp(resolvedIndex + (direction * count), 0, timeline.steps.length - 1);
     });
-  }, [timeline]);
+  }, [invalidatePendingFrameLoad, timeline]);
+
+  const jumpCheckpoint = useCallback((direction: -1 | 1) => {
+    if (!timeline || timeline.steps.length === 0) {
+      return;
+    }
+
+    invalidatePendingFrameLoad();
+    setIsPlaying(false);
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
+
+    const currentSeq = timeline.steps[currentStepIndexRef.current]?.seq ?? replay.lastSeq;
+    const nextIndex = findCheckpointStepIndex(timeline, currentSeq, direction);
+    if (nextIndex >= 0) {
+      setCurrentStepIndex(nextIndex);
+    }
+  }, [invalidatePendingFrameLoad, replay.lastSeq, timeline]);
 
   const adjustPlaybackSpeed = useCallback((direction: -1 | 1, count = 1) => {
     setPlaybackSpeedIndex((index) => clamp(index + (direction * count), 0, PLAYBACK_SPEEDS.length - 1));
@@ -299,18 +380,31 @@ export function ReplayTerminal({
       return;
     }
 
-    setCurrentStepIndex((index) => index >= timeline.steps.length - 1 ? 0 : Math.max(0, index));
+    const atEnd = currentStepIndexRef.current >= timeline.steps.length - 1;
+    if (atEnd) {
+      // Restarting from the end — invalidate and reset checkpoint tracking
+      invalidatePendingFrameLoad();
+      currentCheckpointIdRef.current = null;
+      currentSeqRef.current = 0;
+      setCurrentStepIndex(0);
+    } else {
+      setCurrentStepIndex((index) => Math.max(0, index));
+    }
     setIsPlaying(true);
-  }, [isPlaying, timeline]);
+  }, [invalidatePendingFrameLoad, isPlaying, timeline]);
 
   const jumpToBoundary = useCallback((direction: 'start' | 'end') => {
     if (!timeline || timeline.steps.length === 0) {
       return;
     }
 
+    invalidatePendingFrameLoad();
     setIsPlaying(false);
+    // Reset checkpoint tracking on jump so we get a full frame
+    currentCheckpointIdRef.current = null;
+    currentSeqRef.current = 0;
     setCurrentStepIndex(direction === 'start' ? 0 : timeline.steps.length - 1);
-  }, [timeline]);
+  }, [invalidatePendingFrameLoad, timeline]);
 
   useKeyboard((key) => {
     if (key.name === 'escape' || key.raw === 'q') {
@@ -339,18 +433,42 @@ export function ReplayTerminal({
     }
     if (key.name === 'left') {
       if (isPlaying) {
-        adjustPlaybackSpeed(-1, key.shift ? 2 : 1);
+        if (key.shift) {
+          jumpCheckpoint(-1);
+        } else {
+          adjustPlaybackSpeed(-1, 1);
+        }
       } else {
-        stepReplay(-1, key.shift ? FAST_SCRUB_STEP_COUNT : 1);
+        if (key.shift) {
+          jumpCheckpoint(-1);
+        } else {
+          stepReplay(-1, 1);
+        }
       }
       return;
     }
     if (key.name === 'right') {
       if (isPlaying) {
-        adjustPlaybackSpeed(1, key.shift ? 2 : 1);
+        if (key.shift) {
+          jumpCheckpoint(1);
+        } else {
+          adjustPlaybackSpeed(1, 1);
+        }
       } else {
-        stepReplay(1, key.shift ? FAST_SCRUB_STEP_COUNT : 1);
+        if (key.shift) {
+          jumpCheckpoint(1);
+        } else {
+          stepReplay(1, 1);
+        }
       }
+      return;
+    }
+    if (key.name === 'up' && isPlaying) {
+      adjustPlaybackSpeed(1, 1);
+      return;
+    }
+    if (key.name === 'down' && isPlaying) {
+      adjustPlaybackSpeed(-1, 1);
     }
   });
 
@@ -376,10 +494,10 @@ export function ReplayTerminal({
   const visibleStepIndex = timeline && currentStepIndex >= 0
     ? clamp(currentStepIndex, 0, Math.max(0, timeline.steps.length - 1))
     : totalSteps;
-  const frame = content ?? LOADING_REPLAY_BUFFER;
+  const checkpointPosition = getCheckpointPosition(timeline, currentTarget.atSeq ?? replay.lastSeq);
   const transportHint = isPlaying
-    ? '[Space] Pause  [←/→] Speed  [Shift+←/→] More  [Home/End] Jump'
-    : '[Space] Play  [←/→] Step  [Shift+←/→] Skip  [Home/End] Jump';
+    ? '[Space] Pause  [↑/↓] Speed  [Shift+←/→] Checkpoint  [Home/End] Jump'
+    : '[Space] Play  [←/→] Event  [Shift+←/→] Checkpoint  [Home/End] Jump';
   const speedLabel = `${playbackSpeed.toFixed(playbackSpeed < 1 ? 2 : 1)}x`;
   const timeWidth = Math.max(formatReplayTime(totalTimeMs).length, formatReplayTime(0).length);
   const timeLabel = `${padLabel(formatReplayTime(activeTimeMs), timeWidth)}/${formatReplayTime(totalTimeMs)}`;
@@ -404,6 +522,7 @@ export function ReplayTerminal({
           <text fg={COLORS.textDim}> ({statusLabel.state}){statusLabel.age}</text>
           <text fg={COLORS.textDim}>  {timeLabel}</text>
           <text fg={COLORS.textDim}>  {stepLabel}</text>
+          {checkpointPosition && <text fg={COLORS.textDim}>  ckpt {checkpointPosition.current}/{checkpointPosition.total}</text>}
           <text fg={isPlaying ? COLORS.playing : COLORS.textMuted}>  {isPlaying ? '[playing]' : '[paused]'}</text>
           <text fg={COLORS.loading}>  {paddedSpeedLabel}</text>
           {(timelineLoading || frameLoading) && <text fg={COLORS.loading}> [loading]</text>}
@@ -415,11 +534,18 @@ export function ReplayTerminal({
       </box>
       <scrollbox flexGrow={1} stickyStart="bottom">
         <ghostty-terminal
+          ref={(el: GhosttyTerminalRenderable | null) => {
+            const wasNull = terminalRef.current === null;
+            terminalRef.current = el;
+            if (el && wasNull) {
+              queueMicrotask(() => setTerminalMounted(true));
+            }
+          }}
           persistent={true}
           showCursor={false}
           cols={termSize.cols}
           rows={termSize.rows}
-          ansi={frame}
+          ansi={INITIAL_ANSI}
         />
       </scrollbox>
     </box>

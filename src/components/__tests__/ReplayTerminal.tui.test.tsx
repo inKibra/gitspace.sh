@@ -3,7 +3,7 @@ import { testRender } from '@opentui/react/test-utils';
 import { act, useState } from 'react';
 import { ReplayTerminal } from '../ReplayTerminal.tui.js';
 import type { ReplayInfo } from '../SpacesBrowser.js';
-import type { ReplayFrameTarget, ReplayTimeline } from '../../lib/tmux-lite/replay/index.js';
+import type { ReplayFrame, ReplayFrameTarget, ReplayTimeline } from '../../lib/tmux-lite/replay/index.js';
 
 function makeReplay(overrides: Partial<ReplayInfo> = {}): ReplayInfo {
   return {
@@ -44,19 +44,30 @@ function makeTimeline(overrides: Partial<ReplayTimeline> = {}): ReplayTimeline {
   };
 }
 
-function frameLabel(target?: ReplayFrameTarget): Buffer {
-  return Buffer.from(`frame:${target?.atMs ?? -1}:${target?.atSeq ?? -1}`);
+function textToBase64(text: string): string {
+  return Buffer.from(text, 'utf-8').toString('base64');
+}
+
+function makeFrame(target?: ReplayFrameTarget): ReplayFrame {
+  const label = `frame:${target?.atMs ?? -1}:${target?.atSeq ?? -1}`;
+  return {
+    replayId: 'replay-1',
+    checkpoint: null,
+    events: [
+      { seq: target?.atSeq ?? 0, t: target?.atMs ?? 0, type: 'output', data: textToBase64(label) },
+    ],
+  };
 }
 
 async function renderAndFlush(renderOnce: () => Promise<void>) {
-  await act(async () => {
-    await renderOnce();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  await act(async () => {
-    await renderOnce();
-  });
+  // Allow terminal mount microtask + async frame loads to settle
+  for (let i = 0; i < 5; i++) {
+    await act(async () => {
+      await renderOnce();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
 }
 
 let destroyRenderer: (() => void) | null = null;
@@ -74,13 +85,13 @@ afterEach(async () => {
 
 describe('ReplayTerminal TUI', () => {
   it('shows restore hint for dismissed replays', async () => {
-    const loadReplayAnsi = mock(async (replayId: string, target?: ReplayFrameTarget) => frameLabel(target));
+    const loadReplayFrame = mock(async (_replayId: string, target?: ReplayFrameTarget) => makeFrame(target));
     const loadReplayTimeline = mock(async () => makeTimeline());
 
     const { renderer, renderOnce, captureCharFrame } = await testRender(
       <ReplayTerminal
         replay={makeReplay({ dismissedAt: Date.now() - 1_000, dismissedBy: 'tester' })}
-        loadReplayAnsi={loadReplayAnsi}
+        loadReplayFrame={loadReplayFrame}
         loadReplayTimeline={loadReplayTimeline}
         onBack={mock(() => {})}
         onDismiss={mock(async () => {})}
@@ -97,7 +108,7 @@ describe('ReplayTerminal TUI', () => {
   });
 
   it('does not reload the replay on unrelated parent rerenders', async () => {
-    const loadReplayAnsi = mock(async (replayId: string, target?: ReplayFrameTarget) => frameLabel(target));
+    const loadReplayFrame = mock(async (_replayId: string, target?: ReplayFrameTarget) => makeFrame(target));
     const loadReplayTimeline = mock(async () => makeTimeline());
 
     let bump = () => {};
@@ -109,7 +120,7 @@ describe('ReplayTerminal TUI', () => {
       return (
         <ReplayTerminal
           replay={makeReplay()}
-          loadReplayAnsi={loadReplayAnsi}
+          loadReplayFrame={loadReplayFrame}
           loadReplayTimeline={loadReplayTimeline}
           onBack={mock(() => {})}
         />
@@ -123,7 +134,7 @@ describe('ReplayTerminal TUI', () => {
     destroyRenderer = () => renderer.destroy();
 
     await renderAndFlush(renderOnce);
-    expect(loadReplayAnsi).toHaveBeenCalledTimes(1);
+    expect(loadReplayFrame).toHaveBeenCalledTimes(1);
     expect(captureCharFrame()).toContain('frame:1200:3');
 
     await act(async () => {
@@ -131,19 +142,19 @@ describe('ReplayTerminal TUI', () => {
     });
     await renderAndFlush(renderOnce);
 
-    expect(loadReplayAnsi).toHaveBeenCalledTimes(1);
+    expect(loadReplayFrame).toHaveBeenCalledTimes(1);
     expect(captureCharFrame()).toContain('frame:1200:3');
     expect(captureCharFrame()).not.toContain('Loading replay');
   });
 
   it('steps through replay points when paused', async () => {
-    const loadReplayAnsi = mock(async (replayId: string, target?: ReplayFrameTarget) => frameLabel(target));
+    const loadReplayFrame = mock(async (_replayId: string, target?: ReplayFrameTarget) => makeFrame(target));
     const loadReplayTimeline = mock(async () => makeTimeline());
 
     const { renderer, renderOnce, mockInput, captureCharFrame } = await testRender(
       <ReplayTerminal
         replay={makeReplay()}
-        loadReplayAnsi={loadReplayAnsi}
+        loadReplayFrame={loadReplayFrame}
         loadReplayTimeline={loadReplayTimeline}
         onBack={mock(() => {})}
       />,
@@ -176,19 +187,20 @@ describe('ReplayTerminal TUI', () => {
       mockInput.pressArrow('right', { shift: true });
     });
     await renderAndFlush(renderOnce);
-    expect(captureCharFrame()).toContain('frame:1200:3');
+    expect(captureCharFrame()).toContain('frame:500:2');
+    expect(captureCharFrame()).toContain('ckpt 2/2');
   });
 
-  it('plays in real time and lets arrows adjust playback speed while playing', async () => {
+  it('plays in real time and lets up/down adjust playback speed while playing', async () => {
     jest.useFakeTimers();
 
-    const loadReplayAnsi = mock(async (replayId: string, target?: ReplayFrameTarget) => frameLabel(target));
+    const loadReplayFrame = mock(async (_replayId: string, target?: ReplayFrameTarget) => makeFrame(target));
     const loadReplayTimeline = mock(async () => makeTimeline());
 
     const { renderer, renderOnce, mockInput, captureCharFrame } = await testRender(
       <ReplayTerminal
         replay={makeReplay()}
-        loadReplayAnsi={loadReplayAnsi}
+        loadReplayFrame={loadReplayFrame}
         loadReplayTimeline={loadReplayTimeline}
         onBack={mock(() => {})}
       />,
@@ -216,7 +228,7 @@ describe('ReplayTerminal TUI', () => {
     expect(captureCharFrame()).toContain('frame:200:1');
 
     await act(async () => {
-      mockInput.pressArrow('right');
+      mockInput.pressArrow('up');
     });
     await renderAndFlush(renderOnce);
     expect(captureCharFrame()).toContain('1.5x');

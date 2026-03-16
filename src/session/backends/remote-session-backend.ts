@@ -45,7 +45,7 @@ import {
   type ProjectDeletedResponse,
   type RemoteBranchListResponse,
   type ScriptOutputResponse,
-  type ReplayAnsiResponse,
+  type ReplayFrameResponse,
   type ReplayTimelineResponse,
   type ReplayDismissedResponse,
   type ReplayUndismissedResponse,
@@ -62,7 +62,7 @@ import {
   type OpenCodeStreamErrorResponse,
   type UpdateNotificationConfigRequest,
   type WorkspaceCreatedResponse,
-  type GetReplayAnsiRequest,
+  type GetReplayFrameRequest,
   type DismissReplayRequest,
   type UndismissReplayRequest,
 } from '../../lib/remote-session/protocol.js';
@@ -160,6 +160,14 @@ interface PendingEventsChunk {
   receivedAtMs: number;
 }
 
+interface PendingReplayFrameChunk {
+  replayId: string;
+  totalChunks: number;
+  checkpoint: import('../backend.js').ReplayFrame['checkpoint'] | null;
+  chunks: Map<number, import('../backend.js').ReplayFrame['events']>;
+  receivedAtMs: number;
+}
+
 export interface RemoteSessionSocketHandlers {
   onOpen: () => void;
   onClose: (info?: { code?: number; reason?: string }) => void;
@@ -232,7 +240,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'workspace_list',
   'session_list',
   'replay_list',
-  'replay_ansi',
+  'replay_frame',
   'replay_timeline',
   'replay_dismissed',
   'replay_undismissed',
@@ -512,10 +520,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  private pendingReplayAnsi:
+  private replayFrameRequestSeq = 0;
+  private pendingReplayFrame:
     | {
         replayId: string;
-        resolve: (data: Uint8Array) => void;
+        requestId: string;
+        resolve: (frame: import('../backend.js').ReplayFrame) => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
       }
@@ -548,6 +558,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
   private pendingEventChunks = new Map<string, PendingEventsChunk>();
+  private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
   private pendingOpenCodeRequests = new Map<string, {
     resolve: (response: OpenCodeBridgeResponse) => void;
     reject: (error: Error) => void;
@@ -772,44 +783,69 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async getReplayAnsi(replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array> {
-    if (this.pendingReplayAnsi) {
-      throw new Error('Replay ANSI request already in progress');
+  cancelPendingReplayRequests(): void {
+    this.cancelPendingReplayFrame();
+    if (this.pendingReplayTimeline) {
+      clearTimeout(this.pendingReplayTimeline.timeout);
+      this.pendingReplayTimeline.reject(new Error('Replay timeline request cancelled'));
+      this.pendingReplayTimeline = null;
+    }
+  }
+
+  private cancelPendingReplayFrame(): void {
+    if (this.pendingReplayFrame) {
+      clearTimeout(this.pendingReplayFrame.timeout);
+      this.pendingReplayFrame.reject(new Error('Replay frame request cancelled'));
+      this.pendingReplayFrame = null;
+    }
+  }
+
+  async getReplayFrame(replayId: string, target?: ReplayFrameTarget): Promise<import('../backend.js').ReplayFrame> {
+    if (this.pendingReplayFrame) {
+      // Cancel only the stale frame request, not timeline
+      this.cancelPendingReplayFrame();
     }
 
-    const command: GetReplayAnsiRequest = {
-      type: 'get_replay_ansi',
+    const requestId = `rf-${++this.replayFrameRequestSeq}-${Date.now().toString(36)}`;
+    const command: GetReplayFrameRequest = {
+      type: 'get_replay_frame',
       replayId,
+      requestId,
       atMs: target?.atMs,
       atSeq: target?.atSeq,
     };
-    return new Promise<Uint8Array>((resolve, reject) => {
+    return new Promise<import('../backend.js').ReplayFrame>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const pending = this.pendingReplayAnsi;
-        if (!pending || pending.replayId !== replayId) {
+        const pending = this.pendingReplayFrame;
+        if (!pending || pending.requestId !== requestId) {
           return;
         }
-        this.pendingReplayAnsi = null;
-        pending.reject(new Error(`Timed out waiting for replay ANSI (${replayId})`));
+        this.pendingReplayFrame = null;
+        pending.reject(new Error(`Timed out waiting for replay frame (${replayId})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
 
-      this.pendingReplayAnsi = { replayId, resolve, reject, timeout };
+      const pendingEntry = { replayId, requestId, resolve, reject, timeout };
+      this.pendingReplayFrame = pendingEntry;
 
       void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingReplayAnsi;
-        if (!pending) {
+        // Guard against stale send failures cancelling a newer request
+        if (this.pendingReplayFrame !== pendingEntry) {
           return;
         }
-        clearTimeout(pending.timeout);
-        this.pendingReplayAnsi = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        clearTimeout(pendingEntry.timeout);
+        this.pendingReplayFrame = null;
+        pendingEntry.reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
   }
 
   async getReplayTimeline(replayId: string): Promise<ReplayTimeline> {
     if (this.pendingReplayTimeline) {
-      throw new Error('Replay timeline request already in progress');
+      // Cancel stale in-flight request so we can start a fresh one
+      const pending = this.pendingReplayTimeline;
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Replay timeline request cancelled'));
+      this.pendingReplayTimeline = null;
     }
 
     const command: GetReplayTimelineRequest = { type: 'get_replay_timeline', replayId };
@@ -1928,8 +1964,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'replay_list':
         this.emit({ type: 'replays', replays: message.replays });
         return;
-      case 'replay_ansi':
-        this.resolveReplayAnsi(message);
+      case 'replay_frame':
+        this.resolveReplayFrame(message);
         return;
       case 'replay_timeline':
         this.resolveReplayTimeline(message);
@@ -2066,7 +2102,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingCancelProject(message.message, message.projectName);
         this.rejectPendingWorkspaceCreate(message.message, message.workspaceId, message.projectName);
         this.rejectPendingProjectDelete(message.message, message.projectName);
-        this.rejectPendingReplayAnsi(message.message, undefined, true);
+        this.rejectPendingReplayFrame(message.message, { requestId: message.requestId, force: !message.requestId });
         this.rejectPendingReplayTimeline(message.message, undefined, true);
         this.rejectPendingDismissReplay(message.message, undefined, true);
         this.rejectPendingUndismissReplay(message.message, undefined, true);
@@ -2488,14 +2524,60 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.reject(new Error(message));
   }
 
-  private resolveReplayAnsi(message: ReplayAnsiResponse): void {
-    const pending = this.pendingReplayAnsi;
-    if (!pending || pending.replayId !== message.replayId) {
+  private resolveReplayFrame(message: ReplayFrameResponse): void {
+    const totalChunks = message.totalChunks ?? 1;
+    const chunkIndex = message.chunkIndex ?? 0;
+    if (totalChunks > 1) {
+      this.prunePendingReplayFrameChunks();
+      const pendingChunk = this.pendingReplayFrameChunks.get(message.requestId) ?? {
+        replayId: message.replayId,
+        totalChunks,
+        checkpoint: null,
+        chunks: new Map<number, import('../backend.js').ReplayFrame['events']>(),
+        receivedAtMs: Date.now(),
+      };
+      pendingChunk.replayId = message.replayId;
+      pendingChunk.totalChunks = totalChunks;
+      pendingChunk.receivedAtMs = Date.now();
+      if (message.frame.checkpoint) {
+        pendingChunk.checkpoint = message.frame.checkpoint;
+      }
+      pendingChunk.chunks.set(chunkIndex, message.frame.events);
+      this.pendingReplayFrameChunks.set(message.requestId, pendingChunk);
+
+      if (pendingChunk.chunks.size < pendingChunk.totalChunks) {
+        return;
+      }
+
+      const mergedEvents: import('../backend.js').ReplayFrame['events'] = [];
+      for (let idx = 0; idx < pendingChunk.totalChunks; idx += 1) {
+        const chunk = pendingChunk.chunks.get(idx);
+        if (!chunk) {
+          return;
+        }
+        mergedEvents.push(...chunk);
+      }
+      this.pendingReplayFrameChunks.delete(message.requestId);
+      message = {
+        ...message,
+        totalChunks: 1,
+        chunkIndex: 0,
+        frame: {
+          replayId: message.replayId,
+          checkpoint: pendingChunk.checkpoint,
+          events: mergedEvents,
+        },
+      };
+    }
+
+    const pending = this.pendingReplayFrame;
+    if (!pending || pending.requestId !== message.requestId) {
+      // Stale response for a cancelled or superseded request — discard
       return;
     }
     clearTimeout(pending.timeout);
-    this.pendingReplayAnsi = null;
-    pending.resolve(this.crypto.decodeBase64(message.data));
+    this.pendingReplayFrame = null;
+    pending.resolve(message.frame);
   }
 
   private resolveReplayTimeline(message: ReplayTimelineResponse): void {
@@ -2508,16 +2590,24 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.resolve(message.timeline);
   }
 
-  private rejectPendingReplayAnsi(message: string, replayId?: string, force = false): void {
-    const pending = this.pendingReplayAnsi;
+  private rejectPendingReplayFrame(message: string, options?: { replayId?: string; requestId?: string; force?: boolean }): void {
+    const pending = this.pendingReplayFrame;
     if (!pending) {
       return;
     }
-    if (!force && replayId && pending.replayId !== replayId) {
-      return;
+    const force = options?.force ?? false;
+    if (!force) {
+      // If requestId is provided, match on that (most precise)
+      if (options?.requestId && pending.requestId !== options.requestId) {
+        return;
+      }
+      // Otherwise fall back to replayId match
+      if (!options?.requestId && options?.replayId && pending.replayId !== options.replayId) {
+        return;
+      }
     }
     clearTimeout(pending.timeout);
-    this.pendingReplayAnsi = null;
+    this.pendingReplayFrame = null;
     pending.reject(new Error(message));
   }
 
@@ -2585,6 +2675,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     for (const [requestId, pending] of this.pendingEventChunks) {
       if (nowMs - pending.receivedAtMs > ttlMs) {
         this.pendingEventChunks.delete(requestId);
+      }
+    }
+  }
+
+  private prunePendingReplayFrameChunks(nowMs = Date.now()): void {
+    const ttlMs = 30_000;
+    for (const [requestId, pending] of this.pendingReplayFrameChunks) {
+      if (nowMs - pending.receivedAtMs > ttlMs) {
+        this.pendingReplayFrameChunks.delete(requestId);
       }
     }
   }
@@ -2900,6 +2999,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.pendingEventChunks.clear();
+    this.pendingReplayFrameChunks.clear();
     this.rejectPendingBundleRefreshRequests('Remote session disconnected');
     this.rejectPendingGithubRepoList('Remote session disconnected');
     this.rejectPendingRemoteBranches('Remote session disconnected', undefined, true);
@@ -2909,7 +3009,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingCancelProject('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceCreate('Remote session disconnected', undefined, undefined, true);
     this.rejectPendingProjectDelete('Remote session disconnected', undefined, true);
-    this.rejectPendingReplayAnsi('Remote session disconnected', undefined, true);
+    this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);

@@ -389,6 +389,14 @@ export function useSessionEngine() {
     });
   }, [withBackend]);
 
+  const cancelPendingReplayRequests = useCallback((backendKey: BackendKey) => {
+    void withBackend(backendKey, async (backend) => {
+      backend.cancelPendingReplayRequests?.();
+    }).catch(() => {
+      // Best-effort cleanup; backend may already be disconnected.
+    });
+  }, [withBackend]);
+
   const killSession = useCallback(async (backendKey: BackendKey, sessionId: string) => {
     await withBackend(backendKey, (backend) => backend.killSession(sessionId));
   }, [withBackend]);
@@ -620,22 +628,22 @@ export function useSessionEngine() {
     return markdown;
   }, [withBackend]);
 
-  const getReplayAnsi = useCallback(async (
+  const getReplayFrame = useCallback(async (
     backendKey: BackendKey,
     replayId: string,
     target?: import('./backend.js').ReplayFrameTarget,
   ) => {
-    let ansi: Uint8Array | null = null;
+    let frame: import('./backend.js').ReplayFrame | null = null;
     await withBackend(backendKey, async (backend) => {
-      if (!backend.getReplayAnsi) {
-        throw new SpacesError('Replay ANSI rendering is not supported by this backend', 'SYSTEM_ERROR', 2);
+      if (!backend.getReplayFrame) {
+        throw new SpacesError('Replay frame is not supported by this backend', 'SYSTEM_ERROR', 2);
       }
-      ansi = await backend.getReplayAnsi(replayId, target);
+      frame = await backend.getReplayFrame(replayId, target);
     });
-    if (!ansi) {
-      throw new SpacesError('Replay ANSI was not returned by backend', 'SYSTEM_ERROR', 2);
+    if (!frame) {
+      throw new SpacesError('Replay frame was not returned by backend', 'SYSTEM_ERROR', 2);
     }
-    return ansi;
+    return frame;
   }, [withBackend]);
 
   const getReplayTimeline = useCallback(async (
@@ -702,6 +710,7 @@ export function useSessionEngine() {
     attachSession,
     detachSession,
     cancelPendingScripts,
+    cancelPendingReplayRequests,
     killSession,
     deleteWorkspace,
     getBundleRefreshPlan,
@@ -723,7 +732,7 @@ export function useSessionEngine() {
     getReplaySnapshot,
     getReplayText,
     getReplayMarkdown,
-    getReplayAnsi,
+    getReplayFrame,
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
@@ -750,6 +759,7 @@ export function useSessionEngine() {
     attachSession,
     detachSession,
     cancelPendingScripts,
+    cancelPendingReplayRequests,
     killSession,
     deleteWorkspace,
     getBundleRefreshPlan,
@@ -769,7 +779,7 @@ export function useSessionEngine() {
     getReplaySnapshot,
     getReplayText,
     getReplayMarkdown,
-    getReplayAnsi,
+    getReplayFrame,
     getReplayTimeline,
     dismissReplay,
     undismissReplay,

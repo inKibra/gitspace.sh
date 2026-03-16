@@ -1234,18 +1234,24 @@ describe('LocalSessionBackend', () => {
     });
   });
 
-  it('returns replay ansi and delegates dismiss / undismiss', async () => {
+  it('returns replay frame and delegates dismiss / undismiss', async () => {
     const dismissCalls: string[] = [];
     const undismissCalls: string[] = [];
+    const mockFrame = {
+      replayId: 'replay-1',
+      checkpoint: null,
+      events: [{ seq: 1, t: 10, type: 'output' as const, data: 'dGVzdA==' }],
+    };
     const deps: Partial<LocalSessionBackendDependencies> = {
-      getReplayAnsi: async () => Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]),
+      getReplayFrame: () => mockFrame,
       dismissReplay: (replayId) => { dismissCalls.push(replayId); },
       undismissReplay: (replayId) => { undismissCalls.push(replayId); },
     };
 
     const backend = new LocalSessionBackend({ deps });
-    const ansi = await backend.getReplayAnsi('replay-1');
-    expect(Array.from(ansi)).toEqual([0x1b, 0x5b, 0x33, 0x31, 0x6d]);
+    const frame = await backend.getReplayFrame('replay-1');
+    expect(frame.replayId).toBe('replay-1');
+    expect(frame.events).toHaveLength(1);
 
     await backend.dismissReplay('replay-1');
     await backend.undismissReplay('replay-1');

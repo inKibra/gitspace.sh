@@ -537,8 +537,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
   }, [activeReplay?.dismissedAt]);
 
-  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return remote.getReplayAnsi(replayId, target).then((bytes) => Buffer.from(bytes));
+  const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return remote.getReplayFrame(replayId, target);
   }, [remote]);
 
   const loadReplayTimeline = useCallback((replayId: string) => {
@@ -1092,12 +1092,13 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       <Fragment>
         <ReplayTerminal
           replay={activeReplay}
-          loadReplayAnsi={loadReplayAnsi}
+          loadReplayFrame={loadReplayFrame}
           loadReplayTimeline={loadReplayTimeline}
           onBack={() => {
             setActiveReplay(null);
           }}
           onDismiss={activeReplay.status === 'running' ? undefined : handleReplayDismiss}
+          onCleanup={remote.cancelPendingReplayRequests}
         />
         <FlowTUI flow={flow} />
       </Fragment>

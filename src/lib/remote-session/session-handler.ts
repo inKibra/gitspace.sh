@@ -29,11 +29,12 @@ import {
 } from "../tmux-lite/cli";
 import {
   listReplaysOffline,
-  getReplayAnsiBufferOffline,
+  getReplayFrameOffline,
   getReplayTimelineOffline,
   dismissReplayOffline,
   undismissReplayOffline,
 } from '../tmux-lite/replay/service.js';
+import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
 
 // Import project loading
@@ -291,8 +292,8 @@ export class RemoteSessionHandler {
         await this.handleListReplays(session, msg.workspaceId, msg.includeDismissed, sendResponse);
         break;
 
-      case 'get_replay_ansi':
-        await this.handleGetReplayAnsi(session, msg.replayId, msg.atMs, msg.atSeq, sendResponse);
+      case 'get_replay_frame':
+        await this.handleGetReplayFrame(session, msg.replayId, msg.requestId, msg.atMs, msg.atSeq, sendResponse);
         break;
 
       case 'get_replay_timeline':
@@ -781,31 +782,75 @@ export class RemoteSessionHandler {
     });
   }
 
-  private async handleGetReplayAnsi(
+  private async handleGetReplayFrame(
     session: RemoteClientSession,
     replayId: string,
+    requestId: string,
     atMs: number | undefined,
     atSeq: number | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
     const manifest = readReplayManifest(replayId);
     if (!manifest) {
-      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`);
+      await this.sendError(session, sendResponse, 'NOT_FOUND', `Replay not found: ${replayId}`, { requestId });
       return;
     }
 
     if (!canAccessReplayForSession(session.accessType, session.grantedSessionId, manifest)) {
-      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay');
+      await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Not authorized to access this replay', { requestId });
       return;
     }
 
-    const ansi = await getReplayAnsiBufferOffline(replayId, { atMs, atSeq });
-    await this.sendMessage(session, sendResponse, {
-      type: 'replay_ansi',
+    const frame = getReplayFrameOffline(replayId, { atMs, atSeq });
+
+    const maxPayloadBytes = 900_000;
+    const buildPayload = (
+      events: ReplayFrame['events'],
+      chunkIndex: number,
+      totalChunks: number,
+      checkpoint: ReplayFrame['checkpoint'] | null,
+    ) => ({
+      type: 'replay_frame' as const,
       replayId,
-      data: Buffer.from(ansi).toString('base64'),
-      encoding: 'base64',
+      requestId,
+      frame: {
+        replayId,
+        checkpoint,
+        events,
+      },
+      chunkIndex,
+      totalChunks,
     });
+
+    const chunks: ReplayFrame['events'][] = [];
+    const eventJsonSizes = frame.events.map((event) => Buffer.byteLength(JSON.stringify(event)));
+    const basePayloadSize = (checkpoint: ReplayFrame['checkpoint'] | null) => Buffer.byteLength(JSON.stringify(buildPayload([], 0, 1, checkpoint)));
+    let chunk: ReplayFrame['events'] = [];
+    let chunkSizeBytes = basePayloadSize(frame.checkpoint);
+    for (const [index, event] of frame.events.entries()) {
+      const eventSizeBytes = eventJsonSizes[index] ?? 0;
+      let hasEventsBeforePush = chunk.length > 0;
+      let candidateSize = chunkSizeBytes + eventSizeBytes + (hasEventsBeforePush ? 1 : 0);
+      if (candidateSize > maxPayloadBytes && chunk.length > 0) {
+        chunks.push(chunk);
+        chunk = [];
+        chunkSizeBytes = basePayloadSize(null);
+        hasEventsBeforePush = false;
+        candidateSize = chunkSizeBytes + eventSizeBytes;
+      }
+
+      chunk.push(event);
+      chunkSizeBytes += eventSizeBytes + (hasEventsBeforePush ? 1 : 0);
+    }
+
+    if (chunk.length > 0 || chunks.length === 0) {
+      chunks.push(chunk);
+    }
+
+    const totalChunks = chunks.length;
+    for (let i = 0; i < totalChunks; i += 1) {
+      await this.sendMessage(session, sendResponse, buildPayload(chunks[i] ?? [], i, totalChunks, i === 0 ? frame.checkpoint : null));
+    }
   }
 
   private async handleGetReplayTimeline(
@@ -1971,7 +2016,7 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void,
     code: string,
     message: string,
-    options?: { workspaceId?: string; projectName?: string }
+    options?: { workspaceId?: string; projectName?: string; requestId?: string }
   ): Promise<void> {
     await this.sendMessage(session, sendResponse, {
       type: "error",
@@ -1979,6 +2024,7 @@ export class RemoteSessionHandler {
       message,
       workspaceId: options?.workspaceId,
       projectName: options?.projectName,
+      requestId: options?.requestId,
     });
   }
 

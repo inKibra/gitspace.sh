@@ -1,6 +1,7 @@
 import type { NotificationConfig } from '../notifications/types.js';
 import type { BackendEvent } from './events.js';
 import type {
+  ReplayFrame,
   ReplayFrameTarget,
   ReplayInfo,
   ReplayTimeline,
@@ -185,8 +186,9 @@ export interface SessionBackend {
     includeScrollback?: boolean,
     trimTrailingBlankRows?: boolean,
   ): Promise<string>;
-  getReplayAnsi?(replayId: string, target?: ReplayFrameTarget): Promise<Uint8Array>;
+  getReplayFrame?(replayId: string, target?: ReplayFrameTarget): Promise<ReplayFrame>;
   getReplayTimeline?(replayId: string): Promise<ReplayTimeline>;
+  cancelPendingReplayRequests?(): void;
   dismissReplay?(replayId: string): Promise<void>;
   undismissReplay?(replayId: string): Promise<void>;
 
@@ -222,4 +224,4 @@ export interface OpenCodeBridgeBackend {
   ): Promise<() => Promise<void>>;
 }
 
-export type { ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };
+export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };

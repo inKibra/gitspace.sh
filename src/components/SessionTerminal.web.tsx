@@ -5,6 +5,7 @@ import {
   type PageDirection,
 } from './session-terminal-page-navigation.js';
 import { isIOSDevice } from '../utils/device.web.js';
+import { isReplayDebugEnabled } from './replay-debug.web.js';
 
 interface Props {
   onData: (data: Uint8Array) => void;
@@ -393,8 +394,36 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         setWriteCallback((data: Uint8Array) => {
           const wasScrolledUp = term.viewportY > 0;
           const viewportBefore = term.viewportY;
+          const chunk = new Uint8Array(data);
 
-          term.write(new TextDecoder().decode(data));
+          if (chunk.byteLength === 0) {
+            return;
+          }
+
+          try {
+            if (isReplayDebugEnabled()) {
+              console.debug('[session-terminal:web] write chunk', {
+                byteLength: chunk.byteLength,
+                preview: Array.from(chunk.slice(0, 16)),
+                viewportY: term.viewportY,
+                cols: term.cols,
+                rows: term.rows,
+              });
+            }
+
+            term.write(new TextDecoder().decode(chunk));
+          } catch (error) {
+            console.error('[session-terminal:web] term.write failed', {
+              byteLength: chunk.byteLength,
+              byteOffset: chunk.byteOffset,
+              preview: Array.from(chunk.slice(0, 32)),
+              viewportY: term.viewportY,
+              cols: term.cols,
+              rows: term.rows,
+              error,
+            });
+            throw error;
+          }
 
           if (wasScrolledUp && term.viewportY === 0) {
             requestAnimationFrame(() => {

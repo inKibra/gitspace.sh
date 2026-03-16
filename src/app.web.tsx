@@ -834,8 +834,8 @@ export default function App() {
     }
   }, [activeReplay?.replayId, flow, refreshReplayList, terminal]);
 
-  const loadReplayAnsi = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return terminal.getReplayAnsi(replayId, target);
+  const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
+    return terminal.getReplayFrame(replayId, target);
   }, [terminal]);
 
   const loadReplayTimeline = useCallback((replayId: string) => {
@@ -1579,12 +1579,47 @@ export default function App() {
   }
 
   if (view === 'replay' && activeReplay) {
+    if (terminal.status !== 'established' || terminal.mode !== 'browsing') {
+      const statusMessage = {
+        disconnected: 'Disconnected',
+        connecting: 'Connecting to relay...',
+        connected: 'Connected, authenticating...',
+        handshaking: 'Establishing secure connection...',
+        established: 'Connected!',
+        error: 'Connection failed',
+      }[terminal.status];
+
+      return (
+        <>
+          <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+            <div className="text-center">
+              <div className="text-lg text-[#e6edf3] mb-2">
+                Loading replay for <span className="text-[#58a6ff]">{activeReplay.sessionName}</span>
+              </div>
+              <div className="text-sm text-[#8b949e]">{statusMessage}</div>
+              <button
+                onClick={() => {
+                  setView('terminal');
+                  setActiveReplay(null);
+                }}
+                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+              >
+                Back to Workspaces
+              </button>
+            </div>
+          </div>
+          <FlowWeb flow={flow} />
+          <Toaster theme="dark" position="top-right" richColors />
+        </>
+      );
+    }
+
     return (
       <>
         <ReplayTerminalWeb
           replay={activeReplay}
           machineLabel={selectedMachine?.label || selectedMachine?.machineId}
-          loadReplayAnsi={loadReplayAnsi}
+          loadReplayFrame={loadReplayFrame}
           loadReplayTimeline={loadReplayTimeline}
           onBack={() => {
             setView('terminal');
@@ -1596,6 +1631,7 @@ export default function App() {
               const replay = terminal.replays.find((item) => item.replayId === replayId) ?? activeReplay;
               return toggleReplayDismissed(replay);
             }}
+          onCleanup={terminal.cancelPendingReplayRequests}
         />
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />

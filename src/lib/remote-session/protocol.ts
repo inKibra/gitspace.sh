@@ -41,7 +41,7 @@ export type {
   ConfirmStepResult,
   SpacesBundle,
 } from '../../types/bundle.js';
-export type { ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../tmux-lite/replay/types.js';
+export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../tmux-lite/replay/types.js';
 
 // Re-export attached mode control types from tmux-lite
 // These are used in attached mode for resize/detach/attach-init
@@ -69,10 +69,11 @@ export interface ListReplaysRequest {
   includeDismissed?: boolean;
 }
 
-/** Request ANSI replay bytes for Ghostty/web rendering */
-export interface GetReplayAnsiRequest {
-  type: 'get_replay_ansi';
+/** Request a replay frame (checkpoint + events) for client-side rendering */
+export interface GetReplayFrameRequest {
+  type: 'get_replay_frame';
   replayId: string;
+  requestId: string;
   atMs?: number;
   atSeq?: number;
 }
@@ -381,12 +382,14 @@ export interface ReplayListResponse {
   replays: import('../tmux-lite/replay/types.js').ReplayInfo[];
 }
 
-/** Response with replay ANSI payload */
-export interface ReplayAnsiResponse {
-  type: 'replay_ansi';
+/** Response with replay frame (checkpoint + events for client-side rendering) */
+export interface ReplayFrameResponse {
+  type: 'replay_frame';
   replayId: string;
-  data: string;
-  encoding: 'base64';
+  requestId: string;
+  frame: import('../tmux-lite/replay/types.js').ReplayFrame;
+  chunkIndex?: number;
+  totalChunks?: number;
 }
 
 /** Response with replay timeline metadata */
@@ -436,6 +439,7 @@ export interface ErrorResponse {
   message: string;
   workspaceId?: string;
   projectName?: string;
+  requestId?: string;
 }
 
 /** Project information */
@@ -703,7 +707,7 @@ export type ClientToMachineMessage =
   | ListWorkspacesRequest
   | ListSessionsRequest
   | ListReplaysRequest
-  | GetReplayAnsiRequest
+  | GetReplayFrameRequest
   | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
@@ -744,7 +748,7 @@ export type MachineToClientMessage =
   | WorkspaceListResponse
   | SessionListResponse
   | ReplayListResponse
-  | ReplayAnsiResponse
+  | ReplayFrameResponse
   | ReplayTimelineResponse
   | ReplayDismissedResponse
   | ReplayUndismissedResponse
@@ -824,7 +828,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | ListWorkspacesRequest
   | ListSessionsRequest
   | ListReplaysRequest
-  | GetReplayAnsiRequest
+  | GetReplayFrameRequest
   | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
@@ -850,7 +854,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     "list_workspaces",
     "list_sessions",
     'list_replays',
-    'get_replay_ansi',
+    'get_replay_frame',
     'get_replay_timeline',
     'dismiss_replay',
     'undismiss_replay',

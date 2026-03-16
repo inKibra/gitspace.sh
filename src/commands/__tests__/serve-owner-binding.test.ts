@@ -3,11 +3,13 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  bindControlRelayIdentity,
   bindControlOwner,
   ensureControlStore,
   getControlOwnerIdentityId,
   getVaultMeta,
   listVaultMachines,
+  readControlMeta,
   setVaultMeta,
   upsertVaultMachine,
 } from '../../relay/control/store.js';
@@ -94,6 +96,28 @@ describe('ensureServeOwnerBindingForStartup', () => {
       expect(getControlOwnerIdentityId()).toBe('owner-a');
       expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
       expect(listVaultMachines()).toHaveLength(0);
+    });
+  });
+
+  test('takeover also clears pinned relay identity even when owner already matches', async () => {
+    await withIsolatedEnv(async () => {
+      bindControlOwner('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-a');
+      bindControlRelayIdentity({
+        relayIdentityId: 'relay-old',
+        relaySigningPublicKey: 'old-key',
+        relayFingerprint: 'old:fingerprint',
+      });
+
+      const result = await ensureServeOwnerBindingForStartup('owner-a', {
+        takeover: true,
+        yes: true,
+      });
+
+      expect(result).toEqual({ tookOver: true });
+      expect(getControlOwnerIdentityId()).toBe('owner-a');
+      expect(readControlMeta().relayIdentityId).toBeUndefined();
+      expect(readControlMeta().relayFingerprint).toBeUndefined();
     });
   });
 });

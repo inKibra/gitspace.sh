@@ -16,7 +16,9 @@ import { extractStyledRows, writeReplayScreenshot, type StyledRow, type StyledSp
 import {
   listReplayInfos,
   listReplayCheckpoints,
+  readReplayCheckpoint,
   readReplayEvents,
+  readReplayEventSlice,
   readReplayManifest,
   dismissReplay,
   undismissReplay,
@@ -26,6 +28,7 @@ import {
   type ReplayListFilter,
 } from './store.js';
 import type {
+  ReplayFrame,
   ReplayFrameTarget,
   ReplayInfo,
   ReplayTimeline,
@@ -259,6 +262,62 @@ export async function getReplayAnsiBufferOffline(
   } finally {
     state.xterm.dispose();
   }
+}
+
+// ============================================================================
+// Frame (checkpoint + event slice — no server-side reconstruction)
+// ============================================================================
+
+export function getReplayFrameOffline(
+  replayId: string,
+  target: ReplayFrameTarget = {},
+): ReplayFrame {
+  const manifest = readReplayManifest(replayId);
+  if (!manifest) {
+    logger.error(`[replay.service] Replay manifest not found: ${replayId}`);
+    throw new SpacesError(`Replay manifest not found: ${replayId}`, 'USER_ERROR', 1);
+  }
+
+  const checkpoints = listReplayCheckpoints(replayId);
+  // When no target is specified, use a very large time so readReplayEventSlice
+  // includes all events. We avoid reading the full events file just to compute
+  // the exact latest time — the event slice reader will stop at EOF naturally.
+  const targetMs = target.atMs === undefined
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(0, target.atMs);
+  const targetSeq = target.atSeq;
+
+  // Find the nearest prior checkpoint
+  const checkpoint = [...checkpoints]
+    .reverse()
+    .find((entry) => entry.t < targetMs || (entry.t === targetMs && (targetSeq === undefined || entry.seq <= targetSeq)));
+
+  let frameCheckpoint: ReplayFrame['checkpoint'] = null;
+  let fromSeq = 0;
+
+  if (checkpoint) {
+    const record = readReplayCheckpoint(replayId, checkpoint.checkpointId);
+    if (record) {
+      frameCheckpoint = {
+        checkpointId: checkpoint.checkpointId,
+        seq: checkpoint.seq,
+        t: checkpoint.t,
+        cols: checkpoint.terminal.cols,
+        rows: checkpoint.terminal.rows,
+        ansi: Buffer.from(record.ansi, 'utf-8').toString('base64'),
+      };
+      fromSeq = checkpoint.seq;
+    }
+  }
+
+  // Read only the events between the checkpoint and the target
+  const frameEvents = readReplayEventSlice(replayId, fromSeq, targetMs, targetSeq);
+
+  return {
+    replayId,
+    checkpoint: frameCheckpoint,
+    events: frameEvents,
+  };
 }
 
 // ============================================================================
