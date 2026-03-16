@@ -6,7 +6,7 @@
  */
 
 import type { UseSpacesBrowserReturn, TreeItem } from './SpacesBrowser.js';
-import { formatTime } from './SpacesBrowser.js';
+import { formatTime, getAgentSessionDisplayLabel, getAgentSessionDisplayState } from './SpacesBrowser.js';
 
 // ============================================================================
 // Colors
@@ -79,7 +79,15 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
     return '[↑↓] Navigate  [Enter] Edit Bundle Config  [b] Bundle  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'agents') {
-    return '[↑↓] Navigate  [Enter] Agent Sessions  [r] Refresh  [q] Back';
+    return selectedItem.expanded
+      ? '[↑↓] Navigate  [Enter] Collapse Agents  [r] Refresh  [q] Back'
+      : '[↑↓] Navigate  [Enter] Expand Agents  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'agent-session') {
+    return '[↑↓] Navigate  [Enter] Open Agent Session  [r] Refresh  [q] Back';
+  }
+  if (selectedItem?.type === 'new-agent-session') {
+    return '[↑↓] Navigate  [Enter] New Agent Session  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'events') {
     return '[↑↓] Navigate  [Enter] Open Events  [r] Refresh  [q] Back';
@@ -290,11 +298,42 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           if (item.type === 'agents') {
             const textColor = isSelected ? COLORS.selected : '#C678DD';
             const prefix = isSelected ? '>' : ' ';
+            const arrow = item.expanded ? '▾' : '▸';
             const count = (item.count ?? 0) > 0 ? ` (${item.count})` : '';
             const permBadge = (item.pendingPermissions ?? 0) > 0 ? ` ⚡${item.pendingPermissions}` : '';
             return (
               <text key={`agents-${item.workspaceId}`} fg={textColor} height={1}>
-                {prefix}   ✦ Agent Sessions{count}{permBadge}
+                {prefix}   {arrow} ✦ Agent Sessions{count}{permBadge}
+              </text>
+            );
+          }
+
+          if (item.type === 'agent-session') {
+            const textColor = isSelected ? COLORS.selected : '#C678DD';
+            const prefix = isSelected ? '>' : ' ';
+            const state = getAgentSessionDisplayState(item.session);
+            const label = getAgentSessionDisplayLabel(item.session);
+            const signal =
+              state === 'needs-permission' ? '⚡'
+              : state === 'error' ? '!'
+              : state === 'running' ? '●'
+              : state === 'retrying' ? '↻'
+              : '◦';
+            const timeInfo = item.session.updatedAt ? formatTime(new Date(item.session.updatedAt).getTime()) : '';
+            return (
+              <box key={`agent-session-${item.workspaceId}-${item.session.id}`} flexDirection="row" height={1}>
+                <text fg={textColor}>{prefix}     ✦ {item.session.title}</text>
+                <text fg={COLORS.textDim}> {signal} {label}</text>
+                {timeInfo && <text fg={COLORS.textDim}> {timeInfo}</text>}
+              </box>
+            );
+          }
+
+          if (item.type === 'new-agent-session') {
+            const textColor = isSelected ? COLORS.selected : '#C678DD';
+            return (
+              <text key={`new-agent-${item.workspaceId}`} fg={textColor} height={1}>
+                {isSelected ? '>' : ' '}     + New Agent Session
               </text>
             );
           }

@@ -13,9 +13,6 @@ import {
   type StartProcessRequest,
   type StopProcessRequest,
   type EventsListResponse,
-  type OpenCodeRequest,
-  type OpenCodeResponse,
-  type OpenCodeStreamEventResponse,
   type ProcessStartedResponse,
   type ProcessStoppedResponse,
 } from '../protocol.js';
@@ -156,49 +153,6 @@ describe('round-trip serialization', () => {
     expect(parsed.processName).toBe('web');
   });
 
-  it('should round-trip an OpenCodeRequest', () => {
-    const original: OpenCodeRequest = {
-      type: 'opencode_request',
-      requestId: 'req-1',
-      workspaceId: 'project:workspace',
-      method: 'GET',
-      path: '/session',
-    };
-    const json = serializeRemoteMessage(original);
-    const parsed = parseRemoteMessage(json) as OpenCodeRequest;
-    expect(parsed.type).toBe('opencode_request');
-    expect(parsed.requestId).toBe('req-1');
-    expect(parsed.workspaceId).toBe('project:workspace');
-    expect(parsed.path).toBe('/session');
-  });
-
-  it('should round-trip an OpenCodeResponse', () => {
-    const original: OpenCodeResponse = {
-      type: 'opencode_response',
-      requestId: 'req-1',
-      status: 200,
-      bodyBase64: 'e30=',
-    };
-    const json = serializeRemoteMessage(original);
-    const parsed = parseRemoteMessage(json) as OpenCodeResponse;
-    expect(parsed.type).toBe('opencode_response');
-    expect(parsed.status).toBe(200);
-    expect(parsed.bodyBase64).toBe('e30=');
-  });
-
-  it('should round-trip an OpenCodeStreamEventResponse', () => {
-    const original: OpenCodeStreamEventResponse = {
-      type: 'opencode_stream_event',
-      requestId: 'req-1',
-      event: 'server.connected',
-      data: '{"ok":true}',
-    };
-    const json = serializeRemoteMessage(original);
-    const parsed = parseRemoteMessage(json) as OpenCodeStreamEventResponse;
-    expect(parsed.type).toBe('opencode_stream_event');
-    expect(parsed.event).toBe('server.connected');
-    expect(parsed.data).toBe('{"ok":true}');
-  });
 });
 
 // ============================================================================
@@ -224,18 +178,6 @@ describe('isBrowseMessage', () => {
       workspacePath: '/tmp',
     };
     expect(isBrowseMessage(msg)).toBe(true);
-  });
-
-  it('should return true for opencode_request', () => {
-    expect(
-      isBrowseMessage({
-        type: 'opencode_request',
-        requestId: 'req-1',
-        workspaceId: 'ws',
-        method: 'GET',
-        path: '/session',
-      }),
-    ).toBe(true);
   });
 
   it('should return true for list_remote_branches', () => {
@@ -305,15 +247,16 @@ describe('ClientToMachineMessage type coverage', () => {
     { type: 'get_events', workspacePath: '/tmp' },
     { type: 'start_process', workspaceId: 'w1', processName: 'web' },
     { type: 'stop_process', workspaceId: 'w1', processName: 'web' },
-    { type: 'opencode_request', requestId: 'req-1', workspaceId: 'w1', method: 'GET', path: '/session' },
-    { type: 'opencode_stream_open', requestId: 'req-2', workspaceId: 'w1', path: '/event' },
-    { type: 'opencode_stream_close', requestId: 'req-2' },
-    { type: 'get_opencode_runtime', workspaceId: 'w1' },
+    { type: 'list_agent_sessions', requestId: 'req-1', workspaceId: 'w1', mode: 'live' },
+    { type: 'create_agent_session', requestId: 'req-2', workspaceId: 'w1', title: 'Investigate auth' },
+    { type: 'abort_agent_session', requestId: 'req-3', workspaceId: 'w1', agentSessionId: 'agent-1' },
+    { type: 'respond_agent_permission', requestId: 'req-4', workspaceId: 'w1', agentSessionId: 'agent-1', permissionId: 'perm-1', response: 'allow' },
+    { type: 'get_replay_frame', requestId: 'req-5', replayId: 'r1', atMs: 1000 },
   ];
 
-  it('should include all 28 client message types', () => {
+  it('should include all 29 client message types', () => {
     const types = new Set(clientMessages.map(m => m.type));
-    expect(types.size).toBe(28);
+    expect(types.size).toBe(29);
   });
 
   it('should all parse successfully via round-trip', () => {
@@ -360,11 +303,16 @@ describe('MachineToClientMessage type coverage', () => {
     { type: 'events_list', workspaceId: 'w1', events: [], liveEventIds: [] },
     { type: 'process_started', workspaceId: 'w1', processName: 'web' },
     { type: 'process_stopped', workspaceId: 'w1', processName: 'web' },
+    { type: 'agent_sessions', requestId: 'req-1', workspaceId: 'w1', sessions: [] },
+    { type: 'agent_bool', requestId: 'req-2', workspaceId: 'w1', ok: true },
+    { type: 'agent_state_snapshot', workspaces: [] },
+    { type: 'agent_state_update', delta: { type: 'agent_state_snapshot', workspaces: {} } },
+    { type: 'replay_frame', requestId: 'req-3', replayId: 'r1', frame: { replayId: 'r1', checkpoint: null, events: [] }, chunkIndex: 0, totalChunks: 1 },
   ];
 
-  it('should include all 28 machine message types', () => {
+  it('should include all 33 machine message types', () => {
     const types = new Set(machineMessages.map(m => m.type));
-    expect(types.size).toBe(28);
+    expect(types.size).toBe(33);
   });
 
   it('should all parse successfully via round-trip', () => {

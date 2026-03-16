@@ -10,7 +10,7 @@ import { logger } from "../utils/logger.js";
 import { createRelayServer } from "../relay/server.js";
 import { SpacesError } from "../types/errors.js";
 import chalk from "chalk";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -22,6 +22,7 @@ import { getSpacesDir } from "../core/config.js";
 import {
   bindControlOwner,
   ensureControlStore,
+  getControlDbPath,
   setVaultMeta,
   getVaultMeta,
   isVaultInitialized,
@@ -47,6 +48,47 @@ const RELAY_LOG_FILE = "relay.log";
 const CLOUDFLARED_STARTUP_DELAY_MS = 1200;
 const CLOUDFLARED_EARLY_EXIT_RACE_MS = 100;
 const RELAY_DAEMON_STARTUP_TIMEOUT_MS = 5000;
+const RELAY_SELECTED_SUBDOMAIN_ENV = 'GITSPACE_RELAY_SELECTED_SUBDOMAIN';
+const RELAY_SELECTED_HOSTNAME_ENV = 'GITSPACE_RELAY_SELECTED_HOSTNAME';
+
+export async function selectRelaySubdomain(
+  subdomains: string[],
+  options: {
+    primarySubdomain?: string;
+    interactive?: boolean;
+    select?: typeof selectOne;
+  } = {},
+): Promise<string | null> {
+  if (subdomains.length === 0) {
+    return null;
+  }
+
+  let selectedSubdomain = subdomains[0];
+  if (subdomains.length > 1 && options.interactive) {
+    const picker = options.select ?? selectOne;
+    const picked = await picker(
+      subdomains.map((subdomain) => ({
+        label: `${subdomain}.gitspace.sh`,
+        value: subdomain,
+        description: options.primarySubdomain === subdomain ? 'Primary subdomain' : undefined,
+      })),
+      'Select account host for relay tunnel',
+    );
+
+    if (!picked) {
+      throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+    }
+    selectedSubdomain = picked;
+  } else if (subdomains.length > 1) {
+    logger.warning(
+      `Multiple account hosts available; auto-selecting ${selectedSubdomain}.gitspace.sh in non-interactive mode. `
+      + 'Run interactively to choose a different host.',
+    );
+  }
+
+  logger.info(`Selected account host ${selectedSubdomain}.gitspace.sh for relay tunnel`);
+  return selectedSubdomain;
+}
 
 export function assertRelayOwnerRepairIsSafe(ownerUserRootId: string): void {
   const machineOwners = new Set(listVaultMachines().map((machine) => machine.ownerUserRootId));
@@ -208,10 +250,13 @@ function writeRelayState(state: RelayRuntimeState): void {
     mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   }
 
-  writeFileSync(getRelayStatePath(), JSON.stringify(state, null, 2), {
+  const statePath = getRelayStatePath();
+  const tempPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tempPath, JSON.stringify(state, null, 2), {
     encoding: "utf-8",
     mode: 0o600,
   });
+  renameSync(tempPath, statePath);
 }
 
 function clearRelayState(): void {
@@ -374,34 +419,23 @@ async function resolveAccountRelayTarget(): Promise<{
 } | null> {
   const hostConfig = readHostConfig();
   const subdomains = await resolveRelaySubdomains(hostConfig);
+  const preselectedSubdomain = process.env[RELAY_SELECTED_SUBDOMAIN_ENV]?.trim();
+  const preselectedHostname = process.env[RELAY_SELECTED_HOSTNAME_ENV]?.trim();
+  if (preselectedSubdomain && preselectedHostname) {
+    logger.info(`Using preselected account host ${preselectedHostname} for relay tunnel`);
+    return {
+      hostname: preselectedHostname,
+      subdomain: preselectedSubdomain,
+    };
+  }
 
-  if (subdomains.length === 0) {
+  const selectedSubdomain = await selectRelaySubdomain(subdomains, {
+    primarySubdomain: hostConfig?.subdomain,
+    interactive: Boolean(process.stdout.isTTY && process.stdin.isTTY),
+  });
+  if (!selectedSubdomain) {
     return null;
   }
-
-  let selectedSubdomain = subdomains[0];
-  if (subdomains.length > 1 && process.stdout.isTTY && process.stdin.isTTY) {
-    const picked = await selectOne(
-      subdomains.map((subdomain) => ({
-        label: `${subdomain}.gitspace.sh`,
-        value: subdomain,
-        description: hostConfig?.subdomain === subdomain ? "Primary subdomain" : undefined,
-      })),
-      "Select account host for relay tunnel",
-    );
-
-    if (!picked) {
-      throw new SpacesError("Cancelled", "USER_ERROR", 1);
-    }
-    selectedSubdomain = picked;
-  } else if (subdomains.length > 1) {
-    logger.warning(
-      `Multiple account hosts available; auto-selecting ${selectedSubdomain}.gitspace.sh in non-interactive mode. `
-      + "Run interactively to choose a different host.",
-    );
-  }
-
-  logger.info(`Selected account host ${selectedSubdomain}.gitspace.sh for relay tunnel`);
 
   return {
     hostname: `${selectedSubdomain}.gitspace.sh`,
@@ -426,6 +460,21 @@ export async function startRelay(options: {
 }): Promise<void> {
   if (!options.foreground) {
     logger.log("Starting relay daemon...");
+
+    let daemonSelectedSubdomain: string | undefined;
+    let daemonSelectedHostname: string | undefined;
+    if ((options.mode ?? 'auto') !== 'local' && !options.hostname) {
+      const hostConfig = readHostConfig();
+      const subdomains = await resolveRelaySubdomains(hostConfig);
+      const selectedSubdomain = await selectRelaySubdomain(subdomains, {
+        primarySubdomain: hostConfig?.subdomain,
+        interactive: Boolean(process.stdout.isTTY && process.stdin.isTTY),
+      });
+      if (selectedSubdomain) {
+        daemonSelectedSubdomain = selectedSubdomain;
+        daemonSelectedHostname = `${selectedSubdomain}.gitspace.sh`;
+      }
+    }
 
     const isCompiled = !process.execPath.endsWith("bun");
     const relayArgs = ["relay", "start", "--foreground"];
@@ -470,7 +519,15 @@ export async function startRelay(options: {
       stdin: "ignore",
       stdout: Bun.file(logFile),
       stderr: Bun.file(logFile),
-      env: process.env,
+      env: {
+        ...process.env,
+        ...(daemonSelectedSubdomain
+          ? {
+              [RELAY_SELECTED_SUBDOMAIN_ENV]: daemonSelectedSubdomain,
+              [RELAY_SELECTED_HOSTNAME_ENV]: daemonSelectedHostname ?? `${daemonSelectedSubdomain}.gitspace.sh`,
+            }
+          : {}),
+      },
     });
 
     const snapshot = await waitForRelayRunning(RELAY_DAEMON_STARTUP_TIMEOUT_MS);
@@ -639,7 +696,7 @@ export async function startRelay(options: {
       if (ownerBinding.repairedOwnerBinding && !ownerBinding.missingVaultInitialization) {
         logger.info('Relay vault is initialized but owner metadata is missing; repairing owner binding from the current user root identity.');
       } else if (ownerBinding.missingVaultInitialization) {
-        logger.info('Relay vault is not initialized yet; owner binding will be completed when the owner first unlocks the relay.');
+        logger.info(`Relay control state is not initialized yet; owner metadata will be completed when the owner first unlocks the relay (${getControlDbPath()}).`);
       }
 
       logger.dim(`  Owner identity: ${ownerUserRootId.slice(0, 8)}...`);
@@ -701,19 +758,27 @@ export async function startRelay(options: {
       identity,
     });
 
-    if (tunnelToken) {
-      tunnelProcess = await startCloudflaredTunnel(tunnelToken);
-    }
-
     writeRelayState({
       pid: process.pid,
       startedAt: Date.now(),
       port,
       bind,
       hostname,
-      tunnelPid: tunnelProcess?.pid,
       tunnelSubdomain,
     });
+
+    if (tunnelToken) {
+      tunnelProcess = await startCloudflaredTunnel(tunnelToken);
+      writeRelayState({
+        pid: process.pid,
+        startedAt: Date.now(),
+        port,
+        bind,
+        hostname,
+        tunnelPid: tunnelProcess?.pid,
+        tunnelSubdomain,
+      });
+    }
 
     logger.success(`Local relay URL: ${buildLocalRelayUrl(bind, port)}`);
     if (tunnelSubdomain) {

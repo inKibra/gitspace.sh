@@ -46,6 +46,17 @@ import {
 } from "./replay/store.js";
 import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/types.js";
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
+import {
+  attachAgentSession as ensureAgentTerminalSession,
+  abortAgentSession,
+  createAgentSession,
+  ensureAgentControlInitialized,
+  getAgentControlSnapshot,
+  getKnownAgentSessions,
+  listLiveAgentSessions,
+  respondToAgentPermission,
+  subscribeAgentControl,
+} from './agent-control.js';
 
 // Chunk size for large PTY data (leave room for frame header overhead)
 // Using 512KB to be well under the 1MB limit
@@ -196,22 +207,58 @@ function flushClient(session: SessionData): void {
 interface RouterSocketState {
   buffer: Buffer;
   writer: any;
+  watchesAgentState: boolean;
 }
 
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
+const agentStateWatchers = new Set<object>();
 
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
   if (!state) {
-    state = { buffer: Buffer.alloc(0), writer: null };
+    state = { buffer: Buffer.alloc(0), writer: null, watchesAgentState: false };
     routerSocketStates.set(socket, state);
   }
   return state;
 }
 
 function clearRouterSocketState(socket: object): void {
+  agentStateWatchers.delete(socket);
   routerSocketStates.delete(socket);
 }
+
+function sendRouterResponse(socket: any, response: Response): void {
+  const socketState = getRouterSocketState(socket);
+  if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
+  else socket.write(encodeRouterMessage(response));
+}
+
+function broadcastAgentStateDelta(delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta): void {
+  for (const socket of agentStateWatchers) {
+    try {
+      sendRouterResponse(socket, { type: 'agent-state-update', delta });
+    } catch {
+      agentStateWatchers.delete(socket);
+    }
+  }
+}
+
+let agentControlSubscribed = false;
+
+async function getAgentControlReady(): Promise<void> {
+  await ensureAgentControlInitialized();
+  if (!agentControlSubscribed) {
+    subscribeAgentControl((delta) => {
+      broadcastAgentStateDelta(delta);
+    });
+    agentControlSubscribed = true;
+  }
+}
+
+void getAgentControlReady().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[server] failed to initialize agent control: ${message}`);
+});
 
 function clearIdleTimer(session: SessionData): void {
   if (session.idleState.idleTimer) {
@@ -749,6 +796,10 @@ function markReplayCrashed(session: SessionData, endedAt = Date.now()): void {
 }
 
 function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
+  const session = sessions.get(item.sessionId);
+  if (session?.info.kind === 'agent') {
+    return;
+  }
   // Check if this notification type is enabled in config
   if (!isNotificationTypeEnabled(item.type)) {
     return;
@@ -1570,6 +1621,10 @@ function createSession(
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    recordReplay?: boolean;
+    metadata?: Record<string, string>;
   }
 ): Session {
   const id = genId();
@@ -1583,7 +1638,7 @@ function createSession(
 
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const replay = createReplayRuntime(id, sessionName, cwd, cols, rows);
+  const replay = options?.recordReplay === false ? null : createReplayRuntime(id, sessionName, cwd, cols, rows);
 
   // Create xterm-headless for proper terminal state tracking
   const xterm = new XTerminal({
@@ -1679,6 +1734,9 @@ function createSession(
     attached: false,
     cwd,
     createdAt: Date.now(),
+    kind: options?.kind ?? 'shell',
+    hidden: options?.hidden ?? false,
+    metadata: options?.metadata,
   };
 
   // Create attach handler
@@ -1858,6 +1916,10 @@ routerListener = Bun.listen({
                 command: cmd.command,
                 args: cmd.args,
                 env: cmd.env,
+                kind: cmd.kind,
+                hidden: cmd.hidden,
+                recordReplay: cmd.recordReplay,
+                metadata: cmd.metadata,
               });
               res = { type: "session", session };
             } catch (e) {
@@ -1890,6 +1952,90 @@ routerListener = Bun.listen({
             }
             break;
           }
+
+          case 'agent-state':
+            try {
+              await getAgentControlReady();
+              res = { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to load agent state: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-watch':
+            try {
+              await getAgentControlReady();
+              socketState.watchesAgentState = true;
+              agentStateWatchers.add(socket);
+              res = { type: 'agent-watch-started' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start agent watch: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-sessions':
+            try {
+              await getAgentControlReady();
+              const sessions = cmd.mode === 'known'
+                ? await getKnownAgentSessions(cmd.target)
+                : await listLiveAgentSessions(cmd.target);
+              res = { type: 'agent-sessions', sessions };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list agent sessions: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-create':
+            try {
+              await getAgentControlReady();
+              const sessions = await createAgentSession(cmd.target, cmd.title);
+              res = { type: 'agent-sessions', sessions };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to create agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-abort':
+            try {
+              await getAgentControlReady();
+              const ok = await abortAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to abort agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-attach':
+            try {
+              await getAgentControlReady();
+              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'session', session };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-permission':
+            try {
+              await getAgentControlReady();
+              const ok = await respondToAgentPermission(
+                cmd.target,
+                cmd.agentSessionId,
+                cmd.permissionId,
+                cmd.response,
+              );
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to respond to agent permission: ${errMsg}` };
+            }
+            break;
 
           case "kill-server":
             console.log("Shutting down...");
@@ -1953,8 +2099,10 @@ routerListener = Bun.listen({
             res = { type: "error", message: "Unknown command" };
         }
 
-        if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
-        else socket.write(encodeRouterMessage(res));
+        sendRouterResponse(socket, res);
+        if (res.type === 'agent-watch-started') {
+          sendRouterResponse(socket, { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) });
+        }
       }
     },
     drain(socket) {

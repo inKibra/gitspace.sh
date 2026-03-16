@@ -119,11 +119,9 @@ import {
   forceDisableKittyKeyboard,
 } from './tui/kitty-keyboard.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
-import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
+import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -1248,7 +1246,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [activeReplay?.dismissedAt]);
 
   const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return Promise.resolve().then(() => getReplayFrameOffline(replayId, target));
+    return Promise.resolve(getReplayFrameOffline(replayId, target));
   }, []);
 
   const loadReplayTimeline = useCallback((replayId: string) => {
@@ -1258,12 +1256,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const localBackend = localSession.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
-    bridge: localSession.hasOpenCodeBridge
-      ? {
-          requestOpenCode: localSession.requestOpenCode,
-          subscribeOpenCode: localSession.subscribeOpenCode,
-        }
-      : null,
     backend: localBackend,
   });
 
@@ -1281,27 +1273,45 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Per-workspace agent session persistence — use spacesBrowser's selected workspace if available
   // Fallback to empty string when no workspace is focused (hook is always called, ID may be empty)
-  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
-  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, localBackend);
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    void localBackend?.setAgentSessionPreference(workspaceId, sessionId);
+  }, [localBackend]);
 
-  const agentSessionPicker = useAgentSessionPicker({
-    flow,
-    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
-    createSession: workspaceAgentSessions.createSession,
-    abortSession: workspaceAgentSessions.abortSession,
-    persistedSessionId: agentSessionPref.lastSessionId,
-    onPersistSession: agentSessionPref.persist,
-    onOpenSession: async (session) => {
-      agentSessionPref.persist(session.id);
-      const runtime = await localSession.getOpenCodeRuntimeInfo(session.workspaceId);
-      const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
-      await attachLocal({
-        workspaceId: session.workspaceId,
-        command: commandSpec.command,
-        args: commandSpec.args,
-      });
-    },
-  });
+  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
+    if (!localBackend?.attachAgentSession) {
+      throw new Error('Agent attach unavailable');
+    }
+    await handleInboxSessionSelection({
+      sessionId,
+      agentInboxItems,
+      flow,
+      respondToPermission: agentEvents.respondToPermission,
+      markAgentInboxItemRead: (id) => {
+        setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
+      },
+      openAgentSession: async (workspaceId, agentSessionId) => {
+        await openAgentSession({
+          workspaceId,
+          agentSessionId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: localBackend.attachAgentSession!.bind(localBackend),
+          afterAttach: async () => {
+            dispatch({ type: 'SET_VIEW', view: 'terminal' });
+          },
+        });
+      },
+      attachRegularSession: async (id) => {
+        await handleAttachSession({ sessionId: id });
+      },
+      beforeAgentAction: async () => {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      },
+      beforeRegularAttach: async () => {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      },
+    });
+  }, [agentEvents, agentInboxItems, dispatch, flow, handleAttachSession, localBackend, persistAgentSessionSelection]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
@@ -1317,6 +1327,41 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
+  const agentSessionsByWorkspace = useMemo(() => {
+    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
+    const workspaceIds = new Set([
+      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
+      ...Object.keys(agentEvents.workspaceStates),
+      ...Object.keys(localBackend?.getAgentStateSnapshot() ?? {}),
+    ]);
+
+    for (const workspaceId of workspaceIds) {
+      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
+      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
+      const snapshotSessions = (localBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
+        id: session.id,
+        workspaceId,
+        title: session.title,
+        updatedAt: undefined,
+      }));
+      const combined = new Map<string, (typeof baseSessions)[number]>();
+      for (const session of snapshotSessions) combined.set(session.id, session);
+      for (const session of baseSessions) combined.set(session.id, session);
+      merged[workspaceId] = Array.from(combined.values()).map((session) => {
+        const live = liveStates[session.id];
+        if (!live) return session;
+        return {
+          ...session,
+          status: live.status,
+          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+          errorMessage: live.errorMessage,
+        };
+      });
+    }
+
+    return merged;
+  }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -1337,10 +1382,44 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
     onOpenAgents: async (workspaceId) => {
-      setAgentPickerWorkspaceId(workspaceId);
-      const workspace = workspaceInfos.find((item) => item.id === workspaceId);
-      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
+    onOpenAgentSession: async (workspaceId, agentSessionId) => {
+      if (!localBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await openAgentSession({
+        workspaceId,
+        agentSessionId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+        afterAttach: async () => {
+          dispatch({ type: 'SET_VIEW', view: 'terminal' });
+        },
+      });
+    },
+    onCreateAgentSession: async (workspaceId) => {
+      if (!localBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      promptCreateAgentSession({
+        flow,
+        workspaceId,
+        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
+        createAgentSession: workspaceAgentSessions.createSession,
+        attachOptions: {
+          workspaceId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+          afterAttach: async () => {
+            dispatch({ type: 'SET_VIEW', view: 'terminal' });
+          },
+        },
+      });
+    },
+    agentSessionsByWorkspace,
     agentSessionCounts: agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: refreshWorkspaces,
@@ -1398,40 +1477,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await markLocalInboxRead(id);
       await refreshInbox();
     },
-    onAttachSession: async (sessionId) => {
-      // Check if this is an agent notification item
-      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-      if (agentItem?.agentAction) {
-        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-        dispatch({ type: 'SET_VIEW', view: 'projects' });
-        if (permissionId) {
-          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-            options: [
-              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-            ],
-            onSelect: async (choice) => {
-              if (choice === 'allow' || choice === 'deny') {
-                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-              }
-              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
-            },
-          });
-        } else {
-          // Open agent session picker pre-selected on this session
-          const workspace = workspaceInfos.find((w) => w.id === workspaceId);
-          setAgentPickerWorkspaceId(workspaceId);
-          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
-            preselectSessionId: agentSessionId,
-          });
-        }
-        return;
-      }
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
-      await handleAttachSession({ sessionId });
-    },
+    onAttachSession: attachFromInboxSessionId,
     onClose: () => {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
@@ -1529,7 +1575,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     config: notificationConfig,
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
-      void handleAttachSession({ sessionId }).catch((error) => {
+      void attachFromInboxSessionId(sessionId).catch((error) => {
         flow.showMessage({
           title: 'Attach Failed',
           message: error instanceof Error ? error.message : String(error),

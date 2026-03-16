@@ -112,6 +112,46 @@ export interface AttachSessionRequest {
   viewOnly?: boolean;
 }
 
+/** Attach to a shared agent PTY for an existing OpenCode session. */
+export interface AttachAgentSessionRequest {
+  type: 'attach_agent_session';
+  workspaceId: string;
+  agentSessionId: string;
+  cols?: number;
+  rows?: number;
+  viewOnly?: boolean;
+}
+
+export interface ListAgentSessionsRequest {
+  type: 'list_agent_sessions';
+  requestId: string;
+  workspaceId: string;
+  mode?: 'known' | 'live';
+}
+
+export interface CreateAgentSessionRequest {
+  type: 'create_agent_session';
+  requestId: string;
+  workspaceId: string;
+  title?: string;
+}
+
+export interface AbortAgentSessionRequest {
+  type: 'abort_agent_session';
+  requestId: string;
+  workspaceId: string;
+  agentSessionId: string;
+}
+
+export interface RespondAgentPermissionRequest {
+  type: 'respond_agent_permission';
+  requestId: string;
+  workspaceId: string;
+  agentSessionId: string;
+  permissionId: string;
+  response: 'allow' | 'deny';
+}
+
 /** Cancel a currently running attach workflow (typically stuck scripts). */
 export interface CancelPendingAttachRequest {
   type: 'cancel_pending_attach';
@@ -140,36 +180,6 @@ export interface StopProcessRequest {
   type: "stop_process";
   workspaceId: string;
   processName: string;
-}
-
-export interface OpenCodeRequest {
-  type: 'opencode_request';
-  requestId: string;
-  workspaceId: string;
-  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
-  path: string;
-  query?: Record<string, string | number | boolean>;
-  headers?: Record<string, string>;
-  bodyBase64?: string;
-}
-
-export interface OpenCodeStreamOpenRequest {
-  type: 'opencode_stream_open';
-  requestId: string;
-  workspaceId: string;
-  path: string;
-  query?: Record<string, string | number | boolean>;
-  headers?: Record<string, string>;
-}
-
-export interface OpenCodeStreamCloseRequest {
-  type: 'opencode_stream_close';
-  requestId: string;
-}
-
-export interface GetOpenCodeRuntimeRequest {
-  type: 'get_opencode_runtime';
-  workspaceId: string;
 }
 
 /** Request list of projects on the machine */
@@ -637,47 +647,18 @@ export interface ProcessStoppedResponse {
   processName: string;
 }
 
-export interface OpenCodeResponse {
-  type: 'opencode_response';
+export interface AgentSessionsResponse {
+  type: 'agent_sessions';
   requestId: string;
-  status: number;
-  headers?: Record<string, string>;
-  bodyBase64?: string;
-}
-
-export interface OpenCodeStreamOpenedResponse {
-  type: 'opencode_stream_opened';
-  requestId: string;
-}
-
-export interface OpenCodeStreamEventResponse {
-  type: 'opencode_stream_event';
-  requestId: string;
-  event?: string;
-  data: string;
-  id?: string;
-}
-
-export interface OpenCodeStreamClosedResponse {
-  type: 'opencode_stream_closed';
-  requestId: string;
-}
-
-export interface OpenCodeStreamErrorResponse {
-  type: 'opencode_stream_error';
-  requestId: string;
-  message: string;
-}
-
-export interface OpenCodeRuntimeResponse {
-  type: 'opencode_runtime';
   workspaceId: string;
-  workspacePath: string;
-  hostname: string;
-  port: number;
-  baseUrl: string;
-  username: string;
-  password: string;
+  sessions: Array<{ id: string; title: string; updatedAt?: string }>;
+}
+
+export interface AgentBoolResponse {
+  type: 'agent_bool';
+  requestId: string;
+  workspaceId: string;
+  ok: boolean;
 }
 
 /**
@@ -712,6 +693,11 @@ export type ClientToMachineMessage =
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
+  | AttachAgentSessionRequest
+  | ListAgentSessionsRequest
+  | CreateAgentSessionRequest
+  | AbortAgentSessionRequest
+  | RespondAgentPermissionRequest
   | CancelPendingAttachRequest
   | ListProjectsRequest
   | ListGithubReposRequest
@@ -738,10 +724,7 @@ export type ClientToMachineMessage =
   | GetEventsRequest
   | StartProcessRequest
   | StopProcessRequest
-  | OpenCodeRequest
-  | OpenCodeStreamOpenRequest
-  | OpenCodeStreamCloseRequest
-  | GetOpenCodeRuntimeRequest;
+  ;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
@@ -781,12 +764,8 @@ export type MachineToClientMessage =
   | EventsListResponse
   | ProcessStartedResponse
   | ProcessStoppedResponse
-  | OpenCodeResponse
-  | OpenCodeStreamOpenedResponse
-  | OpenCodeStreamEventResponse
-  | OpenCodeStreamClosedResponse
-  | OpenCodeStreamErrorResponse
-  | OpenCodeRuntimeResponse
+  | AgentSessionsResponse
+  | AgentBoolResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush;
 
@@ -833,6 +812,11 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
+  | AttachAgentSessionRequest
+  | ListAgentSessionsRequest
+  | CreateAgentSessionRequest
+  | AbortAgentSessionRequest
+  | RespondAgentPermissionRequest
   | CancelPendingAttachRequest
   | ListGithubReposRequest
   | ListRemoteBranchesRequest
@@ -845,11 +829,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | DeleteProjectRequest
   | GetBundleConfigStateRequest
   | ApplyBundleConfigUpdateRequest
-  | GetEventsRequest
-  | OpenCodeRequest
-  | OpenCodeStreamOpenRequest
-  | OpenCodeStreamCloseRequest
-  | GetOpenCodeRuntimeRequest {
+  | GetEventsRequest {
   return [
     "list_workspaces",
     "list_sessions",
@@ -859,6 +839,11 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     'dismiss_replay',
     'undismiss_replay',
     "attach_session",
+    'attach_agent_session',
+    'list_agent_sessions',
+    'create_agent_session',
+    'abort_agent_session',
+    'respond_agent_permission',
     'cancel_pending_attach',
     "list_github_repos",
     "list_remote_branches",
@@ -872,9 +857,5 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     'get_bundle_config_state',
     'apply_bundle_config_update',
     "get_events",
-    'opencode_request',
-    'opencode_stream_open',
-    'opencode_stream_close',
-    'get_opencode_runtime',
   ].includes(msg.type);
 }

@@ -57,6 +57,11 @@ async function withIsolatedEnv(run: () => Promise<void>): Promise<void> {
 }
 
 describe('ensureServeOwnerBindingForStartup', () => {
+  const currentRelay = {
+    publicKey: Buffer.alloc(32, 1).toString('base64'),
+    fingerprint: 'curr:relay:fpr1',
+  };
+
   test('binds empty control state to the requested owner', async () => {
     await withIsolatedEnv(async () => {
       const result = await ensureServeOwnerBindingForStartup('owner-a');
@@ -96,6 +101,46 @@ describe('ensureServeOwnerBindingForStartup', () => {
       expect(getControlOwnerIdentityId()).toBe('owner-a');
       expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
       expect(listVaultMachines()).toHaveLength(0);
+    });
+  });
+
+  test('throws a helpful relay mismatch error without takeover', async () => {
+    await withIsolatedEnv(async () => {
+      bindControlOwner('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-a');
+      bindControlRelayIdentity({
+        relayIdentityId: 'old-relay-id',
+        relaySigningPublicKey: Buffer.alloc(32, 2).toString('base64'),
+        relayFingerprint: 'old:relay:fpr0',
+      });
+
+      await expect(
+        ensureServeOwnerBindingForStartup('owner-a', { currentRelay }),
+      ).rejects.toThrow(/Pinned relay:.*old:relay:fpr0[\s\S]*Current relay:.*curr:relay:fpr1[\s\S]*--takeover/i);
+    });
+  });
+
+  test('takeover clears persisted relay pin and rebinds owner state', async () => {
+    await withIsolatedEnv(async () => {
+      bindControlOwner('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-a');
+      bindControlRelayIdentity({
+        relayIdentityId: 'old-relay-id',
+        relaySigningPublicKey: Buffer.alloc(32, 2).toString('base64'),
+        relayFingerprint: 'old:relay:fpr0',
+      });
+
+      const result = await ensureServeOwnerBindingForStartup('owner-a', {
+        takeover: true,
+        yes: true,
+        currentRelay,
+      });
+
+      expect(result).toEqual({ tookOver: true });
+      expect(getControlOwnerIdentityId()).toBe('owner-a');
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(readControlMeta().relayIdentityId).toBeUndefined();
+      expect(readControlMeta().relayFingerprint).toBeUndefined();
     });
   });
 

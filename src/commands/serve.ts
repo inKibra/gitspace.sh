@@ -30,11 +30,9 @@ import {
   readMachineIdentity,
   getPublicKeyWithoutPassword,
   writeRelayConfig,
-  clearRelayConfig,
 } from '../core/identity.js';
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
 import { ClientSessionManager } from '../serve/client-session-manager.js';
-import { defaultAgentEventManager } from '../serve/agent-event-manager.js';
 import type { ServeEventHandler } from '../serve/types.js';
 import type { Identity, StoredIdentity } from '../types/identity.js';
 import {
@@ -70,7 +68,7 @@ import {
   type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
-import { listSessions } from '../lib/tmux-lite/cli.js';
+import { getAgentState, listSessions, watchAgentState } from '../lib/tmux-lite/cli.js';
 import { loadProcessesConfig } from '../lib/processes/config.js';
 import { parseProcessSessionName } from '../lib/processes/names.js';
 import { resolveWorkspaceRef } from '../lib/events/paths.js';
@@ -128,9 +126,14 @@ interface UserRootAuthorizationConfig {
   ownerUserRootId: string;
 }
 
+interface CurrentServeRelayBinding {
+  publicKey: string;
+  fingerprint: string;
+}
+
 export async function ensureServeOwnerBindingForStartup(
   ownerUserRootId: string,
-  options: { takeover?: boolean; yes?: boolean } = {}
+  options: { takeover?: boolean; yes?: boolean; currentRelay?: CurrentServeRelayBinding } = {}
 ): Promise<{ tookOver: boolean }> {
   ensureControlStore();
 
@@ -140,9 +143,19 @@ export async function ensureServeOwnerBindingForStartup(
   const hasPinnedRelayIdentity = Boolean(
     controlMeta.relayIdentityId || controlMeta.relaySigningPublicKey || controlMeta.relayFingerprint,
   );
+  const currentRelayIdentityId = options.currentRelay ? computeIdentityId(options.currentRelay.publicKey) : undefined;
+  const relayMismatch = Boolean(
+    options.currentRelay
+      && (
+        (controlMeta.relayIdentityId && controlMeta.relayIdentityId !== currentRelayIdentityId)
+        || (controlMeta.relaySigningPublicKey && controlMeta.relaySigningPublicKey !== options.currentRelay.publicKey)
+        || (controlMeta.relayFingerprint && controlMeta.relayFingerprint !== options.currentRelay.fingerprint)
+      ),
+  );
 
   const needsTakeover = (currentVaultOwner && currentVaultOwner !== ownerUserRootId)
-    || (currentControlOwner && currentControlOwner !== ownerUserRootId);
+    || (currentControlOwner && currentControlOwner !== ownerUserRootId)
+    || relayMismatch;
 
   const shouldForceResetForTakeover = Boolean(
     options.takeover
@@ -158,6 +171,8 @@ export async function ensureServeOwnerBindingForStartup(
         `  Current user: ${ownerUserRootId.slice(0, 8)}...`,
         currentControlOwner ? `  Control owner: ${currentControlOwner.slice(0, 8)}...` : null,
         currentVaultOwner ? `  Vault owner:   ${currentVaultOwner.slice(0, 8)}...` : null,
+        relayMismatch ? `  Pinned relay:  ${controlMeta.relayFingerprint ?? controlMeta.relayIdentityId}` : null,
+        relayMismatch ? `  Current relay: ${options.currentRelay?.fingerprint}` : null,
         '',
         'Re-run with `gssh machine serve start --takeover` to clear the persisted relay control state and bind it to the recovered identity.',
       ].filter((line): line is string => line !== null).join('\n');
@@ -925,27 +940,65 @@ async function connectToRelay(
 /**
  * Set up shutdown handlers
  */
+export async function performServeShutdown(
+  sessionManager: Pick<ClientSessionManager, 'cleanup'>,
+  options: {
+    isDaemon?: boolean;
+    cleanup?: () => void | Promise<void>;
+    exit?: (code: number) => never;
+    timeoutMs?: number;
+  } = {}
+): Promise<never> {
+  logger.log('');
+  logger.info('Shutting down...');
+
+  const timeoutMs = options.timeoutMs ?? 3_000;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const cleanupPromise = Promise.resolve(options.cleanup?.()).then(() => sessionManager.cleanup());
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      resolve();
+    }, timeoutMs);
+  });
+
+  await Promise.race([cleanupPromise, timeoutPromise]).catch((error) => {
+    logger.error(`Shutdown cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+  }).finally(() => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  });
+
+  if (timedOut) {
+    logger.warning(`Shutdown cleanup timed out after ${timeoutMs}ms; forcing exit.`);
+  }
+
+  if (options.isDaemon) {
+    stopStatusServer();
+    cleanupServeFiles();
+  }
+
+  const exit = options.exit ?? process.exit;
+  return exit(0);
+}
+
 function setupShutdownHandlers(
   sessionManager: ClientSessionManager,
   isDaemon: boolean = false,
   cleanup?: () => void
 ): void {
+  let shutdownPromise: Promise<never> | null = null;
   const shutdown = () => {
-    logger.log('');
-    logger.info('Shutting down...');
-
-    cleanup?.();
-
-    clearRelayConfig();
-    sessionManager.cleanup();
-
-    // Clean up daemon files if in daemon mode
-    if (isDaemon) {
-      stopStatusServer();
-      cleanupServeFiles();
+    if (shutdownPromise) {
+      return;
     }
-
-    process.exit(0);
+    shutdownPromise = performServeShutdown(sessionManager, { isDaemon, cleanup }).catch((error) => {
+      logger.error(`Shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    });
   };
 
   process.on('SIGINT', shutdown);
@@ -993,6 +1046,7 @@ export async function serveStart(options: {
   }
 
   const usingUnlockMode = Boolean(options.unlockToken);
+  const skipOwnerBindingCheck = process.env.GITSPACE_SKIP_OWNER_BINDING_CHECK === '1';
 
   let password: string | null = null;
   let identity: Identity | null = null;
@@ -1038,6 +1092,10 @@ export async function serveStart(options: {
     }
 
     if (!usingUnlockMode) {
+      const userRootAuth = await resolveUserRootAuthorizationConfig({
+        yes: options.yes,
+        devicePasswordContext,
+      });
       const relayIdentity = await fetchRelayIdentity(options.relay);
       const trustResult = await verifyRelayTrust(
         options.relay,
@@ -1052,16 +1110,11 @@ export async function serveStart(options: {
       }
 
       options.relayPubkey ??= relayIdentity.publicKey;
-    }
 
-    if (options.takeover && !options.yes && !usingUnlockMode) {
-      const userRootAuth = await resolveUserRootAuthorizationConfig({
-        yes: options.yes,
-        devicePasswordContext,
-      });
       await ensureServeOwnerBindingForStartup(userRootAuth.ownerUserRootId, {
-        takeover: true,
-        yes: false,
+        takeover: options.takeover,
+        yes: options.yes,
+        currentRelay: relayIdentity,
       });
     }
 
@@ -1108,7 +1161,10 @@ export async function serveStart(options: {
       stdin: 'pipe',
       stdout: Bun.file(logFile),
       stderr: Bun.file(logFile),
-      env: process.env,
+      env: {
+        ...process.env,
+        GITSPACE_SKIP_OWNER_BINDING_CHECK: '1',
+      },
     });
 
     // Send password via stdin (non-unlock mode)
@@ -1285,6 +1341,35 @@ export async function serveStart(options: {
     throw error;
   }
 
+  if (!usingUnlockMode) {
+    try {
+      const relayIdentity = await fetchRelayIdentity(effectiveRelayUrl);
+      const trustResult = await verifyRelayTrust(
+        effectiveRelayUrl,
+        relayIdentity.publicKey,
+        relayIdentity.fingerprint,
+        relayIdentity.label,
+        options.relayPubkey,
+        Boolean(options.yes),
+      );
+      if (!trustResult.trusted) {
+        throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
+      }
+
+      options.relayPubkey ??= relayIdentity.publicKey;
+      if (!skipOwnerBindingCheck) {
+        await ensureServeOwnerBindingForStartup(ownerUserRootId, {
+          takeover: options.takeover,
+          yes: options.yes,
+          currentRelay: relayIdentity,
+        });
+      }
+    } catch (error) {
+      await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+      throw error;
+    }
+  }
+
   // Initialize daemon state
   setDaemonState({
     version: PACKAGE_VERSION,
@@ -1341,13 +1426,85 @@ export async function serveStart(options: {
     throw error;
   }
 
-  // Initialize AgentEventManager — subscribes to already-running OpenCode runtimes
-  void defaultAgentEventManager.initialize();
+  const applyAgentDelta = (delta: import('../serve/agent-event-manager.js').AgentStateUpdateDelta): void => {
+    if (delta.type === 'agent_state_snapshot') {
+      currentAgentSnapshot = { ...delta.workspaces };
+      return;
+    }
+    if (!('workspaceId' in delta)) {
+      return;
+    }
+    const state = currentAgentSnapshot[delta.workspaceId] ?? {
+      workspaceId: delta.workspaceId,
+      sessions: [],
+      statuses: {},
+      pendingPermissions: {},
+      lastMessages: {},
+    };
+    currentAgentSnapshot[delta.workspaceId] = state;
+    switch (delta.type) {
+      case 'agent_session_status':
+        state.statuses[delta.sessionId] = delta.status;
+        break;
+      case 'agent_permission_added':
+        if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
+        state.pendingPermissions[delta.sessionId].push(delta.permission);
+        break;
+      case 'agent_permission_removed':
+        if (state.pendingPermissions[delta.sessionId]) {
+          state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
+            (permission) => permission.id !== delta.permissionId,
+          );
+        }
+        break;
+      case 'agent_session_error':
+        break;
+      case 'agent_last_message':
+        state.lastMessages[delta.sessionId] = delta.preview;
+        break;
+      case 'agent_session_created':
+        if (!state.sessions.some((session) => session.id === delta.sessionId)) {
+          state.sessions.push({ id: delta.sessionId, title: delta.title });
+        }
+        break;
+      case 'agent_session_updated': {
+        const index = state.sessions.findIndex((session) => session.id === delta.sessionId);
+        if (index === -1) {
+          state.sessions.push({ id: delta.sessionId, title: delta.title });
+        } else {
+          state.sessions[index] = { id: delta.sessionId, title: delta.title };
+        }
+        break;
+      }
+      case 'agent_session_deleted':
+        state.sessions = state.sessions.filter((session) => session.id !== delta.sessionId);
+        delete state.statuses[delta.sessionId];
+        delete state.pendingPermissions[delta.sessionId];
+        delete state.lastMessages[delta.sessionId];
+        break;
+    }
+  };
 
-  // Broadcast agent state changes to all connected authenticated clients
-  defaultAgentEventManager.subscribe((delta) => {
-    void sessionManager.broadcastAgentStateUpdate(delta);
-  });
+  let currentAgentSnapshot: Record<string, import('../serve/agent-event-manager.js').WorkspaceAgentState> = {};
+  let stopAgentWatch: (() => void) | null = null;
+  try {
+    currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((workspace) => [workspace.workspaceId, workspace]));
+    stopAgentWatch = await watchAgentState({
+      onSnapshot: (workspaces) => {
+        currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
+      },
+      onUpdate: (delta) => {
+        applyAgentDelta(delta);
+        void sessionManager.broadcastAgentStateUpdate(delta);
+      },
+      onError: (error) => {
+        logger.error(`[serve] tmux-lite agent watch failed: ${error.message}`);
+      },
+    });
+  } catch (error) {
+    await cleanupServeStartupFailure(sessionManager, processHostManager, processHostRefreshTimer);
+    throw error;
+  }
 
   // Event handler - update daemon state
   const eventHandler: ServeEventHandler = (event) => {
@@ -1363,10 +1520,8 @@ export async function serveStart(options: {
         break;
       case 'client_authenticated': {
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        // Push full agent state snapshot to newly authenticated client
-        const snapshot = defaultAgentEventManager.getSnapshot();
-        if (Object.keys(snapshot).length > 0) {
-          void sessionManager.sendAgentStateSnapshot(event.connectionId, snapshot);
+        if (Object.keys(currentAgentSnapshot).length > 0) {
+          void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
         }
         break;
       }
@@ -1443,7 +1598,10 @@ export async function serveStart(options: {
   }
 
   // Set up shutdown handlers with daemon cleanup
-  setupShutdownHandlers(sessionManager, true, () => stopServeProcessHosting(processHostManager, processHostRefreshTimer));
+  setupShutdownHandlers(sessionManager, true, () => {
+    stopAgentWatch?.();
+    stopServeProcessHosting(processHostManager, processHostRefreshTimer);
+  });
 
   // Keep process alive
   await new Promise(() => {});

@@ -27,9 +27,7 @@ import { useLifecycleController } from './app/session/useLifecycleController.js'
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { useAgentSessionPicker } from './agents/useAgentSessionPicker.js';
-import { buildOpenCodeAttachCommand } from './agents/opencode-attach.js';
-import { buildOpenCodeWebProxyUrl } from './agents/opencode-web.js';
+import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
 // Import shared components and hooks
 import {
@@ -49,7 +47,6 @@ import { FlowWeb } from "./components/Flow.web.js";
 import { useInbox } from "./components/Inbox.js";
 import { InboxWeb } from "./components/Inbox.web.js";
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { usePersistedAgentSession } from './agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
@@ -67,7 +64,7 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 
-type View = "machines" | "terminal" | "review" | "replay" | "agent";
+type View = "machines" | "terminal" | "review" | "replay";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
@@ -131,15 +128,6 @@ export default function App() {
     workspaceId: string;
     workspaceLabel?: string;
   } | null>(null);
-  const [activeAgentView, setActiveAgentView] = useState<{
-    machineId: string;
-    workspaceId: string;
-    title: string;
-    url: string;
-  } | null>(null);
-  const activeAgentViewRef = useRef<typeof activeAgentView>(null);
-  const selectedMachineRef = useRef<MachineInfo | null>(null);
-
   // Identity state (resolved by IdentityGate before relay connection)
   const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
 
@@ -150,117 +138,6 @@ export default function App() {
   const terminal = useTerminal();
   const activeNotificationConfig =
     terminal.notificationConfig ?? localNotificationConfig ?? DEFAULT_NOTIFICATION_CONFIG;
-
-  useEffect(() => {
-    activeAgentViewRef.current = activeAgentView;
-  }, [activeAgentView]);
-
-  useEffect(() => {
-    selectedMachineRef.current = selectedMachine;
-  }, [selectedMachine]);
-
-  useEffect(() => {
-    if (!('serviceWorker' in navigator)) {
-      return;
-    }
-
-    const handleServiceWorkerMessage = (event: MessageEvent) => {
-      const data = event.data as {
-        type?: string;
-        mode?: 'request' | 'stream';
-        machineId?: string;
-        workspaceId?: string;
-        method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
-        path?: string;
-        query?: Record<string, string>;
-        headers?: Record<string, string>;
-        bodyBase64?: string;
-      } | null;
-      const port = event.ports?.[0];
-      if (!data || data.type !== 'gitspace-agent-proxy-request' || !port) {
-        return;
-      }
-
-      const agentView = activeAgentViewRef.current;
-      const machine = selectedMachineRef.current;
-
-      if (
-        !agentView ||
-        !machine ||
-        data.machineId !== agentView.machineId ||
-        data.machineId !== machine.machineId ||
-        data.workspaceId !== agentView.workspaceId
-      ) {
-        port.postMessage({ ok: false, status: 409, error: 'Active agent session is unavailable' });
-        return;
-      }
-
-      if (data.mode === 'stream') {
-        let closed = false;
-        const unsubscribePromise = terminal.subscribeOpenCode(
-          {
-            workspaceId: data.workspaceId!,
-            path: data.path!,
-            query: data.query,
-            headers: data.headers,
-          },
-          (streamEvent) => {
-            if (closed) {
-              return;
-            }
-            port.postMessage({
-              type: 'stream-event',
-              event: streamEvent.event,
-              data: streamEvent.data,
-              id: streamEvent.id,
-            });
-          },
-        );
-
-        unsubscribePromise
-          .then(() => {
-            if (!closed) {
-              port.postMessage({ type: 'stream-open' });
-            }
-          })
-          .catch((error) => {
-            port.postMessage({ type: 'stream-error', message: error instanceof Error ? error.message : String(error) });
-          });
-
-        port.onmessage = async (messageEvent) => {
-          if (messageEvent.data?.type !== 'stream-close' || closed) {
-            return;
-          }
-          closed = true;
-          try {
-            const unsubscribe = await unsubscribePromise;
-            await unsubscribe();
-          } finally {
-            port.postMessage({ type: 'stream-close' });
-          }
-        };
-        return;
-      }
-
-      void terminal.requestOpenCode({
-        workspaceId: data.workspaceId!,
-        method: data.method!,
-        path: data.path!,
-        query: data.query,
-        headers: data.headers,
-        bodyBase64: data.bodyBase64,
-      }).then((response) => {
-        port.postMessage({ ok: true, ...response });
-      }).catch((error) => {
-        port.postMessage({ ok: false, status: 502, error: error instanceof Error ? error.message : String(error) });
-      });
-    };
-
-    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
-    return () => {
-      navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
-    };
-  }, [terminal]);
 
   // Visual viewport hook for keyboard detection
   const keyboardVisible = useVisualViewport();
@@ -845,12 +722,6 @@ export default function App() {
   const webBackend = terminal.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
-    bridge: terminal.hasOpenCodeBridge
-      ? {
-          requestOpenCode: terminal.requestOpenCode,
-          subscribeOpenCode: terminal.subscribeOpenCode,
-        }
-      : null,
     backend: webBackend,
   });
 
@@ -868,43 +739,9 @@ export default function App() {
     },
   });
 
-  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
-  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, webBackend);
-
-  const agentSessionPicker = useAgentSessionPicker({
-    flow,
-    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
-    createSession: workspaceAgentSessions.createSession,
-    abortSession: workspaceAgentSessions.abortSession,
-    persistedSessionId: agentSessionPref.lastSessionId,
-    onPersistSession: agentSessionPref.persist,
-    onOpenSession: async (session) => {
-      agentSessionPref.persist(session.id);
-      const runtime = await terminal.getOpenCodeRuntimeInfo(session.workspaceId);
-      if ('serviceWorker' in navigator && selectedMachine?.machineId) {
-        setActiveAgentView({
-          machineId: selectedMachine.machineId,
-          workspaceId: session.workspaceId,
-          title: session.title,
-          url: buildOpenCodeWebProxyUrl({
-            machineId: selectedMachine.machineId,
-            workspaceId: session.workspaceId,
-            workspacePath: runtime.workspacePath,
-            sessionId: session.id,
-          }),
-        });
-        setView('agent');
-        return;
-      }
-
-      const commandSpec = buildOpenCodeAttachCommand(runtime, session.id);
-      await attachController.attach({
-        workspaceId: session.workspaceId,
-        command: commandSpec.command,
-        args: commandSpec.args,
-      });
-    },
-  });
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    void webBackend?.setAgentSessionPreference(workspaceId, sessionId);
+  }, [webBackend]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
@@ -918,6 +755,41 @@ export default function App() {
     }
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
+  const agentSessionsByWorkspace = useMemo(() => {
+    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
+    const workspaceIds = new Set([
+      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
+      ...Object.keys(agentEvents.workspaceStates),
+      ...Object.keys(webBackend?.getAgentStateSnapshot() ?? {}),
+    ]);
+
+    for (const workspaceId of workspaceIds) {
+      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
+      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
+      const snapshotSessions = (webBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
+        id: session.id,
+        workspaceId,
+        title: session.title,
+        updatedAt: undefined,
+      }));
+      const combined = new Map<string, (typeof baseSessions)[number]>();
+      for (const session of snapshotSessions) combined.set(session.id, session);
+      for (const session of baseSessions) combined.set(session.id, session);
+      merged[workspaceId] = Array.from(combined.values()).map((session) => {
+        const live = liveStates[session.id];
+        if (!live) return session;
+        return {
+          ...session,
+          status: live.status,
+          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+          errorMessage: live.errorMessage,
+        };
+      });
+    }
+
+    return merged;
+  }, [agentEvents.workspaceStates, webBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -943,10 +815,44 @@ export default function App() {
       }
     },
     onOpenAgents: async (workspaceId) => {
-      setAgentPickerWorkspaceId(workspaceId);
-      const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
-      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
+    onOpenAgentSession: async (workspaceId, agentSessionId) => {
+      if (!webBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await openAgentSession({
+        workspaceId,
+        agentSessionId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
+        afterAttach: async () => {
+          setView('terminal');
+        },
+      });
+    },
+    onCreateAgentSession: async (workspaceId) => {
+      if (!webBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      promptCreateAgentSession({
+        flow,
+        workspaceId,
+        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
+        createAgentSession: workspaceAgentSessions.createSession,
+        attachOptions: {
+          workspaceId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
+          afterAttach: async () => {
+            setView('terminal');
+          },
+        },
+      });
+    },
+    agentSessionsByWorkspace,
     agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },
@@ -1022,6 +928,36 @@ export default function App() {
     [terminal.inbox, agentInboxItems],
   );
 
+  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
+    if (!webBackend?.attachAgentSession) {
+      throw new Error('Agent attach unavailable');
+    }
+    await handleInboxSessionSelection({
+      sessionId,
+      agentInboxItems,
+      flow,
+      respondToPermission: agentEvents.respondToPermission,
+      markAgentInboxItemRead: (id) => {
+        setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
+      },
+      openAgentSession: async (workspaceId, agentSessionId) => {
+        await openAgentSession({
+          workspaceId,
+          agentSessionId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: webBackend.attachAgentSession!.bind(webBackend),
+          afterAttach: async () => {
+            setView('terminal');
+          },
+        });
+      },
+      attachRegularSession: async (id) => {
+        await attachController.attach({ sessionId: id });
+      },
+    });
+  }, [agentEvents, agentInboxItems, attachController, flow, persistAgentSessionSelection, webBackend]);
+
   const inboxProps = useInbox({
     items: allWebInboxItems,
     unreadCount: terminal.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
@@ -1045,34 +981,7 @@ export default function App() {
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-      if (agentItem?.agentAction) {
-        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-        if (permissionId) {
-          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-            options: [
-              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-            ],
-            onSelect: async (choice) => {
-              if (choice === 'allow' || choice === 'deny') {
-                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-              }
-              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
-            },
-          });
-        } else {
-          const workspace = terminal.workspaces.find((w) => w.id === workspaceId);
-          setAgentPickerWorkspaceId(workspaceId);
-          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
-            preselectSessionId: agentSessionId,
-          });
-        }
-        return;
-      }
-      await attachController.attach({ sessionId });
+      await attachFromInboxSessionId(sessionId);
     },
     onClose: () => setShowInbox(false),
   });
@@ -1160,21 +1069,25 @@ export default function App() {
       action: {
         label: "Attach",
         onClick: () => {
-          void attachController.attach({ sessionId: notification.sessionId });
+          void attachFromInboxSessionId(notification.sessionId);
         },
       },
     });
-  }, [attachController]);
+  }, [attachFromInboxSessionId]);
 
   const notifications = useNotifications({
-    items: terminal.inbox,
+    items: allWebInboxItems,
     config: activeNotificationConfig,
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
-      void attachController.attach({ sessionId });
+      void attachFromInboxSessionId(sessionId);
     },
     onMarkRead: async (itemId) => {
-      terminal.markInboxItemRead(itemId);
+      if (agentInboxItems.some((i) => i.id === itemId)) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === itemId ? { ...i, read: true } : i));
+      } else {
+        terminal.markInboxItemRead(itemId);
+      }
     },
     pollIntervalMs: 5000,
     onRefreshInbox: async () => {
@@ -1758,55 +1671,6 @@ export default function App() {
           </div>
         </div>
         <FlowWeb flow={flow} />
-        <Toaster theme="dark" position="top-right" richColors />
-      </>
-    );
-  }
-
-  if (view === 'agent' && activeAgentView) {
-    return (
-      <>
-        <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-              <button
-                onClick={() => {
-                  setView('terminal');
-                  setActiveAgentView(null);
-                }}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
-              >
-                ← <span className="hidden sm:inline ml-1">Sessions</span>
-              </button>
-              <div className="text-sm text-[#8b949e] truncate">
-                <span className="text-[#c678dd]">✦</span>{' '}
-                <span className="text-[#e6edf3]">{activeAgentView.title}</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <button
-                onClick={() => window.open(activeAgentView.url, '_blank', 'noopener,noreferrer')}
-                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
-              >
-                Open in Tab
-              </button>
-              <button
-                onClick={handleDisconnect}
-                className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
-              >
-                Disconnect
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 bg-[#0d1117]">
-            <iframe
-              src={activeAgentView.url}
-              title={activeAgentView.title}
-              className="w-full h-full border-0"
-              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
-            />
-          </div>
-        </div>
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );

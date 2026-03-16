@@ -1,23 +1,32 @@
+// Bun global is available at runtime but not in the web tsc build which
+// traverses this file via type-only import chains. Declare it so tsc is happy.
+declare const Bun: any;
+
 import { createHash, randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';
 import {
   buildAuthenticatedOpenCodeUrl,
   createOpenCodeBasicAuthHeader,
+  normalizeWorkspacePath,
   type OpenCodeRuntimeInfo,
   type OpenCodeRuntimeTarget,
 } from './opencode-runtime-shared.js';
+import { deleteStoredRuntime, listStoredRuntimes, writeStoredRuntime, type StoredOpenCodeRuntime } from './opencode-store.js';
 
 export type { OpenCodeRuntimeInfo, OpenCodeRuntimeTarget } from './opencode-runtime-shared.js';
 
 interface RuntimeEntry {
   info: OpenCodeRuntimeInfo;
-  process: OpenCodeRuntimeProcess;
+  process?: OpenCodeRuntimeProcess;
+  pid?: number;
 }
 
 interface OpenCodeRuntimeProcess {
   exitCode: number | null;
   kill(): void;
+  pid?: number;
 }
 
 interface BunSpawnAPI {
@@ -75,6 +84,8 @@ export class OpenCodeRuntimeManager {
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly runtimeStartedHandlers = new Set<(info: OpenCodeRuntimeInfo) => void>();
   private readonly runtimeStoppedHandlers = new Set<(workspaceId: string) => void>();
+  private initializePromise: Promise<void> | null = null;
+  private readonly inflightEnsures = new Map<string, Promise<OpenCodeRuntimeInfo>>();
 
   /** Register a callback for when a runtime is successfully started. Returns unsubscribe. */
   onRuntimeStarted(handler: (info: OpenCodeRuntimeInfo) => void): () => void {
@@ -105,30 +116,79 @@ export class OpenCodeRuntimeManager {
     return Array.from(this.entries.values()).map((e) => e.info);
   }
 
+  async initialize(): Promise<void> {
+    if (!this.initializePromise) {
+      this.initializePromise = this.loadPersistedRuntimes();
+    }
+    return this.initializePromise;
+  }
+
+  private async loadPersistedRuntimes(): Promise<void> {
+    const runtimes = await listStoredRuntimes();
+    for (const runtime of runtimes) {
+      if (!existsSync(runtime.workspacePath)) {
+        await deleteStoredRuntime(runtime.workspaceId);
+        continue;
+      }
+      if (!(await checkHealth(runtime))) {
+        await deleteStoredRuntime(runtime.workspaceId);
+        continue;
+      }
+      this.entries.set(runtime.workspaceId, {
+        info: runtime,
+        pid: runtime.pid,
+      });
+      this.emitRuntimeStarted(runtime);
+    }
+  }
+
+  private async forgetRuntime(workspaceId: string): Promise<void> {
+    this.entries.delete(workspaceId);
+    await deleteStoredRuntime(workspaceId);
+    this.emitRuntimeStopped(workspaceId);
+  }
+
   async ensureWorkspaceRuntime(target: OpenCodeRuntimeTarget): Promise<OpenCodeRuntimeInfo> {
+    const inFlight = this.inflightEnsures.get(target.workspaceId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const ensurePromise = this.ensureWorkspaceRuntimeInternal(target).finally(() => {
+      this.inflightEnsures.delete(target.workspaceId);
+    });
+    this.inflightEnsures.set(target.workspaceId, ensurePromise);
+    return ensurePromise;
+  }
+
+  private async ensureWorkspaceRuntimeInternal(target: OpenCodeRuntimeTarget): Promise<OpenCodeRuntimeInfo> {
+    await this.initialize();
+    const normalizedWorkspacePath = normalizeWorkspacePath(target.workspacePath);
     const existing = this.entries.get(target.workspaceId);
     if (existing) {
-      if (existing.process.exitCode === null && (await checkHealth(existing.info))) {
+      const processRunning = existing.process ? existing.process.exitCode === null : true;
+      if (processRunning && (await checkHealth(existing.info))) {
         return existing.info;
       }
 
-      try {
-        existing.process.kill();
-      } catch {
-        // no-op
+      if (existing.process) {
+        try {
+          existing.process.kill();
+        } catch {
+          // no-op
+        }
       }
-      this.entries.delete(target.workspaceId);
-      this.emitRuntimeStopped(target.workspaceId);
+      await this.forgetRuntime(target.workspaceId);
     }
 
-    const username = 'gitspace';
+    const username = 'opencode';
     const password = createPassword();
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const port = hashToPort(`${target.workspaceId}:${attempt}`);
       const info: OpenCodeRuntimeInfo = {
         workspaceId: target.workspaceId,
-        workspacePath: target.workspacePath,
+        workspacePath: normalizedWorkspacePath,
         hostname: '127.0.0.1',
         port,
         baseUrl: `http://127.0.0.1:${port}`,
@@ -143,11 +203,11 @@ export class OpenCodeRuntimeManager {
 
       const spawn = getBunSpawn();
       const child = spawn({
-        cmd: ['opencode', 'web', '--hostname', '127.0.0.1', '--port', String(port)],
-        cwd: target.workspacePath,
+        cmd: ['opencode', 'serve', '--hostname', '127.0.0.1', '--port', String(port)],
+        cwd: normalizedWorkspacePath,
         env: {
           ...process.env,
-          ...(target.projectName ? (await prepareWorkspaceIntegrations(target.projectName, target.workspacePath)).env : {}),
+          ...(target.projectName ? (await prepareWorkspaceIntegrations(target.projectName, normalizedWorkspacePath)).env : {}),
           OPENCODE_SERVER_USERNAME: username,
           OPENCODE_SERVER_PASSWORD: password,
         },
@@ -157,9 +217,16 @@ export class OpenCodeRuntimeManager {
 
       try {
         await waitForHealthy(info);
-        this.entries.set(target.workspaceId, { info, process: child });
-        this.emitRuntimeStarted(info);
-        return info;
+        const storedRuntime: StoredOpenCodeRuntime = {
+          ...info,
+          projectName: target.projectName,
+          pid: typeof child.pid === 'number' ? child.pid : undefined,
+          lastSeenAt: new Date().toISOString(),
+        };
+        this.entries.set(target.workspaceId, { info: storedRuntime, process: child, pid: storedRuntime.pid });
+        await writeStoredRuntime(storedRuntime);
+        this.emitRuntimeStarted(storedRuntime);
+        return storedRuntime;
       } catch (error) {
         try {
           child.kill();
@@ -177,20 +244,30 @@ export class OpenCodeRuntimeManager {
   }
 
   async getWorkspaceRuntime(workspaceId: string): Promise<OpenCodeRuntimeInfo | null> {
+    await this.initialize();
     const entry = this.entries.get(workspaceId);
     if (!entry) {
       return null;
     }
 
-    if (entry.process.exitCode !== null) {
-      this.entries.delete(workspaceId);
-      this.emitRuntimeStopped(workspaceId);
+    if (entry.process && entry.process.exitCode !== null) {
+      await this.forgetRuntime(workspaceId);
       return null;
     }
 
     if (!(await checkHealth(entry.info))) {
+      await this.forgetRuntime(workspaceId);
       return null;
     }
+
+    void writeStoredRuntime({
+      ...entry.info,
+      pid: entry.pid,
+      lastSeenAt: new Date().toISOString(),
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[opencode-runtime] failed to persist runtime ${workspaceId}: ${message}`);
+    });
 
     return entry.info;
   }

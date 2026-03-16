@@ -40,12 +40,12 @@ import { writeCrashLog } from '../utils/crash-log.js';
 import { logger } from '../utils/logger.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.js';
-import { useAgentSessionPicker } from '../agents/useAgentSessionPicker.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
-import { usePersistedAgentSession } from '../agents/usePersistedAgentSession.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
-import { buildOpenCodeAttachUrlCommand } from '../agents/opencode-attach.js';
-import { ensureOpenCodeLocalBridge } from '../agents/opencode-local-bridge.js';
+import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from '../agents/agent-session-actions.js';
+import { toast } from '@opentui-ui/toast';
+import { DEFAULT_NOTIFICATION_CONFIG, useNotifications, type ToastNotification } from '../notifications/index.js';
+import { useUserActivity } from '../hooks/index.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -575,12 +575,6 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
   const remoteBackend = remote.sessionBackend;
 
   const workspaceAgentSessions = useWorkspaceAgentSessions({
-    bridge: remote.hasOpenCodeBridge
-      ? {
-          requestOpenCode: remote.requestOpenCode,
-          subscribeOpenCode: remote.subscribeOpenCode,
-        }
-      : null,
     backend: remoteBackend,
   });
 
@@ -598,33 +592,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
   });
 
-  const [agentPickerWorkspaceId, setAgentPickerWorkspaceId] = useState('');
-  const agentSessionPref = usePersistedAgentSession(agentPickerWorkspaceId, remoteBackend);
-
-  const agentSessionPicker = useAgentSessionPicker({
-    flow,
-    loadWorkspaceSessions: workspaceAgentSessions.loadWorkspaceSessions,
-    createSession: workspaceAgentSessions.createSession,
-    abortSession: workspaceAgentSessions.abortSession,
-    persistedSessionId: agentSessionPref.lastSessionId,
-    onPersistSession: agentSessionPref.persist,
-    onOpenSession: async (session) => {
-      agentSessionPref.persist(session.id);
-      const bridge = await ensureOpenCodeLocalBridge({
-        workspaceId: session.workspaceId,
-        backend: {
-          requestOpenCode: remote.requestOpenCode,
-          subscribeOpenCode: remote.subscribeOpenCode,
-        },
-      });
-      const commandSpec = buildOpenCodeAttachUrlCommand(bridge.baseUrl, session.id);
-      await attachController.attach({
-        workspaceId: session.workspaceId,
-        command: commandSpec.command,
-        args: commandSpec.args,
-      });
-    },
-  });
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    void remoteBackend?.setAgentSessionPreference(workspaceId, sessionId);
+  }, [remoteBackend]);
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
@@ -638,6 +608,41 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
     return counts;
   }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+
+  const agentSessionsByWorkspace = useMemo(() => {
+    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
+    const workspaceIds = new Set([
+      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
+      ...Object.keys(agentEvents.workspaceStates),
+      ...Object.keys(remoteBackend?.getAgentStateSnapshot() ?? {}),
+    ]);
+
+    for (const workspaceId of workspaceIds) {
+      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
+      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
+      const snapshotSessions = (remoteBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
+        id: session.id,
+        workspaceId,
+        title: session.title,
+        updatedAt: undefined,
+      }));
+      const combined = new Map<string, (typeof baseSessions)[number]>();
+      for (const session of snapshotSessions) combined.set(session.id, session);
+      for (const session of baseSessions) combined.set(session.id, session);
+      merged[workspaceId] = Array.from(combined.values()).map((session) => {
+        const live = liveStates[session.id];
+        if (!live) return session;
+        return {
+          ...session,
+          status: live.status,
+          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
+          errorMessage: live.errorMessage,
+        };
+      });
+    }
+
+    return merged;
+  }, [agentEvents.workspaceStates, remoteBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
@@ -653,10 +658,38 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     onStopProcess: handleStopProcess,
     onProcessDisabled: handleProcessDisabled,
     onOpenAgents: async (workspaceId) => {
-      setAgentPickerWorkspaceId(workspaceId);
-      const workspace = remote.workspaces.find((item) => item.id === workspaceId);
-      await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId);
+      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
+    onOpenAgentSession: async (workspaceId, agentSessionId) => {
+      if (!remoteBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      await openAgentSession({
+        workspaceId,
+        agentSessionId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: remoteBackend.attachAgentSession.bind(remoteBackend),
+      });
+    },
+    onCreateAgentSession: async (workspaceId) => {
+      if (!remoteBackend?.attachAgentSession) {
+        throw new Error('Agent attach unavailable');
+      }
+      promptCreateAgentSession({
+        flow,
+        workspaceId,
+        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
+        createAgentSession: workspaceAgentSessions.createSession,
+        attachOptions: {
+          workspaceId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: remoteBackend.attachAgentSession.bind(remoteBackend),
+        },
+      });
+    },
+    agentSessionsByWorkspace,
     agentSessionCounts,
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onOpenEvents: handleOpenEvents,
@@ -692,6 +725,39 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     [remote.inbox, agentInboxItems],
   );
 
+  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
+    if (!remoteBackend?.attachAgentSession) {
+      throw new Error('Agent attach unavailable');
+    }
+    await handleInboxSessionSelection({
+      sessionId,
+      agentInboxItems,
+      flow,
+      respondToPermission: agentEvents.respondToPermission,
+      markAgentInboxItemRead: (id) => {
+        setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
+      },
+      openAgentSession: async (workspaceId, agentSessionId) => {
+        await openAgentSession({
+          workspaceId,
+          agentSessionId,
+          persistAgentSessionSelection,
+          clearViewOnly: () => setIsViewOnlySession(false),
+          attachAgentSession: remoteBackend.attachAgentSession!.bind(remoteBackend),
+        });
+      },
+      attachRegularSession: async (id) => {
+        await handleAttachSession({ sessionId: id });
+      },
+      beforeAgentAction: async () => {
+        setShowInbox(false);
+      },
+      beforeRegularAttach: async () => {
+        setShowInbox(false);
+      },
+    });
+  }, [agentEvents, agentInboxItems, flow, handleAttachSession, persistAgentSessionSelection, remoteBackend]);
+
   const inboxProps = useInbox({
     items: allInboxItems,
     unreadCount: remote.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
@@ -717,38 +783,54 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      const agentItem = agentInboxItems.find((i) => i.sessionId === sessionId && i.agentAction);
-      if (agentItem?.agentAction) {
-        const { workspaceId, agentSessionId, permissionId, permissionTitle } = agentItem.agentAction;
-        if (permissionId) {
-          flow.showSelect<'allow' | 'deny' | 'dismiss'>({
-            title: `Permission: ${permissionTitle ?? 'Action requested'}`,
-            options: [
-              { label: 'Allow', value: 'allow' as const, description: 'Grant the agent permission to proceed' },
-              { label: 'Deny', value: 'deny' as const, description: 'Deny the agent and stop this action' },
-              { label: 'Dismiss', value: 'dismiss' as const, description: 'Close without responding (agent keeps waiting)' },
-            ],
-            onSelect: async (choice) => {
-              if (choice === 'allow' || choice === 'deny') {
-                await agentEvents.respondToPermission(workspaceId, agentSessionId, permissionId, choice);
-              }
-              setAgentInboxItems((prev) => prev.map((i) => i.sessionId === sessionId ? { ...i, read: true } : i));
-            },
-          });
-        } else {
-          const workspace = remote.workspaces.find((w) => w.id === workspaceId);
-          setAgentPickerWorkspaceId(workspaceId);
-          await agentSessionPicker.openPicker(workspaceId, workspace?.name ?? workspaceId, {
-            preselectSessionId: agentSessionId,
-          });
-        }
-        return;
-      }
-      await handleAttachSession({ sessionId });
+      await attachFromInboxSessionId(sessionId);
     },
     onClose: () => {
       setShowInbox(false);
     },
+  });
+
+  const holdWhenIdleMs = (remote.notificationConfig ?? DEFAULT_NOTIFICATION_CONFIG).toast.holdWhenIdleMs ?? 15000;
+  const { isUserActive, markActivity: handleTerminalActivity } = useUserActivity({
+    isActivityTracked: remote.mode === 'attached',
+    holdWhenIdleMs,
+  });
+
+  const handleShowToast = useCallback((notification: ToastNotification) => {
+    const description = notification.preview
+      ? `${notification.preview} · [Shift+Tab to attach]`
+      : '[Shift+Tab to attach]';
+    toast.info(`${notification.icon} ${notification.title}`, {
+      description,
+      duration: 8000,
+    });
+  }, []);
+
+  const notifications = useNotifications({
+    items: allInboxItems,
+    config: remote.notificationConfig ?? DEFAULT_NOTIFICATION_CONFIG,
+    onShowToast: handleShowToast,
+    onAttachSession: (sessionId) => {
+      void attachFromInboxSessionId(sessionId).catch((error) => {
+        flow.showMessage({
+          title: 'Attach Failed',
+          message: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+      });
+    },
+    onMarkRead: async (id) => {
+      const isAgent = agentInboxItems.some((i) => i.id === id);
+      if (isAgent) {
+        setAgentInboxItems((prev) => prev.map((i) => i.id === id ? { ...i, read: true } : i));
+      } else {
+        remote.markInboxItemRead(id);
+      }
+    },
+    pollIntervalMs: 5000,
+    onRefreshInbox: async () => remote.requestInbox(),
+    isUserActive,
+    currentSessionId: remote.attachedSessionId ?? undefined,
   });
 
   useEffect(() => {
@@ -1044,6 +1126,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           onResize={remote.resize}
           onDetach={remote.detachSession}
           setWriteCallback={remote.setWriteCallback}
+          interceptShiftTab={!!notifications.activeToast}
+          onActivity={handleTerminalActivity}
           readOnly={isViewOnlySession}
         />
       </Fragment>

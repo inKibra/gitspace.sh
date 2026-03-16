@@ -8,13 +8,6 @@ import type {
   TerminalSnapshot,
 } from '../lib/tmux-lite/replay/index.js';
 import type {
-  OpenCodeBridgeRequest,
-  OpenCodeBridgeResponse,
-  OpenCodeBridgeStreamEvent,
-  OpenCodeBridgeStreamOpen,
-} from '../agents/opencode-bridge.js';
-import type { OpenCodeRuntimeInfo } from '../agents/opencode-runtime.js';
-import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
@@ -209,19 +202,18 @@ export interface SessionBackend {
     response: 'allow' | 'deny',
   ): Promise<boolean>;
 
+  /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
+  getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>>;
+  /** Live refresh of workspace-scoped agent sessions from the runtime. */
+  listAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>>;
+  createAgentSession?(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>>;
+  abortAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
+  attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean }): Promise<void>;
+
   /** Retrieve the persisted last-selected agent session ID for a workspace. */
   getAgentSessionPreference(workspaceId: string): Promise<string | null>;
   /** Persist the selected agent session ID for a workspace. */
   setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void>;
-}
-
-export interface OpenCodeBridgeBackend {
-  getOpenCodeRuntimeInfo?(workspaceId: string): Promise<OpenCodeRuntimeInfo>;
-  requestOpenCode(request: Omit<OpenCodeBridgeRequest, 'requestId'>): Promise<OpenCodeBridgeResponse>;
-  subscribeOpenCode(
-    request: Omit<OpenCodeBridgeStreamOpen, 'requestId'>,
-    handler: (event: OpenCodeBridgeStreamEvent) => void,
-  ): Promise<() => Promise<void>>;
 }
 
 export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };

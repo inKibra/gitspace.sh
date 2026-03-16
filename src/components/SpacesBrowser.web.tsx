@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, type KeyboardEvent, type RefObject } from 'react';
 import type { TreeItem, UseSpacesBrowserReturn } from './SpacesBrowser.js';
-import { formatTime } from './SpacesBrowser.js';
+import { formatTime, getAgentSessionDisplayLabel, getAgentSessionDisplayState } from './SpacesBrowser.js';
 import type { WorkspaceInfo } from '../lib/remote-session/protocol.js';
 
 function isActivateKey(key: string): boolean {
@@ -489,7 +489,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
                 `}
               >
-                <span className="text-[#c678dd]">✦ Agent Sessions</span>
+                <span className="text-[#c678dd]">{item.expanded ? '▾' : '▸'} ✦ Agent Sessions</span>
                 <div className="flex items-center gap-1">
                   {(item.pendingPermissions ?? 0) > 0 && (
                     <span className="text-xs px-2 py-0.5 rounded bg-[#d29922] text-[#0d1117] font-medium">
@@ -500,6 +500,60 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                     <span className="text-xs px-2 py-1 rounded bg-[#30363d] text-[#e6edf3]">{item.count}</span>
                   )}
                 </div>
+              </div>
+            );
+          }
+
+          if (item.type === 'agent-session') {
+            const state = getAgentSessionDisplayState(item.session);
+            const label = getAgentSessionDisplayLabel(item.session);
+            const signal =
+              state === 'needs-permission' ? `⚡ ${label}`
+              : state === 'error' ? `! ${label}`
+              : state === 'running' ? `● ${label}`
+              : state === 'retrying' ? `↻ ${label}`
+              : `◦ ${label}`;
+            return (
+              <div
+                key={`agent-session-${item.workspaceId}-${item.session.id}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center justify-between
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
+                  <div className="text-xs text-[#8b949e] truncate">
+                    {signal}
+                  </div>
+                </div>
+                {item.session.updatedAt && (
+                  <div className="text-xs text-[#6e7681] ml-3 shrink-0 hidden sm:block">
+                    {formatTime(new Date(item.session.updatedAt).getTime())}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          if (item.type === 'new-agent-session') {
+            return (
+              <div
+                key={`new-agent-${item.workspaceId}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void activateIndex(index);
+                }}
+                className={`
+                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                `}
+              >
+                <span className="text-[#c678dd] text-sm">+ New Agent Session</span>
               </div>
             );
           }

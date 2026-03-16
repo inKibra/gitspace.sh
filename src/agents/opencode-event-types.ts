@@ -41,12 +41,12 @@ export interface EventSessionError {
 
 export interface EventSessionCreated {
   type: 'session.created';
-  properties: { info: { id: string; title: string; directory: string } };
+  properties: { info: { id: string; title: string; directory: string; parentID?: string } };
 }
 
 export interface EventSessionUpdated {
   type: 'session.updated';
-  properties: { info: { id: string; title: string; directory: string } };
+  properties: { info: { id: string; title: string; directory: string; parentID?: string } };
 }
 
 export interface EventSessionDeleted {

@@ -25,6 +25,11 @@ import {
   getInbox,
   clearInbox,
   markInboxRead,
+  listAgentSessions as listTmuxAgentSessions,
+  createAgentSession as createTmuxAgentSession,
+  abortAgentSession as abortTmuxAgentSession,
+  attachAgentSession as attachTmuxAgentSession,
+  respondToAgentPermission as respondToTmuxAgentPermission,
   type Session,
 } from "../tmux-lite/cli";
 import {
@@ -87,13 +92,7 @@ import { readProjectConfig } from "../../core/config.js";
 import { existsSync } from "fs";
 
 import { logger } from "../../utils/logger.js";
-import {
-  createOpenCodeBasicAuthHeader,
-  defaultOpenCodeRuntimeManager,
-  type OpenCodeRuntimeManager,
-} from '../../agents/opencode-runtime.js';
-import { buildOpenCodeUrl } from '../../agents/opencode-bridge.js';
-import { consumeSseStream } from '../../agents/opencode-sse.js';
+import type { AgentWorkspaceTargetPayload } from '../tmux-lite/protocol.js';
 
 /**
  * Session state for a connected client
@@ -171,6 +170,10 @@ export function filterReplaysForSessionAccess<T extends ReplaySessionAccessTarge
   return replays.filter((replay) => replay.sessionId === grantedSessionId);
 }
 
+function isAgentReplay(replay: { sessionName: string }): boolean {
+  return replay.sessionName.startsWith('agent:');
+}
+
 const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
   'create_thread',
   'add_reply',
@@ -196,7 +199,6 @@ function matchesWorkspaceIdToken(parsedWorkspaceId: string, workspaceId: string)
 export interface RemoteSessionHandlerOptions {
   processHostDomain?: string;
   onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
-  openCodeRuntimeManager?: OpenCodeRuntimeManager;
 }
 
 /**
@@ -208,13 +210,10 @@ export class RemoteSessionHandler {
   private pendingAttachRuns = new Map<string, AbortController>();
   private processHostDomain?: string;
   private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
-  private openCodeRuntimeManager: OpenCodeRuntimeManager;
-  private openCodeStreams = new Map<string, AbortController>();
 
   constructor(options: RemoteSessionHandlerOptions = {}) {
     this.processHostDomain = options.processHostDomain;
     this.onProcessesChanged = options.onProcessesChanged;
-    this.openCodeRuntimeManager = options.openCodeRuntimeManager ?? defaultOpenCodeRuntimeManager;
   }
 
   /**
@@ -614,36 +613,64 @@ export class RemoteSessionHandler {
         await this.handleStopProcess(session, msg.workspaceId, msg.processName, sendResponse);
         break;
 
-      case 'opencode_request':
+      case 'list_agent_sessions':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to proxy OpenCode requests');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to list agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
-        await this.handleOpenCodeRequest(session, msg, sendResponse);
+        await this.handleListAgentSessions(session, msg.requestId, msg.workspaceId, msg.mode, sendResponse);
         break;
 
-      case 'opencode_stream_open':
+      case 'create_agent_session':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to proxy OpenCode streams');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to create agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
-        await this.handleOpenCodeStreamOpen(session, msg, sendResponse);
+        await this.handleCreateAgentSession(session, msg.requestId, msg.workspaceId, msg.title, sendResponse);
         break;
 
-      case 'opencode_stream_close':
+      case 'abort_agent_session':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to proxy OpenCode streams');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to abort agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
-        await this.handleOpenCodeStreamClose(session, msg.requestId, sendResponse);
+        await this.handleAbortAgentSession(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
         break;
 
-      case 'get_opencode_runtime':
+      case 'respond_agent_permission':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to access OpenCode runtime info');
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to respond to agent permissions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
           return;
         }
-        await this.handleGetOpenCodeRuntime(session, msg.workspaceId, sendResponse);
+        await this.handleRespondAgentPermission(
+          session,
+          msg.requestId,
+          msg.workspaceId,
+          msg.agentSessionId,
+          msg.permissionId,
+          msg.response,
+          sendResponse,
+        );
+        break;
+
+      case 'attach_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to attach agent sessions');
+          return;
+        }
+        await this.handleAttachAgentSession(session, msg.workspaceId, msg.agentSessionId, msg.viewOnly, sendResponse);
         break;
 
       default: {
@@ -672,7 +699,7 @@ export class RemoteSessionHandler {
           // Note: Session cwd is set once at creation time and does NOT change
           // as users navigate within the shell. This is intentional - we want to
           // show sessions that were *created for* this workspace.
-          const workspaceSessions = sessions.filter(s => s.cwd === workspace.path);
+          const workspaceSessions = sessions.filter((s) => s.cwd === workspace.path && !(s.hidden || s.kind === 'agent'));
           workspace.sessionCount = workspaceSessions.length;
 
           // Load process config for the workspace
@@ -724,6 +751,7 @@ export class RemoteSessionHandler {
         const workspacePathMap = new Map(workspaces.map(w => [w.path, w]));
 
         sessions = allSessions
+          .filter((s) => !(s.hidden || s.kind === 'agent'))
           .filter(s => {
             if (!workspaceId) return true;
             // Try process session name first
@@ -775,7 +803,7 @@ export class RemoteSessionHandler {
       session.accessType,
       session.grantedSessionId,
       listReplaysOffline({ workspaceId, includeDismissed: includeDismissed ?? false }),
-    );
+    ).filter((replay) => !isAgentReplay(replay));
     await this.sendMessage(session, sendResponse, {
       type: 'replay_list',
       replays,
@@ -1795,202 +1823,136 @@ export class RemoteSessionHandler {
     };
   }
 
-  private buildOpenCodeStreamKey(session: RemoteClientSession, requestId: string): string {
-    return `${session.connectionId}:${requestId}`;
-  }
-
-  private async ensureOpenCodeRuntime(workspaceId: string): Promise<{
-    workspaceId: string;
-    workspacePath: string;
-    baseUrl: string;
-    username: string;
-    password: string;
-    authHeader: string;
-  }> {
+  private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTargetPayload> {
     const workspaces = await scanWorkspaces();
     const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
     if (!workspace) {
       throw new Error(`Workspace not found: ${workspaceId}`);
     }
-
-    const runtime = await this.openCodeRuntimeManager.ensureWorkspaceRuntime({
+    return {
       workspaceId: toCanonicalWorkspaceId(workspace),
+      workspaceName: workspace.id,
       workspacePath: workspace.path,
       projectName: workspace.projectName,
-    });
-
-    return {
-      workspaceId: runtime.workspaceId,
-      workspacePath: runtime.workspacePath,
-      baseUrl: runtime.baseUrl,
-      username: runtime.username,
-      password: runtime.password,
-      authHeader: createOpenCodeBasicAuthHeader(runtime),
     };
   }
 
-  private async handleOpenCodeRequest(
-    session: RemoteClientSession,
-    msg: Extract<ClientToMachineMessage, { type: 'opencode_request' }>,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const runtime = await this.ensureOpenCodeRuntime(msg.workspaceId);
-      const url = buildOpenCodeUrl(runtime.baseUrl, msg.path, msg.query);
-      const response = await fetch(url, {
-        method: msg.method,
-        headers: {
-          ...(msg.headers ?? {}),
-          authorization: runtime.authHeader,
-        },
-        body: msg.bodyBase64 ? Buffer.from(msg.bodyBase64, 'base64') : undefined,
-        signal: AbortSignal.timeout(30_000),
-      });
-
-      const bodyBuffer = Buffer.from(await response.arrayBuffer());
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
-      });
-      await this.sendMessage(session, sendResponse, {
-        type: 'opencode_response',
-        requestId: msg.requestId,
-        status: response.status,
-        headers: responseHeaders,
-        bodyBase64: bodyBuffer.length > 0 ? bodyBuffer.toString('base64') : undefined,
-      });
-    } catch (error) {
-      await this.sendMessage(session, sendResponse, {
-        type: 'opencode_response',
-        requestId: msg.requestId,
-        status: 502,
-        bodyBase64: Buffer.from(JSON.stringify({
-          error: error instanceof Error ? error.message : String(error),
-        })).toString('base64'),
-      });
-    }
-  }
-
-  private async handleOpenCodeStreamOpen(
-    session: RemoteClientSession,
-    msg: Extract<ClientToMachineMessage, { type: 'opencode_stream_open' }>,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    const streamKey = this.buildOpenCodeStreamKey(session, msg.requestId);
-    this.openCodeStreams.get(streamKey)?.abort();
-
-    const controller = new AbortController();
-    this.openCodeStreams.set(streamKey, controller);
-
-    try {
-      const runtime = await this.ensureOpenCodeRuntime(msg.workspaceId);
-      const url = buildOpenCodeUrl(runtime.baseUrl, msg.path, msg.query);
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          accept: 'text/event-stream',
-          ...(msg.headers ?? {}),
-          authorization: runtime.authHeader,
-        },
-        signal: controller.signal,
-      });
-
-      if (!response.ok || !response.body) {
-        throw new Error(`OpenCode stream failed (${response.status})`);
-      }
-
-      const responseBody = response.body;
-
-      await this.sendMessage(session, sendResponse, {
-        type: 'opencode_stream_opened',
-        requestId: msg.requestId,
-      });
-
-      // Detach stream consumption so it does not block the message-processing
-      // loop for this client. Subsequent messages (resize, new requests, etc.)
-      // can still be handled while the SSE stream is live.
-      void (async () => {
-        try {
-          await consumeSseStream(responseBody, async (parsed) => {
-            await this.sendMessage(session, sendResponse, {
-              type: 'opencode_stream_event',
-              requestId: msg.requestId,
-              event: parsed.event,
-              data: parsed.data,
-              id: parsed.id,
-            });
-          });
-
-          await this.sendMessage(session, sendResponse, {
-            type: 'opencode_stream_closed',
-            requestId: msg.requestId,
-          });
-        } catch (error) {
-          if (!controller.signal.aborted) {
-            await this.sendMessage(session, sendResponse, {
-              type: 'opencode_stream_error',
-              requestId: msg.requestId,
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }
-        } finally {
-          // Only delete if this controller is still the registered one (not replaced by a reopen)
-          if (this.openCodeStreams.get(streamKey) === controller) {
-            this.openCodeStreams.delete(streamKey);
-          }
-        }
-      })();
-    } catch (error) {
-      // Send error to client BEFORE aborting so the condition isn't short-circuited
-      await this.sendMessage(session, sendResponse, {
-        type: 'opencode_stream_error',
-        requestId: msg.requestId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      controller.abort();
-      if (this.openCodeStreams.get(streamKey) === controller) {
-        this.openCodeStreams.delete(streamKey);
-      }
-    }
-  }
-
-  private async handleOpenCodeStreamClose(
-    session: RemoteClientSession,
+  private async handleListAgentSessions(
+    _session: RemoteClientSession,
     requestId: string,
+    workspaceId: string,
+    mode: 'known' | 'live' | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
-    const streamKey = this.buildOpenCodeStreamKey(session, requestId);
-    const controller = this.openCodeStreams.get(streamKey);
-    if (controller) {
-      controller.abort();
-      this.openCodeStreams.delete(streamKey);
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const sessions = await listTmuxAgentSessions(target, mode ?? 'live');
+      await this.sendMessage(_session, sendResponse, {
+        type: 'agent_sessions',
+        requestId,
+        workspaceId: target.workspaceId,
+        sessions,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.sendError(_session, sendResponse, 'AGENT_SESSIONS_FAILED', detail, { workspaceId, requestId });
     }
-
-    await this.sendMessage(session, sendResponse, {
-      type: 'opencode_stream_closed',
-      requestId,
-    });
   }
 
-  private async handleGetOpenCodeRuntime(
+  private async handleCreateAgentSession(
+    _session: RemoteClientSession,
+    requestId: string,
+    workspaceId: string,
+    title: string | undefined,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const sessions = await createTmuxAgentSession(target, title);
+      await this.sendMessage(_session, sendResponse, {
+        type: 'agent_sessions',
+        requestId,
+        workspaceId: target.workspaceId,
+        sessions,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.sendError(_session, sendResponse, 'AGENT_CREATE_FAILED', detail, { workspaceId, requestId });
+    }
+  }
+
+  private async handleAbortAgentSession(
+    _session: RemoteClientSession,
+    requestId: string,
+    workspaceId: string,
+    agentSessionId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const ok = await abortTmuxAgentSession(target, agentSessionId);
+      await this.sendMessage(_session, sendResponse, {
+        type: 'agent_bool',
+        requestId,
+        workspaceId: target.workspaceId,
+        ok,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.sendError(_session, sendResponse, 'AGENT_ABORT_FAILED', detail, { workspaceId, requestId });
+    }
+  }
+
+  private async handleRespondAgentPermission(
+    _session: RemoteClientSession,
+    requestId: string,
+    workspaceId: string,
+    agentSessionId: string,
+    permissionId: string,
+    response: 'allow' | 'deny',
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const ok = await respondToTmuxAgentPermission(target, agentSessionId, permissionId, response);
+      await this.sendMessage(_session, sendResponse, {
+        type: 'agent_bool',
+        requestId,
+        workspaceId: target.workspaceId,
+        ok,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.sendError(_session, sendResponse, 'AGENT_PERMISSION_FAILED', detail, { workspaceId, requestId });
+    }
+  }
+
+  private async handleAttachAgentSession(
     session: RemoteClientSession,
     workspaceId: string,
+    agentSessionId: string,
+    viewOnly: boolean | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
     try {
-      const runtime = await this.ensureOpenCodeRuntime(workspaceId);
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const terminalSession = await attachTmuxAgentSession(target, agentSessionId);
+
+      session.state = 'attached';
+      session.attachedSessionId = terminalSession.id;
+      session.sessionSocketPath = terminalSession.socketPath;
+      session.viewOnly = viewOnly ?? false;
+
       await this.sendMessage(session, sendResponse, {
-        type: 'opencode_runtime',
-        workspaceId: runtime.workspaceId,
-        workspacePath: runtime.workspacePath,
-        hostname: new URL(runtime.baseUrl).hostname,
-        port: Number(new URL(runtime.baseUrl).port),
-        baseUrl: runtime.baseUrl,
-        username: runtime.username,
-        password: runtime.password,
+        type: 'attached',
+        sessionId: terminalSession.id,
+        sessionName: terminalSession.name,
+        cols: 80,
+        rows: 24,
       });
-    } catch (error) {
-      await this.sendError(session, sendResponse, 'OPENCODE_RUNTIME_FAILED', error instanceof Error ? error.message : String(error), { workspaceId });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      await this.sendError(session, sendResponse, 'ATTACH_FAILED', `Failed to attach agent session: ${detail}`);
     }
   }
 
@@ -2255,21 +2217,15 @@ export class RemoteSessionHandler {
    * Cleanup
    */
   cleanupConnection(connectionId: string): void {
-    for (const [key, controller] of this.openCodeStreams) {
-      if (!key.startsWith(`${connectionId}:`)) {
-        continue;
-      }
-      controller.abort();
-      this.openCodeStreams.delete(key);
+    const pending = this.pendingAttachRuns.get(connectionId);
+    if (!pending) {
+      return;
     }
+    pending.abort();
+    this.pendingAttachRuns.delete(connectionId);
   }
 
   async cleanup(): Promise<void> {
-    for (const controller of this.openCodeStreams.values()) {
-      controller.abort();
-    }
-    this.openCodeStreams.clear();
-
     // Clean up process schedulers
     for (const timer of this.processSchedulers.values()) {
       clearInterval(timer);

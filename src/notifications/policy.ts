@@ -32,6 +32,10 @@ export function isNotificationTypeEnabled(
       return config.types.bell;
     case 'title':
       return config.types.title;
+    case 'agent_permission':
+    case 'agent_idle':
+    case 'agent_error':
+      return true;
     default:
       // OSC notifications come through as 'bell' type with context
       return config.types.osc;

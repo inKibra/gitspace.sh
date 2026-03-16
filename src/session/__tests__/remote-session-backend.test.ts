@@ -275,6 +275,49 @@ describe('RemoteSessionBackend', () => {
     expect(ptyChunks).toEqual(['setup output']);
   });
 
+  it('resolves agent session list responses from machine messages', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const pending = backend.listAgentSessions('project:workspace');
+    await Promise.resolve();
+    const sent = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { requestId: string; type: string };
+    expect(sent.type).toBe('list_agent_sessions');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'agent_sessions',
+        requestId: sent.requestId,
+        workspaceId: 'project:workspace',
+        sessions: [
+          { id: 'agent-1', title: 'Investigate auth', updatedAt: '2026-03-15T12:00:00.000Z' },
+        ],
+      }),
+    );
+
+    await expect(pending).resolves.toEqual([
+      { id: 'agent-1', title: 'Investigate auth', updatedAt: '2026-03-15T12:00:00.000Z' },
+    ]);
+  });
+
   it('buffers PTY output while no callback is registered and flushes on restore', async () => {
     const socket = createFakeSocket();
     const output: string[] = [];

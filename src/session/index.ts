@@ -10,7 +10,6 @@ export type {
   CreateWorkspaceParams,
   DeleteProjectParams,
   DeleteWorkspaceParams,
-  OpenCodeBridgeBackend,
 } from './backend.js';
 
 export type {

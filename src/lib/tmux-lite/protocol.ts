@@ -209,7 +209,23 @@ export interface SessionCreateHooks {
   };
 }
 
+export type SessionKind = 'shell' | 'agent';
+
 export type { ReplayInfo, ReplayStatus, TerminalSnapshot } from './replay/types.js';
+
+export interface AgentWorkspaceTargetPayload {
+  workspaceId: string;
+  workspaceName: string;
+  workspacePath: string;
+  projectName: string;
+}
+
+export interface AgentSessionSummaryPayload {
+  id: string;
+  workspaceId: string;
+  title: string;
+  updatedAt?: string;
+}
 
 export type Command =
   | { type: "list" }
@@ -240,9 +256,26 @@ export type Command =
       command?: string;
       args?: string[];
       env?: Record<string, string>;
+      kind?: SessionKind;
+      hidden?: boolean;
+      recordReplay?: boolean;
+      metadata?: Record<string, string>;
     }
   | { type: "attach"; id: string; force?: boolean }
   | { type: "kill"; id: string }
+  | { type: 'agent-state' }
+  | { type: 'agent-watch' }
+  | { type: 'agent-sessions'; target: AgentWorkspaceTargetPayload; mode?: 'known' | 'live' }
+  | { type: 'agent-create'; target: AgentWorkspaceTargetPayload; title?: string }
+  | { type: 'agent-abort'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | {
+      type: 'agent-permission';
+      target: AgentWorkspaceTargetPayload;
+      agentSessionId: string;
+      permissionId: string;
+      response: 'allow' | 'deny';
+    }
   | { type: "kill-server" }
   | { type: "inbox" }
   | { type: "inbox-clear"; id?: string }  // Clear one or all
@@ -252,6 +285,17 @@ export type Command =
 
 export type Response =
   | { type: "sessions"; sessions: Session[] }
+  | {
+      type: 'agent-state';
+      workspaces: import('../../serve/agent-event-manager.js').WorkspaceAgentState[];
+    }
+  | {
+      type: 'agent-state-update';
+      delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta;
+    }
+  | { type: 'agent-watch-started' }
+  | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
+  | { type: 'agent-bool'; ok: boolean }
   | { type: "replays"; replays: import('./replay/types.js').ReplayInfo[] }
   | { type: "replay-snapshot"; snapshot: import('./replay/types.js').TerminalSnapshot }
   | { type: "replay-text"; text: string }
@@ -274,6 +318,9 @@ export interface Session {
   createdAt: number;
   exitCode?: number;  // undefined = running, number = exited
   processTitle?: string;  // Title set by running process (e.g., vim, npm run dev)
+  kind?: SessionKind;
+  hidden?: boolean;
+  metadata?: Record<string, string>;
 }
 
 // Inbox item - things that need attention
