@@ -584,9 +584,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     });
     if (expanded) {
       onRequestSessions();
-      void onOpenAgents?.(workspaceId);
     }
-  }, [onOpenAgents, onRequestSessions]);
+  }, [onRequestSessions]);
 
   const toggleReplaySection = useCallback((workspaceId: string) => {
     setExpandedReplaySections(prev => {
