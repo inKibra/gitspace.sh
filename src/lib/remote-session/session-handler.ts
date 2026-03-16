@@ -823,21 +823,21 @@ export class RemoteSessionHandler {
     });
 
     const chunks: ReplayFrame['events'][] = [];
+    const eventJsonSizes = frame.events.map((event) => Buffer.byteLength(JSON.stringify(event)));
+    const basePayloadSize = (checkpoint: ReplayFrame['checkpoint'] | null) => Buffer.byteLength(JSON.stringify(buildPayload([], 0, 1, checkpoint)));
     let chunk: ReplayFrame['events'] = [];
-    for (const event of frame.events) {
-      chunk.push(event);
-      const checkpoint = chunks.length === 0 ? frame.checkpoint : null;
-      const payloadSize = Buffer.byteLength(JSON.stringify(buildPayload(chunk, 0, 1, checkpoint)));
-      if (payloadSize > maxPayloadBytes) {
-        if (chunk.length === 1) {
-          chunks.push(chunk);
-          chunk = [];
-          continue;
-        }
-        const last = chunk.pop();
+    let chunkSizeBytes = basePayloadSize(frame.checkpoint);
+    for (const [index, event] of frame.events.entries()) {
+      const eventSizeBytes = eventJsonSizes[index] ?? 0;
+      const candidateSize = chunkSizeBytes + eventSizeBytes + (chunk.length > 0 ? 1 : 0);
+      if (candidateSize > maxPayloadBytes && chunk.length > 0) {
         chunks.push(chunk);
-        chunk = last ? [last] : [];
+        chunk = [];
+        chunkSizeBytes = basePayloadSize(null);
       }
+
+      chunk.push(event);
+      chunkSizeBytes += eventSizeBytes + (chunk.length > 1 ? 1 : 0);
     }
 
     if (chunk.length > 0 || chunks.length === 0) {
