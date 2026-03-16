@@ -1,9 +1,9 @@
 import { createSession as createTmuxSession, listSessions as listTmuxSessions } from '../lib/tmux-lite/cli.js';
 import type { Session as TmuxSession } from '../lib/tmux-lite/protocol.js';
-import { realpathSync } from 'node:fs';
 import { OpenCodeClient, type OpenCodeSessionRecord } from './opencode-client.js';
 import { createOpenCodeBasicAuthHeader, defaultOpenCodeRuntimeManager } from './opencode-runtime.js';
 import type { OpenCodeRuntimeInfo, OpenCodeRuntimeTarget } from './opencode-types.js';
+import { normalizeWorkspacePath } from './opencode-runtime-shared.js';
 import {
   readStoredSessionHistory,
   replaceStoredSessions,
@@ -86,14 +86,6 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
   return session.kind === AGENT_TMUX_SESSION_KIND
     && session.metadata?.workspaceId === workspaceId
     && session.metadata?.agentSessionId === agentSessionId;
-}
-
-function normalizeWorkspacePath(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
-  }
 }
 
 function isTopLevelWorkspaceSession(target: AgentWorkspaceTarget, session: OpenCodeSessionRecord): boolean {

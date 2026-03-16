@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+
 export interface OpenCodeRuntimeTarget {
   workspaceId: string;
   workspacePath: string;
@@ -28,4 +30,12 @@ export function createOpenCodeBasicAuthHeader(
   info: Pick<OpenCodeRuntimeInfo, 'username' | 'password'>,
 ): string {
   return `Basic ${Buffer.from(`${info.username}:${info.password}`).toString('base64')}`;
+}
+
+export function normalizeWorkspacePath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }

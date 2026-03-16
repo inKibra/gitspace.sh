@@ -3,12 +3,13 @@
 declare const Bun: any;
 
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { prepareWorkspaceIntegrations } from '../integrations/apply.js';
 import {
   buildAuthenticatedOpenCodeUrl,
   createOpenCodeBasicAuthHeader,
+  normalizeWorkspacePath,
   type OpenCodeRuntimeInfo,
   type OpenCodeRuntimeTarget,
 } from './opencode-runtime-shared.js';
@@ -53,14 +54,6 @@ function hashToPort(workspaceId: string): number {
 
 function createPassword(): string {
   return randomBytes(24).toString('base64url');
-}
-
-function normalizeWorkspacePath(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
-  }
 }
 
 async function checkHealth(info: OpenCodeRuntimeInfo): Promise<boolean> {
@@ -232,8 +225,8 @@ export class OpenCodeRuntimeManager {
         };
         this.entries.set(target.workspaceId, { info: storedRuntime, process: child, pid: storedRuntime.pid });
         await writeStoredRuntime(storedRuntime);
-        this.emitRuntimeStarted(info);
-        return info;
+        this.emitRuntimeStarted(storedRuntime);
+        return storedRuntime;
       } catch (error) {
         try {
           child.kill();
