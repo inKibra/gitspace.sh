@@ -185,7 +185,7 @@ export class OpenCodeCoordinator {
       target.workspacePath,
       {
         command: 'opencode',
-        args: ['attach', `http://${runtime.hostname}:${runtime.port}`, '--password', runtime.password, '--session', agentSessionId],
+        args: ['attach', `http://${runtime.hostname}:${runtime.port}`, '--session', agentSessionId],
         env: {
           OPENCODE_SERVER_USERNAME: runtime.username,
           OPENCODE_SERVER_PASSWORD: runtime.password,
