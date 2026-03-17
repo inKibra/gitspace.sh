@@ -513,10 +513,6 @@ function setLocalStoreMetaValue(db: Database, key: LocalStoreMetaKey, value: str
   ).run(key, value, nowIso());
 }
 
-function deleteLocalStoreMetaValue(db: Database, key: LocalStoreMetaKey): void {
-  db.query('DELETE FROM local_store_meta WHERE key = ?').run(key);
-}
-
 function mapLocalStoreRecordRow(row: LocalStoreRecordRow): LocalStoreRecord {
   return {
     namespace: row.namespace,
@@ -544,12 +540,6 @@ export function getLocalStoreMeta(key: LocalStoreMetaKey): string | undefined {
 export function setLocalStoreMeta(key: LocalStoreMetaKey, value: string): void {
   withControlDb((db) => {
     setLocalStoreMetaValue(db, key, value);
-  });
-}
-
-export function deleteLocalStoreMeta(key: LocalStoreMetaKey): void {
-  withControlDb((db) => {
-    deleteLocalStoreMetaValue(db, key);
   });
 }
 

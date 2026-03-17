@@ -194,7 +194,11 @@ if (process.argv.length === 2 || hasOnlyTuiOptions) {
 			if (!localStorePassword) {
 				throw new SpacesError('Cancelled', 'USER_ERROR', 1);
 			}
-			await unlockLocalSecureStore(localStorePassword);
+
+			const { shouldDeferLocalStoreUnlockForLegacyIdentityMigration } = await import('./core/identity.js');
+			if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
+				await unlockLocalSecureStore(localStorePassword);
+			}
 
 			const relayCandidate = relayUrlFromArgs
 				? { url: relayUrlFromArgs, label: relayUrlFromArgs, source: 'explicit' as const }

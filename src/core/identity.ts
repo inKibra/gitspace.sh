@@ -360,6 +360,10 @@ export function keypairExists(): boolean {
 	return readStoredDeviceIdentityPublic() !== null || existsSync(getKeypairPath());
 }
 
+export function shouldDeferLocalStoreUnlockForLegacyIdentityMigration(): boolean {
+	return keypairExists() && !localSecureStoreExists();
+}
+
 /**
  * Get the public identity without requiring password
  *

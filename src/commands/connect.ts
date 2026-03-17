@@ -11,6 +11,7 @@ import { promptConfirm, promptInput, selectOne } from '../utils/prompts.js';
 import {
   loadKeypair,
   readRelayConfig,
+  shouldDeferLocalStoreUnlockForLegacyIdentityMigration,
 } from '../core/identity.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import WebSocket from 'ws';
@@ -260,7 +261,9 @@ export async function connectToRemote(
     logger.info('Cancelled');
     return;
   }
-  await unlockLocalSecureStore(localStorePassword);
+  if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
+    await unlockLocalSecureStore(localStorePassword);
+  }
   devicePasswordContext.password = localStorePassword;
 
   // Step 3: Load local identity
@@ -428,7 +431,9 @@ export async function listRemoteMachines(options: {
     logger.info('Cancelled');
     return;
   }
-  await unlockLocalSecureStore(localStorePassword);
+  if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
+    await unlockLocalSecureStore(localStorePassword);
+  }
   devicePasswordContext.password = localStorePassword;
 
   const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);

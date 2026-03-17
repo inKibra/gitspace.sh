@@ -29,6 +29,7 @@ import {
   loadKeypair,
   readMachineIdentity,
   getPublicKeyWithoutPassword,
+  shouldDeferLocalStoreUnlockForLegacyIdentityMigration,
   writeRelayConfig,
 } from '../core/identity.js';
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
@@ -1056,7 +1057,9 @@ export async function serveStart(options: {
         logger.info('Cancelled');
         return;
       }
-      await unlockLocalSecureStore(localStorePassword);
+      if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
+        await unlockLocalSecureStore(localStorePassword);
+      }
       devicePasswordContext.password = localStorePassword;
 
       password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
@@ -1205,7 +1208,9 @@ export async function serveStart(options: {
     cleanupServeFiles();
     return;
   }
-  await unlockLocalSecureStore(localStorePassword);
+  if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
+    await unlockLocalSecureStore(localStorePassword);
+  }
   devicePasswordContext.password = localStorePassword;
 
   // Foreground mode identity resolution
