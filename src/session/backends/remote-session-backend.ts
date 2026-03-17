@@ -2128,7 +2128,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingUndismissReplay(message.message, undefined, true);
         this.rejectPendingAgentSessions(message.message, message.workspaceId, message.requestId);
         this.rejectPendingAgentBooleans(message.message, message.workspaceId, message.requestId);
-        this.rejectPendingAgentTakeoverStatus(message.message, message.workspaceId, message.requestId);
+        this.rejectPendingAgentTakeoverStatus(message.code, message.message, message.workspaceId, message.requestId);
         if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
@@ -2353,7 +2353,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
-  private rejectPendingAgentTakeoverStatus(message: string, workspaceId?: string, requestId?: string): void {
+  private rejectPendingAgentTakeoverStatus(
+    code: string | undefined,
+    message: string,
+    workspaceId?: string,
+    requestId?: string,
+  ): void {
     for (const [pendingRequestId, pending] of this.pendingAgentTakeoverStatus) {
       if (requestId && pendingRequestId !== requestId) {
         continue;
@@ -2363,7 +2368,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
       clearTimeout(pending.timeout);
       this.pendingAgentTakeoverStatus.delete(pendingRequestId);
-      if (message === 'Unknown command') {
+      if (code === 'UNKNOWN_COMMAND') {
         this.agentTakeoverCheckSupported = false;
         pending.resolve({ requiresTakeover: false });
         continue;
@@ -3011,7 +3016,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
     this.rejectPendingAgentSessions('Remote session disconnected');
     this.rejectPendingAgentBooleans('Remote session disconnected');
-    this.rejectPendingAgentTakeoverStatus('Remote session disconnected');
+    this.rejectPendingAgentTakeoverStatus(undefined, 'Remote session disconnected');
     this.rejectAllPendingReviewRequests('Remote session disconnected');
     this.connectPromise = null;
     this.connectResolve = null;

@@ -122,6 +122,7 @@ import {
 } from './tui/kitty-keyboard.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
+import { collectAgentSessionCounts } from './agents/remote-agent-browser.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
@@ -1301,9 +1302,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [localBackend]);
 
   const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
-    if (!localBackend?.attachAgentSession || !localBackend.checkAgentSessionTakeover) {
+    if (!localBackend?.attachAgentSession) {
       throw new Error('Agent attach unavailable');
     }
+    const attachAgentSession = localBackend.attachAgentSession.bind(localBackend);
     await handleInboxSessionSelection({
       sessionId,
       agentInboxItems,
@@ -1319,8 +1321,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover!.bind(localBackend),
-          attachAgentSession: localBackend.attachAgentSession!.bind(localBackend),
+          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover?.bind(localBackend),
+          attachAgentSession,
           afterAttach: async () => {
             dispatch({ type: 'SET_VIEW', view: 'terminal' });
           },
@@ -1340,18 +1342,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
-    // Merge explicit session load counts with live event counts, taking the higher value
-    // (event state may be incomplete if it only received updates for a subset of sessions)
-    const counts: Record<string, number> = {};
-    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
-      counts[wid] = sessions.length;
-    }
-    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-      const eventCount = Object.keys(sessions).length;
-      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
-    }
-    return counts;
-  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+    return collectAgentSessionCounts({
+      sessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
+      workspaceStates: agentEvents.workspaceStates,
+      snapshotByWorkspace: localBackend?.getAgentStateSnapshot() ?? {},
+    });
+  }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   const agentSessionsByWorkspace = useMemo(() => {
     const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
@@ -1436,26 +1432,28 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!localBackend?.attachAgentSession || !localBackend.checkAgentSessionTakeover) {
+      if (!localBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
+      const attachAgentSession = localBackend.attachAgentSession.bind(localBackend);
       await openAgentSession({
         flow,
         workspaceId,
         agentSessionId,
         persistAgentSessionSelection,
         clearViewOnly: () => setIsViewOnlySession(false),
-        checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover!.bind(localBackend),
-        attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+        checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover?.bind(localBackend),
+        attachAgentSession,
         afterAttach: async () => {
           dispatch({ type: 'SET_VIEW', view: 'terminal' });
         },
       });
     },
     onCreateAgentSession: async (workspaceId) => {
-      if (!localBackend?.attachAgentSession || !localBackend.checkAgentSessionTakeover) {
+      if (!localBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
+      const attachAgentSession = localBackend.attachAgentSession.bind(localBackend);
       promptCreateAgentSession({
         flow,
         workspaceId,
@@ -1466,8 +1464,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           workspaceId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover!.bind(localBackend),
-          attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover?.bind(localBackend),
+          attachAgentSession,
           afterAttach: async () => {
             dispatch({ type: 'SET_VIEW', view: 'terminal' });
           },

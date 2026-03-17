@@ -42,7 +42,7 @@ import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
-import { collectWorkspaceSyncIds } from '../agents/remote-agent-browser.js';
+import { collectAgentSessionCounts, collectWorkspaceSyncIds } from '../agents/remote-agent-browser.js';
 import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from '../agents/agent-session-actions.js';
 import { toast } from '@opentui-ui/toast';
 import { DEFAULT_NOTIFICATION_CONFIG, useNotifications, type ToastNotification } from '../notifications/index.js';
@@ -621,16 +621,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
-      counts[wid] = sessions.length;
-    }
-    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-      const eventCount = Object.keys(sessions).length;
-      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
-    }
-    return counts;
-  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+    return collectAgentSessionCounts({
+      sessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
+      workspaceStates: agentEvents.workspaceStates,
+      snapshotByWorkspace: remoteBackend?.getAgentStateSnapshot() ?? {},
+    });
+  }, [agentEvents.workspaceStates, remoteBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   const agentSessionsByWorkspace = useMemo(() => {
     const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};

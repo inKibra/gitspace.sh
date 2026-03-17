@@ -162,8 +162,11 @@ export class OpenCodeCoordinator {
         // best effort
       }
     }
-    await this.refreshAgentSessions(target);
-    await markStoredSessionClosed(target.workspaceId, agentSessionId);
+    try {
+      await this.refreshAgentSessions(target);
+    } finally {
+      await markStoredSessionClosed(target.workspaceId, agentSessionId);
+    }
     return aborted;
   }
 
@@ -199,7 +202,18 @@ export class OpenCodeCoordinator {
     agentSessionId: string,
     options: { force?: boolean } = {},
   ): Promise<TmuxSession> {
-    const key = `${target.workspaceId}:${agentSessionId}:${options.force === true ? 'force' : 'default'}`;
+    const existing = await this.findExistingAgentTerminalSession(target, agentSessionId);
+    if (existing) {
+      if (existing.attached && options.force !== true) {
+        throw new AgentSessionTakeoverRequiredError(
+          `Agent session is already open in ${existing.name}. Taking over will disconnect the current viewer.`,
+          { sessionName: existing.name },
+        );
+      }
+      return existing;
+    }
+
+    const key = `${target.workspaceId}:${agentSessionId}`;
     const inFlight = this.inflightTerminalSessions.get(key);
     if (inFlight) {
       return inFlight;

@@ -726,17 +726,20 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       await onRefreshSessions();
     }
     if (onRefreshAgents) {
-      const selectedWorkspaceId = selectedItem?.type === 'workspace'
-        ? (selectedItem.workspace.id.startsWith('orphan:') ? null : selectedItem.workspace.id)
+      const candidateWorkspaceId = selectedItem?.type === 'workspace'
+        ? selectedItem.workspace.id
         : selectedItem && 'workspaceId' in selectedItem
-          ? (selectedItem.workspaceId.startsWith('orphan:') ? null : selectedItem.workspaceId)
+          ? selectedItem.workspaceId
           : null;
+      const selectedWorkspaceId = candidateWorkspaceId && workspaces.some((workspace) => workspace.id === candidateWorkspaceId)
+        ? candidateWorkspaceId
+        : null;
       await onRefreshAgents({
         expandedWorkspaceIds: Array.from(expandedAgentSections),
         selectedWorkspaceId,
       });
     }
-  }, [expandedAgentSections, onRefresh, onRefreshAgents, onRefreshSessions, selectedItem]);
+  }, [expandedAgentSections, onRefresh, onRefreshAgents, onRefreshSessions, selectedItem, workspaces]);
 
   const back = useCallback(() => {
     onBack();
