@@ -191,6 +191,7 @@ export async function ensureServeOwnerBindingForStartup(
       }),
     );
     resetControlStore();
+    ensureControlStore();
     bindPersistedOwnerIdentity(ownerUserRootId);
     return { tookOver: true };
   }

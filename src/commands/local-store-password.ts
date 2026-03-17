@@ -64,12 +64,15 @@ export async function ensureLocalStorePassword(
   context?: LocalStorePasswordContext,
 ): Promise<string | null> {
   const envPassword = getLocalStorePasswordFromEnv();
+  const sharedContext = context ?? createLocalStorePasswordContext(options);
+  sharedContext.passwordStdin ||= Boolean(options.passwordStdin);
+
   if (envPassword) {
+    sharedContext.resolved = true;
+    sharedContext.password = envPassword;
     return envPassword;
   }
 
-  const sharedContext = context ?? createLocalStorePasswordContext(options);
-  sharedContext.passwordStdin ||= Boolean(options.passwordStdin);
   if (sharedContext.resolved) {
     return sharedContext.password;
   }

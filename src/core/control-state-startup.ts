@@ -29,10 +29,6 @@ export interface StartupControlStateTextOptions {
   subject: 'machine serve' | 'relay';
 }
 
-function getSubjectNoun(subject: StartupControlStateTextOptions['subject']): string {
-  return subject === 'relay' ? 'relay' : 'machine';
-}
-
 export function planStartupControlState(input: {
   ownerUserRootId: string;
   currentRelay?: StartupCurrentRelayBinding;
@@ -98,7 +94,7 @@ export function formatStartupControlStateTakeoverPrompt(
   options: StartupControlStateTextOptions,
 ): string {
   if (plan.needsTakeover) {
-    return `Persisted local control bindings do not match the current identity. Clear them and rebind this ${getSubjectNoun(options.subject)} to the recovered identity?`;
+    return `Persisted local control bindings do not match the current identity. Clear them and rebind this ${options.subject === 'relay' ? 'relay' : 'machine'} to the recovered identity?`;
   }
 
   if (plan.hasPinnedRelayIdentity) {
