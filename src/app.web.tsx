@@ -1526,6 +1526,7 @@ export default function App() {
     const statusMessage = {
       disconnected: "Disconnected",
       connecting: "Connecting to relay...",
+      reconnecting: "Connection lost. Reconnecting...",
       connected: "Connected, authenticating...",
       handshaking: "Establishing secure connection...",
       established: "Connected!",
@@ -1558,6 +1559,7 @@ export default function App() {
       const statusMessage = {
         disconnected: 'Disconnected',
         connecting: 'Connecting to relay...',
+        reconnecting: 'Connection lost. Reconnecting...',
         connected: 'Connected, authenticating...',
         handshaking: 'Establishing secure connection...',
         established: 'Connected!',
