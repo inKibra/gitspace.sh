@@ -288,6 +288,7 @@ export async function loadRelayIdentity(): Promise<RelayIdentity | null> {
     return null;
   }
 
+  let identity: RelayIdentity;
   try {
     const privateKey = new Uint8Array(Buffer.from(privateKeyB64, "base64"));
 
@@ -300,21 +301,26 @@ export async function loadRelayIdentity(): Promise<RelayIdentity | null> {
       return null;
     }
 
-    const identity: RelayIdentity = {
+    identity = {
       ...publicIdentity,
       signingPrivateKey: privateKey,
     };
 
-    if (source === 'keychain' && isLocalSecureStoreUnlocked()) {
-      writeStoredRelayIdentity(identity);
-      markLegacyLocalStorageMigrated(true);
-    }
-
-    return identity;
   } catch (err) {
     console.warn(`[relay] Failed to load private key from ${source}:`, err);
     return null;
   }
+
+  if (source === 'keychain' && isLocalSecureStoreUnlocked()) {
+    try {
+      writeStoredRelayIdentity(identity);
+      markLegacyLocalStorageMigrated(true);
+    } catch (error) {
+      console.warn('[relay] Failed to migrate relay identity into local secure store:', error);
+    }
+  }
+
+  return identity;
 }
 
 /**
@@ -346,8 +352,12 @@ export function getRelayPublicIdentity(): RelayPublicIdentity | null {
   try {
     const content = readFileSync(identityPath, "utf-8");
     const identity = JSON.parse(content) as RelayPublicIdentity;
-    writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_PUBLIC_IDENTITY, identity);
-    markLegacyLocalStorageMigrated(true);
+    try {
+      writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_PUBLIC_IDENTITY, identity);
+      markLegacyLocalStorageMigrated(true);
+    } catch (error) {
+      console.warn('[relay] Failed to migrate relay public identity into local secure store:', error);
+    }
     return identity;
   } catch {
     return null;

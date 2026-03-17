@@ -1018,8 +1018,10 @@ export async function serveStart(options: {
   takeover?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
-  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const localStorePasswordContext = devicePasswordContext as unknown as LocalStorePasswordContext;
+  const sharedPasswordContext: DeviceIdentityPasswordContext & LocalStorePasswordContext =
+    createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+  const devicePasswordContext: DeviceIdentityPasswordContext = sharedPasswordContext;
+  const localStorePasswordContext: LocalStorePasswordContext = sharedPasswordContext;
 
   // Check if already running
   if (isServeRunning()) {
