@@ -6,6 +6,7 @@ import { useCallback, useMemo } from 'react';
 import type { Identity } from '../types/identity.js';
 import { keypairExists, loadKeypair } from '../core/identity.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
+import { getLocalStorePasswordFromEnv } from '../commands/local-store-password.js';
 import { signMessage } from '../relay/signing.js';
 import type { MachineInfo } from '../components/index.js';
 import {
@@ -61,7 +62,7 @@ async function resolveIdentity(options: UseRemoteMachinesOptions): Promise<Ident
     return null;
   }
 
-  const password = options.identityPassword || process.env.GITSPACE_IDENTITY_PASSWORD;
+  const password = options.identityPassword || getLocalStorePasswordFromEnv();
   if (!password) {
     return null;
   }
@@ -81,7 +82,7 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
       return true;
     }
 
-    const password = options.identityPassword || process.env.GITSPACE_IDENTITY_PASSWORD;
+    const password = options.identityPassword || getLocalStorePasswordFromEnv();
     return !!password && keypairExists();
   }, [options.identity, options.identityPassword]);
   const shouldAutoConnect = isRemoteMode
@@ -115,7 +116,7 @@ export function useRemoteMachines(options: UseRemoteMachinesOptions = {}): UseRe
       const identity = await resolveIdentity(options);
       if (!identity) {
         throw new Error(
-          'Remote relay requires an unlocked local device identity.'
+          'Remote relay requires an unlocked local secure store identity.'
         );
       }
 

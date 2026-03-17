@@ -82,14 +82,10 @@ import {
   type RelayCandidate,
 } from '../core/relay-discovery.js';
 import {
+  bindPersistedOwnerIdentity,
   bindControlRelayIdentity,
-  bindControlOwner,
   ensureControlStore,
-  readControlMeta,
-  getControlOwnerIdentityId,
-  getVaultMeta,
   resetControlStore,
-  setVaultMeta,
 } from '../relay/control/store.js';
 import {
   connectMachineRelay,
@@ -106,6 +102,18 @@ import {
   type DeviceIdentityPasswordContext,
 } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
+import {
+  createLocalStorePasswordContext,
+  ensureLocalStorePassword,
+  LOCAL_STORE_PASSWORD_ENV,
+} from './local-store-password.js';
+import { unlockLocalSecureStore } from '../core/local-secure-store.js';
+import {
+  formatStartupControlStateMismatch,
+  formatStartupControlStateTakeoverPrompt,
+  formatStartupControlStateTakeoverWarning,
+  planStartupControlState,
+} from '../core/control-state-startup.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -137,45 +145,23 @@ export async function ensureServeOwnerBindingForStartup(
 ): Promise<{ tookOver: boolean }> {
   ensureControlStore();
 
-  const currentVaultOwner = getVaultMeta('owner_user_root_id');
-  const currentControlOwner = getControlOwnerIdentityId();
-  const controlMeta = readControlMeta();
-  const hasPinnedRelayIdentity = Boolean(
-    controlMeta.relayIdentityId || controlMeta.relaySigningPublicKey || controlMeta.relayFingerprint,
-  );
-  const currentRelayIdentityId = options.currentRelay ? computeIdentityId(options.currentRelay.publicKey) : undefined;
-  const relayMismatch = Boolean(
-    options.currentRelay
-      && (
-        (controlMeta.relayIdentityId && controlMeta.relayIdentityId !== currentRelayIdentityId)
-        || (controlMeta.relaySigningPublicKey && controlMeta.relaySigningPublicKey !== options.currentRelay.publicKey)
-        || (controlMeta.relayFingerprint && controlMeta.relayFingerprint !== options.currentRelay.fingerprint)
-      ),
-  );
-
-  const needsTakeover = (currentVaultOwner && currentVaultOwner !== ownerUserRootId)
-    || (currentControlOwner && currentControlOwner !== ownerUserRootId)
-    || relayMismatch;
+  const plan = planStartupControlState({
+    ownerUserRootId,
+    currentRelay: options.currentRelay,
+  });
 
   const shouldForceResetForTakeover = Boolean(
     options.takeover
-    && !needsTakeover
-    && (currentVaultOwner || currentControlOwner || hasPinnedRelayIdentity),
+    && !plan.needsTakeover
+    && (plan.ownerBinding.controlOwnerId || plan.ownerBinding.vaultOwnerId || plan.hasPinnedRelayIdentity),
   );
 
-  if (needsTakeover || shouldForceResetForTakeover) {
+  if (plan.needsTakeover || shouldForceResetForTakeover) {
     if (!options.takeover) {
-      const mismatchMessage = [
-        'Persisted relay control state belongs to a different identity.',
-        '',
-        `  Current user: ${ownerUserRootId.slice(0, 8)}...`,
-        currentControlOwner ? `  Control owner: ${currentControlOwner.slice(0, 8)}...` : null,
-        currentVaultOwner ? `  Vault owner:   ${currentVaultOwner.slice(0, 8)}...` : null,
-        relayMismatch ? `  Pinned relay:  ${controlMeta.relayFingerprint ?? controlMeta.relayIdentityId}` : null,
-        relayMismatch ? `  Current relay: ${options.currentRelay?.fingerprint}` : null,
-        '',
-        'Re-run with `gssh machine serve start --takeover` to clear the persisted relay control state and bind it to the recovered identity.',
-      ].filter((line): line is string => line !== null).join('\n');
+      const mismatchMessage = formatStartupControlStateMismatch(plan, {
+        subject: 'machine serve',
+        takeoverCommand: 'gssh machine serve start --takeover',
+      });
 
       logger.error(`[serve] owner binding mismatch during startup.\n${mismatchMessage}`);
       throw new SpacesError(
@@ -186,10 +172,11 @@ export async function ensureServeOwnerBindingForStartup(
     }
 
     if (!options.yes) {
-      const confirmed = await promptConfirm(
-        needsTakeover
-          ? 'Persisted relay control state belongs to a different identity. Clear it and rebind this machine to the current recovered identity?'
-          : 'Clear persisted relay control state and relay identity pins before starting machine serve?',
+        const confirmed = await promptConfirm(
+          formatStartupControlStateTakeoverPrompt(plan, {
+            subject: 'machine serve',
+            takeoverCommand: 'gssh machine serve start --takeover',
+          }),
         false,
       );
       if (!confirmed) {
@@ -198,24 +185,17 @@ export async function ensureServeOwnerBindingForStartup(
     }
 
     logger.warning(
-      needsTakeover
-        ? 'Clearing persisted relay control state and rebinding machine serve ownership to the current identity.'
-        : 'Clearing persisted relay control state and relay identity pins before machine serve startup.',
+      formatStartupControlStateTakeoverWarning(plan, {
+        subject: 'machine serve',
+        takeoverCommand: 'gssh machine serve start --takeover',
+      }),
     );
     resetControlStore();
-    ensureControlStore();
-    bindControlOwner(ownerUserRootId);
-    setVaultMeta('owner_user_root_id', ownerUserRootId);
+    bindPersistedOwnerIdentity(ownerUserRootId);
     return { tookOver: true };
   }
 
-  if (!currentControlOwner) {
-    bindControlOwner(ownerUserRootId);
-  }
-
-  if (!currentVaultOwner) {
-    setVaultMeta('owner_user_root_id', ownerUserRootId);
-  }
+  bindPersistedOwnerIdentity(ownerUserRootId);
 
   return { tookOver: false };
 }
@@ -1037,6 +1017,7 @@ export async function serveStart(options: {
   yes?: boolean;
 } = {}): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+  const localStorePasswordContext = createLocalStorePasswordContext({ passwordStdin: options.passwordStdin });
 
   // Check if already running
   if (isServeRunning()) {
@@ -1049,6 +1030,7 @@ export async function serveStart(options: {
   const skipOwnerBindingCheck = process.env.GITSPACE_SKIP_OWNER_BINDING_CHECK === '1';
 
   let password: string | null = null;
+  let localStorePassword: string | null = null;
   let identity: Identity | null = null;
   let signingPrivateKey: Uint8Array | null = null;
   let publicIdentity: PublicIdentity | null = null;
@@ -1068,22 +1050,40 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
+      localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
+      if (!localStorePassword) {
+        logger.info('Cancelled');
+        return;
+      }
+      await unlockLocalSecureStore(localStorePassword);
+      devicePasswordContext.password = localStorePassword;
+
       password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
       if (!password) {
         logger.info('Cancelled');
         return;
       }
 
-      // Validate password before daemonizing
+      // Validate secure store + identity before daemonizing
       const loadedIdentity = await loadKeypair(password);
       if (!loadedIdentity) {
         throw new SpacesError(
-          'Failed to unlock identity. Check your password.',
+          'Failed to unlock local secure store identity. Check your password.',
           'USER_ERROR',
           1
         );
       }
 
+    }
+
+    if (usingUnlockMode) {
+      localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
+      if (!localStorePassword) {
+        logger.info('Cancelled');
+        return;
+      }
+      await unlockLocalSecureStore(localStorePassword);
+      devicePasswordContext.password = localStorePassword;
     }
 
     if (!options.relay) {
@@ -1164,13 +1164,14 @@ export async function serveStart(options: {
       env: {
         ...process.env,
         GITSPACE_SKIP_OWNER_BINDING_CHECK: '1',
+        ...(localStorePassword ? { [LOCAL_STORE_PASSWORD_ENV]: localStorePassword } : {}),
       },
     });
 
     // Send password via stdin (non-unlock mode)
     if (!usingUnlockMode) {
       if (!password) {
-        throw new SpacesError('Failed to pass identity password to serve daemon startup.', 'SYSTEM_ERROR', 2);
+        throw new SpacesError('Failed to pass local secure store password to serve daemon startup.', 'SYSTEM_ERROR', 2);
       }
 
       child.stdin.write(password);
@@ -1196,6 +1197,15 @@ export async function serveStart(options: {
       throw new SpacesError('Failed to start serve daemon. Check log above for details.', 'SYSTEM_ERROR', 2);
     }
   }
+
+  localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
+  if (!localStorePassword) {
+    logger.info('Cancelled');
+    cleanupServeFiles();
+    return;
+  }
+  await unlockLocalSecureStore(localStorePassword);
+  devicePasswordContext.password = localStorePassword;
 
   // Foreground mode identity resolution
   if (usingUnlockMode) {
@@ -1232,7 +1242,7 @@ export async function serveStart(options: {
     if (!identity) {
       cleanupServeFiles();
       throw new SpacesError(
-        'Failed to unlock identity. Check your password.',
+        'Failed to unlock local secure store identity. Check your password.',
         'USER_ERROR',
         1
       );

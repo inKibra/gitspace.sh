@@ -49,6 +49,7 @@ export function registerRelayCommands(parent: Command): void {
     .option('--mode <mode>', 'Startup mode: auto (local + hosted if available), hosted (require tunnel, keep local), local (local only)', 'auto')
     .option('--label <label>', 'Human-readable label for this relay')
     .option('-y, --yes', 'Auto-confirm prompts')
+    .option('--password-stdin', 'Read local secure store password from stdin')
     .option('--foreground', "Run in foreground (don't daemonize)")
     .option('--takeover', 'Clear persisted relay owner state so the current identity can take over')
     .action(withErrorHandler(async (options) => {
@@ -60,6 +61,7 @@ export function registerRelayCommands(parent: Command): void {
         mode: parseRelayStartMode(options.mode),
         label: options.label,
         yes: options.yes,
+        passwordStdin: options.passwordStdin,
         foreground: options.foreground,
         takeover: options.takeover,
       });

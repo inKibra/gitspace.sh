@@ -192,6 +192,51 @@ const CONTROL_MIGRATIONS: ControlMigration[] = [
       `,
     ],
   },
+  {
+    version: 6,
+    statements: [
+      `
+      CREATE TABLE IF NOT EXISTS local_store_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+      `,
+      `
+      CREATE TABLE IF NOT EXISTS local_store_records (
+        namespace TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(namespace, key)
+      )
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_local_store_records_namespace
+      ON local_store_records(namespace)
+      `,
+      `
+      CREATE TABLE IF NOT EXISTS local_store_secrets (
+        namespace TEXT NOT NULL,
+        key TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(namespace, key)
+      )
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_local_store_secrets_namespace
+      ON local_store_secrets(namespace)
+      `,
+      `
+      INSERT INTO local_store_meta(key, value, updated_at)
+      VALUES ('legacy_storage_retained', '1', CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO NOTHING
+      `,
+    ],
+  },
 ];
 
 function ensureMigrationsTable(db: Database): void {

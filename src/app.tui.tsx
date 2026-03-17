@@ -2367,7 +2367,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           <Toaster position="top-right" />
           <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
             <text fg={COLORS.error}>Missing remote identity</text>
-            <text fg={COLORS.textDim} marginTop={1}>Set GITSPACE_IDENTITY_PASSWORD and reconnect</text>
+            <text fg={COLORS.textDim} marginTop={1}>Set GITSPACE_LOCAL_STORE_PASSWORD and reconnect</text>
           </box>
         </Fragment>
       );

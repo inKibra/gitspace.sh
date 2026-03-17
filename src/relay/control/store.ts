@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSpacesDir } from '../../core/config.js';
 import { SpacesError } from '../../types/errors.js';
@@ -10,6 +10,9 @@ import type {
   CloudBootstrapTokenRecord,
   CloudWorkspaceRecord,
   ControlMeta,
+  LocalStoreMetaKey,
+  LocalStoreRecord,
+  LocalStoreSecretRecord,
   VaultAccessListEntry,
   VaultCategoryRecord,
   VaultMachineRecord,
@@ -18,7 +21,7 @@ import type {
   VaultSyncCategory,
 } from './types.js';
 
-const CONTROL_SCHEMA_VERSION = 5;
+const CONTROL_SCHEMA_VERSION = 6;
 const CONTROL_DIR_OVERRIDE_ENV = 'GITSPACE_CONTROL_DIR';
 
 const META_KEY_SCHEMA_VERSION = 'schema_version';
@@ -64,10 +67,49 @@ export function getControlDbPath(): string {
 }
 
 export function resetControlStore(): void {
-  const controlDbPath = getControlDbPath();
-  rmSync(controlDbPath, { force: true });
-  rmSync(`${controlDbPath}-shm`, { force: true });
-  rmSync(`${controlDbPath}-wal`, { force: true });
+  withControlDb((db) => {
+    const tablesToClear = [
+      'machine_access_list',
+      'relay_access_list',
+      'root_invites',
+      'vault_machine_unlock_keys',
+      'vault_access_list',
+      'vault_sync_categories',
+      'cloud_events',
+      'cloud_bootstrap_tokens',
+      'cloud_register_permits',
+      'cloud_workspaces',
+      'vault_machines',
+      'vault_meta',
+    ].filter((tableName) => {
+      const row = db.query(
+        `
+          SELECT 1
+          FROM sqlite_master
+          WHERE type = 'table' AND name = ?
+        `,
+      ).get(tableName);
+      return row !== null;
+    });
+
+    db.exec('BEGIN');
+    try {
+      for (const tableName of tablesToClear) {
+        db.exec(`DELETE FROM ${tableName}`);
+      }
+      db.query(
+        `
+          DELETE FROM control_meta
+          WHERE key NOT IN (?, ?, ?)
+        `,
+      ).run(META_KEY_SCHEMA_VERSION, META_KEY_CREATED_AT, META_KEY_UPDATED_AT);
+      setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  });
 }
 
 function ensureControlDir(): void {
@@ -205,20 +247,131 @@ export function writeControlMeta(meta: ControlMeta): void {
   });
 }
 
-export function getControlOwnerIdentityId(): string | undefined {
-  return withControlDb((db) => getMetaValue(db, META_KEY_OWNER_IDENTITY_ID));
+function getVaultMetaValueFromDb(db: Database, key: VaultMetaKey): string | undefined {
+  const row = db.query('SELECT value FROM vault_meta WHERE key = ?').get(key) as
+    | { value: string }
+    | null;
+  return row?.value;
+}
+
+function setVaultMetaValueInDb(db: Database, key: VaultMetaKey, value: string): void {
+  db.query(
+    `
+      INSERT INTO vault_meta(key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE
+      SET value = excluded.value
+    `
+  ).run(key, value);
+}
+
+export interface PersistedOwnerBinding {
+  controlOwnerId?: string;
+  vaultOwnerId?: string;
+  effectiveOwnerId?: string;
+  mismatch: boolean;
+  repaired: boolean;
+}
+
+function readPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
+  let controlOwnerId = getMetaValue(db, META_KEY_OWNER_IDENTITY_ID);
+  let vaultOwnerId = getVaultMetaValueFromDb(db, 'owner_user_root_id');
+  let repaired = false;
+
+  if (!controlOwnerId && vaultOwnerId) {
+    setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, vaultOwnerId);
+    controlOwnerId = vaultOwnerId;
+    repaired = true;
+  } else if (controlOwnerId && !vaultOwnerId) {
+    setVaultMetaValueInDb(db, 'owner_user_root_id', controlOwnerId);
+    vaultOwnerId = controlOwnerId;
+    repaired = true;
+  }
+
+  const mismatch = Boolean(controlOwnerId && vaultOwnerId && controlOwnerId !== vaultOwnerId);
+  const effectiveOwnerId = mismatch ? undefined : (controlOwnerId ?? vaultOwnerId);
+
+  return {
+    controlOwnerId,
+    vaultOwnerId,
+    effectiveOwnerId,
+    mismatch,
+    repaired,
+  };
+}
+
+export function readPersistedOwnerBinding(): PersistedOwnerBinding {
+  return withControlDb((db) => readPersistedOwnerBindingFromDb(db));
+}
+
+export function getPersistedOwnerIdentityId(): string | undefined {
+  return readPersistedOwnerBinding().effectiveOwnerId;
+}
+
+export function bindPersistedOwnerIdentity(ownerIdentityId: string): {
+  bound: boolean;
+  repaired: boolean;
+  ownerIdentityId: string;
+} {
+  return withControlDb((db) => {
+    const binding = readPersistedOwnerBindingFromDb(db);
+
+    if (!binding.controlOwnerId && !binding.vaultOwnerId) {
+      setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
+      setVaultMetaValueInDb(db, 'owner_user_root_id', ownerIdentityId);
+      setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
+      return { bound: true, repaired: false, ownerIdentityId };
+    }
+
+    if (!binding.mismatch) {
+      if (binding.effectiveOwnerId !== ownerIdentityId) {
+        throw new SpacesError(
+          `Local control bindings mismatch. Persisted owner '${binding.effectiveOwnerId}' does not match current identity '${ownerIdentityId}'.`,
+          'USER_ERROR',
+          1
+        );
+      }
+
+      return { bound: false, repaired: binding.repaired, ownerIdentityId };
+    }
+
+    const canRepairToCurrentIdentity = binding.controlOwnerId === ownerIdentityId
+      || binding.vaultOwnerId === ownerIdentityId;
+
+    if (!canRepairToCurrentIdentity) {
+      throw new SpacesError(
+        `Local control bindings mismatch. Persisted control owner '${binding.controlOwnerId}' and vault owner '${binding.vaultOwnerId}' do not match current identity '${ownerIdentityId}'.`,
+        'USER_ERROR',
+        1
+      );
+    }
+
+    setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
+    setVaultMetaValueInDb(db, 'owner_user_root_id', ownerIdentityId);
+    setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
+    return { bound: false, repaired: true, ownerIdentityId };
+  });
 }
 
 export function isControlOwner(identityId: string): boolean {
-  const ownerIdentityId = getControlOwnerIdentityId();
+  const ownerIdentityId = getPersistedOwnerIdentityId();
   return ownerIdentityId === identityId;
 }
 
 export function assertControlOwner(identityId: string): void {
-  const ownerIdentityId = getControlOwnerIdentityId();
+  const ownerBinding = readPersistedOwnerBinding();
+  if (ownerBinding.mismatch) {
+    throw new SpacesError(
+      `Local control bindings mismatch. Persisted control owner '${ownerBinding.controlOwnerId}' and vault owner '${ownerBinding.vaultOwnerId}' do not match current identity '${identityId}'.`,
+      'USER_ERROR',
+      1
+    );
+  }
+
+  const ownerIdentityId = ownerBinding.effectiveOwnerId;
   if (!ownerIdentityId) {
     throw new SpacesError(
-      'Control relay owner is not initialized.',
+      'Local control bindings are not initialized.',
       'SYSTEM_ERROR',
       2
     );
@@ -226,33 +379,11 @@ export function assertControlOwner(identityId: string): void {
 
   if (ownerIdentityId !== identityId) {
     throw new SpacesError(
-      `Control relay owner mismatch. This control node is owned by '${ownerIdentityId}', but current identity is '${identityId}'.`,
+      `Local control bindings mismatch. Persisted owner '${ownerIdentityId}' does not match current identity '${identityId}'.`,
       'USER_ERROR',
       1
     );
   }
-}
-
-export function bindControlOwner(ownerIdentityId: string): { bound: boolean; ownerIdentityId: string } {
-  return withControlDb((db) => {
-    const currentOwner = getMetaValue(db, META_KEY_OWNER_IDENTITY_ID);
-
-    if (!currentOwner) {
-      setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
-      setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
-      return { bound: true, ownerIdentityId };
-    }
-
-    if (currentOwner !== ownerIdentityId) {
-      throw new SpacesError(
-        `Control relay owner mismatch. This control node is owned by '${currentOwner}', but current identity is '${ownerIdentityId}'.`,
-        'USER_ERROR',
-        1
-      );
-    }
-
-    return { bound: false, ownerIdentityId };
-  });
 }
 
 export interface BindControlRelayIdentityInput {
@@ -284,10 +415,10 @@ export function bindControlRelayIdentity(
     if (!sameIdentityId || !sameSigningKey || !sameFingerprint) {
       throw new SpacesError(
         [
-          `Control relay identity mismatch. Pinned relay '${currentRelayFingerprint ?? currentRelayIdentityId}', current relay '${input.relayFingerprint}'.`,
+          `Local control bindings mismatch. Pinned relay '${currentRelayFingerprint ?? currentRelayIdentityId}', current relay '${input.relayFingerprint}'.`,
           '',
-          'This relay pin is stored in ~/gitspace/.relay/control/control.db, not the trusted relay list.',
-          'If this relay change is expected, re-run `gssh machine serve start --takeover` to clear persisted control state and re-bind to the current relay.',
+          'This relay pin is stored in the local control database, not the trusted relay list.',
+          'If this relay change is expected, re-run `gssh machine serve start --takeover` to clear persisted local control bindings and re-bind to the current relay.',
         ].join('\n'),
         'USER_ERROR',
         1
@@ -295,6 +426,195 @@ export function bindControlRelayIdentity(
     }
 
     return { bound: false, relayIdentityId: input.relayIdentityId };
+  });
+}
+
+// ============================================================================
+// Local Secure Store
+// ============================================================================
+
+interface LocalStoreRecordRow {
+  namespace: string;
+  key: string;
+  value_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LocalStoreSecretRow {
+  namespace: string;
+  key: string;
+  ciphertext: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function getLocalStoreMetaValue(db: Database, key: LocalStoreMetaKey): string | undefined {
+  const row = db.query('SELECT value FROM local_store_meta WHERE key = ?').get(key) as
+    | { value: string }
+    | null;
+  return row?.value;
+}
+
+function setLocalStoreMetaValue(db: Database, key: LocalStoreMetaKey, value: string): void {
+  db.query(
+    `
+      INSERT INTO local_store_meta(key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE
+      SET value = excluded.value,
+          updated_at = excluded.updated_at
+    `
+  ).run(key, value, nowIso());
+}
+
+function deleteLocalStoreMetaValue(db: Database, key: LocalStoreMetaKey): void {
+  db.query('DELETE FROM local_store_meta WHERE key = ?').run(key);
+}
+
+function mapLocalStoreRecordRow(row: LocalStoreRecordRow): LocalStoreRecord {
+  return {
+    namespace: row.namespace,
+    key: row.key,
+    valueJson: row.value_json,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapLocalStoreSecretRow(row: LocalStoreSecretRow): LocalStoreSecretRecord {
+  return {
+    namespace: row.namespace,
+    key: row.key,
+    ciphertext: row.ciphertext,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getLocalStoreMeta(key: LocalStoreMetaKey): string | undefined {
+  return withControlDb((db) => getLocalStoreMetaValue(db, key));
+}
+
+export function setLocalStoreMeta(key: LocalStoreMetaKey, value: string): void {
+  withControlDb((db) => {
+    setLocalStoreMetaValue(db, key, value);
+  });
+}
+
+export function deleteLocalStoreMeta(key: LocalStoreMetaKey): void {
+  withControlDb((db) => {
+    deleteLocalStoreMetaValue(db, key);
+  });
+}
+
+export function getLocalStoreRecord(namespace: string, key: string): LocalStoreRecord | undefined {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT * FROM local_store_records WHERE namespace = ? AND key = ?'
+    ).get(namespace, key) as LocalStoreRecordRow | null;
+    return row ? mapLocalStoreRecordRow(row) : undefined;
+  });
+}
+
+export function listLocalStoreRecords(namespace: string): LocalStoreRecord[] {
+  return withControlDb((db) => {
+    const rows = db.query(
+      'SELECT * FROM local_store_records WHERE namespace = ? ORDER BY updated_at DESC'
+    ).all(namespace) as LocalStoreRecordRow[];
+    return rows.map(mapLocalStoreRecordRow);
+  });
+}
+
+export function upsertLocalStoreRecord(namespace: string, key: string, valueJson: string): LocalStoreRecord {
+  return withControlDb((db) => {
+    const now = nowIso();
+    const existing = db.query(
+      'SELECT created_at FROM local_store_records WHERE namespace = ? AND key = ?'
+    ).get(namespace, key) as { created_at: string } | null;
+    const createdAt = existing?.created_at ?? now;
+
+    db.query(
+      `
+        INSERT INTO local_store_records(namespace, key, value_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(namespace, key) DO UPDATE
+        SET value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+      `
+    ).run(namespace, key, valueJson, createdAt, now);
+
+    return {
+      namespace,
+      key,
+      valueJson,
+      createdAt,
+      updatedAt: now,
+    };
+  });
+}
+
+export function removeLocalStoreRecord(namespace: string, key: string): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM local_store_records WHERE namespace = ? AND key = ?'
+    ).run(namespace, key);
+    return result.changes > 0;
+  });
+}
+
+export function getLocalStoreSecret(namespace: string, key: string): LocalStoreSecretRecord | undefined {
+  return withControlDb((db) => {
+    const row = db.query(
+      'SELECT * FROM local_store_secrets WHERE namespace = ? AND key = ?'
+    ).get(namespace, key) as LocalStoreSecretRow | null;
+    return row ? mapLocalStoreSecretRow(row) : undefined;
+  });
+}
+
+export function listLocalStoreSecrets(namespace: string): LocalStoreSecretRecord[] {
+  return withControlDb((db) => {
+    const rows = db.query(
+      'SELECT * FROM local_store_secrets WHERE namespace = ? ORDER BY updated_at DESC'
+    ).all(namespace) as LocalStoreSecretRow[];
+    return rows.map(mapLocalStoreSecretRow);
+  });
+}
+
+export function upsertLocalStoreSecret(namespace: string, key: string, ciphertext: string): LocalStoreSecretRecord {
+  return withControlDb((db) => {
+    const now = nowIso();
+    const existing = db.query(
+      'SELECT created_at FROM local_store_secrets WHERE namespace = ? AND key = ?'
+    ).get(namespace, key) as { created_at: string } | null;
+    const createdAt = existing?.created_at ?? now;
+
+    db.query(
+      `
+        INSERT INTO local_store_secrets(namespace, key, ciphertext, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(namespace, key) DO UPDATE
+        SET ciphertext = excluded.ciphertext,
+            updated_at = excluded.updated_at
+      `
+    ).run(namespace, key, ciphertext, createdAt, now);
+
+    return {
+      namespace,
+      key,
+      ciphertext,
+      createdAt,
+      updatedAt: now,
+    };
+  });
+}
+
+export function removeLocalStoreSecret(namespace: string, key: string): boolean {
+  return withControlDb((db) => {
+    const result = db.query(
+      'DELETE FROM local_store_secrets WHERE namespace = ? AND key = ?'
+    ).run(namespace, key);
+    return result.changes > 0;
   });
 }
 

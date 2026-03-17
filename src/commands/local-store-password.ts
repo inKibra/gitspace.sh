@@ -1,21 +1,21 @@
-import os from 'os';
 import { promptConfirm, promptPassword } from '../utils/prompts.js';
-import { generateAndSaveKeypair, keypairExists } from '../core/identity.js';
-import { NoIdentityError, SpacesError } from '../types/errors.js';
-import { logger } from '../utils/logger.js';
 import { readPasswordFromStdin } from '../utils/password-stdin.js';
-import { getLocalStorePasswordFromEnv } from './local-store-password.js';
+import { localSecureStoreExists } from '../core/local-secure-store.js';
+import { SpacesError } from '../types/errors.js';
 
-export interface DeviceIdentityPasswordContext {
+export const LOCAL_STORE_PASSWORD_ENV = 'GITSPACE_LOCAL_STORE_PASSWORD';
+const LEGACY_LOCAL_STORE_PASSWORD_ENV = 'GITSPACE_IDENTITY_PASSWORD';
+
+export interface LocalStorePasswordContext {
   resolved: boolean;
   password: string | null;
   passwordStdin: boolean;
   stdinPasswordPromise: Promise<string> | null;
 }
 
-export function createDeviceIdentityPasswordContext(
+export function createLocalStorePasswordContext(
   options: { passwordStdin?: boolean } = {},
-): DeviceIdentityPasswordContext {
+): LocalStorePasswordContext {
   return {
     resolved: false,
     password: null,
@@ -24,30 +24,20 @@ export function createDeviceIdentityPasswordContext(
   };
 }
 
-function getSharedPasswordContext(
-  context: DeviceIdentityPasswordContext | undefined,
-  options: { passwordStdin?: boolean },
-): DeviceIdentityPasswordContext | undefined {
-  if (!context && !options.passwordStdin) {
-    return undefined;
+export function getLocalStorePasswordFromEnv(): string | null {
+  const explicit = process.env[LOCAL_STORE_PASSWORD_ENV]?.trim();
+  if (explicit) {
+    return explicit;
   }
 
-  const sharedContext = context ?? createDeviceIdentityPasswordContext(options);
-  sharedContext.passwordStdin ||= Boolean(options.passwordStdin);
-  return sharedContext;
+  const legacy = process.env[LEGACY_LOCAL_STORE_PASSWORD_ENV]?.trim();
+  return legacy || null;
 }
 
 async function resolvePasswordInput(
   prompt: string,
-  context: DeviceIdentityPasswordContext | undefined,
+  context: LocalStorePasswordContext | undefined,
 ): Promise<{ password: string | null; fromStdin: boolean }> {
-  if (typeof context?.password === 'string') {
-    return {
-      password: context.password,
-      fromStdin: context.passwordStdin,
-    };
-  }
-
   if (context?.passwordStdin) {
     context.stdinPasswordPromise ??= readPasswordFromStdin();
     return {
@@ -62,36 +52,35 @@ async function resolvePasswordInput(
   };
 }
 
-export async function ensureDeviceIdentityPassword(
+export async function ensureLocalStorePassword(
   options: { yes?: boolean; passwordStdin?: boolean } = {},
-  context?: DeviceIdentityPasswordContext,
+  context?: LocalStorePasswordContext,
 ): Promise<string | null> {
   const envPassword = getLocalStorePasswordFromEnv();
   if (envPassword) {
     return envPassword;
   }
 
-  const sharedContext = getSharedPasswordContext(context, options);
-  if (sharedContext?.resolved) {
+  const sharedContext = context ?? createLocalStorePasswordContext(options);
+  sharedContext.passwordStdin ||= Boolean(options.passwordStdin);
+  if (sharedContext.resolved) {
     return sharedContext.password;
   }
 
   const remember = (password: string | null): string | null => {
-    if (sharedContext) {
-      sharedContext.resolved = true;
-      sharedContext.password = password;
-    }
-
+    sharedContext.resolved = true;
+    sharedContext.password = password;
     return password;
   };
 
-  if (!keypairExists()) {
+  const storeExists = localSecureStoreExists();
+  if (!storeExists) {
     const shouldCreate = options.yes || await promptConfirm(
-      'No local secure store identity found. Create one now?',
+      'No local secure store password is configured. Create one now?',
       true,
     );
     if (!shouldCreate) {
-      throw new NoIdentityError();
+      throw new SpacesError('Cancelled', 'USER_ERROR', 1);
     }
 
     const { password, fromStdin } = await resolvePasswordInput(
@@ -109,8 +98,6 @@ export async function ensureDeviceIdentityPassword(
       }
     }
 
-    await generateAndSaveKeypair(password, os.hostname());
-    logger.success('Created local secure store identity');
     return remember(password);
   }
 

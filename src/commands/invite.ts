@@ -120,14 +120,14 @@ async function loadSignedClientContext(): Promise<{
     throw new NoIdentityError();
   }
 
-  const password = await promptPassword('Enter password to unlock identity:');
+  const password = await promptPassword('Enter password to unlock local secure store identity:');
   if (!password) {
     throw new SpacesError('Cancelled', 'USER_ERROR', 1);
   }
 
   const identity = await loadKeypair(password);
   if (!identity) {
-    throw new SpacesError('Failed to unlock identity. Check your password.', 'USER_ERROR', 1);
+    throw new SpacesError('Failed to unlock local secure store identity. Check your password.', 'USER_ERROR', 1);
   }
 
   const deviceCertificate = await createLocalDeviceCertificate(identity);

@@ -17,6 +17,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	unlinkSync,
 	writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +35,15 @@ import {
 import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
 import { deriveKey, generateSalt } from '../lib/tmux-lite/crypto/keys.js';
 import { getSpacesDir } from './config.js';
+import {
+	markLegacyLocalStorageMigrated,
+	readLocalStoreJson,
+	readLocalStoreSecretJson,
+	unlockLocalSecureStore,
+	writeLocalStoreJson,
+	writeLocalStoreSecretJson,
+	deleteLocalStoreJson,
+} from './local-secure-store.js';
 import {
 	SpacesError,
 	NoIdentityError,
@@ -68,6 +78,20 @@ interface DecryptedSecrets {
 	signingSecretKey: string;
 	keyExchangePrivateKey: string;
 }
+
+interface StoredDeviceIdentityPublic {
+	id: string;
+	label?: string;
+	createdAt: number;
+	signingPublicKey: string;
+	keyExchangePublicKey: string;
+}
+
+const LOCAL_STORE_NAMESPACE_IDENTITY = 'identity';
+const LOCAL_STORE_KEY_DEVICE_PUBLIC = 'device-public';
+const LOCAL_STORE_KEY_DEVICE_SECRETS = 'device-secrets';
+const LOCAL_STORE_KEY_MACHINE_IDENTITY = 'machine-identity';
+const LOCAL_STORE_KEY_RELAY_CONFIG = 'relay-config';
 
 // ============================================================================
 // Directory Paths
@@ -108,6 +132,40 @@ function ensureIdentityDir(): void {
 	if (!existsSync(identityDir)) {
 		mkdirSync(identityDir, { recursive: true, mode: 0o700 });
 	}
+}
+
+function readStoredDeviceIdentityPublic(): StoredDeviceIdentityPublic | null {
+	return readLocalStoreJson<StoredDeviceIdentityPublic>(
+		LOCAL_STORE_NAMESPACE_IDENTITY,
+		LOCAL_STORE_KEY_DEVICE_PUBLIC,
+	) ?? null;
+}
+
+function writeStoredDeviceIdentityPublic(value: StoredDeviceIdentityPublic): void {
+	writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_DEVICE_PUBLIC, value);
+}
+
+function readStoredDeviceIdentitySecrets(): DecryptedSecrets | null {
+	return readLocalStoreSecretJson<DecryptedSecrets>(
+		LOCAL_STORE_NAMESPACE_IDENTITY,
+		LOCAL_STORE_KEY_DEVICE_SECRETS,
+	) ?? null;
+}
+
+function writeStoredDeviceIdentitySecrets(value: DecryptedSecrets): void {
+	writeLocalStoreSecretJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_DEVICE_SECRETS, value);
+}
+
+function migrateLegacyKeypairToLocalStore(storage: EncryptedKeypairStorage, secrets: DecryptedSecrets): void {
+	writeStoredDeviceIdentityPublic({
+		id: storage.id,
+		label: storage.label,
+		createdAt: storage.createdAt,
+		signingPublicKey: storage.signingPublicKey,
+		keyExchangePublicKey: storage.keyExchangePublicKey,
+	});
+	writeStoredDeviceIdentitySecrets(secrets);
+	markLegacyLocalStorageMigrated(true);
 }
 
 // ============================================================================
@@ -158,6 +216,16 @@ export async function generateAndSaveKeypair(
 	const secretsJson = JSON.stringify(secrets);
 	const encryptedSecrets = seal(Buffer.from(secretsJson, 'utf-8'), encryptionKey);
 
+	await unlockLocalSecureStore(password);
+	writeStoredDeviceIdentityPublic({
+		id: identity.id,
+		label: identity.label,
+		createdAt: identity.createdAt,
+		signingPublicKey: serialized.signingPublicKey,
+		keyExchangePublicKey: serialized.keyExchangePublicKey,
+	});
+	writeStoredDeviceIdentitySecrets(secrets);
+
 	// Create storage format
 	const storage: EncryptedKeypairStorage = {
 		version: 1,
@@ -203,6 +271,21 @@ export async function generateAndSaveKeypair(
 export async function loadKeypair(password: string): Promise<Identity> {
 	if (!keypairExists()) {
 		throw new NoIdentityError();
+	}
+
+	await unlockLocalSecureStore(password);
+	const storedPublic = readStoredDeviceIdentityPublic();
+	const storedSecrets = readStoredDeviceIdentitySecrets();
+	if (storedPublic && storedSecrets) {
+		return deserializeIdentity({
+			id: storedPublic.id,
+			label: storedPublic.label,
+			createdAt: storedPublic.createdAt,
+			signingPublicKey: storedPublic.signingPublicKey,
+			keyExchangePublicKey: storedPublic.keyExchangePublicKey,
+			signingSecretKey: storedSecrets.signingSecretKey,
+			keyExchangePrivateKey: storedSecrets.keyExchangePrivateKey,
+		});
 	}
 
 	// Read storage file
@@ -256,6 +339,7 @@ export async function loadKeypair(password: string): Promise<Identity> {
 	};
 
 	// Deserialize to Identity format
+	migrateLegacyKeypairToLocalStore(storage, secrets);
 	return deserializeIdentity(storedIdentity);
 }
 
@@ -265,7 +349,7 @@ export async function loadKeypair(password: string): Promise<Identity> {
  * @returns True if keypair.json exists
  */
 export function keypairExists(): boolean {
-	return existsSync(getKeypairPath());
+	return readStoredDeviceIdentityPublic() !== null || existsSync(getKeypairPath());
 }
 
 /**
@@ -277,7 +361,17 @@ export function keypairExists(): boolean {
  * @returns Public identity if keypair exists, null otherwise
  */
 export function getPublicKeyWithoutPassword(): PublicIdentity | null {
-	if (!keypairExists()) {
+	const storedPublic = readStoredDeviceIdentityPublic();
+	if (storedPublic) {
+		return {
+			id: storedPublic.id,
+			signingPublicKey: storedPublic.signingPublicKey,
+			keyExchangePublicKey: storedPublic.keyExchangePublicKey,
+			label: storedPublic.label,
+		};
+	}
+
+	if (!existsSync(getKeypairPath())) {
 		return null;
 	}
 
@@ -312,6 +406,14 @@ export function getPublicKeyWithoutPassword(): PublicIdentity | null {
  * @returns Machine identity if exists, null otherwise
  */
 export function readMachineIdentity(): MachineIdentity | null {
+	const stored = readLocalStoreJson<MachineIdentity>(
+		LOCAL_STORE_NAMESPACE_IDENTITY,
+		LOCAL_STORE_KEY_MACHINE_IDENTITY,
+	);
+	if (stored) {
+		return stored;
+	}
+
 	const machineIdentityPath = getMachineIdentityPath();
 
 	if (!existsSync(machineIdentityPath)) {
@@ -320,7 +422,10 @@ export function readMachineIdentity(): MachineIdentity | null {
 
 	try {
 		const content = readFileSync(machineIdentityPath, 'utf-8');
-		return JSON.parse(content) as MachineIdentity;
+		const identity = JSON.parse(content) as MachineIdentity;
+		writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_MACHINE_IDENTITY, identity);
+		markLegacyLocalStorageMigrated(true);
+		return identity;
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to read machine identity: ${
@@ -340,6 +445,7 @@ export function readMachineIdentity(): MachineIdentity | null {
  * @param identity - Machine identity to write
  */
 export function writeMachineIdentity(identity: MachineIdentity): void {
+	writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_MACHINE_IDENTITY, identity);
 	ensureIdentityDir();
 
 	try {
@@ -397,6 +503,14 @@ export function getRelayConfigPath(): string {
  * @returns Relay config if exists, null otherwise
  */
 export function readRelayConfig(): RelayConfig | null {
+	const stored = readLocalStoreJson<RelayConfig>(
+		LOCAL_STORE_NAMESPACE_IDENTITY,
+		LOCAL_STORE_KEY_RELAY_CONFIG,
+	);
+	if (stored) {
+		return stored;
+	}
+
 	const relayConfigPath = getRelayConfigPath();
 
 	if (!existsSync(relayConfigPath)) {
@@ -405,7 +519,10 @@ export function readRelayConfig(): RelayConfig | null {
 
 	try {
 		const content = readFileSync(relayConfigPath, 'utf-8');
-		return JSON.parse(content) as RelayConfig;
+		const config = JSON.parse(content) as RelayConfig;
+		writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_RELAY_CONFIG, config);
+		markLegacyLocalStorageMigrated(true);
+		return config;
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to read relay config: ${
@@ -425,6 +542,7 @@ export function readRelayConfig(): RelayConfig | null {
  * @param config - Relay configuration to write
  */
 export function writeRelayConfig(config: RelayConfig): void {
+	writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_RELAY_CONFIG, config);
 	ensureIdentityDir();
 
 	try {
@@ -453,11 +571,11 @@ export function writeRelayConfig(config: RelayConfig): void {
  * Removes the relay config file if it exists.
  */
 export function clearRelayConfig(): void {
+	deleteLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_RELAY_CONFIG);
 	const relayConfigPath = getRelayConfigPath();
 
 	if (existsSync(relayConfigPath)) {
 		try {
-			const { unlinkSync } = require('node:fs');
 			unlinkSync(relayConfigPath);
 		} catch (error) {
 			// Ignore errors when clearing

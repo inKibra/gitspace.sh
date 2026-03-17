@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { getIdentityDir } from "./identity.js";
+import { markLegacyLocalStorageMigrated, readLocalStoreJson, writeLocalStoreJson } from './local-secure-store.js';
 import { formatRelayFingerprint } from "../relay/identity.js";
 
 // ============================================================================
@@ -43,6 +44,8 @@ export type RelayTrustStatus = "trusted" | "mismatch" | "unknown";
 // ============================================================================
 
 const TRUSTED_RELAYS_FILE = "trusted-relays.json";
+const LOCAL_STORE_NAMESPACE = 'trust';
+const LOCAL_STORE_KEY = 'trusted-relays';
 
 // ============================================================================
 // Paths
@@ -287,6 +290,11 @@ export function isCloudReachableRelayUrl(url: string): boolean {
  * Load trusted relays from disk
  */
 export function getTrustedRelays(): TrustedRelay[] {
+	const stored = readLocalStoreJson<TrustedRelay[]>(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY);
+	if (stored) {
+		return stored;
+	}
+
   const path = getTrustedRelaysPath();
 
   if (!existsSync(path)) {
@@ -295,7 +303,10 @@ export function getTrustedRelays(): TrustedRelay[] {
 
   try {
     const content = readFileSync(path, "utf-8");
-    return JSON.parse(content) as TrustedRelay[];
+    const relays = JSON.parse(content) as TrustedRelay[];
+    writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, relays);
+    markLegacyLocalStorageMigrated(true);
+    return relays;
   } catch {
     console.warn("[trusted-relays] Failed to parse trusted relays file");
     return [];
@@ -306,6 +317,7 @@ export function getTrustedRelays(): TrustedRelay[] {
  * Save trusted relays to disk
  */
 function saveTrustedRelays(relays: TrustedRelay[]): void {
+	writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, relays);
   const identityDir = getIdentityDir();
 
   // Create directory if needed (should already exist from identity setup)

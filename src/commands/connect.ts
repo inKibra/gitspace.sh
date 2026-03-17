@@ -35,6 +35,10 @@ import {
   createDeviceIdentityPasswordContext,
   ensureDeviceIdentityPassword,
 } from './device-identity-password.js';
+import {
+  createLocalStorePasswordContext,
+  ensureLocalStorePassword,
+} from './local-store-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 import {
   addTrustedRelay,
@@ -45,6 +49,7 @@ import { formatRelayFingerprint } from '../relay/identity.js';
 import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
+import { unlockLocalSecureStore } from '../core/local-secure-store.js';
 
 export interface RelayIdentityProbe {
   publicKey: string;
@@ -201,6 +206,7 @@ export async function connectToRemote(
   options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {}
 ): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+  const localStorePasswordContext = createLocalStorePasswordContext({ passwordStdin: options.passwordStdin });
   if (!target && !options.machine) {
     throw new SpacesError(
       'Connection target required.\n\nUsage:\n  gssh client connect <machine-id> --relay <url>\n  gssh client connect --machine <id> --relay <url>\n\nList available machines:\n  gssh client machines list --relay <url>',
@@ -245,6 +251,14 @@ export async function connectToRemote(
     context: 'remote client authorization',
   });
 
+  const localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
+  if (!localStorePassword) {
+    logger.info('Cancelled');
+    return;
+  }
+  await unlockLocalSecureStore(localStorePassword);
+  devicePasswordContext.password = localStorePassword;
+
   // Step 3: Load local identity
   const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
@@ -255,7 +269,7 @@ export async function connectToRemote(
   const identity = await loadKeypair(password);
   if (!identity) {
     throw new SpacesError(
-      'Failed to unlock identity. Check your password.',
+      'Failed to unlock local secure store identity. Check your password.',
       'USER_ERROR',
       1
     );
@@ -384,6 +398,7 @@ export async function listRemoteMachines(options: {
   passwordStdin?: boolean;
 }): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+  const localStorePasswordContext = createLocalStorePasswordContext({ passwordStdin: options.passwordStdin });
   if (!options.relay) {
     throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
   }
@@ -399,6 +414,14 @@ export async function listRemoteMachines(options: {
     yes: options.yes,
     context: 'remote machine directory authorization',
   });
+
+  const localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
+  if (!localStorePassword) {
+    logger.info('Cancelled');
+    return;
+  }
+  await unlockLocalSecureStore(localStorePassword);
+  devicePasswordContext.password = localStorePassword;
 
   const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
