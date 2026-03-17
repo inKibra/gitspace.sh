@@ -1086,7 +1086,9 @@ export async function serveStart(options: {
         logger.info('Cancelled');
         return;
       }
-      await unlockLocalSecureStore(localStorePassword);
+      if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
+        await unlockLocalSecureStore(localStorePassword);
+      }
       devicePasswordContext.password = localStorePassword;
     }
 

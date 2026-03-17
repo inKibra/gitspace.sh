@@ -702,7 +702,6 @@ export async function startRelay(options: {
       });
     if (userRoot) {
       ownerUserRootId = userRoot.id;
-      const startupPlan = planStartupControlState({ ownerUserRootId });
       let ownerBinding;
       try {
         ownerBinding = bindRelayOwnerForStartup(ownerUserRootId);
@@ -710,6 +709,8 @@ export async function startRelay(options: {
         if (!options.takeover || !isRelayOwnerMismatchError(error)) {
           throw error;
         }
+
+        const startupPlan = planStartupControlState({ ownerUserRootId });
 
         if (!options.yes) {
           const confirmed = await promptConfirm(

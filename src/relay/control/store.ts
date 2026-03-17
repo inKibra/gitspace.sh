@@ -275,8 +275,10 @@ export interface PersistedOwnerBinding {
 }
 
 function peekPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
-  let controlOwnerId = getMetaValue(db, META_KEY_OWNER_IDENTITY_ID);
-  let vaultOwnerId = getVaultMetaValueFromDb(db, 'owner_user_root_id');
+  const originalControlOwnerId = getMetaValue(db, META_KEY_OWNER_IDENTITY_ID);
+  const originalVaultOwnerId = getVaultMetaValueFromDb(db, 'owner_user_root_id');
+  let controlOwnerId = originalControlOwnerId;
+  let vaultOwnerId = originalVaultOwnerId;
 
   if (!controlOwnerId && vaultOwnerId) {
     controlOwnerId = vaultOwnerId;
@@ -287,8 +289,8 @@ function peekPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
   const mismatch = Boolean(controlOwnerId && vaultOwnerId && controlOwnerId !== vaultOwnerId);
   const effectiveOwnerId = mismatch ? undefined : (controlOwnerId ?? vaultOwnerId);
   const repaired = Boolean(
-    (controlOwnerId && !getVaultMetaValueFromDb(db, 'owner_user_root_id'))
-    || (vaultOwnerId && !getMetaValue(db, META_KEY_OWNER_IDENTITY_ID))
+    (controlOwnerId && !originalVaultOwnerId)
+    || (vaultOwnerId && !originalControlOwnerId)
   );
 
   return {
