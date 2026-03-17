@@ -61,12 +61,14 @@ export interface AgentSessionInfo {
   workspaceId: string;
   title: string;
   updatedAt?: string;
+  closed?: boolean;
   status?: SessionStatus;
   pendingPermissionCount?: number;
   errorMessage?: string;
 }
 
 export type AgentSessionDisplayState =
+  | 'closed'
   | 'needs-permission'
   | 'error'
   | 'running'
@@ -74,6 +76,9 @@ export type AgentSessionDisplayState =
   | 'waiting';
 
 export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSessionDisplayState {
+  if (session.closed) {
+    return 'closed';
+  }
   if ((session.pendingPermissionCount ?? 0) > 0) {
     return 'needs-permission';
   }
@@ -92,6 +97,8 @@ export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSes
 export function getAgentSessionDisplayLabel(session: AgentSessionInfo): string {
   const state = getAgentSessionDisplayState(session);
   switch (state) {
+    case 'closed':
+      return 'closed';
     case 'needs-permission':
       return `needs permission${(session.pendingPermissionCount ?? 0) > 1 ? ` (${session.pendingPermissionCount})` : ''}`;
     case 'error':
@@ -156,6 +163,8 @@ export interface UseSpacesBrowserProps {
   onRefresh: () => void | Promise<void>;
   /** Called to refresh sessions after workspace refresh (full refresh by default). */
   onRefreshSessions?: () => void | Promise<void>;
+  /** Called to refresh agent state for expanded/selected workspaces. */
+  onRefreshAgents?: (context: { expandedWorkspaceIds: string[]; selectedWorkspaceId: string | null }) => void | Promise<void>;
   onBack: () => void;
   /** Called when user wants to create a new workspace */
   onCreateWorkspace?: () => void;
@@ -506,6 +515,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     onManageBundleConfig,
     onRefresh,
     onRefreshSessions,
+    onRefreshAgents,
     onBack,
     onCreateWorkspace,
     machineName,
@@ -669,7 +679,9 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     } else if (item.type === 'agents') {
       toggleAgentSection(item.workspaceId);
     } else if (item.type === 'agent-session') {
-      await onOpenAgentSession?.(item.workspaceId, item.session.id);
+      if (!item.session.closed) {
+        await onOpenAgentSession?.(item.workspaceId, item.session.id);
+      }
     } else if (item.type === 'new-agent-session') {
       await onCreateAgentSession?.(item.workspaceId);
     } else if (item.type === 'events') {
@@ -710,11 +722,21 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   const refresh = useCallback(async () => {
     await onRefresh();
-    // Also refresh sessions (shared full refresh policy)
     if (onRefreshSessions) {
       await onRefreshSessions();
     }
-  }, [onRefresh, onRefreshSessions]);
+    if (onRefreshAgents) {
+      const selectedWorkspaceId = selectedItem?.type === 'workspace'
+        ? selectedItem.workspace.id
+        : selectedItem && 'workspaceId' in selectedItem
+          ? selectedItem.workspaceId
+          : null;
+      await onRefreshAgents({
+        expandedWorkspaceIds: Array.from(expandedAgentSections),
+        selectedWorkspaceId,
+      });
+    }
+  }, [expandedAgentSections, onRefresh, onRefreshAgents, onRefreshSessions, selectedItem]);
 
   const back = useCallback(() => {
     onBack();

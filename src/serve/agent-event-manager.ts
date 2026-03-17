@@ -18,7 +18,7 @@ import {
   type SessionStatus,
   type Permission,
 } from '../agents/opencode-event-types.js';
-import { deleteStoredSession, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
+import { markStoredSessionClosed, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
 
 // ============================================================================
 // Shared agent state types (used by both machine and client)
@@ -388,7 +388,7 @@ export class AgentEventManager {
         this.previousStatuses.delete(`${workspaceId}:${id}`);
         this.textAccumulators.delete(`${workspaceId}:${id}`);
         this.emit({ type: 'agent_session_deleted', workspaceId, sessionId: id });
-        this.queuePersistedWrite(workspaceId, () => deleteStoredSession(workspaceId, id));
+        this.queuePersistedWrite(workspaceId, () => markStoredSessionClosed(workspaceId, id));
         break;
       }
 

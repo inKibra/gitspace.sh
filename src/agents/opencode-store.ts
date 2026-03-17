@@ -150,14 +150,45 @@ export async function replaceStoredSessions(
   await withWorkspaceWriteLock(workspaceId, async () => {
     const existing = await readStoredSessionHistory(workspaceId);
     const next: Record<string, StoredWorkspaceAgentSession> = {};
+    const seenIds = new Set<string>();
     for (const session of sessions) {
+      seenIds.add(session.id);
       next[session.id] = {
         ...existing.sessions[session.id],
         ...session,
+        lastKnownStatus: session.lastKnownStatus,
         lastSeenAt: session.lastSeenAt ?? new Date().toISOString(),
       };
     }
+    for (const [sessionId, stored] of Object.entries(existing.sessions)) {
+      if (seenIds.has(sessionId)) {
+        continue;
+      }
+      next[sessionId] = {
+        ...stored,
+        lastKnownStatus: 'closed',
+        lastSeenAt: new Date().toISOString(),
+      };
+    }
     await writeStoredSessionHistory({ workspaceId, sessions: next });
+  });
+}
+
+export async function markStoredSessionClosed(workspaceId: string, sessionId: string): Promise<void> {
+  await withWorkspaceWriteLock(workspaceId, async () => {
+    const history = await readStoredSessionHistory(workspaceId);
+    const existing = history.sessions[sessionId];
+    if (!existing) {
+      return;
+    }
+    history.sessions[sessionId] = {
+      ...existing,
+      lastKnownStatus: 'closed',
+      lastSeenAt: new Date().toISOString(),
+      terminalSessionId: undefined,
+      terminalSessionName: undefined,
+    };
+    await writeStoredSessionHistory(history);
   });
 }
 

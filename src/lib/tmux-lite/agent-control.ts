@@ -45,9 +45,26 @@ export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessi
   return defaultOpenCodeCoordinator.abortAgentSession(target, agentSessionId);
 }
 
-export async function attachAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<import('./protocol.js').Session> {
+export async function clearAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
   await ensureAgentControlInitialized();
-  return defaultOpenCodeCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+  return defaultOpenCodeCoordinator.clearAgentSession(target, agentSessionId);
+}
+
+export async function getAgentSessionTakeoverState(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+  await ensureAgentControlInitialized();
+  return defaultOpenCodeCoordinator.checkAgentSessionTakeover(target, agentSessionId);
+}
+
+export async function attachAgentSession(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  options: { force?: boolean } = {},
+): Promise<import('./protocol.js').Session> {
+  await ensureAgentControlInitialized();
+  return defaultOpenCodeCoordinator.ensureAgentTerminalSession(target, agentSessionId, options);
 }
 
 export async function respondToAgentPermission(

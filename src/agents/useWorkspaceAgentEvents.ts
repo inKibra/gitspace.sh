@@ -62,17 +62,23 @@ export interface UseWorkspaceAgentEventsResult {
 
 function buildLiveStateFromWorkspace(workspace: WorkspaceAgentState): Record<string, AgentSessionLiveState> {
   const result: Record<string, AgentSessionLiveState> = {};
-  for (const session of workspace.sessions) {
-    const status: SessionStatus = workspace.statuses[session.id] ?? { type: 'idle' };
-    const permissions = workspace.pendingPermissions[session.id] ?? [];
+  const sessionIds = new Set<string>([
+    ...workspace.sessions.map((session) => session.id),
+    ...Object.keys(workspace.statuses),
+    ...Object.keys(workspace.pendingPermissions),
+    ...Object.keys(workspace.lastMessages),
+  ]);
+  for (const sessionId of sessionIds) {
+    const status: SessionStatus = workspace.statuses[sessionId] ?? { type: 'idle' };
+    const permissions = workspace.pendingPermissions[sessionId] ?? [];
     const pendingMap: Record<string, Permission> = {};
     for (const p of permissions) {
       pendingMap[p.id] = p;
     }
-    result[session.id] = {
+    result[sessionId] = {
       status,
       pendingPermissions: pendingMap,
-      lastMessagePreview: workspace.lastMessages[session.id] ?? '',
+      lastMessagePreview: workspace.lastMessages[sessionId] ?? '',
       lastActivityAt: Date.now(),
     };
   }

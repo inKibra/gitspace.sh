@@ -84,7 +84,9 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
       : '[↑↓] Navigate  [Enter] Expand Agents  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'agent-session') {
-    return '[↑↓] Navigate  [Enter] Open Agent Session  [r] Refresh  [q] Back';
+    return selectedItem.session.closed
+      ? '[↑↓] Navigate  [d] Clear Closed Agent  [r] Refresh  [q] Back'
+      : '[↑↓] Navigate  [Enter] Open Agent Session  [x] Close Agent  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'new-agent-session') {
     return '[↑↓] Navigate  [Enter] New Agent Session  [r] Refresh  [q] Back';
@@ -309,12 +311,13 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           }
 
           if (item.type === 'agent-session') {
-            const textColor = isSelected ? COLORS.selected : '#C678DD';
+            const textColor = isSelected ? COLORS.selected : item.session.closed ? COLORS.textDim : '#C678DD';
             const prefix = isSelected ? '>' : ' ';
             const state = getAgentSessionDisplayState(item.session);
             const label = getAgentSessionDisplayLabel(item.session);
             const signal =
-              state === 'needs-permission' ? '⚡'
+              state === 'closed' ? '■'
+              : state === 'needs-permission' ? '⚡'
               : state === 'error' ? '!'
               : state === 'running' ? '●'
               : state === 'retrying' ? '↻'

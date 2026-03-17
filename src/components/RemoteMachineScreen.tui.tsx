@@ -46,6 +46,7 @@ import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession
 import { toast } from '@opentui-ui/toast';
 import { DEFAULT_NOTIFICATION_CONFIG, useNotifications, type ToastNotification } from '../notifications/index.js';
 import { useUserActivity } from '../hooks/index.js';
+import { executeSafeRefresh } from './remote-refresh.js';
 
 const COLORS = {
   statusBar: '#333333',
@@ -165,6 +166,27 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     applyBundleRefresh: remote.applyBundleRefresh,
     resolveProjectName: resolveRemoteWorkspaceProjectName,
   });
+  const lastRemoteCommandErrorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!remote.commandError) {
+      lastRemoteCommandErrorRef.current = null;
+      return;
+    }
+    if (remote.commandError.code !== 'SESSION_TAKEN_OVER') {
+      return;
+    }
+    const key = `${remote.commandError.code}:${remote.commandError.message}`;
+    if (lastRemoteCommandErrorRef.current === key) {
+      return;
+    }
+    lastRemoteCommandErrorRef.current = key;
+    flow.showMessage({
+      title: 'Session Taken Over',
+      message: remote.commandError.message,
+      variant: 'warning',
+    });
+  }, [flow, remote.commandError]);
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
@@ -629,6 +651,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       const combined = new Map<string, (typeof baseSessions)[number]>();
       for (const session of snapshotSessions) combined.set(session.id, session);
       for (const session of baseSessions) combined.set(session.id, session);
+      for (const sessionId of Object.keys(liveStates)) {
+        if (!combined.has(sessionId)) {
+          combined.set(sessionId, {
+            id: sessionId,
+            workspaceId,
+            title: sessionId,
+            updatedAt: undefined,
+          });
+        }
+      }
       merged[workspaceId] = Array.from(combined.values()).map((session) => {
         const live = liveStates[session.id];
         if (!live) return session;
@@ -643,6 +675,44 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
 
     return merged;
   }, [agentEvents.workspaceStates, remoteBackend, workspaceAgentSessions.sessionsByWorkspace]);
+
+  const refreshAgentSessions = useCallback(async ({
+    expandedWorkspaceIds,
+    selectedWorkspaceId,
+  }: {
+    expandedWorkspaceIds: string[];
+    selectedWorkspaceId: string | null;
+  }) => {
+    const workspaceIds = new Set(remote.workspaces.map((workspace) => workspace.id));
+    for (const workspaceId of expandedWorkspaceIds) {
+      workspaceIds.add(workspaceId);
+    }
+    if (selectedWorkspaceId) {
+      workspaceIds.add(selectedWorkspaceId);
+    }
+    await workspaceAgentSessions.syncWorkspaceSessions(Array.from(workspaceIds));
+  }, [remote.workspaces, workspaceAgentSessions]);
+
+  const remoteWorkspaceSyncKey = useMemo(
+    () => remote.workspaces.map((workspace) => workspace.id).sort().join('|'),
+    [remote.workspaces],
+  );
+  const lastRemoteWorkspaceSyncKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (remote.status !== 'established' || remote.mode !== 'browsing' || remote.workspaces.length === 0) {
+      lastRemoteWorkspaceSyncKeyRef.current = null;
+      return;
+    }
+    if (lastRemoteWorkspaceSyncKeyRef.current === remoteWorkspaceSyncKey) {
+      return;
+    }
+    lastRemoteWorkspaceSyncKeyRef.current = remoteWorkspaceSyncKey;
+    remote.requestSessions();
+    void workspaceAgentSessions.syncWorkspaceSessions(remote.workspaces.map((workspace) => workspace.id)).catch((error) => {
+      logger.error(`[tui] Initial remote agent sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [remote.mode, remote.requestSessions, remote.status, remote.workspaces, remoteWorkspaceSyncKey, workspaceAgentSessions]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,
@@ -661,19 +731,21 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!remoteBackend?.attachAgentSession) {
+      if (!remoteBackend?.attachAgentSession || !remoteBackend.checkAgentSessionTakeover) {
         throw new Error('Agent attach unavailable');
       }
       await openAgentSession({
+        flow,
         workspaceId,
         agentSessionId,
         persistAgentSessionSelection,
         clearViewOnly: () => setIsViewOnlySession(false),
+        checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover.bind(remoteBackend),
         attachAgentSession: remoteBackend.attachAgentSession.bind(remoteBackend),
       });
     },
     onCreateAgentSession: async (workspaceId) => {
-      if (!remoteBackend?.attachAgentSession) {
+      if (!remoteBackend?.attachAgentSession || !remoteBackend.checkAgentSessionTakeover) {
         throw new Error('Agent attach unavailable');
       }
       promptCreateAgentSession({
@@ -682,9 +754,11 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
         createAgentSession: workspaceAgentSessions.createSession,
         attachOptions: {
+          flow,
           workspaceId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
+          checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover.bind(remoteBackend),
           attachAgentSession: remoteBackend.attachAgentSession.bind(remoteBackend),
         },
       });
@@ -698,6 +772,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       remote.requestSessions();
       remote.requestReplays();
     },
+    onRefreshAgents: refreshAgentSessions,
     onBack,
     machineName: machine.label || machine.machineId,
   });
@@ -739,10 +814,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       },
       openAgentSession: async (workspaceId, agentSessionId) => {
         await openAgentSession({
+          flow,
           workspaceId,
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
+          checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover!.bind(remoteBackend),
           attachAgentSession: remoteBackend.attachAgentSession!.bind(remoteBackend),
         });
       },
@@ -1034,7 +1111,15 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     } else if (browseCommand === 'move-down') {
       spacesBrowserProps.moveDown();
     } else if (browseCommand === 'activate') {
-      spacesBrowserProps.activateSelected();
+      try {
+        await spacesBrowserProps.activateSelected();
+      } catch (error) {
+        flow.showMessage({
+          title: 'Action Failed',
+          message: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+      }
     } else if (browseCommand === 'new') {
       lifecycleController.openCreateMenu(selectedProjectName);
     } else if (browseCommand === 'bundle') {
@@ -1048,7 +1133,22 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         await handleManageBundleConfig({ workspaceId });
       }
     } else if (browseCommand === 'refresh') {
-      spacesBrowserProps.refresh();
+      await executeSafeRefresh({
+        refresh: spacesBrowserProps.refresh,
+        context: {
+          machineId: machine.machineId,
+          machineLabel: machine.label ?? null,
+          selectedProjectName: selectedProjectName ?? null,
+          selectedItemType: spacesBrowserProps.selectedItem?.type ?? null,
+        },
+        onError: (message) => {
+          flow.showMessage({
+            title: 'Refresh Failed',
+            message,
+            variant: 'error',
+          });
+        },
+      });
     } else if (browseCommand === 'open-inbox') {
       remote.requestInbox();
       setShowInbox(true);
@@ -1077,6 +1177,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
             });
           },
         });
+      } else if (selected?.type === 'agent-session' && !selected.session.closed) {
+        flow.showConfirm({
+          title: 'Close Agent Session',
+          message: `Close agent session "${selected.session.title}"?`,
+          variant: 'warning',
+          confirmLabel: 'Close',
+          onConfirm: () => {
+            void workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
+          },
+        });
       }
     } else if (browseCommand === 'delete') {
       const selected = spacesBrowserProps.selectedItem;
@@ -1097,6 +1207,16 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
               workspaceId: selected.workspace.id,
               workspaceName: selected.workspace.name,
             });
+          },
+        });
+      } else if (selected?.type === 'agent-session' && selected.session.closed) {
+        flow.showConfirm({
+          title: 'Clear Closed Agent',
+          message: `Remove closed agent session "${selected.session.title}" from history?`,
+          variant: 'warning',
+          confirmLabel: 'Clear',
+          onConfirm: () => {
+            void workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
           },
         });
       }

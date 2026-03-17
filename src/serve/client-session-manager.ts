@@ -647,6 +647,20 @@ export class ClientSessionManager {
   }
 
   /**
+   * Broadcast a full agent state snapshot to all authenticated browsing clients.
+   */
+  async broadcastAgentStateSnapshot(workspaces: Record<string, WorkspaceAgentState>): Promise<void> {
+    const promises: Promise<void>[] = [];
+
+    for (const [connectionId, session] of this.sessions) {
+      if (session.state !== 'browsing' || !session.sessionKeys) continue;
+      promises.push(this.sendAgentStateSnapshot(connectionId, workspaces));
+    }
+
+    await Promise.allSettled(promises);
+  }
+
+  /**
    * Broadcast an agent state delta to all authenticated browsing clients.
    * Called by AgentEventManager whenever state changes.
    */

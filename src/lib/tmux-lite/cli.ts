@@ -482,12 +482,40 @@ export async function abortAgentSession(
   throw new Error('Unexpected response');
 }
 
+export async function clearAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+): Promise<boolean> {
+  await ensureServer();
+  const res = await send({ type: 'agent-clear', target, agentSessionId });
+  if (res.type === 'agent-bool') return res.ok;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function getAgentSessionTakeoverState(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+  await ensureServer();
+  const res = await send({ type: 'agent-takeover-status', target, agentSessionId });
+  if (res.type === 'agent-takeover-status') {
+    return {
+      requiresTakeover: res.status.requiresTakeover,
+      sessionName: res.status.sessionName,
+    };
+  }
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
 export async function attachAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
+  options: { force?: boolean } = {},
 ): Promise<Session> {
   await ensureServer();
-  const res = await send({ type: 'agent-attach', target, agentSessionId });
+  const res = await send({ type: 'agent-attach', target, agentSessionId, force: options.force });
   if (res.type === 'session') return res.session;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');

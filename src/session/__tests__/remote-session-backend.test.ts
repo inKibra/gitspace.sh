@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager';
 import type { Identity } from '../../types/identity';
 import type { BackendEvent } from '../events';
 import {
@@ -316,6 +317,183 @@ describe('RemoteSessionBackend', () => {
     await expect(pending).resolves.toEqual([
       { id: 'agent-1', title: 'Investigate auth', updatedAt: '2026-03-15T12:00:00.000Z' },
     ]);
+  });
+
+  it('checks whether an agent session takeover is required', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const pending = backend.checkAgentSessionTakeover('project:workspace', 'agent-1');
+    await Bun.sleep(0);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as {
+      type: string;
+      requestId: string;
+    };
+    expect(command.type).toBe('check_agent_session_takeover');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'agent_takeover_status',
+        requestId: command.requestId,
+        workspaceId: 'project:workspace',
+        agentSessionId: 'agent-1',
+        requiresTakeover: true,
+        sessionName: 'agent:workspace:1234abcd',
+      })
+    );
+
+    await expect(pending).resolves.toEqual({
+      requiresTakeover: true,
+      sessionName: 'agent:workspace:1234abcd',
+    });
+  });
+
+  it('treats unsupported takeover checks as no-takeover instead of crashing', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const pending = backend.checkAgentSessionTakeover('project:workspace', 'agent-1');
+    await Bun.sleep(0);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as {
+      requestId: string;
+    };
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        code: 'UNKNOWN_COMMAND',
+        message: 'Unknown command',
+        requestId: command.requestId,
+        workspaceId: 'project:workspace',
+      })
+    );
+
+    await expect(pending).resolves.toEqual({ requiresTakeover: false });
+    await expect(backend.checkAgentSessionTakeover('project:workspace', 'agent-1')).resolves.toEqual({
+      requiresTakeover: false,
+    });
+  });
+
+  it('builds remote agent snapshot from deltas without initial snapshot', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const deltas: AgentStateUpdateDelta[] = [
+      { type: 'agent_session_created', workspaceId: 'project:workspace', sessionId: 'agent-1', title: 'Draft plan' },
+      { type: 'agent_session_status', workspaceId: 'project:workspace', sessionId: 'agent-1', status: { type: 'busy' } },
+      { type: 'agent_session_updated', workspaceId: 'project:workspace', sessionId: 'agent-2', title: 'Follow up' },
+    ];
+
+    for (const delta of deltas) {
+      socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'agent_state_update', delta }));
+    }
+
+    await Bun.sleep(0);
+
+    expect(backend.getAgentStateSnapshot()).toEqual({
+      'project:workspace': {
+        workspaceId: 'project:workspace',
+        sessions: [
+          { id: 'agent-1', title: 'Draft plan' },
+          { id: 'agent-2', title: 'Follow up' },
+        ],
+        statuses: {
+          'agent-1': { type: 'busy' },
+        },
+        pendingPermissions: {},
+        lastMessages: {},
+      },
+    });
+  });
+
+  it('emits a taken-over notice when the attached session is kicked', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+    const events: BackendEvent[] = [];
+    backend.onEvent((event) => events.push(event));
+
+    await connectAndHandshake(backend, socket);
+
+    (backend as any).mode = 'attached';
+    (backend as any).attachedSessionId = 'sess-1';
+    (backend as any).handleSessionEvent({ type: 'kicked' });
+
+    expect(events).toContainEqual({
+      type: 'command_error',
+      code: 'SESSION_TAKEN_OVER',
+      message: 'This agent terminal was taken over by another client.',
+    });
+    expect(events).toContainEqual({ type: 'detached' });
   });
 
   it('buffers PTY output while no callback is registered and flushes on restore', async () => {

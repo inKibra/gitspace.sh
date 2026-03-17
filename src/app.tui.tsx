@@ -75,6 +75,8 @@ import type { NotificationConfig, NotificationTypeConfig } from './types/config.
 import { getDefaultBranch } from './core/git.js';
 import { extractRepoName } from './utils/sanitize.js';
 import { logger } from './utils/logger.js';
+import { writeCrashLog } from './utils/crash-log.js';
+import { restoreTuiTerminalState } from './utils/tui-terminal-cleanup.js';
 
 // Script execution
 import { listAllRepos, cloneRepository } from './core/github.js';
@@ -432,6 +434,27 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     applyBundleRefresh: applyLocalBundleRefresh,
     resolveProjectName: resolveLocalWorkspaceProjectName,
   });
+  const lastLocalCommandErrorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!localCommandError) {
+      lastLocalCommandErrorRef.current = null;
+      return;
+    }
+    if (localCommandError.code !== 'SESSION_TAKEN_OVER') {
+      return;
+    }
+    const key = `${localCommandError.code}:${localCommandError.message}`;
+    if (lastLocalCommandErrorRef.current === key) {
+      return;
+    }
+    lastLocalCommandErrorRef.current = key;
+    flow.showMessage({
+      title: 'Session Taken Over',
+      message: localCommandError.message,
+      variant: 'warning',
+    });
+  }, [flow, localCommandError]);
 
   const {
     attach: attachLocal,
@@ -1278,7 +1301,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [localBackend]);
 
   const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
-    if (!localBackend?.attachAgentSession) {
+    if (!localBackend?.attachAgentSession || !localBackend.checkAgentSessionTakeover) {
       throw new Error('Agent attach unavailable');
     }
     await handleInboxSessionSelection({
@@ -1291,10 +1314,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       },
       openAgentSession: async (workspaceId, agentSessionId) => {
         await openAgentSession({
+          flow,
           workspaceId,
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
+          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover!.bind(localBackend),
           attachAgentSession: localBackend.attachAgentSession!.bind(localBackend),
           afterAttach: async () => {
             dispatch({ type: 'SET_VIEW', view: 'terminal' });
@@ -1348,6 +1373,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       const combined = new Map<string, (typeof baseSessions)[number]>();
       for (const session of snapshotSessions) combined.set(session.id, session);
       for (const session of baseSessions) combined.set(session.id, session);
+      for (const sessionId of Object.keys(liveStates)) {
+        if (!combined.has(sessionId)) {
+          combined.set(sessionId, {
+            id: sessionId,
+            workspaceId,
+            title: sessionId,
+            updatedAt: undefined,
+          });
+        }
+      }
       merged[workspaceId] = Array.from(combined.values()).map((session) => {
         const live = liveStates[session.id];
         if (!live) return session;
@@ -1362,6 +1397,20 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
     return merged;
   }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
+
+  const refreshAgentSessions = useCallback(async ({
+    expandedWorkspaceIds,
+    selectedWorkspaceId,
+  }: {
+    expandedWorkspaceIds: string[];
+    selectedWorkspaceId: string | null;
+  }) => {
+    const workspaceIds = new Set(expandedWorkspaceIds);
+    if (selectedWorkspaceId) {
+      workspaceIds.add(selectedWorkspaceId);
+    }
+    await Promise.all(Array.from(workspaceIds).map((workspaceId) => workspaceAgentSessions.loadWorkspaceSessions(workspaceId)));
+  }, [workspaceAgentSessions]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -1385,14 +1434,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!localBackend?.attachAgentSession) {
+      if (!localBackend?.attachAgentSession || !localBackend.checkAgentSessionTakeover) {
         throw new Error('Agent attach unavailable');
       }
       await openAgentSession({
+        flow,
         workspaceId,
         agentSessionId,
         persistAgentSessionSelection,
         clearViewOnly: () => setIsViewOnlySession(false),
+        checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover!.bind(localBackend),
         attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
         afterAttach: async () => {
           dispatch({ type: 'SET_VIEW', view: 'terminal' });
@@ -1400,7 +1451,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       });
     },
     onCreateAgentSession: async (workspaceId) => {
-      if (!localBackend?.attachAgentSession) {
+      if (!localBackend?.attachAgentSession || !localBackend.checkAgentSessionTakeover) {
         throw new Error('Agent attach unavailable');
       }
       promptCreateAgentSession({
@@ -1409,9 +1460,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
         createAgentSession: workspaceAgentSessions.createSession,
         attachOptions: {
+          flow,
           workspaceId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
+          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover!.bind(localBackend),
           attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
           afterAttach: async () => {
             dispatch({ type: 'SET_VIEW', view: 'terminal' });
@@ -1429,6 +1482,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         requestLocalReplays(undefined, showDismissedReplays),
       ]);
     },
+    onRefreshAgents: refreshAgentSessions,
     onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
     onCreateWorkspace: handleNewWorkspaceFlow,
     machineName: currentProject || undefined,
@@ -2213,6 +2267,17 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
                 variant: 'error',
               });
             }
+          } else if (selected?.type === 'agent-session' && selected.session.closed) {
+            flow.showConfirm({
+              title: 'Clear Closed Agent',
+              message: `Remove closed agent session "${selected.session.title}" from history?`,
+              confirmLabel: 'Clear',
+              cancelLabel: 'Cancel',
+              variant: 'warning',
+              onConfirm: () => {
+                void workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
+              },
+            });
           }
         } else if (command === 'kill') {
           // Kill session or stop running process
@@ -2230,6 +2295,17 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
                   workspaceId: selected.workspaceId,
                   processName: selected.processName,
                 });
+              },
+            });
+          } else if (selected?.type === 'agent-session' && !selected.session.closed) {
+            flow.showConfirm({
+              title: 'Close Agent Session',
+              message: `Close agent session "${selected.session.title}"?`,
+              confirmLabel: 'Close',
+              cancelLabel: 'Cancel',
+              variant: 'warning',
+              onConfirm: () => {
+                void workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
               },
             });
           }
@@ -2975,29 +3051,79 @@ export async function launchTUI(
   let renderer = await createRendererForKeyboardMode(initialKeyboardMode);
   let root = createRoot(renderer);
   let activeRenderer = renderer;
+  let cleanupRegistered = false;
+
+  const cleanupRenderer = () => {
+    try {
+      activeRenderer.destroy();
+    } catch {
+      // Best effort only.
+    }
+  };
+
+  const restoreTerminal = () => {
+    restoreTuiTerminalState();
+  };
+
+  const cleanupListeners = () => {
+    process.removeListener('SIGINT', handleQuit);
+    process.removeListener('exit', handleExit);
+    process.removeListener('uncaughtException', handleFatalException);
+    process.removeListener('unhandledRejection', handleFatalRejection);
+  };
+
+  const handleFatal = (kind: 'uncaughtException' | 'unhandledRejection', error: unknown) => {
+    cleanupRenderer();
+    restoreTerminal();
+    const logPath = writeCrashLog(`tui-${kind}`, error, {
+      keyboardMode: requestedKeyboardMode,
+      relayConfigured: Boolean(relayConfig),
+    });
+    const detail = error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error);
+    try {
+      process.stderr.write(`[gssh] TUI ${kind}: ${detail}\n`);
+      if (logPath) {
+        process.stderr.write(`[gssh] Crash log written to ${logPath}\n`);
+      }
+    } catch {
+      // Best effort only.
+    }
+  };
+
+  function handleFatalException(error: Error): void {
+    handleFatal('uncaughtException', error);
+  }
+
+  function handleFatalRejection(reason: unknown): void {
+    handleFatal('unhandledRejection', reason);
+  }
 
   // Clean exit handler
   const handleQuit = () => {
-    activeRenderer.destroy();
+    cleanupRenderer();
+    restoreTerminal();
 
     const legacyReminder = consumeLegacyCleanupReminderForTui();
     if (legacyReminder) {
       logger.warning(legacyReminder);
     }
 
+    cleanupListeners();
     process.exit(0);
   };
 
-  // Handle SIGINT
-  process.on('SIGINT', handleQuit);
+  const handleExit = () => {
+    restoreTerminal();
+  };
 
-  // Cleanup on exit
-  process.on('exit', () => {
-    // Reset terminal state
-    process.stdout.write('\x1b[?25h'); // Show cursor
-    process.stdout.write('\x1b[?1049l'); // Exit alternate screen
-    process.stdout.write('\x1b[0m'); // Reset colors
-  });
+  // Handle SIGINT
+  if (!cleanupRegistered) {
+    process.prependListener('uncaughtException', handleFatalException);
+    process.prependListener('unhandledRejection', handleFatalRejection);
+    process.on('SIGINT', handleQuit);
+    process.on('exit', handleExit);
+    cleanupRegistered = true;
+  }
 
   const resolvedKeyboardMode = await new Promise<ResolvedKeyboardMode>((resolve) => {
     root.render(
@@ -3014,7 +3140,7 @@ export async function launchTUI(
     resolvedKeyboardMode === 'vt' &&
     initialKeyboardMode !== 'vt'
   ) {
-    activeRenderer.destroy();
+    cleanupRenderer();
     renderer = await createRendererForKeyboardMode('vt');
     activeRenderer = renderer;
     root = createRoot(renderer);

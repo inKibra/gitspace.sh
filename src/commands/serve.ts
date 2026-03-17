@@ -1492,6 +1492,7 @@ export async function serveStart(options: {
     stopAgentWatch = await watchAgentState({
       onSnapshot: (workspaces) => {
         currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
+        void sessionManager.broadcastAgentStateSnapshot(currentAgentSnapshot);
       },
       onUpdate: (delta) => {
         applyAgentDelta(delta);
@@ -1520,9 +1521,7 @@ export async function serveStart(options: {
         break;
       case 'client_authenticated': {
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        if (Object.keys(currentAgentSnapshot).length > 0) {
-          void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
-        }
+        void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
         break;
       }
       case 'client_disconnected':
