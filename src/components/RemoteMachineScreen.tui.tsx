@@ -1178,8 +1178,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           message: `Close agent session "${selected.session.title}"?`,
           variant: 'warning',
           confirmLabel: 'Close',
-          onConfirm: () => {
-            void workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
+          onConfirm: async () => {
+            await workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
           },
         });
       }
@@ -1210,8 +1210,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           message: `Remove closed agent session "${selected.session.title}" from history?`,
           variant: 'warning',
           confirmLabel: 'Clear',
-          onConfirm: () => {
-            void workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
+          onConfirm: async () => {
+            await workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
           },
         });
       }
