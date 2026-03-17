@@ -122,7 +122,7 @@ import {
 } from './tui/kitty-keyboard.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { collectAgentSessionCounts } from './agents/remote-agent-browser.js';
+import { collectAgentSessionCounts, collectWorkspaceSyncIds } from './agents/remote-agent-browser.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 
@@ -1404,12 +1404,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     expandedWorkspaceIds: string[];
     selectedWorkspaceId: string | null;
   }) => {
-    const workspaceIds = Array.from(new Set([
-      ...expandedWorkspaceIds,
-      ...(selectedWorkspaceId ? [selectedWorkspaceId] : []),
-    ]));
-    await workspaceAgentSessions.syncWorkspaceSessions(workspaceIds);
-  }, [workspaceAgentSessions]);
+    await workspaceAgentSessions.syncWorkspaceSessions(
+      collectWorkspaceSyncIds(workspaceInfos, expandedWorkspaceIds, selectedWorkspaceId),
+    );
+  }, [workspaceAgentSessions, workspaceInfos]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
