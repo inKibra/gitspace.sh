@@ -155,8 +155,10 @@ export function takeOverRelayOwnerForStartup(ownerUserRootId: string): {
 }
 
 function isRelayOwnerMismatchError(error: unknown): boolean {
-  return error instanceof SpacesError
-    && error.message.includes('Persisted local control bindings do not match the current identity.');
+  return error instanceof SpacesError && (
+    error.message.includes('Persisted local control bindings do not match the current identity.')
+    || error.message.includes('Local control bindings mismatch.')
+  );
 }
 
 interface RelayRuntimeState {
