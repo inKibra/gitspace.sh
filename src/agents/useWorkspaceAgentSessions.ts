@@ -82,11 +82,11 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
 
   const loadWorkspaceSessions = useCallback(async (
     workspaceId: string,
-    options: { updateSelection?: boolean } = {},
+    loadOptions: { updateSelection?: boolean } = {},
   ) => {
     const getKnownAgentSessions = requireAgentMethod('getKnownAgentSessions');
     const listAgentSessions = requireAgentMethod('listAgentSessions');
-    const shouldUpdateSelection = options.updateSelection !== false;
+    const shouldUpdateSelection = loadOptions.updateSelection !== false;
     if (shouldUpdateSelection) {
       setLoadingWorkspaceId(workspaceId);
       setActiveWorkspaceId(workspaceId);

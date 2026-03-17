@@ -1404,11 +1404,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     expandedWorkspaceIds: string[];
     selectedWorkspaceId: string | null;
   }) => {
-    const workspaceIds = new Set(expandedWorkspaceIds);
-    if (selectedWorkspaceId) {
-      workspaceIds.add(selectedWorkspaceId);
-    }
-    await Promise.all(Array.from(workspaceIds).map((workspaceId) => workspaceAgentSessions.loadWorkspaceSessions(workspaceId)));
+    const workspaceIds = Array.from(new Set([
+      ...expandedWorkspaceIds,
+      ...(selectedWorkspaceId ? [selectedWorkspaceId] : []),
+    ]));
+    await workspaceAgentSessions.syncWorkspaceSessions(workspaceIds);
   }, [workspaceAgentSessions]);
 
   // Spaces browser hook
@@ -2275,8 +2275,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
               confirmLabel: 'Clear',
               cancelLabel: 'Cancel',
               variant: 'warning',
-              onConfirm: () => {
-                void workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
+              onConfirm: async () => {
+                await workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
               },
             });
           }
@@ -2305,8 +2305,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
               confirmLabel: 'Close',
               cancelLabel: 'Cancel',
               variant: 'warning',
-              onConfirm: () => {
-                void workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
+              onConfirm: async () => {
+                await workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
               },
             });
           }

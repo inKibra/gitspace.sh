@@ -162,11 +162,16 @@ export class OpenCodeCoordinator {
         // best effort
       }
     }
-    try {
-      await this.refreshAgentSessions(target);
-    } finally {
-      await markStoredSessionClosed(target.workspaceId, agentSessionId);
+    if (aborted) {
+      try {
+        await this.refreshAgentSessions(target);
+      } finally {
+        await markStoredSessionClosed(target.workspaceId, agentSessionId);
+      }
+      return aborted;
     }
+
+    await this.refreshAgentSessions(target);
     return aborted;
   }
 
