@@ -37,8 +37,8 @@ import {
   ensureDeviceIdentityPassword,
 } from './device-identity-password.js';
 import {
-  createLocalStorePasswordContext,
   ensureLocalStorePassword,
+  type LocalStorePasswordContext,
 } from './local-store-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 import {
@@ -207,7 +207,7 @@ export async function connectToRemote(
   options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {}
 ): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const localStorePasswordContext = createLocalStorePasswordContext({ passwordStdin: options.passwordStdin });
+  const localStorePasswordContext = devicePasswordContext as unknown as LocalStorePasswordContext;
   if (!target && !options.machine) {
     throw new SpacesError(
       'Connection target required.\n\nUsage:\n  gssh client connect <machine-id> --relay <url>\n  gssh client connect --machine <id> --relay <url>\n\nList available machines:\n  gssh client machines list --relay <url>',
@@ -405,7 +405,7 @@ export async function listRemoteMachines(options: {
   passwordStdin?: boolean;
 }): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const localStorePasswordContext = createLocalStorePasswordContext({ passwordStdin: options.passwordStdin });
+  const localStorePasswordContext = devicePasswordContext as unknown as LocalStorePasswordContext;
   if (!options.relay) {
     throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
   }

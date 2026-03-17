@@ -104,9 +104,9 @@ import {
 } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 import {
-  createLocalStorePasswordContext,
   ensureLocalStorePassword,
   LOCAL_STORE_PASSWORD_ENV,
+  type LocalStorePasswordContext,
 } from './local-store-password.js';
 import { unlockLocalSecureStore } from '../core/local-secure-store.js';
 import {
@@ -1019,7 +1019,7 @@ export async function serveStart(options: {
   yes?: boolean;
 } = {}): Promise<void> {
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const localStorePasswordContext = createLocalStorePasswordContext({ passwordStdin: options.passwordStdin });
+  const localStorePasswordContext = devicePasswordContext as unknown as LocalStorePasswordContext;
 
   // Check if already running
   if (isServeRunning()) {
