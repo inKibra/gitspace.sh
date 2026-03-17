@@ -76,4 +76,43 @@ describe('device identity password context', () => {
     expect(generateAndSaveKeypairMock).toHaveBeenCalledWith('env-password', expect.any(String));
     expect(promptPasswordMock).not.toHaveBeenCalled();
   });
+
+  test('resolved shared context still creates a keypair when missing', async () => {
+    const promptPasswordMock = mock(async () => null as string | null);
+    const promptConfirmMock = mock(async () => true);
+    const keypairExistsMock = mock(() => false);
+    const generateAndSaveKeypairMock = mock(async () => undefined);
+
+    mock.module('../../utils/prompts.js', () => ({
+      promptPassword: promptPasswordMock,
+      promptConfirm: promptConfirmMock,
+    }));
+
+    mock.module('../../core/identity.js', () => ({
+      keypairExists: keypairExistsMock,
+      generateAndSaveKeypair: generateAndSaveKeypairMock,
+    }));
+
+    mock.module('../../utils/password-stdin.js', () => ({
+      readPasswordFromStdin: mock(async () => 'stdin-password'),
+    }));
+
+    mock.module('../local-store-password.js', () => ({
+      getLocalStorePasswordFromEnv: () => null,
+    }));
+
+    const {
+      ensureDeviceIdentityPassword,
+      createDeviceIdentityPasswordContext,
+    } = await import(`../device-identity-password.js?test=${Date.now()}`);
+
+    const context = createDeviceIdentityPasswordContext();
+    context.password = 'seeded-password';
+    context.resolved = true;
+
+    const password = await ensureDeviceIdentityPassword({ yes: true }, context);
+
+    expect(password).toBe('seeded-password');
+    expect(generateAndSaveKeypairMock).toHaveBeenCalledWith('seeded-password', expect.any(String));
+  });
 });

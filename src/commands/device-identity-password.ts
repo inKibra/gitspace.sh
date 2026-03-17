@@ -76,10 +76,6 @@ export async function ensureDeviceIdentityPassword(
     sharedContext.password = envPassword;
   }
 
-  if (sharedContext?.resolved) {
-    return sharedContext.password;
-  }
-
   const remember = (password: string | null): string | null => {
     if (sharedContext) {
       sharedContext.resolved = true;
@@ -106,7 +102,7 @@ export async function ensureDeviceIdentityPassword(
       return remember(null);
     }
 
-    if (!fromStdin) {
+    if (!fromStdin && !(sharedContext?.resolved && typeof sharedContext.password === 'string')) {
       const confirmPassword = await promptPassword('Confirm local secure store password:');
       if (password !== confirmPassword) {
         throw new SpacesError('Password confirmation does not match.', 'USER_ERROR', 1);
@@ -116,6 +112,10 @@ export async function ensureDeviceIdentityPassword(
     await generateAndSaveKeypair(password, os.hostname());
     logger.success('Created local secure store identity');
     return remember(password);
+  }
+
+  if (sharedContext?.resolved) {
+    return sharedContext.password;
   }
 
   const { password } = await resolvePasswordInput(
