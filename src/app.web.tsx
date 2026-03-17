@@ -1880,6 +1880,7 @@ export default function App() {
             />
           )}
         </div>
+        <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );

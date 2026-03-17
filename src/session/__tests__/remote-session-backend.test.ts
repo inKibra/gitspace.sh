@@ -491,7 +491,7 @@ describe('RemoteSessionBackend', () => {
     expect(events).toContainEqual({
       type: 'command_error',
       code: 'SESSION_TAKEN_OVER',
-      message: 'This agent terminal was taken over by another client.',
+      message: 'This terminal was taken over by another client.',
     });
     expect(events).toContainEqual({ type: 'detached' });
   });

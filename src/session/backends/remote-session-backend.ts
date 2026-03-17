@@ -2741,7 +2741,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       this.emit({
         type: 'command_error',
         code: 'SESSION_TAKEN_OVER',
-        message: 'This agent terminal was taken over by another client.',
+        message: 'This terminal was taken over by another client.',
       });
       this.emit({ type: 'detached' });
       return;

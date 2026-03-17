@@ -1248,6 +1248,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           onActivity={handleTerminalActivity}
           readOnly={isViewOnlySession}
         />
+        <FlowTUI flow={flow} />
       </Fragment>
     );
   }
