@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const testDir = mkdtempSync(join(tmpdir(), 'gssh-secrets-local-store-'));
+const originalHome = process.env.HOME;
 process.env.HOME = testDir;
 process.env.GSSH_ENABLE_TEST_SECRETS_BACKEND = '1';
 process.env.GSSH_TEST_SECRETS_FILE = join(testDir, 'test-secrets.json');
@@ -24,6 +25,11 @@ beforeEach(() => {
 afterAll(() => {
   clearSecretsCache();
   lockLocalSecureStore();
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
   delete process.env.GSSH_TEST_SECRETS_FILE;
   delete process.env.GSSH_ENABLE_TEST_SECRETS_BACKEND;
   if (existsSync(testDir)) {
