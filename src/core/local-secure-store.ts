@@ -1,7 +1,6 @@
 import { deriveKey, generateSalt } from '../lib/tmux-lite/crypto/keys.js';
 import { open, seal } from '../lib/tmux-lite/crypto/secretbox.js';
 import {
-  deleteLocalStoreMeta,
   getLocalStoreMeta,
   getLocalStoreRecord,
   getLocalStoreSecret,
@@ -127,17 +126,9 @@ export function writeLocalStoreSecretJson(namespace: string, key: string, value:
   upsertLocalStoreSecret(namespace, key, ciphertext);
 }
 
-export function deleteLocalStoreSecretJson(namespace: string, key: string): boolean {
-  return removeLocalStoreSecret(namespace, key);
-}
-
 export function markLegacyLocalStorageMigrated(retained: boolean = true): void {
   setLocalStoreMeta(META_KEY_LEGACY_STORAGE_MIGRATED_AT, new Date().toISOString());
   setLocalStoreMeta(META_KEY_LEGACY_STORAGE_RETAINED, retained ? '1' : '0');
-}
-
-export function clearLegacyLocalStorageMigrationMarker(): void {
-  deleteLocalStoreMeta(META_KEY_LEGACY_STORAGE_MIGRATED_AT);
 }
 
 export function getLegacyLocalStorageMigrationState(): {

@@ -237,6 +237,36 @@ function stripKeychainOnlySecrets(blob: UnifiedSecretsBlob): UnifiedSecretsBlob 
   };
 }
 
+async function migrateRootUserSecretFromUnifiedBlob(blob: UnifiedSecretsBlob): Promise<{
+  blob: UnifiedSecretsBlob;
+  migrated: boolean;
+  rootUserSecret: string | null;
+}> {
+  const rootUserSecret = typeof blob.global[ROOT_USER_SECRET_KEY] === 'string'
+    && blob.global[ROOT_USER_SECRET_KEY].length > 0
+    ? blob.global[ROOT_USER_SECRET_KEY]
+    : null;
+
+  if (!rootUserSecret) {
+    return {
+      blob: stripKeychainOnlySecrets(blob),
+      migrated: false,
+      rootUserSecret: null,
+    };
+  }
+
+  const directRootUserSecret = await readSecretValue(ROOT_USER_SECRET_KEY);
+  if (!directRootUserSecret) {
+    await writeSecretValue(ROOT_USER_SECRET_KEY, rootUserSecret);
+  }
+
+  return {
+    blob: stripKeychainOnlySecrets(blob),
+    migrated: true,
+    rootUserSecret,
+  };
+}
+
 function normalizeRecord(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object') {
     return {};
@@ -317,11 +347,16 @@ async function loadUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
   }
 
   const raw = await readSecretValue(UNIFIED_SECRETS_KEY);
+  const parsed = parseUnifiedSecretsBlob(raw);
+  const { blob, migrated } = await migrateRootUserSecretFromUnifiedBlob(parsed);
 
-  unifiedSecretsCache = parseUnifiedSecretsBlob(raw);
-  unifiedSecretsCache = stripKeychainOnlySecrets(unifiedSecretsCache);
+  unifiedSecretsCache = blob;
   if (unifiedSecretsCache.metadata.legacyMigrationComplete) {
     legacyEntriesDetected = unifiedSecretsCache.metadata.legacyEntriesRetained;
+  }
+
+  if (migrated) {
+    await writeSecretValue(UNIFIED_SECRETS_KEY, JSON.stringify(unifiedSecretsCache));
   }
 
   if (isLocalSecureStoreUnlocked()) {
@@ -665,7 +700,24 @@ export async function setSecret(key: string, value: string): Promise<void> {
  */
 export async function getSecret(key: string): Promise<string | null> {
   if (key === ROOT_USER_SECRET_KEY) {
-    return readSecretValue(key);
+    const directValue = await readSecretValue(key);
+    if (directValue) {
+      return directValue;
+    }
+
+    const rawUnifiedBlob = await readSecretValue(UNIFIED_SECRETS_KEY);
+    if (!rawUnifiedBlob) {
+      return null;
+    }
+
+    const parsed = parseUnifiedSecretsBlob(rawUnifiedBlob);
+    const { blob, migrated, rootUserSecret } = await migrateRootUserSecretFromUnifiedBlob(parsed);
+    if (migrated) {
+      unifiedSecretsCache = blob;
+      await writeSecretValue(UNIFIED_SECRETS_KEY, JSON.stringify(blob));
+    }
+
+    return rootUserSecret;
   }
 
   const blob = await loadUnifiedSecretsBlob();

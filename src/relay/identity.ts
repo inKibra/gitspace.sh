@@ -105,16 +105,24 @@ function readStoredRelayPublicIdentity(): RelayPublicIdentity | null {
   ) ?? null;
 }
 
-function writeStoredRelayIdentity(identity: RelayIdentity): void {
+function writeStoredRelayPublicIdentity(identity: RelayPublicIdentity): void {
   writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_PUBLIC_IDENTITY, {
     id: identity.id,
     signingPublicKey: identity.signingPublicKey,
     label: identity.label,
     createdAt: identity.createdAt,
   } satisfies RelayPublicIdentity);
+}
+
+function writeStoredRelayPrivateIdentity(identity: RelayIdentity): void {
   writeLocalStoreSecretJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_PRIVATE_IDENTITY, {
     signingPrivateKey: Buffer.from(identity.signingPrivateKey).toString('base64'),
   });
+}
+
+function writeStoredRelayIdentity(identity: RelayIdentity): void {
+  writeStoredRelayPublicIdentity(identity);
+  writeStoredRelayPrivateIdentity(identity);
 }
 
 function readStoredRelayPrivateKey(): Uint8Array | null {
@@ -204,8 +212,9 @@ export function generateRelayIdentity(label?: string): RelayIdentity {
  * @param identity - Relay identity to save
  */
 export async function saveRelayIdentity(identity: RelayIdentity): Promise<void> {
+  writeStoredRelayPublicIdentity(identity);
   if (isLocalSecureStoreUnlocked()) {
-    writeStoredRelayIdentity(identity);
+    writeStoredRelayPrivateIdentity(identity);
   }
 
   ensureRelayDir();
@@ -312,7 +321,7 @@ export async function loadRelayIdentity(): Promise<RelayIdentity | null> {
  * Check if relay identity exists on disk
  */
 export function relayIdentityExists(): boolean {
-	return readStoredRelayPublicIdentity() !== null || existsSync(getRelayIdentityPath());
+  return readStoredRelayPublicIdentity() !== null || existsSync(getRelayIdentityPath());
 }
 
 /**
@@ -323,16 +332,16 @@ export function relayIdentityExists(): boolean {
  * @returns Public identity if exists, null otherwise
  */
 export function getRelayPublicIdentity(): RelayPublicIdentity | null {
-	const stored = readStoredRelayPublicIdentity();
-	if (stored) {
-		return stored;
-	}
+  const stored = readStoredRelayPublicIdentity();
+  if (stored) {
+    return stored;
+  }
 
-	const identityPath = getRelayIdentityPath();
+  const identityPath = getRelayIdentityPath();
 
-	if (!existsSync(identityPath)) {
-		return null;
-	}
+  if (!existsSync(identityPath)) {
+    return null;
+  }
 
   try {
     const content = readFileSync(identityPath, "utf-8");
@@ -392,6 +401,7 @@ export async function loadOrCreateRelayIdentity(label?: string): Promise<RelayId
         JSON.stringify(publicIdentity, null, 2),
         { encoding: "utf-8", mode: 0o600 }
       );
+      writeStoredRelayPublicIdentity(publicIdentity);
 
       console.log(`[relay] Created identity from env var: ${formatRelayFingerprint(publicKeyB64)}`);
       return identity;

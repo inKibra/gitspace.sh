@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +16,10 @@ const {
   setSecret,
 } = await import('../secrets.js');
 const { unlockLocalSecureStore, readLocalStoreSecretJson, lockLocalSecureStore } = await import('../../core/local-secure-store.js');
+
+beforeEach(() => {
+  clearSecretsCache();
+});
 
 afterAll(() => {
   clearSecretsCache();
@@ -54,5 +58,41 @@ describe('secrets local secure store migration', () => {
     };
 
     expect(rawBackend.entries?.['com.gitspace:USER_ROOT_IDENTITY']).toBe('root-secret');
+  });
+
+  test('migrates root mnemonic out of legacy unified blob on read', async () => {
+    const testSecretsFile = process.env.GSSH_TEST_SECRETS_FILE!;
+    const legacyUnifiedBlob = {
+      global: {
+        USER_ROOT_IDENTITY: 'legacy-root-secret',
+        GITSPACE_TOKEN: 'legacy-token',
+      },
+      projects: {},
+      metadata: {
+        schemaVersion: 2,
+        legacyMigrationComplete: false,
+        legacyEntriesRetained: false,
+      },
+    };
+
+    const rawBackend = {
+      entries: {
+        'com.gitspace:secrets': JSON.stringify(legacyUnifiedBlob),
+      },
+    };
+    writeFileSync(testSecretsFile, JSON.stringify(rawBackend, null, 2), 'utf-8');
+
+    expect(await getSecret('USER_ROOT_IDENTITY')).toBe('legacy-root-secret');
+
+    const migratedBackend = JSON.parse(readFileSync(testSecretsFile, 'utf-8')) as {
+      entries?: Record<string, string>;
+    };
+    expect(migratedBackend.entries?.['com.gitspace:USER_ROOT_IDENTITY']).toBe('legacy-root-secret');
+
+    const migratedUnifiedBlob = JSON.parse(migratedBackend.entries?.['com.gitspace:secrets'] ?? '{}') as {
+      global?: Record<string, string>;
+    };
+    expect(migratedUnifiedBlob.global?.USER_ROOT_IDENTITY).toBeUndefined();
+    expect(migratedUnifiedBlob.global?.GITSPACE_TOKEN).toBe('legacy-token');
   });
 });

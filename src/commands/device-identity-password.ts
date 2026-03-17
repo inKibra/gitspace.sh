@@ -67,11 +67,15 @@ export async function ensureDeviceIdentityPassword(
   context?: DeviceIdentityPasswordContext,
 ): Promise<string | null> {
   const envPassword = getLocalStorePasswordFromEnv();
-  if (envPassword) {
-    return envPassword;
+  const sharedContext = getSharedPasswordContext(context, {
+    ...options,
+    passwordStdin: options.passwordStdin || Boolean(envPassword),
+  });
+
+  if (envPassword && sharedContext && typeof sharedContext.password !== 'string') {
+    sharedContext.password = envPassword;
   }
 
-  const sharedContext = getSharedPasswordContext(context, options);
   if (sharedContext?.resolved) {
     return sharedContext.password;
   }

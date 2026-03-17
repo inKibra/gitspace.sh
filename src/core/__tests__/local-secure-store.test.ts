@@ -21,6 +21,7 @@ import {
   writeMachineIdentity,
   writeRelayConfig,
 } from '../identity.js';
+import { getControlDbPath } from '../../relay/control/store.js';
 
 let originalHome: string | undefined;
 let testDir: string;
@@ -88,5 +89,19 @@ describe('local secure store', () => {
 
     clearRelayConfig();
     expect(readRelayConfig()).toBeNull();
+  });
+
+  test('does not permanently initialize the local store with a wrong password before legacy keypair migration', async () => {
+    const created = await generateAndSaveKeypair('secret-password', 'legacy-device');
+
+    lockLocalSecureStore();
+    rmSync(getControlDbPath(), { force: true });
+    rmSync(`${getControlDbPath()}-shm`, { force: true });
+    rmSync(`${getControlDbPath()}-wal`, { force: true });
+
+    await expect(loadKeypair('wrong-password')).rejects.toThrow();
+
+    const loaded = await loadKeypair('secret-password');
+    expect(loaded.id).toBe(created.id);
   });
 });

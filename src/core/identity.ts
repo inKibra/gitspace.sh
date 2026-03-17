@@ -36,6 +36,7 @@ import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
 import { deriveKey, generateSalt } from '../lib/tmux-lite/crypto/keys.js';
 import { getSpacesDir } from './config.js';
 import {
+	localSecureStoreExists,
 	markLegacyLocalStorageMigrated,
 	readLocalStoreJson,
 	readLocalStoreSecretJson,
@@ -273,19 +274,22 @@ export async function loadKeypair(password: string): Promise<Identity> {
 		throw new NoIdentityError();
 	}
 
-	await unlockLocalSecureStore(password);
-	const storedPublic = readStoredDeviceIdentityPublic();
-	const storedSecrets = readStoredDeviceIdentitySecrets();
-	if (storedPublic && storedSecrets) {
-		return deserializeIdentity({
-			id: storedPublic.id,
-			label: storedPublic.label,
-			createdAt: storedPublic.createdAt,
-			signingPublicKey: storedPublic.signingPublicKey,
-			keyExchangePublicKey: storedPublic.keyExchangePublicKey,
-			signingSecretKey: storedSecrets.signingSecretKey,
-			keyExchangePrivateKey: storedSecrets.keyExchangePrivateKey,
-		});
+	const hasInitializedLocalStore = localSecureStoreExists();
+	if (hasInitializedLocalStore) {
+		await unlockLocalSecureStore(password);
+		const storedPublic = readStoredDeviceIdentityPublic();
+		const storedSecrets = readStoredDeviceIdentitySecrets();
+		if (storedPublic && storedSecrets) {
+			return deserializeIdentity({
+				id: storedPublic.id,
+				label: storedPublic.label,
+				createdAt: storedPublic.createdAt,
+				signingPublicKey: storedPublic.signingPublicKey,
+				keyExchangePublicKey: storedPublic.keyExchangePublicKey,
+				signingSecretKey: storedSecrets.signingSecretKey,
+				keyExchangePrivateKey: storedSecrets.keyExchangePrivateKey,
+			});
+		}
 	}
 
 	// Read storage file
@@ -337,6 +341,10 @@ export async function loadKeypair(password: string): Promise<Identity> {
 		signingSecretKey: secrets.signingSecretKey,
 		keyExchangePrivateKey: secrets.keyExchangePrivateKey,
 	};
+
+	if (!hasInitializedLocalStore) {
+		await unlockLocalSecureStore(password);
+	}
 
 	// Deserialize to Identity format
 	migrateLegacyKeypairToLocalStore(storage, secrets);

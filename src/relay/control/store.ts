@@ -517,15 +517,6 @@ export function getLocalStoreRecord(namespace: string, key: string): LocalStoreR
   });
 }
 
-export function listLocalStoreRecords(namespace: string): LocalStoreRecord[] {
-  return withControlDb((db) => {
-    const rows = db.query(
-      'SELECT * FROM local_store_records WHERE namespace = ? ORDER BY updated_at DESC'
-    ).all(namespace) as LocalStoreRecordRow[];
-    return rows.map(mapLocalStoreRecordRow);
-  });
-}
-
 export function upsertLocalStoreRecord(namespace: string, key: string, valueJson: string): LocalStoreRecord {
   return withControlDb((db) => {
     const now = nowIso();
@@ -569,15 +560,6 @@ export function getLocalStoreSecret(namespace: string, key: string): LocalStoreS
       'SELECT * FROM local_store_secrets WHERE namespace = ? AND key = ?'
     ).get(namespace, key) as LocalStoreSecretRow | null;
     return row ? mapLocalStoreSecretRow(row) : undefined;
-  });
-}
-
-export function listLocalStoreSecrets(namespace: string): LocalStoreSecretRecord[] {
-  return withControlDb((db) => {
-    const rows = db.query(
-      'SELECT * FROM local_store_secrets WHERE namespace = ? ORDER BY updated_at DESC'
-    ).all(namespace) as LocalStoreSecretRow[];
-    return rows.map(mapLocalStoreSecretRow);
   });
 }
 
