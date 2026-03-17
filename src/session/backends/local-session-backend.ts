@@ -1404,6 +1404,7 @@ export class LocalSessionBackend implements SessionBackend {
       this.sessionSocket = null;
       this.sessionSocketSessionId = null;
     }
+    this.closingSessionSocket = false;
 
     this.attachedSessionId = null;
     this.pendingUtf8Bytes = new Uint8Array(0);

@@ -80,11 +80,17 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     return snapshot[workspaceId]?.sessions ?? [];
   }, [options.backend]);
 
-  const loadWorkspaceSessions = useCallback(async (workspaceId: string) => {
+  const loadWorkspaceSessions = useCallback(async (
+    workspaceId: string,
+    options: { updateSelection?: boolean } = {},
+  ) => {
     const getKnownAgentSessions = requireAgentMethod('getKnownAgentSessions');
     const listAgentSessions = requireAgentMethod('listAgentSessions');
-    setLoadingWorkspaceId(workspaceId);
-    setActiveWorkspaceId(workspaceId);
+    const shouldUpdateSelection = options.updateSelection !== false;
+    if (shouldUpdateSelection) {
+      setLoadingWorkspaceId(workspaceId);
+      setActiveWorkspaceId(workspaceId);
+    }
     setError(null);
 
     try {
@@ -108,7 +114,11 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
             }));
           })
           .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-          .finally(() => setLoadingWorkspaceId((current) => (current === workspaceId ? null : current)));
+          .finally(() => {
+            if (shouldUpdateSelection) {
+              setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
+            }
+          });
         return knownMapped;
       }
 
@@ -124,7 +134,9 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
       setError(message);
       throw err;
     } finally {
-      setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
+      if (shouldUpdateSelection) {
+        setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
+      }
     }
   }, [getPendingPermissionMap, getSnapshotSessions, getStatusMap, requireAgentMethod]);
 
@@ -158,7 +170,9 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
 
   const syncWorkspaceSessions = useCallback(async (workspaceIds: string[]) => {
     const uniqueWorkspaceIds = Array.from(new Set(workspaceIds.filter(Boolean)));
-    const results = await Promise.allSettled(uniqueWorkspaceIds.map((workspaceId) => loadWorkspaceSessions(workspaceId)));
+    const results = await Promise.allSettled(
+      uniqueWorkspaceIds.map((workspaceId) => loadWorkspaceSessions(workspaceId, { updateSelection: false })),
+    );
     const rejection = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (rejection) {
       throw rejection.reason;

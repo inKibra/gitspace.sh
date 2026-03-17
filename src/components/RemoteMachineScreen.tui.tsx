@@ -175,6 +175,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       return;
     }
     if (remote.commandError.code !== 'SESSION_TAKEN_OVER') {
+      lastRemoteCommandErrorRef.current = null;
       return;
     }
     const key = `${remote.commandError.code}:${remote.commandError.message}`;

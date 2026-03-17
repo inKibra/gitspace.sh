@@ -443,6 +443,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       return;
     }
     if (localCommandError.code !== 'SESSION_TAKEN_OVER') {
+      lastLocalCommandErrorRef.current = null;
       return;
     }
     const key = `${localCommandError.code}:${localCommandError.message}`;

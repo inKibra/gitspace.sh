@@ -3091,7 +3091,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           if (idx === -1) {
             state.sessions.push({ id: delta.sessionId, title: delta.title });
           } else {
-            state.sessions[idx] = { id: delta.sessionId, title: delta.title };
+            state.sessions[idx] = {
+              ...state.sessions[idx],
+              title: delta.title,
+            };
           }
           break;
         }
