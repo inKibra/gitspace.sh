@@ -687,6 +687,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       collectWorkspaceSyncIds(remote.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
     );
   }, [remote.workspaces, workspaceAgentSessions]);
+  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
 
   const remoteWorkspaceSyncKey = useMemo(
     () => remote.workspaces.map((workspace) => workspace.id).sort().join('|'),
@@ -704,10 +705,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     }
     lastRemoteWorkspaceSyncKeyRef.current = remoteWorkspaceSyncKey;
     remote.requestSessions();
-    void workspaceAgentSessions.syncWorkspaceSessions(remote.workspaces.map((workspace) => workspace.id)).catch((error) => {
+    void syncWorkspaceAgentSessions(remote.workspaces.map((workspace) => workspace.id)).catch((error) => {
       logger.error(`[tui] Initial remote agent sync failed: ${error instanceof Error ? error.message : String(error)}`);
     });
-  }, [remote.mode, remote.requestSessions, remote.status, remote.workspaces, remoteWorkspaceSyncKey, workspaceAgentSessions]);
+  }, [remote.mode, remote.requestSessions, remote.status, remote.workspaces, remoteWorkspaceSyncKey, syncWorkspaceAgentSessions]);
 
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: remote.workspaces,

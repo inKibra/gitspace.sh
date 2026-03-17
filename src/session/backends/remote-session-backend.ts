@@ -3082,15 +3082,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           state.lastMessages[delta.sessionId] = delta.preview;
           break;
         case 'agent_session_created':
-          if (!state.sessions.some((s) => s.id === delta.sessionId)) {
-            state.sessions.push({ id: delta.sessionId, title: delta.title });
-          }
           break;
         case 'agent_session_updated': {
           const idx = state.sessions.findIndex((s) => s.id === delta.sessionId);
-          if (idx === -1) {
-            state.sessions.push({ id: delta.sessionId, title: delta.title });
-          } else {
+          if (idx !== -1) {
             state.sessions[idx] = {
               ...state.sessions[idx],
               title: delta.title,

@@ -820,6 +820,7 @@ export default function App() {
       collectWorkspaceSyncIds(terminal.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
     );
   }, [terminal.workspaces, workspaceAgentSessions]);
+  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
 
   const allWorkspaceSyncKey = useMemo(
     () => terminal.workspaces.map((workspace) => workspace.id).sort().join('|'),
@@ -1170,10 +1171,10 @@ export default function App() {
     }
     lastAllWorkspaceSyncKeyRef.current = allWorkspaceSyncKey;
     terminal.requestSessions();
-    void workspaceAgentSessions.syncWorkspaceSessions(terminal.workspaces.map((workspace) => workspace.id)).catch((error) => {
+    void syncWorkspaceAgentSessions(terminal.workspaces.map((workspace) => workspace.id)).catch((error) => {
       toast.error(error instanceof Error ? error.message : String(error));
     });
-  }, [allWorkspaceSyncKey, terminal, view, workspaceAgentSessions]);
+  }, [allWorkspaceSyncKey, syncWorkspaceAgentSessions, terminal, view]);
 
   useEffect(() => {
     if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
