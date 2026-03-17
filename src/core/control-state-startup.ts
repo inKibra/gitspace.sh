@@ -1,7 +1,7 @@
 import { computeIdentityId } from '../relay/identity.js';
 import {
+  peekPersistedOwnerBinding,
   readControlMeta,
-  readPersistedOwnerBinding,
   type PersistedOwnerBinding,
 } from '../relay/control/store.js';
 import type { ControlMeta } from '../relay/control/types.js';
@@ -33,7 +33,7 @@ export function planStartupControlState(input: {
   ownerUserRootId: string;
   currentRelay?: StartupCurrentRelayBinding;
 }): StartupControlStatePlan {
-  const ownerBinding = readPersistedOwnerBinding();
+  const ownerBinding = peekPersistedOwnerBinding();
   const controlMeta = readControlMeta();
   const hasPinnedRelayIdentity = Boolean(
     controlMeta.relayIdentityId || controlMeta.relaySigningPublicKey || controlMeta.relayFingerprint,

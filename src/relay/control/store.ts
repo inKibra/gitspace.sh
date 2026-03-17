@@ -273,20 +273,9 @@ export interface PersistedOwnerBinding {
   repaired: boolean;
 }
 
-function readPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
+function peekPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
   let controlOwnerId = getMetaValue(db, META_KEY_OWNER_IDENTITY_ID);
   let vaultOwnerId = getVaultMetaValueFromDb(db, 'owner_user_root_id');
-  let repaired = false;
-
-  if (!controlOwnerId && vaultOwnerId) {
-    setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, vaultOwnerId);
-    controlOwnerId = vaultOwnerId;
-    repaired = true;
-  } else if (controlOwnerId && !vaultOwnerId) {
-    setVaultMetaValueInDb(db, 'owner_user_root_id', controlOwnerId);
-    vaultOwnerId = controlOwnerId;
-    repaired = true;
-  }
 
   const mismatch = Boolean(controlOwnerId && vaultOwnerId && controlOwnerId !== vaultOwnerId);
   const effectiveOwnerId = mismatch ? undefined : (controlOwnerId ?? vaultOwnerId);
@@ -296,12 +285,42 @@ function readPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
     vaultOwnerId,
     effectiveOwnerId,
     mismatch,
-    repaired,
+    repaired: false,
   };
+}
+
+function readPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
+  const binding = peekPersistedOwnerBindingFromDb(db);
+
+  if (!binding.controlOwnerId && binding.vaultOwnerId) {
+    setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, binding.vaultOwnerId);
+    return {
+      ...binding,
+      controlOwnerId: binding.vaultOwnerId,
+      effectiveOwnerId: binding.vaultOwnerId,
+      repaired: true,
+    };
+  }
+
+  if (binding.controlOwnerId && !binding.vaultOwnerId) {
+    setVaultMetaValueInDb(db, 'owner_user_root_id', binding.controlOwnerId);
+    return {
+      ...binding,
+      vaultOwnerId: binding.controlOwnerId,
+      effectiveOwnerId: binding.controlOwnerId,
+      repaired: true,
+    };
+  }
+
+  return binding;
 }
 
 export function readPersistedOwnerBinding(): PersistedOwnerBinding {
   return withControlDb((db) => readPersistedOwnerBindingFromDb(db));
+}
+
+export function peekPersistedOwnerBinding(): PersistedOwnerBinding {
+  return withControlDb((db) => peekPersistedOwnerBindingFromDb(db));
 }
 
 export function getPersistedOwnerIdentityId(): string | undefined {

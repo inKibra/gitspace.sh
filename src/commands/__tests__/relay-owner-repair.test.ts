@@ -131,6 +131,20 @@ describe('bindRelayOwnerForStartup', () => {
     });
   });
 
+  test('reports repaired owner binding when only vault owner metadata exists', async () => {
+    await withIsolatedEnv(async () => {
+      setVaultMeta('owner_user_root_id', 'owner-a');
+
+      const result = bindRelayOwnerForStartup('owner-a');
+
+      expect(result).toEqual({
+        repairedOwnerBinding: true,
+        missingVaultInitialization: false,
+      });
+      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+    });
+  });
+
   test('can explicitly take over relay ownership by clearing persisted control state', async () => {
     await withIsolatedEnv(async () => {
       await unlockLocalSecureStore('test-password');
