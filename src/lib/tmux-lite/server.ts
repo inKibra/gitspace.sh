@@ -49,9 +49,11 @@ import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/sn
 import {
   attachAgentSession as ensureAgentTerminalSession,
   abortAgentSession,
+  clearAgentSession,
   createAgentSession,
   ensureAgentControlInitialized,
   getAgentControlSnapshot,
+  getAgentSessionTakeoverState,
   getKnownAgentSessions,
   listLiveAgentSessions,
   respondToAgentPermission,
@@ -2010,14 +2012,44 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'agent-clear':
+            try {
+              await getAgentControlReady();
+              const ok = await clearAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to clear agent session: ${errMsg}` };
+            }
+            break;
+
           case 'agent-attach':
             try {
               await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
+              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { force: cmd.force });
               res = { type: 'session', session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-takeover-status':
+            try {
+              await getAgentControlReady();
+              const status = await getAgentSessionTakeoverState(cmd.target, cmd.agentSessionId);
+              res = {
+                type: 'agent-takeover-status',
+                status: {
+                  workspaceId: cmd.target.workspaceId,
+                  agentSessionId: cmd.agentSessionId,
+                  requiresTakeover: status.requiresTakeover,
+                  sessionName: status.sessionName,
+                },
+              };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to inspect agent session: ${errMsg}` };
             }
             break;
 

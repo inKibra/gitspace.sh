@@ -1,10 +1,12 @@
-import { createSession as createTmuxSession, listSessions as listTmuxSessions } from '../lib/tmux-lite/cli.js';
+import { createSession as createTmuxSession, killSession as killTmuxSession, listSessions as listTmuxSessions } from '../lib/tmux-lite/cli.js';
 import type { Session as TmuxSession } from '../lib/tmux-lite/protocol.js';
 import { OpenCodeClient, type OpenCodeSessionRecord } from './opencode-client.js';
 import { createOpenCodeBasicAuthHeader, defaultOpenCodeRuntimeManager } from './opencode-runtime.js';
 import type { OpenCodeRuntimeInfo, OpenCodeRuntimeTarget } from './opencode-types.js';
 import { normalizeWorkspacePath } from './opencode-runtime-shared.js';
 import {
+  deleteStoredSession,
+  markStoredSessionClosed,
   readStoredSessionHistory,
   replaceStoredSessions,
   upsertStoredSession,
@@ -22,6 +24,17 @@ export interface AgentSessionSummary {
   workspaceId: string;
   title: string;
   updatedAt?: string;
+  closed?: boolean;
+}
+
+export class AgentSessionTakeoverRequiredError extends Error {
+  readonly sessionName?: string;
+
+  constructor(message: string, options: { sessionName?: string } = {}) {
+    super(message);
+    this.name = 'AgentSessionTakeoverRequiredError';
+    this.sessionName = options.sessionName;
+  }
 }
 
 function buildAgentTerminalSessionName(target: AgentWorkspaceTarget, agentSessionId: string): string {
@@ -63,6 +76,7 @@ function normalizeOpenCodeSession(target: AgentWorkspaceTarget, session: OpenCod
     createdAt,
     updatedAt,
     lastSeenAt: new Date().toISOString(),
+    lastKnownStatus: undefined,
   };
 }
 
@@ -80,6 +94,7 @@ function toSummaries(workspaceId: string, sessions: Record<string, StoredWorkspa
       workspaceId,
       title: session.title,
       updatedAt: session.updatedAt ?? session.lastSeenAt,
+      closed: session.lastKnownStatus === 'closed',
     }));
 }
 
@@ -138,24 +153,85 @@ export class OpenCodeCoordinator {
   async abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
     const runtime = await this.ensureRuntime(target);
     const client = createClient(runtime);
-    return client.abortSession(agentSessionId);
+    const aborted = await client.abortSession(agentSessionId);
+    const existing = await this.findExistingAgentTerminalSession(target, agentSessionId);
+    if (existing) {
+      try {
+        await killTmuxSession(existing.id);
+      } catch {
+        // best effort
+      }
+    }
+    if (aborted) {
+      try {
+        await this.refreshAgentSessions(target);
+      } finally {
+        await markStoredSessionClosed(target.workspaceId, agentSessionId);
+      }
+      return aborted;
+    }
+
+    await this.refreshAgentSessions(target);
+    return aborted;
   }
 
-  async ensureAgentTerminalSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
+  async clearAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+    const existing = await this.findExistingAgentTerminalSession(target, agentSessionId);
+    if (existing) {
+      try {
+        await killTmuxSession(existing.id);
+      } catch {
+        // best effort
+      }
+    }
+    await deleteStoredSession(target.workspaceId, agentSessionId);
+    return true;
+  }
+
+  async checkAgentSessionTakeover(
+    target: AgentWorkspaceTarget,
+    agentSessionId: string,
+  ): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+    const existing = await this.findExistingAgentTerminalSession(target, agentSessionId);
+    if (!existing?.attached) {
+      return { requiresTakeover: false };
+    }
+    return {
+      requiresTakeover: true,
+      sessionName: existing.name,
+    };
+  }
+
+  async ensureAgentTerminalSession(
+    target: AgentWorkspaceTarget,
+    agentSessionId: string,
+    options: { force?: boolean } = {},
+  ): Promise<TmuxSession> {
+    const existing = await this.findExistingAgentTerminalSession(target, agentSessionId);
+    if (existing) {
+      if (existing.attached && options.force !== true) {
+        throw new AgentSessionTakeoverRequiredError(
+          `Agent session is already open in ${existing.name}. Taking over will disconnect the current viewer.`,
+          { sessionName: existing.name },
+        );
+      }
+      return existing;
+    }
+
     const key = `${target.workspaceId}:${agentSessionId}`;
     const inFlight = this.inflightTerminalSessions.get(key);
     if (inFlight) {
       return inFlight;
     }
 
-    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId).finally(() => {
+    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId, options).finally(() => {
       this.inflightTerminalSessions.delete(key);
     });
     this.inflightTerminalSessions.set(key, ensurePromise);
     return ensurePromise;
   }
 
-  private async ensureAgentTerminalSessionInternal(target: AgentWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
+  private async findExistingAgentTerminalSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<TmuxSession | null> {
     const history = await readStoredSessionHistory(target.workspaceId);
     const record = history.sessions[agentSessionId];
     const sessions = await listTmuxSessions();
@@ -163,7 +239,16 @@ export class OpenCodeCoordinator {
     if (record?.terminalSessionId) {
       const existingById = sessions.find((session) => session.id === record.terminalSessionId);
       if (existingById && isAgentTmuxSession(existingById, target.workspaceId, agentSessionId)) {
-        return existingById;
+        await upsertStoredSession(target.workspaceId, {
+          id: agentSessionId,
+          title: record?.title ?? agentSessionId,
+          terminalSessionId: existingById.id,
+          terminalSessionName: existingById.name,
+          lastKnownStatus: existingById.exitCode === undefined ? undefined : 'closed',
+        });
+        if (existingById.exitCode === undefined) {
+          return existingById;
+        }
       }
     }
 
@@ -174,7 +259,31 @@ export class OpenCodeCoordinator {
         title: record?.title ?? agentSessionId,
         terminalSessionId: existing.id,
         terminalSessionName: existing.name,
+        lastKnownStatus: existing.exitCode === undefined ? undefined : 'closed',
       });
+      if (existing.exitCode === undefined) {
+        return existing;
+      }
+    }
+
+    return null;
+  }
+
+  private async ensureAgentTerminalSessionInternal(
+    target: AgentWorkspaceTarget,
+    agentSessionId: string,
+    options: { force?: boolean },
+  ): Promise<TmuxSession> {
+    const history = await readStoredSessionHistory(target.workspaceId);
+    const record = history.sessions[agentSessionId];
+    const existing = await this.findExistingAgentTerminalSession(target, agentSessionId);
+    if (existing) {
+      if (existing.attached && options.force !== true) {
+        throw new AgentSessionTakeoverRequiredError(
+          `Agent session is already open in ${existing.name}. Taking over will disconnect the current viewer.`,
+          { sessionName: existing.name },
+        );
+      }
       return existing;
     }
 
@@ -204,6 +313,7 @@ export class OpenCodeCoordinator {
       title: record?.title ?? agentSessionId,
       terminalSessionId: session.id,
       terminalSessionName: session.name,
+      lastKnownStatus: undefined,
     });
     return session;
   }

@@ -28,7 +28,9 @@ import {
   listAgentSessions as listTmuxAgentSessions,
   createAgentSession as createTmuxAgentSession,
   abortAgentSession as abortTmuxAgentSession,
+  clearAgentSession as clearTmuxAgentSession,
   attachAgentSession as attachTmuxAgentSession,
+  getAgentSessionTakeoverState as getTmuxAgentSessionTakeoverState,
   respondToAgentPermission as respondToTmuxAgentPermission,
   type Session,
 } from "../tmux-lite/cli";
@@ -41,6 +43,7 @@ import {
 } from '../tmux-lite/replay/service.js';
 import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
+import { AgentSessionTakeoverRequiredError } from '../../agents/opencode-coordinator.js';
 
 // Import project loading
 import { listProjectSummaries } from "../../core/project-catalog";
@@ -635,6 +638,17 @@ export class RemoteSessionHandler {
         await this.handleCreateAgentSession(session, msg.requestId, msg.workspaceId, msg.title, sendResponse);
         break;
 
+      case 'clear_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to clear agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
+          return;
+        }
+        await this.handleClearAgentSession(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
+        break;
+
       case 'abort_agent_session':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to abort agent sessions', {
@@ -670,7 +684,18 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to attach agent sessions');
           return;
         }
-        await this.handleAttachAgentSession(session, msg.workspaceId, msg.agentSessionId, msg.viewOnly, sendResponse);
+        await this.handleAttachAgentSession(session, msg.workspaceId, msg.agentSessionId, msg.viewOnly, msg.force, sendResponse);
+        break;
+
+      case 'check_agent_session_takeover':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to inspect agent sessions', {
+            workspaceId: msg.workspaceId,
+            requestId: msg.requestId,
+          });
+          return;
+        }
+        await this.handleCheckAgentSessionTakeover(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
         break;
 
       default: {
@@ -1903,6 +1928,28 @@ export class RemoteSessionHandler {
     }
   }
 
+  private async handleClearAgentSession(
+    _session: RemoteClientSession,
+    requestId: string,
+    workspaceId: string,
+    agentSessionId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const ok = await clearTmuxAgentSession(target, agentSessionId);
+      await this.sendMessage(_session, sendResponse, {
+        type: 'agent_bool',
+        requestId,
+        workspaceId: target.workspaceId,
+        ok,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.sendError(_session, sendResponse, 'AGENT_CLEAR_FAILED', detail, { workspaceId, requestId });
+    }
+  }
+
   private async handleRespondAgentPermission(
     _session: RemoteClientSession,
     requestId: string,
@@ -1932,11 +1979,12 @@ export class RemoteSessionHandler {
     workspaceId: string,
     agentSessionId: string,
     viewOnly: boolean | undefined,
+    force: boolean | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
     try {
       const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const terminalSession = await attachTmuxAgentSession(target, agentSessionId);
+      const terminalSession = await attachTmuxAgentSession(target, agentSessionId, { force });
 
       session.state = 'attached';
       session.attachedSessionId = terminalSession.id;
@@ -1952,7 +2000,35 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
+      if (e instanceof AgentSessionTakeoverRequiredError) {
+        await this.sendError(session, sendResponse, 'TAKEOVER_REQUIRED', detail, { workspaceId });
+        return;
+      }
       await this.sendError(session, sendResponse, 'ATTACH_FAILED', `Failed to attach agent session: ${detail}`);
+    }
+  }
+
+  private async handleCheckAgentSessionTakeover(
+    session: RemoteClientSession,
+    requestId: string,
+    workspaceId: string,
+    agentSessionId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    try {
+      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+      const status = await getTmuxAgentSessionTakeoverState(target, agentSessionId);
+      await this.sendMessage(session, sendResponse, {
+        type: 'agent_takeover_status',
+        requestId,
+        workspaceId: target.workspaceId,
+        agentSessionId,
+        requiresTakeover: status.requiresTakeover,
+        sessionName: status.sessionName,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.sendError(session, sendResponse, 'AGENT_TAKEOVER_CHECK_FAILED', detail, { workspaceId, requestId });
     }
   }
 

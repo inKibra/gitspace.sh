@@ -225,6 +225,14 @@ export interface AgentSessionSummaryPayload {
   workspaceId: string;
   title: string;
   updatedAt?: string;
+  closed?: boolean;
+}
+
+export interface AgentTakeoverStatusPayload {
+  workspaceId: string;
+  agentSessionId: string;
+  requiresTakeover: boolean;
+  sessionName?: string;
 }
 
 export type Command =
@@ -268,7 +276,9 @@ export type Command =
   | { type: 'agent-sessions'; target: AgentWorkspaceTargetPayload; mode?: 'known' | 'live' }
   | { type: 'agent-create'; target: AgentWorkspaceTargetPayload; title?: string }
   | { type: 'agent-abort'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-clear'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; force?: boolean }
+  | { type: 'agent-takeover-status'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | {
       type: 'agent-permission';
       target: AgentWorkspaceTargetPayload;
@@ -295,6 +305,7 @@ export type Response =
     }
   | { type: 'agent-watch-started' }
   | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
+  | { type: 'agent-takeover-status'; status: AgentTakeoverStatusPayload }
   | { type: 'agent-bool'; ok: boolean }
   | { type: "replays"; replays: import('./replay/types.js').ReplayInfo[] }
   | { type: "replay-snapshot"; snapshot: import('./replay/types.js').TerminalSnapshot }

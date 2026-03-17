@@ -120,6 +120,14 @@ export interface AttachAgentSessionRequest {
   cols?: number;
   rows?: number;
   viewOnly?: boolean;
+  force?: boolean;
+}
+
+export interface CheckAgentSessionTakeoverRequest {
+  type: 'check_agent_session_takeover';
+  requestId: string;
+  workspaceId: string;
+  agentSessionId: string;
 }
 
 export interface ListAgentSessionsRequest {
@@ -127,6 +135,13 @@ export interface ListAgentSessionsRequest {
   requestId: string;
   workspaceId: string;
   mode?: 'known' | 'live';
+}
+
+export interface ClearAgentSessionRequest {
+  type: 'clear_agent_session';
+  requestId: string;
+  workspaceId: string;
+  agentSessionId: string;
 }
 
 export interface CreateAgentSessionRequest {
@@ -651,7 +666,7 @@ export interface AgentSessionsResponse {
   type: 'agent_sessions';
   requestId: string;
   workspaceId: string;
-  sessions: Array<{ id: string; title: string; updatedAt?: string }>;
+  sessions: Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>;
 }
 
 export interface AgentBoolResponse {
@@ -659,6 +674,15 @@ export interface AgentBoolResponse {
   requestId: string;
   workspaceId: string;
   ok: boolean;
+}
+
+export interface AgentTakeoverStatusResponse {
+  type: 'agent_takeover_status';
+  requestId: string;
+  workspaceId: string;
+  agentSessionId: string;
+  requiresTakeover: boolean;
+  sessionName?: string;
 }
 
 /**
@@ -694,7 +718,9 @@ export type ClientToMachineMessage =
   | UndismissReplayRequest
   | AttachSessionRequest
   | AttachAgentSessionRequest
+  | CheckAgentSessionTakeoverRequest
   | ListAgentSessionsRequest
+  | ClearAgentSessionRequest
   | CreateAgentSessionRequest
   | AbortAgentSessionRequest
   | RespondAgentPermissionRequest
@@ -766,6 +792,7 @@ export type MachineToClientMessage =
   | ProcessStoppedResponse
   | AgentSessionsResponse
   | AgentBoolResponse
+  | AgentTakeoverStatusResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush;
 
@@ -813,7 +840,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
   | UndismissReplayRequest
   | AttachSessionRequest
   | AttachAgentSessionRequest
+  | CheckAgentSessionTakeoverRequest
   | ListAgentSessionsRequest
+  | ClearAgentSessionRequest
   | CreateAgentSessionRequest
   | AbortAgentSessionRequest
   | RespondAgentPermissionRequest
@@ -840,7 +869,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is
     'undismiss_replay',
     "attach_session",
     'attach_agent_session',
+    'check_agent_session_takeover',
     'list_agent_sessions',
+    'clear_agent_session',
     'create_agent_session',
     'abort_agent_session',
     'respond_agent_permission',

@@ -18,7 +18,7 @@ import {
   type SessionStatus,
   type Permission,
 } from '../agents/opencode-event-types.js';
-import { deleteStoredSession, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
+import { markStoredSessionClosed, replaceStoredSessions, upsertStoredSession } from '../agents/opencode-store.js';
 
 // ============================================================================
 // Shared agent state types (used by both machine and client)
@@ -194,10 +194,7 @@ export class AgentEventManager {
 
     if (statusesResp.ok) {
       const statuses = (await statusesResp.json()) as Record<string, SessionStatus>;
-      const allowedSessionIds = new Set(state.sessions.map((session) => session.id));
-      state.statuses = Object.fromEntries(
-        Object.entries(statuses).filter(([sessionId]) => allowedSessionIds.has(sessionId)),
-      );
+      state.statuses = statuses;
       for (const [sessionId, status] of Object.entries(state.statuses)) {
         this.previousStatuses.set(`${info.workspaceId}:${sessionId}`, status);
       }
@@ -263,7 +260,7 @@ export class AgentEventManager {
         const props = raw.properties as { sessionID: string; status: SessionStatus };
         const { sessionID, status } = props;
         if (!state.sessions.some((session) => session.id === sessionID)) {
-          break;
+          state.sessions.push({ id: sessionID, title: sessionID });
         }
         const prevKey = `${workspaceId}:${sessionID}`;
         const prev = this.previousStatuses.get(prevKey);
@@ -388,7 +385,7 @@ export class AgentEventManager {
         this.previousStatuses.delete(`${workspaceId}:${id}`);
         this.textAccumulators.delete(`${workspaceId}:${id}`);
         this.emit({ type: 'agent_session_deleted', workspaceId, sessionId: id });
-        this.queuePersistedWrite(workspaceId, () => deleteStoredSession(workspaceId, id));
+        this.queuePersistedWrite(workspaceId, () => markStoredSessionClosed(workspaceId, id));
         break;
       }
 

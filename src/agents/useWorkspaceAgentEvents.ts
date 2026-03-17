@@ -62,17 +62,23 @@ export interface UseWorkspaceAgentEventsResult {
 
 function buildLiveStateFromWorkspace(workspace: WorkspaceAgentState): Record<string, AgentSessionLiveState> {
   const result: Record<string, AgentSessionLiveState> = {};
-  for (const session of workspace.sessions) {
-    const status: SessionStatus = workspace.statuses[session.id] ?? { type: 'idle' };
-    const permissions = workspace.pendingPermissions[session.id] ?? [];
+  const sessionIds = new Set<string>([
+    ...workspace.sessions.map((session) => session.id),
+    ...Object.keys(workspace.statuses),
+    ...Object.keys(workspace.pendingPermissions),
+    ...Object.keys(workspace.lastMessages),
+  ]);
+  for (const sessionId of sessionIds) {
+    const status: SessionStatus = workspace.statuses[sessionId] ?? { type: 'idle' };
+    const permissions = workspace.pendingPermissions[sessionId] ?? [];
     const pendingMap: Record<string, Permission> = {};
     for (const p of permissions) {
       pendingMap[p.id] = p;
     }
-    result[session.id] = {
+    result[sessionId] = {
       status,
       pendingPermissions: pendingMap,
-      lastMessagePreview: workspace.lastMessages[session.id] ?? '',
+      lastMessagePreview: workspace.lastMessages[sessionId] ?? '',
       lastActivityAt: Date.now(),
     };
   }
@@ -172,6 +178,7 @@ export function useWorkspaceAgentEvents({
                 }),
                 status,
                 lastActivityAt: Date.now(),
+                errorMessage: undefined,
               },
             };
 
@@ -205,6 +212,7 @@ export function useWorkspaceAgentEvents({
                   [permission.id]: permission,
                 },
                 lastActivityAt: Date.now(),
+                errorMessage: undefined,
               },
             };
             onNotificationRef.current?.({
@@ -226,7 +234,7 @@ export function useWorkspaceAgentEvents({
               const { [permissionId]: _removed, ...rest } = existing.pendingPermissions;
               next[workspaceId] = {
                 ...next[workspaceId],
-                [sessionId]: { ...existing, pendingPermissions: rest },
+                [sessionId]: { ...existing, pendingPermissions: rest, errorMessage: undefined },
               };
             }
             break;
@@ -265,7 +273,7 @@ export function useWorkspaceAgentEvents({
             if (existing) {
               next[workspaceId] = {
                 ...next[workspaceId],
-                [sessionId]: { ...existing, lastMessagePreview: preview },
+                [sessionId]: { ...existing, lastMessagePreview: preview, errorMessage: undefined },
               };
             }
             break;
@@ -282,6 +290,7 @@ export function useWorkspaceAgentEvents({
                   pendingPermissions: {},
                   lastMessagePreview: '',
                   lastActivityAt: Date.now(),
+                  errorMessage: undefined,
                 },
               };
             }
@@ -291,6 +300,13 @@ export function useWorkspaceAgentEvents({
           case 'agent_session_updated': {
             const { sessionId, title } = delta;
             sessionTitlesRef.current[`${workspaceId}:${sessionId}`] = title;
+            const existing = next[workspaceId]?.[sessionId];
+            if (existing) {
+              next[workspaceId] = {
+                ...next[workspaceId],
+                [sessionId]: { ...existing, errorMessage: undefined },
+              };
+            }
             break;
           }
 

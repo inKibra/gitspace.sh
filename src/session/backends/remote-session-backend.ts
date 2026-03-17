@@ -5,6 +5,8 @@ import {
   type ApplyBundleRefreshRequest,
   type AttachSessionRequest,
   type AttachAgentSessionRequest,
+  type CheckAgentSessionTakeoverRequest,
+  type ClearAgentSessionRequest,
   type ListAgentSessionsRequest,
   type CreateAgentSessionRequest,
   type AbortAgentSessionRequest,
@@ -59,6 +61,7 @@ import {
   type StopProcessRequest,
   type AgentSessionsResponse,
   type AgentBoolResponse,
+  type AgentTakeoverStatusResponse,
   type UpdateNotificationConfigRequest,
   type WorkspaceCreatedResponse,
   type GetReplayFrameRequest,
@@ -266,6 +269,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'process_stopped',
   'agent_sessions',
   'agent_bool',
+  'agent_takeover_status',
   'agent_state_snapshot',
   'agent_state_update',
 ]);
@@ -548,7 +552,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
   private pendingAgentSessions = new Map<string, {
     workspaceId: string;
-    resolve: (sessions: Array<{ id: string; title: string; updatedAt?: string }>) => void;
+    resolve: (sessions: Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
@@ -558,6 +562,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
+  private pendingAgentTakeoverStatus = new Map<string, {
+    workspaceId: string;
+    resolve: (status: { requiresTakeover: boolean; sessionName?: string }) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+  private agentTakeoverCheckSupported = true;
 
   constructor(options: RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHello, TServerAuth>) {
     this.descriptor = options.descriptor;
@@ -600,6 +611,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return this.connectPromise;
     }
 
+    this.agentTakeoverCheckSupported = true;
     this.emit({ type: 'status', status: 'connecting' });
     this.attachSocketListeners();
 
@@ -1200,7 +1212,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
     const requestId = crypto.randomUUID();
     const command: ListAgentSessionsRequest = { type: 'list_agent_sessions', requestId, workspaceId, mode: 'known' };
     return new Promise((resolve, reject) => {
@@ -1221,7 +1233,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
-  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
     const requestId = crypto.randomUUID();
     const command: ListAgentSessionsRequest = { type: 'list_agent_sessions', requestId, workspaceId, mode: 'live' };
     return new Promise((resolve, reject) => {
@@ -1242,7 +1254,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
-  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
     const requestId = crypto.randomUUID();
     const command: CreateAgentSessionRequest = { type: 'create_agent_session', requestId, workspaceId, title };
     return new Promise((resolve, reject) => {
@@ -1284,13 +1296,72 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+  async clearAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+    const requestId = crypto.randomUUID();
+    const command: ClearAgentSessionRequest = { type: 'clear_agent_session', requestId, workspaceId, agentSessionId };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentBooleans.get(requestId);
+        if (!pending) return;
+        this.pendingAgentBooleans.delete(requestId);
+        reject(new Error(`Timed out clearing agent session (${workspaceId})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentBooleans.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentBooleans.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentBooleans.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async checkAgentSessionTakeover(
+    workspaceId: string,
+    agentSessionId: string,
+  ): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+    if (!this.agentTakeoverCheckSupported) {
+      return { requiresTakeover: false };
+    }
+    const requestId = crypto.randomUUID();
+    const command: CheckAgentSessionTakeoverRequest = {
+      type: 'check_agent_session_takeover',
+      requestId,
+      workspaceId,
+      agentSessionId,
+    };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingAgentTakeoverStatus.get(requestId);
+        if (!pending) return;
+        this.agentTakeoverCheckSupported = false;
+        this.pendingAgentTakeoverStatus.delete(requestId);
+        resolve({ requiresTakeover: false });
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingAgentTakeoverStatus.set(requestId, { workspaceId, resolve, reject, timeout });
+      void this.sendCommand(command).catch((error) => {
+        const pending = this.pendingAgentTakeoverStatus.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAgentTakeoverStatus.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  async attachAgentSession(
+    workspaceId: string,
+    agentSessionId: string,
+    options: { viewOnly?: boolean; force?: boolean } = {},
+  ): Promise<void> {
     this.viewOnly = options.viewOnly ?? false;
     const command: AttachAgentSessionRequest = {
       type: 'attach_agent_session',
       workspaceId,
       agentSessionId,
       viewOnly: options.viewOnly,
+      force: options.force,
     };
     await this.sendCommand(command);
   }
@@ -2038,6 +2109,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'agent_bool':
         this.resolveAgentBoolean(message as AgentBoolResponse);
         return;
+      case 'agent_takeover_status':
+        this.resolveAgentTakeoverStatus(message as AgentTakeoverStatusResponse);
+        return;
       case 'error':
         this.rejectPendingBundleRefreshRequests(message.message);
         this.rejectPendingGithubRepoList(message.message);
@@ -2054,6 +2128,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectPendingUndismissReplay(message.message, undefined, true);
         this.rejectPendingAgentSessions(message.message, message.workspaceId, message.requestId);
         this.rejectPendingAgentBooleans(message.message, message.workspaceId, message.requestId);
+        this.rejectPendingAgentTakeoverStatus(message.code, message.message, message.workspaceId, message.requestId);
         if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
@@ -2113,6 +2188,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     clearTimeout(pending.timeout);
     this.pendingAgentBooleans.delete(message.requestId);
     pending.resolve(message.ok);
+  }
+
+  private resolveAgentTakeoverStatus(message: AgentTakeoverStatusResponse): void {
+    const pending = this.pendingAgentTakeoverStatus.get(message.requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingAgentTakeoverStatus.delete(message.requestId);
+    pending.resolve({
+      requiresTakeover: message.requiresTakeover,
+      sessionName: message.sessionName,
+    });
   }
 
   private resolveRemoteBranchList(message: RemoteBranchListResponse): void {
@@ -2261,6 +2349,34 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
       clearTimeout(pending.timeout);
       this.pendingAgentBooleans.delete(pendingRequestId);
+      pending.reject(new Error(message));
+    }
+  }
+
+  private rejectPendingAgentTakeoverStatus(
+    code: string | undefined,
+    message: string,
+    workspaceId?: string,
+    requestId?: string,
+  ): void {
+    for (const [pendingRequestId, pending] of this.pendingAgentTakeoverStatus) {
+      if (requestId && pendingRequestId !== requestId) {
+        continue;
+      }
+      if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
+        continue;
+      }
+      clearTimeout(pending.timeout);
+      this.pendingAgentTakeoverStatus.delete(pendingRequestId);
+      if (code === 'UNKNOWN_COMMAND') {
+        this.agentTakeoverCheckSupported = false;
+        pending.resolve({ requiresTakeover: false });
+        continue;
+      }
+      if (message === 'Remote session disconnected') {
+        pending.resolve({ requiresTakeover: false });
+        continue;
+      }
       pending.reject(new Error(message));
     }
   }
@@ -2627,6 +2743,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (message.type === 'kicked') {
       this.mode = 'browsing';
       this.attachedSessionId = null;
+      this.emit({
+        type: 'command_error',
+        code: 'SESSION_TAKEN_OVER',
+        message: 'This terminal was taken over by another client.',
+      });
       this.emit({ type: 'detached' });
       return;
     }
@@ -2895,6 +3016,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
     this.rejectPendingAgentSessions('Remote session disconnected');
     this.rejectPendingAgentBooleans('Remote session disconnected');
+    this.rejectPendingAgentTakeoverStatus(undefined, 'Remote session disconnected');
     this.rejectAllPendingReviewRequests('Remote session disconnected');
     this.connectPromise = null;
     this.connectResolve = null;
@@ -2927,40 +3049,56 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const delta = msg.delta;
     // Apply delta to local cache
     if ('workspaceId' in delta && 'sessionId' in delta) {
-      const state = this.agentStateCache[delta.workspaceId];
-      if (state) {
-        switch (delta.type) {
-          case 'agent_session_status':
-            state.statuses[delta.sessionId] = delta.status;
-            break;
-          case 'agent_permission_added':
-            if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
-            state.pendingPermissions[delta.sessionId].push(delta.permission);
-            break;
-          case 'agent_permission_removed':
-            if (state.pendingPermissions[delta.sessionId]) {
-              state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
-                (p) => p.id !== delta.permissionId,
-              );
-            }
-            break;
-          case 'agent_last_message':
-            state.lastMessages[delta.sessionId] = delta.preview;
-            break;
-          case 'agent_session_created':
-            if (!state.sessions.some((s) => s.id === delta.sessionId)) {
-              state.sessions.push({ id: delta.sessionId, title: delta.title });
-            }
-            break;
-          case 'agent_session_updated': {
-            const idx = state.sessions.findIndex((s) => s.id === delta.sessionId);
-            if (idx !== -1) state.sessions[idx] = { id: delta.sessionId, title: delta.title };
-            break;
+      const state = this.agentStateCache[delta.workspaceId] ?? {
+        workspaceId: delta.workspaceId,
+        sessions: [],
+        statuses: {},
+        pendingPermissions: {},
+        lastMessages: {},
+      };
+      this.agentStateCache[delta.workspaceId] = state;
+      if (delta.type !== 'agent_session_deleted' && !state.sessions.some((session) => session.id === delta.sessionId)) {
+        state.sessions.push({
+          id: delta.sessionId,
+          title: 'title' in delta ? delta.title : delta.sessionId,
+        });
+      }
+      switch (delta.type) {
+        case 'agent_session_status':
+          state.statuses[delta.sessionId] = delta.status;
+          break;
+        case 'agent_permission_added':
+          if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
+          state.pendingPermissions[delta.sessionId].push(delta.permission);
+          break;
+        case 'agent_permission_removed':
+          if (state.pendingPermissions[delta.sessionId]) {
+            state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
+              (p) => p.id !== delta.permissionId,
+            );
           }
-          case 'agent_session_deleted':
-            state.sessions = state.sessions.filter((s) => s.id !== delta.sessionId);
-            break;
+          break;
+        case 'agent_last_message':
+          state.lastMessages[delta.sessionId] = delta.preview;
+          break;
+        case 'agent_session_created':
+          break;
+        case 'agent_session_updated': {
+          const idx = state.sessions.findIndex((s) => s.id === delta.sessionId);
+          if (idx !== -1) {
+            state.sessions[idx] = {
+              ...state.sessions[idx],
+              title: delta.title,
+            };
+          }
+          break;
         }
+        case 'agent_session_deleted':
+          state.sessions = state.sessions.filter((s) => s.id !== delta.sessionId);
+          delete state.statuses[delta.sessionId];
+          delete state.pendingPermissions[delta.sessionId];
+          delete state.lastMessages[delta.sessionId];
+          break;
       }
     }
     for (const handler of this.agentStateHandlers) {

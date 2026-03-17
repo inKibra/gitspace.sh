@@ -7,6 +7,7 @@ export interface AgentSessionInfo {
   workspaceId: string;
   title: string;
   updatedAt?: string;
+  closed?: boolean;
   status?: SessionStatus;
   pendingPermissionCount?: number;
   errorMessage?: string;
@@ -18,7 +19,7 @@ export interface UseWorkspaceAgentSessionsOptions {
 
 function mapSessions(
   workspaceId: string,
-  sessions: Array<{ id: string; title: string; updatedAt?: string }>,
+  sessions: Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>,
   statusMap: Record<string, SessionStatus>,
   pendingPermissionMap: Record<string, unknown[]>,
 ): AgentSessionInfo[] {
@@ -27,9 +28,24 @@ function mapSessions(
     workspaceId,
     title: session.title,
     updatedAt: session.updatedAt,
+    closed: session.closed,
     status: statusMap[session.id],
     pendingPermissionCount: pendingPermissionMap[session.id]?.length ?? 0,
   }));
+}
+
+function mergeSessions(existing: AgentSessionInfo[], next: AgentSessionInfo[]): AgentSessionInfo[] {
+  const combined = new Map<string, AgentSessionInfo>();
+  for (const session of existing) {
+    combined.set(session.id, session);
+  }
+  for (const session of next) {
+    combined.set(session.id, {
+      ...(combined.get(session.id) ?? {}),
+      ...session,
+    });
+  }
+  return Array.from(combined.values()).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
 }
 
 export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOptions) {
@@ -59,33 +75,58 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     return snapshot[workspaceId]?.pendingPermissions ?? {};
   }, [options.backend]);
 
-  const loadWorkspaceSessions = useCallback(async (workspaceId: string) => {
+  const getSnapshotSessions = useCallback((workspaceId: string) => {
+    const snapshot = options.backend?.getAgentStateSnapshot() ?? {};
+    return snapshot[workspaceId]?.sessions ?? [];
+  }, [options.backend]);
+
+  const loadWorkspaceSessions = useCallback(async (
+    workspaceId: string,
+    loadOptions: { updateSelection?: boolean } = {},
+  ) => {
     const getKnownAgentSessions = requireAgentMethod('getKnownAgentSessions');
     const listAgentSessions = requireAgentMethod('listAgentSessions');
-    setLoadingWorkspaceId(workspaceId);
-    setActiveWorkspaceId(workspaceId);
+    const shouldUpdateSelection = loadOptions.updateSelection !== false;
+    if (shouldUpdateSelection) {
+      setLoadingWorkspaceId(workspaceId);
+      setActiveWorkspaceId(workspaceId);
+    }
     setError(null);
 
     try {
       const known = await getKnownAgentSessions(workspaceId);
-      const knownMapped = mapSessions(workspaceId, known, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
+      const snapshotMapped = mapSessions(workspaceId, getSnapshotSessions(workspaceId), getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
+      const knownMapped = mergeSessions(
+        snapshotMapped,
+        mapSessions(workspaceId, known, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId)),
+      );
 
       if (knownMapped.length > 0) {
         setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: knownMapped }));
         void listAgentSessions(workspaceId)
           .then((live) => {
+            const liveMapped = mapSessions(workspaceId, live, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
             setSessionsByWorkspace((current) => ({
               ...current,
-              [workspaceId]: mapSessions(workspaceId, live, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId)),
+              [workspaceId]: liveMapped.length > 0
+                ? mergeSessions(current[workspaceId] ?? [], liveMapped)
+                : (current[workspaceId] ?? knownMapped),
             }));
           })
           .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-          .finally(() => setLoadingWorkspaceId((current) => (current === workspaceId ? null : current)));
+          .finally(() => {
+            if (shouldUpdateSelection) {
+              setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
+            }
+          });
         return knownMapped;
       }
 
       const live = await listAgentSessions(workspaceId);
-      const mapped = mapSessions(workspaceId, live, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
+      const mapped = mergeSessions(
+        snapshotMapped,
+        mapSessions(workspaceId, live, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId)),
+      );
       setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
       return mapped;
     } catch (err) {
@@ -93,9 +134,11 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
       setError(message);
       throw err;
     } finally {
-      setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
+      if (shouldUpdateSelection) {
+        setLoadingWorkspaceId((current) => (current === workspaceId ? null : current));
+      }
     }
-  }, [getPendingPermissionMap, getStatusMap, requireAgentMethod]);
+  }, [getPendingPermissionMap, getSnapshotSessions, getStatusMap, requireAgentMethod]);
 
   const createSession = useCallback(async (workspaceId: string, title?: string) => {
     const createAgentSession = requireAgentMethod('createAgentSession');
@@ -107,13 +150,34 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
 
   const abortSession = useCallback(async (workspaceId: string, sessionId: string) => {
     const abortAgentSession = requireAgentMethod('abortAgentSession');
-    const listAgentSessions = requireAgentMethod('listAgentSessions');
     await abortAgentSession(workspaceId, sessionId);
-    const sessions = await listAgentSessions(workspaceId);
-    const mapped = mapSessions(workspaceId, sessions, getStatusMap(workspaceId), getPendingPermissionMap(workspaceId));
-    setSessionsByWorkspace((current) => ({ ...current, [workspaceId]: mapped }));
-    return mapped;
-  }, [getPendingPermissionMap, getStatusMap, requireAgentMethod]);
+    return loadWorkspaceSessions(workspaceId);
+  }, [loadWorkspaceSessions, requireAgentMethod]);
+
+  const clearSession = useCallback(async (workspaceId: string, sessionId: string) => {
+    const clearAgentSession = requireAgentMethod('clearAgentSession');
+    await clearAgentSession(workspaceId, sessionId);
+    let nextSessions: AgentSessionInfo[] = [];
+    setSessionsByWorkspace((current) => ({
+      ...current,
+      [workspaceId]: (() => {
+        nextSessions = (current[workspaceId] ?? []).filter((session) => session.id !== sessionId);
+        return nextSessions;
+      })(),
+    }));
+    return nextSessions;
+  }, [requireAgentMethod]);
+
+  const syncWorkspaceSessions = useCallback(async (workspaceIds: string[]) => {
+    const uniqueWorkspaceIds = Array.from(new Set(workspaceIds.filter(Boolean)));
+    const results = await Promise.allSettled(
+      uniqueWorkspaceIds.map((workspaceId) => loadWorkspaceSessions(workspaceId, { updateSelection: false })),
+    );
+    const rejection = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (rejection) {
+      throw rejection.reason;
+    }
+  }, [loadWorkspaceSessions]);
 
   const sessions = useMemo(() => {
     if (!activeWorkspaceId) {
@@ -130,7 +194,9 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
     error,
     setActiveWorkspaceId,
     loadWorkspaceSessions,
+    syncWorkspaceSessions,
     createSession,
     abortSession,
+    clearSession,
   };
 }

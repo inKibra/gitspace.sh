@@ -16,7 +16,7 @@ import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType, type S
 import { RemoteSessionHandler, type RemoteClientSession } from "../lib/remote-session/index.js";
 import { STREAM_ID, canWrite, type ServeOptions, type ClientSession, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
 import { createBufferedSocketWriter } from "../utils/bun-socket-writer.js";
-import { serializeRemoteMessage } from "../lib/remote-session/protocol.js";
+import { serializeRemoteMessage, type MachineToClientMessage } from "../lib/remote-session/protocol.js";
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from "./agent-event-manager.js";
 
 // ============================================================================
@@ -69,6 +69,33 @@ export class ClientSessionManager {
       return;
     }
     session.tmuxSocket?.write(frame);
+  }
+
+  private resetAttachedSession(session: ClientSession): Awaited<ReturnType<typeof Bun.connect>> | undefined {
+    const socket = session.tmuxSocket;
+    session.tmuxSocket = undefined;
+    session.tmuxSocketWriter = undefined;
+    session.state = 'browsing';
+    session.attachedSessionId = undefined;
+    session.viewOnly = undefined;
+    session.sessionSocketPath = undefined;
+    session.waitingForResize = undefined;
+    session.frameBuffer = undefined;
+    return socket;
+  }
+
+  private async sendMachineMessages(connectionId: string, messages: MachineToClientMessage[]): Promise<void> {
+    const session = this.sessions.get(connectionId);
+    if (!session?.sessionKeys) {
+      return;
+    }
+
+    const sendToClient = this.createSendCallback(connectionId);
+    for (const message of messages) {
+      const payload = new TextEncoder().encode(serializeRemoteMessage(message));
+      const frame = await createFrame(STREAM_ID.DATA, payload, session.sessionKeys.sendKey);
+      sendToClient(Buffer.from(frame));
+    }
   }
 
   /**
@@ -218,16 +245,11 @@ export class ClientSessionManager {
           // Handle detach specially - close tmux socket and send response to client
           // Store socket reference and clear it BEFORE ending to prevent close callback
           // from triggering handleDisconnect
-          const socket = session.tmuxSocket;
           const writer = session.tmuxSocketWriter;
-          session.tmuxSocket = undefined;
-          session.tmuxSocketWriter = undefined;
-          session.state = "browsing";
-          session.attachedSessionId = undefined;
-          session.viewOnly = undefined;
-          session.sessionSocketPath = undefined;
-          session.waitingForResize = undefined;
-          session.frameBuffer = undefined;
+          const socket = this.resetAttachedSession(session);
+          if (!socket) {
+            return null;
+          }
 
           // Now send detach and close the socket (using framed protocol)
           {
@@ -498,16 +520,23 @@ export class ClientSessionManager {
 
                 if (event.type === "exited") {
                   console.log(`[session-manager] Session exited: ${event.code}`);
-                  // Send exit notification to client
-                  const exitMsg = JSON.stringify({ type: "session_exited", sessionId: session.attachedSessionId, exitCode: event.code });
-                  const exitData = new TextEncoder().encode(exitMsg);
-                  const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
-                  sendToClient(Buffer.from(encFrame));
-                  this.handleDisconnect(connectionId, `Session exited with code ${event.code}`);
+                  const sessionId = session.attachedSessionId;
+                  const socket = this.resetAttachedSession(session);
+                  socket?.end();
+                  if (sessionId) {
+                    void this.sendMachineMessages(connectionId, [
+                      { type: 'session_exited', sessionId, exitCode: event.code },
+                    ]);
+                  }
                   return;
                 } else if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
-                  this.handleDisconnect(connectionId, "Session kicked");
+                  const socket = this.resetAttachedSession(session);
+                  socket?.end();
+                  void this.sendMachineMessages(connectionId, [
+                    { type: 'detached' },
+                    { type: 'error', code: 'SESSION_TAKEN_OVER', message: 'This terminal was taken over by another client.' },
+                  ]);
                   return;
                 } else if (event.type === "wide_event") {
                   const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });
@@ -644,6 +673,20 @@ export class ClientSessionManager {
     } catch {
       // Non-fatal — client can request a refresh
     }
+  }
+
+  /**
+   * Broadcast a full agent state snapshot to all authenticated browsing clients.
+   */
+  async broadcastAgentStateSnapshot(workspaces: Record<string, WorkspaceAgentState>): Promise<void> {
+    const promises: Promise<void>[] = [];
+
+    for (const [connectionId, session] of this.sessions) {
+      if (session.state !== 'browsing' || !session.sessionKeys) continue;
+      promises.push(this.sendAgentStateSnapshot(connectionId, workspaces));
+    }
+
+    await Promise.allSettled(promises);
   }
 
   /**

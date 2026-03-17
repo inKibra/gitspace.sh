@@ -108,6 +108,11 @@ export function useSessionEngine() {
           break;
         case 'attached':
           dispatch({
+            type: 'SET_COMMAND_ERROR',
+            backendKey,
+            commandError: null,
+          });
+          dispatch({
             type: 'SET_ATTACHED_SESSION',
             backendKey,
             sessionId: event.sessionId,

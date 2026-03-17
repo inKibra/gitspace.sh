@@ -28,6 +28,7 @@ import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
 import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
 import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
+import { collectAgentSessionCounts, collectWorkspaceSyncIds } from './agents/remote-agent-browser.js';
 
 // Import shared components and hooks
 import {
@@ -470,6 +471,15 @@ export default function App() {
       return;
     }
 
+    if (terminal.commandError.code === 'SESSION_TAKEN_OVER') {
+      flow.showMessage({
+        title: 'Session Taken Over',
+        message: terminal.commandError.message,
+        variant: 'warning',
+      });
+      return;
+    }
+
     flow.showMessage({
       title: 'Session Failed',
       message: terminal.commandError.message,
@@ -747,16 +757,12 @@ export default function App() {
 
   // Memoize agent session counts to preserve referential stability for useSpacesBrowser
   const agentSessionCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const [wid, sessions] of Object.entries(workspaceAgentSessions.sessionsByWorkspace)) {
-      counts[wid] = sessions.length;
-    }
-    for (const [wid, sessions] of Object.entries(agentEvents.workspaceStates)) {
-      const eventCount = Object.keys(sessions).length;
-      counts[wid] = Math.max(counts[wid] ?? 0, eventCount);
-    }
-    return counts;
-  }, [workspaceAgentSessions.sessionsByWorkspace, agentEvents.workspaceStates]);
+    return collectAgentSessionCounts({
+      sessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
+      workspaceStates: agentEvents.workspaceStates,
+      snapshotByWorkspace: webBackend?.getAgentStateSnapshot() ?? {},
+    });
+  }, [agentEvents.workspaceStates, webBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
   const agentSessionsByWorkspace = useMemo(() => {
     const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
@@ -774,10 +780,22 @@ export default function App() {
         workspaceId,
         title: session.title,
         updatedAt: undefined,
+        closed: 'closed' in session ? Boolean(session.closed) : undefined,
       }));
       const combined = new Map<string, (typeof baseSessions)[number]>();
       for (const session of snapshotSessions) combined.set(session.id, session);
       for (const session of baseSessions) combined.set(session.id, session);
+      for (const sessionId of Object.keys(liveStates)) {
+        if (!combined.has(sessionId)) {
+          combined.set(sessionId, {
+            id: sessionId,
+            workspaceId,
+            title: sessionId,
+            updatedAt: undefined,
+            closed: false,
+          });
+        }
+      }
       merged[workspaceId] = Array.from(combined.values()).map((session) => {
         const live = liveStates[session.id];
         if (!live) return session;
@@ -792,6 +810,26 @@ export default function App() {
 
     return merged;
   }, [agentEvents.workspaceStates, webBackend, workspaceAgentSessions.sessionsByWorkspace]);
+
+  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+
+  const refreshAgentSessions = useCallback(async ({
+    expandedWorkspaceIds,
+    selectedWorkspaceId,
+  }: {
+    expandedWorkspaceIds: string[];
+    selectedWorkspaceId: string | null;
+  }) => {
+    await syncWorkspaceAgentSessions(
+      collectWorkspaceSyncIds(terminal.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
+    );
+  }, [syncWorkspaceAgentSessions, terminal.workspaces]);
+
+  const allWorkspaceSyncKey = useMemo(
+    () => terminal.workspaces.map((workspace) => workspace.id).sort().join('|'),
+    [terminal.workspaces],
+  );
+  const lastAllWorkspaceSyncKeyRef = useRef<string | null>(null);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
@@ -824,10 +862,12 @@ export default function App() {
         throw new Error('Agent attach unavailable');
       }
       await openAgentSession({
+        flow,
         workspaceId,
         agentSessionId,
         persistAgentSessionSelection,
         clearViewOnly: () => setIsViewOnlySession(false),
+        checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
         attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
         afterAttach: async () => {
           setView('terminal');
@@ -844,9 +884,11 @@ export default function App() {
         getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
         createAgentSession: workspaceAgentSessions.createSession,
         attachOptions: {
+          flow,
           workspaceId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
+          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
           attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
           afterAttach: async () => {
             setView('terminal');
@@ -859,6 +901,7 @@ export default function App() {
     pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
     onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },
     onRefreshSessions: () => { terminal.requestSessions(); refreshReplayList(); },
+    onRefreshAgents: refreshAgentSessions,
     onBack: handleBackToMachines,
     machineName: selectedProjectName
       ? `${selectedProjectName} - ${selectedMachine?.label || selectedMachine?.machineId || 'machine'}`
@@ -944,10 +987,12 @@ export default function App() {
       },
       openAgentSession: async (workspaceId, agentSessionId) => {
         await openAgentSession({
+          flow,
           workspaceId,
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
+          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
           attachAgentSession: webBackend.attachAgentSession!.bind(webBackend),
           afterAttach: async () => {
             setView('terminal');
@@ -1118,6 +1163,21 @@ export default function App() {
     terminal.requestSessions,
     terminal.requestNotificationConfig,
   ]);
+
+  useEffect(() => {
+    if (view !== 'terminal' || terminal.status !== 'established' || terminal.mode !== 'browsing' || terminal.workspaces.length === 0) {
+      lastAllWorkspaceSyncKeyRef.current = null;
+      return;
+    }
+    if (lastAllWorkspaceSyncKeyRef.current === allWorkspaceSyncKey) {
+      return;
+    }
+    lastAllWorkspaceSyncKeyRef.current = allWorkspaceSyncKey;
+    terminal.requestSessions();
+    void syncWorkspaceAgentSessions(terminal.workspaces.map((workspace) => workspace.id)).catch((error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    });
+  }, [allWorkspaceSyncKey, syncWorkspaceAgentSessions, terminal, view]);
 
   useEffect(() => {
     if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
@@ -1834,6 +1894,7 @@ export default function App() {
             />
           )}
         </div>
+        <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );

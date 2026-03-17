@@ -6,11 +6,13 @@ interface AgentSessionSummaryLike {
 }
 
 interface AttachAgentSessionOptions {
+  flow: Pick<UseFlowReturn, 'showConfirm'>;
   workspaceId: string;
   agentSessionId: string;
   persistAgentSessionSelection: (workspaceId: string, sessionId: string) => void;
   clearViewOnly: () => void;
-  attachAgentSession: (workspaceId: string, agentSessionId: string) => Promise<void>;
+  checkAgentSessionTakeover?: (workspaceId: string, agentSessionId: string) => Promise<{ requiresTakeover: boolean; sessionName?: string }>;
+  attachAgentSession: (workspaceId: string, agentSessionId: string, options?: { force?: boolean }) => Promise<void>;
   afterAttach?: () => void | Promise<void>;
 }
 
@@ -58,10 +60,41 @@ export function findCreatedAgentSession(
 }
 
 export async function openAgentSession(options: AttachAgentSessionOptions): Promise<void> {
-  options.persistAgentSessionSelection(options.workspaceId, options.agentSessionId);
-  options.clearViewOnly();
-  await options.attachAgentSession(options.workspaceId, options.agentSessionId);
-  await options.afterAttach?.();
+  const takeover = options.checkAgentSessionTakeover
+    ? await options.checkAgentSessionTakeover(options.workspaceId, options.agentSessionId)
+    : { requiresTakeover: false };
+  const runAttach = async (force?: boolean) => {
+    options.persistAgentSessionSelection(options.workspaceId, options.agentSessionId);
+    options.clearViewOnly();
+    await options.attachAgentSession(options.workspaceId, options.agentSessionId, force ? { force } : undefined);
+    await options.afterAttach?.();
+  };
+
+  if (takeover.requiresTakeover) {
+    let attachPromise: Promise<void> | null = null;
+    await new Promise<void>((resolve) => {
+      options.flow.showConfirm({
+        title: 'Take Over Agent Terminal?',
+        message: `${takeover.sessionName ?? 'This agent terminal'} is already open in another client. Taking over will disconnect that viewer.`,
+        variant: 'warning',
+        confirmLabel: 'Take Over',
+        cancelLabel: 'Cancel',
+        onConfirm: () => {
+          resolve();
+          attachPromise = runAttach(true);
+        },
+        onCancel: () => {
+          resolve();
+        },
+      });
+    });
+    if (attachPromise) {
+      await attachPromise;
+    }
+    return;
+  }
+
+  await runAttach();
 }
 
 export function promptCreateAgentSession(options: PromptCreateAgentSessionOptions): void {

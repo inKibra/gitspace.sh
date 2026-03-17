@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { LocalSessionBackend, type LocalSessionBackendDependencies } from '../backends/local-session-backend';
 import type { BackendEvent } from '../events';
+import type { SessionEvent } from '../../lib/tmux-lite/protocol';
 import type { NotificationConfig } from '../../notifications/types';
 
 const notificationConfig: NotificationConfig = {
@@ -1392,6 +1393,8 @@ describe('LocalSessionBackend', () => {
         listSessions: mock(async () => []),
         createSession: mock(async () => []),
         abortSession: mock(async () => true),
+        clearSession: mock(async () => true),
+        checkTakeover: mock(async () => ({ requiresTakeover: false })),
         attachSession: ensureAgentTerminalSession,
         respondToPermission: mock(async () => true),
       },
@@ -1401,6 +1404,72 @@ describe('LocalSessionBackend', () => {
     expect(ensureAgentTerminalSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: 'alpha:ws-1', workspacePath: '/tmp/ws-1' }),
       'agent-ses-1',
+      { force: undefined },
     );
+  });
+
+  it('emits a taken-over notice when a session is kicked', async () => {
+    let socketHandlers:
+      | {
+          onControl: (event: SessionEvent) => void;
+          onClose: () => void;
+          onError: (error: Error) => void;
+        }
+      | null = null;
+    const backend = new LocalSessionBackend({
+      deps: {
+        ensureServer: async () => {},
+        listSessions: async () => [
+          {
+            id: 'sess-1',
+            name: 'shell-1',
+            socketPath: '/tmp/socket-1',
+            pid: 123,
+            attached: false,
+            cwd: '/tmp',
+            createdAt: 10,
+          },
+        ],
+        connectSessionSocket: async (_socketPath, handlers) => {
+          socketHandlers = handlers;
+          return {
+            sendControl: (control) => {
+              if (control.type === 'attach-init') {
+                handlers.onControl({ type: 'attached' });
+              }
+            },
+            sendPty: () => {},
+            close: () => handlers.onClose(),
+          };
+        },
+      },
+      agentControl: {
+        getState: mock(async () => []),
+        watchState: mock(async () => () => {}),
+        listSessions: mock(async () => []),
+        createSession: mock(async () => []),
+        abortSession: mock(async () => true),
+        clearSession: mock(async () => true),
+        checkTakeover: mock(async () => ({ requiresTakeover: false })),
+        attachSession: mock(async () => {
+          throw new Error('unused');
+        }),
+        respondToPermission: mock(async () => true),
+      },
+    });
+    const events: BackendEvent[] = [];
+    backend.onEvent((event) => events.push(event));
+
+    await backend.attachSession({ sessionId: 'sess-1' });
+    expect(socketHandlers).not.toBeNull();
+    socketHandlers!.onControl({ type: 'kicked' });
+    await Bun.sleep(0);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'command_error',
+      code: 'SESSION_TAKEN_OVER',
+      message: expect.stringContaining('taken over'),
+    }));
+    expect(events).toContainEqual({ type: 'detached' });
   });
 });

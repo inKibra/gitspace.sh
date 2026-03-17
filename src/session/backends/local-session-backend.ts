@@ -21,7 +21,9 @@ import {
   listAgentSessions as listTmuxAgentSessions,
   createAgentSession as createTmuxAgentSession,
   abortAgentSession as abortTmuxAgentSession,
+  clearAgentSession as clearTmuxAgentSession,
   attachAgentSession as attachTmuxAgentSession,
+  getAgentSessionTakeoverState as getTmuxAgentSessionTakeoverState,
   respondToAgentPermission as respondToTmuxAgentPermission,
 } from '../../lib/tmux-lite/cli.js';
 import {
@@ -188,6 +190,8 @@ interface LocalAgentControl {
   listSessions: typeof listTmuxAgentSessions;
   createSession: typeof createTmuxAgentSession;
   abortSession: typeof abortTmuxAgentSession;
+  clearSession: typeof clearTmuxAgentSession;
+  checkTakeover: typeof getTmuxAgentSessionTakeoverState;
   attachSession: typeof attachTmuxAgentSession;
   respondToPermission: typeof respondToTmuxAgentPermission;
 }
@@ -468,6 +472,8 @@ export class LocalSessionBackend implements SessionBackend {
       listSessions: options.agentControl?.listSessions ?? listTmuxAgentSessions,
       createSession: options.agentControl?.createSession ?? createTmuxAgentSession,
       abortSession: options.agentControl?.abortSession ?? abortTmuxAgentSession,
+      clearSession: options.agentControl?.clearSession ?? clearTmuxAgentSession,
+      checkTakeover: options.agentControl?.checkTakeover ?? getTmuxAgentSessionTakeoverState,
       attachSession: options.agentControl?.attachSession ?? attachTmuxAgentSession,
       respondToPermission: options.agentControl?.respondToPermission ?? respondToTmuxAgentPermission,
     };
@@ -1398,6 +1404,7 @@ export class LocalSessionBackend implements SessionBackend {
       this.sessionSocket = null;
       this.sessionSocketSessionId = null;
     }
+    this.closingSessionSocket = false;
 
     this.attachedSessionId = null;
     this.pendingUtf8Bytes = new Uint8Array(0);
@@ -1410,6 +1417,11 @@ export class LocalSessionBackend implements SessionBackend {
 
   private handleSessionControl(event: SessionEvent, sessionId: string): void {
     if (event.type === 'kicked') {
+      this.emit({
+        type: 'command_error',
+        code: 'SESSION_TAKEN_OVER',
+        message: 'This terminal was taken over by another client.',
+      });
       void this.closeSessionSocket(true);
       return;
     }
@@ -1575,17 +1587,17 @@ export class LocalSessionBackend implements SessionBackend {
     return this.agentControl.respondToPermission(target, agentSessionId, permissionId, response);
   }
 
-  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     return this.agentControl.listSessions(target, 'known');
   }
 
-  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     return this.agentControl.listSessions(target, 'live');
   }
 
-  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string }>> {
+  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     return this.agentControl.createSession(target, title);
   }
@@ -1595,9 +1607,26 @@ export class LocalSessionBackend implements SessionBackend {
     return this.agentControl.abortSession(target, agentSessionId);
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+  async clearAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const terminalSession = await this.agentControl.attachSession(target, agentSessionId);
+    return this.agentControl.clearSession(target, agentSessionId);
+  }
+
+  async checkAgentSessionTakeover(
+    workspaceId: string,
+    agentSessionId: string,
+  ): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.agentControl.checkTakeover(target, agentSessionId);
+  }
+
+  async attachAgentSession(
+    workspaceId: string,
+    agentSessionId: string,
+    options: { viewOnly?: boolean; force?: boolean } = {},
+  ): Promise<void> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const terminalSession = await this.agentControl.attachSession(target, agentSessionId, { force: options.force });
     await this.attachSession({ sessionId: terminalSession.id, viewOnly: options.viewOnly });
   }
 

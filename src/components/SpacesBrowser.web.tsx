@@ -508,7 +508,8 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             const state = getAgentSessionDisplayState(item.session);
             const label = getAgentSessionDisplayLabel(item.session);
             const signal =
-              state === 'needs-permission' ? `⚡ ${label}`
+              state === 'closed' ? `■ ${label}`
+              : state === 'needs-permission' ? `⚡ ${label}`
               : state === 'error' ? `! ${label}`
               : state === 'running' ? `● ${label}`
               : state === 'retrying' ? `↻ ${label}`
@@ -526,7 +527,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 `}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
+                  <div className={`truncate text-sm ${item.session.closed ? 'text-[#8b949e]' : 'text-[#c678dd]'}`}>✦ {item.session.title}</div>
                   <div className="text-xs text-[#8b949e] truncate">
                     {signal}
                   </div>
