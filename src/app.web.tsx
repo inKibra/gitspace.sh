@@ -809,6 +809,8 @@ export default function App() {
     return merged;
   }, [agentEvents.workspaceStates, webBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
+  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+
   const refreshAgentSessions = useCallback(async ({
     expandedWorkspaceIds,
     selectedWorkspaceId,
@@ -816,11 +818,10 @@ export default function App() {
     expandedWorkspaceIds: string[];
     selectedWorkspaceId: string | null;
   }) => {
-    await workspaceAgentSessions.syncWorkspaceSessions(
+    await syncWorkspaceAgentSessions(
       collectWorkspaceSyncIds(terminal.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
     );
-  }, [terminal.workspaces, workspaceAgentSessions]);
-  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+  }, [syncWorkspaceAgentSessions, terminal.workspaces]);
 
   const allWorkspaceSyncKey = useMemo(
     () => terminal.workspaces.map((workspace) => workspace.id).sort().join('|'),

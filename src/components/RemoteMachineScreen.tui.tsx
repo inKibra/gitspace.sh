@@ -676,6 +676,8 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     return merged;
   }, [agentEvents.workspaceStates, remoteBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
+  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+
   const refreshAgentSessions = useCallback(async ({
     expandedWorkspaceIds,
     selectedWorkspaceId,
@@ -683,11 +685,10 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     expandedWorkspaceIds: string[];
     selectedWorkspaceId: string | null;
   }) => {
-    await workspaceAgentSessions.syncWorkspaceSessions(
+    await syncWorkspaceAgentSessions(
       collectWorkspaceSyncIds(remote.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
     );
-  }, [remote.workspaces, workspaceAgentSessions]);
-  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+  }, [remote.workspaces, syncWorkspaceAgentSessions]);
 
   const remoteWorkspaceSyncKey = useMemo(
     () => remote.workspaces.map((workspace) => workspace.id).sort().join('|'),

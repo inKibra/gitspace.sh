@@ -1397,6 +1397,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     return merged;
   }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
 
+  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+
   const refreshAgentSessions = useCallback(async ({
     expandedWorkspaceIds,
     selectedWorkspaceId,
@@ -1404,10 +1406,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     expandedWorkspaceIds: string[];
     selectedWorkspaceId: string | null;
   }) => {
-    await workspaceAgentSessions.syncWorkspaceSessions(
+    await syncWorkspaceAgentSessions(
       collectWorkspaceSyncIds(workspaceInfos, expandedWorkspaceIds, selectedWorkspaceId),
     );
-  }, [workspaceAgentSessions, workspaceInfos]);
+  }, [syncWorkspaceAgentSessions, workspaceInfos]);
 
   // Spaces browser hook
   const spacesBrowserProps = useSpacesBrowser({
