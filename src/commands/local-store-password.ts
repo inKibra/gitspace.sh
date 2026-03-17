@@ -38,6 +38,13 @@ async function resolvePasswordInput(
   prompt: string,
   context: LocalStorePasswordContext | undefined,
 ): Promise<{ password: string | null; fromStdin: boolean }> {
+  if (typeof context?.password === 'string') {
+    return {
+      password: context.password,
+      fromStdin: context.passwordStdin,
+    };
+  }
+
   if (context?.passwordStdin) {
     context.stdinPasswordPromise ??= readPasswordFromStdin();
     return {

@@ -290,10 +290,10 @@ export function isCloudReachableRelayUrl(url: string): boolean {
  * Load trusted relays from disk
  */
 export function getTrustedRelays(): TrustedRelay[] {
-	const stored = readLocalStoreJson<TrustedRelay[]>(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY);
-	if (stored) {
-		return stored;
-	}
+  const stored = readLocalStoreJson<TrustedRelay[]>(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY);
+  if (stored) {
+    return stored;
+  }
 
   const path = getTrustedRelaysPath();
 
@@ -301,23 +301,31 @@ export function getTrustedRelays(): TrustedRelay[] {
     return [];
   }
 
+  let relays: TrustedRelay[];
   try {
     const content = readFileSync(path, "utf-8");
-    const relays = JSON.parse(content) as TrustedRelay[];
-    writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, relays);
-    markLegacyLocalStorageMigrated(true);
-    return relays;
+    relays = JSON.parse(content) as TrustedRelay[];
   } catch {
     console.warn("[trusted-relays] Failed to parse trusted relays file");
     return [];
   }
+
+  try {
+    writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, relays);
+    markLegacyLocalStorageMigrated(true);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`[trusted-relays] Failed to migrate trusted relays into local secure store: ${detail}`);
+  }
+
+  return relays;
 }
 
 /**
  * Save trusted relays to disk
  */
 function saveTrustedRelays(relays: TrustedRelay[]): void {
-	writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, relays);
+  writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, relays);
   const identityDir = getIdentityDir();
 
   // Create directory if needed (should already exist from identity setup)

@@ -251,6 +251,10 @@ export async function connectToRemote(
     context: 'remote client authorization',
   });
 
+  if (typeof devicePasswordContext.password === 'string' && !localStorePasswordContext.password) {
+    localStorePasswordContext.password = devicePasswordContext.password;
+  }
+
   const localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
   if (!localStorePassword) {
     logger.info('Cancelled');
@@ -414,6 +418,10 @@ export async function listRemoteMachines(options: {
     yes: options.yes,
     context: 'remote machine directory authorization',
   });
+
+  if (typeof devicePasswordContext.password === 'string' && !localStorePasswordContext.password) {
+    localStorePasswordContext.password = devicePasswordContext.password;
+  }
 
   const localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
   if (!localStorePassword) {
