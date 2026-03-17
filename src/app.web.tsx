@@ -21,6 +21,7 @@ import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useBundleConfigFlow } from './session/useBundleConfigFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
+import { CONNECTION_STATUS_LABELS } from './app/session/types.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { useLifecycleController } from './app/session/useLifecycleController.js';
@@ -1523,15 +1524,7 @@ export default function App() {
 
     // Connection not yet established — show a targeted connecting screen
     // rather than falling through to the generic machine list.
-    const statusMessage = {
-      disconnected: "Disconnected",
-      connecting: "Connecting to relay...",
-      reconnecting: "Connection lost. Reconnecting...",
-      connected: "Connected, authenticating...",
-      handshaking: "Establishing secure connection...",
-      established: "Connected!",
-      error: "Connection failed",
-    }[terminal.status];
+    const statusMessage = CONNECTION_STATUS_LABELS[terminal.status];
 
     return (
       <>
@@ -1556,15 +1549,7 @@ export default function App() {
 
   if (view === 'replay' && activeReplay) {
     if (terminal.status !== 'established' || terminal.mode !== 'browsing') {
-      const statusMessage = {
-        disconnected: 'Disconnected',
-        connecting: 'Connecting to relay...',
-        reconnecting: 'Connection lost. Reconnecting...',
-        connected: 'Connected, authenticating...',
-        handshaking: 'Establishing secure connection...',
-        established: 'Connected!',
-        error: 'Connection failed',
-      }[terminal.status];
+      const statusMessage = CONNECTION_STATUS_LABELS[terminal.status];
 
       return (
         <>
@@ -1904,15 +1889,7 @@ export default function App() {
 
   // ========== Terminal Connecting View ==========
   if (view === "terminal") {
-    const statusMessage = {
-      disconnected: "Disconnected",
-      connecting: "Connecting to relay...",
-      reconnecting: "Connection lost. Reconnecting...",
-      connected: "Connected, authenticating...",
-      handshaking: "Establishing secure connection...",
-      established: "Connected!",
-      error: "Connection failed",
-    }[terminal.status];
+    const statusMessage = CONNECTION_STATUS_LABELS[terminal.status];
 
     return (
       <>
