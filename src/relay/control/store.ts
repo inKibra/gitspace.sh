@@ -4,6 +4,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSpacesDir } from '../../core/config.js';
 import { SpacesError } from '../../types/errors.js';
+import { logger } from '../../utils/logger.js';
 import { applyControlMigrations } from './schema.js';
 import type {
   CloudBootstrapState,
@@ -333,42 +334,57 @@ export function bindPersistedOwnerIdentity(ownerIdentityId: string): {
   ownerIdentityId: string;
 } {
   return withControlDb((db) => {
-    const binding = readPersistedOwnerBindingFromDb(db);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const binding = readPersistedOwnerBindingFromDb(db);
 
-    if (!binding.controlOwnerId && !binding.vaultOwnerId) {
-      setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
-      setVaultMetaValueInDb(db, 'owner_user_root_id', ownerIdentityId);
-      setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
-      return { bound: true, repaired: false, ownerIdentityId };
-    }
+      if (!binding.controlOwnerId && !binding.vaultOwnerId) {
+        setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
+        setVaultMetaValueInDb(db, 'owner_user_root_id', ownerIdentityId);
+        setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
+        db.exec('COMMIT');
+        return { bound: true, repaired: false, ownerIdentityId };
+      }
 
-    if (!binding.mismatch) {
-      if (binding.effectiveOwnerId !== ownerIdentityId) {
+      if (!binding.mismatch) {
+        if (binding.effectiveOwnerId !== ownerIdentityId) {
+          logger.error(
+            `Local control binding owner mismatch: persisted=${binding.effectiveOwnerId ?? 'unset'} current=${ownerIdentityId}`,
+          );
+          throw new SpacesError(
+            `Local control bindings mismatch. Persisted owner '${binding.effectiveOwnerId}' does not match current identity '${ownerIdentityId}'.`,
+            'USER_ERROR',
+            1
+          );
+        }
+
+        db.exec('COMMIT');
+        return { bound: false, repaired: binding.repaired, ownerIdentityId };
+      }
+
+      const canRepairToCurrentIdentity = binding.controlOwnerId === ownerIdentityId
+        || binding.vaultOwnerId === ownerIdentityId;
+
+      if (!canRepairToCurrentIdentity) {
+        logger.error(
+          `Local control binding mismatch: control=${binding.controlOwnerId ?? 'unset'} vault=${binding.vaultOwnerId ?? 'unset'} current=${ownerIdentityId}`,
+        );
         throw new SpacesError(
-          `Local control bindings mismatch. Persisted owner '${binding.effectiveOwnerId}' does not match current identity '${ownerIdentityId}'.`,
+          `Local control bindings mismatch. Persisted control owner '${binding.controlOwnerId}' and vault owner '${binding.vaultOwnerId}' do not match current identity '${ownerIdentityId}'.`,
           'USER_ERROR',
           1
         );
       }
 
-      return { bound: false, repaired: binding.repaired, ownerIdentityId };
+      setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
+      setVaultMetaValueInDb(db, 'owner_user_root_id', ownerIdentityId);
+      setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
+      db.exec('COMMIT');
+      return { bound: false, repaired: true, ownerIdentityId };
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
     }
-
-    const canRepairToCurrentIdentity = binding.controlOwnerId === ownerIdentityId
-      || binding.vaultOwnerId === ownerIdentityId;
-
-    if (!canRepairToCurrentIdentity) {
-      throw new SpacesError(
-        `Local control bindings mismatch. Persisted control owner '${binding.controlOwnerId}' and vault owner '${binding.vaultOwnerId}' do not match current identity '${ownerIdentityId}'.`,
-        'USER_ERROR',
-        1
-      );
-    }
-
-    setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, ownerIdentityId);
-    setVaultMetaValueInDb(db, 'owner_user_root_id', ownerIdentityId);
-    setMetaValue(db, META_KEY_UPDATED_AT, nowIso());
-    return { bound: false, repaired: true, ownerIdentityId };
   });
 }
 
@@ -380,6 +396,9 @@ export function isControlOwner(identityId: string): boolean {
 export function assertControlOwner(identityId: string): void {
   const ownerBinding = readPersistedOwnerBinding();
   if (ownerBinding.mismatch) {
+    logger.error(
+      `Local control binding mismatch: control=${ownerBinding.controlOwnerId ?? 'unset'} vault=${ownerBinding.vaultOwnerId ?? 'unset'} current=${identityId}`,
+    );
     throw new SpacesError(
       `Local control bindings mismatch. Persisted control owner '${ownerBinding.controlOwnerId}' and vault owner '${ownerBinding.vaultOwnerId}' do not match current identity '${identityId}'.`,
       'USER_ERROR',
@@ -389,6 +408,7 @@ export function assertControlOwner(identityId: string): void {
 
   const ownerIdentityId = ownerBinding.effectiveOwnerId;
   if (!ownerIdentityId) {
+    logger.error('Local control bindings are not initialized.');
     throw new SpacesError(
       'Local control bindings are not initialized.',
       'SYSTEM_ERROR',
@@ -397,6 +417,9 @@ export function assertControlOwner(identityId: string): void {
   }
 
   if (ownerIdentityId !== identityId) {
+    logger.error(
+      `Local control binding owner mismatch: persisted=${ownerIdentityId} current=${identityId}`,
+    );
     throw new SpacesError(
       `Local control bindings mismatch. Persisted owner '${ownerIdentityId}' does not match current identity '${identityId}'.`,
       'USER_ERROR',
@@ -432,6 +455,9 @@ export function bindControlRelayIdentity(
     const sameFingerprint = currentRelayFingerprint === input.relayFingerprint;
 
     if (!sameIdentityId || !sameSigningKey || !sameFingerprint) {
+      logger.error(
+        `Relay pin mismatch: persisted=${currentRelayFingerprint ?? currentRelayIdentityId ?? 'unset'} current=${input.relayFingerprint}`,
+      );
       throw new SpacesError(
         [
           `Local control bindings mismatch. Pinned relay '${currentRelayFingerprint ?? currentRelayIdentityId}', current relay '${input.relayFingerprint}'.`,

@@ -72,6 +72,18 @@ export function formatStartupControlStateMismatch(
   plan: StartupControlStatePlan,
   options: StartupControlStateTextOptions,
 ): string {
+  if (plan.relayMismatch && !plan.hasUnrepairableOwnerMismatch) {
+    return [
+      'Persisted local control bindings are pinned to a different relay.',
+      '',
+      `  Current user: ${plan.ownerUserRootId.slice(0, 8)}...`,
+      `  Pinned relay:  ${plan.controlMeta.relayFingerprint ?? plan.controlMeta.relayIdentityId}`,
+      `  Current relay: ${plan.currentRelay?.fingerprint}`,
+      '',
+      `Re-run with \`${options.takeoverCommand}\` to clear the persisted relay pin and rebind local control bindings to the current relay.`,
+    ].join('\n');
+  }
+
   const lines = [
     'Persisted local control bindings do not match the current identity.',
     '',
@@ -93,6 +105,14 @@ export function formatStartupControlStateTakeoverPrompt(
   plan: StartupControlStatePlan,
   options: StartupControlStateTextOptions,
 ): string {
+  if (plan.relayMismatch && !plan.hasUnrepairableOwnerMismatch) {
+    if (options.subject === 'machine serve') {
+      return 'Persisted local control bindings are pinned to a different relay. Clear the relay pin and rebind machine serve to the current relay?';
+    }
+
+    return 'Persisted local control bindings are pinned to a different relay. Clear the relay pin and rebind the relay startup state?';
+  }
+
   if (plan.needsTakeover) {
     return `Persisted local control bindings do not match the current identity. Clear them and rebind this ${options.subject === 'relay' ? 'relay' : 'machine'} to the recovered identity?`;
   }
@@ -112,6 +132,14 @@ export function formatStartupControlStateTakeoverWarning(
   plan: StartupControlStatePlan,
   options: StartupControlStateTextOptions,
 ): string {
+  if (plan.relayMismatch && !plan.hasUnrepairableOwnerMismatch) {
+    if (options.subject === 'machine serve') {
+      return 'Clearing persisted relay pin and rebinding machine serve to the current relay.';
+    }
+
+    return 'Clearing persisted relay pin and rebinding relay startup state to the current relay.';
+  }
+
   if (plan.needsTakeover) {
     return `Clearing persisted local control bindings and rebinding ${options.subject} ownership to the current identity.`;
   }

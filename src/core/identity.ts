@@ -428,12 +428,10 @@ export function readMachineIdentity(): MachineIdentity | null {
 		return null;
 	}
 
+	let identity: MachineIdentity;
 	try {
 		const content = readFileSync(machineIdentityPath, 'utf-8');
-		const identity = JSON.parse(content) as MachineIdentity;
-		writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_MACHINE_IDENTITY, identity);
-		markLegacyLocalStorageMigrated(true);
-		return identity;
+		identity = JSON.parse(content) as MachineIdentity;
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to read machine identity: ${
@@ -443,6 +441,15 @@ export function readMachineIdentity(): MachineIdentity | null {
 			2
 		);
 	}
+
+	try {
+		writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_MACHINE_IDENTITY, identity);
+		markLegacyLocalStorageMigrated(true);
+	} catch {
+		// Keep returning the parsed legacy value even if opportunistic migration fails.
+	}
+
+	return identity;
 }
 
 /**
@@ -525,12 +532,10 @@ export function readRelayConfig(): RelayConfig | null {
 		return null;
 	}
 
+	let config: RelayConfig;
 	try {
 		const content = readFileSync(relayConfigPath, 'utf-8');
-		const config = JSON.parse(content) as RelayConfig;
-		writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_RELAY_CONFIG, config);
-		markLegacyLocalStorageMigrated(true);
-		return config;
+		config = JSON.parse(content) as RelayConfig;
 	} catch (error) {
 		throw new SpacesError(
 			`Failed to read relay config: ${
@@ -540,6 +545,15 @@ export function readRelayConfig(): RelayConfig | null {
 			2
 		);
 	}
+
+	try {
+		writeLocalStoreJson(LOCAL_STORE_NAMESPACE_IDENTITY, LOCAL_STORE_KEY_RELAY_CONFIG, config);
+		markLegacyLocalStorageMigrated(true);
+	} catch {
+		// Keep returning the parsed legacy value even if opportunistic migration fails.
+	}
+
+	return config;
 }
 
 /**
