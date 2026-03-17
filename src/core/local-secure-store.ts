@@ -5,7 +5,6 @@ import {
   getLocalStoreRecord,
   getLocalStoreSecret,
   removeLocalStoreRecord,
-  removeLocalStoreSecret,
   setLocalStoreMeta,
   upsertLocalStoreRecord,
   upsertLocalStoreSecret,
@@ -129,14 +128,4 @@ export function writeLocalStoreSecretJson(namespace: string, key: string, value:
 export function markLegacyLocalStorageMigrated(retained: boolean = true): void {
   setLocalStoreMeta(META_KEY_LEGACY_STORAGE_MIGRATED_AT, new Date().toISOString());
   setLocalStoreMeta(META_KEY_LEGACY_STORAGE_RETAINED, retained ? '1' : '0');
-}
-
-export function getLegacyLocalStorageMigrationState(): {
-  migratedAt?: string;
-  retained: boolean;
-} {
-  return {
-    migratedAt: getLocalStoreMeta(META_KEY_LEGACY_STORAGE_MIGRATED_AT),
-    retained: getLocalStoreMeta(META_KEY_LEGACY_STORAGE_RETAINED) !== '0',
-  };
 }

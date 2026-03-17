@@ -278,39 +278,39 @@ function peekPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
   let controlOwnerId = getMetaValue(db, META_KEY_OWNER_IDENTITY_ID);
   let vaultOwnerId = getVaultMetaValueFromDb(db, 'owner_user_root_id');
 
+  if (!controlOwnerId && vaultOwnerId) {
+    controlOwnerId = vaultOwnerId;
+  } else if (controlOwnerId && !vaultOwnerId) {
+    vaultOwnerId = controlOwnerId;
+  }
+
   const mismatch = Boolean(controlOwnerId && vaultOwnerId && controlOwnerId !== vaultOwnerId);
   const effectiveOwnerId = mismatch ? undefined : (controlOwnerId ?? vaultOwnerId);
+  const repaired = Boolean(
+    (controlOwnerId && !getVaultMetaValueFromDb(db, 'owner_user_root_id'))
+    || (vaultOwnerId && !getMetaValue(db, META_KEY_OWNER_IDENTITY_ID))
+  );
 
   return {
     controlOwnerId,
     vaultOwnerId,
     effectiveOwnerId,
     mismatch,
-    repaired: false,
+    repaired,
   };
 }
 
 function readPersistedOwnerBindingFromDb(db: Database): PersistedOwnerBinding {
   const binding = peekPersistedOwnerBindingFromDb(db);
 
-  if (!binding.controlOwnerId && binding.vaultOwnerId) {
-    setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, binding.vaultOwnerId);
-    return {
-      ...binding,
-      controlOwnerId: binding.vaultOwnerId,
-      effectiveOwnerId: binding.vaultOwnerId,
-      repaired: true,
-    };
-  }
-
-  if (binding.controlOwnerId && !binding.vaultOwnerId) {
-    setVaultMetaValueInDb(db, 'owner_user_root_id', binding.controlOwnerId);
-    return {
-      ...binding,
-      vaultOwnerId: binding.controlOwnerId,
-      effectiveOwnerId: binding.controlOwnerId,
-      repaired: true,
-    };
+  if (binding.repaired) {
+    if (!getMetaValue(db, META_KEY_OWNER_IDENTITY_ID) && binding.controlOwnerId) {
+      setMetaValue(db, META_KEY_OWNER_IDENTITY_ID, binding.controlOwnerId);
+    }
+    if (!getVaultMetaValueFromDb(db, 'owner_user_root_id') && binding.vaultOwnerId) {
+      setVaultMetaValueInDb(db, 'owner_user_root_id', binding.vaultOwnerId);
+    }
+    return binding;
   }
 
   return binding;
