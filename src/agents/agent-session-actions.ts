@@ -11,7 +11,7 @@ interface AttachAgentSessionOptions {
   agentSessionId: string;
   persistAgentSessionSelection: (workspaceId: string, sessionId: string) => void;
   clearViewOnly: () => void;
-  checkAgentSessionTakeover: (workspaceId: string, agentSessionId: string) => Promise<{ requiresTakeover: boolean; sessionName?: string }>;
+  checkAgentSessionTakeover?: (workspaceId: string, agentSessionId: string) => Promise<{ requiresTakeover: boolean; sessionName?: string }>;
   attachAgentSession: (workspaceId: string, agentSessionId: string, options?: { force?: boolean }) => Promise<void>;
   afterAttach?: () => void | Promise<void>;
 }
@@ -60,7 +60,9 @@ export function findCreatedAgentSession(
 }
 
 export async function openAgentSession(options: AttachAgentSessionOptions): Promise<void> {
-  const takeover = await options.checkAgentSessionTakeover(options.workspaceId, options.agentSessionId);
+  const takeover = options.checkAgentSessionTakeover
+    ? await options.checkAgentSessionTakeover(options.workspaceId, options.agentSessionId)
+    : { requiresTakeover: false };
   const runAttach = async (force?: boolean) => {
     options.persistAgentSessionSelection(options.workspaceId, options.agentSessionId);
     options.clearViewOnly();
@@ -69,6 +71,7 @@ export async function openAgentSession(options: AttachAgentSessionOptions): Prom
   };
 
   if (takeover.requiresTakeover) {
+    let attachPromise: Promise<void> | null = null;
     await new Promise<void>((resolve) => {
       options.flow.showConfirm({
         title: 'Take Over Agent Terminal?',
@@ -76,15 +79,18 @@ export async function openAgentSession(options: AttachAgentSessionOptions): Prom
         variant: 'warning',
         confirmLabel: 'Take Over',
         cancelLabel: 'Cancel',
-        onConfirm: async () => {
-          await runAttach(true);
+        onConfirm: () => {
           resolve();
+          attachPromise = runAttach(true);
         },
         onCancel: () => {
           resolve();
         },
       });
     });
+    if (attachPromise) {
+      await attachPromise;
+    }
     return;
   }
 

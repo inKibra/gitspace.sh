@@ -43,6 +43,7 @@ import {
 } from '../tmux-lite/replay/service.js';
 import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
+import { AgentSessionTakeoverRequiredError } from '../../agents/opencode-coordinator.js';
 
 // Import project loading
 import { listProjectSummaries } from "../../core/project-catalog";
@@ -1999,6 +2000,10 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
+      if (e instanceof AgentSessionTakeoverRequiredError) {
+        await this.sendError(session, sendResponse, 'TAKEOVER_REQUIRED', detail, { workspaceId });
+        return;
+      }
       await this.sendError(session, sendResponse, 'ATTACH_FAILED', `Failed to attach agent session: ${detail}`);
     }
   }

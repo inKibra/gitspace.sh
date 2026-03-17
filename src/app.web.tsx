@@ -778,6 +778,7 @@ export default function App() {
         workspaceId,
         title: session.title,
         updatedAt: undefined,
+        closed: 'closed' in session ? Boolean(session.closed) : undefined,
       }));
       const combined = new Map<string, (typeof baseSessions)[number]>();
       for (const session of snapshotSessions) combined.set(session.id, session);
@@ -789,6 +790,7 @@ export default function App() {
             workspaceId,
             title: sessionId,
             updatedAt: undefined,
+            closed: false,
           });
         }
       }
@@ -852,7 +854,7 @@ export default function App() {
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!webBackend?.attachAgentSession || !webBackend.checkAgentSessionTakeover) {
+      if (!webBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
       await openAgentSession({
@@ -861,7 +863,7 @@ export default function App() {
         agentSessionId,
         persistAgentSessionSelection,
         clearViewOnly: () => setIsViewOnlySession(false),
-        checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover!.bind(webBackend),
+        checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
         attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
         afterAttach: async () => {
           setView('terminal');
@@ -869,7 +871,7 @@ export default function App() {
       });
     },
     onCreateAgentSession: async (workspaceId) => {
-      if (!webBackend?.attachAgentSession || !webBackend.checkAgentSessionTakeover) {
+      if (!webBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
       promptCreateAgentSession({
@@ -882,7 +884,7 @@ export default function App() {
           workspaceId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover!.bind(webBackend),
+          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
           attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
           afterAttach: async () => {
             setView('terminal');
@@ -968,7 +970,7 @@ export default function App() {
   );
 
   const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
-    if (!webBackend?.attachAgentSession || !webBackend.checkAgentSessionTakeover) {
+    if (!webBackend?.attachAgentSession) {
       throw new Error('Agent attach unavailable');
     }
     await handleInboxSessionSelection({
@@ -986,7 +988,7 @@ export default function App() {
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover!.bind(webBackend),
+          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
           attachAgentSession: webBackend.attachAgentSession!.bind(webBackend),
           afterAttach: async () => {
             setView('terminal');

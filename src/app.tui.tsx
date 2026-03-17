@@ -1369,6 +1369,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         workspaceId,
         title: session.title,
         updatedAt: undefined,
+        closed: 'closed' in session ? Boolean(session.closed) : undefined,
       }));
       const combined = new Map<string, (typeof baseSessions)[number]>();
       for (const session of snapshotSessions) combined.set(session.id, session);
@@ -1380,6 +1381,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             workspaceId,
             title: sessionId,
             updatedAt: undefined,
+            closed: false,
           });
         }
       }
@@ -3051,8 +3053,6 @@ export async function launchTUI(
   let renderer = await createRendererForKeyboardMode(initialKeyboardMode);
   let root = createRoot(renderer);
   let activeRenderer = renderer;
-  let cleanupRegistered = false;
-
   const cleanupRenderer = () => {
     try {
       activeRenderer.destroy();
@@ -3073,20 +3073,25 @@ export async function launchTUI(
   };
 
   const handleFatal = (kind: 'uncaughtException' | 'unhandledRejection', error: unknown) => {
-    cleanupRenderer();
-    restoreTerminal();
-    const logPath = writeCrashLog(`tui-${kind}`, error, {
-      keyboardMode: requestedKeyboardMode,
-      relayConfigured: Boolean(relayConfig),
-    });
-    const detail = error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error);
     try {
-      process.stderr.write(`[gssh] TUI ${kind}: ${detail}\n`);
-      if (logPath) {
-        process.stderr.write(`[gssh] Crash log written to ${logPath}\n`);
+      cleanupRenderer();
+      restoreTerminal();
+      cleanupListeners();
+      const logPath = writeCrashLog(`tui-${kind}`, error, {
+        keyboardMode: requestedKeyboardMode,
+        relayConfigured: Boolean(relayConfig),
+      });
+      const detail = error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error);
+      try {
+        process.stderr.write(`[gssh] TUI ${kind}: ${detail}\n`);
+        if (logPath) {
+          process.stderr.write(`[gssh] Crash log written to ${logPath}\n`);
+        }
+      } catch {
+        // Best effort only.
       }
-    } catch {
-      // Best effort only.
+    } finally {
+      process.exit(1);
     }
   };
 
@@ -3117,13 +3122,10 @@ export async function launchTUI(
   };
 
   // Handle SIGINT
-  if (!cleanupRegistered) {
-    process.prependListener('uncaughtException', handleFatalException);
-    process.prependListener('unhandledRejection', handleFatalRejection);
-    process.on('SIGINT', handleQuit);
-    process.on('exit', handleExit);
-    cleanupRegistered = true;
-  }
+  process.prependListener('uncaughtException', handleFatalException);
+  process.prependListener('unhandledRejection', handleFatalRejection);
+  process.on('SIGINT', handleQuit);
+  process.on('exit', handleExit);
 
   const resolvedKeyboardMode = await new Promise<ResolvedKeyboardMode>((resolve) => {
     root.render(

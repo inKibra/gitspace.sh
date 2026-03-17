@@ -1335,8 +1335,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       const timeout = setTimeout(() => {
         const pending = this.pendingAgentTakeoverStatus.get(requestId);
         if (!pending) return;
+        this.agentTakeoverCheckSupported = false;
         this.pendingAgentTakeoverStatus.delete(requestId);
-        reject(new Error(`Timed out checking agent session takeover (${workspaceId})`));
+        resolve({ requiresTakeover: false });
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
       this.pendingAgentTakeoverStatus.set(requestId, { workspaceId, resolve, reject, timeout });
       void this.sendCommand(command).catch((error) => {

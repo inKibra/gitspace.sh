@@ -103,8 +103,8 @@ export function useWorkspaceAgentSessions(options: UseWorkspaceAgentSessionsOpti
             setSessionsByWorkspace((current) => ({
               ...current,
               [workspaceId]: liveMapped.length > 0
-                ? mergeSessions(knownMapped, liveMapped)
-                : knownMapped,
+                ? mergeSessions(current[workspaceId] ?? [], liveMapped)
+                : (current[workspaceId] ?? knownMapped),
             }));
           })
           .catch((err) => setError(err instanceof Error ? err.message : String(err)))

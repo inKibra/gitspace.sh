@@ -482,12 +482,22 @@ export async function abortAgentSession(
   throw new Error('Unexpected response');
 }
 
+async function sendAgentCommandWithServerRetry(command: Command): Promise<Response> {
+  const response = await send(command);
+  if (response.type === 'error' && /Unknown command/i.test(response.message)) {
+    await killServer();
+    await ensureServer();
+    return send(command);
+  }
+  return response;
+}
+
 export async function clearAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
 ): Promise<boolean> {
   await ensureServer();
-  const res = await send({ type: 'agent-clear', target, agentSessionId });
+  const res = await sendAgentCommandWithServerRetry({ type: 'agent-clear', target, agentSessionId });
   if (res.type === 'agent-bool') return res.ok;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -498,7 +508,7 @@ export async function getAgentSessionTakeoverState(
   agentSessionId: string,
 ): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
   await ensureServer();
-  const res = await send({ type: 'agent-takeover-status', target, agentSessionId });
+  const res = await sendAgentCommandWithServerRetry({ type: 'agent-takeover-status', target, agentSessionId });
   if (res.type === 'agent-takeover-status') {
     return {
       requiresTakeover: res.status.requiresTakeover,

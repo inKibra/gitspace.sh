@@ -18,13 +18,32 @@ export async function executeSafeRefresh(options: ExecuteSafeRefreshOptions): Pr
     await options.refresh();
   } catch (error) {
     const detail = toDetail(error);
-    const logPath = (options.writeLog ?? writeCrashLog)('remote-tui-refresh', error, options.context);
     const logError = options.logError ?? ((message: string) => logger.error(message));
-    if (error instanceof Error && error.stack) {
-      logError(`[tui] Remote refresh failed:\n${error.stack}`);
-    } else {
-      logError(`[tui] Remote refresh failed: ${detail}`);
+    try {
+      let logPath = '';
+      try {
+        logPath = (options.writeLog ?? writeCrashLog)('remote-tui-refresh', error, options.context);
+      } catch (writeError) {
+        logger.error(`[tui] Failed to write refresh crash log: ${toDetail(writeError)}`);
+      }
+
+      try {
+        if (error instanceof Error && error.stack) {
+          logError(`[tui] Remote refresh failed:\n${error.stack}`);
+        } else {
+          logError(`[tui] Remote refresh failed: ${detail}`);
+        }
+      } catch {
+        logger.error(`[tui] Remote refresh failed: ${detail}`);
+      }
+
+      try {
+        options.onError(logPath ? `${detail}\nCrash log: ${logPath}` : detail);
+      } catch {
+        logger.error(`[tui] Failed to surface refresh error: ${detail}`);
+      }
+    } catch {
+      logger.error(`[tui] Remote refresh handling failed: ${detail}`);
     }
-    options.onError(logPath ? `${detail}\nCrash log: ${logPath}` : detail);
   }
 }

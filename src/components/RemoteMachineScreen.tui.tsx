@@ -42,6 +42,7 @@ import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
 import { useWorkspaceAgentSessions } from '../agents/useWorkspaceAgentSessions.js';
 import { useWorkspaceAgentEvents } from '../agents/useWorkspaceAgentEvents.js';
 import { agentNotificationToInboxItem } from '../agents/agentNotificationToInboxItem.js';
+import { collectWorkspaceSyncIds } from '../agents/remote-agent-browser.js';
 import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from '../agents/agent-session-actions.js';
 import { toast } from '@opentui-ui/toast';
 import { DEFAULT_NOTIFICATION_CONFIG, useNotifications, type ToastNotification } from '../notifications/index.js';
@@ -647,6 +648,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         workspaceId,
         title: session.title,
         updatedAt: undefined,
+        closed: 'closed' in session ? Boolean(session.closed) : undefined,
       }));
       const combined = new Map<string, (typeof baseSessions)[number]>();
       for (const session of snapshotSessions) combined.set(session.id, session);
@@ -658,6 +660,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
             workspaceId,
             title: sessionId,
             updatedAt: undefined,
+            closed: false,
           });
         }
       }
@@ -683,14 +686,9 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
     expandedWorkspaceIds: string[];
     selectedWorkspaceId: string | null;
   }) => {
-    const workspaceIds = new Set(remote.workspaces.map((workspace) => workspace.id));
-    for (const workspaceId of expandedWorkspaceIds) {
-      workspaceIds.add(workspaceId);
-    }
-    if (selectedWorkspaceId) {
-      workspaceIds.add(selectedWorkspaceId);
-    }
-    await workspaceAgentSessions.syncWorkspaceSessions(Array.from(workspaceIds));
+    await workspaceAgentSessions.syncWorkspaceSessions(
+      collectWorkspaceSyncIds(remote.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
+    );
   }, [remote.workspaces, workspaceAgentSessions]);
 
   const remoteWorkspaceSyncKey = useMemo(
@@ -731,7 +729,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
       await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
     },
     onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!remoteBackend?.attachAgentSession || !remoteBackend.checkAgentSessionTakeover) {
+      if (!remoteBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
       await openAgentSession({
@@ -740,12 +738,12 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
         agentSessionId,
         persistAgentSessionSelection,
         clearViewOnly: () => setIsViewOnlySession(false),
-        checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover.bind(remoteBackend),
+        checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover?.bind(remoteBackend),
         attachAgentSession: remoteBackend.attachAgentSession.bind(remoteBackend),
       });
     },
     onCreateAgentSession: async (workspaceId) => {
-      if (!remoteBackend?.attachAgentSession || !remoteBackend.checkAgentSessionTakeover) {
+      if (!remoteBackend?.attachAgentSession) {
         throw new Error('Agent attach unavailable');
       }
       promptCreateAgentSession({
@@ -758,7 +756,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           workspaceId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover.bind(remoteBackend),
+          checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover?.bind(remoteBackend),
           attachAgentSession: remoteBackend.attachAgentSession.bind(remoteBackend),
         },
       });
@@ -819,7 +817,7 @@ export function RemoteMachineScreen({ machine, relayUrl, identity, onBack }: Rem
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover!.bind(remoteBackend),
+          checkAgentSessionTakeover: remoteBackend.checkAgentSessionTakeover?.bind(remoteBackend),
           attachAgentSession: remoteBackend.attachAgentSession!.bind(remoteBackend),
         });
       },

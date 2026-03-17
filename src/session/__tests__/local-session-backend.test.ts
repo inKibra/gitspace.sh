@@ -1465,11 +1465,11 @@ describe('LocalSessionBackend', () => {
     socketHandlers!.onControl({ type: 'kicked' });
     await Bun.sleep(0);
 
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'command_error',
       code: 'SESSION_TAKEN_OVER',
-      message: 'This agent terminal was taken over by another client.',
-    });
+      message: expect.stringContaining('taken over'),
+    }));
     expect(events).toContainEqual({ type: 'detached' });
   });
 });

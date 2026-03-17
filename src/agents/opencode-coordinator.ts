@@ -162,8 +162,8 @@ export class OpenCodeCoordinator {
         // best effort
       }
     }
-    await markStoredSessionClosed(target.workspaceId, agentSessionId);
     await this.refreshAgentSessions(target);
+    await markStoredSessionClosed(target.workspaceId, agentSessionId);
     return aborted;
   }
 
@@ -227,7 +227,9 @@ export class OpenCodeCoordinator {
           terminalSessionName: existingById.name,
           lastKnownStatus: existingById.exitCode === undefined ? undefined : 'closed',
         });
-        return existingById;
+        if (existingById.exitCode === undefined) {
+          return existingById;
+        }
       }
     }
 
@@ -240,7 +242,9 @@ export class OpenCodeCoordinator {
         terminalSessionName: existing.name,
         lastKnownStatus: existing.exitCode === undefined ? undefined : 'closed',
       });
-      return existing;
+      if (existing.exitCode === undefined) {
+        return existing;
+      }
     }
 
     return null;

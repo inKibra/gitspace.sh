@@ -168,6 +168,8 @@ export async function replaceStoredSessions(
         ...stored,
         lastKnownStatus: 'closed',
         lastSeenAt: new Date().toISOString(),
+        terminalSessionId: undefined,
+        terminalSessionName: undefined,
       };
     }
     await writeStoredSessionHistory({ workspaceId, sessions: next });

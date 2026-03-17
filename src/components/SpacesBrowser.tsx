@@ -727,9 +727,9 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     }
     if (onRefreshAgents) {
       const selectedWorkspaceId = selectedItem?.type === 'workspace'
-        ? selectedItem.workspace.id
+        ? (selectedItem.workspace.id.startsWith('orphan:') ? null : selectedItem.workspace.id)
         : selectedItem && 'workspaceId' in selectedItem
-          ? selectedItem.workspaceId
+          ? (selectedItem.workspaceId.startsWith('orphan:') ? null : selectedItem.workspaceId)
           : null;
       await onRefreshAgents({
         expandedWorkspaceIds: Array.from(expandedAgentSections),
