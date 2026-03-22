@@ -1,5 +1,6 @@
 import { promptConfirm, promptPassword } from '../utils/prompts.js';
 import { readPasswordFromStdin } from '../utils/password-stdin.js';
+import { keypairExists } from '../core/identity.js';
 import { localSecureStoreExists } from '../core/local-secure-store.js';
 import { SpacesError } from '../types/errors.js';
 
@@ -84,6 +85,14 @@ export async function ensureLocalStorePassword(
   };
 
   const storeExists = localSecureStoreExists();
+  if (!storeExists && keypairExists()) {
+    const { password } = await resolvePasswordInput(
+      'Enter your existing device identity password to migrate it into the new local secure store:',
+      sharedContext,
+    );
+    return remember(password);
+  }
+
   if (!storeExists) {
     const shouldCreate = options.yes || await promptConfirm(
       'No local secure store password is configured. Create one now?',

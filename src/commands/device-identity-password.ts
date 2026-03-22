@@ -1,6 +1,7 @@
 import os from 'os';
 import { promptConfirm, promptPassword } from '../utils/prompts.js';
 import { generateAndSaveKeypair, keypairExists } from '../core/identity.js';
+import { localSecureStoreExists } from '../core/local-secure-store.js';
 import { NoIdentityError, SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import { readPasswordFromStdin } from '../utils/password-stdin.js';
@@ -119,7 +120,9 @@ export async function ensureDeviceIdentityPassword(
   }
 
   const { password } = await resolvePasswordInput(
-    'Enter password to unlock local secure store:',
+    keypairExists() && !localSecureStoreExists()
+      ? 'Enter your existing device identity password to migrate it into the new local secure store:'
+      : 'Enter password to unlock local secure store:',
     sharedContext,
   );
   return remember(password);

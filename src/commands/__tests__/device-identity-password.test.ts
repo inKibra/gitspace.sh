@@ -115,4 +115,43 @@ describe('device identity password context', () => {
     expect(password).toBe('seeded-password');
     expect(generateAndSaveKeypairMock).toHaveBeenCalledWith('seeded-password', expect.any(String));
   });
+
+  test('prompts for the existing identity password during legacy migration', async () => {
+    const promptPasswordMock = mock(async () => 'legacy-password');
+    const promptConfirmMock = mock(async () => true);
+    const keypairExistsMock = mock(() => true);
+    const generateAndSaveKeypairMock = mock(async () => undefined);
+
+    mock.module('../../utils/prompts.js', () => ({
+      promptPassword: promptPasswordMock,
+      promptConfirm: promptConfirmMock,
+    }));
+
+    mock.module('../../core/identity.js', () => ({
+      keypairExists: keypairExistsMock,
+      generateAndSaveKeypair: generateAndSaveKeypairMock,
+    }));
+
+    mock.module('../../core/local-secure-store.js', () => ({
+      localSecureStoreExists: () => false,
+    }));
+
+    mock.module('../../utils/password-stdin.js', () => ({
+      readPasswordFromStdin: mock(async () => 'stdin-password'),
+    }));
+
+    mock.module('../local-store-password.js', () => ({
+      getLocalStorePasswordFromEnv: () => null,
+    }));
+
+    const { ensureDeviceIdentityPassword } = await import(`../device-identity-password.js?test=${Date.now()}`);
+
+    const password = await ensureDeviceIdentityPassword();
+
+    expect(password).toBe('legacy-password');
+    expect(promptPasswordMock).toHaveBeenCalledWith(
+      'Enter your existing device identity password to migrate it into the new local secure store:',
+    );
+    expect(promptConfirmMock).not.toHaveBeenCalled();
+  });
 });
