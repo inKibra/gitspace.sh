@@ -14,7 +14,7 @@ import {
 } from '../cloud.js';
 import { SpritesProvider } from '../../relay/control/sprites-provider.js';
 import {
-  bindControlOwner,
+  bindPersistedOwnerIdentity,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
@@ -61,7 +61,7 @@ function setupEnv(): void {
   process.env.GITSPACE_CONTROL_DIR = join(testDir, '.relay', 'control');
 
   ensureControlStore();
-  bindControlOwner(OWNER_ID);
+  bindPersistedOwnerIdentity(OWNER_ID);
 }
 
 function teardownEnv(): void {

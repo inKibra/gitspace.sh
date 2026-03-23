@@ -12,6 +12,12 @@
 
 import { notifyOwnerSyncCategoryDirty } from '../core/owner-sync-events.js';
 import {
+  isLocalSecureStoreUnlocked,
+  markLegacyLocalStorageMigrated,
+  readLocalStoreSecretJson,
+  writeLocalStoreSecretJson,
+} from '../core/local-secure-store.js';
+import {
   chmodSync,
   existsSync,
   lstatSync,
@@ -55,6 +61,9 @@ function resolveTestSecretsFilePath(): string | null {
 }
 
 const TEST_SECRETS_FILE = resolveTestSecretsFilePath();
+const LOCAL_STORE_NAMESPACE = 'secrets';
+const LOCAL_STORE_KEY_UNIFIED_BLOB = 'unified';
+const ROOT_USER_SECRET_KEY = 'USER_ROOT_IDENTITY';
 
 // Keychain entry names
 const UNIFIED_SECRETS_KEY = 'secrets';
@@ -218,6 +227,46 @@ function createEmptyBlob(): UnifiedSecretsBlob {
   };
 }
 
+function stripKeychainOnlySecrets(blob: UnifiedSecretsBlob): UnifiedSecretsBlob {
+  const global = { ...blob.global };
+  delete global[ROOT_USER_SECRET_KEY];
+  return {
+    global,
+    projects: { ...blob.projects },
+    metadata: { ...blob.metadata },
+  };
+}
+
+async function migrateRootUserSecretFromUnifiedBlob(blob: UnifiedSecretsBlob): Promise<{
+  blob: UnifiedSecretsBlob;
+  migrated: boolean;
+  rootUserSecret: string | null;
+}> {
+  const rootUserSecret = typeof blob.global[ROOT_USER_SECRET_KEY] === 'string'
+    && blob.global[ROOT_USER_SECRET_KEY].length > 0
+    ? blob.global[ROOT_USER_SECRET_KEY]
+    : null;
+
+  if (!rootUserSecret) {
+    return {
+      blob: stripKeychainOnlySecrets(blob),
+      migrated: false,
+      rootUserSecret: null,
+    };
+  }
+
+  const directRootUserSecret = await readSecretValue(ROOT_USER_SECRET_KEY);
+  if (!directRootUserSecret) {
+    await writeSecretValue(ROOT_USER_SECRET_KEY, rootUserSecret);
+  }
+
+  return {
+    blob: stripKeychainOnlySecrets(blob),
+    migrated: true,
+    rootUserSecret,
+  };
+}
+
 function normalizeRecord(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object') {
     return {};
@@ -286,17 +335,39 @@ async function loadUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
     return unifiedSecretsCache;
   }
 
-  const raw = await readSecretValue(UNIFIED_SECRETS_KEY);
+  if (isLocalSecureStoreUnlocked()) {
+    const stored = readLocalStoreSecretJson<UnifiedSecretsBlob>(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_UNIFIED_BLOB);
+    if (stored) {
+      unifiedSecretsCache = stripKeychainOnlySecrets(stored);
+      if (unifiedSecretsCache.metadata.legacyMigrationComplete) {
+        legacyEntriesDetected = unifiedSecretsCache.metadata.legacyEntriesRetained;
+      }
+      return unifiedSecretsCache;
+    }
+  }
 
-  unifiedSecretsCache = parseUnifiedSecretsBlob(raw);
+  const raw = await readSecretValue(UNIFIED_SECRETS_KEY);
+  const parsed = parseUnifiedSecretsBlob(raw);
+  const { blob, migrated } = await migrateRootUserSecretFromUnifiedBlob(parsed);
+
+  unifiedSecretsCache = blob;
   if (unifiedSecretsCache.metadata.legacyMigrationComplete) {
     legacyEntriesDetected = unifiedSecretsCache.metadata.legacyEntriesRetained;
+  }
+
+  if (migrated) {
+    await writeSecretValue(UNIFIED_SECRETS_KEY, JSON.stringify(unifiedSecretsCache));
+  }
+
+  if (isLocalSecureStoreUnlocked()) {
+    writeLocalStoreSecretJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_UNIFIED_BLOB, unifiedSecretsCache);
+    markLegacyLocalStorageMigrated(true);
   }
   return unifiedSecretsCache;
 }
 
 async function saveUnifiedSecretsBlob(blob: UnifiedSecretsBlob): Promise<void> {
-  const normalized: UnifiedSecretsBlob = {
+  const normalized = stripKeychainOnlySecrets({
     global: { ...blob.global },
     projects: { ...blob.projects },
     metadata: {
@@ -304,8 +375,13 @@ async function saveUnifiedSecretsBlob(blob: UnifiedSecretsBlob): Promise<void> {
       legacyMigrationComplete: blob.metadata.legacyMigrationComplete === true,
       legacyEntriesRetained: blob.metadata.legacyEntriesRetained === true,
     },
-  };
+  });
   unifiedSecretsCache = normalized;
+
+  if (isLocalSecureStoreUnlocked()) {
+    writeLocalStoreSecretJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY_UNIFIED_BLOB, normalized);
+    markLegacyLocalStorageMigrated(true);
+  }
 
   await writeSecretValue(UNIFIED_SECRETS_KEY, JSON.stringify(normalized));
 }
@@ -604,6 +680,12 @@ async function saveGlobalSecretsBlob(secrets: Record<string, string>): Promise<v
  * Used for: GITSPACE_TOKEN, TUNNEL_TOKEN_{subdomain}, etc.
  */
 export async function setSecret(key: string, value: string): Promise<void> {
+  if (key === ROOT_USER_SECRET_KEY) {
+    await writeSecretValue(key, value);
+    notifyGlobalSecretChangeForSync(key);
+    return;
+  }
+
   const secrets = await loadGlobalSecretsBlob();
   secrets[key] = value;
   await saveGlobalSecretsBlob(secrets);
@@ -617,6 +699,27 @@ export async function setSecret(key: string, value: string): Promise<void> {
  * format for seamless migration from older versions.
  */
 export async function getSecret(key: string): Promise<string | null> {
+  if (key === ROOT_USER_SECRET_KEY) {
+    const directValue = await readSecretValue(key);
+    if (directValue) {
+      return directValue;
+    }
+
+    const rawUnifiedBlob = await readSecretValue(UNIFIED_SECRETS_KEY);
+    if (!rawUnifiedBlob) {
+      return null;
+    }
+
+    const parsed = parseUnifiedSecretsBlob(rawUnifiedBlob);
+    const { blob, migrated, rootUserSecret } = await migrateRootUserSecretFromUnifiedBlob(parsed);
+    if (migrated) {
+      unifiedSecretsCache = blob;
+      await writeSecretValue(UNIFIED_SECRETS_KEY, JSON.stringify(blob));
+    }
+
+    return rootUserSecret;
+  }
+
   const blob = await loadUnifiedSecretsBlob();
   const secrets = blob.global;
 
@@ -659,6 +762,14 @@ export async function getSecret(key: string): Promise<string | null> {
  * Delete a global secret
  */
 export async function deleteSecret(key: string): Promise<boolean> {
+  if (key === ROOT_USER_SECRET_KEY) {
+    const deleted = await removeSecretValue(key);
+    if (deleted) {
+      notifyGlobalSecretChangeForSync(key);
+    }
+    return deleted;
+  }
+
   const secrets = await loadGlobalSecretsBlob();
   if (!(key in secrets)) {
     return false;
@@ -680,15 +791,25 @@ export async function exportSecretsForOwnerSyncSnapshot(): Promise<OwnerSyncSecr
   for (const [projectName, values] of Object.entries(blob.projects)) {
     projects[projectName] = { ...values };
   }
+
+  const global = { ...blob.global };
+  const rootIdentity = await readSecretValue(ROOT_USER_SECRET_KEY);
+  if (rootIdentity) {
+    global[ROOT_USER_SECRET_KEY] = rootIdentity;
+  }
+
   return {
-    global: { ...blob.global },
+    global,
     projects,
   };
 }
 
 export async function importSecretsFromOwnerSyncSnapshot(snapshot: OwnerSyncSecretsSnapshot): Promise<void> {
   const blob = await loadUnifiedSecretsBlob();
-  blob.global = { ...snapshot.global };
+  const global = normalizeRecord(snapshot.global);
+  const rootIdentity = global[ROOT_USER_SECRET_KEY];
+  delete global[ROOT_USER_SECRET_KEY];
+  blob.global = global;
 
   const projects: Record<string, Record<string, string>> = {};
   for (const [projectName, values] of Object.entries(snapshot.projects)) {
@@ -696,6 +817,9 @@ export async function importSecretsFromOwnerSyncSnapshot(snapshot: OwnerSyncSecr
   }
   blob.projects = projects;
   await saveUnifiedSecretsBlob(blob);
+  if (typeof rootIdentity === 'string' && rootIdentity.length > 0) {
+    await writeSecretValue(ROOT_USER_SECRET_KEY, rootIdentity);
+  }
 }
 
 export interface PreloadAllSecretsResult {

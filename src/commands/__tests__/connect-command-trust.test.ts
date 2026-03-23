@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateAndSaveKeypair } from '../../core/identity.js';
 import { addTrustedRelay, getTrustedRelay } from '../../core/trusted-relays.js';
+import { getControlDbPath } from '../../relay/control/store.js';
 
 let promptConfirmQueue: boolean[] = [];
 let promptPasswordValue: string | null = null;
@@ -173,6 +174,39 @@ describe('connect command relay trust flow', () => {
           yes: true,
         }),
       ).rejects.toThrow(/invalid password|failed to unlock identity/i);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('wrong password does not poison legacy migration before a later correct connect attempt', async () => {
+    const relayPubkey = Buffer.from('relay-legacy-migration-pubkey').toString('base64');
+    const server = startRelayHealthServer(relayPubkey);
+    const relayUrl = `ws://127.0.0.1:${server.port}/ws`;
+
+    await generateAndSaveKeypair('correct-password', 'test-host');
+    rmSync(getControlDbPath(), { force: true });
+    rmSync(`${getControlDbPath()}-shm`, { force: true });
+    rmSync(`${getControlDbPath()}-wal`, { force: true });
+
+    try {
+      promptPasswordValue = 'wrong-password';
+      await expect(
+        connectToRemote('machine-test', {
+          relay: relayUrl,
+          relayPubkey,
+          yes: true,
+        }),
+      ).rejects.toThrow(/invalid password|failed to unlock/i);
+
+      promptPasswordValue = 'correct-password';
+      await expect(
+        connectToRemote('machine-test', {
+          relay: relayUrl,
+          relayPubkey,
+          yes: true,
+        }),
+      ).rejects.toThrow(/connection failed|websocket/i);
     } finally {
       server.stop(true);
     }

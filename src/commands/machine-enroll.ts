@@ -305,7 +305,7 @@ export async function enrollMachine(options: {
     throw new NoIdentityError();
   }
 
-  const password = await promptPassword('Enter password to unlock identity:');
+  const password = await promptPassword('Enter password to unlock local secure store identity:');
   if (!password) {
     logger.info('Cancelled');
     return;

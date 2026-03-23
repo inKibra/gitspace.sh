@@ -3,10 +3,12 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  bindControlOwner,
+  bindPersistedOwnerIdentity,
   ensureControlStore,
   getControlDbPath,
+  getPersistedOwnerIdentityId,
   listCloudWorkspaces,
+  readPersistedOwnerBinding,
 } from './store.js';
 import {
   consumeRootInviteToken,
@@ -54,21 +56,23 @@ describe('control store', () => {
     const meta = ensureControlStore();
 
     expect(existsSync(getControlDbPath())).toBe(true);
-    expect(meta.schemaVersion).toBe(5);
+    expect(meta.schemaVersion).toBe(6);
     expect(meta.createdAt.length).toBeGreaterThan(0);
     expect(meta.updatedAt.length).toBeGreaterThan(0);
     expect(meta.ownerIdentityId).toBeUndefined();
   });
 
   test('binds owner once and rejects different owner identity', () => {
-    const first = bindControlOwner('owner-1');
+    const first = bindPersistedOwnerIdentity('owner-1');
     expect(first.bound).toBe(true);
     expect(first.ownerIdentityId).toBe('owner-1');
+    expect(getPersistedOwnerIdentityId()).toBe('owner-1');
+    expect(readPersistedOwnerBinding().vaultOwnerId).toBe('owner-1');
 
-    const second = bindControlOwner('owner-1');
+    const second = bindPersistedOwnerIdentity('owner-1');
     expect(second.bound).toBe(false);
 
-    expect(() => bindControlOwner('owner-2')).toThrow(/owner mismatch/i);
+    expect(() => bindPersistedOwnerIdentity('owner-2')).toThrow(/mismatch/i);
   });
 
   test('lists cloud workspaces as empty by default', () => {

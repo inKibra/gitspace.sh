@@ -17,14 +17,13 @@ import {
   loadOrCreateRelayIdentity,
   formatRelayFingerprint,
 } from "../relay/identity.js";
+import { unlockLocalSecureStore } from '../core/local-secure-store.js';
 import { loadUserRootIdentity } from "../core/user-identity.js";
 import { getSpacesDir } from "../core/config.js";
 import {
-  bindControlOwner,
+  bindPersistedOwnerIdentity,
   ensureControlStore,
   getControlDbPath,
-  setVaultMeta,
-  getVaultMeta,
   isVaultInitialized,
   listVaultMachines,
   listVaultMachinesForOwner,
@@ -39,6 +38,17 @@ import {
 import { promptConfirm, selectOne } from "../utils/prompts.js";
 import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
 import { ensureUserRootIdentityWithRecovery } from "./identity-recovery.js";
+import {
+  createLocalStorePasswordContext,
+  ensureLocalStorePassword,
+  LOCAL_STORE_PASSWORD_ENV,
+} from './local-store-password.js';
+import {
+  formatStartupControlStateMismatch,
+  formatStartupControlStateTakeoverPrompt,
+  formatStartupControlStateTakeoverWarning,
+  planStartupControlState,
+} from '../core/control-state-startup.js';
 
 /** Default port for relay server (4480 = "GIT0" on phone keypad) */
 const DEFAULT_PORT = 4480;
@@ -111,31 +121,27 @@ export function bindRelayOwnerForStartup(ownerUserRootId: string): {
 } {
   ensureControlStore();
 
-  const existingOwner = getVaultMeta("owner_user_root_id");
-  if (existingOwner && existingOwner !== ownerUserRootId) {
+  const plan = planStartupControlState({ ownerUserRootId });
+  if (plan.hasUnrepairableOwnerMismatch) {
     throw new SpacesError(
-      `Relay is already owned by a different user root identity.\n`
-      + `  Existing owner: ${existingOwner.slice(0, 8)}...\n`
-      + `  Current user:   ${ownerUserRootId.slice(0, 8)}...\n\n`
-      + 'Recover the original identity, or re-run with `gssh relay start --takeover` to clear persisted relay control state and rebind ownership.',
-      "USER_ERROR",
+      formatStartupControlStateMismatch(plan, {
+        subject: 'relay',
+        takeoverCommand: 'gssh relay start --takeover',
+      }),
+      'USER_ERROR',
       1,
     );
   }
 
   const vaultInitialized = isVaultInitialized();
-  if (!existingOwner) {
+  if (!plan.ownerBinding.effectiveOwnerId && !plan.ownerBinding.mismatch) {
     assertRelayOwnerRepairIsSafe(ownerUserRootId);
   }
 
-  bindControlOwner(ownerUserRootId);
-
-  if (!existingOwner) {
-    setVaultMeta("owner_user_root_id", ownerUserRootId);
-  }
+  const ownerBinding = bindPersistedOwnerIdentity(ownerUserRootId);
 
   return {
-    repairedOwnerBinding: !existingOwner,
+    repairedOwnerBinding: ownerBinding.bound || ownerBinding.repaired,
     missingVaultInitialization: !vaultInitialized,
   };
 }
@@ -149,8 +155,10 @@ export function takeOverRelayOwnerForStartup(ownerUserRootId: string): {
 }
 
 function isRelayOwnerMismatchError(error: unknown): boolean {
-  return error instanceof SpacesError
-    && error.message.includes('Relay is already owned by a different user root identity.');
+  return error instanceof SpacesError && (
+    error.message.includes('Persisted local control bindings do not match the current identity.')
+    || error.message.includes('Local control bindings mismatch.')
+  );
 }
 
 interface RelayRuntimeState {
@@ -455,11 +463,24 @@ export async function startRelay(options: {
   mode?: RelayStartMode;
   label?: string;
   yes?: boolean;
+  passwordStdin?: boolean;
   foreground?: boolean;
   takeover?: boolean;
 }): Promise<void> {
+  const localStorePasswordContext = createLocalStorePasswordContext({
+    passwordStdin: options.passwordStdin,
+  });
+
   if (!options.foreground) {
     logger.log("Starting relay daemon...");
+
+    const localStorePassword = await ensureLocalStorePassword({
+      yes: options.yes,
+      passwordStdin: options.passwordStdin,
+    }, localStorePasswordContext);
+    if (!localStorePassword) {
+      throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+    }
 
     let daemonSelectedSubdomain: string | undefined;
     let daemonSelectedHostname: string | undefined;
@@ -521,6 +542,7 @@ export async function startRelay(options: {
       stderr: Bun.file(logFile),
       env: {
         ...process.env,
+        [LOCAL_STORE_PASSWORD_ENV]: localStorePassword,
         ...(daemonSelectedSubdomain
           ? {
               [RELAY_SELECTED_SUBDOMAIN_ENV]: daemonSelectedSubdomain,
@@ -547,6 +569,15 @@ export async function startRelay(options: {
     logger.log(logContent);
     throw new SpacesError("Failed to start relay daemon. Check log above for details.", "SYSTEM_ERROR", 2);
   }
+
+  const localStorePassword = await ensureLocalStorePassword({
+    yes: options.yes,
+    passwordStdin: options.passwordStdin,
+  }, localStorePasswordContext);
+  if (!localStorePassword) {
+    throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+  }
+  await unlockLocalSecureStore(localStorePassword);
 
   const existingState = readRelayState();
   if (existingState?.pid && isProcessRunning(existingState.pid)) {
@@ -679,9 +710,14 @@ export async function startRelay(options: {
           throw error;
         }
 
+        const startupPlan = planStartupControlState({ ownerUserRootId });
+
         if (!options.yes) {
           const confirmed = await promptConfirm(
-            'Relay ownership belongs to a different identity. Clear persisted relay registrations, access lists, invites, and owner metadata so the current identity can take over?',
+            formatStartupControlStateTakeoverPrompt(startupPlan, {
+              subject: 'relay',
+              takeoverCommand: 'gssh relay start --takeover',
+            }),
             false,
           );
           if (!confirmed) {
@@ -689,7 +725,10 @@ export async function startRelay(options: {
           }
         }
 
-        logger.warning('Clearing persisted relay control state and taking ownership with the current identity.');
+        logger.warning(formatStartupControlStateTakeoverWarning(startupPlan, {
+          subject: 'relay',
+          takeoverCommand: 'gssh relay start --takeover',
+        }));
         ownerBinding = takeOverRelayOwnerForStartup(ownerUserRootId);
       }
 

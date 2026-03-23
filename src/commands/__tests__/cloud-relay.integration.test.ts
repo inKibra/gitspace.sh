@@ -11,7 +11,7 @@ import {
 } from '../cloud.js';
 import { SpritesProvider } from '../../relay/control/sprites-provider.js';
 import {
-  bindControlOwner,
+  bindPersistedOwnerIdentity,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
@@ -31,9 +31,9 @@ const keychainToken = RUN_RELAY_LIVE && !envToken ? await getSpritesToken() : nu
 const SPRITES_TOKEN = envToken || keychainToken || '';
 const relayDescribe = RUN_RELAY_LIVE && Boolean(SPRITES_TOKEN) ? describe : describe.skip;
 
-const OWNER_ID = 'owner-cloud-relay-live-001';
 const TEST_OWNER_USER_ROOT = mnemonicToUserIdentity(generateMnemonic());
 const OWNER_USER_ROOT_ID = TEST_OWNER_USER_ROOT.id;
+const OWNER_ID = OWNER_USER_ROOT_ID;
 const SPRITES_APP_ID = process.env.SPRITES_APP_ID ?? `gssh-live-relay-${Date.now().toString(36)}`;
 
 setDefaultTimeout(900_000);
@@ -214,7 +214,7 @@ relayDescribe('cloud relay live integration', () => {
     process.env.GITSPACE_CONTROL_DIR = join(testDir, '.relay', 'control');
 
     ensureControlStore();
-    bindControlOwner(OWNER_ID);
+    bindPersistedOwnerIdentity(OWNER_ID);
     setVaultMeta('vault_initialized', '1');
     setVaultMeta('owner_user_root_id', OWNER_USER_ROOT_ID);
 

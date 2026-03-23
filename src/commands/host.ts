@@ -6,6 +6,7 @@
 
 import { existsSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { markLegacyLocalStorageMigrated, readLocalStoreJson, writeLocalStoreJson } from '../core/local-secure-store.js';
 import { getSecret, setSecret, deleteSecret } from '../utils/secrets.js';
 import { getSpacesDir } from '../core/config.js';
 import { getPublicKeyWithoutPassword } from '../core/identity.js';
@@ -263,27 +264,47 @@ function getHostConfigPath(): string {
   return join(getSpacesDir(), 'host.json');
 }
 
+const LOCAL_STORE_NAMESPACE = 'host';
+const LOCAL_STORE_KEY = 'config';
+
 /**
  * Read host config from disk
  */
 export function readHostConfig(): HostConfig | null {
+  const stored = readLocalStoreJson<HostConfig>(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY);
+  if (stored) {
+    return stored;
+  }
+
   const configPath = getHostConfigPath();
   if (!existsSync(configPath)) {
     return null;
   }
 
+  let config: HostConfig;
   try {
     const content = readFileSync(configPath, 'utf-8');
-    return JSON.parse(content) as HostConfig;
+    config = JSON.parse(content) as HostConfig;
   } catch {
     return null;
   }
+
+  try {
+    writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, config);
+    markLegacyLocalStorageMigrated(true);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`[host] Failed to migrate host config into local secure store: ${detail}`);
+  }
+
+  return config;
 }
 
 /**
  * Write host config to disk
  */
 function writeHostConfig(config: HostConfig): void {
+  writeLocalStoreJson(LOCAL_STORE_NAMESPACE, LOCAL_STORE_KEY, config);
   const configPath = getHostConfigPath();
   writeFileSync(configPath, JSON.stringify(config, null, 2), {
     encoding: 'utf-8',

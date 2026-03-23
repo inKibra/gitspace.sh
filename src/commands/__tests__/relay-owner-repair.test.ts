@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureControlStore, getVaultMeta, listVaultMachines, setVaultMeta, upsertVaultMachine } from '../../relay/control/store.js';
+import { bindPersistedOwnerIdentity, ensureControlStore, getPersistedOwnerIdentityId, getVaultMeta, listVaultMachines, setVaultMeta, upsertVaultMachine } from '../../relay/control/store.js';
+import { readLocalStoreJson, unlockLocalSecureStore, writeLocalStoreJson } from '../../core/local-secure-store.js';
 import { assertRelayOwnerRepairIsSafe, bindRelayOwnerForStartup, takeOverRelayOwnerForStartup } from '../relay.js';
 
 let envLock: Promise<void> = Promise.resolve();
@@ -95,7 +96,7 @@ describe('bindRelayOwnerForStartup', () => {
         repairedOwnerBinding: true,
         missingVaultInitialization: false,
       });
-      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
       expect(getVaultMeta('vault_initialized')).toBe('1');
     });
   });
@@ -108,15 +109,46 @@ describe('bindRelayOwnerForStartup', () => {
         repairedOwnerBinding: true,
         missingVaultInitialization: true,
       });
-      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
       expect(getVaultMeta('vault_initialized')).toBeUndefined();
       expect(getVaultMeta('vault_salt')).toBeUndefined();
       expect(getVaultMeta('vault_key_check')).toBeUndefined();
     }, { initializeVault: false });
   });
 
+  test('repairs owner binding drift when control owner already matches current identity', async () => {
+    await withIsolatedEnv(async () => {
+      bindPersistedOwnerIdentity('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-b');
+
+      const result = bindRelayOwnerForStartup('owner-a');
+
+      expect(result).toEqual({
+        repairedOwnerBinding: true,
+        missingVaultInitialization: false,
+      });
+      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+    });
+  });
+
+  test('reports repaired owner binding when only vault owner metadata exists', async () => {
+    await withIsolatedEnv(async () => {
+      setVaultMeta('owner_user_root_id', 'owner-a');
+
+      const result = bindRelayOwnerForStartup('owner-a');
+
+      expect(result).toEqual({
+        repairedOwnerBinding: true,
+        missingVaultInitialization: false,
+      });
+      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+    });
+  });
+
   test('can explicitly take over relay ownership by clearing persisted control state', async () => {
     await withIsolatedEnv(async () => {
+      await unlockLocalSecureStore('test-password');
+      writeLocalStoreJson('test', 'preserved', { ok: true });
       setVaultMeta('owner_user_root_id', 'owner-b');
       upsertVaultMachine({
         machineId: 'machine-a',
@@ -131,9 +163,10 @@ describe('bindRelayOwnerForStartup', () => {
         repairedOwnerBinding: true,
         missingVaultInitialization: true,
       });
-      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
+      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
       expect(getVaultMeta('vault_initialized')).toBeUndefined();
       expect(listVaultMachines()).toHaveLength(0);
+      expect(readLocalStoreJson<{ ok: boolean }>('test', 'preserved')).toEqual({ ok: true });
     });
   });
 });

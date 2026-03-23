@@ -31,6 +31,7 @@ import {
   consumeCloudRegisterPermit,
   getCloudWorkspace,
   getCloudWorkspaceByMachinePublicKey,
+  getPersistedOwnerIdentityId,
   markCloudBootstrapReady,
 } from "./control/store.js";
 import { getWorkspaceIdentity } from "./control/workspace-identity.js";
@@ -188,7 +189,6 @@ import {
 } from "./persistent-registry.js";
 import {
   getVaultMachine,
-  getVaultMeta,
   isVaultInitialized,
   upsertVaultMachine,
 } from "./control/store.js";
@@ -490,7 +490,7 @@ function authenticateOwnerClient<T extends {
     return null;
   }
 
-  const configuredOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta("owner_user_root_id") ?? null;
+  const configuredOwnerUserRootId = state.ownerUserRootId ?? getPersistedOwnerIdentityId() ?? null;
   if (!configuredOwnerUserRootId) {
     ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Relay owner user root is not configured")));
     return null;
@@ -602,7 +602,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   };
 
   // Determine owner from vault metadata when available
-  const ownerUserRootId = getVaultMeta('owner_user_root_id') ?? null;
+  const ownerUserRootId = getPersistedOwnerIdentityId() ?? null;
   if (ownerUserRootId) {
     console.log(`[relay] Vault owner: ${ownerUserRootId.slice(0, 8)}...`);
     console.log(`[relay] Vault state: ${isVaultInitialized() ? getVaultLockState() : 'uninitialized'}`);
@@ -1113,7 +1113,7 @@ async function handleProtocolMessage(
 
           // Extract user root ID from the certificate and check against relay owner
           const certUserRootId = getUserRootIdFromCert(cert);
-          const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
+          const relayOwnerUserRootId = state.ownerUserRootId ?? getPersistedOwnerIdentityId() ?? null;
 
           if (relayOwnerUserRootId && certUserRootId === relayOwnerUserRootId) {
             // Certificate is signed by the relay's owner — auto-authorize
@@ -1201,7 +1201,7 @@ async function handleProtocolMessage(
           return;
         }
 
-        const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
+        const relayOwnerUserRootId = state.ownerUserRootId ?? getPersistedOwnerIdentityId() ?? null;
         if (relayOwnerUserRootId && relayOwnerUserRootId !== parsedInvite.ownerUserRootId) {
           ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Invite owner does not match relay owner")));
           ws.close();
@@ -1251,7 +1251,7 @@ async function handleProtocolMessage(
       const resolvedOwnerUserRootId = enrollmentOwnerUserRootId
         ?? persistedMachine?.ownerUserRootId
         ?? state.ownerUserRootId
-        ?? getVaultMeta('owner_user_root_id')
+        ?? getPersistedOwnerIdentityId()
         ?? null;
 
       if (!resolvedOwnerUserRootId) {
@@ -1720,7 +1720,7 @@ async function handleProtocolMessage(
         return;
       }
 
-      const storedOwner = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id');
+      const storedOwner = state.ownerUserRootId ?? getPersistedOwnerIdentityId();
       if (storedOwner && storedOwner !== userRootId) {
         ws.send(serializeMessage({
           type: "unlock_relay_result",
