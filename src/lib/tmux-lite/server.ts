@@ -1186,7 +1186,7 @@ function setupXtermEventHandlers(
       syncReplayManifest(session, { processTitle: title, title });
       // Update client's terminal title if attached
       if (session.client) {
-        sendTitle(session.client, sessionName, title);
+        sendTitle(session, sessionName, title);
       }
 
       // Create inbox notification for ANY title change when not actively using
@@ -2255,9 +2255,10 @@ routerListener = Bun.listen({
 
           case 'machine-watch':
             try {
-              await buildCurrentMachineSnapshot();
+              const snapshot = await buildCurrentMachineSnapshot();
               socketState.watchesMachineState = true;
               machineStateWatchers.add(socket);
+              writeResponse({ type: 'machine-snapshot', snapshot });
               res = { type: 'machine-watch-started' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

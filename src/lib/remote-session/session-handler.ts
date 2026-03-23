@@ -214,6 +214,13 @@ export class RemoteSessionHandler {
         onError: (error) => {
           console.warn('[remote-session] Machine watch error:', error.message);
           this.machineWatchUnsubscribe = null;
+          if (this.machineSnapshotWatchers.size > 0) {
+            setTimeout(() => {
+              if (!this.machineWatchUnsubscribe && this.machineSnapshotWatchers.size > 0) {
+                void this.startMachineWatch();
+              }
+            }, 250);
+          }
         },
       });
       this.machineWatchUnsubscribe = unsubscribe;
