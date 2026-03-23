@@ -14,6 +14,8 @@ import {
   updateComment,
   deleteComment,
   detectPRNumber,
+  approveHunk,
+  type ReviewWriteOptions,
 } from './review.js';
 import {
   getWorkspaceChangedFiles,
@@ -27,8 +29,14 @@ import { readProjectConfig } from './config.js';
 import { scanWorkspaces } from '../lib/remote-session/workspace-scanner.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import { matchesWorkspaceId } from '../utils/workspace-id.js';
+import { normalizeHunkHeader } from '../utils/hunk-header.js';
 
 type ScanWorkspacesFn = typeof scanWorkspaces;
+
+function extractHunkHeaders(diff: string): string[] {
+  const matches = diff.match(/^@@[^\n]*@@.*$/gm) ?? [];
+  return matches.map((header) => normalizeHunkHeader(header));
+}
 
 async function resolveWorkspaceByName(
   projectName: string,
@@ -63,7 +71,8 @@ async function resolveWorkspaceByName(
  */
 export async function executeLocalReviewOperation(
   operation: ReviewOperation,
-  scan: ScanWorkspacesFn = scanWorkspaces
+  scan: ScanWorkspacesFn = scanWorkspaces,
+  writeOptions: ReviewWriteOptions = {}
 ): Promise<ReviewResult> {
   switch (operation.op) {
     case 'get_threads': {
@@ -88,7 +97,9 @@ export async function executeLocalReviewOperation(
         workspace.baseBranch,
         operation.target,
         operation.body,
-        operation.decision
+        operation.decision,
+        undefined,
+        writeOptions
       );
       return { op: 'thread_created', thread };
     }
@@ -264,6 +275,56 @@ export async function executeLocalReviewOperation(
       };
     }
 
+    case 'approve_path': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan,
+      );
+
+      const changed = await getWorkspaceChangedFiles(workspace.path, workspace.baseBranch);
+      const matchingFiles = changed.files.filter((file) => (
+        operation.pathKind === 'folder'
+          ? file.filePath === operation.path || file.filePath.startsWith(`${operation.path}/`)
+          : file.filePath === operation.path
+      ));
+
+      let approvedCount = 0;
+      for (const file of matchingFiles) {
+        const fileDiff = await getWorkspaceFileDiff(
+          workspace.path,
+          workspace.baseBranch,
+          file.filePath,
+          file.prevFilePath,
+        );
+        const headers = extractHunkHeaders(fileDiff.diff);
+        for (const hunkHeader of headers) {
+          await approveHunk(
+            workspace.path,
+            workspace.id,
+            workspace.baseBranch,
+            {
+              kind: 'hunk',
+              file: file.filePath,
+              hunkHeader,
+            },
+            undefined,
+            writeOptions
+          );
+          approvedCount += 1;
+        }
+      }
+
+      const threads = getThreads(workspace.path, workspace.id, workspace.baseBranch);
+      return {
+        op: 'path_approved',
+        path: operation.path,
+        pathKind: operation.pathKind,
+        approvedCount,
+        threads,
+      };
+    }
+
     case 'import_github': {
       const workspace = await resolveWorkspaceByName(
         operation.projectName,
@@ -281,7 +342,8 @@ export async function executeLocalReviewOperation(
         workspace.path,
         workspace.id,
         workspace.baseBranch,
-        prNumber
+        prNumber,
+        writeOptions
       );
       return { op: 'github_imported', imported, threads };
     }

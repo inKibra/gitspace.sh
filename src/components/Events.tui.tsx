@@ -42,6 +42,7 @@ function getLevelColor(level: string): string {
 export function EventsTui(props: UseEventsReturn) {
   const { filtered, selectedIndex, selected } = props;
   const timeline = (selected?.timeline ?? []) as TimelineEntry[];
+  const showingSourceEvents = filtered.length > 0 && filtered[0]?.kind === 'source';
 
   return (
     <box flexDirection="column" flexGrow={1} width="100%" height="100%">
@@ -54,7 +55,7 @@ export function EventsTui(props: UseEventsReturn) {
         paddingRight={1}
       >
         <text fg={COLORS.title}>Events</text>
-        <text fg={COLORS.textDim}> - Wide events</text>
+        <text fg={COLORS.textDim}> - {showingSourceEvents ? 'Source events' : 'Wide events'}</text>
         <box flexGrow={1} />
         <text fg={COLORS.textDim}>[Esc] Back</text>
       </box>
@@ -71,7 +72,7 @@ export function EventsTui(props: UseEventsReturn) {
           </text>
           <box flexDirection="column" paddingLeft={1} paddingTop={1} flexGrow={1} overflow="scroll">
             {filtered.length === 0 ? (
-              <text fg={COLORS.textDim}>No wide events yet.</text>
+              <text fg={COLORS.textDim}>No events yet for this workspace.</text>
             ) : (
               filtered.map((event, index) => {
                 const isSelected = index === selectedIndex;
@@ -97,6 +98,7 @@ export function EventsTui(props: UseEventsReturn) {
             {selected ? (
               <box flexDirection="column">
                 <text fg={COLORS.text} height={1}>Correlation: {selected.correlationId ?? selected.eventId}</text>
+                <text fg={COLORS.textDim} height={1}>Type: {selected.kind ?? 'wide'}</text>
                 <text fg={COLORS.textDim} height={1}>Latest: {selected.message}</text>
                 {selected.processName && (
                   <text fg={COLORS.textDim} height={1}>Process: {selected.processName}</text>

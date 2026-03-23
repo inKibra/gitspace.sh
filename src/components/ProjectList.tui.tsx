@@ -19,7 +19,6 @@ const COLORS = {
   textDim: '#888888',
   selected: '#00AAFF',
   title: '#00FF88',
-  current: '#FFAA00',
   repository: '#888888',
 };
 
@@ -87,15 +86,14 @@ export function ProjectListTUI(props: ProjectListTUIProps) {
         {items.map((project) => {
           const isSelected = project.isSelected && focused;
           const prefix = isSelected ? '>' : ' ';
-          const currentIndicator = project.isCurrent ? '*' : '';
 
           return (
             <box key={project.name} flexDirection="column" height={2}>
               <text
-                fg={isSelected ? COLORS.selected : project.isCurrent ? COLORS.current : COLORS.text}
+                fg={isSelected ? COLORS.selected : COLORS.text}
                 height={1}
               >
-                {prefix} {project.name} {currentIndicator}
+                {prefix} {project.name}
               </text>
               <text fg={COLORS.repository} height={1}>
                 {'  '}{project.repository} ({formatWorkspaceCount(project.workspaceCount)})

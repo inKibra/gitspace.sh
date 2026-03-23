@@ -90,8 +90,11 @@ export function itemToToast(item: InboxItem): ToastNotification {
     title = `${sessionLabel}: ${typeLabel} - ${item.processTitle}`;
   }
 
-  // Preview is the first line of context, truncated
-  const preview = item.context.split('\n')[0]?.substring(0, 60) || '';
+  // Preview: show up to 2 lines of context for better readability
+  const contextLines = item.context.split('\n').filter((l) => l.trim());
+  const line1 = contextLines[0]?.substring(0, 120) || '';
+  const line2 = contextLines[1]?.substring(0, 120) || '';
+  const preview = line2 ? `${line1}\n${line2}` : line1;
 
   return {
     id: item.id,

@@ -11,7 +11,6 @@ import { promptConfirm, promptInput, selectOne } from '../utils/prompts.js';
 import {
   loadKeypair,
   readRelayConfig,
-  shouldDeferLocalStoreUnlockForLegacyIdentityMigration,
 } from '../core/identity.js';
 import { createLocalDeviceCertificate } from '../core/user-identity.js';
 import WebSocket from 'ws';
@@ -34,13 +33,8 @@ import {
 } from '../types/errors.js';
 import {
   createDeviceIdentityPasswordContext,
-  type DeviceIdentityPasswordContext,
   ensureDeviceIdentityPassword,
 } from './device-identity-password.js';
-import {
-  ensureLocalStorePassword,
-  type LocalStorePasswordContext,
-} from './local-store-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 import {
   addTrustedRelay,
@@ -51,7 +45,6 @@ import { formatRelayFingerprint } from '../relay/identity.js';
 import type {
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
-import { unlockLocalSecureStore } from '../core/local-secure-store.js';
 
 export interface RelayIdentityProbe {
   publicKey: string;
@@ -207,10 +200,7 @@ export async function connectToRemote(
   target?: string,
   options: { relay?: string; machine?: string; relayPubkey?: string; yes?: boolean; passwordStdin?: boolean } = {}
 ): Promise<void> {
-  const sharedPasswordContext: DeviceIdentityPasswordContext & LocalStorePasswordContext =
-    createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const devicePasswordContext: DeviceIdentityPasswordContext = sharedPasswordContext;
-  const localStorePasswordContext: LocalStorePasswordContext = sharedPasswordContext;
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
   if (!target && !options.machine) {
     throw new SpacesError(
       'Connection target required.\n\nUsage:\n  gssh client connect <machine-id> --relay <url>\n  gssh client connect --machine <id> --relay <url>\n\nList available machines:\n  gssh client machines list --relay <url>',
@@ -255,16 +245,6 @@ export async function connectToRemote(
     context: 'remote client authorization',
   });
 
-  const localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
-  if (!localStorePassword) {
-    logger.info('Cancelled');
-    return;
-  }
-  if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
-    await unlockLocalSecureStore(localStorePassword);
-  }
-  devicePasswordContext.password = localStorePassword;
-
   // Step 3: Load local identity
   const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
@@ -275,7 +255,7 @@ export async function connectToRemote(
   const identity = await loadKeypair(password);
   if (!identity) {
     throw new SpacesError(
-      'Failed to unlock local secure store identity. Check your password.',
+      'Failed to unlock identity. Check your password.',
       'USER_ERROR',
       1
     );
@@ -285,7 +265,27 @@ export async function connectToRemote(
 
   logger.info('Connecting to relay...');
 
-  const backend = createRemoteBackend(relayUrl, machineId, identity, deviceCertificate);
+  const socketUrl = new URL(relayUrl);
+  socketUrl.searchParams.set('role', 'client');
+
+  const backendKey = buildRemoteBackendKey(relayUrl, machineId);
+  const backend = new RemoteSessionBackend({
+    descriptor: {
+      key: backendKey,
+      kind: 'remote',
+      label: machineId,
+      relayUrl,
+      machineId,
+    },
+    socket: new WebSocket(socketUrl.toString()),
+    socketAdapter: nodeRemoteSocketAdapter,
+    identity,
+    machineId,
+    deviceCertificate,
+    signer: (message, identity) => createNodeRelaySigner(identity)(message),
+    crypto: nodeRemoteCryptoAdapter,
+    handshake: nodeRemoteHandshakeAdapter,
+  });
 
   backend.setPtyOutputHandler((data) => {
     process.stdout.write(Buffer.from(data));
@@ -369,17 +369,7 @@ export async function connectToRemote(
     logger.dim('Press Ctrl+D to disconnect');
     logger.log('');
 
-    // Build reconnect context so startTerminalSession can re-attach
-    // automatically if the relay or machine drops.
-    const reconnectCtx: ReconnectContext = {
-      relayUrl,
-      machineId,
-      identity,
-      deviceCertificate,
-      tmuxSessionId: attached.sessionId,
-    };
-
-    await startTerminalSession(backend, reconnectCtx);
+    await startTerminalSession(backend);
     backendConnected = false;
   } finally {
     await disconnectBackend();
@@ -393,10 +383,7 @@ export async function listRemoteMachines(options: {
   yes?: boolean;
   passwordStdin?: boolean;
 }): Promise<void> {
-  const sharedPasswordContext: DeviceIdentityPasswordContext & LocalStorePasswordContext =
-    createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const devicePasswordContext: DeviceIdentityPasswordContext = sharedPasswordContext;
-  const localStorePasswordContext: LocalStorePasswordContext = sharedPasswordContext;
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
   if (!options.relay) {
     throw new SpacesError('Relay URL is required. Use --relay <url>.', 'USER_ERROR', 1);
   }
@@ -412,16 +399,6 @@ export async function listRemoteMachines(options: {
     yes: options.yes,
     context: 'remote machine directory authorization',
   });
-
-  const localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
-  if (!localStorePassword) {
-    logger.info('Cancelled');
-    return;
-  }
-  if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
-    await unlockLocalSecureStore(localStorePassword);
-  }
-  devicePasswordContext.password = localStorePassword;
 
   const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
   if (!password) {
@@ -521,56 +498,9 @@ interface ConnectedTerminalBackend {
   onEvent: (handler: (event: BackendEvent) => void) => () => void;
 }
 
-/** Context required to create a new backend for reconnection */
-interface ReconnectContext {
-  relayUrl: string;
-  machineId: string;
-  identity: Awaited<ReturnType<typeof import('../core/identity.js').loadKeypair>>;
-  deviceCertificate: string;
-  /** tmux-lite session ID to re-attach to after reconnect */
-  tmuxSessionId: string;
-  // cols/rows are intentionally omitted: the reconnect loop reads live
-  // process.stdout values so it always uses the current terminal size,
-  // not the (possibly stale) size captured at initial attach time.
-}
-
-/** Build a fresh RemoteSessionBackend + WebSocket */
-function createRemoteBackend(
-  relayUrl: string,
-  machineId: string,
-  identity: NonNullable<Awaited<ReturnType<typeof import('../core/identity.js').loadKeypair>>>,
-  deviceCertificate: string,
-): RemoteSessionBackend<WebSocket, import('../lib/tmux-lite/crypto/handshake.js').X3DHClientState, import('../types/identity.js').X3DHResponseMessage, import('../types/identity.js').X3DHResultMessage> {
-  const socketUrl = new URL(relayUrl);
-  socketUrl.searchParams.set('role', 'client');
-  const backendKey = buildRemoteBackendKey(relayUrl, machineId);
-  return new RemoteSessionBackend({
-    descriptor: {
-      key: backendKey,
-      kind: 'remote',
-      label: machineId,
-      relayUrl,
-      machineId,
-    },
-    socket: new WebSocket(socketUrl.toString()),
-    socketAdapter: nodeRemoteSocketAdapter,
-    identity,
-    machineId,
-    deviceCertificate,
-    signer: (message, id) => createNodeRelaySigner(id)(message),
-    crypto: nodeRemoteCryptoAdapter,
-    handshake: nodeRemoteHandshakeAdapter,
-  });
-}
-
-async function startTerminalSession(
-  initialBackend: ConnectedTerminalBackend,
-  reconnectCtx?: ReconnectContext,
-): Promise<void> {
+async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<void> {
   const handlers: Array<() => void> = [];
   let cleanedUp = false;
-  // currentBackend may be swapped out by the reconnect logic.
-  let currentBackend = initialBackend;
 
   const cleanup = () => {
     if (cleanedUp) {
@@ -590,8 +520,6 @@ async function startTerminalSession(
 
   await new Promise<void>((resolve) => {
     let stopping = false;
-    let reconnecting = false;
-
     const stop = async (message?: string) => {
       if (stopping) {
         return;
@@ -603,7 +531,7 @@ async function startTerminalSession(
       }
       cleanup();
       try {
-        await currentBackend.disconnect();
+        await backend.disconnect();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(`Failed to disconnect cleanly: ${detail}`);
@@ -612,141 +540,7 @@ async function startTerminalSession(
       }
     };
 
-    // ---------------------------------------------------------------------------
-    // Reconnection logic
-    //
-    // When the relay or machine drops, we attempt to transparently rebuild the
-    // backend and re-attach to the same tmux-lite session.  The terminal state
-    // is fully preserved by xterm-headless on the machine side.
-    //
-    // Strategy:
-    //   - 10 attempts with exponential backoff capped at 30 s
-    //   - On success: swap currentBackend and resume the session
-    //   - On exhaustion: fall through to stop() with an error message
-    // ---------------------------------------------------------------------------
-
-    const MAX_RECONNECT_ATTEMPTS = 10;
-    const BASE_RECONNECT_DELAY_MS = 1_000;
-    const MAX_RECONNECT_DELAY_MS = 30_000;
-
-    const attemptReconnect = async () => {
-      if (reconnecting || stopping || !reconnectCtx) {
-        if (!reconnectCtx) {
-          void stop('Disconnected');
-        }
-        return;
-      }
-      reconnecting = true;
-
-      const { relayUrl, machineId, identity, deviceCertificate, tmuxSessionId } = reconnectCtx;
-      // Read current terminal size at reconnect time (not the stale size from
-      // initial attach, which may differ if the user resized the window).
-      const { cols, rows } = getTerminalSize();
-
-      for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
-        if (stopping) break;
-
-        const delay = attempt === 1
-          ? 0
-          : Math.min(BASE_RECONNECT_DELAY_MS * Math.pow(2, attempt - 2) + Math.random() * 1_000, MAX_RECONNECT_DELAY_MS);
-
-        if (delay > 0) {
-          logger.log(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})...`);
-          await new Promise<void>((r) => setTimeout(r, delay));
-        } else {
-          logger.log(`Reconnecting... (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})`);
-        }
-
-        if (stopping) break;
-
-        try {
-          const newBackend = createRemoteBackend(relayUrl, machineId, identity, deviceCertificate);
-          newBackend.setPtyOutputHandler((data) => {
-            process.stdout.write(Buffer.from(data));
-          });
-
-          let attachSucceeded = false;
-          try {
-            await newBackend.connect();
-
-            // Re-attach to the same tmux-lite session.
-            const attachWait = waitForBackendEvent(
-              newBackend,
-              (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
-              30000,
-              'attach confirmation'
-            );
-
-            try {
-              await newBackend.attachSession({
-                sessionId: tmuxSessionId,
-                cols,
-                rows,
-              });
-            } catch (attachErr) {
-              attachWait.cancel();
-              throw attachErr;
-            }
-
-            // This can also throw (timeout or command_error) — caught below.
-            await attachWait.promise;
-
-            attachSucceeded = true;
-          } finally {
-            // Disconnect the new backend if anything above failed so we don't
-            // leak open WebSocket connections across retry attempts.
-            if (!attachSucceeded) {
-              await newBackend.disconnect().catch(() => {});
-            }
-          }
-
-          // If stop() was called while we were awaiting connect/attach,
-          // discard the new backend and bail out cleanly.
-          if (stopping) {
-            await newBackend.disconnect().catch(() => {});
-            reconnecting = false;
-            return;
-          }
-
-          // Swap backend and wire stdin/resize to the new one.
-          const oldUnsub = unsubEvents;
-          currentBackend = newBackend;
-
-          // Unsubscribe the old listener before discarding the reference so
-          // the old backend can't fire spurious events after the swap.
-          oldUnsub();
-
-          // Rewire the new backend's events.
-          unsubEvents = newBackend.onEvent(handleBackendEvent);
-
-          // Replace the old unsub in the cleanup handlers with the new one.
-          const idx = handlers.indexOf(oldUnsub);
-          if (idx !== -1) {
-            handlers.splice(idx, 1, unsubEvents);
-          } else {
-            handlers.push(unsubEvents);
-          }
-
-          logger.log('Reconnected!');
-          logger.log('');
-
-          reconnecting = false;
-          return;
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          logger.log(`Reconnect attempt ${attempt} failed: ${detail}`);
-          // Continue to next attempt
-        }
-      }
-
-      // All attempts exhausted
-      reconnecting = false;
-      void stop('Failed to reconnect after multiple attempts');
-    };
-
-    // handleBackendEvent is declared as a var so it can be referenced before
-    // unsubEvents is assigned.
-    const handleBackendEvent = (event: BackendEvent) => {
+    const unsubEvents = backend.onEvent((event) => {
       if (event.type === 'session_exited') {
         void stop(`Session exited${typeof event.exitCode === 'number' ? ` (${event.exitCode})` : ''}`);
       }
@@ -756,15 +550,13 @@ async function startTerminalSession(
       }
 
       if (event.type === 'status' && event.status === 'disconnected') {
-        void attemptReconnect();
+        void stop('Disconnected');
       }
 
       if (event.type === 'error') {
         logger.error(`Connection error: ${event.message}`);
       }
-    };
-
-    let unsubEvents = initialBackend.onEvent(handleBackendEvent);
+    });
     handlers.push(unsubEvents);
 
   // Set stdin to raw mode for character-by-character input
@@ -782,7 +574,7 @@ async function startTerminalSession(
       return;
     }
 
-      currentBackend.writePtyData?.(new Uint8Array(data))?.catch((error: unknown) => {
+      backend.writePtyData?.(new Uint8Array(data))?.catch((error) => {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(`Failed to send PTY input: ${detail}`);
       });
@@ -795,7 +587,7 @@ async function startTerminalSession(
       const onResize = () => {
         const cols = process.stdout.columns;
         const rows = process.stdout.rows;
-        currentBackend.resizePty?.(cols, rows)?.catch((error: unknown) => {
+        backend.resizePty?.(cols, rows)?.catch((error) => {
           const detail = error instanceof Error ? error.message : String(error);
           logger.error(`Failed to send PTY resize: ${detail}`);
         });
@@ -806,7 +598,7 @@ async function startTerminalSession(
     // Send initial size
       const cols = process.stdout.columns;
       const rows = process.stdout.rows;
-      currentBackend.resizePty?.(cols, rows)?.catch((error: unknown) => {
+      backend.resizePty?.(cols, rows)?.catch((error) => {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(`Failed to send initial PTY size: ${detail}`);
       });
@@ -815,7 +607,7 @@ async function startTerminalSession(
   // Handle SIGINT (Ctrl+C)
     const onSigInt = () => {
     // Forward Ctrl+C to remote instead of terminating
-      currentBackend.writePtyData?.(new Uint8Array([0x03]))?.catch((error: unknown) => {
+      backend.writePtyData?.(new Uint8Array([0x03]))?.catch((error) => {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(`Failed to send Ctrl+C to remote: ${detail}`);
       });

@@ -17,28 +17,6 @@ export interface ControlMeta {
   updatedAt: string;
 }
 
-export type LocalStoreMetaKey =
-  | 'store_password_salt'
-  | 'store_password_key_check'
-  | 'legacy_storage_migrated_at'
-  | 'legacy_storage_retained';
-
-export interface LocalStoreRecord {
-  namespace: string;
-  key: string;
-  valueJson: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface LocalStoreSecretRecord {
-  namespace: string;
-  key: string;
-  ciphertext: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface CloudWorkspaceRecord {
   id: string;
   provider: 'sprites';

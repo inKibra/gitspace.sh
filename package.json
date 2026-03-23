@@ -1,6 +1,6 @@
 {
   "name": "gitspace",
-  "version": "0.2.0-rc.37",
+  "version": "0.2.0-rc.36",
   "description": "CLI for managing GitHub workspaces with git worktrees and secure remote terminal access",
   "bin": {
     "gssh": "./bin/gssh"
@@ -21,13 +21,15 @@
     "build:all": "bun scripts/build.ts --all",
     "build:npm": "bun scripts/build.ts --npm",
     "relay": "bun src/relay/index.ts",
-    "e2e:on-demand": "bash scripts/e2e/run-on-demand.sh"
+    "e2e:on-demand": "bash scripts/e2e/run-on-demand.sh",
+    "check:arch": "/usr/local/bin/node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type err",
+    "check:arch:json": "/usr/local/bin/node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type json"
   },
   "optionalDependencies": {
-    "@gitspace/darwin-arm64": "0.2.0-rc.37",
-    "@gitspace/darwin-x64": "0.2.0-rc.37",
-    "@gitspace/linux-x64": "0.2.0-rc.37",
-    "@gitspace/linux-arm64": "0.2.0-rc.37"
+    "@gitspace/darwin-arm64": "0.2.0-rc.36",
+    "@gitspace/darwin-x64": "0.2.0-rc.36",
+    "@gitspace/linux-x64": "0.2.0-rc.36",
+    "@gitspace/linux-arm64": "0.2.0-rc.36"
   },
   "keywords": [
     "cli",
@@ -52,6 +54,7 @@
     "@linear/sdk": "^29.0.0",
     "@noble/curves": "^2.0.1",
     "@noble/hashes": "^2.0.1",
+    "@opencode-ai/sdk": "^1.2.27",
     "@opentui-ui/toast": "^0.0.5",
     "@opentui/core": "^0.1.77",
     "@opentui/react": "^0.1.77",
@@ -78,6 +81,7 @@
     "@types/node": "^20.19.32",
     "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
+    "dependency-cruiser": "^17.3.9",
     "eslint": "^8.57.1",
     "happy-dom": "^20.5.0",
     "typescript": "^5.9.3"

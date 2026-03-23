@@ -6,8 +6,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { DiffViewer, type HunkFocusTarget } from '../components/DiffViewer.web.js';
 import { ThreadPanel } from '../components/ThreadPanel.web.js';
-import { useReview } from '../hooks/useReview.web.js';
-import { computeWorkspaceStatus } from '../types/review.js';
+import { useReviewPageModel } from '../app/shared/review/useReviewPageModel.js';
 import type {
   HunkDecision,
   ReviewChangedFile,
@@ -26,13 +25,6 @@ export interface ReviewPageProps {
   onBack: () => void;
 }
 
-const STATUS_LABELS = {
-  not_started: { label: 'Not started', color: '#6e7681' },
-  in_progress: { label: 'In progress', color: '#d29922' },
-  approved: { label: 'Approved', color: '#22c55e' },
-  changes_required: { label: 'Changes required', color: '#f85149' },
-};
-
 export function ReviewPage({
   projectName,
   workspaceName,
@@ -41,7 +33,7 @@ export function ReviewPage({
   sendReviewRequest,
   onBack,
 }: ReviewPageProps) {
-  const review = useReview({ sendReviewRequest, projectName, workspaceName });
+  const { review, statusInfo } = useReviewPageModel({ sendReviewRequest, projectName, workspaceName });
   const {
     threads,
     loading: reviewLoading,
@@ -54,6 +46,7 @@ export function ReviewPage({
     deleteComment,
     importGitHub,
     pushGitHub,
+    approvePath,
   } = review;
 
   const [files, setFiles] = useState<ReviewChangedFile[]>([]);
@@ -76,9 +69,6 @@ export function ReviewPage({
   const [pushing, setPushing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
-
-  const status = computeWorkspaceStatus(threads);
-  const statusInfo = STATUS_LABELS[status];
 
   const loadChangedFiles = useCallback(async () => {
     setFilesLoading(true);
@@ -459,6 +449,14 @@ export function ReviewPage({
               onUpdateThread={handleUpdateThread}
               onRequestFileDiff={handleGetFileDiff}
               onRequestFileContextRange={handleGetFileContextRange}
+              onApprovePath={async (path, pathKind) => {
+                const { approvedCount } = await approvePath(path, pathKind);
+                setActionError(null);
+                setActionSuccess(
+                  `Approved ${approvedCount} hunk${approvedCount === 1 ? '' : 's'} in ${pathKind === 'folder' ? 'folder' : 'file'} ${path}`,
+                );
+                setTimeout(() => setActionSuccess(null), 4000);
+              }}
               onThreadClick={openThread}
               onSelectedFileChange={handleSelectedFileChange}
               onHunkFocus={handleHunkFocus}

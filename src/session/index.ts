@@ -56,9 +56,6 @@ export {
   BackendManager,
 } from './backend-manager.js';
 
-export {
-  useSessionEngine,
-} from './useSessionEngine.js';
 
 export type {
   RemoteSessionConnectionStatus,

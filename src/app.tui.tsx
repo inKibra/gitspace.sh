@@ -5,7 +5,6 @@
  * - useFlow for modal system
  * - useMachineList for machine selection
  * - useSpacesBrowser for workspace browsing
- * - useProjectList for project selection
  */
 
 import { createCliRenderer } from '@opentui/core';
@@ -16,7 +15,7 @@ import { Toaster } from '@opentui-ui/toast/react';
 
 // Terminal components
 import { SessionTerminal } from './components/SessionTerminal.tui.js';
-import { RemoteMachineScreen } from './components/RemoteMachineScreen.tui.js';
+
 import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
 import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
@@ -30,24 +29,20 @@ import {
 // Shared components and hooks
 import {
   useFlow,
-  useMachineList,
   useSpacesBrowser,
-  useProjectList,
   getDefaultShortcuts,
   isFlowInput,
   isFlowConfirmTyped,
   isFlowWizard,
-  type MachineInfo,
   type ProjectInfo,
   type ReplayInfo,
 } from './components/index.js';
 import { FlowTUI } from './components/Flow.tui.js';
-import { MachineListTUI } from './components/MachineList.tui.js';
-import { SpacesBrowserTUI } from './components/SpacesBrowser.tui.js';
+import { KanbanBoardTUI } from './components/KanbanBoard.tui.js';
+import { WorkspaceDetailScreen } from './components/WorkspaceDetailScreen.tui.js';
 import type { TreeItem } from './components/SpacesBrowser.js';
-import { ProjectListTUI } from './components/ProjectList.tui.js';
 import { InboxTUI } from './components/Inbox.tui.js';
-import { useInbox } from './components/Inbox.js';
+import { useInboxPageModel } from './app/shared/inbox/useInboxPageModel.js';
 import { EventsTui } from './components/Events.tui.js';
 import { useEvents, toWideEventItem, type WideEventItem } from './components/Events.js';
 import type { SavedEventFilter, WideEventFilter } from './types/events.js';
@@ -60,23 +55,22 @@ import {
 } from './notifications/index.js';
 
 // Local state and config
-import { useDaemonStatus, formatUptime, formatRelayStatus } from './hooks/useDaemonStatus.tui.js';
+import { useDaemonStatus, formatRelayStatus } from './hooks/useDaemonStatus.tui.js';
 import {
-  setCurrentProject,
   readProjectConfig,
   getProjectBaseDir,
   createProject,
   projectExists,
 } from './core/config.js';
 import { localPreferencesService } from './core/preferences-service.js';
-import type { NotificationConfig, NotificationTypeConfig } from './types/config.js';
+import type { NotificationConfig, NotificationTypeConfig, WorkspacePhase } from './types/config.js';
 
 // Git and workspace operations
 import { getDefaultBranch } from './core/git.js';
 import { extractRepoName } from './utils/sanitize.js';
 import { logger } from './utils/logger.js';
-import { writeCrashLog } from './utils/crash-log.js';
-import { restoreTuiTerminalState } from './utils/tui-terminal-cleanup.js';
+import { openBrowserUrl } from './utils/open-browser.js';
+import { buildReviewUrl } from './utils/review-url.js';
 
 // Script execution
 import { listAllRepos, cloneRepository } from './core/github.js';
@@ -85,14 +79,19 @@ import { applyProjectBundleState } from './core/project-lifecycle.js';
 import { checkCommandExists } from './utils/deps.js';
 import type { OnboardingStep } from './types/bundle.js';
 
-// TUI hooks
-import { useRemoteMachines, type RelayConfig } from './hooks/useRemoteMachines.tui.js';
-import { useLocalSession } from './hooks/useLocalSession.tui.js';
+export type { RelayDescriptor as RelayConfig } from './relay-client/index.js';
+import type { RelayDescriptor } from './relay-client/index.js';
+import { useMultiBackends, LOCAL_BACKEND_KEY, type LocalSessionPtyBackend } from './machine/multi/useMultiBackends.js';
+import { createBunLocalSessionBackend, createBunRemoteSessionBackend } from './machine/local/createSessionBackend.bun.js';
+import { nodeRelaySocketAdapter } from './relay-client/index.js';
+import { createNodeRelaySigner } from './session/index.js';
+import { createLocalDeviceCertificate } from './core/user-identity.js';
 import { useUserActivity } from './hooks/index.js';
 import { useBundleRefreshAttachFlow } from './session/index.js';
 import { useBundleConfigFlow } from './session/index.js';
 import { useAttachController } from './app/session/useAttachController.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
+import { ProcessStartCancelledError, isPortConflictError, promptToResolveProcessStartConflict } from './app/session/resolveProcessStartConflict.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
@@ -103,7 +102,6 @@ import {
 } from './core/secret-runtime.js';
 import {
   resolveInboxCommand,
-  resolveMachineListCommand,
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 import { resolveLocalTerminalSyncAction, type AppView } from './tui/local-terminal-sync.js';
@@ -116,15 +114,27 @@ import {
   applySearchableSelectPaste,
   handleSearchableSelectKey,
 } from './tui/flow-select-input.js';
+import { showReplayHistorySelect } from './app/shared/workspace-detail/showReplayHistorySelect.js';
+import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/types.js';
 import {
   VT_KITTY_KEYBOARD_CONFIG,
   forceDisableKittyKeyboard,
 } from './tui/kitty-keyboard.js';
-import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { collectAgentSessionCounts, collectWorkspaceSyncIds } from './agents/remote-agent-browser.js';
 import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
+import { getAgentSessionDisplayTitle } from './agents/session-display.js';
 import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
+import { selectAllWorkspaces, selectBackendSnapshot } from './machine/multi/selectors.js';
+import { useWorkspaceController } from './machine/controllers/useWorkspaceController.js';
+import type { AgentSessionInfo as BrowserAgentSessionInfo } from './machine/api/list-types.js';
+import {
+  useCommandPaletteState,
+  COMMAND_PALETTE_COMMAND_DEFS,
+} from './app/workspaces/index.js';
+import { executeCommandPaletteAction } from './app/shared/command-palette/executeCommandPaletteAction.js';
+import { resolveSelectedProjectName, resolveSelectedWorkspace } from './app/shared/command-palette/workspace-selection.js';
+import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
+import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
+import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -196,58 +206,29 @@ const COLORS = {
   subtitle: '#888899',
 };
 
-// ASCII art header
-const ASCII_LINES = [
-  { text: '╔══════════════════════════════════════════════════════════════╗', color: COLORS.asciiBox },
-  { text: '║                                                              ║', color: COLORS.asciiBox },
-  { text: '║   ███████╗██████╗  █████╗  ██████╗███████╗███████╗           ║', color: COLORS.gradient1 },
-  { text: '║   ██╔════╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔════╝           ║', color: COLORS.gradient2 },
-  { text: '║   ███████╗██████╔╝███████║██║     █████╗  ███████╗           ║', color: COLORS.gradient3 },
-  { text: '║   ╚════██║██╔═══╝ ██╔══██║██║     ██╔══╝  ╚════██║           ║', color: COLORS.gradient4 },
-  { text: '║   ███████║██║     ██║  ██║╚██████╗███████╗███████║           ║', color: COLORS.gradient5 },
-  { text: '║   ╚══════╝╚═╝     ╚═╝  ╚═╝ ╚═════╝╚══════╝╚══════╝           ║', color: COLORS.gradient6 },
-  { text: '║                                                              ║', color: COLORS.asciiBox },
-  { text: '║                    worktree manager                          ║', color: COLORS.subtitle },
-  { text: '║                                                              ║', color: COLORS.asciiBox },
-  { text: '╚══════════════════════════════════════════════════════════════╝', color: COLORS.asciiBox },
-];
-
 // ============================================================================
 // App State
 // ============================================================================
 
-type PanelFocus = 'projects' | 'workspaces';
-
 interface AppState {
   view: AppView;
-  panelFocus: PanelFocus;
-  selectedMachine: MachineInfo | null;
   isLoading: boolean;
   error: string | null;
 }
 
 type AppAction =
   | { type: 'SET_VIEW'; view: AppView }
-  | { type: 'SET_PANEL_FOCUS'; focus: PanelFocus }
-  | { type: 'SET_MACHINE'; machine: MachineInfo | null }
   | { type: 'SET_LOADING'; loading: boolean }
-  | { type: 'SET_ERROR'; error: string | null }
-  | { type: 'SWITCH_PANEL' };
+  | { type: 'SET_ERROR'; error: string | null };
 
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_VIEW':
       return { ...state, view: action.view };
-    case 'SET_PANEL_FOCUS':
-      return { ...state, panelFocus: action.focus };
-    case 'SET_MACHINE':
-      return { ...state, selectedMachine: action.machine };
     case 'SET_LOADING':
       return { ...state, isLoading: action.loading };
     case 'SET_ERROR':
       return { ...state, error: action.error };
-    case 'SWITCH_PANEL':
-      return { ...state, panelFocus: state.panelFocus === 'projects' ? 'workspaces' : 'projects' };
     default:
       return state;
   }
@@ -258,7 +239,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
 // ============================================================================
 
 export interface AppProps {
-  relayConfig?: RelayConfig;
+  relayConfig?: RelayDescriptor;
   remoteIdentity?: Identity | null;
   onQuit?: () => void;
   keyboardMode: 'kitty' | 'vt';
@@ -269,7 +250,6 @@ export interface AppProps {
 // ============================================================================
 
 function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
-  const isRemoteMode = !!relayConfig;
   const keyboardModeHint = `kbd: ${keyboardMode}`;
 
   // Force re-render counter for resize
@@ -290,9 +270,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // App state
   const [state, dispatch] = useReducer(appReducer, {
-    view: isRemoteMode ? 'machines' : 'projects',
-    panelFocus: 'projects',
-    selectedMachine: null,
+    view: 'projects',
     isLoading: true,
     error: null,
   });
@@ -318,86 +296,105 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Events view state
   const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
-  const [activeRemoteIdentity, setActiveRemoteIdentity] = useState<Identity | null>(null);
+  const [eventsReturnView, setEventsReturnView] = useState<AppView>('projects');
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
   const [showDismissedReplays, setShowDismissedReplays] = useState(false);
   const activeReplayDismissedRef = useRef(false);
+  const [attachedAgentSession, setAttachedAgentSession] = useState<{
+    workspaceId: string;
+    sessionId: string;
+  } | null>(null);
 
   // View-only session state (true when attached to a running process session)
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
+  const [focusedLaneIndex, setFocusedLaneIndex] = useState(0);
 
-  // Remote machines hook
-  const remoteMachines = useRemoteMachines({
-    relayConfig,
-    onError: (error) => dispatch({ type: 'SET_ERROR', error: error.message }),
-    identity: remoteIdentity ?? undefined,
+  // Multi-backend hook — manages local backend + auto-discovers remote machines via relay
+  const multi = useMultiBackends({
+    enabled: true,
+    relay: relayConfig ?? null,
+    identity: remoteIdentity ?? null,
+    createLocalBackend: () => createBunLocalSessionBackend(LOCAL_BACKEND_KEY),
+    createRemoteBackend: createBunRemoteSessionBackend,
+    relaySocketAdapter: nodeRelaySocketAdapter,
+    createRelaySigner: createNodeRelaySigner,
+    getDeviceCertificate: createLocalDeviceCertificate,
+  });
+  const multiMachineState = multi.state;
+
+  // Per-backend state for the local machine (inbox, sessions, replays, attached session, etc.)
+  const localState = multi.getBackendState(LOCAL_BACKEND_KEY);
+  const localSessionStatus = localState?.status ?? 'disconnected';
+  const localSessionMode = localState?.mode ?? 'browsing';
+  const localSessions = localState?.sessions ?? [];
+  const localReplays = localState?.replays ?? [];
+  const localInbox = localState?.inbox ?? [];
+  const localInboxUnreadCount = localState?.inboxUnreadCount ?? 0;
+  const localAttachedSessionId = localState?.attachedSessionId ?? null;
+  const localAttachedSessionName = localState?.attachedSessionName ?? null;
+  const localAttachedSessionMeta = localState?.attachedSessionMeta ?? null;
+  const localScriptState = localState?.scriptState ?? null;
+  const localCommandError = localState?.commandError ?? null;
+  const localEvents = localState?.events ?? [];
+  const localLiveEventIds = localState?.liveEventIds ?? [];
+  const localSavedEventFilters = localState?.savedEventFilters ?? [];
+
+  // Raw backend for PTY operations (send/resize/setWriteCallback)
+  const localBackend = multi.getBackend(LOCAL_BACKEND_KEY) as LocalSessionPtyBackend | null;
+  const localBackendRef = useRef<LocalSessionPtyBackend | null>(null);
+  const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  useEffect(() => { localBackendRef.current = localBackend; }, [localBackend]);
+
+  const sendLocalPty = useCallback((data: Uint8Array) => {
+    const b = localBackendRef.current;
+    if (b?.writePtyData) void b.writePtyData(data).catch(() => undefined);
+  }, []);
+  const resizeLocalPty = useCallback((cols: number, rows: number) => {
+    const b = localBackendRef.current;
+    if (b?.resizePty) void b.resizePty(cols, rows).catch(() => undefined);
+  }, []);
+  const setLocalWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    writeCallbackRef.current = fn;
+    localBackendRef.current?.setPtyOutputHandler(fn);
+  }, []);
+
+  // Derive projects from the machine snapshot for the local backend
+  const localProjects = useMemo(() => {
+    const snapshot = selectBackendSnapshot(multiMachineState, LOCAL_BACKEND_KEY);
+    if (!snapshot) return localState?.projects ?? [];
+    return snapshot.projectOrder.map((id) => snapshot.projectsById[id]).filter(Boolean);
+  }, [multiMachineState, localState?.projects]);
+
+  // Derive workspaces from the machine snapshot for the local backend
+  const localWorkspaces = useMemo(() => {
+    return selectAllWorkspaces(multiMachineState)
+      .filter(({ backendKey }) => backendKey === LOCAL_BACKEND_KEY)
+      .map(({ workspace }) => workspace);
+  }, [multiMachineState]);
+
+  const workspaceController = useWorkspaceController({
+    state: multiMachineState,
   });
 
-  const relayStatusLabel = relayConfig?.label ?? relayConfig?.url;
-  const machineListStatusHint = relayConfig
-    ? remoteMachines.status === 'connecting'
-      ? `relay: connecting to ${relayStatusLabel}`
-      : remoteMachines.status === 'connected'
-        ? `relay: ${relayStatusLabel}`
-        : remoteMachines.status === 'error'
-          ? `relay unavailable - local access still works`
-          : `relay: ${relayStatusLabel}`
-    : 'local only';
-
-  const isLocalMachineContext = !isRemoteMode || state.selectedMachine?.machineId === 'local';
-
-  // Local machine session engine hook
-  const localSession = useLocalSession({ enabled: isLocalMachineContext });
+  /** Shared kanban controller over multi-machine state */
   const {
-    status: localSessionStatus,
-    mode: localSessionMode,
-    requestProjects: requestLocalProjects,
-    listGithubRepos: listLocalGithubRepos,
-    listRemoteBranches: listLocalRemoteBranches,
-    listLinearIssues: listLocalLinearIssues,
-    requestWorkspaces: requestLocalWorkspaces,
-    requestSessions: requestLocalSessions,
-    requestReplays: requestLocalReplays,
-    createProject: createLocalProject,
-    prepareProjectCreation: prepareLocalProjectCreation,
-    finalizeProjectCreation: finalizeLocalProjectCreation,
-    cancelProjectCreation: cancelLocalProjectCreation,
-    createWorkspace: createLocalWorkspace,
-    deleteProject: deleteLocalProject,
-    requestInbox: requestLocalInbox,
-    clearInbox: clearLocalInbox,
-    markInboxRead: markLocalInboxRead,
-    attachSession: attachLocalSession,
-    detachSession: detachLocalSession,
-    cancelPendingScripts: cancelLocalPendingScripts,
-    killSession: killLocalSession,
-    deleteWorkspace: deleteLocalWorkspace,
-    send: sendLocalPty,
-    resize: resizeLocalPty,
-    setWriteCallback: setLocalWriteCallback,
-    projects: localProjects,
-    workspaces: localWorkspaces,
-    sessions: localSessions,
-    replays: localReplays,
-    inbox: localInbox,
-    inboxUnreadCount: localInboxUnreadCount,
-    attachedSessionId: localAttachedSessionId,
-    attachedSessionName: localAttachedSessionName,
-    scriptState: localScriptState,
-    commandError: localCommandError,
-    getBundleRefreshPlan: getLocalBundleRefreshPlan,
-    applyBundleRefresh: applyLocalBundleRefresh,
-    getBundleConfigState: getLocalBundleConfigState,
-    applyBundleConfigUpdate: applyLocalBundleConfigUpdate,
-    startProcess: startLocalProcess,
-    stopProcess: stopLocalProcess,
-    requestEvents: requestLocalEvents,
-    events: localEvents,
-    liveEventIds: localLiveEventIds,
-    savedEventFilters: localSavedEventFilters,
-  } = localSession;
+    boardState: workspaceBoardState,
+    handleSelectWorkspace: handleBoardSelectWorkspace,
+    worktreeCount: totalWorktrees,
+    selectedWorkspaceProjectName,
+  } = useBoardPageModel({
+    state: multiMachineState,
+    selectedRef: workspaceController.selectedRef,
+    setSelectedRef: workspaceController.setSelectedRef,
+    clearSelectedRef: workspaceController.clearSelectedRef,
+    onSetWorkspacePhase: async (ref, phase) => {
+      await multi.setWorkspaceStatus(ref, phase);
+    },
+    resolveRefForWorkspaceId: (workspaceId) => ({ backendKey: LOCAL_BACKEND_KEY, workspaceId }),
+  });
+  const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
 
   const currentProject =
     localProjects.find((project) => project.isCurrent)?.name ?? localProjects[0]?.name ?? null;
@@ -430,45 +427,26 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
     commandError: localCommandError,
-    attachSession: (params) => attachLocalSession(params),
-    getBundleRefreshPlan: getLocalBundleRefreshPlan,
-    applyBundleRefresh: applyLocalBundleRefresh,
-    resolveProjectName: resolveLocalWorkspaceProjectName,
+    attachSession: (params) => multi.attachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: params.workspaceId ?? '' }, params),
+    getBundleRefreshPlan: (ref) => multi.getBundleRefreshPlan(ref),
+    applyBundleRefresh: (ref, submission) => multi.applyBundleRefresh(ref, submission),
   });
-  const lastLocalCommandErrorRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!localCommandError) {
-      lastLocalCommandErrorRef.current = null;
-      return;
-    }
-    if (localCommandError.code !== 'SESSION_TAKEN_OVER') {
-      lastLocalCommandErrorRef.current = null;
-      return;
-    }
-    const key = `${localCommandError.code}:${localCommandError.message}`;
-    if (lastLocalCommandErrorRef.current === key) {
-      return;
-    }
-    lastLocalCommandErrorRef.current = key;
-    flow.showMessage({
-      title: 'Session Taken Over',
-      message: localCommandError.message,
-      variant: 'warning',
-    });
-  }, [flow, localCommandError]);
 
   const {
     attach: attachLocal,
     attachFromSelection: attachLocalFromSelection,
+    canAttachAnyway: canAttachLocalAnyway,
+    attachAnyway: attachLocalAnyway,
   } = useAttachController({
     flow,
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
+    recoverableAttachParams: bundleRefreshAttach.recoverableParams,
     defaultProjectName: currentProject,
+    defaultBackendKey: LOCAL_BACKEND_KEY,
     getAttachSize: getLocalAttachSize,
     resolveProjectName: resolveLocalWorkspaceProjectName,
     preflightSessionAttach: async (sessionId) => {
-      const sessionInfo = localSessions.find((session) => session.id === sessionId);
+      const sessionInfo = localSessions.find((session: { id: string; attached: boolean }) => session.id === sessionId);
       if (!sessionInfo) {
         await refreshWorkspaces();
         dispatch({ type: 'SET_ERROR', error: 'Session no longer exists. The session list has been refreshed.' });
@@ -496,18 +474,27 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     },
     onBeforeAttach: ({ target, params }) => {
       sessionSwitchingRef.current = true;
+        setAttachedAgentSession(null);
 
       if (target === 'workspace' && params.workspaceId && !params.command) {
         lastScriptWorkspaceIdRef.current = params.workspaceId;
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
-        dispatch({ type: 'SET_VIEW', view: 'scripts' });
+        if (state.view !== 'workspace-detail') {
+          dispatch({ type: 'SET_VIEW', view: 'scripts' });
+        }
       }
     },
     onAttachSuccess: () => {
+      if (state.view === 'workspace-detail') {
+        return;
+      }
       dispatch({ type: 'SET_VIEW', view: 'terminal' });
     },
     onAttachCancelled: ({ target }) => {
       if (target === 'workspace' && state.view === 'scripts') {
+        return;
+      }
+      if (target === 'workspace' && state.view === 'workspace-detail') {
         return;
       }
       dispatch({ type: 'SET_VIEW', view: 'projects' });
@@ -530,14 +517,24 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
     flow,
-    deleteWorkspace: deleteLocalWorkspace,
+    deleteWorkspace: (ref, params) => multi.deleteWorkspace(ref, params),
     onBeforeDelete: ({ target }) => {
       setScriptWorkspaceName(target.workspaceName);
       dispatch({ type: 'SET_VIEW', view: 'scripts' });
     },
-    onDeleteSuccess: async () => {
+    onDeleteSuccess: async ({ target }) => {
+      // Clean up stale selection and tab state for the deleted workspace
+      if (workspaceBoardState.selectedWorkspaceId === target.ref.workspaceId) {
+        workspaceBoardState.setSelectedWorkspaceId(null);
+      }
+      workspaceController.clearSelectedRef();
       dispatch({ type: 'SET_VIEW', view: 'projects' });
       await refreshWorkspaces();
+    },
+    onDeleteCancelled: () => {
+      // Return to kanban board if user declines script-failure retry
+      lastScriptWorkspaceIdRef.current = null;
+      dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onDeleteError: async ({ message }) => {
       dispatch({ type: 'SET_VIEW', view: 'projects' });
@@ -570,29 +567,20 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Load projects
   const refreshProjects = useCallback(async () => {
-    if (!isLocalMachineContext) {
-      return;
-    }
-    await requestLocalProjects();
-  }, [isLocalMachineContext, requestLocalProjects]);
+    multi.listProjects();
+  }, [multi]);
 
   // Load workspaces for current project
   const refreshWorkspaces = useCallback(async () => {
-    if (!isLocalMachineContext) {
-      return;
-    }
-    await Promise.all([
-      requestLocalWorkspaces(),
-      requestLocalSessions(),
-      requestLocalReplays(undefined, showDismissedReplays),
-    ]);
-  }, [isLocalMachineContext, requestLocalReplays, requestLocalSessions, requestLocalWorkspaces, showDismissedReplays]);
+    multi.listWorkspaces();
+    multi.listSessions();
+    multi.listReplays(undefined, showDismissedReplays);
+  }, [multi, showDismissedReplays]);
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
-    getBundleConfigState: getLocalBundleConfigState,
-    applyBundleConfigUpdate: applyLocalBundleConfigUpdate,
-    resolveProjectName: resolveLocalWorkspaceProjectName,
+    getBundleConfigState: (ref) => multi.getBundleConfigState(ref),
+    applyBundleConfigUpdate: (ref, submission) => multi.applyBundleConfigUpdate(ref, submission),
     onApplied: async () => {
       await refreshWorkspaces();
     },
@@ -600,27 +588,24 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // Load inbox
   const refreshInbox = useCallback(async () => {
-    if (!isLocalMachineContext) {
-      return;
-    }
-    await requestLocalInbox();
-  }, [isLocalMachineContext, requestLocalInbox]);
+    multi.requestInbox();
+  }, [multi]);
 
   const lifecycleController = useLifecycleController({
     flow,
-    listGithubRepos: listLocalGithubRepos,
-    listRemoteBranches: listLocalRemoteBranches,
-    listLinearIssues: listLocalLinearIssues,
-    createProject: createLocalProject,
-    prepareProjectCreation: prepareLocalProjectCreation,
-    finalizeProjectCreation: finalizeLocalProjectCreation,
-    cancelProjectCreation: cancelLocalProjectCreation,
-    createWorkspace: createLocalWorkspace,
-    deleteProject: deleteLocalProject,
-    getProjectNames: () => localProjects.map((project) => project.name),
+    listGithubRepos: (org) => multi.listGithubRepos(LOCAL_BACKEND_KEY, org),
+    listRemoteBranches: (projectName) => multi.listRemoteBranches(LOCAL_BACKEND_KEY, projectName),
+    listLinearIssues: (projectName) => multi.listLinearIssues(LOCAL_BACKEND_KEY, projectName),
+    createProject: (params) => multi.createProject(LOCAL_BACKEND_KEY, params),
+    prepareProjectCreation: (params) => multi.prepareProjectCreation(LOCAL_BACKEND_KEY, params),
+    finalizeProjectCreation: (params) => multi.finalizeProjectCreation(LOCAL_BACKEND_KEY, params),
+    cancelProjectCreation: (name) => multi.cancelProjectCreation(LOCAL_BACKEND_KEY, name),
+    createWorkspace: (params) => multi.createWorkspace(LOCAL_BACKEND_KEY, params),
+    deleteProject: (name, params) => multi.deleteProject(LOCAL_BACKEND_KEY, name, params),
+    getProjectNames: () => localProjects.map((project: { name: string }) => project.name),
     refreshProjects,
     refreshWorkspaces,
-    refreshSessions: requestLocalSessions,
+    refreshSessions: () => multi.listSessions(),
     onWorkspaceCreated: async ({ workspaceId, workspaceName }) => {
       setScriptWorkspaceName(workspaceName);
       dispatch({ type: 'SET_VIEW', view: 'scripts' });
@@ -666,28 +651,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   // ========== Action Handlers ==========
 
-  // Select a project
-  const handleSelectProject = useCallback((project: ProjectInfo) => {
-    setCurrentProject(project.name);
-    void requestLocalProjects().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[tui] Failed to refresh projects after project select:', message);
-    });
-    void requestLocalWorkspaces().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[tui] Failed to refresh workspaces after project select:', message);
-    });
-    void requestLocalSessions().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[tui] Failed to refresh sessions after project select:', message);
-    });
-    void requestLocalReplays(undefined, showDismissedReplays).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[tui] Failed to refresh replays after project select:', message);
-    });
-    dispatch({ type: 'SET_PANEL_FOCUS', focus: 'workspaces' });
-  }, [requestLocalProjects, requestLocalReplays, requestLocalSessions, requestLocalWorkspaces, showDismissedReplays]);
-
   // Delete project
   const handleDeleteProject = useCallback((project: ProjectInfo) => {
     lifecycleController.openDeleteProjectFlow(project.name);
@@ -696,8 +659,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   // Attach to session using embedded terminal
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
     setIsViewOnlySession(params.viewOnly ?? false);
+    setAttachedAgentSession(null);
     await attachLocalFromSelection(params);
   }, [attachLocalFromSelection]);
+
+  const handleAttachLocalAnyway = useCallback(async () => {
+    if (flow.flow.type === 'message') {
+      flow.close();
+    }
+    await attachLocalAnyway();
+  }, [attachLocalAnyway, flow]);
 
   // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
@@ -718,10 +689,8 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [attachLocal, localWorkspaces]);
 
   const handleManageBundleConfig = useCallback(async ({ workspaceId }: { workspaceId: string }) => {
-    const workspace = localWorkspaces.find((item) => item.id === workspaceId);
-    const projectName = workspace?.projectName ?? currentProject;
-    await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
-  }, [bundleConfigFlow, currentProject, localWorkspaces]);
+    await bundleConfigFlow.openBundleConfig({ backendKey: LOCAL_BACKEND_KEY, workspaceId });
+  }, [bundleConfigFlow]);
 
   useEffect(() => {
     if (!pendingProcessEditWorkspaceId) {
@@ -780,10 +749,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     if (sessionSwitchingRef.current) return;
 
     setIsViewOnlySession(false);
-    await detachLocalSession();
+    setAttachedAgentSession(null);
+    await multi.detachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: '' });
     dispatch({ type: 'SET_VIEW', view: 'projects' });
     await refreshWorkspaces();
-  }, [detachLocalSession, refreshWorkspaces]);
+  }, [multi, refreshWorkspaces]);
 
   // Delete workspace
   const handleDeleteWorkspace = useCallback((workspace: { id: string; name: string; sessionCount: number }) => {
@@ -793,15 +763,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       confirmText: workspace.name,
       warning: workspace.sessionCount > 0 ? `This will kill ${workspace.sessionCount} active session(s)!` : undefined,
       onConfirm: async () => {
-        if (!currentProject) return;
         await deleteWorkspaceWithPrompt({
-          projectName: currentProject,
-          workspaceId: workspace.id,
+          ref: { backendKey: LOCAL_BACKEND_KEY, workspaceId: workspace.id },
           workspaceName: workspace.name,
         });
       },
     });
-  }, [currentProject, flow, deleteWorkspaceWithPrompt]);
+  }, [flow, deleteWorkspaceWithPrompt]);
 
   // Delete session
   const handleDeleteSession = useCallback((sessionId: string, sessionName: string) => {
@@ -812,24 +780,26 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       confirmLabel: 'Kill',
       onConfirm: async () => {
         try {
-          await killLocalSession(sessionId);
+          if (localAttachedSessionId === sessionId) {
+            await multi.detachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: '' });
+          }
+          await multi.killSession({ backendKey: LOCAL_BACKEND_KEY, sessionId });
         } catch (err) {
           dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to kill session' });
         }
       },
     });
-  }, [flow, killLocalSession]);
+  }, [flow, multi, localAttachedSessionId]);
 
   // ========== Workspace Creation ==========
   const handleNewWorkspaceFlow = useCallback(() => {
-    lifecycleController.openCreateWorkspaceFlow(currentProject);
-  }, [currentProject, lifecycleController]);
+    lifecycleController.openCreateWorkspaceFlow(selectedWorkspaceProjectName);
+  }, [selectedWorkspaceProjectName, lifecycleController]);
 
   // ========== Project Creation (Custom State Machine) ==========
 
   // Finalize project creation
   const finalizeProject = useCallback(async (projectName: string) => {
-    setCurrentProject(projectName);
     await refreshProjects();
     setProjectFlow({ type: 'closed' });
     flow.showMessage({
@@ -1101,32 +1071,86 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     isCurrent: project.name === currentProject,
   }));
 
-  const workspaceInfos = localWorkspaces
-    .filter((workspace) => workspace.projectName === currentProject)
-    .map((workspace) => ({
+  const workspaceInfos = useMemo(
+    () =>
+      workspaceRuntime.workspaces
+        .filter((workspace) => workspace.backendKey === LOCAL_BACKEND_KEY)
+        .filter((workspace) => workspace.projectName === currentProject)
+        .map((workspace) => ({
+          id: workspace.id,
+          name: workspace.name,
+          path: workspace.path,
+          projectName: workspace.projectName,
+          branch: workspace.branch,
+          phase: workspace.phase ?? ('code' as import('./types/config.js').WorkspacePhase),
+          sessionCount: workspaceRuntime.runtimeByWorkspace[workspace.id]?.sessions.length ?? 0,
+          isStale: workspace.isStale,
+          processes: workspace.processes,
+          processConfigError: workspace.processConfigError,
+          serveDomain: workspace.serveDomain,
+        })),
+    [workspaceRuntime, currentProject]
+  );
+
+  const sessionInfos = useMemo(
+    () => currentProject
+      ? workspaceRuntime.sessions.filter(
+          (session) =>
+            session.workspaceId !== 'unknown' &&
+            session.workspaceId.startsWith(`${currentProject}:`)
+        )
+      : [],
+    [currentProject, workspaceRuntime.sessions],
+  );
+
+  const replayInfos = currentProject
+    ? localReplays.filter((replay) => replay.projectName === currentProject)
+    : [];
+
+  const selectedWorkspaceForDetail = useMemo(() => {
+    if (!workspaceController.selectedRef || !workspaceController.workspace) {
+      return null;
+    }
+    const workspace = workspaceRuntime.workspaces.find((item) => item.id === workspaceController.workspace!.id) ?? workspaceController.workspace;
+    return {
       id: workspace.id,
       name: workspace.name,
       path: workspace.path,
       projectName: workspace.projectName,
       branch: workspace.branch,
-      sessionCount: localSessions.filter((session) => session.workspaceId === workspace.id).length,
+      sessionCount: workspaceRuntime.runtimeByWorkspace[workspace.id]?.sessions.length ?? 0,
       isStale: workspace.isStale,
       processes: workspace.processes,
       processConfigError: workspace.processConfigError,
       serveDomain: workspace.serveDomain,
-    }));
-
-  const sessionInfos = currentProject
-    ? localSessions.filter(
-        (session) =>
-          session.workspaceId !== 'unknown' &&
-          session.workspaceId.startsWith(`${currentProject}:`)
-      )
-    : [];
-
-  const replayInfos = currentProject
-    ? localReplays.filter((replay) => replay.projectName === currentProject)
-    : [];
+      pullRequest: workspace.pullRequest,
+      linear: workspace.linear,
+    };
+  }, [workspaceController.selectedRef, workspaceController.workspace, workspaceRuntime]);
+  const detailSessions = useMemo(
+    () => {
+      const workspaceId = workspaceController.selectedRef?.workspaceId;
+      if (!workspaceId) {
+        return [];
+      }
+      const byId = new Map<string, (typeof localSessions)[number]>();
+      for (const session of sessionInfos.filter((s) => s.workspaceId === workspaceId)) {
+        byId.set(session.id, session);
+      }
+      for (const session of localSessions.filter((s) => s.workspaceId === workspaceId || s.workspaceId.endsWith(`:${workspaceId}`))) {
+        byId.set(session.id, { ...(byId.get(session.id) ?? session), ...session });
+      }
+      return Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [localSessions, sessionInfos, workspaceController.selectedRef]
+  );
+  const detailReplays = useMemo(
+    () =>
+      workspaceController.selectedRef?.workspaceId
+        ? localReplays.filter((r) => (r as { workspaceId?: string }).workspaceId === workspaceController.selectedRef?.workspaceId)
+        : [],
+    [localReplays, workspaceController.selectedRef]
+  );
 
   // Agent inbox items — generated from useWorkspaceAgentEvents notifications
   const [agentInboxItems, setAgentInboxItems] = useState<InboxItem[]>([]);
@@ -1137,19 +1161,24 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   );
   const inboxUnreadCount = localInboxUnreadCount + agentInboxItems.filter((i) => !i.read).length;
 
-  // Project list hook
-  const projectListProps = useProjectList({
-    projects: projectInfos,
-    onSelect: handleSelectProject,
-    onCreateNew: lifecycleController.openCreateProjectFlow,
-    onDelete: handleDeleteProject,
-    onRefresh: refreshProjects,
-  });
-
   const processActions = useProcessActions({
     sessions: sessionInfos,
-    startProcess: startLocalProcess,
-    stopProcess: stopLocalProcess,
+    startProcess: async (workspaceId, processName, instance) => {
+      try {
+        await multi.startProcess({ backendKey: LOCAL_BACKEND_KEY, workspaceId }, processName, instance);
+      } catch (error) {
+        if (isPortConflictError(error)) {
+          const resolved = await promptToResolveProcessStartConflict({ error, showConfirm: flow.showConfirm });
+          if (resolved) {
+            await multi.startProcess({ backendKey: LOCAL_BACKEND_KEY, workspaceId }, processName, instance);
+            return;
+          }
+          throw new ProcessStartCancelledError();
+        }
+        throw error;
+      }
+    },
+    stopProcess: (workspaceId, processName) => multi.stopProcess({ backendKey: LOCAL_BACKEND_KEY, workspaceId }, processName),
     attachSession: handleAttachSession,
     onStartProcessError: (error) => {
       flow.showMessage({
@@ -1203,13 +1232,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   const handleOpenEvents = useCallback((workspaceId: string) => {
     setEventsWorkspaceId(workspaceId);
-    // Find workspace path for events request
-    const workspace = localWorkspaces.find(w => w.id === workspaceId);
-    if (workspace) {
-      void requestLocalEvents(workspace.path);
-    }
+    setEventsReturnView(state.view === 'workspace-detail' ? 'workspace-detail' : 'projects');
+    void multi.requestEvents({ backendKey: LOCAL_BACKEND_KEY, workspaceId });
     dispatch({ type: 'SET_VIEW', view: 'events' });
-  }, [localWorkspaces, requestLocalEvents]);
+  }, [multi, state.view]);
 
   const handleOpenReplay = useCallback(async (replayId: string) => {
     const replay = localReplays.find((item) => item.replayId === replayId);
@@ -1228,7 +1254,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   const handleReplayDismiss = useCallback((replayId: string) => {
     try {
-      const replay = localReplays.find((item) => item.replayId === replayId) ?? activeReplay;
+      const replay = localReplays.find((item: { replayId: string; status: string }) => item.replayId === replayId) ?? activeReplay;
       if (!activeReplayDismissedRef.current && replay?.status === 'running') {
         flow.showMessage({
           title: 'Replay Still Running',
@@ -1262,9 +1288,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       });
       return false;
     } finally {
-      void requestLocalReplays(undefined, showDismissedReplays);
+      multi.listReplays(undefined, showDismissedReplays);
     }
-  }, [activeReplay, flow, localReplays, requestLocalReplays, showDismissedReplays]);
+  }, [activeReplay, flow, localReplays, multi, showDismissedReplays]);
 
   useEffect(() => {
     activeReplayDismissedRef.current = Boolean(activeReplay?.dismissedAt);
@@ -1276,25 +1302,48 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
   const loadReplayTimeline = useCallback((replayId: string) => {
     return Promise.resolve(getReplayTimelineOffline(replayId));
-  }, []);
+  }, []); 
 
-  const localBackend = localSession.sessionBackend;
+  const handleOpenReplayHistory = useCallback((args: {
+    workspaceId: string;
+    workspaceName: string;
+    replayRows: WorkspaceDetailReplayRow[];
+  }) => {
+    showReplayHistorySelect({
+      workspaceName: args.workspaceName,
+      replayRows: args.replayRows,
+      showSelect: (config) => flow.showSelect<string>(config),
+      onSelectReplay: handleOpenReplay,
+    });
+  }, [flow, handleOpenReplay]);
 
-  const workspaceAgentSessions = useWorkspaceAgentSessions({
-    backend: localBackend,
-  });
+  const toAgentSessionInfo = useCallback((agent: typeof workspaceController.agents[number]): BrowserAgentSessionInfo => ({
+    id: agent.id,
+    workspaceId: agent.workspaceId,
+    title: getAgentSessionDisplayTitle({ id: agent.id, title: agent.title }),
+    updatedAt: agent.updatedAt,
+    closedAt: agent.closedAt,
+    archivedAt: agent.archivedAt,
+    status: agent.state === 'running'
+      ? { type: 'busy' }
+      : agent.state === 'retrying'
+        ? { type: 'retry', attempt: 1, message: agent.errorMessage ?? 'retrying', next: Date.now() + 1000 }
+        : !agent.closedAt && agent.state !== 'archived'
+          ? { type: 'idle' }
+          : undefined,
+    pendingPermissionCount: agent.pendingPermissionCount,
+    errorMessage: agent.errorMessage,
+  }), []);
 
-  // Agent event subscription — machine-side push, no per-client SSE
-  const agentEvents = useWorkspaceAgentEvents({
-    backend: localBackend,
-    onNotification: (notification) => {
-      const workspace = localWorkspaces.find((w) => w.id === notification.workspaceId);
-      const projectName = workspace?.projectName ?? 'unknown';
-      const workspaceName = workspace?.name ?? notification.workspaceId;
-      const item = agentNotificationToInboxItem(notification, projectName, workspaceName);
-      setAgentInboxItems((prev) => [item, ...prev.slice(0, 49)]);
-    },
-  });
+  const respondToPermission = useCallback(async (
+    workspaceId: string,
+    agentSessionId: string,
+    permissionId: string,
+    response: 'allow' | 'deny',
+  ) => {
+    if (!localBackend) return;
+    await localBackend.respondToAgentPermission(workspaceId, agentSessionId, permissionId, response);
+  }, [localBackend]);
 
   // Per-workspace agent session persistence — use spacesBrowser's selected workspace if available
   // Fallback to empty string when no workspace is focused (hook is always called, ID may be empty)
@@ -1306,25 +1355,23 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     if (!localBackend?.attachAgentSession) {
       throw new Error('Agent attach unavailable');
     }
-    const attachAgentSession = localBackend.attachAgentSession.bind(localBackend);
     await handleInboxSessionSelection({
       sessionId,
       agentInboxItems,
       flow,
-      respondToPermission: agentEvents.respondToPermission,
+      respondToPermission,
       markAgentInboxItemRead: (id) => {
         setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
       },
       openAgentSession: async (workspaceId, agentSessionId) => {
         await openAgentSession({
-          flow,
           workspaceId,
           agentSessionId,
           persistAgentSessionSelection,
           clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover?.bind(localBackend),
-          attachAgentSession,
+          attachAgentSession: localBackend.attachAgentSession!.bind(localBackend),
           afterAttach: async () => {
+            setAttachedAgentSession(null);
             dispatch({ type: 'SET_VIEW', view: 'terminal' });
           },
         });
@@ -1339,197 +1386,246 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         dispatch({ type: 'SET_VIEW', view: 'projects' });
       },
     });
-  }, [agentEvents, agentInboxItems, dispatch, flow, handleAttachSession, localBackend, persistAgentSessionSelection]);
+  }, [agentInboxItems, dispatch, flow, handleAttachSession, localBackend, persistAgentSessionSelection, respondToPermission]);
 
-  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
-  const agentSessionCounts = useMemo(() => {
-    return collectAgentSessionCounts({
-      sessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
-      workspaceStates: agentEvents.workspaceStates,
-      snapshotByWorkspace: localBackend?.getAgentStateSnapshot() ?? {},
-    });
-  }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
+  const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
 
-  const agentSessionsByWorkspace = useMemo(() => {
-    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
-    const workspaceIds = new Set([
-      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
-      ...Object.keys(agentEvents.workspaceStates),
-      ...Object.keys(localBackend?.getAgentStateSnapshot() ?? {}),
-    ]);
+  const agentSessionCounts = workspaceRuntime.agentSessionCounts;
+  const pendingPermissionsByWorkspace = workspaceRuntime.pendingPermissionsByWorkspace;
 
-    for (const workspaceId of workspaceIds) {
-      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
-      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
-      const snapshotSessions = (localBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
-        id: session.id,
-        workspaceId,
-        title: session.title,
-        updatedAt: undefined,
-        closed: 'closed' in session ? Boolean(session.closed) : undefined,
-      }));
-      const combined = new Map<string, (typeof baseSessions)[number]>();
-      for (const session of snapshotSessions) combined.set(session.id, session);
-      for (const session of baseSessions) combined.set(session.id, session);
-      for (const sessionId of Object.keys(liveStates)) {
-        if (!combined.has(sessionId)) {
-          combined.set(sessionId, {
-            id: sessionId,
-            workspaceId,
-            title: sessionId,
-            updatedAt: undefined,
-            closed: false,
-          });
-        }
-      }
-      merged[workspaceId] = Array.from(combined.values()).map((session) => {
-        const live = liveStates[session.id];
-        if (!live) return session;
-        return {
-          ...session,
-          status: live.status,
-          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
-          errorMessage: live.errorMessage,
-        };
-      });
+  // Build status entries for every workspace across all backends so the kanban
+  // board (which shows all workspaces) always has a status entry per card.
+  const allWorkspaceEntries = workspaceRuntime.workspaces;
+  const workspaceStatusById = workspaceRuntime.workspaceStatusById;
+
+  const handleOpenAgents = useCallback(async (workspaceId: string) => {
+    void workspaceId;
+  }, []);
+
+  const handleOpenReview = useCallback(async (workspaceId: string) => {
+    const workspace = allWorkspaceEntries.find((item) => item.id === workspaceId);
+    if (!workspace) {
+      flow.showMessage({ title: 'Open Review', message: 'Select a workspace first.', variant: 'info' });
+      return;
     }
+    const result = await openBrowserUrl(buildReviewUrl({
+      projectName: workspace.projectName,
+      workspaceName: workspace.name,
+    }));
+    if (!result.ok) {
+      flow.showMessage({ title: 'Open Review', message: result.message, variant: 'error' });
+    }
+  }, [allWorkspaceEntries, flow]);
 
-    return merged;
-  }, [agentEvents.workspaceStates, localBackend, workspaceAgentSessions.sessionsByWorkspace]);
+  const handleOpenGitHubPullRequest = useCallback(async (workspaceId: string) => {
+    const workspace = allWorkspaceEntries.find((item) => item.id === workspaceId);
+    const url = workspace?.pullRequest?.url;
+    if (!url) {
+      flow.showMessage({ title: 'Open GitHub PR', message: 'No GitHub pull request found for this workspace.', variant: 'info' });
+      return;
+    }
+    const result = await openBrowserUrl(url);
+    if (!result.ok) {
+      flow.showMessage({ title: 'Open GitHub PR', message: result.message, variant: 'error' });
+    }
+  }, [allWorkspaceEntries, flow]);
 
-  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
+  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await localBackend?.abortAgentSession?.(workspaceId, agentSessionId);
+  }, [localBackend]);
 
-  const refreshAgentSessions = useCallback(async ({
-    expandedWorkspaceIds,
-    selectedWorkspaceId,
-  }: {
-    expandedWorkspaceIds: string[];
-    selectedWorkspaceId: string | null;
-  }) => {
-    await syncWorkspaceAgentSessions(
-      collectWorkspaceSyncIds(workspaceInfos, expandedWorkspaceIds, selectedWorkspaceId),
-    );
-  }, [syncWorkspaceAgentSessions, workspaceInfos]);
+  const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await localBackend?.closeAgentSession?.(workspaceId, agentSessionId);
+    if (attachedAgentSession?.workspaceId === workspaceId && attachedAgentSession.sessionId === agentSessionId) {
+      setAttachedAgentSession(null);
+    }
+  }, [attachedAgentSession, localBackend]);
 
-  // Spaces browser hook
+  const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await localBackend?.archiveAgentSession?.(workspaceId, agentSessionId);
+    if (attachedAgentSession?.workspaceId === workspaceId && attachedAgentSession.sessionId === agentSessionId) {
+      setAttachedAgentSession(null);
+    }
+  }, [attachedAgentSession, localBackend]);
+
+  const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await localBackend?.restoreAgentSession?.(workspaceId, agentSessionId);
+  }, [localBackend]);
+
+  const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    if (!localBackend?.attachAgentSession) {
+      throw new Error('Agent attach unavailable');
+    }
+    await openAgentSession({
+      workspaceId,
+      agentSessionId,
+      persistAgentSessionSelection,
+      clearViewOnly: () => setIsViewOnlySession(false),
+      attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+      afterAttach: async (attachedAgentId) => {
+        setAttachedAgentSession({ workspaceId, sessionId: attachedAgentId });
+        if (state.view !== 'workspace-detail') {
+          dispatch({ type: 'SET_VIEW', view: 'terminal' });
+        }
+      },
+    });
+  }, [localBackend, persistAgentSessionSelection, state.view]);
+
+  const handleCreateAgentSession = useCallback(async (workspaceId: string) => {
+    if (!localBackend?.attachAgentSession) {
+      throw new Error('Agent attach unavailable');
+    }
+    promptCreateAgentSession({
+      flow,
+      workspaceId,
+      getCurrentSessions: (id) => agentSessionsByWorkspace[id] ?? [],
+      createAgentSession: async (wid, title) => {
+        const sessions = await localBackend?.createAgentSession?.(wid, title);
+        return (sessions ?? []).map((session) => ({
+          ...session,
+          workspaceId: wid,
+        }));
+      },
+      attachOptions: {
+        workspaceId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
+        afterAttach: async (attachedAgentId) => {
+          setAttachedAgentSession({ workspaceId, sessionId: attachedAgentId });
+          if (state.view !== 'workspace-detail') {
+            dispatch({ type: 'SET_VIEW', view: 'terminal' });
+          }
+        },
+      },
+    });
+  }, [agentSessionsByWorkspace, flow, localBackend, persistAgentSessionSelection, state.view]);
+
+  // Spaces browser hook (full project list; when a workspace is selected we show WorkspaceDetailPaneTUI instead)
   const spacesBrowserProps = useSpacesBrowser({
     workspaces: workspaceInfos,
     sessions: sessionInfos,
     replays: replayInfos,
-    onRequestSessions: () => {
-      void requestLocalSessions();
-      void requestLocalReplays(undefined, showDismissedReplays);
-    },
     onAttachSession: handleAttachSession,
     onOpenReplay: handleOpenReplay,
     onEditProcesses: handleEditProcesses,
     onManageBundleConfig: handleManageBundleConfig,
-    onStartProcess: handleStartProcess,
     onStartProcessAttach: handleStartProcessAttach,
     onStopProcess: handleStopProcess,
     onProcessDisabled: handleProcessDisabled,
     onOpenEvents: handleOpenEvents,
-    onOpenAgents: async (workspaceId) => {
-      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
-    },
-    onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!localBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      const attachAgentSession = localBackend.attachAgentSession.bind(localBackend);
-      await openAgentSession({
-        flow,
-        workspaceId,
-        agentSessionId,
-        persistAgentSessionSelection,
-        clearViewOnly: () => setIsViewOnlySession(false),
-        checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover?.bind(localBackend),
-        attachAgentSession,
-        afterAttach: async () => {
-          dispatch({ type: 'SET_VIEW', view: 'terminal' });
-        },
-      });
-    },
-    onCreateAgentSession: async (workspaceId) => {
-      if (!localBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      const attachAgentSession = localBackend.attachAgentSession.bind(localBackend);
-      promptCreateAgentSession({
-        flow,
-        workspaceId,
-        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
-        createAgentSession: workspaceAgentSessions.createSession,
-        attachOptions: {
-          flow,
-          workspaceId,
-          persistAgentSessionSelection,
-          clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: localBackend.checkAgentSessionTakeover?.bind(localBackend),
-          attachAgentSession,
-          afterAttach: async () => {
-            dispatch({ type: 'SET_VIEW', view: 'terminal' });
-          },
-        },
-      });
-    },
+    onOpenAgents: handleOpenAgents,
+    onOpenAgentSession: handleOpenAgentSession,
+    onCreateAgentSession: handleCreateAgentSession,
     agentSessionsByWorkspace,
     agentSessionCounts: agentSessionCounts,
-    pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
+    pendingPermissionsByWorkspace,
+    runtimeByWorkspace: workspaceRuntime.runtimeByWorkspace,
     onRefresh: refreshWorkspaces,
-    onRefreshSessions: async () => {
-      await Promise.all([
-        requestLocalSessions(),
-        requestLocalReplays(undefined, showDismissedReplays),
-      ]);
+    onRefreshSessions: () => {
+      multi.listSessions();
+      multi.listReplays(undefined, showDismissedReplays);
     },
-    onRefreshAgents: refreshAgentSessions,
-    onBack: () => dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' }),
+    onBack: () => undefined,
     onCreateWorkspace: handleNewWorkspaceFlow,
     machineName: currentProject || undefined,
     showProjectHeaders: false, // Don't show project headers since we're already filtered
   });
 
-  // Machine list hook (for remote mode)
-  const machineListProps = useMachineList({
-    machines: remoteMachines.machines,
-    status: remoteMachines.status,
-    error: remoteMachines.error,
-    publicKey: undefined,
-    onConnect: async (machine) => {
-      setActiveRemoteIdentity(remoteMachines.identity ?? remoteIdentity ?? null);
-      dispatch({ type: 'SET_MACHINE', machine });
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
+  // Command palette (shared state + handler)
+  const commandPaletteCommands = useMemo(
+    () => COMMAND_PALETTE_COMMAND_DEFS.map((d) => ({ id: d.id, label: d.label, shortcut: d.shortcut })),
+    []
+  );
+  const selectedWorkspaceForCommands = resolveSelectedWorkspace({
+    selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
+    selectedDetailWorkspaceId: selectedWorkspaceForDetail?.id ?? null,
+    selectedBrowserWorkspaceId:
+      spacesBrowserProps.selectedItem?.type === 'workspace'
+        ? spacesBrowserProps.selectedItem.workspace.id
+        : null,
+    workspaces: workspaceInfos,
+  });
+  const selectedProjectForCommands = resolveSelectedProjectName({ selectedProjectName: selectedWorkspaceProjectName });
+  const selectedWorkspaceForPmActions = useMemo(
+    () => allWorkspaceEntries.find((workspace) => workspace.id === selectedWorkspaceForCommands?.id) ?? null,
+    [allWorkspaceEntries, selectedWorkspaceForCommands?.id],
+  );
+  const handleCommandPaletteSelect = useCallback(
+    (id: string) => {
+      executeCommandPaletteAction({
+        commandId: id as (typeof COMMAND_PALETTE_COMMAND_DEFS)[number]['id'],
+        workspace: selectedWorkspaceForPmActions,
+        projectName: selectedProjectForCommands,
+        showSelect: (config) => flow.showSelect<string>(config),
+        showMessage: flow.showMessage,
+        onOpenUrl: async (url) => {
+          const result = await openBrowserUrl(url);
+          if (!result.ok) {
+            flow.showMessage({ title: 'Open Service', message: result.message, variant: 'error' });
+          }
+        },
+        onAddRepo: () => lifecycleController.openCreateProjectFlow(),
+        onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+        onSetStatus: (workspace) => {
+          showWorkspaceStatusSelect({
+            showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
+            onSelectPhase: (phase) => {
+              workspaceBoardState.setPhase(workspace.id, phase);
+              flow.close();
+            },
+          });
+        },
+        onDeleteWorkspace: handleDeleteWorkspace,
+        onEditBundleConfig: async (workspace) => {
+          await handleManageBundleConfig({ workspaceId: workspace.id });
+        },
+        onEditProcessConfig: async (workspace) => {
+          await handleEditProcesses({ workspaceId: workspace.id });
+        },
+        onDeleteRepo: (projectName) => {
+          const project = projectInfos.find((item) => item.name === projectName);
+          if (project) handleDeleteProject(project);
+        },
+        onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
+        onOpenReview: (workspace) => handleOpenReview(workspace.id),
+      });
     },
-    onRefresh: remoteMachines.refreshMachines,
+    [
+      lifecycleController,
+      projectInfos,
+      workspaceBoardState,
+      handleDeleteWorkspace,
+      handleDeleteProject,
+      handleManageBundleConfig,
+      handleEditProcesses,
+      handleOpenGitHubPullRequest,
+      handleOpenReview,
+      flow,
+      selectedProjectForCommands,
+      selectedWorkspaceForPmActions,
+      selectedWorkspaceForCommands,
+    ]
+  );
+  const commandPalette = useCommandPaletteState({
+    commands: commandPaletteCommands,
+    onSelect: handleCommandPaletteSelect,
   });
 
-  useEffect(() => {
-    if (
-      isRemoteMode &&
-      state.view === 'projects' &&
-      state.selectedMachine &&
-      state.selectedMachine.machineId !== 'local' &&
-      remoteMachines.identity
-    ) {
-      setActiveRemoteIdentity(remoteMachines.identity);
-    }
-  }, [isRemoteMode, remoteMachines.identity, state.selectedMachine, state.view]);
-
   // Inbox hook
-  const inboxProps = useInbox({
+  const inboxProps = useInboxPageModel({
     items: inboxItems,
     unreadCount: inboxUnreadCount,
     onClearItem: async (id) => {
-      await clearLocalInbox(id);
+      await multi.clearInbox(id);
       await refreshInbox();
     },
     onClearAll: async () => {
-      await clearLocalInbox();
+      await multi.clearInbox();
       await refreshInbox();
     },
     onMarkRead: async (id) => {
-      await markLocalInboxRead(id);
+      await multi.markInboxRead(id);
       await refreshInbox();
     },
     onAttachSession: attachFromInboxSessionId,
@@ -1547,51 +1643,39 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     savedFilters: localSavedEventFilters,
     onSelectFilter: (filter) => {
       if (!eventsWorkspaceId) return;
-      const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
-      if (!workspace) return;
+      const ref = { backendKey: LOCAL_BACKEND_KEY, workspaceId: eventsWorkspaceId };
       if (filter) {
         const sinceMs = filter.sinceMinutes
           ? Date.now() - filter.sinceMinutes * 60 * 1000
           : undefined;
-        void requestLocalEvents(
-          workspace.path,
-          filter.filter as WideEventFilter,
-          undefined,
-          sinceMs
-        );
+        void multi.requestEvents(ref, filter.filter as WideEventFilter, undefined, sinceMs);
       } else {
-        void requestLocalEvents(workspace.path);
+        void multi.requestEvents(ref);
       }
     },
     onClose: () => {
       setEventsWorkspaceId(null);
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
+      dispatch({ type: 'SET_VIEW', view: eventsReturnView });
     },
   });
 
   // Events polling when events view is active
   useEffect(() => {
     if (state.view !== 'events' || !eventsWorkspaceId) return;
-    const workspace = localWorkspaces.find(w => w.id === eventsWorkspaceId);
-    if (!workspace) return;
+    const ref = { backendKey: LOCAL_BACKEND_KEY, workspaceId: eventsWorkspaceId };
 
     const interval = setInterval(() => {
       const activeFilter = eventsProps.activeFilterName
-        ? localSavedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+        ? localSavedEventFilters.find((filter: { name: string }) => filter.name === eventsProps.activeFilterName) ?? null
         : null;
 
       if (activeFilter) {
-        const sinceMs = activeFilter.sinceMinutes
-          ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
+        const sinceMs = (activeFilter as { sinceMinutes?: number }).sinceMinutes
+          ? Date.now() - (activeFilter as { sinceMinutes: number }).sinceMinutes * 60 * 1000
           : undefined;
-        void requestLocalEvents(
-          workspace.path,
-          activeFilter.filter as WideEventFilter,
-          undefined,
-          sinceMs
-        );
+        void multi.requestEvents(ref, (activeFilter as { filter: WideEventFilter }).filter, undefined, sinceMs);
       } else {
-        void requestLocalEvents(workspace.path);
+        void multi.requestEvents(ref);
       }
     }, 2000);
 
@@ -1599,10 +1683,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [
     state.view,
     eventsWorkspaceId,
-    localWorkspaces,
     eventsProps.activeFilterName,
     localSavedEventFilters,
-    requestLocalEvents,
+    multi,
   ]);
 
   // ========== Activity Tracking for Notifications ==========
@@ -1639,7 +1722,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       });
     },
     onMarkRead: async (itemId) => {
-      await markLocalInboxRead(itemId);
+      await multi.markInboxRead(itemId);
       await refreshInbox();
     },
     pollIntervalMs: 5000,
@@ -1717,6 +1800,29 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       state.view === 'scripts' &&
       (localScriptState?.isRunning ?? true);
 
+    // Command palette: Ctrl+Shift+P toggles; when open, handle palette keys
+    if (key.ctrl && key.shift && (key.name === 'p' || key.raw === 'P' || key.raw === 'p')) {
+      commandPalette.toggle();
+      return;
+    }
+    if (commandPalette.isOpen) {
+      if (key.name === 'escape') {
+        commandPalette.close();
+      } else if (key.name === 'up' || key.raw === 'k') {
+        commandPalette.moveSelection(-1);
+      } else if (key.name === 'down' || key.raw === 'j') {
+        commandPalette.moveSelection(1);
+      } else if (key.name === 'return') {
+        commandPalette.selectCurrent();
+      } else if (key.name === 'backspace') {
+        commandPalette.setFilter(commandPalette.filter.slice(0, -1));
+      } else {
+        const chunk = getKeyboardInputChunk(key);
+        if (chunk) commandPalette.setFilter(commandPalette.filter + chunk);
+      }
+      return;
+    }
+
     // Handle flow modals FIRST - even in terminal view
     // This ensures y/n work in confirmation modals when terminal is underneath
     if (flow.isOpen && !localScriptTerminalRunning) {
@@ -1762,18 +1868,10 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         !localScriptState?.isRunning &&
         !!localScriptState?.error &&
         flow.flow.type === 'message' &&
-        (key.raw === 'a' || key.name === 'a')
+        (key.raw === 'a' || key.name === 'a') &&
+        canAttachLocalAnyway
       ) {
-        const workspaceId = lastScriptWorkspaceIdRef.current;
-        if (!workspaceId) {
-          return;
-        }
-
-        flow.close();
-        await attachLocal({
-          workspaceId,
-          scriptPolicy: 'skip',
-        });
+        await handleAttachLocalAnyway();
         return;
       }
 
@@ -1792,16 +1890,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       } else if (key.name === 'down' || key.raw === 'j') {
         flow.moveDown();
       }
-      return;
-    }
-
-    // Remote machine screen handles its own keyboard bindings.
-    if (
-      isRemoteMode &&
-      state.view === 'projects' &&
-      state.selectedMachine &&
-      state.selectedMachine.machineId !== 'local'
-    ) {
       return;
     }
 
@@ -1829,7 +1917,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     // Read-only script terminal view.
     if (state.view === 'scripts') {
       if (localScriptState?.isRunning && (key.raw === 'c' || key.name === 'c')) {
-        await cancelLocalPendingScripts();
+        if (workspaceController.selectedRef) {
+            await multi.cancelPendingScripts(workspaceController.selectedRef);
+          } else {
+            // No selected workspace ref — detach any pending scripts
+            await multi.detachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: '' });
+          }
         return;
       }
 
@@ -1837,17 +1930,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         !localScriptState?.isRunning &&
         (key.raw === 'a' || key.name === 'a') &&
         !!localScriptState?.error &&
-        !!lastScriptWorkspaceIdRef.current
+        canAttachLocalAnyway
       ) {
-        const workspaceId = lastScriptWorkspaceIdRef.current;
-        if (!workspaceId) {
-          return;
-        }
-
-        await attachLocal({
-          workspaceId,
-          scriptPolicy: 'skip',
-        });
+        await handleAttachLocalAnyway();
         return;
       }
 
@@ -1869,7 +1954,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     if (state.view === 'events') {
       if (key.name === 'escape' || key.raw === 'q') {
         setEventsWorkspaceId(null);
-        dispatch({ type: 'SET_VIEW', view: 'projects' });
+        dispatch({ type: 'SET_VIEW', view: eventsReturnView });
       } else if (key.name === 'up' || key.raw === 'k') {
         eventsProps.selectIndex(eventsProps.selectedIndex - 1);
       } else if (key.name === 'down' || key.raw === 'j') {
@@ -2139,176 +2224,135 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       return;
     }
 
-    // View-specific shortcuts
-    if (state.view === 'machines') {
-      const command = resolveMachineListCommand({
-        name: key.name,
-        raw: key.raw,
-        shift: key.shift,
-      });
-
-      if (command === 'move-up') {
-        machineListProps.moveUp();
-      } else if (command === 'move-down') {
-        machineListProps.moveDown();
-      } else if (command === 'activate') {
-        machineListProps.connectSelected();
-      } else if (command === 'refresh') {
-        try {
-          await machineListProps.refresh();
-        } catch (error) {
-          flow.showMessage({
-            title: 'Refresh Failed',
-            message: error instanceof Error ? error.message : String(error),
-            variant: 'error',
-          });
-        }
-      } else if (command === 'help') {
-        flow.showHelp(getDefaultShortcuts());
+    // Workspace detail view: q goes back to kanban board.
+    // Escape is handled by the WorkspaceDetailScreen component itself (onBack prop)
+    // to allow internal focus management (closing pickers, releasing terminal, etc.)
+    if (state.view === 'workspace-detail') {
+      if (key.raw === 'q') {
+        dispatch({ type: 'SET_VIEW', view: 'projects' });
       }
+      // All other keys (including Escape) are handled by WorkspaceDetailScreen
       return;
     }
 
     if (state.view === 'projects') {
-      // Panel switching
-      if (key.name === 'tab') {
-        dispatch({ type: 'SWITCH_PANEL' });
+      // Moving mode: intercept all keys when repositioning a workspace between lanes
+      if (workspaceBoardState.moving) {
+        if (key.shift && key.name === 'left') {
+          workspaceBoardState.shiftMovingTarget(-1);
+        } else if (key.shift && key.name === 'right') {
+          workspaceBoardState.shiftMovingTarget(1);
+        } else if (key.name === 'return') {
+          workspaceBoardState.confirmMoving();
+        } else if (key.name === 'escape') {
+          workspaceBoardState.cancelMoving();
+        }
         return;
       }
 
-      if (state.panelFocus === 'projects') {
-        if (key.name === 'up' || key.raw === 'k') {
-          projectListProps.moveUp();
-        } else if (key.name === 'down' || key.raw === 'j') {
-          projectListProps.moveDown();
-        } else if (key.name === 'return') {
-          projectListProps.selectProject();
-        } else if (key.raw === 'n') {
-          // In projects panel, 'n' creates new project
-          lifecycleController.openCreateProjectFlow();
-        } else if (key.raw === 'd') {
-          projectListProps.deleteSelected();
-        } else if (key.raw === 'r') {
-          try {
-            await projectListProps.refresh();
-          } catch (error) {
-            flow.showMessage({
-              title: 'Refresh Failed',
-              message: error instanceof Error ? error.message : String(error),
-              variant: 'error',
-            });
-          }
-        }
-      } else {
-        // Workspaces panel
+      const moveFocusedLane = (delta: number) => {
+        const laneCount = Math.max(1, workspaceBoardState.groups.length);
+        const nextIndex = delta < 0
+          ? focusedLaneIndex <= 0
+            ? laneCount - 1
+            : focusedLaneIndex - 1
+          : focusedLaneIndex >= laneCount - 1
+            ? 0
+            : focusedLaneIndex + 1;
+        setFocusedLaneIndex(nextIndex);
+        handleBoardSelectWorkspace(
+          workspaceBoardState.groups[nextIndex]?.workspaces[0]?.id ?? null
+        );
+      };
+
+      // Tab cycles lanes only; command palette is Ctrl+Shift+P only
+      if (key.name === 'tab') {
+        moveFocusedLane(key.shift ? -1 : 1);
+        return;
+      }
+
+      if (key.name === 'left') {
+        moveFocusedLane(-1);
+        return;
+      }
+
+      if (key.name === 'right') {
+        moveFocusedLane(1);
+        return;
+      }
+
+      // Workspaces panel
+        const laneWorkspaces =
+          workspaceBoardState.groups[focusedLaneIndex]?.workspaces ?? [];
+        const moveLaneSelection = (delta: number) => {
+          if (laneWorkspaces.length === 0) return;
+          const currentIndex = laneWorkspaces.findIndex(
+            (w) => w.id === workspaceBoardState.selectedWorkspaceId
+          );
+          const nextIndex =
+            currentIndex < 0
+              ? delta >= 0
+                ? 0
+                : laneWorkspaces.length - 1
+              : Math.max(0, Math.min(laneWorkspaces.length - 1, currentIndex + delta));
+          handleBoardSelectWorkspace(laneWorkspaces[nextIndex]?.id ?? null);
+        };
         const command = resolveSessionBrowserCommand({
           name: key.name,
           raw: key.raw,
           shift: key.shift,
         });
 
+        // Shift+Left/Right: enter moving mode when a workspace is selected
+        if (key.shift && (key.name === 'left' || key.name === 'right')) {
+          const selectedId = workspaceBoardState.selectedWorkspaceId;
+          if (selectedId) {
+            const entry = laneWorkspaces.find((w) => w.id === selectedId);
+            if (entry) {
+              workspaceBoardState.startMoving(entry.id, entry.phase);
+              // Immediately shift in the pressed direction
+              workspaceBoardState.shiftMovingTarget(key.name === 'left' ? -1 : 1);
+            }
+          }
+          return;
+        }
+
         if (command === 'move-up') {
-          spacesBrowserProps.moveUp();
+          moveLaneSelection(-1);
         } else if (command === 'move-down') {
-          spacesBrowserProps.moveDown();
+          moveLaneSelection(1);
         } else if (command === 'activate') {
-          // Let the hook handle it:
-          // - workspace: toggle expand/collapse
-          // - session: attach via onAttachSession
-          // - new-session: create via onAttachSession
-          try {
-            await spacesBrowserProps.activateSelected();
-          } catch (error) {
-            flow.showMessage({
-              title: 'Attach Failed',
-              message: error instanceof Error ? error.message : String(error),
-              variant: 'error',
-            });
+          if (laneWorkspaces.length > 0) {
+            const currentIndex = laneWorkspaces.findIndex(
+              (w) => w.id === workspaceBoardState.selectedWorkspaceId
+            );
+            const targetId =
+              currentIndex >= 0
+                ? laneWorkspaces[currentIndex].id
+                : laneWorkspaces[0].id;
+            handleBoardSelectWorkspace(targetId);
+            // Always navigate to workspace-detail; sessions are managed
+            // from the sidebar once the workspace detail view is open.
+            dispatch({ type: 'SET_VIEW', view: 'workspace-detail' });
           }
         } else if (command === 'new') {
           // In workspaces panel, 'n' always creates new workspace
           // Sessions are created via expand (Enter) → "+ New session" (Enter)
-          lifecycleController.openCreateWorkspaceFlow(currentProject);
+          lifecycleController.openCreateWorkspaceFlow(selectedWorkspaceProjectName);
         } else if (command === 'bundle') {
-          const selected = spacesBrowserProps.selectedItem;
-          const workspaceId = selected?.type === 'workspace'
-            ? selected.workspace.id
-            : selected && 'workspaceId' in selected && selected.type !== 'replay'
-              ? selected.workspaceId
-              : null;
-          if (workspaceId) {
-            await handleManageBundleConfig({ workspaceId });
+          // Requires a workspace to be selected on the board
+          const selectedId = workspaceBoardState.selectedWorkspaceId;
+          if (selectedId) {
+            await handleManageBundleConfig({ workspaceId: selectedId });
           }
         } else if (command === 'delete') {
-          // Delete workspace
-          const selected = spacesBrowserProps.selectedItem;
-          if (selected?.type === 'workspace') {
-            const workspace = workspaceInfos.find((item) => item.id === selected.workspace.id);
+          // Requires a workspace to be selected on the board
+          const selectedId = workspaceBoardState.selectedWorkspaceId;
+          if (selectedId) {
+            const workspace = workspaceInfos.find((item) => item.id === selectedId);
             if (workspace) {
               handleDeleteWorkspace(workspace);
             }
-          } else if (selected?.type === 'replay') {
-            try {
-              if (!selected.replay.dismissedAt && selected.replay.status === 'running') {
-                flow.showMessage({
-                  title: 'Replay Still Running',
-                  message: 'Running replays cannot be dismissed.',
-                  variant: 'info',
-                });
-              } else if (selected.replay.dismissedAt) {
-                undismissReplayOffline(selected.replay.replayId);
-              } else {
-                dismissReplayOffline(selected.replay.replayId);
-              }
-              void requestLocalReplays(undefined, showDismissedReplays);
-            } catch (error) {
-              flow.showMessage({
-                title: 'Replay Update Failed',
-                message: error instanceof Error ? error.message : String(error),
-                variant: 'error',
-              });
-            }
-          } else if (selected?.type === 'agent-session' && selected.session.closed) {
-            flow.showConfirm({
-              title: 'Clear Closed Agent',
-              message: `Remove closed agent session "${selected.session.title}" from history?`,
-              confirmLabel: 'Clear',
-              cancelLabel: 'Cancel',
-              variant: 'warning',
-              onConfirm: async () => {
-                await workspaceAgentSessions.clearSession(selected.workspaceId, selected.session.id);
-              },
-            });
-          }
-        } else if (command === 'kill') {
-          // Kill session or stop running process
-          const selected = spacesBrowserProps.selectedItem;
-          if (selected?.type === 'session') {
-            handleDeleteSession(selected.session.id, selected.session.name);
-          } else if (selected?.type === 'process' && selected.status === 'running') {
-            flow.showConfirm({
-              title: 'Stop Process',
-              message: `Stop process "${selected.processName}"?`,
-              variant: 'warning',
-              confirmLabel: 'Stop',
-              onConfirm: () => {
-                void handleStopProcess({
-                  workspaceId: selected.workspaceId,
-                  processName: selected.processName,
-                });
-              },
-            });
-          } else if (selected?.type === 'agent-session' && !selected.session.closed) {
-            flow.showConfirm({
-              title: 'Close Agent Session',
-              message: `Close agent session "${selected.session.title}"?`,
-              confirmLabel: 'Close',
-              cancelLabel: 'Cancel',
-              variant: 'warning',
-              onConfirm: async () => {
-                await workspaceAgentSessions.abortSession(selected.workspaceId, selected.session.id);
-              },
-            });
           }
         } else if (command === 'refresh') {
           try {
@@ -2323,13 +2367,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         } else if (command === 'toggle-hidden') {
           setShowDismissedReplays((value) => {
             const next = !value;
-            void requestLocalReplays(undefined, next);
+            multi.listReplays(undefined, next);
             return next;
           });
         } else if (command === 'back') {
-          dispatch({ type: 'SET_PANEL_FOCUS', focus: 'projects' });
+          if (workspaceController.selectedRef) {
+            handleBoardSelectWorkspace(null);
+          } else {
+            onQuit?.();
+          }
         }
-      }
       return;
     }
   });
@@ -2339,7 +2386,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       return;
     }
 
-    if (state.view === 'projects' || state.view === 'machines' || state.view === 'inbox') {
+    if (state.view === 'projects' || state.view === 'inbox') {
       sessionSwitchingRef.current = false;
       return;
     }
@@ -2349,10 +2396,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
   }, [localSessionMode, state.view]);
 
+  useEffect(() => {
+    if (localSessionMode === 'browsing') {
+      setAttachedAgentSession(null);
+    }
+  }, [localSessionMode]);
+
   // Keep local terminal view in sync with backend session lifecycle.
   useEffect(() => {
     const action = resolveLocalTerminalSyncAction({
-      isLocalMachineContext,
+      isLocalMachineContext: true,
       view: state.view,
       localSessionStatus,
       localSessionMode,
@@ -2371,7 +2424,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       void refreshWorkspaces();
     }
   }, [
-    isLocalMachineContext,
     localScriptState,
     localSessionMode,
     localSessionStatus,
@@ -2382,12 +2434,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   // ========== Render ==========
 
   // Loading state
-  if (state.isLoading) {
+  if (state.isLoading || localSessionStatus === 'connecting') {
     return (
       <Fragment>
         <Toaster position="top-right" />
         <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
-          <text fg={COLORS.loading}>Loading...</text>
+          <text fg={COLORS.loading}>
+            {localSessionStatus === 'connecting'
+              ? 'Starting local machine runtime...'
+              : 'Loading...'}
+          </text>
         </box>
       </Fragment>
     );
@@ -2402,67 +2458,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           <text fg={COLORS.error}>Error: {state.error}</text>
           <text fg={COLORS.textDim} marginTop={1}>Press 'q' to quit</text>
         </box>
-      </Fragment>
-    );
-  }
-
-  // Machine list view (remote mode)
-  if (state.view === 'machines') {
-    return (
-      <Fragment>
-        <Toaster position="top-right" />
-        <box flexDirection="column" flexGrow={1}>
-          <MachineListTUI
-            {...machineListProps}
-            focused={true}
-            relayLabel={relayStatusLabel}
-            relayError={remoteMachines.error}
-            isAutoConnected={relayConfig?.autoConnected === true}
-          />
-          <StatusBar
-            hint="[↑↓] Navigate  [Enter] Connect  [r] Refresh  [?] Help  [q] Quit"
-            rightHint={`${machineListStatusHint}  ${keyboardModeHint}`}
-          />
-          <FlowTUI flow={flow} />
-        </box>
-      </Fragment>
-    );
-  }
-
-  // Remote machine view (uses shared remote session engine + backend).
-  if (
-    isRemoteMode &&
-    state.view === 'projects' &&
-    state.selectedMachine &&
-    state.selectedMachine.machineId !== 'local'
-  ) {
-    const remoteScreenIdentity = activeRemoteIdentity ?? remoteMachines.identity ?? remoteIdentity ?? null;
-
-    if (!relayConfig || !remoteScreenIdentity) {
-      return (
-        <Fragment>
-          <Toaster position="top-right" />
-          <box flexDirection="column" flexGrow={1} justifyContent="center" alignItems="center">
-            <text fg={COLORS.error}>Missing remote identity</text>
-            <text fg={COLORS.textDim} marginTop={1}>Set GITSPACE_LOCAL_STORE_PASSWORD and reconnect</text>
-          </box>
-        </Fragment>
-      );
-    }
-
-    return (
-      <Fragment>
-        <Toaster position="top-right" />
-        <RemoteMachineScreen
-          machine={state.selectedMachine}
-          relayUrl={relayConfig.url}
-          identity={remoteScreenIdentity}
-          onBack={() => {
-            setActiveRemoteIdentity(null);
-            dispatch({ type: 'SET_MACHINE', machine: null });
-            dispatch({ type: 'SET_VIEW', view: 'machines' });
-          }}
-        />
       </Fragment>
     );
   }
@@ -2540,6 +2535,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         <Toaster position="top-right" />
         <SessionTerminal
           sessionName={sessionLabel}
+          processTitle={localAttachedSessionMeta?.processTitle ?? null}
+          terminalTitle={localAttachedSessionMeta?.terminalTitle ?? null}
+          lastAlertLabel={localAttachedSessionMeta?.lastAlertKind
+            ? `${localAttachedSessionMeta.lastAlertKind}${localAttachedSessionMeta.unreadAlertCount ? ` (${localAttachedSessionMeta.unreadAlertCount})` : ''}`
+            : null}
           endpointLabel="local"
           onData={sendLocalPty}
           onResize={resizeLocalPty}
@@ -2565,77 +2565,190 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     );
   }
 
-  // Main project/workspace view
+  const machineLabel = 'local';
+
+  // Workspace detail view — full-screen, navigated to from kanban board via Enter
+  if (state.view === 'workspace-detail' && selectedWorkspaceForDetail) {
+    return (
+      <Fragment>
+        <Toaster position="top-right" />
+        <WorkspaceDetailScreen
+          key={selectedWorkspaceForDetail.id}
+          workspace={selectedWorkspaceForDetail}
+          sessions={detailSessions}
+          replays={detailReplays}
+          agentSessions={agentSessionsByWorkspace[selectedWorkspaceForDetail.id]}
+          agentSessionCount={agentSessionCounts[selectedWorkspaceForDetail.id]}
+          pendingPermissions={pendingPermissionsByWorkspace[selectedWorkspaceForDetail.id]}
+           onAttachSession={handleAttachSession}
+           onOpenReplay={handleOpenReplay}
+           onOpenReplayHistory={handleOpenReplayHistory}
+           onStartProcess={handleStartProcess}
+          onStartProcessAttach={handleStartProcessAttach}
+          onStopProcess={handleStopProcess}
+          onEditProcesses={handleEditProcesses}
+          onManageBundleConfig={handleManageBundleConfig}
+          onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
+          onOpenReview={handleOpenReview}
+          onOpenEvents={handleOpenEvents}
+          onOpenAgentSession={handleOpenAgentSession}
+          onCreateAgentSession={handleCreateAgentSession}
+          onDeleteSession={handleDeleteSession}
+          onClose={() => handleBoardSelectWorkspace(null)}
+          machineLabel={machineLabel}
+          onBack={() => handleBoardSelectWorkspace(null)}
+          onChangeStatus={(wid, phase) => workspaceBoardState.setPhase(wid, phase)}
+          allWorkspaces={allWorkspaceEntries}
+          workspaceStatusById={workspaceStatusById}
+          runtime={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.id] ?? null}
+          onSelectWorkspace={(workspaceId) => handleBoardSelectWorkspace(workspaceId)}
+          onAbortAgentSession={handleAbortAgentSession}
+          onCloseAgentSession={handleCloseAgentSession}
+          onArchiveAgentSession={handleArchiveAgentSession}
+          onRestoreAgentSession={handleRestoreAgentSession}
+          flow={flow}
+          terminalBindings={{
+             attachedSessionId: localAttachedSessionId,
+             attachedAgentSessionId: attachedAgentSession?.sessionId ?? null,
+             attachedSessionName: localAttachedSessionName,
+             attachedSessionMeta: localAttachedSessionMeta,
+             onData: sendLocalPty,
+            onResize: resizeLocalPty,
+            onDetach: handleTerminalDetach,
+            setWriteCallback: setLocalWriteCallback,
+            modalOpen: flow.isOpen,
+            readOnly: isViewOnlySession,
+          }}
+          scriptBindings={{
+            workspaceId: lastScriptWorkspaceIdRef.current,
+            workspaceName: scriptWorkspaceName,
+            scriptState: localScriptState,
+            modalOpen: flow.isOpen,
+            setWriteCallback: setLocalWriteCallback,
+            canAttachAnyway: canAttachLocalAnyway,
+            onAttachAnyway: handleAttachLocalAnyway,
+          }}
+        />
+        <FlowTUI flow={flow} />
+      </Fragment>
+    );
+  }
+
+  // Fallback: if workspace-detail was requested but no workspace selected yet, go back to board
+  if (state.view === 'workspace-detail') {
+    dispatch({ type: 'SET_VIEW', view: 'projects' });
+  }
+
+  // Main project/workspace view — Figma layout: board header, command bar, then board + detail
+  const daemonRightHint = [
+    `tmux:${daemonStatus.tmux.running ? '●' : '○'}`,
+    `serve:${daemonStatus.serve.running ? '●' : formatRelayStatus(daemonStatus.serve.relayStatus)}`,
+    inboxUnreadCount > 0 ? `📥 ${inboxUnreadCount}` : '',
+    keyboardModeHint,
+  ]
+    .filter(Boolean)
+    .join('  ');
+
   return (
     <Fragment>
       <Toaster position="top-right" />
       <box flexDirection="column" flexGrow={1} width="100%">
-        {/* ASCII Art Header */}
-      <box flexDirection="row" width="100%" height={13}>
-        {/* ASCII art on left - fixed width */}
-        <box flexDirection="column" alignItems="flex-start" paddingLeft={1} width={68}>
-          {ASCII_LINES.map((line, i) => (
-            <text key={i} fg={line.color}>{line.text}</text>
-          ))}
+        {/* Board header: Project Board · N worktrees active */}
+        <box flexDirection="row" width="100%" paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0}>
+          <text fg={COLORS.title}>Project Board</text>
+          <text fg={COLORS.textDim}>  ·  </text>
+          <text fg={COLORS.textDim}>{totalWorktrees} worktree{totalWorktrees !== 1 ? 's' : ''} active</text>
         </box>
 
-        {/* Status & Notifications on right */}
-        <box flexDirection="column" flexGrow={1} paddingLeft={2} paddingTop={1}>
-          {/* Daemon status line */}
-          <box flexDirection="row" gap={2}>
-            <text fg={daemonStatus.tmux.running ? COLORS.title : COLORS.textDim}>
-              tmux: {daemonStatus.tmux.running ? '●' : '○'} {daemonStatus.tmux.sessions ?? 0} sessions
-            </text>
-            <text fg={daemonStatus.serve.running ? COLORS.title : COLORS.textDim}>
-              relay: {formatRelayStatus(daemonStatus.serve.relayStatus)} {daemonStatus.serve.running ? (daemonStatus.serve.clients ?? 0) + ' clients' : 'off'}
-            </text>
-          </box>
-
-          {/* Uptime info */}
-          {(daemonStatus.tmux.running || daemonStatus.serve.running) && (
-            <text fg={COLORS.textDim}>
-              {daemonStatus.tmux.uptime ? `tmux: ${formatUptime(daemonStatus.tmux.uptime)}` : ''}
-              {daemonStatus.tmux.uptime && daemonStatus.serve.uptime ? '  ' : ''}
-              {daemonStatus.serve.uptime ? `serve: ${formatUptime(daemonStatus.serve.uptime)}` : ''}
-            </text>
-          )}
-
-          {/* Version mismatch warning */}
-          {daemonStatus.versionMismatch && (
-            <text fg={COLORS.error}>⚠ Version mismatch - restart daemons</text>
-          )}
-
-          {/* Notifications */}
-          <box marginTop={1}>
-            {inboxUnreadCount > 0 ? (
-              <box flexDirection="column">
-                <text fg={COLORS.loading}>{'📥'} {inboxUnreadCount} notification{inboxUnreadCount > 1 ? 's' : ''}</text>
-                <text fg={COLORS.textDim}>[i] view inbox</text>
-              </box>
-            ) : (
-              <text fg={COLORS.textDim}>No notifications</text>
-            )}
-          </box>
+        {/* Persistent command bar - Ctrl+Shift+P only, not in Tab cycle */}
+        <box
+          flexDirection="row"
+          width="100%"
+          paddingLeft={1}
+          paddingRight={1}
+          paddingTop={0}
+          paddingBottom={1}
+          borderStyle="single"
+          borderColor={COLORS.border}
+        >
+          <text fg={COLORS.textDim}>🔍 Type a command or search...  [Ctrl+Shift+P]</text>
+          <box flexGrow={1} />
         </box>
-      </box>
 
-      {/* Main content - two panel layout */}
-      <box flexDirection="row" flexGrow={1} width="100%" gap={1} paddingLeft={1} paddingRight={1}>
-        <ProjectListTUI {...projectListProps} focused={state.panelFocus === 'projects'} />
-        <SpacesBrowserTUI {...spacesBrowserProps} focused={state.panelFocus === 'workspaces'} />
-      </box>
+        {/* Main content: board + workspace detail (full width, no sidebar) */}
+        <box flexDirection="column" flexGrow={1} width="100%" gap={1} paddingLeft={1} paddingRight={1}>
+          <KanbanBoardTUI
+            groups={workspaceBoardState.groups}
+            selectedWorkspaceId={workspaceBoardState.selectedWorkspaceId}
+            onSelectWorkspace={handleBoardSelectWorkspace}
+            workspaceStatusById={workspaceStatusById}
+            machineLabel={machineLabel}
+            focused={true}
+            focusedLaneIndex={focusedLaneIndex}
+            moving={workspaceBoardState.moving}
+          />
+          {/* Detail pane removed: Enter on a card now navigates to 'workspace-detail' view */}
+        </box>
 
-      {/* Status bar */}
-      <StatusBar
-        hint={state.panelFocus === 'projects'
-          ? '[Tab] Switch  [Enter] Select  [n] New Project  [d] Delete  [,] Settings  [?] Help  [q] Quit'
-          : getWorkspacesPanelHint(spacesBrowserProps.selectedItem)
-        }
-        rightHint={keyboardModeHint}
-      />
+        {/* Status bar: hints left, daemon + notifications right */}
+        <StatusBar
+          hint="[←→/Tab] Lanes  [↑↓] Select  [Shift+←/→] Move Phase  [Enter] Open  [Ctrl+Shift+P] Palette  [q] Quit"
+          rightHint={daemonRightHint}
+        />
 
       {/* Flow modal overlay */}
       <FlowTUI flow={flow} />
+
+      {/* Command palette overlay */}
+      {commandPalette.isOpen && (
+        <box
+          position="absolute"
+          top={0}
+          left={0}
+          width="100%"
+          height="100%"
+          justifyContent="flex-start"
+          alignItems="center"
+        >
+          <box
+            position="absolute"
+            top={0}
+            left={0}
+            width="100%"
+            height="100%"
+            backgroundColor="#111111"
+          />
+          <box
+            flexDirection="column"
+            width="90%"
+            borderStyle="single"
+            borderColor={COLORS.borderFocused}
+            backgroundColor="#1a1a1a"
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+            marginTop={1}
+            zIndex={10}
+          >
+            <text fg={COLORS.title}>Command palette</text>
+            <text fg={COLORS.textDim}>Filter: {commandPalette.filter || '(none)'}</text>
+            <box flexDirection="column" marginTop={1}>
+              {commandPalette.filteredCommands.map((cmd, i) => (
+                <text
+                  key={cmd.id}
+                  fg={i === commandPalette.selectedIndex ? COLORS.selected : COLORS.text}
+                >
+                  {i === commandPalette.selectedIndex ? '▸ ' : '  '}
+                  {cmd.label}
+                  {cmd.shortcut ? `  ${cmd.shortcut}` : ''}
+                </text>
+              ))}
+            </box>
+            <text fg={COLORS.textDim} marginTop={1}>↑/↓ select  Enter run  Esc close</text>
+          </box>
+        </box>
+      )}
 
       {/* Project creation flow modal */}
       <ProjectFlowModal flow={projectFlow} />
@@ -3034,11 +3147,9 @@ function KeyboardWelcomeGate({
 // Entry Point
 // ============================================================================
 
-/** @deprecated Use RelayConfig instead */
-export type TUIRelayConfig = RelayConfig;
 
 export async function launchTUI(
-  relayConfig?: RelayConfig,
+  relayConfig?: RelayDescriptor,
   options: { ignoreKeychainAndSkipSecrets?: boolean; remoteIdentity?: Identity | null } = {}
 ): Promise<void> {
   await initializeSecretRuntime({
@@ -3052,79 +3163,29 @@ export async function launchTUI(
   let renderer = await createRendererForKeyboardMode(initialKeyboardMode);
   let root = createRoot(renderer);
   let activeRenderer = renderer;
-  const cleanupRenderer = () => {
-    try {
-      activeRenderer.destroy();
-    } catch {
-      // Best effort only.
-    }
-  };
-
-  const restoreTerminal = () => {
-    restoreTuiTerminalState();
-  };
-
-  const cleanupListeners = () => {
-    process.removeListener('SIGINT', handleQuit);
-    process.removeListener('exit', handleExit);
-    process.removeListener('uncaughtException', handleFatalException);
-    process.removeListener('unhandledRejection', handleFatalRejection);
-  };
-
-  const handleFatal = (kind: 'uncaughtException' | 'unhandledRejection', error: unknown) => {
-    try {
-      cleanupRenderer();
-      restoreTerminal();
-      cleanupListeners();
-      const logPath = writeCrashLog(`tui-${kind}`, error, {
-        keyboardMode: requestedKeyboardMode,
-        relayConfigured: Boolean(relayConfig),
-      });
-      const detail = error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error);
-      try {
-        process.stderr.write(`[gssh] TUI ${kind}: ${detail}\n`);
-        if (logPath) {
-          process.stderr.write(`[gssh] Crash log written to ${logPath}\n`);
-        }
-      } catch {
-        // Best effort only.
-      }
-    } finally {
-      process.exit(1);
-    }
-  };
-
-  function handleFatalException(error: Error): void {
-    handleFatal('uncaughtException', error);
-  }
-
-  function handleFatalRejection(reason: unknown): void {
-    handleFatal('unhandledRejection', reason);
-  }
 
   // Clean exit handler
   const handleQuit = () => {
-    cleanupRenderer();
-    restoreTerminal();
+    activeRenderer.destroy();
 
     const legacyReminder = consumeLegacyCleanupReminderForTui();
     if (legacyReminder) {
       logger.warning(legacyReminder);
     }
 
-    cleanupListeners();
     process.exit(0);
   };
 
-  const handleExit = () => {
-    restoreTerminal();
-  };
-
   // Handle SIGINT
-  process.prependListener('uncaughtException', handleFatalException);
-  process.prependListener('unhandledRejection', handleFatalRejection);
   process.on('SIGINT', handleQuit);
-  process.on('exit', handleExit);
+
+  // Cleanup on exit
+  process.on('exit', () => {
+    // Reset terminal state
+    process.stdout.write('\x1b[?25h'); // Show cursor
+    process.stdout.write('\x1b[?1049l'); // Exit alternate screen
+    process.stdout.write('\x1b[0m'); // Reset colors
+  });
 
   const resolvedKeyboardMode = await new Promise<ResolvedKeyboardMode>((resolve) => {
     root.render(
@@ -3141,7 +3202,7 @@ export async function launchTUI(
     resolvedKeyboardMode === 'vt' &&
     initialKeyboardMode !== 'vt'
   ) {
-    cleanupRenderer();
+    activeRenderer.destroy();
     renderer = await createRendererForKeyboardMode('vt');
     activeRenderer = renderer;
     root = createRoot(renderer);

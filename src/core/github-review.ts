@@ -13,7 +13,12 @@ import { writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ReviewThread, ReviewComment, ThreadTarget } from '../types/review.js';
-import { readReviewSession, writeReviewSession } from './review.js';
+import {
+  prepareReviewStorage,
+  readReviewSession,
+  writeReviewSession,
+  type ReviewWriteOptions,
+} from './review.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 import { generateId } from '../utils/id.js';
 import { logger } from '../utils/logger.js';
@@ -55,13 +60,16 @@ export async function importGitHubReview(
   workspacePath: string,
   workspaceName: string,
   baseBranch: string,
-  prNumber: number
+  prNumber: number,
+  options: ReviewWriteOptions = {}
 ): Promise<{ imported: number; threads: ReviewThread[] }> {
   const owner = await getRepoOwner(workspacePath);
   const repo = await getRepoName(workspacePath);
 
   // Fetch all review comments from the PR
   const comments = await fetchPRComments(owner, repo, prNumber, workspacePath);
+
+  await prepareReviewStorage(workspacePath, workspaceName, options);
 
   const session = readReviewSession(workspacePath, workspaceName, baseBranch);
 

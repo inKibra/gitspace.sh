@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test'
-import { renderHook } from '@testing-library/react'
+import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
 import { useAttachController } from '../useAttachController.js'
 
@@ -154,7 +154,7 @@ describe('useAttachController', () => {
   it('runs lifecycle callbacks for cancelled and failed attach attempts', async () => {
     const onAttachCancelled = mock(() => {})
     const onAttachError = mock(() => {})
-    const attachSessionWithBundleRefresh = mock(async (params: { sessionId?: string }) => {
+    const attachSessionWithBundleRefresh = mock(async (_ref: { backendKey: string; workspaceId: string }, params: { sessionId?: string }) => {
       if (params.sessionId === 'cancelled') {
         return false
       }
@@ -225,5 +225,73 @@ describe('useAttachController', () => {
         projectName: null,
       }
     )
+  })
+
+  it('canAttachAnyway is true when recoverableAttachParams is provided and calls attach with scriptPolicy skip', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const recoverableParams = {
+      workspaceId: 'my-project:my-workspace',
+      sessionName: 'debug-shell',
+      cols: 120,
+      rows: 40,
+    }
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+        recoverableAttachParams: recoverableParams,
+      })
+    )
+
+    expect(result.current.canAttachAnyway).toBe(true)
+
+    let retried = false
+    await act(async () => {
+      retried = await result.current.attachAnyway()
+    })
+
+    expect(retried).toBe(true)
+    expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
+      {
+        workspaceId: 'my-project:my-workspace',
+        sessionName: 'debug-shell',
+        cols: 120,
+        rows: 40,
+        scriptPolicy: 'skip',
+      },
+      {
+        projectName: 'my-project',
+      }
+    )
+  })
+
+  it('canAttachAnyway is false when recoverableAttachParams is null', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+        recoverableAttachParams: null,
+      })
+    )
+
+    expect(result.current.canAttachAnyway).toBe(false)
+
+    let retried = true
+    await act(async () => {
+      retried = await result.current.attachAnyway()
+    })
+    expect(retried).toBe(false)
   })
 })

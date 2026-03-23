@@ -344,6 +344,40 @@ describe('github-review sync behavior', () => {
     expect(third.threads[0]?.comments).toHaveLength(2);
   });
 
+  it('imports review notes without prompting and defaults storage to private', async () => {
+    const originalStdinIsTTY = process.stdin.isTTY;
+    const originalStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+
+    try {
+      setImportComments(importFile, [
+        {
+          id: 151,
+          body: 'Imported without prompting',
+          path: 'src/main.ts',
+          line: 12,
+          original_line: 12,
+          side: 'RIGHT',
+          start_line: 12,
+          original_start_line: 12,
+          diff_hunk: '@@ -10,2 +10,3 @@ context',
+          user: { login: 'octocat' },
+          created_at: '2026-02-19T10:30:00Z',
+          pull_request_review_id: 11,
+        },
+      ]);
+
+      await importGitHubReview(workspacePath, WORKSPACE_NAME, BASE_BRANCH, PR_NUMBER);
+
+      expect(readFileSync(join(workspacePath, '.gitignore'), 'utf-8')).toContain('.gitspace/workspace/');
+      expect(existsSync(join(workspacePath, '.gitspace', 'workspace', WORKSPACE_NAME, 'review.json'))).toBe(true);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalStdinIsTTY, configurable: true });
+      Object.defineProperty(process.stdout, 'isTTY', { value: originalStdoutIsTTY, configurable: true });
+    }
+  });
+
   it('imports paginated slurp responses by flattening pages', async () => {
     setImportPayload(importFile, [
       [

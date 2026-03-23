@@ -12,7 +12,7 @@ import type {
 import type { BackendEvent } from '../events';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config';
-import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager';
+import type { AgentStateUpdateDelta } from '../../lib/tmux-lite/agent-event-manager.js';
 
 class FakeBackend implements SessionBackend {
   readonly descriptor: BackendDescriptor;

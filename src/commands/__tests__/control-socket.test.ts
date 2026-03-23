@@ -14,7 +14,7 @@ import { existsSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  bindPersistedOwnerIdentity,
+  bindControlOwner,
   ensureControlStore,
   upsertCloudWorkspace,
 } from '../../relay/control/store.js';
@@ -117,7 +117,7 @@ describe('control socket – control_meta command', () => {
   });
 
   test('returns control_meta with ownerIdentityId after owner is bound', async () => {
-    bindPersistedOwnerIdentity('test-owner-id');
+    bindControlOwner('test-owner-id');
 
     const response = await queryControlMeta();
     expect(response).not.toBeNull();
@@ -150,13 +150,13 @@ describe('control socket – assert_owner command', () => {
   });
 
   test('assert_owner returns ok for the correct owner', async () => {
-    bindPersistedOwnerIdentity('real-owner');
+    bindControlOwner('real-owner');
     const result = await sendAssertOwnerCommand('real-owner');
     expect(result.success).toBe(true);
   });
 
   test('assert_owner returns error for a different identity', async () => {
-    bindPersistedOwnerIdentity('real-owner');
+    bindControlOwner('real-owner');
     const result = await sendAssertOwnerCommand('impostor');
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/mismatch/i);
@@ -182,21 +182,21 @@ describe('control socket – list_cloud_workspaces command', () => {
   });
 
   test('list_cloud_workspaces returns error when called by non-owner identity', async () => {
-    bindPersistedOwnerIdentity('owner-id');
+    bindControlOwner('owner-id');
     const result = await sendListCloudWorkspacesCommand('impostor-id');
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/mismatch/i);
   });
 
   test('list_cloud_workspaces returns empty list for owner when no workspaces exist', async () => {
-    bindPersistedOwnerIdentity('owner-id');
+    bindControlOwner('owner-id');
     const result = await sendListCloudWorkspacesCommand('owner-id');
     expect(result.success).toBe(true);
     expect(result.workspaces).toEqual([]);
   });
 
   test('list_cloud_workspaces returns workspaces for owner', async () => {
-    bindPersistedOwnerIdentity('owner-id');
+    bindControlOwner('owner-id');
     upsertCloudWorkspace({
       id: 'ws-socket-test',
       provider: 'sprites',

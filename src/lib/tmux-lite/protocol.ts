@@ -225,15 +225,61 @@ export interface AgentSessionSummaryPayload {
   workspaceId: string;
   title: string;
   updatedAt?: string;
-  closed?: boolean;
+  closedAt?: string;
+  archivedAt?: string;
 }
 
-export interface AgentTakeoverStatusPayload {
-  workspaceId: string;
-  agentSessionId: string;
-  requiresTakeover: boolean;
-  sessionName?: string;
+export interface WorkspaceRuntimeAgentSummary {
+  sessionCount: number;
+  busyCount: number;
+  waitingCount: number;
+  needsPermissionCount: number;
+  errorCount: number;
+  closedCount: number;
+  archivedCount: number;
 }
+
+export interface WorkspaceRuntimeTerminalSummary {
+  sessionCount: number;
+  attachedCount: number;
+  runningCount: number;
+  failedCount: number;
+}
+
+export interface WorkspaceRuntimeProcessSummary {
+  configuredCount: number;
+  runningCount: number;
+  failedCount: number;
+}
+
+export interface WorkspaceRuntimeRecord {
+  id: string;
+  name: string;
+  path: string;
+  projectName: string;
+  branch?: string;
+  sessionCount: number;
+  isStale?: boolean;
+  serveDomain?: string;
+  processes?: { name: string; instances?: number; ports?: import('../../types/processes.js').ProcessPortConfig[] }[];
+  processConfigError?: string;
+  status?: import('../../types/config.js').WorkspacePhase;
+  notesSummary?: import('../../types/workspace.js').WorkspaceNotesSummary;
+  terminals: WorkspaceRuntimeTerminalSummary;
+  agents: WorkspaceRuntimeAgentSummary;
+  processSummary: WorkspaceRuntimeProcessSummary;
+}
+
+export type {
+  MachineAgentSessionFilter,
+  MachineProjectFilter,
+  MachineRequest,
+  MachineResponse,
+  MachineTerminalSessionFilter,
+  MachineWorkspaceFilter,
+  MachineEvent,
+  MachineSnapshot,
+} from './machine/protocol.js';
 
 export type Command =
   | { type: "list" }
@@ -269,16 +315,62 @@ export type Command =
       recordReplay?: boolean;
       metadata?: Record<string, string>;
     }
+  | {
+      type: 'attach-prepare';
+      requestId: string;
+      sessionId?: string;
+      workspaceId?: string;
+      sessionName?: string;
+      scriptPolicy?: 'auto' | 'skip';
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      viewOnly?: boolean;
+    }
+  | { type: 'attach-cancel'; requestId: string }
   | { type: "attach"; id: string; force?: boolean }
   | { type: "kill"; id: string }
   | { type: 'agent-state' }
   | { type: 'agent-watch' }
+  | { type: 'machine-snapshot' } // legacy tmux router alias for getMachineSnapshot
+  | { type: 'machine-watch' }    // legacy tmux router alias for watchMachineEvents
+  | {
+      type: 'workspace-set-phase';
+      projectName: string;
+      workspaceName: string;
+      phase: import('../../types/config.js').WorkspacePhase;
+    }
   | { type: 'agent-sessions'; target: AgentWorkspaceTargetPayload; mode?: 'known' | 'live' }
   | { type: 'agent-create'; target: AgentWorkspaceTargetPayload; title?: string }
   | { type: 'agent-abort'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-clear'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; force?: boolean }
-  | { type: 'agent-takeover-status'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-close'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
+  | { type: 'service-stop'; workspaceId: string; processName: string }
+  | { type: 'github-repos'; org?: string }
+  | { type: 'remote-branches'; projectName: string }
+  | { type: 'linear-issues'; projectName: string }
+  | { type: 'project-create'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
+  | { type: 'project-prepare'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
+  | { type: 'project-finalize'; projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }
+  | { type: 'project-cancel'; projectName: string }
+  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }
+  | { type: 'project-delete'; projectName: string }
+  | { type: 'workspace-delete'; requestId: string; projectName: string; workspaceId: string; scriptPolicy?: 'auto' | 'skip' }
+  | { type: 'bundle-refresh-plan'; projectName: string; workspaceId: string }
+  | { type: 'bundle-refresh-apply'; projectName: string; workspaceId: string; submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission }
+  | { type: 'bundle-config-state'; projectName: string; workspaceId: string }
+  | { type: 'bundle-config-apply'; projectName: string; workspaceId: string; submission: import('../../types/bundle-config.js').BundleConfigSubmission }
+  | { type: 'review-request'; requestId: string; operation: import('../../types/review.js').ReviewOperation }
+  | {
+      type: 'events-request';
+      workspacePath: string;
+      filter?: import('../../types/events.js').WideEventFilter;
+      limit?: number;
+      sinceMs?: number;
+    }
   | {
       type: 'agent-permission';
       target: AgentWorkspaceTargetPayload;
@@ -290,6 +382,8 @@ export type Command =
   | { type: "inbox" }
   | { type: "inbox-clear"; id?: string }  // Clear one or all
   | { type: "inbox-read"; id: string }    // Mark as read
+  | { type: 'notification-config-get' }
+  | { type: 'notification-config-update'; config: import('../../notifications/types.js').NotificationConfig }
   | { type: "version" }                   // Get server version info
   | { type: "status" };                   // Get server status (version + stats)
 
@@ -297,16 +391,44 @@ export type Response =
   | { type: "sessions"; sessions: Session[] }
   | {
       type: 'agent-state';
-      workspaces: import('../../serve/agent-event-manager.js').WorkspaceAgentState[];
+      workspaces: import('./agent-event-manager.js').WorkspaceAgentState[];
+    }
+  | {
+      type: 'machine-snapshot';
+      snapshot: import('./machine/protocol.js').MachineSnapshot;
     }
   | {
       type: 'agent-state-update';
-      delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta;
+      delta: import('./agent-event-manager.js').AgentStateUpdateDelta;
+    }
+  | {
+      type: 'machine-event';
+      event: import('./machine/protocol.js').MachineEvent;
     }
   | { type: 'agent-watch-started' }
+  | { type: 'machine-watch-started' }
   | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
-  | { type: 'agent-takeover-status'; status: AgentTakeoverStatusPayload }
   | { type: 'agent-bool'; ok: boolean }
+  | { type: 'attach-script-output'; requestId: string; phase: 'pre' | 'setup' | 'select'; data: string; done?: boolean; error?: string }
+  | { type: 'attach-prepared'; requestId: string; session: Session; workspaceId?: string; viewOnly?: boolean }
+  | { type: 'service-started'; workspaceId: string; processName: string; sessionId: string; sessionIds: string[] }
+  | { type: 'service-stopped'; workspaceId: string; processName: string }
+  | { type: 'github-repos'; repos: string[] }
+  | { type: 'remote-branches'; projectName: string; branches: string[] }
+  | { type: 'linear-issues'; projectName: string; issues: import('../../types/lifecycle.js').SessionLinearIssueSummary[] }
+  | { type: 'project-created'; projectName: string; repository: string; baseBranch: string }
+  | { type: 'project-prepared'; result: import('../../session/backend.js').PreparedProjectResult }
+  | { type: 'project-cancelled'; projectName: string }
+  | { type: 'workspace-created'; projectName: string; workspaceId: string; workspaceName: string; branchName: string }
+  | { type: 'project-deleted'; projectName: string }
+  | { type: 'workspace-delete-output'; requestId: string; data: string; done?: boolean; error?: string }
+  | { type: 'workspace-deleted'; requestId: string; workspaceId: string }
+  | { type: 'bundle-refresh-plan'; plan: import('../../types/bundle-refresh.js').BundleRefreshPlan }
+  | { type: 'bundle-refresh-applied'; projectName: string; workspaceId: string }
+  | { type: 'bundle-config-state'; state: import('../../types/bundle-config.js').BundleConfigState }
+  | { type: 'bundle-config-applied'; projectName: string; workspaceId: string }
+  | { type: 'review-response'; requestId: string; result?: import('../../types/review.js').ReviewResult; error?: { code: string; message: string } }
+  | { type: 'events-list'; workspaceId: string; events: import('../../types/events.js').WideEvent[]; liveEventIds: string[]; savedEventFilters?: import('../../types/events.js').SavedEventFilter[] }
   | { type: "replays"; replays: import('./replay/types.js').ReplayInfo[] }
   | { type: "replay-snapshot"; snapshot: import('./replay/types.js').TerminalSnapshot }
   | { type: "replay-text"; text: string }
@@ -316,6 +438,7 @@ export type Response =
   | { type: "ok" }
   | { type: "error"; message: string }
   | { type: "inbox"; items: InboxItem[] }
+  | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
   | { type: "version"; version: string; protocol: number }
   | { type: "status"; version: string; protocol: number; pid: number; uptime: number; sessions: number; attached: number };
 
@@ -329,6 +452,11 @@ export interface Session {
   createdAt: number;
   exitCode?: number;  // undefined = running, number = exited
   processTitle?: string;  // Title set by running process (e.g., vim, npm run dev)
+  terminalTitle?: string;
+  lastAlertKind?: InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
   kind?: SessionKind;
   hidden?: boolean;
   metadata?: Record<string, string>;
@@ -388,6 +516,16 @@ export type SessionCtrl =
 export type SessionEvent =
   | { type: "attach-ready"; cols: number; rows: number }
   | { type: "attached" }
+  | {
+      type: 'session-meta';
+      sessionName: string;
+      processTitle?: string;
+      terminalTitle?: string;
+      lastAlertKind?: InboxItem['type'];
+      lastAlertPreview?: string;
+      lastAlertAt?: number;
+      unreadAlertCount?: number;
+    }
   | { type: "exited"; code: number }
   | { type: "kicked" }
   | { type: "wide_event"; event: Record<string, unknown> };

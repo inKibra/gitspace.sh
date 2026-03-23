@@ -14,7 +14,7 @@
 import { join, resolve, sep } from "path";
 import { randomBytes } from "crypto";
 import type { Server, ServerWebSocket } from "bun";
-import type { RelayConfig, WebSocketData } from "./types";
+import type { RelayServerConfig, WebSocketData } from "./types";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { signMessage, verifySignedMessage, getSignerPublicKey, type SignedMessage } from "./signing.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
@@ -31,12 +31,10 @@ import {
   consumeCloudRegisterPermit,
   getCloudWorkspace,
   getCloudWorkspaceByMachinePublicKey,
-  getPersistedOwnerIdentityId,
   markCloudBootstrapReady,
 } from "./control/store.js";
 import { getWorkspaceIdentity } from "./control/workspace-identity.js";
 import { deriveUnlockKey } from "./unlock-kdf.js";
-import { logger } from "../utils/logger.js";
 
 /**
  * Candidate paths to web terminal dist files (built by Vite).
@@ -59,8 +57,6 @@ try {
 } catch {
   // Not running as compiled binary - use filesystem
 }
-
-const machineSocketServerIds = new WeakMap<ServerWebSocket<WebSocketData>, string>();
 
 /**
  * Check if we have embedded assets available
@@ -139,8 +135,6 @@ import {
   getMachine,
   setMachineConnection,
   getRegistryStats,
-  updateMachineHeartbeat,
-  markMachineStaleWarned,
 } from "./registries";
 import {
   parseMessage,
@@ -189,6 +183,7 @@ import {
 } from "./persistent-registry.js";
 import {
   getVaultMachine,
+  getVaultMeta,
   isVaultInitialized,
   upsertVaultMachine,
 } from "./control/store.js";
@@ -490,7 +485,7 @@ function authenticateOwnerClient<T extends {
     return null;
   }
 
-  const configuredOwnerUserRootId = state.ownerUserRootId ?? getPersistedOwnerIdentityId() ?? null;
+  const configuredOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta("owner_user_root_id") ?? null;
   if (!configuredOwnerUserRootId) {
     ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Relay owner user root is not configured")));
     return null;
@@ -517,7 +512,6 @@ interface RelayServerState {
   pendingChallenges: Map<string, { nonce: Uint8Array; timestamp: number }>;
   preAuthorizedMachines: Set<string>;
   signRelayMessage: <T extends object>(msg: T) => T;
-  serverInstanceId: string;
   /** Owner user root ID (set after vault initialization or unlock) */
   ownerUserRootId: string | null;
   ownerSyncState: OwnerSyncRuntimeState;
@@ -551,7 +545,7 @@ function setupClientConnection(
 /**
  * Create the relay server
  */
-export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
+export function createRelayServer(config: RelayServerConfig): Server<WebSocketData> {
   const { port, bind = "0.0.0.0", hostname, identity } = config;
   const disableRateLimit = config.disableRateLimit === true;
 
@@ -590,7 +584,6 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     timestamp: number;
   }
   const pendingChallenges = new Map<string, PendingChallenge>();
-  const serverInstanceId = randomBytes(8).toString("hex");
 
   /**
    * Sign a message with the relay's private key
@@ -602,7 +595,7 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   };
 
   // Determine owner from vault metadata when available
-  const ownerUserRootId = getPersistedOwnerIdentityId() ?? null;
+  const ownerUserRootId = getVaultMeta('owner_user_root_id') ?? null;
   if (ownerUserRootId) {
     console.log(`[relay] Vault owner: ${ownerUserRootId.slice(0, 8)}...`);
     console.log(`[relay] Vault state: ${isVaultInitialized() ? getVaultLockState() : 'uninitialized'}`);
@@ -614,7 +607,6 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     pendingChallenges,
     preAuthorizedMachines,
     signRelayMessage,
-    serverInstanceId,
     ownerUserRootId,
     ownerSyncState: createOwnerSyncRuntimeState(),
   };
@@ -703,16 +695,6 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
     },
 
     websocket: {
-      // Explicit idle/ping configuration so behaviour is deterministic
-      // regardless of Bun version defaults.
-      //
-      // idleTimeout is set higher than our application-level heartbeat
-      // threshold (HEARTBEAT_STALE_MS = 90 s on the machine side) so that
-      // the app-level check fires first and the WebSocket-level timeout is
-      // merely a safety net for connections that send no data at all.
-      idleTimeout: 180, // seconds
-      sendPings: true,  // Bun sends WS-level ping frames automatically
-
       open(ws) {
         const { role, connectionId } = ws.data;
         console.log(`[ws] ${role} ${connectionId} connected`);
@@ -752,10 +734,6 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
           rawMsg = JSON.parse(msgStr);
           if (rawMsg && typeof rawMsg === "object" && (rawMsg as { type?: string }).type === "ping") {
             ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
-            // Update heartbeat timestamp for stale-connection detection.
-            if (ws.data.role === "machine" && ws.data.machineId) {
-              updateMachineHeartbeat(ws.data.machineId);
-            }
             return;
           }
         } catch {
@@ -843,67 +821,6 @@ export function createRelayServer(config: RelayConfig): Server<WebSocketData> {
   });
 
   console.log(`[relay] Listening on ${bind}:${port}${hostname ? ` (serving ${hostname})` : ""}`);
-
-  // -------------------------------------------------------------------------
-  // Stale machine connection detection
-  //
-  // The machine daemon sends a ping every 30 s (HEARTBEAT_INTERVAL_MS).
-  // We check every 30 s as well. Thresholds:
-  //
-  //   > 90 s (3 missed pings)  → "stale warning" — log and note; keep open.
-  //   > 150 s (5 missed pings) → force-close the WebSocket so the machine's
-  //                               reconnect loop kicks in and re-registers.
-  //
-  // This handles the case where a network partition silently kills the
-  // connection without either side sending a TCP RST.
-  // -------------------------------------------------------------------------
-
-  const STALE_CHECK_INTERVAL_MS = 30_000;
-  const STALE_WARN_THRESHOLD_MS = 90_000;   // 3 missed pings
-  const STALE_CLOSE_THRESHOLD_MS = 150_000; // 5 missed pings (grace period)
-
-  // Bind the watchdog to this specific server instance by scoping the check
-  // to machine sockets that were registered through this server. The interval
-  // handle is cleared when server.stop() is called so multiple relay instances
-  // in the same process do not accumulate watchdog timers or close each
-  // other's connections.
-  const staleWatchdog = setInterval(() => {
-    const now = Date.now();
-    for (const machine of getAllMachines()) {
-      if (!machine.ws) continue; // already offline
-      if (machineSocketServerIds.get(machine.ws) !== serverInstanceId) continue;
-
-      const elapsed = now - machine.lastHeartbeatAt;
-
-      if (elapsed >= STALE_CLOSE_THRESHOLD_MS) {
-        // Grace period expired – force-close so the machine reconnects.
-        logger.log(
-          `[relay] Machine ${machine.machineId} has been silent for ${Math.round(elapsed / 1000)}s – force-closing stale connection.`,
-        );
-        try {
-          machine.ws.close(4000, "Heartbeat timeout");
-        } catch {
-          // Socket may already be closed
-        }
-        // The close handler will mark the machine offline and notify clients.
-      } else if (elapsed >= STALE_WARN_THRESHOLD_MS && !machine.staleWarned) {
-        markMachineStaleWarned(machine.machineId);
-        logger.warning(
-          `[relay] Machine ${machine.machineId} may be stale (no heartbeat for ${Math.round(elapsed / 1000)}s). ` +
-          `Will force-close in ${Math.round((STALE_CLOSE_THRESHOLD_MS - elapsed) / 1000)}s if no heartbeat received.`,
-        );
-      }
-    }
-  }, STALE_CHECK_INTERVAL_MS);
-
-  // Wrap server.stop() to also clear the watchdog so multiple server
-  // instances in the same process (tests) don't leak timers.
-  const originalStop = server.stop.bind(server);
-  server.stop = (closeActiveConnections?: boolean) => {
-    clearInterval(staleWatchdog);
-    return originalStop(closeActiveConnections);
-  };
-
   return server;
 }
 
@@ -1113,7 +1030,7 @@ async function handleProtocolMessage(
 
           // Extract user root ID from the certificate and check against relay owner
           const certUserRootId = getUserRootIdFromCert(cert);
-          const relayOwnerUserRootId = state.ownerUserRootId ?? getPersistedOwnerIdentityId() ?? null;
+          const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
 
           if (relayOwnerUserRootId && certUserRootId === relayOwnerUserRootId) {
             // Certificate is signed by the relay's owner — auto-authorize
@@ -1201,7 +1118,7 @@ async function handleProtocolMessage(
           return;
         }
 
-        const relayOwnerUserRootId = state.ownerUserRootId ?? getPersistedOwnerIdentityId() ?? null;
+        const relayOwnerUserRootId = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id') ?? null;
         if (relayOwnerUserRootId && relayOwnerUserRootId !== parsedInvite.ownerUserRootId) {
           ws.send(serializeMessage(createErrorMessage("FORBIDDEN", "Invite owner does not match relay owner")));
           ws.close();
@@ -1251,7 +1168,7 @@ async function handleProtocolMessage(
       const resolvedOwnerUserRootId = enrollmentOwnerUserRootId
         ?? persistedMachine?.ownerUserRootId
         ?? state.ownerUserRootId
-        ?? getPersistedOwnerIdentityId()
+        ?? getVaultMeta('owner_user_root_id')
         ?? null;
 
       if (!resolvedOwnerUserRootId) {
@@ -1292,8 +1209,6 @@ async function handleProtocolMessage(
         ws.send(serializeMessage(createErrorMessage("FORBIDDEN", result.error)));
         return;
       }
-
-      machineSocketServerIds.set(ws, state.serverInstanceId);
 
       // Dual-write to persistent registry (SQLite-backed, survives restarts)
       const persistOwner = resolvedOwnerUserRootId;
@@ -1720,7 +1635,7 @@ async function handleProtocolMessage(
         return;
       }
 
-      const storedOwner = state.ownerUserRootId ?? getPersistedOwnerIdentityId();
+      const storedOwner = state.ownerUserRootId ?? getVaultMeta('owner_user_root_id');
       if (storedOwner && storedOwner !== userRootId) {
         ws.send(serializeMessage({
           type: "unlock_relay_result",

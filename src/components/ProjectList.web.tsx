@@ -81,11 +81,6 @@ export function ProjectListWeb(props: ProjectListWebProps) {
               <div className="min-w-0">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[#e6edf3] font-medium truncate">{project.name}</span>
-                  {project.isCurrent && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-[#3d2f00] text-[#d29922] flex-shrink-0">
-                      Current
-                    </span>
-                  )}
                 </div>
                 <div className="text-xs text-[#8b949e] truncate">
                   {getShortRepoName(project.repository)} · {formatWorkspaceCount(project.workspaceCount)}

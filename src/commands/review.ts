@@ -27,20 +27,16 @@
  *     Add a line-range review thread.
  */
 
-import open from 'open';
 import { readProjectConfig, readGlobalConfig, getGitspaceDir } from '../core/config.js';
 import { executeLocalReviewOperation } from '../core/review-executor.js';
 import { logger } from '../utils/logger.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
 import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
-import type { HunkDecision, ReviewChangedFile, ReviewThread } from '../types/review.js';
+import { openBrowserUrl } from '../utils/open-browser.js';
+import { buildReviewUrl, getDefaultReviewPort } from '../utils/review-url.js';
+import type { HunkDecision, ReviewChangedFile, ReviewOperation, ReviewThread } from '../types/review.js';
 import { SpacesError } from '../types/errors.js';
-
-// Match the port used by `gssh machine serve start` local relay (overridable via RELAY_PORT env)
-const DEFAULT_PORT = (() => {
-  const parsed = Number.parseInt(process.env.RELAY_PORT ?? '4480', 10);
-  return Number.isNaN(parsed) ? 4480 : parsed;
-})();
+import { getWorkspaceStatus, listWorkspaceNotes, summarizeWorkspaceNotes } from '../core/workspace-metadata.js';
 
 // ============================================================================
 // Helpers
@@ -109,10 +105,26 @@ export interface SpaceContextOptions {
 
 export async function showSpaceContext(options: SpaceContextOptions = {}): Promise<void> {
   const context = resolveCurrentWorkspace(options);
+  const workspaceState = context
+    ? (() => {
+        const status = getWorkspaceStatus(context.projectName, context.workspaceName);
+        const notes = listWorkspaceNotes(context.projectName, context.workspaceName);
+        const summary = summarizeWorkspaceNotes(notes);
+        return {
+          status,
+          notes: {
+            summary,
+            todos: summary.topOpenTodos,
+            recent: summary.recentNotes,
+          },
+        };
+      })()
+    : null;
   const payload = {
     mode: process.env.GSSH_SESSION_MODE ?? null,
     tmuxSessionId: process.env.TMUX_LITE ?? null,
     context,
+    workspaceState,
   };
 
   if (options.json) {
@@ -127,6 +139,12 @@ export async function showSpaceContext(options: SpaceContextOptions = {}): Promi
 
   logger.log(`Project: ${context.projectName}`);
   logger.log(`Workspace: ${context.workspaceName}`);
+  if (workspaceState?.status) {
+    logger.log(`Status: ${workspaceState.status}`);
+  }
+  if ((workspaceState?.notes.summary.total ?? 0) > 0) {
+    logger.log(`Notes: ${workspaceState?.notes.summary.total} total, ${workspaceState?.notes.summary.openTodoCount} open todos`);
+  }
 }
 
 function parseHunksFromDiff(diff: string): Array<{
@@ -213,11 +231,18 @@ function defaultDecisionBody(decision?: HunkDecision): string {
   return '';
 }
 
+async function executeCliReviewOperation(
+  operation: ReviewOperation,
+  options?: { allowPrompt?: boolean }
+) {
+  return executeLocalReviewOperation(operation, undefined, options);
+}
+
 async function getChangedFilesForContext(ctx: {
   projectName: string;
   workspaceName: string;
 }): Promise<ReviewChangedFile[]> {
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'get_changed_files',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
@@ -270,11 +295,9 @@ function resolveChangedFile(
  * Open a URL in the default browser.
  */
 async function openBrowser(url: string): Promise<void> {
-  try {
-    await open(url, { wait: false });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.warning(`Could not open browser automatically: ${message}`);
+  const result = await openBrowserUrl(url);
+  if (!result.ok) {
+    logger.warning(`Could not open browser automatically: ${result.message}`);
   }
 }
 
@@ -289,13 +312,12 @@ export interface ReviewOptions {
 }
 
 export async function openReview(options: ReviewOptions = {}): Promise<void> {
-  const port = options.port ?? DEFAULT_PORT;
+  const port = options.port ?? getDefaultReviewPort();
   const ctx = resolveCurrentWorkspace(options);
 
-  let url = `http://localhost:${port}?view=review`;
-  if (ctx) {
-    url += `&workspace=${encodeURIComponent(ctx.workspaceName)}&project=${encodeURIComponent(ctx.projectName)}`;
-  }
+  const url = ctx
+    ? buildReviewUrl({ projectName: ctx.projectName, workspaceName: ctx.workspaceName, port })
+    : `http://localhost:${port}?view=review`;
 
   logger.log(`Opening review UI: ${url}`);
   logger.log('(Requires `gssh machine serve start` to be running)');
@@ -319,7 +341,7 @@ export async function showReviewNotes(options: ReviewNotesOptions = {}): Promise
     process.exit(1);
   }
 
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'get_threads',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
@@ -388,7 +410,7 @@ export async function listReviewHunks(file: string, options: ReviewHunksOptions 
   const changed = await getChangedFilesForContext(ctx);
   const resolvedFile = resolveChangedFile(changed, file);
 
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'get_file_diff',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
@@ -469,7 +491,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
   const changed = await getChangedFilesForContext(ctx);
   const resolvedFile = resolveChangedFile(changed, file);
 
-  const diffResult = await executeLocalReviewOperation({
+  const diffResult = await executeCliReviewOperation({
     op: 'get_file_diff',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
@@ -490,7 +512,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
   }
   const chosenHeader = normalizeHunkHeader(chosen.header);
 
-  const threadsResult = await executeLocalReviewOperation({
+  const threadsResult = await executeCliReviewOperation({
     op: 'get_threads',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
@@ -511,7 +533,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
   let createdOrUpdatedThreadId = existing?.id;
 
   if (existing && decision) {
-    await executeLocalReviewOperation({
+    await executeCliReviewOperation({
       op: 'update_thread',
       projectName: ctx.projectName,
       workspaceName: ctx.workspaceName,
@@ -521,7 +543,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
   }
 
   if (existing && body) {
-    await executeLocalReviewOperation({
+    await executeCliReviewOperation({
       op: 'add_reply',
       projectName: ctx.projectName,
       workspaceName: ctx.workspaceName,
@@ -531,7 +553,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
   }
 
   if (!existing) {
-    const createResult = await executeLocalReviewOperation({
+    const createResult = await executeCliReviewOperation({
       op: 'create_thread',
       projectName: ctx.projectName,
       workspaceName: ctx.workspaceName,
@@ -542,7 +564,7 @@ export async function addHunkReview(file: string, options: ReviewAddHunkOptions)
       },
       body: body || defaultDecisionBody(decision),
       decision,
-    });
+    }, { allowPrompt: true });
 
     if (createResult.op !== 'thread_created') {
       logger.error('Unexpected response from create_thread operation');
@@ -604,13 +626,13 @@ export async function addFileReview(file: string, options: ReviewAddFileOptions)
   const changed = await getChangedFilesForContext(ctx);
   const resolvedFile = resolveChangedFile(changed, file);
 
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'create_thread',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
     target: { kind: 'file', file: resolvedFile.filePath },
     body,
-  });
+  }, { allowPrompt: true });
 
   if (result.op !== 'thread_created') {
     logger.error('Unexpected response from create_thread operation');
@@ -681,7 +703,7 @@ export async function addLineReview(file: string, options: ReviewAddLineOptions)
   const changed = await getChangedFilesForContext(ctx);
   const resolvedFile = resolveChangedFile(changed, file);
 
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'create_thread',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
@@ -693,7 +715,7 @@ export async function addLineReview(file: string, options: ReviewAddLineOptions)
       side: normalizedSide,
     },
     body,
-  });
+  }, { allowPrompt: true });
 
   if (result.op !== 'thread_created') {
     logger.error('Unexpected response from create_thread operation');
@@ -745,12 +767,12 @@ export async function importReview(options: ReviewImportOptions = {}): Promise<v
 
   logger.log(`Importing GitHub PR review for ${ctx.projectName}:${ctx.workspaceName}...`);
 
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'import_github',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,
     prNumber: options.pr,
-  });
+  }, { allowPrompt: true });
 
   if (result.op !== 'github_imported') {
     logger.error('Unexpected response from import operation');
@@ -779,7 +801,7 @@ export async function pushReview(options: ReviewPushOptions = {}): Promise<void>
 
   logger.log(`Pushing review for ${ctx.projectName}:${ctx.workspaceName} to GitHub...`);
 
-  const result = await executeLocalReviewOperation({
+  const result = await executeCliReviewOperation({
     op: 'push_github',
     projectName: ctx.projectName,
     workspaceName: ctx.workspaceName,

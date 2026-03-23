@@ -543,7 +543,6 @@ export function ReplayTerminalWeb({
               {machineLabel && <span className="hidden sm:inline">{machineLabel}</span>}
               {machineLabel && <span className="hidden sm:inline text-[#6e7681] mx-1">/</span>}
               <span className="text-[#e6edf3]">{replay.sessionName}</span>
-              {replay.workspaceName && <span className="text-[#6e7681]"> · {replay.workspaceName}</span>}
             </div>
             <div className="text-xs text-[#8b949e] font-mono tabular-nums flex items-center gap-3 overflow-x-auto whitespace-nowrap">
               <span className="inline-flex min-w-[14ch] justify-end">

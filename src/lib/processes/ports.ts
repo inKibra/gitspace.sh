@@ -1,0 +1,164 @@
+import { killSession, listSessions } from '../tmux-lite/cli.js';
+import { parseProcessSessionName } from './names.js';
+import type { ProcessInstanceSpec, ProcessPortConfig } from '../../types/processes.js';
+
+export interface PortConflictInfo {
+  port: number;
+  protocol: 'http' | 'tcp';
+  pid: number;
+  command?: string;
+  user?: string;
+  address?: string;
+  managedSessionId?: string;
+  managedSessionName?: string;
+  managedWorkspaceId?: string;
+  managedProcessName?: string;
+  managedInstance?: number;
+}
+
+export class PortConflictError extends Error {
+  readonly code = 'PORT_CONFLICT';
+  readonly conflicts: PortConflictInfo[];
+
+  constructor(processName: string, conflicts: PortConflictInfo[]) {
+    super(buildConflictMessage(processName, conflicts));
+    this.name = 'PortConflictError';
+    this.conflicts = conflicts;
+  }
+}
+
+function buildConflictMessage(processName: string, conflicts: PortConflictInfo[]): string {
+  const summary = conflicts
+    .map((conflict) => {
+      const owner = conflict.managedSessionId
+        ? `${conflict.managedProcessName ?? 'service'}#${conflict.managedInstance ?? 1} (${conflict.managedWorkspaceId ?? 'managed'})`
+        : `${conflict.command ?? 'unknown process'} (pid ${conflict.pid})`;
+      return `:${conflict.port} -> ${owner}`;
+    })
+    .join(', ');
+  return `Cannot start ${processName}; port already in use: ${summary}`;
+}
+
+function protocolForPort(port: ProcessPortConfig): 'http' | 'tcp' {
+  return port.protocol === 'tcp' ? 'tcp' : 'http';
+}
+
+function inspectListeningProcess(port: number): Array<{ pid: number; command?: string; user?: string; address?: string }> {
+  const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn']);
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  const output = result.stdout.toString();
+  const entries: Array<{ pid: number; command?: string; user?: string; address?: string }> = [];
+  let current: { pid?: number; command?: string; user?: string; address?: string } = {};
+
+  for (const line of output.split('\n')) {
+    if (!line) continue;
+    const prefix = line[0];
+    const value = line.slice(1);
+    if (prefix === 'p') {
+      if (current.pid) {
+        entries.push({ pid: current.pid, command: current.command, user: current.user, address: current.address });
+      }
+      current = { pid: Number(value) };
+    } else if (prefix === 'c') {
+      current.command = value;
+    } else if (prefix === 'u') {
+      current.user = value;
+    } else if (prefix === 'n') {
+      current.address = value;
+    }
+  }
+  if (current.pid) {
+    entries.push({ pid: current.pid, command: current.command, user: current.user, address: current.address });
+  }
+  return entries;
+}
+
+function getParentPid(pid: number): number | null {
+  const result = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', String(pid)]);
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const value = result.stdout.toString().trim();
+  const parentPid = Number(value);
+  return Number.isFinite(parentPid) && parentPid > 0 ? parentPid : null;
+}
+
+async function resolveManagedSession(pid: number): Promise<PortConflictInfo | null> {
+  const sessions = await listSessions();
+  const sessionByPid = new Map(sessions.map((session) => [session.pid, session]));
+
+  let currentPid: number | null = pid;
+  while (currentPid && currentPid > 1) {
+    const session = sessionByPid.get(currentPid);
+    if (session) {
+      const parsed = parseProcessSessionName(session.name);
+      return {
+        port: 0,
+        protocol: 'http',
+        pid,
+        managedSessionId: session.id,
+        managedSessionName: session.name,
+        managedWorkspaceId: parsed?.workspaceId,
+        managedProcessName: parsed?.processName,
+        managedInstance: parsed?.instance,
+      };
+    }
+    currentPid = getParentPid(currentPid);
+  }
+
+  return null;
+}
+
+export async function detectPortConflicts(spec: ProcessInstanceSpec): Promise<PortConflictInfo[]> {
+  const conflicts: PortConflictInfo[] = [];
+
+  for (const port of spec.definition.ports ?? []) {
+    if (!Number.isInteger(port.port) || port.port <= 0) continue;
+    const listeners = inspectListeningProcess(port.port);
+    for (const listener of listeners) {
+      const managed = await resolveManagedSession(listener.pid);
+      conflicts.push({
+        port: port.port,
+        protocol: protocolForPort(port),
+        pid: listener.pid,
+        command: listener.command,
+        user: listener.user,
+        address: listener.address,
+        managedSessionId: managed?.managedSessionId,
+        managedSessionName: managed?.managedSessionName,
+        managedWorkspaceId: managed?.managedWorkspaceId,
+        managedProcessName: managed?.managedProcessName,
+        managedInstance: managed?.managedInstance,
+      });
+    }
+  }
+
+  const deduped = new Map(conflicts.map((conflict) => [`${conflict.port}:${conflict.pid}`, conflict]));
+  return [...deduped.values()];
+}
+
+export async function ensurePortsAvailable(spec: ProcessInstanceSpec): Promise<void> {
+  const conflicts = await detectPortConflicts(spec);
+  if (conflicts.length > 0) {
+    throw new PortConflictError(spec.name, conflicts);
+  }
+}
+
+export async function resolvePortConflict(conflict: PortConflictInfo): Promise<void> {
+  if (conflict.managedSessionId) {
+    await killSession(conflict.managedSessionId);
+  } else {
+    process.kill(conflict.pid, 'SIGTERM');
+  }
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (inspectListeningProcess(conflict.port).length === 0) {
+      return;
+    }
+    await Bun.sleep(100);
+  }
+}

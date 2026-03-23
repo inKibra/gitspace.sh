@@ -58,6 +58,19 @@ export interface ServerStatus {
   attached: number;
 }
 
+export interface AttachPrepareOptions {
+  sessionId?: string;
+  workspaceId?: string;
+  sessionName?: string;
+  scriptPolicy?: 'auto' | 'skip';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  viewOnly?: boolean;
+  onRequestId?: (requestId: string) => void;
+  onScriptOutput?: (event: Extract<Response, { type: 'attach-script-output' }>) => void;
+}
+
 // Terminal reset - RIS (Reset to Initial State) resets everything
 const TERM_RESET = "\x1bc";
 
@@ -135,10 +148,12 @@ const getServerCommand = (options: { testMode?: boolean } = {}): string[] => {
       : [process.execPath, '--internal-tmux-server'];
   }
 
-  // Dev mode: use bun run
+  // Dev mode: invoke the script directly. `bun run <file>` fans out into
+  // multiple helper processes in development, which makes tmux-lite look like
+  // several servers and complicates shutdown.
   return testMode
-    ? ['bun', 'run', SERVER_SCRIPT, '--test']
-    : ['bun', 'run', SERVER_SCRIPT];
+    ? ['bun', SERVER_SCRIPT, '--test']
+    : ['bun', SERVER_SCRIPT];
 };
 
 // Check if we're already inside a tmux-lite session
@@ -168,21 +183,41 @@ export async function isServerRunning(): Promise<boolean> {
 }
 
 // Start server if not running
+let ensureServerPromise: Promise<void> | null = null;
+
 export async function ensureServer(): Promise<void> {
-  if (await isServerRunning()) return;
-
-  spawn({
-    cmd: getServerCommand(),
-    stdout: "ignore",
-    stderr: "ignore",
-    env: process.env as Record<string, string>,
-  });
-
-  for (let i = 0; i < 30; i++) {
-    await Bun.sleep(100);
-    if (await isServerRunning()) return;
+  if (ensureServerPromise) {
+    return ensureServerPromise;
   }
-  throw new Error("Failed to start tmux-lite server");
+
+  ensureServerPromise = (async () => {
+    if (await isServerRunning()) {
+      await send({ type: 'agent-state' });
+      return;
+    }
+
+    spawn({
+      cmd: getServerCommand(),
+      stdout: "ignore",
+      stderr: "ignore",
+      env: process.env as Record<string, string>,
+    });
+
+    for (let i = 0; i < 30; i++) {
+      await Bun.sleep(100);
+      if (await isServerRunning()) {
+        await send({ type: 'agent-state' });
+        return;
+      }
+    }
+    throw new Error("Failed to start tmux-lite server");
+  })();
+
+  try {
+    await ensureServerPromise;
+  } finally {
+    ensureServerPromise = null;
+  }
 }
 
 /**
@@ -329,6 +364,333 @@ export async function send(cmd: Command): Promise<Response> {
   });
 }
 
+export async function prepareAttachSession(options: AttachPrepareOptions): Promise<Extract<Response, { type: 'attach-prepared' }>> {
+  await ensureServer();
+  return new Promise((resolve, reject) => {
+    let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    let settled = false;
+    const requestId = crypto.randomUUID();
+    options.onRequestId?.(requestId);
+    let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
+    let writer: ReturnType<typeof createBufferedSocketWriter> | null = null;
+    const cleanup = () => {
+      try { writer?.flush(); } catch {}
+      try { socketRef?.end(); } catch {}
+    };
+
+    void Bun.connect({
+      unix: getRouterSocket(),
+      socket: {
+        open(socket) {
+          socketRef = socket;
+          writer = createBufferedSocketWriter(socket);
+          writer.write(encodeRouterMessage({ type: 'attach-prepare', requestId, ...options }));
+        },
+        data(_socket, chunk) {
+          if (settled) return;
+          buffer = Buffer.concat([buffer, Buffer.from(chunk)] as Buffer[]);
+          try {
+            const decoded = decodeRouterMessages(buffer);
+            buffer = decoded.remaining;
+            for (const message of decoded.messages) {
+              const response = message as Response;
+              if (response.type === 'attach-script-output' && response.requestId === requestId) {
+                options.onScriptOutput?.(response);
+                continue;
+              }
+              if (response.type === 'attach-prepared' && response.requestId === requestId) {
+                settled = true;
+                cleanup();
+                resolve(response);
+                return;
+              }
+              if (response.type === 'error') {
+                settled = true;
+                cleanup();
+                reject(new Error(response.message));
+                return;
+              }
+            }
+          } catch (error) {
+            settled = true;
+            cleanup();
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        },
+        error(_socket, error) {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+        close() {
+          if (settled) return;
+          settled = true;
+          reject(new Error('Router socket closed during attach prepare'));
+        },
+      },
+    }).catch((error) => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
+}
+
+export async function cancelPrepareAttachSession(requestId: string): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: 'attach-cancel', requestId });
+  if (res.type === 'ok') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function sendTmuxReviewRequest(
+  operation: import('../../types/review.js').ReviewOperation,
+): Promise<Extract<Response, { type: 'review-response' }>> {
+  await ensureServer();
+  const requestId = crypto.randomUUID();
+  const res = await send({ type: 'review-request', requestId, operation });
+  if (res.type === 'review-response') return res;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function requestTmuxEvents(options: {
+  workspacePath: string;
+  filter?: import('../../types/events.js').WideEventFilter;
+  limit?: number;
+  sinceMs?: number;
+}): Promise<Extract<Response, { type: 'events-list' }>> {
+  await ensureServer();
+  const res = await send({ type: 'events-request', ...options });
+  if (res.type === 'events-list') return res;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function setTmuxWorkspacePhase(
+  projectName: string,
+  workspaceName: string,
+  phase: import('../../types/config.js').WorkspacePhase,
+): Promise<void> {
+  const res = await send({ type: 'workspace-set-phase', projectName, workspaceName, phase });
+  if (res.type === 'ok') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function killTmuxSession(id: string): Promise<void> {
+  const res = await send({ type: 'kill', id });
+  if (res.type === 'ok') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function getTmuxInbox(): Promise<Extract<Response, { type: 'inbox' }>> {
+  const res = await send({ type: 'inbox' });
+  if (res.type === 'inbox') return res;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function clearTmuxInbox(id?: string): Promise<void> {
+  const res = await send({ type: 'inbox-clear', id });
+  if (res.type === 'ok') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function markTmuxInboxRead(id: string): Promise<void> {
+  const res = await send({ type: 'inbox-read', id });
+  if (res.type === 'ok') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function getTmuxNotificationConfig(): Promise<Extract<Response, { type: 'notification-config' }>> {
+  const res = await send({ type: 'notification-config-get' });
+  if (res.type === 'notification-config') return res;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function updateTmuxNotificationConfig(
+  config: import('../../notifications/types.js').NotificationConfig,
+): Promise<Extract<Response, { type: 'notification-config' }>> {
+  const res = await send({ type: 'notification-config-update', config });
+  if (res.type === 'notification-config') return res;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function listTmuxGithubRepos(org?: string): Promise<string[]> {
+  const res = await send({ type: 'github-repos', org });
+  if (res.type === 'github-repos') return res.repos;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function listTmuxRemoteBranches(projectName: string): Promise<string[]> {
+  const res = await send({ type: 'remote-branches', projectName });
+  if (res.type === 'remote-branches') return res.branches;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function listTmuxLinearIssues(projectName: string): Promise<import('../../types/lifecycle.js').SessionLinearIssueSummary[]> {
+  const res = await send({ type: 'linear-issues', projectName });
+  if (res.type === 'linear-issues') return res.issues;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function createTmuxProject(params: { repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }): Promise<void> {
+  const res = await send({ type: 'project-create', ...params });
+  if (res.type === 'project-created') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function prepareTmuxProject(params: { repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }): Promise<import('../../session/backend.js').PreparedProjectResult> {
+  const res = await send({ type: 'project-prepare', ...params });
+  if (res.type === 'project-prepared') return res.result;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function finalizeTmuxProject(params: { projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }): Promise<void> {
+  const res = await send({ type: 'project-finalize', ...params });
+  if (res.type === 'project-created') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function cancelTmuxProjectCreation(projectName: string): Promise<void> {
+  const res = await send({ type: 'project-cancel', projectName });
+  if (res.type === 'project-cancelled') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function createTmuxWorkspace(params: { projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }): Promise<void> {
+  const res = await send({ type: 'workspace-create', ...params });
+  if (res.type === 'workspace-created') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function deleteTmuxProject(projectName: string): Promise<void> {
+  const res = await send({ type: 'project-delete', projectName });
+  if (res.type === 'project-deleted') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function getTmuxBundleRefreshPlan(projectName: string, workspaceId: string): Promise<import('../../types/bundle-refresh.js').BundleRefreshPlan> {
+  const res = await send({ type: 'bundle-refresh-plan', projectName, workspaceId });
+  if (res.type === 'bundle-refresh-plan') return res.plan;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function applyTmuxBundleRefresh(projectName: string, workspaceId: string, submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission): Promise<void> {
+  const res = await send({ type: 'bundle-refresh-apply', projectName, workspaceId, submission });
+  if (res.type === 'bundle-refresh-applied') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function getTmuxBundleConfigState(projectName: string, workspaceId: string): Promise<import('../../types/bundle-config.js').BundleConfigState> {
+  const res = await send({ type: 'bundle-config-state', projectName, workspaceId });
+  if (res.type === 'bundle-config-state') return res.state;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function applyTmuxBundleConfig(projectName: string, workspaceId: string, submission: import('../../types/bundle-config.js').BundleConfigSubmission): Promise<void> {
+  const res = await send({ type: 'bundle-config-apply', projectName, workspaceId, submission });
+  if (res.type === 'bundle-config-applied') return;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function deleteTmuxWorkspace(options: {
+  projectName: string;
+  workspaceId: string;
+  scriptPolicy?: 'auto' | 'skip';
+  onScriptOutput?: (event: Extract<Response, { type: 'workspace-delete-output' }>) => void;
+}): Promise<void> {
+  await ensureServer();
+  return new Promise((resolve, reject) => {
+    let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    let settled = false;
+    const requestId = crypto.randomUUID();
+    let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
+    let writer: ReturnType<typeof createBufferedSocketWriter> | null = null;
+    const cleanup = () => {
+      try { writer?.flush(); } catch {}
+      try { socketRef?.end(); } catch {}
+    };
+    void Bun.connect({
+      unix: getRouterSocket(),
+      socket: {
+        open(socket) {
+          socketRef = socket;
+          writer = createBufferedSocketWriter(socket);
+          writer.write(encodeRouterMessage({ type: 'workspace-delete', requestId, projectName: options.projectName, workspaceId: options.workspaceId, scriptPolicy: options.scriptPolicy }));
+        },
+        data(_socket, chunk) {
+          if (settled) return;
+          buffer = Buffer.concat([buffer, Buffer.from(chunk)] as Buffer[]);
+          try {
+            const decoded = decodeRouterMessages(buffer);
+            buffer = decoded.remaining;
+            for (const message of decoded.messages) {
+              const response = message as Response;
+              if (response.type === 'workspace-delete-output' && response.requestId === requestId) {
+                options.onScriptOutput?.(response);
+                continue;
+              }
+              if (response.type === 'workspace-deleted' && response.requestId === requestId) {
+                settled = true;
+                cleanup();
+                resolve();
+                return;
+              }
+              if (response.type === 'error') {
+                settled = true;
+                cleanup();
+                reject(new Error(response.message));
+                return;
+              }
+            }
+          } catch (error) {
+            settled = true;
+            cleanup();
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        },
+        error(_socket, error) {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+        close() {
+          if (settled) return;
+          settled = true;
+          reject(new Error('Router socket closed during workspace delete'));
+        },
+      },
+    }).catch((error) => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
+}
+
 // === API convenience functions ===
 
 export async function listSessions(): Promise<Session[]> {
@@ -441,10 +803,31 @@ export async function killSession(id: string): Promise<void> {
   if (res.type === "error") throw new Error(res.message);
 }
 
-export async function getAgentState(): Promise<import('../../serve/agent-event-manager.js').WorkspaceAgentState[]> {
+export async function getAgentState(): Promise<import('./agent-event-manager.js').WorkspaceAgentState[]> {
   await ensureServer();
   const res = await send({ type: 'agent-state' });
   if (res.type === 'agent-state') return res.workspaces;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+
+export async function getMachineSnapshot(): Promise<import('./machine/protocol.js').MachineSnapshot> {
+  await ensureServer();
+  const res = await send({ type: 'machine-snapshot' });
+  if (res.type === 'machine-snapshot') return res.snapshot;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function setWorkspacePhase(
+  projectName: string,
+  workspaceName: string,
+  phase: import('../../types/config.js').WorkspacePhase,
+): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: 'workspace-set-phase', projectName, workspaceName, phase });
+  if (res.type === 'ok') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
@@ -482,39 +865,35 @@ export async function abortAgentSession(
   throw new Error('Unexpected response');
 }
 
-async function sendAgentCommandWithServerRetry(command: Command): Promise<Response> {
-  const response = await send(command);
-  if (response.type === 'error' && /Unknown command/i.test(response.message)) {
-    await killServer();
-    await ensureServer();
-    return send(command);
-  }
-  return response;
-}
-
-export async function clearAgentSession(
+export async function closeAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
-): Promise<boolean> {
+): Promise<AgentSessionSummaryPayload[]> {
   await ensureServer();
-  const res = await sendAgentCommandWithServerRetry({ type: 'agent-clear', target, agentSessionId });
-  if (res.type === 'agent-bool') return res.ok;
+  const res = await send({ type: 'agent-close', target, agentSessionId });
+  if (res.type === 'agent-sessions') return res.sessions;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
-export async function getAgentSessionTakeoverState(
+export async function archiveAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
-): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+): Promise<AgentSessionSummaryPayload[]> {
   await ensureServer();
-  const res = await sendAgentCommandWithServerRetry({ type: 'agent-takeover-status', target, agentSessionId });
-  if (res.type === 'agent-takeover-status') {
-    return {
-      requiresTakeover: res.status.requiresTakeover,
-      sessionName: res.status.sessionName,
-    };
-  }
+  const res = await send({ type: 'agent-archive', target, agentSessionId });
+  if (res.type === 'agent-sessions') return res.sessions;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function restoreAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+): Promise<AgentSessionSummaryPayload[]> {
+  await ensureServer();
+  const res = await send({ type: 'agent-restore', target, agentSessionId });
+  if (res.type === 'agent-sessions') return res.sessions;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
@@ -522,10 +901,9 @@ export async function getAgentSessionTakeoverState(
 export async function attachAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
-  options: { force?: boolean } = {},
 ): Promise<Session> {
   await ensureServer();
-  const res = await send({ type: 'agent-attach', target, agentSessionId, force: options.force });
+  const res = await send({ type: 'agent-attach', target, agentSessionId });
   if (res.type === 'session') return res.session;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -545,8 +923,8 @@ export async function respondToAgentPermission(
 }
 
 export async function watchAgentState(handlers: {
-  onSnapshot?: (workspaces: import('../../serve/agent-event-manager.js').WorkspaceAgentState[]) => void;
-  onUpdate?: (delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta) => void;
+  onSnapshot?: (workspaces: import('./agent-event-manager.js').WorkspaceAgentState[]) => void;
+  onUpdate?: (delta: import('./agent-event-manager.js').AgentStateUpdateDelta) => void;
   onError?: (error: Error) => void;
 }): Promise<() => void> {
   await ensureServer();
@@ -626,6 +1004,97 @@ export async function watchAgentState(handlers: {
         },
       }).then((socket) => {
         socketRef = socket;
+      }).catch((error) => {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+export async function watchMachineEvents(handlers: {
+  onSnapshot?: (snapshot: import('./machine/protocol.js').MachineSnapshot) => void;
+  onEvent?: (event: import('./machine/protocol.js').MachineEvent) => void;
+  onError?: (error: Error) => void;
+}): Promise<() => void> {
+  await ensureServer();
+  return new Promise<() => void>((resolve, reject) => {
+    let started = false;
+    let closedByCaller = false;
+    let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
+    let buffer: Buffer = Buffer.alloc(0);
+
+    const fail = (error: Error) => {
+      if (!started) {
+        try { socketRef?.end(); } catch {}
+        reject(error);
+        return;
+      }
+      handlers.onError?.(error);
+    };
+
+    try {
+      void Bun.connect({
+        unix: getRouterSocket(),
+        socket: {
+          open(sock) {
+            const writer = createBufferedSocketWriter(sock);
+            writer.write(encodeRouterMessage({ type: 'machine-watch' }));
+          },
+          data(sock, data) {
+            buffer = Buffer.concat([buffer, Buffer.from(data)]);
+            let decoded;
+            try {
+              decoded = decodeRouterMessages(buffer);
+            } catch (error) {
+              fail(error instanceof Error ? error : new Error('Invalid response'));
+              return;
+            }
+            buffer = decoded.remaining as Buffer;
+            for (const message of decoded.messages) {
+              if (message.type === 'machine-watch-started') {
+                if (!started) {
+                  started = true;
+                  resolve(() => {
+                    closedByCaller = true;
+                    try { sock.end(); } catch {}
+                  });
+                }
+                continue;
+              }
+              if (message.type === 'machine-snapshot' && 'snapshot' in message) {
+                handlers.onSnapshot?.(message.snapshot);
+                continue;
+              }
+              if (message.type === 'machine-event' && 'event' in message) {
+                handlers.onEvent?.(message.event);
+                continue;
+              }
+              if (message.type === 'error') {
+                fail(new Error(message.message));
+                return;
+              }
+            }
+          },
+          close() {
+            if (!started) {
+              reject(new Error('Connection closed before watch started'));
+              return;
+            }
+            if (!closedByCaller) {
+              handlers.onError?.(new Error('Machine watch connection closed'));
+            }
+          },
+          error(_, error) {
+            fail(error instanceof Error ? error : new Error(String(error)));
+          },
+          connectError(_, error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          },
+        },
+      }).then((sock) => {
+        socketRef = sock;
       }).catch((error) => {
         reject(error instanceof Error ? error : new Error(String(error)));
       });

@@ -8,6 +8,9 @@ import { readdir, stat, readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import type { WorkspaceInfo } from "./protocol";
+import type { WorkspacePhase } from "../../types/config.js";
+import { getWorkspaceStatus } from "../../core/workspace-metadata.js";
+import { listWorkspaceNotes, summarizeWorkspaceNotes } from "../../core/workspace-metadata.js";
 
 const SPACES_DIR = join(homedir(), "gitspace");
 const STALE_DAYS = 30;
@@ -68,7 +71,8 @@ async function scanProjectWorkspaces(
       if (!entry.isDirectory()) continue;
 
       const workspacePath = join(workspacesDir, entry.name);
-      const info = await getWorkspaceInfo(projectName, entry.name, workspacePath);
+      const status = getWorkspaceStatus(projectName, entry.name);
+      const info = await getWorkspaceInfo(projectName, entry.name, workspacePath, status);
       if (info) {
         workspaces.push(info);
       }
@@ -90,7 +94,8 @@ async function scanProjectWorkspaces(
 async function getWorkspaceInfo(
   projectName: string,
   workspaceName: string,
-  workspacePath: string
+  workspacePath: string,
+  status?: WorkspacePhase
 ): Promise<WorkspaceInfo | null> {
   try {
     const stats = await stat(workspacePath);
@@ -105,6 +110,7 @@ async function getWorkspaceInfo(
 
     // Count sessions (we'll get this from tmux-lite later)
     const sessionCount = 0;
+    const notesSummary = summarizeWorkspaceNotes(listWorkspaceNotes(projectName, workspaceName));
 
     return {
       id: workspaceName,
@@ -114,6 +120,8 @@ async function getWorkspaceInfo(
       branch,
       sessionCount,
       isStale,
+      ...(status !== undefined && { status }),
+      ...(notesSummary.total > 0 ? { notesSummary } : {}),
     };
   } catch {
     return null;
@@ -157,5 +165,6 @@ export async function getWorkspace(
   workspaceName: string
 ): Promise<WorkspaceInfo | null> {
   const workspacePath = join(SPACES_DIR, projectName, "workspaces", workspaceName);
-  return getWorkspaceInfo(projectName, workspaceName, workspacePath);
+  const status = getWorkspaceStatus(projectName, workspaceName);
+  return getWorkspaceInfo(projectName, workspaceName, workspacePath, status);
 }

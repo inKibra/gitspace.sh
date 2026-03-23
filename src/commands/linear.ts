@@ -622,13 +622,6 @@ async function showProjectConfig(projectName: string): Promise<void> {
 		logger.log(`  Teams: ${config.teamKeys.join(', ')} (inherited from user config)`)
 	}
 
-	// Show legacy config warning if present
-	if (projectConfig.linearApiKey) {
-		logger.log('')
-		logger.warning('  Legacy config detected (linearApiKey in project config)')
-		logger.log("  Run 'gssh user config linear setup --project' to migrate")
-	}
-
 	logger.log('')
 }
 
@@ -707,9 +700,6 @@ async function clearProjectConfig(projectName: string): Promise<void> {
 
 	updateProjectConfig(projectName, {
 		linearTeams: undefined,
-		// Also clear legacy fields
-		linearApiKey: undefined,
-		linearTeamKey: undefined,
 	})
 
 	logger.success(`Linear configuration cleared for project '${projectName}'`)

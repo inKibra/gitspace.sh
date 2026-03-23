@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   bindControlRelayIdentity,
-  bindPersistedOwnerIdentity,
+  bindControlOwner,
   ensureControlStore,
-  getPersistedOwnerIdentityId,
+  getControlOwnerIdentityId,
+  getVaultMeta,
   listVaultMachines,
   readControlMeta,
   setVaultMeta,
@@ -66,34 +67,23 @@ describe('ensureServeOwnerBindingForStartup', () => {
       const result = await ensureServeOwnerBindingForStartup('owner-a');
 
       expect(result).toEqual({ tookOver: false });
-      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+      expect(getControlOwnerIdentityId()).toBe('owner-a');
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
     });
   });
 
   test('throws a helpful mismatch error without takeover', async () => {
     await withIsolatedEnv(async () => {
-      bindPersistedOwnerIdentity('owner-b');
+      bindControlOwner('owner-b');
       setVaultMeta('owner_user_root_id', 'owner-b');
 
       await expect(ensureServeOwnerBindingForStartup('owner-a')).rejects.toThrow(/machine serve start --takeover/i);
     });
   });
 
-  test('repairs owner binding drift without takeover when one persisted binding matches current identity', async () => {
-    await withIsolatedEnv(async () => {
-      bindPersistedOwnerIdentity('owner-a');
-      setVaultMeta('owner_user_root_id', 'owner-b');
-
-      const result = await ensureServeOwnerBindingForStartup('owner-a');
-
-      expect(result).toEqual({ tookOver: false });
-      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
-    });
-  });
-
   test('takeover clears persisted control state and rebinds to the recovered owner', async () => {
     await withIsolatedEnv(async () => {
-      bindPersistedOwnerIdentity('owner-b');
+      bindControlOwner('owner-b');
       setVaultMeta('owner_user_root_id', 'owner-b');
       upsertVaultMachine({
         machineId: 'machine-a',
@@ -108,14 +98,16 @@ describe('ensureServeOwnerBindingForStartup', () => {
       });
 
       expect(result).toEqual({ tookOver: true });
-      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+      expect(getControlOwnerIdentityId()).toBe('owner-a');
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
       expect(listVaultMachines()).toHaveLength(0);
     });
   });
 
   test('throws a helpful relay mismatch error without takeover', async () => {
     await withIsolatedEnv(async () => {
-      bindPersistedOwnerIdentity('owner-a');
+      bindControlOwner('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-a');
       bindControlRelayIdentity({
         relayIdentityId: 'old-relay-id',
         relaySigningPublicKey: Buffer.alloc(32, 2).toString('base64'),
@@ -130,7 +122,8 @@ describe('ensureServeOwnerBindingForStartup', () => {
 
   test('takeover clears persisted relay pin and rebinds owner state', async () => {
     await withIsolatedEnv(async () => {
-      bindPersistedOwnerIdentity('owner-a');
+      bindControlOwner('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-a');
       bindControlRelayIdentity({
         relayIdentityId: 'old-relay-id',
         relaySigningPublicKey: Buffer.alloc(32, 2).toString('base64'),
@@ -144,7 +137,8 @@ describe('ensureServeOwnerBindingForStartup', () => {
       });
 
       expect(result).toEqual({ tookOver: true });
-      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+      expect(getControlOwnerIdentityId()).toBe('owner-a');
+      expect(getVaultMeta('owner_user_root_id')).toBe('owner-a');
       expect(readControlMeta().relayIdentityId).toBeUndefined();
       expect(readControlMeta().relayFingerprint).toBeUndefined();
     });
@@ -152,7 +146,8 @@ describe('ensureServeOwnerBindingForStartup', () => {
 
   test('takeover also clears pinned relay identity even when owner already matches', async () => {
     await withIsolatedEnv(async () => {
-      bindPersistedOwnerIdentity('owner-a');
+      bindControlOwner('owner-a');
+      setVaultMeta('owner_user_root_id', 'owner-a');
       bindControlRelayIdentity({
         relayIdentityId: 'relay-old',
         relaySigningPublicKey: 'old-key',
@@ -165,7 +160,7 @@ describe('ensureServeOwnerBindingForStartup', () => {
       });
 
       expect(result).toEqual({ tookOver: true });
-      expect(getPersistedOwnerIdentityId()).toBe('owner-a');
+      expect(getControlOwnerIdentityId()).toBe('owner-a');
       expect(readControlMeta().relayIdentityId).toBeUndefined();
       expect(readControlMeta().relayFingerprint).toBeUndefined();
     });

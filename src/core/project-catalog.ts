@@ -2,7 +2,6 @@ import { existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import {
   getAllProjectNames,
-  getCurrentProject,
   getProjectWorkspacesDir,
   readProjectConfig,
 } from './config.js';
@@ -15,11 +14,11 @@ export interface ProjectSummary {
 }
 
 /**
- * List projects with workspace counts and current-project marker.
+ * List projects with workspace counts.
+ * Note: isCurrent is always false; app uses selected-project state instead.
  */
 export function listProjectSummaries(): ProjectSummary[] {
   const projectNames = getAllProjectNames();
-  const currentProject = getCurrentProject();
 
   return projectNames.map((name) => {
     const config = readProjectConfig(name);
@@ -46,7 +45,7 @@ export function listProjectSummaries(): ProjectSummary[] {
       name,
       repository: config.repository,
       workspaceCount,
-      isCurrent: name === currentProject,
+      isCurrent: false,
     };
   });
 }

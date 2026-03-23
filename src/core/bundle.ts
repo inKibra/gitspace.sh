@@ -11,7 +11,7 @@ import {
   writeFileSync,
   rmSync,
 } from 'fs';
-import { join, basename, resolve, sep } from 'path';
+import { join, resolve, sep } from 'path';
 import { tmpdir } from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';

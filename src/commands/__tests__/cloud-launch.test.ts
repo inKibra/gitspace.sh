@@ -8,7 +8,7 @@ import { writeRelayConfig } from '../../core/identity.js';
 import { addTrustedRelay } from '../../core/trusted-relays.js';
 import {
   bindControlRelayIdentity,
-  bindPersistedOwnerIdentity,
+  bindControlOwner,
   ensureControlStore,
   getCloudWorkspace,
   listCloudEvents,
@@ -80,7 +80,7 @@ function setup() {
   process.env.HOME = testDir;
   process.env.GITSPACE_CONTROL_DIR = join(testDir, '.relay', 'control');
   ensureControlStore();
-  bindPersistedOwnerIdentity(TEST_OWNER_ID);
+  bindControlOwner(TEST_OWNER_ID);
 
   mockCreateWorkspaceImpl = async () => ({ providerWorkspaceId: 'sprite-123', rawState: 'running' });
   mockExecImpl = async () => ({ exitCode: 0, stdout: 'started', stderr: '' });

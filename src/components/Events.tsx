@@ -84,7 +84,9 @@ export function useEvents(props: UseEventsProps): UseEventsReturn {
 
   const filtered = useMemo(() => {
     const wideEvents = props.events.filter((event) => event.kind === 'wide');
-    return [...wideEvents].sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
+    const sourceEvents = props.events.filter((event) => event.kind !== 'wide');
+    const visibleEvents = wideEvents.length > 0 ? wideEvents : sourceEvents;
+    return [...visibleEvents].sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
   }, [props.events]);
 
   useEffect(() => {

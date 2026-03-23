@@ -21,6 +21,7 @@ mock.module('../../lib/tmux-lite/cli.js', () => ({
   listSessions: mockListSessions,
   createSession: mock(() => Promise.resolve({ id: 'sess-1', name: 'test' })),
   killSession: mock(() => Promise.resolve()),
+  isProcessRunning: mock(() => false),
 }));
 
 // Mock process manager
@@ -30,6 +31,19 @@ const mockStopProcessInstance = mock(() => Promise.resolve());
 const mockListProcessSessions = mock<
   () => Promise<Array<{ sessionId: string; processName: string; instance: number; name: string; workspacePath: string }>>
 >(() => Promise.resolve([]));
+const mockOpenBrowserUrl = mock(() => Promise.resolve({ ok: true as const }));
+const mockReadTmuxHostingState = mock<() => { baseHost?: string; machineName?: string; enabled: boolean; updatedAt: number } | null>(() => null);
+const mockSelectOne = mock(() => Promise.resolve<'resolve' | 'cancel'>('resolve'));
+const mockResolvePortConflict = mock(() => Promise.resolve());
+class MockPortConflictError extends Error {
+  code = 'PORT_CONFLICT';
+  conflicts;
+  constructor(conflicts: Array<{ port: number; protocol: 'http' | 'tcp'; pid: number; command?: string; user?: string; managedSessionId?: string; managedProcessName?: string; managedInstance?: number; managedWorkspaceId?: string }>) {
+    super('port conflict');
+    this.name = 'PortConflictError';
+    this.conflicts = conflicts;
+  }
+}
 
 mock.module('../../lib/processes/manager.js', () => ({
   getProcessSpecs: mockGetProcessSpecs,
@@ -38,8 +52,28 @@ mock.module('../../lib/processes/manager.js', () => ({
   listProcessSessions: mockListProcessSessions,
 }));
 
+mock.module('../../utils/open-browser.js', () => ({
+  openBrowserUrl: mockOpenBrowserUrl,
+}));
+
+mock.module('../../lib/tmux-lite/hosting/state.js', () => ({
+  readTmuxHostingState: mockReadTmuxHostingState,
+  writeTmuxHostingState: mock(() => ({ enabled: true, updatedAt: Date.now() })),
+  resolveTmuxHostingState: mock(() => ({ enabled: false, updatedAt: Date.now() })),
+  clearTmuxHostingState: mock(() => undefined),
+}));
+
+mock.module('../../utils/prompts.js', () => ({
+  selectOne: mockSelectOne,
+}));
+
+mock.module('../../lib/processes/ports.js', () => ({
+  PortConflictError: MockPortConflictError,
+  resolvePortConflict: mockResolvePortConflict,
+}));
+
 // Import after mocking
-const { listProcesses, startProcess, stopProcess, attachProcess } = await import('../process.js');
+const { listProcesses, startProcess, stopProcess, attachProcess, openProcess } = await import('../process.js');
 
 // ============================================================================
 // startProcess
@@ -49,6 +83,8 @@ describe('startProcess', () => {
   beforeEach(() => {
     mockGetProcessSpecs.mockReset();
     mockStartProcessInstance.mockReset();
+    mockSelectOne.mockReset();
+    mockResolvePortConflict.mockReset();
   });
 
   it('should throw SpacesError with exit code 1 when --name is missing', async () => {
@@ -89,6 +125,25 @@ describe('startProcess', () => {
     await startProcess({ name: 'web' });
 
     expect(mockStartProcessInstance).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves port conflicts and retries start', async () => {
+    const spec: ProcessInstanceSpec = {
+      name: 'web',
+      instance: 1,
+      definition: { name: 'web', command: 'npm start', ports: [{ port: 3000, protocol: 'http' }] },
+    };
+    mockGetProcessSpecs.mockImplementation(() => [spec]);
+    mockStartProcessInstance
+      .mockRejectedValueOnce(new MockPortConflictError([{ port: 3000, protocol: 'http', pid: 1234, command: 'node' }]))
+      .mockResolvedValueOnce({ sessionId: 'sess-1', created: true });
+    mockSelectOne.mockResolvedValue('resolve');
+
+    await startProcess({ name: 'web' });
+
+    expect(mockSelectOne).toHaveBeenCalledTimes(1);
+    expect(mockResolvePortConflict).toHaveBeenCalledTimes(1);
+    expect(mockStartProcessInstance).toHaveBeenCalledTimes(2);
   });
 
   it('should throw disabled error when process exists with instances: 0', async () => {
@@ -239,6 +294,7 @@ describe('listProcesses', () => {
   beforeEach(() => {
     mockGetProcessSpecs.mockReset();
     mockListProcessSessions.mockReset();
+    mockReadTmuxHostingState.mockReset();
   });
 
   it('should not throw when no processes are configured', async () => {
@@ -247,5 +303,82 @@ describe('listProcesses', () => {
 
     // Should not throw
     await listProcesses({});
+  });
+
+  it('should include local and remote urls for configured ports', async () => {
+    mockGetProcessSpecs.mockImplementation(() => [{
+      name: 'web',
+      instance: 1,
+      definition: {
+        name: 'web',
+        command: 'npm start',
+        ports: [
+          { name: 'app', port: 3000, protocol: 'http' },
+          { name: 'tcp-admin', port: 7000, protocol: 'tcp' },
+        ],
+      },
+    }]);
+    mockListProcessSessions.mockImplementation(() => Promise.resolve([]));
+    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.serve.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
+
+    await listProcesses({ workspace: '/tmp/project/workspaces/demo' });
+  });
+});
+
+describe('openProcess', () => {
+  beforeEach(() => {
+    mockGetProcessSpecs.mockReset();
+    mockOpenBrowserUrl.mockReset();
+    mockReadTmuxHostingState.mockReset();
+    mockOpenBrowserUrl.mockResolvedValue({ ok: true });
+  });
+
+  it('opens hosted url by default when available', async () => {
+    mockGetProcessSpecs.mockImplementation(() => [{
+      name: 'web',
+      instance: 1,
+      definition: { name: 'web', command: 'npm start', ports: [{ name: 'app', port: 3000, protocol: 'http' }] },
+    }]);
+    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.serve.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
+
+    await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web' });
+
+    expect(mockOpenBrowserUrl).toHaveBeenCalledWith('https://macbook-demo-web-1-app.brad.serve.gitspace.sh');
+  });
+
+  it('opens all configured http ports and skips tcp ports with --all', async () => {
+    mockGetProcessSpecs.mockImplementation(() => [{
+      name: 'web',
+      instance: 1,
+      definition: {
+        name: 'web',
+        command: 'npm start',
+        ports: [
+          { name: 'app', port: 3000, protocol: 'http' },
+          { name: 'admin', port: 3001, protocol: 'http' },
+          { name: 'tcp-admin', port: 7000, protocol: 'tcp' },
+        ],
+      },
+    }]);
+    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.serve.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
+
+    await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web', all: true });
+
+    expect(mockOpenBrowserUrl).toHaveBeenCalledTimes(2);
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, 'https://macbook-demo-web-1-app.brad.serve.gitspace.sh');
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, 'https://macbook-demo-web-1-admin.brad.serve.gitspace.sh');
+  });
+
+  it('falls back to localhost when no hosted url exists', async () => {
+    mockGetProcessSpecs.mockImplementation(() => [{
+      name: 'web',
+      instance: 1,
+      definition: { name: 'web', command: 'npm start', ports: [{ port: 3000, protocol: 'http' }] },
+    }]);
+    mockReadTmuxHostingState.mockImplementation(() => null);
+
+    await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web' });
+
+    expect(mockOpenBrowserUrl).toHaveBeenCalledWith('http://localhost:3000');
   });
 });

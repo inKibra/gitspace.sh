@@ -42,7 +42,11 @@ function isShiftTabSequence(sequence: string): boolean {
   return SHIFT_TAB_SEQUENCES.has(sequence);
 }
 
-function getTerminalSize() {
+function getTerminalSize(
+  reservedRows: number,
+  reservedCols: number = 0,
+  reservedRowsExtra: number = 0
+) {
   let cols = process.stdout.columns || 0;
   let rows = process.stdout.rows || 0;
   if (cols <= 0 || rows <= 0) {
@@ -52,14 +56,19 @@ function getTerminalSize() {
       rows = size[1];
     }
   }
+  const viewportCols = cols > 0 ? cols : 80;
+  const viewportRows = rows > 0 ? rows : 24;
   return {
-    cols: cols > 0 ? cols : 80,
-    rows: Math.max(1, (rows > 0 ? rows : 24) - 1),
+    cols: Math.max(40, viewportCols - reservedCols),
+    rows: Math.max(1, viewportRows - reservedRows - reservedRowsExtra),
   };
 }
 
 export interface SessionTerminalProps {
   sessionName: string;
+  processTitle?: string | null;
+  terminalTitle?: string | null;
+  lastAlertLabel?: string | null;
   endpointLabel?: string;
   onData: (data: Uint8Array) => void;
   onResize: (cols: number, rows: number) => void;
@@ -70,10 +79,21 @@ export interface SessionTerminalProps {
   onActivity?: () => void;
   /** When true, keyboard input and paste are disabled (view-only mode) */
   readOnly?: boolean;
+  /** Hide top status/banner row (for inline embedding). */
+  showTopBanner?: boolean;
+  /** Reserved columns for layout chrome (e.g. sidebar) when embedded. */
+  reservedCols?: number;
+  /** Additional reserved rows for layout chrome (header, tab bar, status bar) when embedded. */
+  reservedRowsExtra?: number;
+  /** When provided, Shift+Esc calls this instead of toggling UI mode (e.g. for parent to release focus). */
+  onShiftEsc?: () => void;
 }
 
 export function SessionTerminal({
   sessionName,
+  processTitle,
+  terminalTitle,
+  lastAlertLabel,
   endpointLabel = 'remote',
   onData,
   onResize,
@@ -83,9 +103,16 @@ export function SessionTerminal({
   modalOpen,
   onActivity,
   readOnly = false,
+  showTopBanner = true,
+  reservedCols = 0,
+  reservedRowsExtra = 0,
+  onShiftEsc,
 }: SessionTerminalProps) {
   const renderer = useRenderer();
-  const [termSize, setTermSize] = useState(getTerminalSize);
+  const reservedRows = showTopBanner ? 1 : 0;
+  const [termSize, setTermSize] = useState(() =>
+    getTerminalSize(reservedRows, reservedCols, reservedRowsExtra)
+  );
   const [initialData] = useState<Buffer>(() => Buffer.alloc(0));
 
   const terminalRef = useRef<GhosttyTerminalRenderable | null>(null);
@@ -255,12 +282,12 @@ export function SessionTerminal({
   }, [initialData, scheduleScrollFollow, terminalMounted]);
 
   useEffect(() => {
-    const { cols, rows } = getTerminalSize();
+    const { cols, rows } = getTerminalSize(reservedRows, reservedCols, reservedRowsExtra);
     setTermSize({ cols, rows });
     onResize(cols, rows);
 
     const handleResize = () => {
-      const next = getTerminalSize();
+      const next = getTerminalSize(reservedRows, reservedCols, reservedRowsExtra);
       setTermSize(next);
       onResize(next.cols, next.rows);
     };
@@ -276,7 +303,7 @@ export function SessionTerminal({
       }
       process.removeListener('SIGWINCH', handleResize);
     };
-  }, [onResize]);
+  }, [onResize, reservedRows, reservedCols, reservedRowsExtra]);
 
   useEffect(() => {
     const rawInputHandler = (sequence: string): boolean => {
@@ -285,6 +312,10 @@ export function SessionTerminal({
       }
 
       if (isUiModeToggleSequence(sequence)) {
+        if (onShiftEsc) {
+          onShiftEsc();
+          return true;
+        }
         if (uiModeEnabledRef.current) {
           forceDisableKeyboard();
         }
@@ -309,7 +340,7 @@ export function SessionTerminal({
     return () => {
       renderer.removeInputHandler(rawInputHandler);
     };
-  }, [forceDisableKeyboard, interceptShiftTab, modalOpen, onActivity, onData, readOnly, renderer, uiModeEnabled]);
+  }, [forceDisableKeyboard, interceptShiftTab, modalOpen, onActivity, onData, onShiftEsc, readOnly, renderer, uiModeEnabled]);
 
   useEffect(() => {
     if (!modalOpen) {
@@ -402,24 +433,29 @@ export function SessionTerminal({
   const modeHint = uiModeEnabled
     ? `[UI mode] [q] ${readOnly ? 'Back' : 'Detach'}  [Shift+Esc] Shell`
     : '[Shift+Esc] UI';
+  const subtitle = processTitle || terminalTitle || null;
 
   return (
     <box flexDirection="column" flexGrow={1}>
-      <box
-        height={1}
-        width="100%"
-        backgroundColor={COLORS.statusBar}
-        flexDirection="row"
-        paddingLeft={1}
-        paddingRight={1}
-      >
-        <box flexGrow={1} flexDirection="row">
-          <text fg={COLORS.session}>{sessionName}</text>
-          <text fg={COLORS.textDim}> ({endpointLabel})</text>
-          {readOnly && <text fg={COLORS.textDim}> [view only]</text>}
+      {showTopBanner && (
+        <box
+          height={1}
+          width="100%"
+          backgroundColor={COLORS.statusBar}
+          flexDirection="row"
+          paddingLeft={1}
+          paddingRight={1}
+        >
+          <box flexGrow={1} flexDirection="row">
+            <text fg={COLORS.session}>{sessionName}</text>
+            <text fg={COLORS.textDim}> ({endpointLabel})</text>
+            {subtitle && <text fg={COLORS.textDim}>  {subtitle}</text>}
+            {lastAlertLabel && <text fg={COLORS.detachHint}>  {lastAlertLabel}</text>}
+            {readOnly && <text fg={COLORS.textDim}> [view only]</text>}
+          </box>
+          <text fg={COLORS.detachHint}>{modeHint}</text>
         </box>
-        <text fg={COLORS.detachHint}>{modeHint}</text>
-      </box>
+      )}
 
       <scrollbox
         ref={(el: ScrollBoxRenderable | null) => {

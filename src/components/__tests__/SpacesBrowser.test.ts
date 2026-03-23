@@ -68,10 +68,8 @@ function makeProps(overrides: Partial<UseSpacesBrowserProps> = {}): UseSpacesBro
     workspaces: [],
     sessions: [],
     replays: [],
-    onRequestSessions: mock(() => {}),
     onAttachSession: mock(async () => {}),
     onOpenReplay: mock(async () => {}),
-    onStartProcess: mock(() => {}),
     onStartProcessAttach: mock(() => {}),
     onStopProcess: mock(() => {}),
     onOpenEvents: mock(() => {}),
@@ -667,38 +665,5 @@ describe('useSpacesBrowser navigation', () => {
     // At end, moveDown stays
     act(() => { result.current.moveDown(); });
     expect(result.current.selectedIndex).toBe(1);
-  });
-
-  it('refreshes agent sessions for expanded and selected workspaces', async () => {
-    const ws1 = makeWorkspace({ id: 'ws-1', name: 'alpha' });
-    const ws2 = makeWorkspace({ id: 'ws-2', name: 'beta' });
-    const onRefresh = mock(async () => {});
-    const onRefreshSessions = mock(async () => {});
-    const onRefreshAgents = mock(async () => {});
-    const props = makeProps({
-      workspaces: [ws1, ws2],
-      onRefresh,
-      onRefreshSessions,
-      onRefreshAgents,
-    });
-    const { result } = renderHook(() => useSpacesBrowser(props));
-
-    act(() => {
-      result.current.toggleWorkspace('ws-1');
-      result.current.toggleAgentSection('ws-1');
-      result.current.toggleWorkspace('ws-2');
-    });
-
-    const ws2Index = result.current.items.findIndex((item) => item.type === 'workspace' && item.workspace.id === 'ws-2');
-    act(() => { result.current.selectIndex(ws2Index); });
-
-    await act(async () => { await result.current.refresh(); });
-
-    expect(onRefresh).toHaveBeenCalledTimes(1);
-    expect(onRefreshSessions).toHaveBeenCalledTimes(1);
-    expect(onRefreshAgents).toHaveBeenCalledWith({
-      expandedWorkspaceIds: ['ws-1'],
-      selectedWorkspaceId: 'ws-2',
-    });
   });
 });

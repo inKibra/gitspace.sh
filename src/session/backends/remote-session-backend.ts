@@ -1,72 +1,24 @@
 import type { Identity, SessionKeys } from '../../types/identity.js';
 import {
-  type ApplyBundleConfigUpdateRequest,
   parseRemoteMessage,
-  type ApplyBundleRefreshRequest,
   type AttachSessionRequest,
-  type AttachAgentSessionRequest,
-  type CheckAgentSessionTakeoverRequest,
-  type ClearAgentSessionRequest,
-  type ListAgentSessionsRequest,
-  type CreateAgentSessionRequest,
-  type AbortAgentSessionRequest,
-  type RespondAgentPermissionRequest,
-  type CancelProjectCreationRequest,
-  type CreateProjectRequest,
-  type CreateWorkspaceRequest,
-  type DeleteProjectRequest,
-  type BundleRefreshAppliedResponse,
-  type BundleConfigUpdatedResponse,
-  type BundleConfigStateResponse,
-  type BundleRefreshPlanResponse,
   type CancelPendingAttachRequest,
-  type ClearInboxRequest,
   type ClientToMachineMessage,
   type DeleteWorkspaceRequest,
-  type GithubRepoListResponse,
-  type LinearIssueListResponse,
-  type GetEventsRequest,
-  type GetInboxRequest,
-  type GetBundleRefreshPlanRequest,
-  type GetBundleConfigStateRequest,
-  type GetNotificationConfigRequest,
   type GetReplayTimelineRequest,
-  type KillSessionRequest,
-  type ListLinearIssuesRequest,
-  type ListProjectsRequest,
-  type ListGithubReposRequest,
   type ListReplaysRequest,
-  type ListRemoteBranchesRequest,
-  type ListSessionsRequest,
-  type ListWorkspacesRequest,
   type MachineToClientMessage,
-  type MarkInboxReadRequest,
-  type PrepareProjectCreationRequest,
-  type ProjectCreationCancelledResponse,
-  type ProjectCreationPreparedResponse,
-  type ReviewRequest,
-  type ReviewResponse,
-  type FinalizeProjectCreationRequest,
-  type EventsListResponse,
-  type ProjectCreatedResponse,
-  type ProjectDeletedResponse,
-  type RemoteBranchListResponse,
   type ScriptOutputResponse,
   type ReplayFrameResponse,
   type ReplayTimelineResponse,
   type ReplayDismissedResponse,
   type ReplayUndismissedResponse,
   type SessionCtrl,
-  type StartProcessRequest,
-  type StopProcessRequest,
-  type AgentSessionsResponse,
-  type AgentBoolResponse,
-  type AgentTakeoverStatusResponse,
-  type UpdateNotificationConfigRequest,
-  type WorkspaceCreatedResponse,
   type GetReplayFrameRequest,
   type DismissReplayRequest,
   type UndismissReplayRequest,
+  type TmuxCommandRequest,
+  type TmuxCommandResponse,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
@@ -74,7 +26,6 @@ import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEvent, WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
-import { extractRepoName, sanitizeForFileSystem } from '../../utils/sanitize.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
   ReviewRequestError,
@@ -95,22 +46,22 @@ import type {
   SessionBackend,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
-import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../serve/agent-event-manager.js';
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
+import { MachineStateClient } from '../../machine/state/client.js';
+import {
+  machineSnapshotToAgentState,
+  machineSnapshotToKnownAgentSessions,
+  machineSnapshotToProjects,
+  machineSnapshotToSessions,
+  machineSnapshotToWorkspaces,
+} from '../../machine/state/selectors.js';
+import type { Command as TmuxCommand, Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
+import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30000;
-
-function normalizeExpectedProjectName(projectName: string | undefined, repository: string): string {
-	const candidate = projectName?.trim() || extractRepoName(repository);
-	return sanitizeForFileSystem(candidate) || candidate;
-}
-
-function normalizeProjectName(projectName: string): string {
-	const trimmed = projectName.trim();
-	return sanitizeForFileSystem(trimmed) || trimmed;
-}
 
 interface RelayDataMessage {
   type: 'data';
@@ -133,25 +84,18 @@ interface HandshakeEnvelope {
 
 type AuthorizationPayload = { type: 'access_list' };
 
-interface PtyOutputMessage {
-  type: 'pty_output';
-  data: string;
-}
-
 interface SessionEventMessage {
-  type: 'attach-ready' | 'attached' | 'exited' | 'kicked';
+  type: 'attach-ready' | 'attached' | 'exited' | 'kicked' | 'session-meta';
+  sessionName?: string;
+  processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: import('../../lib/tmux-lite/protocol.js').InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
   cols?: number;
   rows?: number;
   code?: number;
-}
-
-interface PendingEventsChunk {
-  workspaceId: string;
-  totalChunks: number;
-  chunks: Map<number, WideEvent[]>;
-  liveEventIds: string[];
-  savedEventFilters?: import('../../types/events.js').SavedEventFilter[];
-  receivedAtMs: number;
 }
 
 interface PendingReplayFrameChunk {
@@ -231,8 +175,6 @@ export interface RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHe
 }
 
 const MACHINE_TO_CLIENT_TYPES = new Set<string>([
-  'workspace_list',
-  'session_list',
   'replay_list',
   'replay_frame',
   'replay_timeline',
@@ -242,36 +184,14 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'detached',
   'session_exited',
   'error',
-  'project_list',
-  'github_repo_list',
-  'remote_branch_list',
-  'linear_issue_list',
-  'project_creation_prepared',
-  'project_creation_cancelled',
-  'project_created',
-  'workspace_created',
-  'project_deleted',
-  'session_killed',
   'workspace_deleted',
-  'inbox_list',
-  'inbox_cleared',
-  'inbox_marked_read',
-  'notification_config',
-  'notification_config_updated',
   'script_output',
-  'bundle_refresh_plan',
-  'bundle_refresh_applied',
-  'bundle_config_state',
-  'bundle_config_updated',
-  'review_response',
-  'events_list',
   'process_started',
   'process_stopped',
-  'agent_sessions',
-  'agent_bool',
-  'agent_takeover_status',
+  'tmux_command_response',
   'agent_state_snapshot',
   'agent_state_update',
+  'machine_snapshot',
 ]);
 
 function isHandshakeEnvelope(value: unknown): value is HandshakeEnvelope {
@@ -280,14 +200,6 @@ function isHandshakeEnvelope(value: unknown): value is HandshakeEnvelope {
   }
   const envelope = value as Partial<HandshakeEnvelope>;
   return envelope.type === 'handshake' && typeof envelope.phase === 'string';
-}
-
-function isPtyOutputMessage(value: unknown): value is PtyOutputMessage {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const message = value as Partial<PtyOutputMessage>;
-  return message.type === 'pty_output' && typeof message.data === 'string';
 }
 
 function isSessionEventMessage(value: unknown): value is SessionEventMessage {
@@ -299,7 +211,8 @@ function isSessionEventMessage(value: unknown): value is SessionEventMessage {
     message.type === 'attach-ready' ||
     message.type === 'attached' ||
     message.type === 'exited' ||
-    message.type === 'kicked'
+    message.type === 'kicked' ||
+    message.type === 'session-meta'
   );
 }
 
@@ -396,6 +309,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private mode: 'browsing' | 'attached' = 'browsing';
   private attachedSessionId: string | null = null;
+  private attachedWorkspaceId: string | null = null;
   private viewOnly = false;
   private handshakeState: THandshakeState | null = null;
   private sessionKeys: SessionKeys | null = null;
@@ -404,34 +318,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
   private connectReject: ((error: Error) => void) | null = null;
-  private pendingBundleRefreshPlan:
-    | {
-        resolve: (plan: BundleRefreshPlan) => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingBundleRefreshApply:
-    | {
-        resolve: () => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingBundleConfigState:
-    | {
-        resolve: (state: BundleConfigState) => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingBundleConfigUpdate:
-    | {
-        resolve: () => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
+  private initialSnapshotPromise: Promise<void> | null = null;
+  private initialSnapshotResolve: (() => void) | null = null;
+  private initialSnapshotReject: ((error: Error) => void) | null = null;
+  private initialSnapshotReceived = false;
   private pendingDeleteWorkspace:
     | {
         workspaceId: string;
@@ -440,77 +330,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
-  private pendingGithubRepos:
-    | {
-        resolve: (repos: string[]) => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingRemoteBranches:
-    | {
-        projectName: string;
-        resolve: (branches: string[]) => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingLinearIssues:
-    | {
-        projectName: string;
-        resolve: (issues: SessionLinearIssueSummary[]) => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingCreateProject:
-    | {
-        projectName: string;
-        resolve: () => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingPrepareProject:
-    | {
-        projectName: string;
-        resolve: (result: PreparedProjectResult) => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingCancelProject:
-    | {
-        projectName: string;
-        resolve: () => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingCreateWorkspace:
-    | {
-        projectName: string;
-        workspaceName: string;
-        expectedWorkspaceId: string;
-        resolve: () => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingDeleteProject:
-    | {
-        projectName: string;
-        resolve: () => void;
-        reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
-  private pendingReviewRequests = new Map<string, {
-    op: ReviewOperation['op'];
-    resolve: (result: ReviewResult) => void;
-    reject: (error: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }>();
   private replayFrameRequestSeq = 0;
   private pendingReplayFrame:
     | {
@@ -548,27 +367,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
-  private pendingEventChunks = new Map<string, PendingEventsChunk>();
   private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
-  private pendingAgentSessions = new Map<string, {
-    workspaceId: string;
-    resolve: (sessions: Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>) => void;
+  private pendingTmuxCommands = new Map<string, {
+    resolve: (response: TmuxResponse) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  private pendingAgentBooleans = new Map<string, {
-    workspaceId: string;
-    resolve: (ok: boolean) => void;
-    reject: (error: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }>();
-  private pendingAgentTakeoverStatus = new Map<string, {
-    workspaceId: string;
-    resolve: (status: { requiresTakeover: boolean; sessionName?: string }) => void;
-    reject: (error: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }>();
-  private agentTakeoverCheckSupported = true;
+  private readonly machineStateClient = new MachineStateClient();
 
   constructor(options: RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHello, TServerAuth>) {
     this.descriptor = options.descriptor;
@@ -611,13 +416,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return this.connectPromise;
     }
 
-    this.agentTakeoverCheckSupported = true;
     this.emit({ type: 'status', status: 'connecting' });
     this.attachSocketListeners();
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
+    });
+    this.initialSnapshotReceived = false;
+    this.initialSnapshotPromise = new Promise<void>((resolve, reject) => {
+      this.initialSnapshotResolve = resolve;
+      this.initialSnapshotReject = reject;
     });
 
     if (this.isSocketOpen()) {
@@ -643,129 +452,55 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listProjects(): Promise<void> {
-    const command: ListProjectsRequest = { type: 'list_projects' };
-    await this.sendCommand(command);
+    await this.waitForInitialSnapshot();
+    this.emit({ type: 'projects', projects: machineSnapshotToProjects(this.machineStateClient.getSnapshot()) });
   }
 
   async listGithubRepos(org?: string): Promise<string[]> {
-    if (this.pendingGithubRepos) {
-      throw new Error('GitHub repository list request already in progress');
-    }
-
-    const command: ListGithubReposRequest = { type: 'list_github_repos', org };
-
-    return new Promise<string[]>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingGithubRepos) {
-          return;
-        }
-
-        this.pendingGithubRepos = null;
-        reject(new Error('Timed out waiting for GitHub repository list'));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingGithubRepos = { resolve, reject, timeout };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingGithubRepos;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingGithubRepos = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'github-repos', org });
+    if (response.type === 'github-repos') return response.repos;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected GitHub repo response');
   }
 
   async listRemoteBranches(projectName: string): Promise<string[]> {
-    if (this.pendingRemoteBranches) {
-      throw new Error('Remote branch list request already in progress');
-    }
-
-    const command: ListRemoteBranchesRequest = {
-      type: 'list_remote_branches',
-      projectName,
-    };
-
-    return new Promise<string[]>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingRemoteBranches;
-        if (!pending || pending.projectName !== projectName) {
-          return;
-        }
-
-        this.pendingRemoteBranches = null;
-        pending.reject(new Error(`Timed out waiting for remote branches (${projectName})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingRemoteBranches = {
-        projectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingRemoteBranches;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingRemoteBranches = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'remote-branches', projectName });
+    if (response.type === 'remote-branches') return response.branches;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected remote branches response');
   }
 
   async listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]> {
-    if (this.pendingLinearIssues) {
-      throw new Error('Linear issue list request already in progress');
-    }
-
-    const command: ListLinearIssuesRequest = {
-      type: 'list_linear_issues',
-      projectName,
-    };
-
-    return new Promise<SessionLinearIssueSummary[]>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingLinearIssues;
-        if (!pending || pending.projectName !== projectName) {
-          return;
-        }
-
-        this.pendingLinearIssues = null;
-        pending.reject(new Error(`Timed out waiting for Linear issues (${projectName})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingLinearIssues = {
-        projectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingLinearIssues;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingLinearIssues = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'linear-issues', projectName });
+    if (response.type === 'linear-issues') return response.issues;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected linear issues response');
   }
 
   async listWorkspaces(): Promise<void> {
-    const command: ListWorkspacesRequest = { type: 'list_workspaces' };
-    await this.sendCommand(command);
+    await this.waitForInitialSnapshot();
+    this.emit({ type: 'workspaces', workspaces: machineSnapshotToWorkspaces(this.machineStateClient.getSnapshot()) });
+  }
+
+  async setWorkspaceStatus(
+    projectName: string,
+    workspaceName: string,
+    phase: import('../../types/config.js').WorkspacePhase
+  ): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-set-phase', projectName, workspaceName, phase });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') {
+      throw new Error(response.message);
+    }
+    throw new Error('Unexpected workspace status response');
   }
 
   async listSessions(workspaceId?: string): Promise<void> {
-    const command: ListSessionsRequest = { type: 'list_sessions', workspaceId };
-    await this.sendCommand(command);
+    await this.waitForInitialSnapshot();
+    this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(this.machineStateClient.getSnapshot(), workspaceId) });
   }
 
   async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
@@ -924,278 +659,51 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {
-    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
-      throw new Error('Project creation request already in progress');
-    }
-
-    const command: CreateProjectRequest = {
-      type: 'create_project',
-      repository: params.repository,
-      projectName: params.projectName,
-      baseBranch: params.baseBranch,
-      setCurrent: params.setCurrent,
-    };
-    const expectedProjectName = normalizeExpectedProjectName(params.projectName, params.repository);
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingCreateProject;
-        if (!pending) {
-          return;
-        }
-
-        this.pendingCreateProject = null;
-        pending.reject(new Error('Timed out waiting for project creation response'));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingCreateProject = {
-        projectName: expectedProjectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingCreateProject;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingCreateProject = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'project-create', ...params });
+    if (response.type === 'project-created') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected project create response');
   }
 
   async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
-    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
-      throw new Error('Project preparation request already in progress');
-    }
-
-    const command: PrepareProjectCreationRequest = {
-      type: 'prepare_project_creation',
-      repository: params.repository,
-      projectName: params.projectName,
-      baseBranch: params.baseBranch,
-      setCurrent: params.setCurrent,
-    };
-    const expectedProjectName = normalizeExpectedProjectName(params.projectName, params.repository);
-
-    return new Promise<PreparedProjectResult>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingPrepareProject;
-        if (!pending) {
-          return;
-        }
-
-        this.pendingPrepareProject = null;
-        pending.reject(new Error('Timed out waiting for project preparation response'));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingPrepareProject = {
-        projectName: expectedProjectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingPrepareProject;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingPrepareProject = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'project-prepare', ...params });
+    if (response.type === 'project-prepared') return response.result;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected project prepare response');
   }
 
   async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
-    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
-      throw new Error('Project creation request already in progress');
-    }
-
-    const command: FinalizeProjectCreationRequest = {
-      type: 'finalize_project_creation',
-      projectName: params.projectName,
-      repository: params.repository,
-      baseBranch: params.baseBranch,
-      bundle: params.bundle,
-      inputValues: params.inputValues,
-      secretValues: params.secretValues,
-      confirmResults: params.confirmResults,
-      setCurrent: params.setCurrent,
-    };
-    const expectedProjectName = normalizeExpectedProjectName(params.projectName, params.repository);
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingCreateProject;
-        if (!pending) {
-          return;
-        }
-
-        this.pendingCreateProject = null;
-        pending.reject(new Error('Timed out waiting for project creation response'));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingCreateProject = {
-        projectName: expectedProjectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingCreateProject;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingCreateProject = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'project-finalize', ...params });
+    if (response.type === 'project-created') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected project finalize response');
   }
 
   async cancelProjectCreation(projectName: string): Promise<void> {
-    if (this.pendingCreateProject || this.pendingPrepareProject || this.pendingCancelProject) {
-      throw new Error('Project cancellation request already in progress');
-    }
-
-    const expectedProjectName = normalizeProjectName(projectName);
-
-    const command: CancelProjectCreationRequest = {
-      type: 'cancel_project_creation',
-      projectName,
-    };
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingCancelProject;
-        if (!pending || pending.projectName !== expectedProjectName) {
-          return;
-        }
-
-        this.pendingCancelProject = null;
-        pending.reject(new Error(`Timed out waiting for project cancellation response (${expectedProjectName})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingCancelProject = {
-        projectName: expectedProjectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingCancelProject;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingCancelProject = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'project-cancel', projectName });
+    if (response.type === 'project-cancelled') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected project cancel response');
   }
 
   async createWorkspace(params: CreateWorkspaceParams): Promise<void> {
-    if (this.pendingCreateWorkspace) {
-      throw new Error('Workspace creation request already in progress');
-    }
-
-    const expectedWorkspaceId = `${params.projectName}:${params.workspaceName}`;
-    const command: CreateWorkspaceRequest = {
-      type: 'create_workspace',
-      projectName: params.projectName,
-      workspaceName: params.workspaceName,
-      branchName: params.branchName,
-      baseBranch: params.baseBranch,
-      workspaceSource: params.workspaceSource,
-      linearIssue: params.linearIssue,
-    };
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingCreateWorkspace;
-        if (!pending) {
-          return;
-        }
-
-        this.pendingCreateWorkspace = null;
-        pending.reject(new Error(`Timed out waiting for workspace creation response (${expectedWorkspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingCreateWorkspace = {
-        projectName: params.projectName,
-        workspaceName: params.workspaceName,
-        expectedWorkspaceId,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingCreateWorkspace;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingCreateWorkspace = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'workspace-create', ...params });
+    if (response.type === 'workspace-created') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace create response');
   }
 
   async deleteProject(projectName: string, params: DeleteProjectParams = {}): Promise<void> {
-    if (this.pendingDeleteProject) {
-      throw new Error('Project delete request already in progress');
-    }
-
-    const command: DeleteProjectRequest = {
-      type: 'delete_project',
-      projectName,
-    };
-
-    const timeoutMs =
-      typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
-        ? params.timeoutMs
-        : DEFAULT_LIFECYCLE_TIMEOUT_MS;
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingDeleteProject;
-        if (!pending || pending.projectName !== projectName) {
-          return;
-        }
-
-        this.pendingDeleteProject = null;
-        pending.reject(new Error(`Timed out waiting for project deletion response (${projectName})`));
-      }, timeoutMs);
-
-      this.pendingDeleteProject = {
-        projectName,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingDeleteProject;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingDeleteProject = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    void params;
+    const response = await this.sendTmuxCommand({ type: 'project-delete', projectName });
+    if (response.type === 'project-deleted') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected project delete response');
   }
 
   async attachSession(params: AttachSessionParams): Promise<void> {
     this.viewOnly = params.viewOnly ?? false;
+    this.attachedWorkspaceId = params.workspaceId ?? null;
     const command: AttachSessionRequest = {
       type: 'attach_session',
       sessionId: params.sessionId,
@@ -1212,158 +720,68 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
-    const requestId = crypto.randomUUID();
-    const command: ListAgentSessionsRequest = { type: 'list_agent_sessions', requestId, workspaceId, mode: 'known' };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentSessions.get(requestId);
-        if (!pending) return;
-        this.pendingAgentSessions.delete(requestId);
-        reject(new Error(`Timed out waiting for known agent sessions (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentSessions.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentSessions.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentSessions.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    await this.waitForInitialSnapshot();
+    return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }
 
-  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
-    const requestId = crypto.randomUUID();
-    const command: ListAgentSessionsRequest = { type: 'list_agent_sessions', requestId, workspaceId, mode: 'live' };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentSessions.get(requestId);
-        if (!pending) return;
-        this.pendingAgentSessions.delete(requestId);
-        reject(new Error(`Timed out waiting for agent sessions (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentSessions.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentSessions.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentSessions.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-sessions', target: this.getAgentWorkspaceTarget(workspaceId), mode: 'live' });
+    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent sessions response');
   }
 
-  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
-    const requestId = crypto.randomUUID();
-    const command: CreateAgentSessionRequest = { type: 'create_agent_session', requestId, workspaceId, title };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentSessions.get(requestId);
-        if (!pending) return;
-        this.pendingAgentSessions.delete(requestId);
-        reject(new Error(`Timed out creating agent session (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentSessions.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentSessions.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentSessions.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-create', target: this.getAgentWorkspaceTarget(workspaceId), title });
+    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent create response');
   }
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
-    const requestId = crypto.randomUUID();
-    const command: AbortAgentSessionRequest = { type: 'abort_agent_session', requestId, workspaceId, agentSessionId };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentBooleans.get(requestId);
-        if (!pending) return;
-        this.pendingAgentBooleans.delete(requestId);
-        reject(new Error(`Timed out aborting agent session (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentBooleans.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentBooleans.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentBooleans.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-abort', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (response.type === 'agent-bool') return response.ok;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent abort response');
   }
 
-  async clearAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
-    const requestId = crypto.randomUUID();
-    const command: ClearAgentSessionRequest = { type: 'clear_agent_session', requestId, workspaceId, agentSessionId };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentBooleans.get(requestId);
-        if (!pending) return;
-        this.pendingAgentBooleans.delete(requestId);
-        reject(new Error(`Timed out clearing agent session (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentBooleans.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentBooleans.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentBooleans.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+  async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-close', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent close response');
   }
 
-  async checkAgentSessionTakeover(
-    workspaceId: string,
-    agentSessionId: string,
-  ): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
-    if (!this.agentTakeoverCheckSupported) {
-      return { requiresTakeover: false };
-    }
-    const requestId = crypto.randomUUID();
-    const command: CheckAgentSessionTakeoverRequest = {
-      type: 'check_agent_session_takeover',
-      requestId,
-      workspaceId,
-      agentSessionId,
-    };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentTakeoverStatus.get(requestId);
-        if (!pending) return;
-        this.agentTakeoverCheckSupported = false;
-        this.pendingAgentTakeoverStatus.delete(requestId);
-        resolve({ requiresTakeover: false });
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentTakeoverStatus.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentTakeoverStatus.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentTakeoverStatus.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+  async archiveAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-archive', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent archive response');
   }
 
-  async attachAgentSession(
-    workspaceId: string,
-    agentSessionId: string,
-    options: { viewOnly?: boolean; force?: boolean } = {},
-  ): Promise<void> {
+  async restoreAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-restore', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent restore response');
+  }
+
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+    await this.waitForInitialSnapshot();
     this.viewOnly = options.viewOnly ?? false;
-    const command: AttachAgentSessionRequest = {
-      type: 'attach_agent_session',
-      workspaceId,
-      agentSessionId,
-      viewOnly: options.viewOnly,
-      force: options.force,
-    };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'agent-attach', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (response.type !== 'session') {
+      if (response.type === 'error') throw new Error(response.message);
+      throw new Error('Unexpected agent attach response');
+    }
+    await this.attachSession({ sessionId: response.session.id, viewOnly: options.viewOnly });
   }
 
   async detachSession(): Promise<void> {
@@ -1377,8 +795,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async killSession(sessionId: string): Promise<void> {
-    const command: KillSessionRequest = { type: 'kill_session', sessionId };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'kill', id: sessionId });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected kill session response');
   }
 
   async deleteWorkspace(
@@ -1438,36 +858,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
-    if (this.pendingBundleRefreshPlan) {
-      throw new Error('Bundle refresh plan request already in progress');
-    }
-
-    const command: GetBundleRefreshPlanRequest = {
-      type: 'get_bundle_refresh_plan',
-      projectName,
-      workspaceId,
-    };
-
-    return new Promise<BundleRefreshPlan>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingBundleRefreshPlan) {
-          return;
-        }
-        this.pendingBundleRefreshPlan = null;
-        reject(new Error('Timed out waiting for bundle refresh plan'));
-      }, 15000);
-
-      this.pendingBundleRefreshPlan = { resolve, reject, timeout };
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingBundleRefreshPlan;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingBundleRefreshPlan = null;
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'bundle-refresh-plan', projectName, workspaceId });
+    if (response.type === 'bundle-refresh-plan') return response.plan;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected bundle refresh plan response');
   }
 
   async applyBundleRefresh(
@@ -1475,70 +869,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     submission: BundleRefreshSubmission
   ): Promise<void> {
-    if (this.pendingBundleRefreshApply) {
-      throw new Error('Bundle refresh apply request already in progress');
-    }
-
-    const command: ApplyBundleRefreshRequest = {
-      type: 'apply_bundle_refresh',
-      projectName,
-      workspaceId,
-      submission,
-    };
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingBundleRefreshApply) {
-          return;
-        }
-        this.pendingBundleRefreshApply = null;
-        reject(new Error('Timed out applying bundle refresh submission'));
-      }, 15000);
-
-      this.pendingBundleRefreshApply = { resolve, reject, timeout };
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingBundleRefreshApply;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingBundleRefreshApply = null;
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'bundle-refresh-apply', projectName, workspaceId, submission });
+    if (response.type === 'bundle-refresh-applied') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected bundle refresh apply response');
   }
 
   async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
-    if (this.pendingBundleConfigState) {
-      throw new Error('Bundle config state request already in progress');
-    }
-
-    const command: GetBundleConfigStateRequest = {
-      type: 'get_bundle_config_state',
-      projectName,
-      workspaceId,
-    };
-
-    return new Promise<BundleConfigState>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingBundleConfigState) {
-          return;
-        }
-        this.pendingBundleConfigState = null;
-        reject(new Error('Timed out waiting for bundle config state'));
-      }, 15000);
-
-      this.pendingBundleConfigState = { resolve, reject, timeout };
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingBundleConfigState;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingBundleConfigState = null;
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'bundle-config-state', projectName, workspaceId });
+    if (response.type === 'bundle-config-state') return response.state;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected bundle config state response');
   }
 
   async applyBundleConfigUpdate(
@@ -1546,133 +887,124 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     submission: BundleConfigSubmission
   ): Promise<void> {
-    if (this.pendingBundleConfigUpdate) {
-      throw new Error('Bundle config update request already in progress');
-    }
-
-    const command: ApplyBundleConfigUpdateRequest = {
-      type: 'apply_bundle_config_update',
-      projectName,
-      workspaceId,
-      submission,
-    };
-
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingBundleConfigUpdate) {
-          return;
-        }
-        this.pendingBundleConfigUpdate = null;
-        reject(new Error('Timed out applying bundle config update'));
-      }, 15000);
-
-      this.pendingBundleConfigUpdate = { resolve, reject, timeout };
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingBundleConfigUpdate;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingBundleConfigUpdate = null;
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'bundle-config-apply', projectName, workspaceId, submission });
+    if (response.type === 'bundle-config-applied') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected bundle config apply response');
   }
 
   async requestInbox(): Promise<void> {
-    const command: GetInboxRequest = { type: 'get_inbox' };
-    await this.sendCommand(command);
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'inbox' });
+    if (response.type === 'inbox') {
+      const sessions = machineSnapshotToSessions(this.machineStateClient.getSnapshot());
+      const activeSessionIds = new Set(sessions.map((session) => session.id));
+      const unreadCount = new Set(response.items.filter((item) => !item.read && activeSessionIds.has(item.sessionId)).map((item) => item.sessionId)).size;
+      this.emit({ type: 'inbox', items: response.items, unreadCount });
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected inbox response');
   }
 
   async clearInbox(id?: string): Promise<void> {
-    const command: ClearInboxRequest = { type: 'clear_inbox', id };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'inbox-clear', id });
+    if (response.type === 'ok') {
+      await this.requestInbox();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected clear inbox response');
   }
 
   async markInboxRead(id: string): Promise<void> {
-    const command: MarkInboxReadRequest = { type: 'mark_inbox_read', id };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'inbox-read', id });
+    if (response.type === 'ok') {
+      await this.requestInbox();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected mark inbox read response');
   }
 
   async getNotificationConfig(): Promise<void> {
-    const command: GetNotificationConfigRequest = { type: 'get_notification_config' };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'notification-config-get' });
+    if (response.type === 'notification-config') {
+      this.emit({ type: 'notification_config', config: response.config });
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected notification config response');
   }
 
   async updateNotificationConfig(config: NotificationConfig): Promise<void> {
-    const command: UpdateNotificationConfigRequest = {
-      type: 'update_notification_config',
-      config,
-    };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'notification-config-update', config });
+    if (response.type === 'notification-config') {
+      this.emit({ type: 'notification_config', config: response.config });
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected notification config update response');
   }
 
   async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {
-    const requestId = crypto.randomUUID();
-
-    const command: ReviewRequest = {
-      type: 'review_request',
-      requestId,
-      operation,
-    };
-
-    return new Promise<ReviewResult>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pendingReviewRequests.has(requestId)) {
-          return;
-        }
-        this.pendingReviewRequests.delete(requestId);
-        reject(
-          new ReviewRequestError(
-            `Timed out waiting for review response (${operation.op})`,
-            'REVIEW_TIMEOUT',
-            { op: operation.op, requestId }
-          )
-        );
-      }, 30000);
-
-      this.pendingReviewRequests.set(requestId, {
-        op: operation.op,
-        resolve,
-        reject,
-        timeout,
-      });
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingReviewRequests.get(requestId);
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingReviewRequests.delete(requestId);
-        const message = error instanceof Error ? error.message : String(error);
-        reject(
-          new ReviewRequestError(message, 'REVIEW_FAILED', {
-            op: pending.op,
-            requestId,
-          })
-        );
-      });
-    });
+    const response = await this.sendTmuxCommand({ type: 'review-request', requestId: crypto.randomUUID(), operation });
+    if (response.type === 'review-response') {
+      if (response.error) {
+        throw new ReviewRequestError(response.error.message, response.error.code, { op: operation.op, requestId: response.requestId });
+      }
+      if (!response.result) {
+        throw new ReviewRequestError('Review response missing result', 'REVIEW_MISSING_RESULT', { op: operation.op, requestId: response.requestId });
+      }
+      return response.result;
+    }
+    if (response.type === 'error') {
+      throw new ReviewRequestError(response.message, 'REVIEW_FAILED', { op: operation.op });
+    }
+    throw new ReviewRequestError('Unexpected review response', 'REVIEW_FAILED', { op: operation.op });
   }
 
   async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
-    const command: StartProcessRequest = {
-      type: 'start_process',
+    const response = await this.sendTmuxCommand({
+      type: 'service-start',
       workspaceId,
       processName,
       instance,
-    };
-    await this.sendCommand(command);
+    });
+    if (response.type === 'service-started') {
+      this.emit({
+        type: 'process_started',
+        workspaceId: response.workspaceId,
+        processName: response.processName,
+        sessionId: response.sessionId,
+        sessionIds: response.sessionIds,
+      });
+      return;
+    }
+    if (response.type === 'error') {
+      throw new Error(response.message);
+    }
+    throw new Error('Unexpected tmux service start response');
   }
 
   async stopProcess(workspaceId: string, processName: string): Promise<void> {
-    const command: StopProcessRequest = {
-      type: 'stop_process',
+    const response = await this.sendTmuxCommand({
+      type: 'service-stop',
       workspaceId,
       processName,
-    };
-    await this.sendCommand(command);
+    });
+    if (response.type === 'service-stopped') {
+      this.emit({
+        type: 'process_stopped',
+        workspaceId: response.workspaceId,
+        processName: response.processName,
+      });
+      return;
+    }
+    if (response.type === 'error') {
+      throw new Error(response.message);
+    }
+    throw new Error('Unexpected tmux service stop response');
   }
 
   async requestEvents(
@@ -1681,14 +1013,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     limit?: number,
     sinceMs?: number,
   ): Promise<void> {
-    const command: GetEventsRequest = {
-      type: 'get_events',
-      workspacePath,
-      filter,
-      limit,
-      sinceMs,
-    };
-    await this.sendCommand(command);
+    const response = await this.sendTmuxCommand({ type: 'events-request', workspacePath, filter, limit, sinceMs });
+    if (response.type === 'events-list') {
+      this.emit({ type: 'events', events: response.events, liveEventIds: response.liveEventIds, savedEventFilters: response.savedEventFilters ?? [] });
+      return;
+    }
+    if (response.type === 'error') {
+      throw new Error(response.message);
+    }
+    throw new Error('Unexpected events response');
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
@@ -1738,17 +1071,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       },
       onError: (error) => {
         this.rejectConnect(error);
-        this.rejectPendingBundleRefreshRequests(error.message);
-        this.rejectPendingGithubRepoList(error.message);
-        this.rejectPendingRemoteBranches(error.message, undefined, true);
-        this.rejectPendingLinearIssues(error.message, undefined, true);
-        this.rejectPendingPrepareProject(error.message, undefined, true);
-        this.rejectPendingProjectCreate(error.message, undefined, true);
-        this.rejectPendingCancelProject(error.message, undefined, true);
-        this.rejectPendingWorkspaceCreate(error.message, undefined, undefined, true);
-        this.rejectPendingProjectDelete(error.message, undefined, true);
         this.rejectPendingWorkspaceDelete('DELETE_FAILED', error.message);
-        this.rejectAllPendingReviewRequests(error.message);
         this.emit({ type: 'status', status: 'error', error: error.message });
       },
     });
@@ -1851,11 +1174,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const decodedText = new TextDecoder().decode(opened.data);
     const parsedMessage = safeJsonParse(decodedText);
 
-    if (isPtyOutputMessage(parsedMessage)) {
-      this.emitPtyData(this.crypto.decodeBase64(parsedMessage.data));
-      return;
-    }
-
     const machineMessage = toMachineMessage(parsedMessage);
     if (machineMessage) {
       await this.handleMachineMessage(machineMessage);
@@ -1947,49 +1265,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private async handleMachineMessage(message: MachineToClientMessage): Promise<void> {
     switch (message.type) {
-      case 'project_list':
-        this.emit({ type: 'projects', projects: message.projects });
-        return;
-      case 'github_repo_list':
-        this.resolveGithubRepoList(message);
-        return;
-      case 'remote_branch_list':
-        this.resolveRemoteBranchList(message);
-        return;
-      case 'linear_issue_list':
-        this.resolveLinearIssueList(message);
-        return;
-      case 'project_creation_prepared':
-        this.resolvePrepareProject(message);
-        return;
-      case 'project_creation_cancelled':
-        this.resolveCancelProject(message);
-        return;
-      case 'project_created':
-        this.resolveCreateProject(message);
-        await this.listProjects();
-        return;
-      case 'workspace_created':
-        this.resolveCreateWorkspace(message);
-        await this.listWorkspaces();
-        await this.listSessions(message.workspaceId);
-        return;
-      case 'project_deleted':
-        this.resolveDeleteProject(message);
-        await this.listProjects();
-        await this.listWorkspaces();
-        await this.listSessions();
-        return;
-      case 'workspace_list':
-        this.emit({
-          type: 'workspaces',
-          workspaces: message.workspaces,
-          savedEventFilters: message.savedEventFilters,
-        });
-        return;
-      case 'session_list':
-        this.emit({ type: 'sessions', sessions: message.sessions });
-        return;
       case 'replay_list':
         this.emit({ type: 'replays', replays: message.replays });
         return;
@@ -2013,89 +1288,43 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           sessionId: message.sessionId,
           sessionName: message.sessionName,
           viewOnly: this.viewOnly,
+          workspaceId: this.attachedWorkspaceId ?? undefined,
+        });
+        this.emit({
+          type: 'session_meta',
+          meta: {
+            sessionName: message.sessionName,
+            processTitle: message.processTitle ?? null,
+            terminalTitle: message.terminalTitle ?? null,
+            lastAlertKind: message.lastAlertKind ?? null,
+            lastAlertPreview: message.lastAlertPreview ?? null,
+            lastAlertAt: message.lastAlertAt ?? null,
+            unreadAlertCount: message.unreadAlertCount ?? null,
+          },
         });
         return;
       case 'detached':
         this.mode = 'browsing';
         this.attachedSessionId = null;
+        this.attachedWorkspaceId = null;
         this.viewOnly = false;
         this.emit({ type: 'detached' });
         return;
       case 'session_exited':
         this.mode = 'browsing';
         this.attachedSessionId = null;
+        this.attachedWorkspaceId = null;
         this.emit({
           type: 'session_exited',
           sessionId: message.sessionId,
           exitCode: message.exitCode,
         });
         return;
-      case 'session_killed':
-        await this.listWorkspaces();
-        await this.listSessions(
-          message.workspaceId && message.workspaceId !== 'unknown' ? message.workspaceId : undefined
-        );
-        return;
       case 'workspace_deleted':
         this.resolveWorkspaceDelete(message.workspaceId);
-        await this.listWorkspaces();
-        return;
-      case 'inbox_list':
-        this.emit({
-          type: 'inbox',
-          items: message.items,
-          unreadCount: message.unreadCount,
-        });
-        return;
-      case 'inbox_cleared':
-      case 'inbox_marked_read':
-        await this.requestInbox();
-        return;
-      case 'notification_config':
-      case 'notification_config_updated':
-        this.emit({ type: 'notification_config', config: message.config });
         return;
       case 'script_output':
         this.handleScriptOutput(message);
-        return;
-      case 'bundle_refresh_plan': {
-        this.resolveBundleRefreshPlan(message);
-        return;
-      }
-      case 'bundle_refresh_applied': {
-        this.resolveBundleRefreshApply(message);
-        return;
-      }
-      case 'bundle_config_state': {
-        this.resolveBundleConfigState(message);
-        return;
-      }
-      case 'bundle_config_updated': {
-        this.resolveBundleConfigUpdate(message);
-        return;
-      }
-      case 'review_response': {
-        this.resolveReviewRequest(message);
-        return;
-      }
-      case 'events_list':
-        this.handleEventsList(message);
-        return;
-      case 'process_started':
-        this.emit({
-          type: 'process_started',
-          workspaceId: message.workspaceId,
-          processName: message.processName,
-          sessionId: message.sessionId,
-          sessionIds: message.sessionIds,
-        });
-        return;
-      case 'process_stopped':
-        this.emit({
-          type: 'process_stopped',
-          workspaceId: message.workspaceId,
-          processName: message.processName,
-        });
         return;
       case 'agent_state_snapshot':
         this.handleAgentStateSnapshot(message as unknown as AgentStateSnapshotPush);
@@ -2103,32 +1332,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'agent_state_update':
         this.handleAgentStateUpdate(message as unknown as AgentStateUpdatePush);
         return;
-      case 'agent_sessions':
-        this.resolveAgentSessions(message as AgentSessionsResponse);
+      case 'machine_snapshot':
+        this.machineStateClient.replaceSnapshot(message.snapshot);
+        this.emitDerivedMachineState();
+        this.agentStateCache = machineSnapshotToAgentState(message.snapshot);
+        this.resolveInitialSnapshot();
         return;
-      case 'agent_bool':
-        this.resolveAgentBoolean(message as AgentBoolResponse);
-        return;
-      case 'agent_takeover_status':
-        this.resolveAgentTakeoverStatus(message as AgentTakeoverStatusResponse);
+      case 'tmux_command_response':
+        this.resolveTmuxCommand(message);
         return;
       case 'error':
-        this.rejectPendingBundleRefreshRequests(message.message);
-        this.rejectPendingGithubRepoList(message.message);
-        this.rejectPendingRemoteBranches(message.message, message.projectName);
-        this.rejectPendingLinearIssues(message.message, message.projectName);
-        this.rejectPendingPrepareProject(message.message, message.projectName);
-        this.rejectPendingProjectCreate(message.message, message.projectName);
-        this.rejectPendingCancelProject(message.message, message.projectName);
-        this.rejectPendingWorkspaceCreate(message.message, message.workspaceId, message.projectName);
-        this.rejectPendingProjectDelete(message.message, message.projectName);
+        if (message.requestId) {
+          this.rejectPendingTmuxCommand(message.requestId, message.message);
+        }
         this.rejectPendingReplayFrame(message.message, { requestId: message.requestId, force: !message.requestId });
         this.rejectPendingReplayTimeline(message.message, undefined, true);
         this.rejectPendingDismissReplay(message.message, undefined, true);
         this.rejectPendingUndismissReplay(message.message, undefined, true);
-        this.rejectPendingAgentSessions(message.message, message.workspaceId, message.requestId);
-        this.rejectPendingAgentBooleans(message.message, message.workspaceId, message.requestId);
-        this.rejectPendingAgentTakeoverStatus(message.code, message.message, message.workspaceId, message.requestId);
         if (message.workspaceId) {
           this.rejectPendingWorkspaceDelete(message.code, message.message, message.workspaceId);
         }
@@ -2157,366 +1377,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       error: message.error,
       exitCode: message.exitCode,
     });
-  }
-
-  private resolveGithubRepoList(message: GithubRepoListResponse): void {
-    const pending = this.pendingGithubRepos;
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingGithubRepos = null;
-    pending.resolve(message.repos);
-  }
-
-  private resolveAgentSessions(message: AgentSessionsResponse): void {
-    const pending = this.pendingAgentSessions.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-    clearTimeout(pending.timeout);
-    this.pendingAgentSessions.delete(message.requestId);
-    pending.resolve(message.sessions);
-  }
-
-  private resolveAgentBoolean(message: AgentBoolResponse): void {
-    const pending = this.pendingAgentBooleans.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-    clearTimeout(pending.timeout);
-    this.pendingAgentBooleans.delete(message.requestId);
-    pending.resolve(message.ok);
-  }
-
-  private resolveAgentTakeoverStatus(message: AgentTakeoverStatusResponse): void {
-    const pending = this.pendingAgentTakeoverStatus.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-    clearTimeout(pending.timeout);
-    this.pendingAgentTakeoverStatus.delete(message.requestId);
-    pending.resolve({
-      requiresTakeover: message.requiresTakeover,
-      sessionName: message.sessionName,
-    });
-  }
-
-  private resolveRemoteBranchList(message: RemoteBranchListResponse): void {
-    const pending = this.pendingRemoteBranches;
-    if (!pending) {
-      return;
-    }
-
-    if (pending.projectName !== message.projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingRemoteBranches = null;
-    pending.resolve(message.branches);
-  }
-
-  private resolveLinearIssueList(message: LinearIssueListResponse): void {
-    const pending = this.pendingLinearIssues;
-    if (!pending) {
-      return;
-    }
-
-    if (pending.projectName !== message.projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingLinearIssues = null;
-    pending.resolve(message.issues);
-  }
-
-  private resolvePrepareProject(message: ProjectCreationPreparedResponse): void {
-    const pending = this.pendingPrepareProject;
-    if (!pending) {
-      return;
-    }
-
-    if (pending.projectName !== message.projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingPrepareProject = null;
-    pending.resolve({
-      projectName: message.projectName,
-      repository: message.repository,
-      baseBranch: message.baseBranch,
-      bundle: message.bundle,
-      confirmStatuses: message.confirmStatuses,
-    });
-  }
-
-  private resolveCreateProject(message: ProjectCreatedResponse): void {
-    const pending = this.pendingCreateProject;
-    if (!pending) {
-      return;
-    }
-
-    if (pending.projectName !== message.projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingCreateProject = null;
-    pending.resolve();
-  }
-
-  private resolveCancelProject(message: ProjectCreationCancelledResponse): void {
-    const pending = this.pendingCancelProject;
-    if (!pending) {
-      return;
-    }
-
-    if (pending.projectName !== message.projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingCancelProject = null;
-    pending.resolve();
-  }
-
-  private resolveCreateWorkspace(message: WorkspaceCreatedResponse): void {
-    const pending = this.pendingCreateWorkspace;
-    if (!pending) {
-      return;
-    }
-
-    if (!workspaceIdsMatch(pending.expectedWorkspaceId, message.workspaceId)) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingCreateWorkspace = null;
-    pending.resolve();
-  }
-
-  private resolveDeleteProject(message: ProjectDeletedResponse): void {
-    const pending = this.pendingDeleteProject;
-    if (!pending) {
-      return;
-    }
-
-    if (pending.projectName !== message.projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingDeleteProject = null;
-    pending.resolve();
-  }
-
-  private rejectPendingGithubRepoList(message: string): void {
-    const pending = this.pendingGithubRepos;
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingGithubRepos = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingAgentSessions(message: string, workspaceId?: string, requestId?: string): void {
-    for (const [pendingRequestId, pending] of this.pendingAgentSessions) {
-      if (requestId && pendingRequestId !== requestId) {
-        continue;
-      }
-      if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
-        continue;
-      }
-      clearTimeout(pending.timeout);
-      this.pendingAgentSessions.delete(pendingRequestId);
-      pending.reject(new Error(message));
-    }
-  }
-
-  private rejectPendingAgentBooleans(message: string, workspaceId?: string, requestId?: string): void {
-    for (const [pendingRequestId, pending] of this.pendingAgentBooleans) {
-      if (requestId && pendingRequestId !== requestId) {
-        continue;
-      }
-      if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
-        continue;
-      }
-      clearTimeout(pending.timeout);
-      this.pendingAgentBooleans.delete(pendingRequestId);
-      pending.reject(new Error(message));
-    }
-  }
-
-  private rejectPendingAgentTakeoverStatus(
-    code: string | undefined,
-    message: string,
-    workspaceId?: string,
-    requestId?: string,
-  ): void {
-    for (const [pendingRequestId, pending] of this.pendingAgentTakeoverStatus) {
-      if (requestId && pendingRequestId !== requestId) {
-        continue;
-      }
-      if (workspaceId && !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
-        continue;
-      }
-      clearTimeout(pending.timeout);
-      this.pendingAgentTakeoverStatus.delete(pendingRequestId);
-      if (code === 'UNKNOWN_COMMAND') {
-        this.agentTakeoverCheckSupported = false;
-        pending.resolve({ requiresTakeover: false });
-        continue;
-      }
-      if (message === 'Remote session disconnected') {
-        pending.resolve({ requiresTakeover: false });
-        continue;
-      }
-      pending.reject(new Error(message));
-    }
-  }
-
-  private rejectPendingRemoteBranches(
-    message: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingRemoteBranches;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingRemoteBranches = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingLinearIssues(
-    message: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingLinearIssues;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingLinearIssues = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingProjectCreate(
-    message: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingCreateProject;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingCreateProject = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingPrepareProject(
-    message: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingPrepareProject;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingPrepareProject = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingCancelProject(
-    message: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingCancelProject;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingCancelProject = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingWorkspaceCreate(
-    message: string,
-    workspaceId?: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingCreateWorkspace;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && workspaceId && !workspaceIdsMatch(pending.expectedWorkspaceId, workspaceId)) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingCreateWorkspace = null;
-    pending.reject(new Error(message));
-  }
-
-  private rejectPendingProjectDelete(
-    message: string,
-    projectName?: string,
-    force = false
-  ): void {
-    const pending = this.pendingDeleteProject;
-    if (!pending) {
-      return;
-    }
-
-    if (!force && projectName && pending.projectName !== projectName) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingDeleteProject = null;
-    pending.reject(new Error(message));
   }
 
   private resolveReplayFrame(message: ReplayFrameResponse): void {
@@ -2665,15 +1525,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     pending.reject(new Error(message));
   }
 
-  private prunePendingEventChunks(nowMs = Date.now()): void {
-    const ttlMs = 30_000;
-    for (const [requestId, pending] of this.pendingEventChunks) {
-      if (nowMs - pending.receivedAtMs > ttlMs) {
-        this.pendingEventChunks.delete(requestId);
-      }
-    }
-  }
-
   private prunePendingReplayFrameChunks(nowMs = Date.now()): void {
     const ttlMs = 30_000;
     for (const [requestId, pending] of this.pendingReplayFrameChunks) {
@@ -2683,71 +1534,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
-  private handleEventsList(message: EventsListResponse): void {
-    const totalChunks = message.totalChunks ?? 1;
-    const chunkIndex = message.chunkIndex ?? 0;
-    const requestId = message.requestId;
-
-    if (!requestId || totalChunks <= 1) {
-      this.emit({
-        type: 'events',
-        events: message.events,
-        liveEventIds: message.liveEventIds,
-        savedEventFilters: message.savedEventFilters,
-      });
-      return;
-    }
-
-    this.prunePendingEventChunks();
-
-    const pending = this.pendingEventChunks.get(requestId) ?? {
-      workspaceId: message.workspaceId,
-      totalChunks,
-      chunks: new Map<number, WideEvent[]>(),
-      liveEventIds: message.liveEventIds,
-      savedEventFilters: message.savedEventFilters,
-      receivedAtMs: Date.now(),
-    };
-
-    pending.workspaceId = message.workspaceId;
-    pending.totalChunks = totalChunks;
-    pending.liveEventIds = message.liveEventIds;
-    pending.savedEventFilters = message.savedEventFilters;
-    pending.receivedAtMs = Date.now();
-    pending.chunks.set(chunkIndex, message.events);
-    this.pendingEventChunks.set(requestId, pending);
-
-    if (pending.chunks.size < pending.totalChunks) {
-      return;
-    }
-
-    const merged: WideEvent[] = [];
-    for (let idx = 0; idx < pending.totalChunks; idx += 1) {
-      const chunk = pending.chunks.get(idx);
-      if (!chunk) {
-        return;
-      }
-      merged.push(...chunk);
-    }
-
-    this.pendingEventChunks.delete(requestId);
-    this.emit({
-      type: 'events',
-      events: merged,
-      liveEventIds: pending.liveEventIds,
-      savedEventFilters: pending.savedEventFilters,
-    });
-  }
-
   private handleSessionEvent(message: SessionEventMessage): void {
     if (message.type === 'kicked') {
       this.mode = 'browsing';
       this.attachedSessionId = null;
-      this.emit({
-        type: 'command_error',
-        code: 'SESSION_TAKEN_OVER',
-        message: 'This terminal was taken over by another client.',
-      });
+      this.attachedWorkspaceId = null;
       this.emit({ type: 'detached' });
       return;
     }
@@ -2756,6 +1547,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       const sessionId = this.attachedSessionId;
       this.mode = 'browsing';
       this.attachedSessionId = null;
+      this.attachedWorkspaceId = null;
       if (sessionId) {
         this.emit({ type: 'session_exited', sessionId, exitCode: message.code });
       }
@@ -2763,79 +1555,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
 
     if (message.type === 'attached' && this.attachedSessionId) {
-      this.emit({ type: 'attached', sessionId: this.attachedSessionId });
-    }
-  }
-
-  private resolveBundleRefreshPlan(message: BundleRefreshPlanResponse): void {
-    const pending = this.pendingBundleRefreshPlan;
-    if (!pending) {
+      this.emit({ type: 'attached', sessionId: this.attachedSessionId, workspaceId: this.attachedWorkspaceId ?? undefined });
       return;
     }
 
-    clearTimeout(pending.timeout);
-    this.pendingBundleRefreshPlan = null;
-    pending.resolve(message.plan);
-  }
-
-  private resolveBundleRefreshApply(_message: BundleRefreshAppliedResponse): void {
-    const pending = this.pendingBundleRefreshApply;
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingBundleRefreshApply = null;
-    pending.resolve();
-  }
-
-  private resolveBundleConfigState(message: BundleConfigStateResponse): void {
-    const pending = this.pendingBundleConfigState;
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingBundleConfigState = null;
-    pending.resolve(message.state);
-  }
-
-  private resolveBundleConfigUpdate(_message: BundleConfigUpdatedResponse): void {
-    const pending = this.pendingBundleConfigUpdate;
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingBundleConfigUpdate = null;
-    pending.resolve();
-  }
-
-  private rejectPendingBundleRefreshRequests(message: string): void {
-    const error = new Error(message);
-
-    if (this.pendingBundleRefreshPlan) {
-      clearTimeout(this.pendingBundleRefreshPlan.timeout);
-      this.pendingBundleRefreshPlan.reject(error);
-      this.pendingBundleRefreshPlan = null;
-    }
-
-    if (this.pendingBundleRefreshApply) {
-      clearTimeout(this.pendingBundleRefreshApply.timeout);
-      this.pendingBundleRefreshApply.reject(error);
-      this.pendingBundleRefreshApply = null;
-    }
-
-    if (this.pendingBundleConfigState) {
-      clearTimeout(this.pendingBundleConfigState.timeout);
-      this.pendingBundleConfigState.reject(error);
-      this.pendingBundleConfigState = null;
-    }
-
-    if (this.pendingBundleConfigUpdate) {
-      clearTimeout(this.pendingBundleConfigUpdate.timeout);
-      this.pendingBundleConfigUpdate.reject(error);
-      this.pendingBundleConfigUpdate = null;
+    if (message.type === 'session-meta') {
+      this.emit({
+        type: 'session_meta',
+        meta: {
+          sessionName: message.sessionName ?? null,
+          processTitle: message.processTitle ?? null,
+          terminalTitle: message.terminalTitle ?? null,
+          lastAlertKind: message.lastAlertKind ?? null,
+          lastAlertPreview: message.lastAlertPreview ?? null,
+          lastAlertAt: message.lastAlertAt ?? null,
+          unreadAlertCount: message.unreadAlertCount ?? null,
+        },
+      });
     }
   }
 
@@ -2872,46 +1608,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     clearTimeout(pending.timeout);
     this.pendingDeleteWorkspace = null;
     pending.reject(new WorkspaceDeleteError(message, toWorkspaceDeleteErrorCode(code)));
-  }
-
-  private resolveReviewRequest(message: ReviewResponse): void {
-    const pending = this.pendingReviewRequests.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-    clearTimeout(pending.timeout);
-    this.pendingReviewRequests.delete(message.requestId);
-    if (message.error) {
-      pending.reject(
-        new ReviewRequestError(
-          message.error.message,
-          message.error.code || 'REVIEW_FAILED',
-          { op: pending.op, requestId: message.requestId }
-        )
-      );
-    } else if (message.result) {
-      pending.resolve(message.result);
-    } else {
-      pending.reject(
-        new ReviewRequestError('Review response missing result', 'REVIEW_MISSING_RESULT', {
-          op: pending.op,
-          requestId: message.requestId,
-        })
-      );
-    }
-  }
-
-  private rejectAllPendingReviewRequests(message: string): void {
-    for (const [requestId, pending] of this.pendingReviewRequests) {
-      clearTimeout(pending.timeout);
-      pending.reject(
-        new ReviewRequestError(message, 'REVIEW_FAILED', {
-          op: pending.op,
-          requestId,
-        })
-      );
-      this.pendingReviewRequests.delete(requestId);
-    }
   }
 
   private emitPtyData(data: Uint8Array): void {
@@ -2972,6 +1668,74 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
+  private emitDerivedMachineState(): void {
+    const snapshot = this.machineStateClient.getSnapshot();
+    this.emit({ type: 'machine_snapshot', snapshot });
+    this.emit({ type: 'projects', projects: machineSnapshotToProjects(snapshot) });
+    this.emit({ type: 'workspaces', workspaces: machineSnapshotToWorkspaces(snapshot) });
+    this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(snapshot) });
+  }
+
+  private async sendTmuxCommand(command: TmuxCommand): Promise<TmuxResponse> {
+    const requestId = crypto.randomUUID();
+    const message: TmuxCommandRequest = { type: 'tmux_command', requestId, command };
+    return new Promise<TmuxResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingTmuxCommands.get(requestId);
+        if (!pending) {
+          return;
+        }
+        this.pendingTmuxCommands.delete(requestId);
+        reject(new Error(`Timed out waiting for tmux command response (${command.type})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+
+      this.pendingTmuxCommands.set(requestId, { resolve, reject, timeout });
+      void this.sendCommand(message).catch((error) => {
+        const pending = this.pendingTmuxCommands.get(requestId);
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingTmuxCommands.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
+  private resolveTmuxCommand(message: TmuxCommandResponse): void {
+    const pending = this.pendingTmuxCommands.get(message.requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingTmuxCommands.delete(message.requestId);
+    pending.resolve(message.response);
+  }
+
+  private rejectPendingTmuxCommand(requestId: string, message: string): void {
+    const pending = this.pendingTmuxCommands.get(requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingTmuxCommands.delete(requestId);
+    pending.reject(new Error(message));
+  }
+
+  private getAgentWorkspaceTarget(workspaceId: string): import('../../lib/tmux-lite/protocol.js').AgentWorkspaceTargetPayload {
+    const snapshot = this.machineStateClient.getSnapshot();
+    const workspace = Object.entries(snapshot.workspacesById).find(([key, item]) => item && (workspaceIdsMatch(key, workspaceId) || workspaceIdsMatch(item.id, workspaceId)))?.[1];
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+    return {
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      workspacePath: workspace.path,
+      projectName: workspace.projectName,
+    };
+  }
+
   private resolveConnect(): void {
     if (this.connectResolve) {
       this.connectResolve();
@@ -2994,33 +1758,57 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.isConnected = false;
     this.mode = 'browsing';
     this.attachedSessionId = null;
+    this.attachedWorkspaceId = null;
     this.handshakeState = null;
     this.sessionKeys = null;
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
-    this.pendingEventChunks.clear();
     this.pendingReplayFrameChunks.clear();
-    this.rejectPendingBundleRefreshRequests('Remote session disconnected');
-    this.rejectPendingGithubRepoList('Remote session disconnected');
-    this.rejectPendingRemoteBranches('Remote session disconnected', undefined, true);
-    this.rejectPendingLinearIssues('Remote session disconnected', undefined, true);
-    this.rejectPendingPrepareProject('Remote session disconnected', undefined, true);
-    this.rejectPendingProjectCreate('Remote session disconnected', undefined, true);
-    this.rejectPendingCancelProject('Remote session disconnected', undefined, true);
-    this.rejectPendingWorkspaceCreate('Remote session disconnected', undefined, undefined, true);
-    this.rejectPendingProjectDelete('Remote session disconnected', undefined, true);
     this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
-    this.rejectPendingAgentSessions('Remote session disconnected');
-    this.rejectPendingAgentBooleans('Remote session disconnected');
-    this.rejectPendingAgentTakeoverStatus(undefined, 'Remote session disconnected');
-    this.rejectAllPendingReviewRequests('Remote session disconnected');
+    for (const pending of this.pendingTmuxCommands.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Remote session disconnected'));
+    }
+    this.pendingTmuxCommands.clear();
+    this.rejectInitialSnapshot(new Error('Remote session disconnected'));
+    this.machineStateClient.replaceSnapshot(createEmptyMachineSnapshot());
     this.connectPromise = null;
     this.connectResolve = null;
     this.connectReject = null;
+    this.initialSnapshotPromise = null;
+    this.initialSnapshotResolve = null;
+    this.initialSnapshotReject = null;
+    this.initialSnapshotReceived = false;
+  }
+
+  private resolveInitialSnapshot(): void {
+    if (this.initialSnapshotReceived) {
+      return;
+    }
+    this.initialSnapshotReceived = true;
+    this.initialSnapshotResolve?.();
+    this.initialSnapshotResolve = null;
+    this.initialSnapshotReject = null;
+  }
+
+  private async waitForInitialSnapshot(): Promise<void> {
+    if (this.initialSnapshotReceived || !this.initialSnapshotPromise) {
+      return;
+    }
+    await this.initialSnapshotPromise;
+  }
+
+  private rejectInitialSnapshot(error: Error): void {
+    if (this.initialSnapshotReceived) {
+      return;
+    }
+    this.initialSnapshotReject?.(error);
+    this.initialSnapshotResolve = null;
+    this.initialSnapshotReject = null;
   }
 
   // ============================================================================
@@ -3049,56 +1837,40 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const delta = msg.delta;
     // Apply delta to local cache
     if ('workspaceId' in delta && 'sessionId' in delta) {
-      const state = this.agentStateCache[delta.workspaceId] ?? {
-        workspaceId: delta.workspaceId,
-        sessions: [],
-        statuses: {},
-        pendingPermissions: {},
-        lastMessages: {},
-      };
-      this.agentStateCache[delta.workspaceId] = state;
-      if (delta.type !== 'agent_session_deleted' && !state.sessions.some((session) => session.id === delta.sessionId)) {
-        state.sessions.push({
-          id: delta.sessionId,
-          title: 'title' in delta ? delta.title : delta.sessionId,
-        });
-      }
-      switch (delta.type) {
-        case 'agent_session_status':
-          state.statuses[delta.sessionId] = delta.status;
-          break;
-        case 'agent_permission_added':
-          if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
-          state.pendingPermissions[delta.sessionId].push(delta.permission);
-          break;
-        case 'agent_permission_removed':
-          if (state.pendingPermissions[delta.sessionId]) {
-            state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
-              (p) => p.id !== delta.permissionId,
-            );
+      const state = this.agentStateCache[delta.workspaceId];
+      if (state) {
+        switch (delta.type) {
+          case 'agent_session_status':
+            state.statuses[delta.sessionId] = delta.status;
+            break;
+          case 'agent_permission_added':
+            if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
+            state.pendingPermissions[delta.sessionId].push(delta.permission);
+            break;
+          case 'agent_permission_removed':
+            if (state.pendingPermissions[delta.sessionId]) {
+              state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
+                (p) => p.id !== delta.permissionId,
+              );
+            }
+            break;
+          case 'agent_last_message':
+            state.lastMessages[delta.sessionId] = delta.preview;
+            break;
+          case 'agent_session_created':
+            if (!state.sessions.some((s) => s.id === delta.sessionId)) {
+              state.sessions.push({ id: delta.sessionId, title: delta.title });
+            }
+            break;
+          case 'agent_session_updated': {
+            const idx = state.sessions.findIndex((s) => s.id === delta.sessionId);
+            if (idx !== -1) state.sessions[idx] = { id: delta.sessionId, title: delta.title };
+            break;
           }
-          break;
-        case 'agent_last_message':
-          state.lastMessages[delta.sessionId] = delta.preview;
-          break;
-        case 'agent_session_created':
-          break;
-        case 'agent_session_updated': {
-          const idx = state.sessions.findIndex((s) => s.id === delta.sessionId);
-          if (idx !== -1) {
-            state.sessions[idx] = {
-              ...state.sessions[idx],
-              title: delta.title,
-            };
-          }
-          break;
+          case 'agent_session_deleted':
+            state.sessions = state.sessions.filter((s) => s.id !== delta.sessionId);
+            break;
         }
-        case 'agent_session_deleted':
-          state.sessions = state.sessions.filter((s) => s.id !== delta.sessionId);
-          delete state.statuses[delta.sessionId];
-          delete state.pendingPermissions[delta.sessionId];
-          delete state.lastMessages[delta.sessionId];
-          break;
       }
     }
     for (const handler of this.agentStateHandlers) {
@@ -3121,31 +1893,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     permissionId: string,
     response: 'allow' | 'deny',
   ): Promise<boolean> {
-    const requestId = crypto.randomUUID();
-    const command: RespondAgentPermissionRequest = {
-      type: 'respond_agent_permission',
-      requestId,
-      workspaceId,
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendTmuxCommand({
+      type: 'agent-permission',
+      target: this.getAgentWorkspaceTarget(workspaceId),
       agentSessionId,
       permissionId,
       response,
-    };
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingAgentBooleans.get(requestId);
-        if (!pending) return;
-        this.pendingAgentBooleans.delete(requestId);
-        reject(new Error(`Timed out responding to agent permission (${workspaceId})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingAgentBooleans.set(requestId, { workspaceId, resolve, reject, timeout });
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingAgentBooleans.get(requestId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAgentBooleans.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      });
     });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent permission response');
   }
 
   // ============================================================================

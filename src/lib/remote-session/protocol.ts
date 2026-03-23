@@ -1,18 +1,9 @@
 /**
- * Remote session protocol - encrypted messages between client and machine
+ * Remote transport protocol for encrypted client<->machine communication.
  *
- * These messages are sent over the encrypted channel after X3DH handshake.
- *
- * ## Protocol Layers
- *
- * 1. **Browsing Mode**: Uses JSON-RPC style messages (list_workspaces, attach_session, etc.)
- *    - Client sends: ClientToMachineMessage
- *    - Machine responds: MachineToClientMessage
- *
- * 2. **Attached Mode**: Uses binary framing with tmux-lite protocol
- *    - STREAM_ID.DATA (0): Raw PTY bytes (stdin/stdout)
- *    - STREAM_ID.CONTROL (1): JSON SessionCtrl messages (resize, detach, attach-init)
- *    - See src/lib/tmux-lite/protocol.ts for SessionCtrl/SessionEvent types
+ * App and machine operations flow through tmux-lite via `tmux_command`.
+ * The remaining top-level messages are transport-oriented attached/replay flows
+ * plus machine and agent snapshot pushes.
  */
 
 // Re-export InboxItem from tmux-lite protocol
@@ -23,7 +14,7 @@ export type {
   AgentStateUpdateDelta,
   WorkspaceAgentState,
   AgentSessionSummary,
-} from '../../serve/agent-event-manager.js';
+} from '../tmux-lite/agent-event-manager.js';
 export type { ReviewOperation, ReviewResult } from "../../types/review.js";
 export type {
   BundleRefreshPlan,
@@ -50,17 +41,6 @@ export type { SessionCtrl, SessionEvent } from "../tmux-lite/protocol.js";
 // ============================================================================
 // Client → Machine Messages (Browsing Mode)
 // ============================================================================
-
-/** Request list of workspaces on the machine */
-export interface ListWorkspacesRequest {
-  type: "list_workspaces";
-}
-
-/** Request list of sessions, optionally filtered by workspace */
-export interface ListSessionsRequest {
-  type: "list_sessions";
-  workspaceId?: string;  // Filter by workspace, or all if omitted
-}
 
 /** Request list of saved replays, optionally filtered by workspace */
 export interface ListReplaysRequest {
@@ -112,172 +92,15 @@ export interface AttachSessionRequest {
   viewOnly?: boolean;
 }
 
-/** Attach to a shared agent PTY for an existing OpenCode session. */
-export interface AttachAgentSessionRequest {
-  type: 'attach_agent_session';
-  workspaceId: string;
-  agentSessionId: string;
-  cols?: number;
-  rows?: number;
-  viewOnly?: boolean;
-  force?: boolean;
-}
-
-export interface CheckAgentSessionTakeoverRequest {
-  type: 'check_agent_session_takeover';
-  requestId: string;
-  workspaceId: string;
-  agentSessionId: string;
-}
-
-export interface ListAgentSessionsRequest {
-  type: 'list_agent_sessions';
-  requestId: string;
-  workspaceId: string;
-  mode?: 'known' | 'live';
-}
-
-export interface ClearAgentSessionRequest {
-  type: 'clear_agent_session';
-  requestId: string;
-  workspaceId: string;
-  agentSessionId: string;
-}
-
-export interface CreateAgentSessionRequest {
-  type: 'create_agent_session';
-  requestId: string;
-  workspaceId: string;
-  title?: string;
-}
-
-export interface AbortAgentSessionRequest {
-  type: 'abort_agent_session';
-  requestId: string;
-  workspaceId: string;
-  agentSessionId: string;
-}
-
-export interface RespondAgentPermissionRequest {
-  type: 'respond_agent_permission';
-  requestId: string;
-  workspaceId: string;
-  agentSessionId: string;
-  permissionId: string;
-  response: 'allow' | 'deny';
-}
-
 /** Cancel a currently running attach workflow (typically stuck scripts). */
 export interface CancelPendingAttachRequest {
   type: 'cancel_pending_attach';
 }
 
-/** Request wide events for a workspace */
-export interface GetEventsRequest {
-  type: "get_events";
-  workspacePath: string;
-  processName?: string;
-  filter?: import("../../types/events.js").WideEventFilter;
-  limit?: number;
-  sinceMs?: number;
-}
-
-/** Start a process in a workspace */
-export interface StartProcessRequest {
-  type: "start_process";
-  workspaceId: string;
-  processName: string;
-  instance?: number;
-}
-
-/** Stop a process in a workspace */
-export interface StopProcessRequest {
-  type: "stop_process";
-  workspaceId: string;
-  processName: string;
-}
-
-/** Request list of projects on the machine */
-export interface ListProjectsRequest {
-  type: "list_projects";
-}
-
-/** Request list of GitHub repositories visible to the machine user */
-export interface ListGithubReposRequest {
-  type: "list_github_repos";
-  org?: string;
-}
-
-/** Request list of remote branches for a project */
-export interface ListRemoteBranchesRequest {
-  type: "list_remote_branches";
-  projectName: string;
-}
-
-/** Request list of Linear issues for workspace creation */
-export interface ListLinearIssuesRequest {
-  type: "list_linear_issues";
-  projectName: string;
-}
-
-/** Create a project on the machine */
-export interface CreateProjectRequest {
-  type: "create_project";
-  repository: string;
-  projectName?: string;
-  baseBranch?: string;
-  setCurrent?: boolean;
-}
-
-/** Prepare a project clone and inspect bundle onboarding before finalizing */
-export interface PrepareProjectCreationRequest {
-  type: 'prepare_project_creation';
-  repository: string;
-  projectName?: string;
-  baseBranch?: string;
-  setCurrent?: boolean;
-}
-
-/** Finalize a prepared project after onboarding values have been collected */
-export interface FinalizeProjectCreationRequest {
-  type: 'finalize_project_creation';
-  projectName: string;
-  repository: string;
-  baseBranch: string;
-  bundle?: import('../../types/bundle.js').SpacesBundle;
-  inputValues?: Record<string, string>;
-  secretValues?: Record<string, string>;
-  confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>;
-  setCurrent?: boolean;
-}
-
-/** Cancel an in-progress prepared project creation */
-export interface CancelProjectCreationRequest {
-  type: 'cancel_project_creation';
-  projectName: string;
-}
-
-/** Create a workspace in an existing project */
-export interface CreateWorkspaceRequest {
-  type: "create_workspace";
-  projectName: string;
-  workspaceName: string;
-  branchName?: string;
-  baseBranch?: string;
-  workspaceSource?: import("../../types/lifecycle.js").WorkspaceSource;
-  linearIssue?: import("../../types/lifecycle.js").SessionLinearIssueSummary;
-}
-
-/** Delete a project and all its workspaces */
-export interface DeleteProjectRequest {
-  type: "delete_project";
-  projectName: string;
-}
-
-/** Kill a session */
-export interface KillSessionRequest {
-  type: "kill_session";
-  sessionId: string;
+export interface TmuxCommandRequest {
+  type: 'tmux_command';
+  requestId: string;
+  command: import('../tmux-lite/protocol.js').Command;
 }
 
 /** Delete a workspace */
@@ -286,75 +109,6 @@ export interface DeleteWorkspaceRequest {
   workspaceId: string;
   projectName: string;  // Needed to locate workspace
   scriptPolicy?: 'auto' | 'skip';
-}
-
-/** Request inbox items */
-export interface GetInboxRequest {
-  type: "get_inbox";
-}
-
-/** Clear inbox item(s) */
-export interface ClearInboxRequest {
-  type: "clear_inbox";
-  id?: string;  // If omitted, clears all
-}
-
-/** Mark inbox item as read */
-export interface MarkInboxReadRequest {
-  type: "mark_inbox_read";
-  id: string;
-}
-
-/** Request current notification configuration */
-export interface GetNotificationConfigRequest {
-  type: "get_notification_config";
-}
-
-/** Update notification configuration */
-export interface UpdateNotificationConfigRequest {
-  type: "update_notification_config";
-  config: import("../../notifications/types.js").NotificationConfig;
-}
-
-/** Request bundle refresh plan for a workspace */
-export interface GetBundleRefreshPlanRequest {
-  type: "get_bundle_refresh_plan";
-  projectName: string;
-  workspaceId: string;
-}
-
-/** Apply bundle refresh submission for a workspace */
-export interface ApplyBundleRefreshRequest {
-  type: "apply_bundle_refresh";
-  projectName: string;
-  workspaceId: string;
-  submission: import("../../types/bundle-refresh.js").BundleRefreshSubmission;
-}
-
-/** Request ad hoc bundle configuration state for a workspace */
-export interface GetBundleConfigStateRequest {
-  type: 'get_bundle_config_state';
-  projectName: string;
-  workspaceId: string;
-}
-
-/** Apply ad hoc bundle configuration updates for a workspace */
-export interface ApplyBundleConfigUpdateRequest {
-  type: 'apply_bundle_config_update';
-  projectName: string;
-  workspaceId: string;
-  submission: import('../../types/bundle-config.js').BundleConfigSubmission;
-}
-
-/**
- * Review operation request — wraps all review sub-operations in a single
- * message type, matched to its response by requestId.
- */
-export interface ReviewRequest {
-  type: "review_request";
-  /** Unique ID for correlating request → response */
-  requestId: string;
-  operation: import("../../types/review.js").ReviewOperation;
 }
 
 // ============================================================================
@@ -373,6 +127,16 @@ export interface WorkspaceInfo {
   serveDomain?: string; // Hosting domain for process ports
   processes?: { name: string; instances?: number; ports?: import("../../types/processes.js").ProcessPortConfig[] }[];
   processConfigError?: string;
+  /** GitSpace kanban phase (plan | code | review | ship). From project config. */
+  status?: import('../../types/config.js').WorkspacePhase;
+  notesSummary?: import('../../types/workspace.js').WorkspaceNotesSummary;
+}
+
+export interface ProjectInfo {
+  name: string;
+  repository: string;
+  workspaceCount: number;
+  isCurrent: boolean;
 }
 
 /** Session information */
@@ -383,22 +147,14 @@ export interface SessionInfo {
   attached: boolean;      // Currently attached by another client
   createdAt: number;
   processTitle?: string;  // Current process (e.g., "vim", "npm run dev")
+   terminalTitle?: string;
+   lastAlertKind?: import('../tmux-lite/protocol.js').InboxItem['type'];
+   lastAlertPreview?: string;
+   lastAlertAt?: number;
+   unreadAlertCount?: number;
   exitCode?: number;      // If session has exited
   processName?: string;   // Managed process name
   processInstance?: number; // Managed process instance number
-}
-
-/** Response with workspace list */
-export interface WorkspaceListResponse {
-  type: "workspace_list";
-  workspaces: WorkspaceInfo[];
-  savedEventFilters?: import("../../types/events.js").SavedEventFilter[];
-}
-
-/** Response with session list */
-export interface SessionListResponse {
-  type: "session_list";
-  sessions: SessionInfo[];
 }
 
 /** Response with replay list */
@@ -441,6 +197,12 @@ export interface AttachedResponse {
   type: "attached";
   sessionId: string;
   sessionName: string;
+   processTitle?: string;
+   terminalTitle?: string;
+   lastAlertKind?: import('../tmux-lite/protocol.js').InboxItem['type'];
+   lastAlertPreview?: string;
+   lastAlertAt?: number;
+   unreadAlertCount?: number;
   cols: number;
   rows: number;
 }
@@ -467,121 +229,10 @@ export interface ErrorResponse {
   requestId?: string;
 }
 
-/** Project information */
-export interface ProjectInfo {
-  name: string;
-  repository: string;
-  workspaceCount: number;
-  isCurrent: boolean;
-}
-
-/** Response with project list */
-export interface ProjectListResponse {
-  type: "project_list";
-  projects: ProjectInfo[];
-}
-
-/** Response with GitHub repository list */
-export interface GithubRepoListResponse {
-  type: "github_repo_list";
-  repos: string[];
-}
-
-/** Response with remote branch list */
-export interface RemoteBranchListResponse {
-  type: "remote_branch_list";
-  projectName: string;
-  branches: string[];
-}
-
-/** Response with Linear issue list */
-export interface LinearIssueListResponse {
-  type: "linear_issue_list";
-  projectName: string;
-  issues: import("../../types/lifecycle.js").SessionLinearIssueSummary[];
-}
-
-/** Prepared project clone with optional bundle onboarding requirements */
-export interface ProjectCreationPreparedResponse {
-  type: 'project_creation_prepared';
-  projectName: string;
-  repository: string;
-  baseBranch: string;
-  bundle?: import('../../types/bundle.js').SpacesBundle;
-  confirmStatuses?: Record<string, 'found' | 'missing'>;
-}
-
-/** Project created successfully */
-export interface ProjectCreatedResponse {
-  type: "project_created";
-  projectName: string;
-  repository: string;
-  baseBranch: string;
-}
-
-/** Prepared project creation cancelled and cleaned up */
-export interface ProjectCreationCancelledResponse {
-  type: 'project_creation_cancelled';
-  projectName: string;
-}
-
-/** Workspace created successfully */
-export interface WorkspaceCreatedResponse {
-  type: "workspace_created";
-  projectName: string;
-  workspaceId: string;
-  workspaceName: string;
-  branchName: string;
-}
-
-/** Project deleted successfully */
-export interface ProjectDeletedResponse {
-  type: "project_deleted";
-  projectName: string;
-}
-
-/** Session killed response */
-export interface SessionKilledResponse {
-  type: "session_killed";
-  sessionId: string;
-  workspaceId: string;
-}
-
 /** Workspace deleted response */
 export interface WorkspaceDeletedResponse {
   type: "workspace_deleted";
   workspaceId: string;
-}
-
-/** Response with inbox items */
-export interface InboxListResponse {
-  type: "inbox_list";
-  items: import("../tmux-lite/protocol.js").InboxItem[];
-  unreadCount: number;
-}
-
-/** Inbox item(s) cleared response */
-export interface InboxClearedResponse {
-  type: "inbox_cleared";
-  id?: string;  // Which item was cleared, or undefined if all cleared
-}
-
-/** Inbox item marked as read response */
-export interface InboxMarkedReadResponse {
-  type: "inbox_marked_read";
-  id: string;
-}
-
-/** Current notification configuration */
-export interface NotificationConfigResponse {
-  type: "notification_config";
-  config: import("../../notifications/types.js").NotificationConfig;
-}
-
-/** Notification configuration updated */
-export interface NotificationConfigUpdatedResponse {
-  type: "notification_config_updated";
-  config: import("../../notifications/types.js").NotificationConfig;
 }
 
 /** Script output during attach_session (streams lifecycle script output) */
@@ -599,90 +250,10 @@ export interface ScriptOutputResponse {
   error?: string;
 }
 
-/** Bundle refresh plan response */
-export interface BundleRefreshPlanResponse {
-  type: "bundle_refresh_plan";
-  plan: import("../../types/bundle-refresh.js").BundleRefreshPlan;
-}
-
-/** Bundle refresh applied successfully */
-export interface BundleRefreshAppliedResponse {
-  type: "bundle_refresh_applied";
-  projectName: string;
-  workspaceId: string;
-}
-
-/** Bundle configuration state response */
-export interface BundleConfigStateResponse {
-  type: 'bundle_config_state';
-  state: import('../../types/bundle-config.js').BundleConfigState;
-}
-
-/** Bundle configuration update applied successfully */
-export interface BundleConfigUpdatedResponse {
-  type: 'bundle_config_updated';
-  projectName: string;
-  workspaceId: string;
-}
-
-/** Review operation response — carries either a result or an error */
-export interface ReviewResponse {
-  type: "review_response";
-  /** Matches the requestId from the ReviewRequest */
+export interface TmuxCommandResponse {
+  type: 'tmux_command_response';
   requestId: string;
-  result?: import("../../types/review.js").ReviewResult;
-  error?: { code: string; message: string };
-}
-
-/** Response with wide events list */
-export interface EventsListResponse {
-  type: "events_list";
-  workspaceId: string;
-  events: import("../../types/events.js").WideEvent[];
-  liveEventIds: string[];
-  savedEventFilters?: import("../../types/events.js").SavedEventFilter[];
-  requestId?: string;
-  chunkIndex?: number;
-  totalChunks?: number;
-}
-
-/** Process started response */
-export interface ProcessStartedResponse {
-  type: "process_started";
-  workspaceId: string;
-  processName: string;
-  sessionId?: string;
-  sessionIds?: string[];
-}
-
-/** Process stopped response */
-export interface ProcessStoppedResponse {
-  type: "process_stopped";
-  workspaceId: string;
-  processName: string;
-}
-
-export interface AgentSessionsResponse {
-  type: 'agent_sessions';
-  requestId: string;
-  workspaceId: string;
-  sessions: Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>;
-}
-
-export interface AgentBoolResponse {
-  type: 'agent_bool';
-  requestId: string;
-  workspaceId: string;
-  ok: boolean;
-}
-
-export interface AgentTakeoverStatusResponse {
-  type: 'agent_takeover_status';
-  requestId: string;
-  workspaceId: string;
-  agentSessionId: string;
-  requiresTakeover: boolean;
-  sessionName?: string;
+  response: import('../tmux-lite/protocol.js').Response;
 }
 
 /**
@@ -691,7 +262,7 @@ export interface AgentTakeoverStatusResponse {
  */
 export interface AgentStateSnapshotPush {
   type: 'agent_state_snapshot';
-  workspaces: import('../../serve/agent-event-manager.js').WorkspaceAgentState[];
+  workspaces: import('../tmux-lite/agent-event-manager.js').WorkspaceAgentState[];
 }
 
 /**
@@ -700,8 +271,20 @@ export interface AgentStateSnapshotPush {
  */
 export interface AgentStateUpdatePush {
   type: 'agent_state_update';
-  delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta;
+  delta: import('../tmux-lite/agent-event-manager.js').AgentStateUpdateDelta;
 }
+
+/**
+ * Machine pushes a full machine snapshot to the client.
+ * Sent immediately after handshake + on every snapshot-replaced event.
+ * This is an unsolicited push — no client request needed.
+ */
+export interface MachineSnapshotPush {
+  type: 'machine_snapshot';
+  snapshot: import('../tmux-lite/machine/protocol.js').MachineSnapshot;
+}
+
+
 
 // ============================================================================
 // Union Types
@@ -709,53 +292,19 @@ export interface AgentStateUpdatePush {
 
 /** All messages from client to machine (browsing mode) */
 export type ClientToMachineMessage =
-  | ListWorkspacesRequest
-  | ListSessionsRequest
   | ListReplaysRequest
   | GetReplayFrameRequest
   | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
-  | AttachAgentSessionRequest
-  | CheckAgentSessionTakeoverRequest
-  | ListAgentSessionsRequest
-  | ClearAgentSessionRequest
-  | CreateAgentSessionRequest
-  | AbortAgentSessionRequest
-  | RespondAgentPermissionRequest
   | CancelPendingAttachRequest
-  | ListProjectsRequest
-  | ListGithubReposRequest
-  | ListRemoteBranchesRequest
-  | ListLinearIssuesRequest
-  | CreateProjectRequest
-  | PrepareProjectCreationRequest
-  | FinalizeProjectCreationRequest
-  | CancelProjectCreationRequest
-  | CreateWorkspaceRequest
-  | DeleteProjectRequest
-  | KillSessionRequest
   | DeleteWorkspaceRequest
-  | GetInboxRequest
-  | ClearInboxRequest
-  | MarkInboxReadRequest
-  | GetNotificationConfigRequest
-  | UpdateNotificationConfigRequest
-  | GetBundleRefreshPlanRequest
-  | ApplyBundleRefreshRequest
-  | GetBundleConfigStateRequest
-  | ApplyBundleConfigUpdateRequest
-  | ReviewRequest
-  | GetEventsRequest
-  | StartProcessRequest
-  | StopProcessRequest
+  | TmuxCommandRequest
   ;
 
 /** All messages from machine to client (browsing mode) */
 export type MachineToClientMessage =
-  | WorkspaceListResponse
-  | SessionListResponse
   | ReplayListResponse
   | ReplayFrameResponse
   | ReplayTimelineResponse
@@ -765,36 +314,12 @@ export type MachineToClientMessage =
   | DetachedResponse
   | SessionExitedResponse
   | ErrorResponse
-  | ProjectListResponse
-  | GithubRepoListResponse
-  | RemoteBranchListResponse
-  | LinearIssueListResponse
-  | ProjectCreationPreparedResponse
-  | ProjectCreatedResponse
-  | ProjectCreationCancelledResponse
-  | WorkspaceCreatedResponse
-  | ProjectDeletedResponse
-  | SessionKilledResponse
   | WorkspaceDeletedResponse
-  | InboxListResponse
-  | InboxClearedResponse
-  | InboxMarkedReadResponse
-  | NotificationConfigResponse
-  | NotificationConfigUpdatedResponse
   | ScriptOutputResponse
-  | BundleRefreshPlanResponse
-  | BundleRefreshAppliedResponse
-  | BundleConfigStateResponse
-  | BundleConfigUpdatedResponse
-  | ReviewResponse
-  | EventsListResponse
-  | ProcessStartedResponse
-  | ProcessStoppedResponse
-  | AgentSessionsResponse
-  | AgentBoolResponse
-  | AgentTakeoverStatusResponse
+  | TmuxCommandResponse
   | AgentStateSnapshotPush
-  | AgentStateUpdatePush;
+  | AgentStateUpdatePush
+  | MachineSnapshotPush;
 
 /** All remote session messages */
 export type RemoteSessionMessage =
@@ -828,65 +353,27 @@ export function serializeRemoteMessage(msg: RemoteSessionMessage): string {
 }
 
 /**
- * Check if a message is a browse command (workspace/session listing)
+ * Check if a message is a browse command
  */
 export function isBrowseMessage(msg: RemoteSessionMessage): msg is
-  | ListWorkspacesRequest
-  | ListSessionsRequest
   | ListReplaysRequest
   | GetReplayFrameRequest
   | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
   | AttachSessionRequest
-  | AttachAgentSessionRequest
-  | CheckAgentSessionTakeoverRequest
-  | ListAgentSessionsRequest
-  | ClearAgentSessionRequest
-  | CreateAgentSessionRequest
-  | AbortAgentSessionRequest
-  | RespondAgentPermissionRequest
   | CancelPendingAttachRequest
-  | ListGithubReposRequest
-  | ListRemoteBranchesRequest
-  | ListLinearIssuesRequest
-  | CreateProjectRequest
-  | PrepareProjectCreationRequest
-  | FinalizeProjectCreationRequest
-  | CancelProjectCreationRequest
-  | CreateWorkspaceRequest
-  | DeleteProjectRequest
-  | GetBundleConfigStateRequest
-  | ApplyBundleConfigUpdateRequest
-  | GetEventsRequest {
+  | DeleteWorkspaceRequest
+  | TmuxCommandRequest {
   return [
-    "list_workspaces",
-    "list_sessions",
     'list_replays',
     'get_replay_frame',
     'get_replay_timeline',
     'dismiss_replay',
     'undismiss_replay',
     "attach_session",
-    'attach_agent_session',
-    'check_agent_session_takeover',
-    'list_agent_sessions',
-    'clear_agent_session',
-    'create_agent_session',
-    'abort_agent_session',
-    'respond_agent_permission',
     'cancel_pending_attach',
-    "list_github_repos",
-    "list_remote_branches",
-    "list_linear_issues",
-    "create_project",
-    'prepare_project_creation',
-    'finalize_project_creation',
-    'cancel_project_creation',
-    "create_workspace",
-    "delete_project",
-    'get_bundle_config_state',
-    'apply_bundle_config_update',
-    "get_events",
+    'delete_workspace',
+    'tmux_command',
   ].includes(msg.type);
 }

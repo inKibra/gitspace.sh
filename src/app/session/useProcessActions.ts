@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ProcessStartCancelledError } from './resolveProcessStartConflict.js'
 
 export interface ProcessSessionInfo {
   id: string
@@ -12,6 +13,7 @@ export interface ProcessSessionInfo {
 export interface ProcessActionParams {
   workspaceId: string
   processName: string
+  instance?: number
 }
 
 export interface ProcessStartAttachParams extends ProcessActionParams {
@@ -93,8 +95,11 @@ export function useProcessActions(options: UseProcessActionsOptions): UseProcess
   }, [])
 
   const handleStartProcess = useCallback((params: ProcessActionParams) => {
-    void Promise.resolve(startProcess(params.workspaceId, params.processName))
+    void Promise.resolve(startProcess(params.workspaceId, params.processName, params.instance))
       .catch((error) => {
+        if (error instanceof ProcessStartCancelledError) {
+          return
+        }
         onStartProcessError?.(error)
       })
       .finally(() => {
@@ -125,6 +130,9 @@ export function useProcessActions(options: UseProcessActionsOptions): UseProcess
         setPendingProcessAttach((current) =>
           matchesTarget(current, target) ? null : current
         )
+        if (error instanceof ProcessStartCancelledError) {
+          return
+        }
         const errorHandler = onStartProcessAttachError ?? onStartProcessError
         errorHandler?.(error)
       })

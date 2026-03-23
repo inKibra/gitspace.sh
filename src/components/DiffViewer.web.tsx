@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from 'react';
 import { FileDiff } from '@pierre/diffs/react';
 import {
   parsePatchFiles,
@@ -31,6 +31,7 @@ export interface DiffViewerProps {
   threads: ReviewThread[];
   onCreateThread: (target: ThreadTarget, body: string, decision?: HunkDecision) => Promise<void>;
   onUpdateThread: (threadId: string, updates: { decision?: HunkDecision }) => Promise<void>;
+  onApprovePath?: (path: string, pathKind: 'file' | 'folder') => Promise<void>;
   onRequestFileDiff: (filePath: string, prevFilePath?: string) => Promise<string>;
   onRequestFileContextRange: (
     filePath: string,
@@ -90,6 +91,22 @@ type FileContextState =
     }
   | { status: 'error'; error: SpacesError };
 
+interface FileApprovalState {
+  totalHunks: number;
+  approvedHunks: number;
+  rejectedHunks: number;
+  pendingHunks: number;
+  isApproved: boolean;
+}
+
+interface FileTreeNode {
+  type: 'folder' | 'file';
+  name: string;
+  path: string;
+  files: ReviewChangedFile[];
+  children: FileTreeNode[];
+}
+
 type InlineAnnotationMeta =
   | { kind: 'thread'; thread: ReviewThread }
   | {
@@ -128,6 +145,7 @@ export function DiffViewer({
   threads,
   onCreateThread,
   onUpdateThread,
+  onApprovePath,
   onRequestFileDiff,
   onRequestFileContextRange,
   onThreadClick,
@@ -137,6 +155,12 @@ export function DiffViewer({
   focusRequest,
 }: DiffViewerProps) {
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
+  const [fileListWidth, setFileListWidth] = useState(260);
+  const [fileListMode, setFileListMode] = useState<'list' | 'tree'>('list');
+  const [hideApprovedFiles, setHideApprovedFiles] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
+  const [approvingPath, setApprovingPath] = useState<string | null>(null);
+  const [reviewStateByFileKey, setReviewStateByFileKey] = useState<Record<string, FileApprovalState>>({});
   const [fileDiffStateByKey, setFileDiffStateByKey] = useState<Record<string, FileDiffState>>({});
   const [contextStateByKey, setContextStateByKey] = useState<Record<string, FileContextState>>({});
 
@@ -190,9 +214,80 @@ export function DiffViewer({
   const selectedDiffState = selectedKey ? fileDiffStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
   const selectedContextState = selectedKey ? contextStateByKey[selectedKey] ?? ({ status: 'idle' } as const) : null;
 
+  const startFileListResize = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const initialClientX = event.clientX;
+    const initialWidth = fileListWidth;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - initialClientX;
+      const next = Math.min(480, Math.max(180, initialWidth + delta));
+      setFileListWidth(next);
+    };
+
+    const handleUp = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+  }, [fileListWidth]);
+
   useEffect(() => {
     onSelectedFileChange?.(selectedFile?.filePath ?? null);
   }, [onSelectedFileChange, selectedFile]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadReviewState = async () => {
+      const entries = await Promise.all(files.map(async (file) => {
+        try {
+          const diff = await onRequestFileDiff(file.filePath, file.prevFilePath);
+          const parsed = parseSingleFileDiff(diff, file);
+          const totalHunks = parsed.hunks.length;
+          const key = fileKey(file.filePath, file.prevFilePath);
+          const fileThreads = threads.filter((thread) => thread.target.kind === 'hunk' && thread.target.file === file.filePath);
+          const decisions = new Map<string, HunkDecision>();
+          for (const hunk of parsed.hunks) {
+            const matching = fileThreads.filter((thread) => (
+              thread.target.kind === 'hunk' &&
+              normalizeHunkHeader(thread.target.hunkHeader) === normalizeHunkHeader(hunk.header)
+            ));
+            decisions.set(normalizeHunkHeader(hunk.header), aggregateHunkDecision(matching));
+          }
+          const approvedHunks = [...decisions.values()].filter((decision) => decision === 'approved').length;
+          const rejectedHunks = [...decisions.values()].filter((decision) => decision === 'rejected').length;
+          const pendingHunks = Math.max(0, totalHunks - approvedHunks - rejectedHunks);
+          return [key, {
+            totalHunks,
+            approvedHunks,
+            rejectedHunks,
+            pendingHunks,
+            isApproved: totalHunks > 0 && approvedHunks === totalHunks,
+          } satisfies FileApprovalState] as const;
+        } catch {
+          return [fileKey(file.filePath, file.prevFilePath), {
+            totalHunks: 0,
+            approvedHunks: 0,
+            rejectedHunks: 0,
+            pendingHunks: 0,
+            isApproved: false,
+          } satisfies FileApprovalState] as const;
+        }
+      }));
+
+      if (!cancelled) {
+        setReviewStateByFileKey(Object.fromEntries(entries));
+      }
+    };
+
+    void loadReviewState();
+    return () => {
+      cancelled = true;
+    };
+  }, [files, threads, onRequestFileDiff]);
 
   useEffect(() => {
     fileDiffStateByKeyRef.current = fileDiffStateByKey;
@@ -826,14 +921,41 @@ export function DiffViewer({
   const contextLoading = selectedContextState?.status === 'loading';
   const contextError = selectedContextState?.status === 'error' ? selectedContextState.error.message : null;
   const contextReady = selectedContextState?.status === 'ready';
+  const visibleFiles = useMemo(() => {
+    if (!hideApprovedFiles) {
+      return files;
+    }
+    return files.filter((file) => !reviewStateByFileKey[fileKey(file.filePath, file.prevFilePath)]?.isApproved);
+  }, [files, hideApprovedFiles, reviewStateByFileKey]);
+  const visibleFileTree = useMemo(() => buildFileTree(visibleFiles), [visibleFiles]);
 
-  return (
-    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+  useEffect(() => {
+    if (!selectedKey) {
+      return;
+    }
+    if (!visibleFiles.some((file) => fileKey(file.filePath, file.prevFilePath) === selectedKey)) {
+      setSelectedFileKey(visibleFiles[0] ? fileKey(visibleFiles[0].filePath, visibleFiles[0].prevFilePath) : null);
+    }
+  }, [selectedKey, visibleFiles]);
+
+  const handleApprovePath = useCallback(async (path: string, pathKind: 'file' | 'folder') => {
+    if (!onApprovePath) {
+      return;
+    }
+    setApprovingPath(`${pathKind}:${path}`);
+    try {
+      await onApprovePath(path, pathKind);
+    } finally {
+      setApprovingPath(null);
+    }
+  }, [onApprovePath]);
+
+    return (
+      <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       <div style={{
-        width: '220px',
+        width: `${fileListWidth}px`,
         flexShrink: 0,
-        borderRight: '1px solid #30363d',
-        overflow: 'auto',
+        overflow: 'hidden',
         background: '#0d1117',
         display: 'flex',
         flexDirection: 'column',
@@ -847,62 +969,66 @@ export function DiffViewer({
           letterSpacing: '0.06em',
           borderBottom: '1px solid #21262d',
           flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
         }}>
-          {files.length} file{files.length !== 1 ? 's' : ''}
+          <span>{visibleFiles.length} file{visibleFiles.length !== 1 ? 's' : ''}</span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px', alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={() => setHideApprovedFiles((value) => !value)}
+              style={miniToggleStyle(hideApprovedFiles)}
+            >
+              Hide approved
+            </button>
+            <button
+              type="button"
+              onClick={() => setFileListMode((mode) => mode === 'list' ? 'tree' : 'list')}
+              style={miniToggleStyle(fileListMode === 'tree')}
+            >
+              {fileListMode === 'tree' ? 'Tree' : 'List'}
+            </button>
+          </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
-          {files.map((file) => {
-            const key = fileKey(file.filePath, file.prevFilePath);
-            const isSelected = selectedKey === key;
-            const color = CHANGE_COLOR[file.changeType];
-            const label = CHANGE_LABEL[file.changeType];
-            const lastSlash = file.filePath.lastIndexOf('/');
-            const dirPart = lastSlash >= 0 ? file.filePath.slice(0, lastSlash + 1) : '';
-            const basePart = lastSlash >= 0 ? file.filePath.slice(lastSlash + 1) : file.filePath;
-
-            return (
-              <button
-                key={key}
-                onClick={() => setSelectedFileKey(key)}
-                title={file.filePath}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  padding: '5px 10px',
-                  background: isSelected ? '#161b22' : 'transparent',
-                  borderLeft: isSelected ? '2px solid #58a6ff' : '2px solid transparent',
-                  borderTop: 'none',
-                  borderRight: 'none',
-                  borderBottom: 'none',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  minWidth: 0,
-                }}
-              >
-                <span style={{ fontSize: '10px', fontWeight: 700, color, flexShrink: 0, width: '12px', textAlign: 'center' }}>
-                  {label}
-                </span>
-                <span style={{
-                  flex: 1,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  fontSize: '12px',
-                  color: isSelected ? '#e6edf3' : '#8b949e',
-                  fontFamily: 'monospace',
-                }}>
-                  {dirPart && <span style={{ color: '#6e7681' }}>{dirPart}</span>}
-                  {basePart}
-                </span>
-              </button>
-            );
-          })}
+          {visibleFiles.length === 0 ? (
+            <div style={{ padding: '12px 10px', fontSize: '12px', color: '#6e7681' }}>
+              No visible files.
+            </div>
+          ) : fileListMode === 'tree' ? (
+            renderFileTreeNodes({
+              nodes: visibleFileTree,
+              selectedKey,
+              expandedFolders,
+              onToggleFolder: (path) => setExpandedFolders((prev) => ({ ...prev, [path]: !prev[path] })),
+              onSelectFile: setSelectedFileKey,
+              onApproveFolder: onApprovePath ? (path) => void handleApprovePath(path, 'folder') : undefined,
+              approvingPath,
+              reviewStateByFileKey,
+            })
+          ) : (
+            visibleFiles.map((file) => renderFileListRow({
+              file,
+              selectedKey,
+              onSelectFile: setSelectedFileKey,
+              reviewState: reviewStateByFileKey[fileKey(file.filePath, file.prevFilePath)],
+            }))
+          )}
         </div>
       </div>
+
+      <div
+        onMouseDown={startFileListResize}
+        style={{
+          width: '6px',
+          cursor: 'col-resize',
+          background: 'transparent',
+          borderLeft: '1px solid #30363d',
+          flexShrink: 0,
+        }}
+      />
 
       <div ref={diffHostRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <div style={{
@@ -1070,6 +1196,233 @@ export function DiffViewer({
 
 function fileKey(filePath: string, prevFilePath?: string): string {
   return `${prevFilePath ?? ''}=>${filePath}`;
+}
+
+function miniToggleStyle(active: boolean): CSSProperties {
+  return {
+    fontSize: '10px',
+    padding: '3px 6px',
+    borderRadius: '999px',
+    border: '1px solid #30363d',
+    background: active ? '#1f6feb22' : '#161b22',
+    color: active ? '#58a6ff' : '#8b949e',
+    cursor: 'pointer',
+  };
+}
+
+function renderFileListRow({
+  file,
+  selectedKey,
+  onSelectFile,
+  reviewState,
+  depth = 0,
+}: {
+  file: ReviewChangedFile;
+  selectedKey: string | null;
+  onSelectFile: (key: string) => void;
+  reviewState?: FileApprovalState;
+  depth?: number;
+}) {
+  const key = fileKey(file.filePath, file.prevFilePath);
+  const isSelected = selectedKey === key;
+  const color = CHANGE_COLOR[file.changeType];
+  const label = CHANGE_LABEL[file.changeType];
+  const lastSlash = file.filePath.lastIndexOf('/');
+  const dirPart = lastSlash >= 0 ? file.filePath.slice(0, lastSlash + 1) : '';
+  const basePart = lastSlash >= 0 ? file.filePath.slice(lastSlash + 1) : file.filePath;
+
+  return (
+    <button
+      key={key}
+      onClick={() => onSelectFile(key)}
+      title={file.filePath}
+      style={{
+        width: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '5px 10px',
+        paddingLeft: `${10 + depth * 14}px`,
+        background: isSelected ? '#161b22' : 'transparent',
+        borderLeft: isSelected ? '2px solid #58a6ff' : '2px solid transparent',
+        borderTop: 'none',
+        borderRight: 'none',
+        borderBottom: 'none',
+        cursor: 'pointer',
+        textAlign: 'left',
+        minWidth: 0,
+      }}
+    >
+      <span style={{ fontSize: '10px', fontWeight: 700, color, flexShrink: 0, width: '12px', textAlign: 'center' }}>
+        {label}
+      </span>
+      <span style={{
+        flex: 1,
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        fontSize: '12px',
+        color: isSelected ? '#e6edf3' : '#8b949e',
+        fontFamily: 'monospace',
+      }}>
+        {dirPart && <span style={{ color: '#6e7681' }}>{dirPart}</span>}
+        {basePart}
+      </span>
+      {reviewState?.isApproved && <span style={{ color: '#22c55e', fontSize: '10px' }}>OK</span>}
+    </button>
+  );
+}
+
+function buildFileTree(files: ReviewChangedFile[]): FileTreeNode[] {
+  const root = new Map<string, FileTreeNode>();
+
+  for (const file of files) {
+    const parts = file.filePath.split('/');
+    let current = root;
+    let currentPath = '';
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index]!;
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const isFile = index === parts.length - 1;
+      const existing = current.get(part);
+      if (existing) {
+        if (isFile) existing.files.push(file);
+        current = ensureChildMap(existing);
+        continue;
+      }
+      const node: FileTreeNode = {
+        type: isFile ? 'file' : 'folder',
+        name: part,
+        path: currentPath,
+        files: isFile ? [file] : [],
+        children: [],
+      };
+      current.set(part, node);
+      current = ensureChildMap(node);
+    }
+  }
+
+  return sortTreeNodes([...root.values()]);
+}
+
+function ensureChildMap(node: FileTreeNode): Map<string, FileTreeNode> {
+  const map = new Map<string, FileTreeNode>();
+  for (const child of node.children) {
+    map.set(child.name, child);
+  }
+  node.children = [...map.values()];
+  return new Proxy(map, {
+    set(target, property, value) {
+      const result = Reflect.set(target, property, value);
+      node.children = sortTreeNodes([...target.values()]);
+      return result;
+    },
+  });
+}
+
+function sortTreeNodes(nodes: FileTreeNode[]): FileTreeNode[] {
+  return [...nodes].sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function collectNodeFiles(node: FileTreeNode): ReviewChangedFile[] {
+  if (node.type === 'file') {
+    return node.files;
+  }
+  return node.children.flatMap(collectNodeFiles);
+}
+
+function renderFileTreeNodes({
+  nodes,
+  selectedKey,
+  expandedFolders,
+  onToggleFolder,
+  onSelectFile,
+  onApproveFolder,
+  approvingPath,
+  reviewStateByFileKey,
+  depth = 0,
+}: {
+  nodes: FileTreeNode[];
+  selectedKey: string | null;
+  expandedFolders: Record<string, boolean>;
+  onToggleFolder: (path: string) => void;
+  onSelectFile: (key: string) => void;
+  onApproveFolder?: (path: string) => void;
+  approvingPath: string | null;
+  reviewStateByFileKey: Record<string, FileApprovalState>;
+  depth?: number;
+}): ReactElement[] {
+  return nodes.flatMap((node) => {
+    if (node.type === 'file') {
+      return [renderFileListRow({
+        file: node.files[0]!,
+        selectedKey,
+        onSelectFile,
+        reviewState: reviewStateByFileKey[fileKey(node.files[0]!.filePath, node.files[0]!.prevFilePath)],
+        depth,
+      })];
+    }
+
+    const childFiles = collectNodeFiles(node);
+    const allApproved = childFiles.length > 0 && childFiles.every((file) => reviewStateByFileKey[fileKey(file.filePath, file.prevFilePath)]?.isApproved);
+    const isExpanded = expandedFolders[node.path] ?? depth < 1;
+    const header = (
+      <div
+        key={`folder:${node.path}`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '5px 10px',
+          paddingLeft: `${10 + depth * 14}px`,
+          color: '#8b949e',
+          fontSize: '12px',
+        }}
+      >
+        <button type="button" onClick={() => onToggleFolder(node.path)} style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', padding: 0 }}>
+          {isExpanded ? '▾' : '▸'}
+        </button>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
+        <span style={{ fontSize: '10px', color: allApproved ? '#22c55e' : '#6e7681' }}>{childFiles.length}</span>
+        {onApproveFolder && (
+          <button
+            type="button"
+            onClick={() => onApproveFolder(node.path)}
+            disabled={allApproved || approvingPath === `folder:${node.path}`}
+            style={{
+              fontSize: '10px',
+              padding: '2px 6px',
+              borderRadius: '999px',
+              border: '1px solid #30363d',
+              background: allApproved ? '#161b22' : '#22c55e22',
+              color: allApproved ? '#6e7681' : '#22c55e',
+              cursor: allApproved ? 'default' : 'pointer',
+            }}
+          >
+            {approvingPath === `folder:${node.path}` ? '...' : 'Approve'}
+          </button>
+        )}
+      </div>
+    );
+
+    return isExpanded
+      ? [header, ...renderFileTreeNodes({
+        nodes: node.children,
+        selectedKey,
+        expandedFolders,
+        onToggleFolder,
+        onSelectFile,
+        onApproveFolder,
+        approvingPath,
+        reviewStateByFileKey,
+        depth: depth + 1,
+      })]
+      : [header];
+  });
 }
 
 function parseSingleFileDiff(diff: string, file: ReviewChangedFile): LoadedFileDiff {

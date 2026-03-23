@@ -34,7 +34,6 @@ function makeTuiProps(overrides: Partial<UseSpacesBrowserReturn> = {}): UseSpace
     attachSession: mock(async () => {}),
     openReplay: mock(async () => {}),
     startProcessAttach: mock(() => {}),
-    startProcess: mock(() => {}),
     stopProcess: mock(() => {}),
     createNewSession: mock(async () => {}),
     createWorkspace: mock(() => {}),

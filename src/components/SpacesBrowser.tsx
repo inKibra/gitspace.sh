@@ -8,7 +8,14 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
-import type { SessionStatus } from '../agents/opencode-event-types.js';
+import type {
+  MachineWorkspaceLinearRecord,
+  MachineWorkspacePullRequestRecord,
+} from '../lib/tmux-lite/machine/types.js';
+import type { AgentSessionInfo } from '../machine/api/list-types.js';
+import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
+import type { WorkspaceNotesSummary } from '../types/workspace.js';
+export type { AgentSessionInfo } from '../machine/api/list-types.js';
 
 export type { ReplayInfo };
 
@@ -41,6 +48,9 @@ export interface WorkspaceInfo {
   processes?: WorkspaceProcessInfo[];
   serveDomain?: string;
   processConfigError?: string;
+  pullRequest?: MachineWorkspacePullRequestRecord;
+  linear?: MachineWorkspaceLinearRecord;
+  notesSummary?: WorkspaceNotesSummary;
 }
 
 /** Session info from machine */
@@ -51,21 +61,16 @@ export interface SessionInfo {
   attached: boolean;
   createdAt: number;
   processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: import('../lib/tmux-lite/protocol.js').InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
   processName?: string;
   processInstance?: number;
   exitCode?: number;
 }
 
-export interface AgentSessionInfo {
-  id: string;
-  workspaceId: string;
-  title: string;
-  updatedAt?: string;
-  closed?: boolean;
-  status?: SessionStatus;
-  pendingPermissionCount?: number;
-  errorMessage?: string;
-}
 
 export type AgentSessionDisplayState =
   | 'closed'
@@ -76,7 +81,7 @@ export type AgentSessionDisplayState =
   | 'waiting';
 
 export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSessionDisplayState {
-  if (session.closed) {
+  if (session.closedAt) {
     return 'closed';
   }
   if ((session.pendingPermissionCount ?? 0) > 0) {
@@ -120,11 +125,11 @@ export type TreeItem =
   | { type: 'agents'; workspaceId: string; count?: number; pendingPermissions?: number; expanded: boolean }
   | { type: 'agent-session'; session: AgentSessionInfo; workspaceId: string }
   | { type: 'new-agent-session'; workspaceId: string }
-  | { type: 'session'; session: SessionInfo; workspaceId: string }
+  | { type: 'session'; session: SessionInfo; workspaceId: string; subtitle?: string; alertLabel?: string }
   | { type: 'replay-section'; workspaceId: string; count: number; expanded: boolean }
   | { type: 'orphaned-replay-section'; projectName: string; count: number; expanded: boolean }
   | { type: 'replay'; replay: ReplayInfo; workspaceId: string }
-  | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string }
+  | { type: 'process'; processName: string; instance: number; workspaceId: string; status: 'running' | 'stopped' | 'failed'; ports?: WorkspaceProcessPort[]; serveDomain?: string; subtitle?: string; alertLabel?: string; attachableSessionId?: string }
   | { type: 'process-disabled'; processName: string; workspaceId: string; ports?: WorkspaceProcessPort[] }
   | { type: 'process-config-error'; workspaceId: string; error: string }
   | { type: 'edit-processes'; workspaceId: string }
@@ -143,10 +148,8 @@ export interface UseSpacesBrowserProps {
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
   replays: ReplayInfo[];
-  onRequestSessions: (workspaceId?: string) => void;
   onAttachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => void | Promise<void>;
   onOpenReplay: (replayId: string) => void | Promise<void>;
-  onStartProcess?: (params: { workspaceId: string; processName: string }) => void;
   onStartProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
   onStopProcess?: (params: { workspaceId: string; processName: string }) => void;
   onProcessDisabled?: (params: { workspaceId: string; processName: string }) => void;
@@ -158,13 +161,12 @@ export interface UseSpacesBrowserProps {
   agentSessionCounts?: Record<string, number>;
   /** Pending permission count per workspace, from useWorkspaceAgentEvents */
   pendingPermissionsByWorkspace?: Record<string, number>;
+  runtimeByWorkspace?: Record<string, WorkspaceRuntimeEntry>;
   onEditProcesses?: (params: { workspaceId: string }) => void;
   onManageBundleConfig?: (params: { workspaceId: string }) => void;
   onRefresh: () => void | Promise<void>;
   /** Called to refresh sessions after workspace refresh (full refresh by default). */
   onRefreshSessions?: () => void | Promise<void>;
-  /** Called to refresh agent state for expanded/selected workspaces. */
-  onRefreshAgents?: (context: { expandedWorkspaceIds: string[]; selectedWorkspaceId: string | null }) => void | Promise<void>;
   onBack: () => void;
   /** Called when user wants to create a new workspace */
   onCreateWorkspace?: () => void;
@@ -198,7 +200,6 @@ export interface UseSpacesBrowserReturn {
   attachSession: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => Promise<void>;
   openReplay: (replayId: string) => Promise<void>;
   startProcessAttach: (params: { workspaceId: string; processName: string; instance: number }) => void;
-  startProcess: (params: { workspaceId: string; processName: string }) => void;
   stopProcess: (params: { workspaceId: string; processName: string }) => void;
   createNewSession: () => Promise<void>;
   createWorkspace: () => void;
@@ -253,9 +254,19 @@ function buildTree(
   showProjectHeaders: boolean = true,
   agentSessionsByWorkspace: Record<string, AgentSessionInfo[]> = {},
   pendingPermissionsByWorkspace: Record<string, number> = {},
+  runtimeByWorkspace: Record<string, WorkspaceRuntimeEntry> = {},
 ): TreeItem[] {
   const items: TreeItem[] = [];
   const projectGroups = groupByProject(workspaces, replays);
+
+  const sortWorkspaceSessions = (workspaceSessions: SessionInfo[]): SessionInfo[] => (
+    [...workspaceSessions].sort((a, b) => {
+      const aProcess = a.processName ? 0 : 1;
+      const bProcess = b.processName ? 0 : 1;
+      if (aProcess !== bProcess) return aProcess - bProcess;
+      return a.name.localeCompare(b.name);
+    })
+  );
 
   for (const group of projectGroups) {
     const workspaceIds = new Set(group.workspaces.map((workspace) => workspace.id));
@@ -283,69 +294,83 @@ function buildTree(
 
       // If expanded, show processes, sessions, events, and new session action
       if (isExpanded) {
-        const workspaceSessions = sessions
-          .filter(s => s.workspaceId === ws.id)
-          .sort((a, b) => {
-            const aProcess = a.processName ? 0 : 1;
-            const bProcess = b.processName ? 0 : 1;
-            if (aProcess !== bProcess) return aProcess - bProcess;
-            return a.name.localeCompare(b.name);
-          });
-        const processSessions = workspaceSessions.filter(s => s.processName);
-        const adHocSessions = workspaceSessions.filter(s => !s.processName);
-
-        // Build process entries from workspace config
-        const processEntries = ws.processes ?? [];
+        const runtime = runtimeByWorkspace[ws.id];
+        const workspaceSessions = runtime?.sessions ?? sortWorkspaceSessions(sessions.filter((session) => session.workspaceId === ws.id));
+        const processSessions = runtime?.processSessions ?? workspaceSessions.filter((session) => session.processName);
+        const adHocSessions = runtime?.shellSessions ?? workspaceSessions.filter((session) => !session.processName);
         const renderedProcessKeys = new Set<string>();
-        const processSessionGroups = new Map<string, SessionInfo[]>();
-        for (const session of processSessions) {
-          const key = `${session.processName ?? ''}:${session.processInstance ?? 1}`;
-          const existing = processSessionGroups.get(key) ?? [];
-          existing.push(session);
-          processSessionGroups.set(key, existing);
-        }
 
-        const getLatestSession = (items: SessionInfo[]): SessionInfo | null => {
-          if (items.length === 0) return null;
-          return [...items].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
-        };
-
-        for (const process of processEntries) {
-          const configuredCount = normalizeProcessInstanceCount(process.instances);
-          if (configuredCount === 0) {
-            items.push({
-              type: 'process-disabled',
-              processName: process.name,
-              workspaceId: ws.id,
-              ports: process.ports,
-            });
-            continue;
-          }
-
-          const configuredInstances = Array.from({ length: configuredCount }, (_, idx) => idx + 1);
-          for (const instance of configuredInstances) {
-            const sessionKey = `${process.name}:${instance}`;
-            const matchingSessions = processSessionGroups.get(sessionKey) ?? [];
-            const runningSession = getLatestSession(matchingSessions.filter((session) => session.exitCode === undefined));
-            const latestSession = getLatestSession(matchingSessions);
-
-            let status: 'running' | 'stopped' | 'failed' = 'stopped';
-            if (runningSession) {
-              status = 'running';
-            } else if (latestSession?.exitCode !== undefined) {
-              status = latestSession.exitCode === 0 ? 'stopped' : 'failed';
+        if (runtime) {
+          for (const row of runtime.processRows) {
+            if (row.state === 'disabled') {
+              items.push({
+                type: 'process-disabled',
+                processName: row.processName,
+                workspaceId: ws.id,
+                ports: ws.processes?.find((process) => process.name === row.processName)?.ports,
+              });
+              continue;
             }
-
             items.push({
               type: 'process',
-              processName: process.name,
-              instance,
+              processName: row.processName,
+              instance: row.instance,
               workspaceId: ws.id,
-              status,
-              ports: process.ports,
+              status: row.state,
+              ports: ws.processes?.find((process) => process.name === row.processName)?.ports,
               serveDomain: ws.serveDomain,
+              subtitle: row.subtitle,
+              alertLabel: row.alertLabel,
+              attachableSessionId: row.attachableSessionId,
             });
-            renderedProcessKeys.add(`${process.name}:${instance}`);
+            renderedProcessKeys.add(`${row.processName}:${row.instance}`);
+          }
+        } else {
+          const processEntries = ws.processes ?? [];
+          const processSessionGroups = new Map<string, SessionInfo[]>();
+          for (const session of processSessions) {
+            const key = `${session.processName ?? ''}:${session.processInstance ?? 1}`;
+            const existing = processSessionGroups.get(key) ?? [];
+            existing.push(session);
+            processSessionGroups.set(key, existing);
+          }
+          const getLatestSession = (items: SessionInfo[]): SessionInfo | null => {
+            if (items.length === 0) return null;
+            return [...items].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+          };
+          for (const process of processEntries) {
+            const configuredCount = normalizeProcessInstanceCount(process.instances);
+            if (configuredCount === 0) {
+              items.push({
+                type: 'process-disabled',
+                processName: process.name,
+                workspaceId: ws.id,
+                ports: process.ports,
+              });
+              continue;
+            }
+            for (let instance = 1; instance <= configuredCount; instance += 1) {
+              const sessionKey = `${process.name}:${instance}`;
+              const matchingSessions = processSessionGroups.get(sessionKey) ?? [];
+              const runningSession = getLatestSession(matchingSessions.filter((session) => session.exitCode === undefined));
+              const latestSession = getLatestSession(matchingSessions);
+              let status: 'running' | 'stopped' | 'failed' = 'stopped';
+              if (runningSession) {
+                status = 'running';
+              } else if (latestSession?.exitCode !== undefined) {
+                status = latestSession.exitCode === 0 ? 'stopped' : 'failed';
+              }
+              items.push({
+                type: 'process',
+                processName: process.name,
+                instance,
+                workspaceId: ws.id,
+                status,
+                ports: process.ports,
+                serveDomain: ws.serveDomain,
+              });
+              renderedProcessKeys.add(`${process.name}:${instance}`);
+            }
           }
         }
 
@@ -359,6 +384,8 @@ function buildTree(
             type: 'session',
             session,
             workspaceId: ws.id,
+            subtitle: runtime?.sessionRows.find((row) => row.id === session.id)?.subtitle,
+            alertLabel: runtime?.sessionRows.find((row) => row.id === session.id)?.alertLabel,
           });
         }
 
@@ -368,6 +395,8 @@ function buildTree(
             type: 'session',
             session,
             workspaceId: ws.id,
+            subtitle: runtime?.sessionRows.find((row) => row.id === session.id)?.subtitle,
+            alertLabel: runtime?.sessionRows.find((row) => row.id === session.id)?.alertLabel,
           });
         }
 
@@ -497,10 +526,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     workspaces,
     sessions,
     replays,
-    onRequestSessions,
     onAttachSession,
     onOpenReplay,
-    onStartProcess,
     onStartProcessAttach,
     onStopProcess,
     onProcessDisabled,
@@ -511,11 +538,11 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     agentSessionCounts = {},
     agentSessionsByWorkspace = {},
     pendingPermissionsByWorkspace = {},
+    runtimeByWorkspace = {},
     onEditProcesses,
     onManageBundleConfig,
     onRefresh,
     onRefreshSessions,
-    onRefreshAgents,
     onBack,
     onCreateWorkspace,
     machineName,
@@ -530,8 +557,8 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   // Build tree
   const tree = useMemo(
-    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedAgentSections, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace),
-    [workspaces, sessions, replays, expandedWorkspaces, expandedAgentSections, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace]
+    () => buildTree(workspaces, sessions, replays, expandedWorkspaces, expandedAgentSections, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace, runtimeByWorkspace),
+    [workspaces, sessions, replays, expandedWorkspaces, expandedAgentSections, expandedReplaySections, agentSessionCounts, showProjectHeaders, agentSessionsByWorkspace, pendingPermissionsByWorkspace, runtimeByWorkspace]
   );
 
   // Add selection state
@@ -593,9 +620,9 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       return next;
     });
     if (expanded) {
-      onRequestSessions();
+      void (onRefreshSessions?.() ?? onRefresh());
     }
-  }, [onRequestSessions]);
+  }, [onRefresh, onRefreshSessions]);
 
   const toggleReplaySection = useCallback((workspaceId: string) => {
     setExpandedReplaySections(prev => {
@@ -644,11 +671,13 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       await onOpenReplay(item.replay.replayId);
     } else if (item.type === 'process') {
       if (item.status === 'running') {
-        const session = findSessionForProcess(
-          item.workspaceId,
-          item.processName,
-          item.instance
-        );
+        const session = item.attachableSessionId
+          ? sessions.find((candidate) => candidate.id === item.attachableSessionId)
+          : findSessionForProcess(
+              item.workspaceId,
+              item.processName,
+              item.instance,
+            );
         if (session) {
           await onAttachSession({ sessionId: session.id, viewOnly: true });
         } else {
@@ -679,9 +708,7 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
     } else if (item.type === 'agents') {
       toggleAgentSection(item.workspaceId);
     } else if (item.type === 'agent-session') {
-      if (!item.session.closed) {
-        await onOpenAgentSession?.(item.workspaceId, item.session.id);
-      }
+      await onOpenAgentSession?.(item.workspaceId, item.session.id);
     } else if (item.type === 'new-agent-session') {
       await onCreateAgentSession?.(item.workspaceId);
     } else if (item.type === 'events') {
@@ -722,24 +749,11 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
 
   const refresh = useCallback(async () => {
     await onRefresh();
+    // Also refresh sessions (shared full refresh policy)
     if (onRefreshSessions) {
       await onRefreshSessions();
     }
-    if (onRefreshAgents) {
-      const candidateWorkspaceId = selectedItem?.type === 'workspace'
-        ? selectedItem.workspace.id
-        : selectedItem && 'workspaceId' in selectedItem
-          ? selectedItem.workspaceId
-          : null;
-      const selectedWorkspaceId = candidateWorkspaceId && workspaces.some((workspace) => workspace.id === candidateWorkspaceId)
-        ? candidateWorkspaceId
-        : null;
-      await onRefreshAgents({
-        expandedWorkspaceIds: Array.from(expandedAgentSections),
-        selectedWorkspaceId,
-      });
-    }
-  }, [expandedAgentSections, onRefresh, onRefreshAgents, onRefreshSessions, selectedItem, workspaces]);
+  }, [onRefresh, onRefreshSessions]);
 
   const back = useCallback(() => {
     onBack();
@@ -772,7 +786,6 @@ export function useSpacesBrowser(props: UseSpacesBrowserProps): UseSpacesBrowser
       await onOpenReplay(replayId);
     },
     startProcessAttach: (params) => onStartProcessAttach(params),
-    startProcess: (params) => onStartProcess?.(params),
     stopProcess: (params) => onStopProcess?.(params),
     createNewSession,
     createWorkspace,

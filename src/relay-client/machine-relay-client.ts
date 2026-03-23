@@ -4,7 +4,6 @@ import { signMessage } from '../relay/signing.js';
 import { PROTOCOL_VERSION } from '../relay/protocol.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ServeEventHandler } from '../serve/types.js';
-import { SpacesError } from '../types/errors.js';
 
 export type RelayTrustResult =
   | { trusted: true }
@@ -205,31 +204,6 @@ function createSendCallback(
   };
 }
 
-// ============================================================================
-// Heartbeat constants
-// ============================================================================
-
-/**
- * Interval (ms) at which the machine sends application-level ping messages to
- * the relay.  Three missed responses within HEARTBEAT_STALE_MS trigger a
- * proactive reconnect.
- */
-const HEARTBEAT_INTERVAL_MS = 30_000;
-
-/**
- * How long (ms) without a pong response before we consider the connection dead
- * and forcibly close the WebSocket so the reconnect loop can re-establish.
- * 3 × HEARTBEAT_INTERVAL_MS = 90 s.
- */
-const HEARTBEAT_STALE_MS = 90_000;
-
-/**
- * Backoff cap (ms) used after the initial connection has been established.
- * We cap at 5 minutes so a long relay outage is handled gracefully without
- * hammering the relay every 30 s forever.
- */
-const MAX_RECONNECT_DELAY_AFTER_CONNECT_MS = 300_000; // 5 minutes
-
 export async function connectMachineRelay(
   relayUrl: string,
   machineId: string,
@@ -254,40 +228,11 @@ export async function connectMachineRelay(
   url.searchParams.set('role', 'machine');
 
   return new Promise((resolve, reject) => {
-    // -----------------------------------------------------------------------
-    // Reconnect state
-    // -----------------------------------------------------------------------
-
-    /**
-     * Number of consecutive failed connection attempts since the last
-     * successful registration.  Reset to 0 on each successful registration.
-     */
     let reconnectAttempts = 0;
-
-    /**
-     * Base delay used for the *first* reconnect after an initial connection
-     * is established.  After every failed attempt the delay is doubled up to
-     * MAX_RECONNECT_DELAY_AFTER_CONNECT_MS.  Before the initial connection we
-     * use the shorter 30 s cap so startup failures surface quickly.
-     */
-    const baseReconnectDelay = 1_000;
-
-    /**
-     * Cap used before the very first successful registration (quick failures
-     * are visible faster).
-     */
-    const maxReconnectDelayBeforeConnect = 30_000;
-
-    /**
-     * Whether the outer promise has already been resolved (i.e. the first
-     * successful registration has happened).  After this point we never
-     * reject – we simply keep retrying indefinitely.
-     */
+    const maxReconnectAttempts = 10;
+    const baseReconnectDelay = 1000;
+    const maxReconnectDelay = 30000;
     let resolved = false;
-
-    // -----------------------------------------------------------------------
-    // Signing helpers
-    // -----------------------------------------------------------------------
 
     const signingPublicKey = signingPrivateKey
       ? new Uint8Array(Buffer.from(publicIdentity.signingPublicKey, 'base64'))
@@ -302,56 +247,6 @@ export async function connectMachineRelay(
       }
     };
 
-    // -----------------------------------------------------------------------
-    // Heartbeat management
-    // -----------------------------------------------------------------------
-
-    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-    let markHeartbeatAcked: (() => void) | null = null;
-
-    /** Start the application-level heartbeat after successful registration. */
-    const startHeartbeat = (ws: WebSocket) => {
-      stopHeartbeat();
-
-      // Record first heartbeat baseline so the stale timer has a reference.
-      let lastPongAt = Date.now();
-
-      heartbeatInterval = setInterval(() => {
-        if (ws.readyState !== WebSocket.OPEN) {
-          stopHeartbeat();
-          return;
-        }
-
-        // Send the ping first so the stale check on the *next* tick accounts
-        // for the full HEARTBEAT_STALE_MS window rather than adding an extra
-        // HEARTBEAT_INTERVAL_MS of latency to detection.
-        ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
-
-        // Check if the connection has gone silent (no heartbeat ack in HEARTBEAT_STALE_MS).
-        if (Date.now() - lastPongAt >= HEARTBEAT_STALE_MS) {
-          logger.log(`[serve] Heartbeat stale – no heartbeat ack received within ${HEARTBEAT_STALE_MS}ms. Forcing reconnect.`);
-          stopHeartbeat();
-          ws.close(4001, 'Heartbeat timeout');
-        }
-      }, HEARTBEAT_INTERVAL_MS);
-
-      markHeartbeatAcked = () => {
-        lastPongAt = Date.now();
-      };
-    };
-
-    const stopHeartbeat = () => {
-      if (heartbeatInterval !== null) {
-        clearInterval(heartbeatInterval);
-        heartbeatInterval = null;
-      }
-      markHeartbeatAcked = null;
-    };
-
-    // -----------------------------------------------------------------------
-    // Connection factory
-    // -----------------------------------------------------------------------
-
     const connect = () => {
       console.log(`[serve] Connecting to relay: ${url.toString()}`);
       const ws = new WebSocket(url.toString());
@@ -359,17 +254,10 @@ export async function connectMachineRelay(
 
       ws.onopen = () => {
         console.log('[serve] WebSocket connected, waiting for relay identity...');
-        // Do NOT reset reconnectAttempts here. Resetting on open would mask
-        // repeated registration failures (the relay keeps accepting the TCP
-        // connection but rejecting the register_machine) and would prevent
-        // the backoff from growing. The counter is reset only on a successful
-        // `registered` response so every failure between open and registered
-        // is correctly counted towards the backoff.
+        reconnectAttempts = 0;
       };
 
       ws.onclose = (event) => {
-        stopHeartbeat();
-
         console.log(`[serve] WebSocket closed: code=${event.code} reason=${event.reason || 'none'}`);
         eventHandler({
           type: 'relay_disconnected',
@@ -377,46 +265,24 @@ export async function connectMachineRelay(
           reason: event.reason || 'Connection closed',
         });
 
-        // Before the first successful connection: behave like before but with
-        // a shorter cap so startup failures surface quickly.
-        if (!resolved) {
-          if (reconnectAttempts < 10) {
-            reconnectAttempts++;
-            const delay = Math.min(
-              baseReconnectDelay * Math.pow(2, reconnectAttempts - 1) + Math.random() * 1_000,
-              maxReconnectDelayBeforeConnect,
-            );
-            eventHandler({ type: 'relay_reconnecting', attempt: reconnectAttempts, nextRetryMs: delay });
-            setTimeout(connect, delay);
-          } else {
-            // Exhausted fast-start attempts – give up and let serve.ts surface
-            // the startup failure to the user.
-            reject(new SpacesError(
-              `Failed to connect to relay after ${reconnectAttempts} attempts`,
-              'SYSTEM_ERROR',
-              1,
-            ));
-          }
-          return;
+        if (reconnectAttempts < maxReconnectAttempts) {
+          reconnectAttempts++;
+          const delay = Math.min(
+            baseReconnectDelay * Math.pow(2, reconnectAttempts - 1) + Math.random() * 1000,
+            maxReconnectDelay
+          );
+          eventHandler({ type: 'relay_reconnecting', attempt: reconnectAttempts });
+          setTimeout(connect, delay);
+        } else {
+          // All reconnect attempts exhausted — reject the outer promise so the
+          // caller does not hang indefinitely waiting for a connection that will
+          // never succeed.
+          reject(new Error(`WebSocket reconnect failed after ${maxReconnectAttempts} attempts`));
         }
-
-        // After the first successful registration: retry forever with an
-        // increasing backoff capped at MAX_RECONNECT_DELAY_AFTER_CONNECT_MS.
-        reconnectAttempts++;
-        const delay = Math.min(
-          baseReconnectDelay * Math.pow(2, Math.min(reconnectAttempts - 1, 18)) + Math.random() * 2_000,
-          MAX_RECONNECT_DELAY_AFTER_CONNECT_MS,
-        );
-        const delaySeconds = Math.round(delay / 1_000);
-        console.log(`[serve] Relay disconnected. Reconnecting in ${delaySeconds}s (attempt ${reconnectAttempts})...`);
-        eventHandler({ type: 'relay_reconnecting', attempt: reconnectAttempts, nextRetryMs: delay });
-        setTimeout(connect, delay);
       };
 
       ws.onerror = (err) => {
         console.log('[serve] WebSocket error:', err);
-        // Only reject the outer promise on the very first connection attempt
-        // before any reconnect attempts have started.
         if (!resolved && reconnectAttempts === 0) {
           reject(new Error('WebSocket connection failed'));
         }
@@ -437,12 +303,6 @@ export async function connectMachineRelay(
               logger.warning('Received binary data without JSON envelope');
               return;
             }
-          }
-
-          // Handle pong responses from relay heartbeat.
-          if (msg.type === 'pong') {
-            markHeartbeatAcked?.();
-            return;
           }
 
           switch (msg.type) {
@@ -494,25 +354,14 @@ export async function connectMachineRelay(
               break;
             }
 
-            case 'registered': {
-              // Successful registration – start heartbeat and resolve the
-              // outer promise (only once, on first connection).
-              startHeartbeat(ws);
-
-              // Reset the backoff counter so the next disconnect starts fresh.
-              reconnectAttempts = 0;
-
+            case 'registered':
               eventHandler({ type: 'relay_connected' });
 
               if (!resolved) {
                 resolved = true;
                 resolve();
-              } else {
-                // Subsequent successful reconnections are logged for observability.
-                console.log('[serve] Reconnected to relay successfully.');
               }
               break;
-            }
 
             case 'client_connected':
               sessionManager.handleConnect(msg.connectionId);

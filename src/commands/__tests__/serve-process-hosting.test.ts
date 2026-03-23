@@ -26,13 +26,13 @@ describe("process hosting helpers", () => {
       "web"
     );
 
-    expect(hostname).toBe("web.web-api-2.my-workspace.brad.serve.gitspace.sh");
+    expect(hostname).toBe("my-workspace-web-api-2-web.brad.serve.gitspace.sh");
   });
 
   test("buildServeIngressConfig adds fallback", () => {
     const entries: ProcessHostEntry[] = [
       {
-        hostname: "web.api-1.alpha.brad.serve.gitspace.sh",
+        hostname: "alpha-api-1-web.brad.serve.gitspace.sh",
         service: "http://127.0.0.1:3000",
         protocol: "http",
         workspaceId: "alpha",
@@ -42,7 +42,7 @@ describe("process hosting helpers", () => {
         portName: "web",
       },
       {
-        hostname: "tcp.api-1.alpha.brad.serve.gitspace.sh",
+        hostname: "alpha-api-1-tcp.brad.serve.gitspace.sh",
         service: "tcp://127.0.0.1:9000",
         protocol: "tcp",
         workspaceId: "alpha",
@@ -55,9 +55,9 @@ describe("process hosting helpers", () => {
 
     const config = buildServeIngressConfig(entries);
     expect(config).toContain("ingress:");
-    expect(config).toContain("hostname: web.api-1.alpha.brad.serve.gitspace.sh");
+    expect(config).toContain("hostname: alpha-api-1-web.brad.serve.gitspace.sh");
     expect(config).toContain("service: http://127.0.0.1:3000");
-    expect(config).toContain("hostname: tcp.api-1.alpha.brad.serve.gitspace.sh");
+    expect(config).toContain("hostname: alpha-api-1-tcp.brad.serve.gitspace.sh");
     expect(config).toContain("service: tcp://127.0.0.1:9000");
     expect(config).toContain("service: http_status:404");
   });

@@ -209,6 +209,13 @@ export type ReviewOperation =
       /** 1-based inclusive range on new/head side. Omit for full file */
       newEnd?: number;
     }
+  | {
+      op: 'approve_path';
+      projectName: string;
+      workspaceName: string;
+      path: string;
+      pathKind: 'file' | 'folder';
+    }
   | { op: 'import_github'; projectName: string; workspaceName: string; prNumber?: number }
   | { op: 'push_github'; projectName: string; workspaceName: string; prNumber?: number };
 
@@ -257,6 +264,13 @@ export type ReviewResult =
       newStart: number;
       newLines: string[];
       newTotal: number;
+    }
+  | {
+      op: 'path_approved';
+      path: string;
+      pathKind: 'file' | 'folder';
+      approvedCount: number;
+      threads: ReviewThread[];
     }
   | { op: 'github_imported'; imported: number; threads: ReviewThread[] }
   | { op: 'github_pushed'; prNumber: number; url: string };

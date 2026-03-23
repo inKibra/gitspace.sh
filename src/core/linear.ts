@@ -294,6 +294,14 @@ export interface ResolvedLinearConfig {
 	hasProjectApiKey: boolean
 }
 
+export interface LinearIssueLookupResult {
+	id: string
+	identifier: string
+	title: string
+	url: string
+	stateName: string | null
+}
+
 /**
  * Get Linear configuration with project -> user fallback
  *
@@ -348,21 +356,6 @@ export async function getLinearConfig(projectName?: string): Promise<ResolvedLin
 		try {
 			const projectConfig = readProjectConfig(project)
 
-			// Handle legacy config (deprecated linearApiKey/linearTeamKey)
-			if (projectConfig.linearApiKey || projectConfig.linearTeamKey) {
-				// Legacy config exists - use linearTeamKey if set
-				const legacyTeamKey = projectConfig.linearTeamKey
-				if (legacyTeamKey) {
-					return {
-						apiKey,
-						teamKeys: [legacyTeamKey],
-						teams: userTeams,
-						scope: 'project',
-						hasProjectApiKey,
-					}
-				}
-			}
-
 			// New config - project-level team override
 			if (projectConfig.linearTeams && projectConfig.linearTeams.length > 0) {
 				return {
@@ -400,4 +393,88 @@ export async function getLinearConfig(projectName?: string): Promise<ResolvedLin
 export async function isLinearConfigured(): Promise<boolean> {
 	const config = await getLinearConfig()
 	return config.apiKey !== null && config.teamKeys.length > 0
+}
+
+export async function fetchLinearIssueByIdentifier(
+	apiKey: string,
+	identifier: string
+): Promise<LinearIssueLookupResult | null> {
+	try {
+		const response = await fetch('https://api.linear.app/graphql', {
+			method: 'POST',
+			headers: {
+				Authorization: apiKey,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				query: `
+					query IssueByIdentifier($identifier: String!) {
+						issues(filter: { identifier: { eq: $identifier } }, first: 1) {
+							nodes {
+								id
+								identifier
+								title
+								url
+								state {
+									name
+								}
+							}
+						}
+					}
+				`,
+				variables: { identifier: identifier.toUpperCase() },
+			}),
+		})
+
+		if (!response.ok) {
+			throw new LinearAPIError(`Linear API request failed with status ${response.status}`)
+		}
+
+		const payload = (await response.json()) as {
+			data?: {
+				issues?: {
+					nodes?: Array<{
+						id: string
+						identifier: string
+						title: string
+						url: string
+						state?: { name?: string | null } | null
+					}>
+				}
+			}
+			errors?: Array<{ message?: string }>
+		}
+
+		if (payload.errors && payload.errors.length > 0) {
+			throw new LinearAPIError(payload.errors[0]?.message ?? 'Linear GraphQL request failed')
+		}
+
+		const issue = payload.data?.issues?.nodes?.[0]
+		if (!issue) {
+			return null
+		}
+
+		return {
+			id: issue.id,
+			identifier: issue.identifier,
+			title: issue.title,
+			url: issue.url,
+			stateName: issue.state?.name ?? null,
+		}
+	} catch (error) {
+		if (error instanceof LinearAPIError) {
+			throw error
+		}
+
+		if (error instanceof LinearError) {
+			throw new LinearAPIError(`Linear API error: ${error.message}`, error)
+		}
+
+		throw new LinearAPIError(
+			`Failed to fetch Linear issue ${identifier}: ${
+				error instanceof Error ? error.message : 'Unknown error'
+			}`,
+			error
+		)
+	}
 }

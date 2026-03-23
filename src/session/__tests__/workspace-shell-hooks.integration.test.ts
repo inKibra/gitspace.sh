@@ -157,6 +157,7 @@ describe('workspace shell hooks integration', () => {
   let envSnapshot: EnvSnapshot;
   let tempRoot: string;
   let serverProcess: Bun.Subprocess | null = null;
+  let fakeGsshPath: string;
 
   beforeEach(() => {
     envSnapshot = captureEnv();
@@ -167,7 +168,7 @@ describe('workspace shell hooks integration', () => {
     mkdirSync(sessionDir, { recursive: true });
     mkdirSync(binDir, { recursive: true });
 
-    const fakeGsshPath = join(binDir, 'gssh');
+    fakeGsshPath = join(binDir, 'fake-gssh');
     writeFileSync(
       fakeGsshPath,
       '#!/bin/sh\nprintf "__GSSH_ENV_PROJECT__%s\\n" "$GSSH_SPACE_PROJECT"\nprintf "__GSSH_ENV_WORKSPACE__%s\\n" "$GSSH_SPACE_WORKSPACE"\nfor arg in "$@"; do\n  printf "__GSSH_ARGV__%s\\n" "$arg"\ndone\n'
@@ -236,7 +237,7 @@ describe('workspace shell hooks integration', () => {
       type: 'new',
       name: 'workspace-hooks-e2e',
       cwd: process.cwd(),
-      hooks: buildWorkspaceSessionHooks(projectName, workspaceName),
+      hooks: buildWorkspaceSessionHooks(projectName, workspaceName, [fakeGsshPath]),
     });
     if (response.type !== 'session') {
       throw new Error(`Expected session response, got ${response.type}`);

@@ -4,20 +4,20 @@
  * Manages multiple concurrent client connections:
  * - Routes handshake messages to HandshakeHandler
  * - After handshake, enters "browsing" mode for workspace/session listing
- * - Spawns PTY sessions when client attaches to a session
- * - Routes encrypted frames between clients and PTY sessions
+ * - Attaches clients to tmux-lite session sockets when requested
+ * - Routes encrypted frames between clients and tmux-lite session sockets
  * - Handles disconnect cleanup
  */
 
 import { HandshakeHandler, type HandshakeMessage, type EstablishedSession } from "../lib/tmux-lite/handshake-handler.js";
-import { PTYSession } from "./pty-session.js";
 import { createFrame, openFrame, MASTER_STREAM_ID } from "../lib/tmux-lite/crypto/frames.js";
 import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType, type SessionEvent } from "../lib/tmux-lite/protocol.js";
 import { RemoteSessionHandler, type RemoteClientSession } from "../lib/remote-session/index.js";
 import { STREAM_ID, canWrite, type ServeOptions, type ClientSession, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
 import { createBufferedSocketWriter } from "../utils/bun-socket-writer.js";
-import { serializeRemoteMessage, type MachineToClientMessage } from "../lib/remote-session/protocol.js";
-import type { AgentStateUpdateDelta, WorkspaceAgentState } from "./agent-event-manager.js";
+import { serializeRemoteMessage } from "../lib/remote-session/protocol.js";
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from "../lib/tmux-lite/agent-event-manager.js";
+import type { SessionKeys } from "../types/identity.js";
 
 // ============================================================================
 // ClientSessionManager Class
@@ -71,31 +71,20 @@ export class ClientSessionManager {
     session.tmuxSocket?.write(frame);
   }
 
-  private resetAttachedSession(session: ClientSession): Awaited<ReturnType<typeof Bun.connect>> | undefined {
-    const socket = session.tmuxSocket;
-    session.tmuxSocket = undefined;
-    session.tmuxSocketWriter = undefined;
-    session.state = 'browsing';
-    session.attachedSessionId = undefined;
-    session.viewOnly = undefined;
-    session.sessionSocketPath = undefined;
-    session.waitingForResize = undefined;
-    session.frameBuffer = undefined;
-    return socket;
-  }
-
-  private async sendMachineMessages(connectionId: string, messages: MachineToClientMessage[]): Promise<void> {
-    const session = this.sessions.get(connectionId);
-    if (!session?.sessionKeys) {
-      return;
-    }
-
+  private registerBrowsingPushes(connectionId: string, sessionKeys: SessionKeys): void {
     const sendToClient = this.createSendCallback(connectionId);
-    for (const message of messages) {
-      const payload = new TextEncoder().encode(serializeRemoteMessage(message));
-      const frame = await createFrame(STREAM_ID.DATA, payload, session.sessionKeys.sendKey);
-      sendToClient(Buffer.from(frame));
-    }
+    setTimeout(() => {
+      const current = this.sessions.get(connectionId);
+      if (!current || current.state !== 'browsing' || current.sessionKeys !== sessionKeys) {
+        return;
+      }
+      void this.remoteSessionHandler.onClientEntersBrowsing(connectionId, async (msg) => {
+        const json = serializeRemoteMessage(msg);
+        const data = new TextEncoder().encode(json);
+        const frame = await createFrame(0, data, sessionKeys.sendKey);
+        sendToClient(Buffer.from(frame));
+      });
+    }, 0);
   }
 
   /**
@@ -202,12 +191,6 @@ export class ClientSessionManager {
       return this.handleAttachedMessage(connectionId, session, data);
     }
 
-    if (session.state === "attached" && session.ptySession) {
-      // Legacy: Forward encrypted data to PTY
-      session.ptySession.write(Buffer.from(data));
-      return null;
-    }
-
     // Invalid state
     console.warn(`[session-manager] Message in invalid state: ${session.state}`);
     return null;
@@ -245,11 +228,16 @@ export class ClientSessionManager {
           // Handle detach specially - close tmux socket and send response to client
           // Store socket reference and clear it BEFORE ending to prevent close callback
           // from triggering handleDisconnect
+          const socket = session.tmuxSocket;
           const writer = session.tmuxSocketWriter;
-          const socket = this.resetAttachedSession(session);
-          if (!socket) {
-            return null;
-          }
+          session.tmuxSocket = undefined;
+          session.tmuxSocketWriter = undefined;
+          session.state = "browsing";
+          session.attachedSessionId = undefined;
+          session.viewOnly = undefined;
+          session.sessionSocketPath = undefined;
+          session.waitingForResize = undefined;
+          session.frameBuffer = undefined;
 
           // Now send detach and close the socket (using framed protocol)
           {
@@ -258,6 +246,7 @@ export class ClientSessionManager {
             else socket.write(frame);
           }
           socket.end();
+          this.registerBrowsingPushes(connectionId, session.sessionKeys);
 
           // Send detached response to client
           const detachedMsg = JSON.stringify({ type: "detached" });
@@ -340,6 +329,7 @@ export class ClientSessionManager {
 
     // Check if we're now attached (after attach_session command)
     if (remoteSession.state === "attached" && remoteSession.attachedSessionId) {
+      this.remoteSessionHandler.onClientLeavesBrowsing(connectionId);
       session.state = "attached";
       session.attachedSessionId = remoteSession.attachedSessionId;
       session.viewOnly = remoteSession.viewOnly ?? false;
@@ -431,42 +421,17 @@ export class ClientSessionManager {
       sessionId: established.sessionId,
     });
 
+    // Register this client for machine snapshot pushes only after the handshake
+    // response has been flushed back to the client. Otherwise the initial
+    // machine_snapshot can race ahead of server_auth, get delivered as an
+    // encrypted pre-handshake payload, and be dropped by the browser backend.
+    this.registerBrowsingPushes(connectionId, established.sessionKeys);
+
     // Client can now send list_workspaces, list_sessions, attach_session commands
     // PTY will be spawned when attach_session is received
 
     // Return ServerAuth message from HandshakeHandler
     return new TextEncoder().encode(JSON.stringify(serverAuthMessage));
-  }
-
-  /**
-   * Spawn PTY session for an established connection
-   */
-  private spawnPTYSession(connectionId: string, session: ClientSession): void {
-    if (!session.sessionKeys) {
-      console.error("[session-manager] Cannot spawn PTY: no session keys");
-      return;
-    }
-
-    // Callback to send encrypted data to client
-    const sendToClient = this.createSendCallback(connectionId);
-
-    session.ptySession = new PTYSession({
-      shell: this.options.shell,
-      env: {
-        ...this.options.env,
-        SPACES_PEER_ID: session.peerIdentityId ?? "",
-      },
-      sessionKeys: session.sessionKeys,
-      onData: (encrypted) => {
-        sendToClient(encrypted);
-      },
-      onClose: (exitCode) => {
-        console.log(`[session-manager] PTY exited: ${exitCode}`);
-        this.handleDisconnect(connectionId, `PTY exited with code ${exitCode}`);
-      },
-    });
-
-    console.log(`[session-manager] PTY spawned for ${connectionId} (pid: ${session.ptySession.pid})`);
   }
 
   /**
@@ -520,28 +485,26 @@ export class ClientSessionManager {
 
                 if (event.type === "exited") {
                   console.log(`[session-manager] Session exited: ${event.code}`);
-                  const sessionId = session.attachedSessionId;
-                  const socket = this.resetAttachedSession(session);
-                  socket?.end();
-                  if (sessionId) {
-                    void this.sendMachineMessages(connectionId, [
-                      { type: 'session_exited', sessionId, exitCode: event.code },
-                    ]);
-                  }
+                  // Send exit notification to client
+                  const exitMsg = JSON.stringify({ type: "session_exited", sessionId: session.attachedSessionId, exitCode: event.code });
+                  const exitData = new TextEncoder().encode(exitMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
+                  this.handleDisconnect(connectionId, `Session exited with code ${event.code}`);
                   return;
                 } else if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
-                  const socket = this.resetAttachedSession(session);
-                  socket?.end();
-                  void this.sendMachineMessages(connectionId, [
-                    { type: 'detached' },
-                    { type: 'error', code: 'SESSION_TAKEN_OVER', message: 'This terminal was taken over by another client.' },
-                  ]);
+                  this.handleDisconnect(connectionId, "Session kicked");
                   return;
                 } else if (event.type === "wide_event") {
                   const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });
                   const eventData = new TextEncoder().encode(eventMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, eventData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
+                } else if (event.type === 'session-meta') {
+                  const metaMsg = JSON.stringify(event);
+                  const metaData = new TextEncoder().encode(metaMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, metaData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
                 }
                 // Ignore attach-ready and attached - handled by client
@@ -635,11 +598,6 @@ export class ClientSessionManager {
       session.frameBuffer = undefined;
     }
 
-    // Close PTY if active (legacy)
-    if (session.ptySession && !session.ptySession.isClosed) {
-      session.ptySession.close();
-    }
-
     // Cleanup handshake state
     this.handshakeHandler.cleanup(connectionId);
     this.remoteSessionHandler.cleanupConnection(connectionId);
@@ -673,20 +631,6 @@ export class ClientSessionManager {
     } catch {
       // Non-fatal — client can request a refresh
     }
-  }
-
-  /**
-   * Broadcast a full agent state snapshot to all authenticated browsing clients.
-   */
-  async broadcastAgentStateSnapshot(workspaces: Record<string, WorkspaceAgentState>): Promise<void> {
-    const promises: Promise<void>[] = [];
-
-    for (const [connectionId, session] of this.sessions) {
-      if (session.state !== 'browsing' || !session.sessionKeys) continue;
-      promises.push(this.sendAgentStateSnapshot(connectionId, workspaces));
-    }
-
-    await Promise.allSettled(promises);
   }
 
   /**

@@ -147,7 +147,7 @@ function registerAuthCommands(user: Command): void {
     .command('login')
     .description('Login with GitHub')
     .option('-y, --yes', 'Auto-confirm prompts')
-    .option('--password-stdin', 'Read local secure store password from stdin')
+    .option('--password-stdin', 'Read local identity password from stdin')
     .action(withErrorHandler(async (options) => {
       const { authLogin } = await import('../../commands/auth.js');
       await authLogin(options);

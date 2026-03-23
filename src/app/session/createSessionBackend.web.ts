@@ -58,19 +58,65 @@ const browserHandshakeAdapter = createBrowserRemoteHandshakeAdapter<
 })
 
 export interface WebRemoteSessionConnectParams {
-  /**
-   * Pre-opened WebSocket for the initial connection.
-   * On reconnect this may be omitted; `relayUrl` will be used to open a fresh one.
-   */
-  ws?: WebSocket
+  ws: WebSocket
   identity: Identity
   machineId: string
   deviceCertificate: string
-  /**
-   * Relay WebSocket URL (ws:// or wss://).
-   * Derived from `ws` on first connect; required when `ws` is omitted (reconnect).
-   */
   relayUrl?: string
+}
+
+/**
+ * Parameters for creating a browser remote backend from a relay URL.
+ * Mirrors BunRemoteSessionConnectParams — creates its own WebSocket internally.
+ */
+export interface BrowserRemoteSessionConnectParams {
+  relayUrl: string
+  identity: Identity
+  machineId: string
+  deviceCertificate: string
+  machineLabel?: string
+}
+
+/**
+ * Create a browser remote session backend from a relay URL.
+ * Creates its own WebSocket — matches the signature used by useMultiBackends
+ * for auto-discovered machines.
+ */
+export function createBrowserRemoteSessionBackend(
+  params: BrowserRemoteSessionConnectParams
+): {
+  backendKey: BackendKey
+  backend: RemoteSessionPtyBackend
+} {
+  const relayUrl = new URL(params.relayUrl)
+  relayUrl.searchParams.set('role', 'client')
+  const ws = new WebSocket(relayUrl.toString())
+  const backendKey = buildRemoteBackendKey(params.relayUrl, params.machineId)
+  return {
+    backendKey,
+    backend: new RemoteSessionBackend<
+      WebSocket,
+      X3DHClientState,
+      X3DHResponseMessage,
+      X3DHResultMessage
+    >({
+      descriptor: {
+        key: backendKey,
+        kind: 'remote',
+        label: params.machineLabel ?? params.machineId,
+        relayUrl: params.relayUrl,
+        machineId: params.machineId,
+      },
+      socket: ws,
+      socketAdapter: browserRemoteSocketAdapter,
+      identity: params.identity,
+      machineId: params.machineId,
+      deviceCertificate: params.deviceCertificate,
+      signer: signRelayMessage,
+      crypto: browserCryptoAdapter,
+      handshake: browserHandshakeAdapter,
+    }),
+  }
 }
 
 export function createWebRemoteSessionBackend(
@@ -79,24 +125,7 @@ export function createWebRemoteSessionBackend(
   backendKey: BackendKey
   backend: RemoteSessionPtyBackend
 } {
-  // On the initial connect, a pre-opened WebSocket is passed in.
-  // On reconnect, `ws` is absent and we open a fresh one from `relayUrl`.
-  let socket: WebSocket
-  let relayUrl: string
-
-  if (params.ws) {
-    relayUrl = params.relayUrl ?? deriveRelayUrlFromBrowserSocket(params.ws)
-    socket = params.ws
-  } else if (params.relayUrl) {
-    relayUrl = params.relayUrl
-    const wsUrl = new URL(relayUrl)
-    wsUrl.searchParams.set('role', 'client')
-    wsUrl.searchParams.set('m', params.machineId)
-    socket = new WebSocket(wsUrl.toString())
-  } else {
-    throw new Error('createWebRemoteSessionBackend: either ws or relayUrl must be provided')
-  }
-
+  const relayUrl = params.relayUrl ?? deriveRelayUrlFromBrowserSocket(params.ws)
   const backendKey = buildRemoteBackendKey(relayUrl, params.machineId)
 
   return {
@@ -114,7 +143,7 @@ export function createWebRemoteSessionBackend(
         relayUrl,
         machineId: params.machineId,
       },
-      socket,
+      socket: params.ws,
       socketAdapter: browserRemoteSocketAdapter,
       identity: params.identity,
       machineId: params.machineId,

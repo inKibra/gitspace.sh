@@ -15,12 +15,15 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
       workspaces: [],
       sessions: [],
       replays: [],
+      machineSnapshot: null,
       inbox: [],
       inboxUnreadCount: 0,
     notificationConfig: null,
     mode: 'browsing',
     attachedSessionId: null,
     attachedSessionName: null,
+    attachedSessionMeta: null,
+    attachedWorkspaceId: null,
     scriptState: null,
     events: [],
     liveEventIds: [],
@@ -186,6 +189,21 @@ export function sessionEngineReducer(
       };
     }
 
+    case 'SET_MACHINE_SNAPSHOT': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            machineSnapshot: action.snapshot,
+          },
+        },
+      };
+    }
+
     case 'SET_INBOX': {
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
@@ -239,6 +257,13 @@ export function sessionEngineReducer(
       const nextSessionName = attached
         ? (action.sessionName ?? backend.attachedSessionName)
         : null;
+      const nextMeta = attached
+        ? {
+            ...(backend.attachedSessionMeta ?? {}),
+            ...(action.meta ?? {}),
+            sessionName: action.sessionName ?? action.meta?.sessionName ?? nextSessionName ?? null,
+          }
+        : null;
       return {
         ...state,
         backends: {
@@ -248,6 +273,26 @@ export function sessionEngineReducer(
             mode: attached ? 'attached' : 'browsing',
             attachedSessionId: action.sessionId,
             attachedSessionName: nextSessionName,
+            attachedSessionMeta: nextMeta,
+            attachedWorkspaceId: attached
+              ? (action.workspaceId ?? backend.attachedWorkspaceId)
+              : null,
+          },
+        },
+      };
+    }
+
+    case 'SET_ATTACHED_SESSION_META': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            attachedSessionMeta: action.meta,
+            attachedSessionName: action.meta?.sessionName ?? backend.attachedSessionName,
           },
         },
       };

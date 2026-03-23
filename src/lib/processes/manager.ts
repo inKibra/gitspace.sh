@@ -9,6 +9,9 @@ import { getProcessInstances, loadProcessesConfig } from './config.js';
 import { buildProcessSessionName, parseProcessSessionName } from './names.js';
 import { enableProcessRestart, disableProcessRestart } from './control.js';
 import { markProcessStarted, clearProcessExit } from './state.js';
+import { resolveWorkspaceRef } from '../events/paths.js';
+import { toWorkspaceId } from '../../utils/workspace-id.js';
+import { ensurePortsAvailable } from './ports.js';
 
 export interface ProcessSessionInfo {
   sessionId: string;
@@ -67,8 +70,14 @@ export async function startProcessInstance(
     throw new Error(`Process ${spec.name} is missing a command`);
   }
 
-  const workspaceId = workspacePath.split('/').pop() ?? workspacePath;
-  const sessionName = buildProcessSessionName(workspaceId, spec.name, spec.instance);
+  await ensurePortsAvailable(spec);
+
+  const workspaceRef = resolveWorkspaceRef(workspacePath);
+  const workspaceName = workspaceRef?.workspaceId ?? (workspacePath.split('/').pop() ?? workspacePath);
+  const canonicalWorkspaceId = workspaceRef
+    ? toWorkspaceId(workspaceRef.projectName, workspaceRef.workspaceId)
+    : workspaceName;
+  const sessionName = buildProcessSessionName(workspaceName, spec.name, spec.instance);
   const cwd = spec.definition.cwd
     ? join(workspacePath, spec.definition.cwd)
     : workspacePath;
@@ -91,6 +100,12 @@ export async function startProcessInstance(
     command: process.execPath,
     args: devScript,
     env: spec.definition.env,
+    metadata: {
+      workspaceId: canonicalWorkspaceId,
+      processName: spec.name,
+      processInstance: String(spec.instance),
+      role: 'process',
+    },
   });
 
   enableProcessRestart(workspacePath, spec.name, spec.instance);

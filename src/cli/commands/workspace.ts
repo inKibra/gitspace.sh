@@ -1,5 +1,5 @@
 /**
- * gssh workspace list|add|remove|context|review|session|process|events|bundle
+ * gssh workspace list|add|remove|context|review|notes|session|service|events|bundle
  *
  * --project is REQUIRED on all workspace subcommands.
  * --workspace is a required flag on review/session/process/events/bundle subcommands,
@@ -66,18 +66,52 @@ export function registerWorkspaceCommands(parent: Command): void {
   )
     .option('--branch <name>', 'Specify different branch name from workspace name')
     .option('--from <branch>', 'Create from specific branch instead of base')
+    .option('--status <phase>', 'Kanban phase: plan, code, review, ship (default: code)')
     .option('--no-setup', 'Skip setup commands')
     .action(withErrorHandler(async (workspaceName, options) => {
       const ctx = useExplicitContext(options);
+      const phase = options.status as string | undefined;
+      const validPhases = ['plan', 'code', 'review', 'ship'] as const;
+      const status = phase && validPhases.includes(phase as typeof validPhases[number])
+        ? (phase as typeof validPhases[number])
+        : undefined;
       const { addWorkspace } = await import('../../commands/add.js');
       await addWorkspace(workspaceName, {
         project: ctx.project,
         branchName: options.branch,
         fromBranch: options.from,
+        status,
         // New CLI: never open shell (no implicit session attach)
         noShell: true,
         noSetup: options.setup === false,
       });
+    }));
+
+  // --------------------------------------------------------------------------
+  // gssh workspace set-phase <name> --phase <plan|code|review|ship> --project <p>
+  // --------------------------------------------------------------------------
+  requireProject(
+    cmd
+      .command('set-phase')
+      .description('Set kanban phase for a workspace')
+      .argument('<workspace-name>', 'Workspace name')
+      .requiredOption('--phase <phase>', 'Phase: plan, code, review, ship')
+  )
+    .action(withErrorHandler(async (workspaceName, options) => {
+      const ctx = useExplicitContext(options);
+      const phase = options.phase as string;
+      const validPhases = ['plan', 'code', 'review', 'ship'] as const;
+      if (!validPhases.includes(phase as typeof validPhases[number])) {
+        throw new SpacesError(
+          `Invalid phase: ${phase}. Use one of: ${validPhases.join(', ')}`,
+          'USER_ERROR',
+          1
+        );
+      }
+      const { setWorkspacePhase } = await import('../../lib/tmux-lite/cli.js');
+      await setWorkspacePhase(ctx.project, workspaceName, phase as typeof validPhases[number]);
+      const { logger } = await import('../../utils/logger.js');
+      logger.success(`Workspace ${workspaceName} set to phase: ${phase}`);
     }));
 
   // --------------------------------------------------------------------------
@@ -122,14 +156,19 @@ export function registerWorkspaceCommands(parent: Command): void {
   registerWorkspaceReviewCommands(cmd);
 
   // --------------------------------------------------------------------------
+  // Notes subcommands: gssh workspace notes [...]
+  // --------------------------------------------------------------------------
+  registerWorkspaceNotesCommands(cmd);
+
+  // --------------------------------------------------------------------------
   // Session subcommands: gssh workspace session [list|new|attach]
   // --------------------------------------------------------------------------
   registerWorkspaceSessionCommands(cmd);
 
   // --------------------------------------------------------------------------
-  // Process subcommands: gssh workspace process [list|start|stop|attach]
+  // Service subcommands: gssh workspace service [list|start|stop|attach|open]
   // --------------------------------------------------------------------------
-  registerWorkspaceProcessCommands(cmd);
+  registerWorkspaceServiceCommands(cmd);
 
   // --------------------------------------------------------------------------
   // Events subcommands: gssh workspace events [list|show|tail]
@@ -140,6 +179,74 @@ export function registerWorkspaceCommands(parent: Command): void {
   // Bundle subcommands: gssh workspace bundle [refresh|status|show|edit]
   // --------------------------------------------------------------------------
   registerWorkspaceBundleCommands(cmd);
+}
+
+function registerWorkspaceNotesCommands(workspace: Command): void {
+  const notes = workspace
+    .command('notes')
+    .description('Manage local workspace notes and todos');
+
+  requireProjectAndWorkspace(notes.command('list').description('List workspace notes'))
+    .option('--format <format>', 'Output format: json (default) or text')
+    .action(withErrorHandler(async (options) => {
+      useExplicitContext(options);
+      const { listNotes } = await import('../../commands/notes.js');
+      await listNotes(options);
+    }));
+
+  requireProjectAndWorkspace(notes.command('add').description('Add a workspace note'))
+    .option('--body <text>', 'Note body')
+    .option('--stdin', 'Read note body from stdin')
+    .option('--todo', 'Add as todo')
+    .option('--priority <priority>', 'Todo priority: low, medium, high')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      useExplicitContext(options);
+      const { addNote } = await import('../../commands/notes.js');
+      await addNote(options);
+    }));
+
+  requireProjectAndWorkspace(notes.command('update').description('Update a workspace note'))
+    .requiredOption('--id <id>', 'Note id')
+    .option('--body <text>', 'New body')
+    .option('--todo', 'Convert to todo')
+    .option('--note', 'Convert to note')
+    .option('--priority <priority>', 'Todo priority: low, medium, high')
+    .option('--done', 'Mark todo done')
+    .option('--undone', 'Mark todo open')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      useExplicitContext(options);
+      const { updateNote } = await import('../../commands/notes.js');
+      await updateNote(options);
+    }));
+
+  requireProjectAndWorkspace(notes.command('remove').description('Remove a workspace note'))
+    .requiredOption('--id <id>', 'Note id')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      useExplicitContext(options);
+      const { removeNote } = await import('../../commands/notes.js');
+      await removeNote(options);
+    }));
+
+  requireProjectAndWorkspace(notes.command('done').description('Mark a todo done'))
+    .requiredOption('--id <id>', 'Note id')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      useExplicitContext(options);
+      const { markNoteDone } = await import('../../commands/notes.js');
+      await markNoteDone(options);
+    }));
+
+  requireProjectAndWorkspace(notes.command('undone').description('Mark a todo open'))
+    .requiredOption('--id <id>', 'Note id')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      useExplicitContext(options);
+      const { markNoteUndone } = await import('../../commands/notes.js');
+      await markNoteUndone(options);
+    }));
 }
 
 // ============================================================================
@@ -308,19 +415,19 @@ function registerWorkspaceSessionCommands(workspace: Command): void {
 }
 
 // ============================================================================
-// Process
+// Service
 // ============================================================================
 
-function registerWorkspaceProcessCommands(workspace: Command): void {
-  const proc = workspace
-    .command('process')
-    .description('Manage workspace processes');
+function registerWorkspaceServiceCommands(workspace: Command): void {
+  const service = workspace
+    .command('service')
+    .description('Manage workspace services');
 
-  // gssh workspace process list --project <p> --workspace <w>
+  // gssh workspace service list --project <p> --workspace <w>
   requireProjectAndWorkspace(
-    proc
+    service
       .command('list')
-      .description('List configured processes')
+      .description('List configured services')
   )
     .action(withErrorHandler(async (options) => {
       const ctx = useExplicitContext(options);
@@ -328,43 +435,67 @@ function registerWorkspaceProcessCommands(workspace: Command): void {
       await listProcesses({ workspace: getWorkspacePath(ctx.project, ctx.workspace!) });
     }));
 
-  // gssh workspace process start --project <p> --workspace <w> --name <name>
+  // gssh workspace service start --project <p> --workspace <w> --name <name>
   requireProjectAndWorkspace(
-    proc
+    service
       .command('start')
-      .description('Start a process by name')
+      .description('Start a service by name')
   )
-    .requiredOption('--name <name>', 'Process name')
+    .requiredOption('--name <name>', 'Service name')
     .action(withErrorHandler(async (options) => {
       const ctx = useExplicitContext(options);
       const { startProcess } = await import('../../commands/process.js');
       await startProcess({ workspace: getWorkspacePath(ctx.project, ctx.workspace!), name: options.name });
     }));
 
-  // gssh workspace process stop --project <p> --workspace <w> --name <name>
+  // gssh workspace service stop --project <p> --workspace <w> --name <name>
   requireProjectAndWorkspace(
-    proc
+    service
       .command('stop')
-      .description('Stop a process by name')
+      .description('Stop a service by name')
   )
-    .requiredOption('--name <name>', 'Process name')
+    .requiredOption('--name <name>', 'Service name')
     .action(withErrorHandler(async (options) => {
       const ctx = useExplicitContext(options);
       const { stopProcess } = await import('../../commands/process.js');
       await stopProcess({ workspace: getWorkspacePath(ctx.project, ctx.workspace!), name: options.name });
     }));
 
-  // gssh workspace process attach --project <p> --workspace <w> --name <name>
+  // gssh workspace service attach --project <p> --workspace <w> --name <name>
   requireProjectAndWorkspace(
-    proc
+    service
       .command('attach')
-      .description('Show attach hint for process')
+      .description('Show attach hint for service')
   )
-    .requiredOption('--name <name>', 'Process name')
+    .requiredOption('--name <name>', 'Service name')
     .action(withErrorHandler(async (options) => {
       const ctx = useExplicitContext(options);
       const { attachProcess } = await import('../../commands/process.js');
       await attachProcess({ workspace: getWorkspacePath(ctx.project, ctx.workspace!), name: options.name });
+    }));
+
+  // gssh workspace service open --project <p> --workspace <w> --name <name>
+  requireProjectAndWorkspace(
+    service
+      .command('open')
+      .description('Open service HTTP ports in the browser')
+  )
+    .requiredOption('--name <name>', 'Service name')
+    .option('--port <name-or-number>', 'Open a specific HTTP port by name or number')
+    .option('--all', 'Open all HTTP ports for this service')
+    .option('--local', 'Prefer local localhost URLs')
+    .option('--remote', 'Require hosted URLs')
+    .action(withErrorHandler(async (options) => {
+      const ctx = useExplicitContext(options);
+      const { openProcess } = await import('../../commands/process.js');
+      await openProcess({
+        workspace: getWorkspacePath(ctx.project, ctx.workspace!),
+        name: options.name,
+        port: options.port,
+        all: options.all,
+        local: options.local,
+        remote: options.remote,
+      });
     }));
 }
 
