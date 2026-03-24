@@ -89,8 +89,8 @@ function toErrorMessage(error: unknown): string {
 
 const DEFAULT_PROMPT: SessionNamePromptConfig = {
   title: 'New Session',
-  label: 'Session name:',
-  placeholder: 'e.g. debug, feature-x',
+  label: 'Session name (required):',
+  placeholder: 'Enter a session name, e.g. "debug" or "feature-x"',
 }
 
 export function useAttachController(options: UseAttachControllerOptions): UseAttachControllerResult {

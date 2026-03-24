@@ -211,7 +211,7 @@ export class OpenCodeCoordinator {
   private async ensureAgentTerminalSessionInternal(target: AgentWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
     const sessions = await listTmuxSessions();
     const existing = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId));
-    if (existing) return existing;
+    if (existing && existing.exitCode === undefined) return existing;
 
     const runtime = await this.ensureRuntime(target);
     return createTmuxSession(

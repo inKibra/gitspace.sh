@@ -22,8 +22,8 @@
     "build:npm": "bun scripts/build.ts --npm",
     "relay": "bun src/relay/index.ts",
     "e2e:on-demand": "bash scripts/e2e/run-on-demand.sh",
-    "check:arch": "/usr/local/bin/node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type err",
-    "check:arch:json": "/usr/local/bin/node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type json"
+    "check:arch": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type err",
+    "check:arch:json": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type json"
   },
   "optionalDependencies": {
     "@gitspace/darwin-arm64": "0.2.0-rc.36",
