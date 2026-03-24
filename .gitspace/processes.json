@@ -18,21 +18,6 @@
         "backoffMs": 2000,
         "maxBackoffMs": 15000
       }
-    },
-    {
-      "name": "sample-server",
-      "command": "bun",
-      "args": ["sample-server/index.ts"],
-      "autostart": false,
-      "ports": [
-        { "port": 7777, "name": "web", "protocol": "http" }
-      ],
-      "restart": {
-        "policy": "on-failure",
-        "maxAttempts": 5,
-        "backoffMs": 2000,
-        "maxBackoffMs": 10000
-      }
     }
   ]
 }
