@@ -36,7 +36,7 @@ export function ensurePiAgentDir(): string {
   ];
   for (const dir of dirs) {
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
   }
   return agentDir;
@@ -139,8 +139,8 @@ export async function updateOmp(): Promise<{ version: string; updated: boolean }
 /**
  * Build environment variables for a Pi agent session scoped to a workspace.
  *
- * Sets OMP_CODING_AGENT_DIR so oh-my-pi reads config/extensions/sessions
- * from the gitspace-managed directory instead of ~/.omp/agent/.
+ * Sets PI_CODING_AGENT_DIR so oh-my-pi reads config/extensions/sessions
+ * from the gitspace-managed directory (~/.pi/) instead of the default (~/.omp/agent/).
  */
 export function setupPiEnvironment(
   _target: AgentWorkspaceTarget,

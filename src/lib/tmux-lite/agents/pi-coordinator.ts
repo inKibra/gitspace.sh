@@ -5,7 +5,7 @@ import {
 } from '../cli.js';
 import type { Session as TmuxSession } from '../protocol.js';
 import { setupPiEnvironment, ensureOmpInstalled } from './pi-runtime.js';
-import { listPiSessions, findPiSessionFile, getDefaultSessionsRoot } from './pi-session-files.js';
+import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
   getAgentSessionDisplayTitle,
@@ -128,16 +128,21 @@ export class PiCoordinator {
     return mergeCreatedSession(sessions, created);
   }
 
-  async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<void> {
+  async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+    let killed = false;
     try {
       const sessions = await listTmuxSessions();
       const pty = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
         ?? this.findMappedTmuxSession(sessions, target.workspaceId, agentSessionId);
-      if (pty) await killTmuxSession(pty.id);
+      if (pty) {
+        await killTmuxSession(pty.id);
+        killed = true;
+      }
     } catch {
       // non-fatal
     }
     this.sessionIdMap.delete(`${target.workspaceId}:${agentSessionId}`);
+    return killed;
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {

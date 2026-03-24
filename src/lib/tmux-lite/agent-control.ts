@@ -147,8 +147,7 @@ export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessi
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
   // Pi doesn't have a separate abort API — closing the PTY stops the agent.
-  await defaultPiCoordinator.closeAgentSession(target, agentSessionId);
-  return true;
+  return defaultPiCoordinator.closeAgentSession(target, agentSessionId);
 }
 
 export async function closeAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<AgentSessionSummary[]> {

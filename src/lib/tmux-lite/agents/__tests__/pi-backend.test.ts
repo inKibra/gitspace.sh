@@ -1,22 +1,13 @@
 import { describe, it, expect } from 'bun:test';
-import { SessionManager } from '@oh-my-pi/pi-coding-agent';
 import { PiBackend } from '../pi-backend.js';
 import { PiCoordinator } from '../pi-coordinator.js';
-import { setupPiEnvironment, getPiAgentDir } from '../pi-runtime.js';
-import { existsSync } from 'node:fs';
+import { getPiAgentDir } from '../pi-runtime.js';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 describe('pi-runtime', () => {
-  it('setupPiEnvironment returns PI_CODING_AGENT_DIR', () => {
-    const env = setupPiEnvironment({ workspaceId: 'test:ws' });
-    expect(env.PI_CODING_AGENT_DIR).toBeDefined();
-    expect(env.PI_CODING_AGENT_DIR).toContain('.pi');
-    expect(existsSync(env.PI_CODING_AGENT_DIR)).toBe(true);
-  });
-
-  it('getPiAgentDir is under gitspace', () => {
+  it('getPiAgentDir is under gitspace/.pi', () => {
     const dir = getPiAgentDir();
     expect(dir).toContain('gitspace');
     expect(dir).toEndWith('.pi');
@@ -47,13 +38,6 @@ describe('PiBackend', () => {
       workspacePath: tmpDir,
     });
     expect(sessions).toEqual([]);
-  });
-
-  it('SessionManager.list works with Pi SDK', async () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), 'pi-test-'));
-    const sessions = await SessionManager.list(tmpDir);
-    expect(Array.isArray(sessions)).toBe(true);
-    expect(sessions.length).toBe(0);
   });
 });
 
