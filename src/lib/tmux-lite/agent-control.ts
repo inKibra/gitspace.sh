@@ -1,14 +1,19 @@
-import { defaultOpenCodeCoordinator, type AgentSessionSummary, type AgentWorkspaceTarget } from '../../agents/opencode-coordinator.js';
-import { defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
+import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
 import { defaultAgentEventManager, type AgentStateUpdateDelta, type WorkspaceAgentState } from './agent-event-manager.js';
 import { getArchivedSessions } from '../../agents/agent-db.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
+import type { WorkspaceInfo } from '../remote-session/protocol.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 
+export type AgentWorkspaceTarget = PiWorkspaceTarget;
+export type AgentSessionSummary = PiAgentSessionSummary;
+
 let initializePromise: Promise<void> | null = null;
+let scanWorkspacesCache: WorkspaceInfo[] = [];
 
 export async function syncKnownWorkspaces(): Promise<void> {
   const workspaces = await scanWorkspaces();
+  scanWorkspacesCache = workspaces;
   for (const workspace of workspaces) {
     defaultAgentEventManager.registerWorkspace(
       toCanonicalWorkspaceId(workspace),
@@ -20,15 +25,49 @@ export async function syncKnownWorkspaces(): Promise<void> {
 export function ensureAgentControlInitialized(): Promise<void> {
   if (!initializePromise) {
     initializePromise = (async () => {
-      await defaultOpenCodeRuntimeManager.ensureMachineRuntime();
+      // Pi is in-process — no runtime server to start.
+      // Skip defaultAgentEventManager.initialize() which tries to connect
+      // to OpenCode's SSE stream. Instead, seed sessions from Pi's session
+      // files on disk for each known workspace.
       await syncKnownWorkspaces();
-      await defaultAgentEventManager.initialize();
+      await seedPiSessions();
     })().catch((error) => {
       initializePromise = null;
       throw error;
     });
   }
   return initializePromise;
+}
+
+/**
+ * Seed the AgentEventManager with sessions from Pi's session files.
+ * Called at init and can be called again to refresh.
+ */
+async function seedPiSessions(): Promise<void> {
+  const snapshot = defaultAgentEventManager.getSnapshot();
+  for (const workspaceId of Object.keys(snapshot)) {
+    try {
+      const target = buildTargetFromWorkspaceId(workspaceId);
+      if (!target) continue;
+      const sessions = await defaultPiCoordinator.refreshAgentSessions(target);
+      defaultAgentEventManager.syncKnownSessions(workspaceId, sessions);
+    } catch {
+      // non-fatal — workspace may not have Pi sessions yet
+    }
+  }
+}
+
+function buildTargetFromWorkspaceId(workspaceId: string): PiWorkspaceTarget | null {
+  const match = scanWorkspacesCache.find(
+    (w) => toCanonicalWorkspaceId(w) === workspaceId,
+  );
+  if (!match) return null;
+  return {
+    workspaceId,
+    workspaceName: match.name,
+    workspacePath: match.path,
+    projectName: match.projectName,
+  };
 }
 
 export function subscribeAgentControl(handler: (delta: AgentStateUpdateDelta) => void): () => void {
@@ -72,16 +111,19 @@ export async function getKnownAgentSessions(target: AgentWorkspaceTarget): Promi
 }
 
 /**
- * Fetches live sessions from OpenCode and merges closedAt from the current
- * snapshot so sessions that haven't been un-closed by SSE stay closed.
+ * Fetches live sessions from Pi session files and merges closedAt from the
+ * current snapshot so sessions that haven't been un-closed stay closed.
  */
 export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
 
-  const liveSessions = await defaultOpenCodeCoordinator.refreshAgentSessions(target);
+  const liveSessions = await defaultPiCoordinator.refreshAgentSessions(target);
 
-  // Preserve closedAt from snapshot for sessions not yet activated by SSE.
+  // Sync into event manager so the snapshot stays current
+  defaultAgentEventManager.syncKnownSessions(target.workspaceId, liveSessions);
+
+  // Preserve closedAt from snapshot for sessions not yet activated.
   const snapshot = defaultAgentEventManager.getSnapshot();
   const snapshotMap = new Map(
     (snapshot[target.workspaceId]?.sessions ?? []).map((s) => [s.id, s]),
@@ -96,7 +138,7 @@ export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promi
 export async function createAgentSession(target: AgentWorkspaceTarget, title?: string): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  const sessions = await defaultOpenCodeCoordinator.createAgentSession(target, title);
+  const sessions = await defaultPiCoordinator.createAgentSession(target, title);
   defaultAgentEventManager.syncKnownSessions(target.workspaceId, sessions);
   return sessions;
 }
@@ -104,13 +146,15 @@ export async function createAgentSession(target: AgentWorkspaceTarget, title?: s
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  return defaultOpenCodeCoordinator.abortAgentSession(target, agentSessionId);
+  // Pi doesn't have a separate abort API — closing the PTY stops the agent.
+  await defaultPiCoordinator.closeAgentSession(target, agentSessionId);
+  return true;
 }
 
 export async function closeAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  await defaultOpenCodeCoordinator.closeAgentSession(target, agentSessionId);
+  await defaultPiCoordinator.closeAgentSession(target, agentSessionId);
   defaultAgentEventManager.markSessionClosed(target.workspaceId, agentSessionId);
   return getKnownAgentSessions(target);
 }
@@ -118,11 +162,10 @@ export async function closeAgentSession(target: AgentWorkspaceTarget, agentSessi
 export async function archiveAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  // Get the title from the snapshot before removing it.
   const snapshot = defaultAgentEventManager.getSnapshot();
   const sess = snapshot[target.workspaceId]?.sessions.find((s) => s.id === agentSessionId);
   const title = sess?.title ?? agentSessionId;
-  await defaultOpenCodeCoordinator.archiveAgentSession(target, agentSessionId, title);
+  await defaultPiCoordinator.archiveAgentSession(target, agentSessionId, title);
   defaultAgentEventManager.markSessionArchived(target.workspaceId, agentSessionId);
   return getKnownAgentSessions(target);
 }
@@ -130,10 +173,9 @@ export async function archiveAgentSession(target: AgentWorkspaceTarget, agentSes
 export async function restoreAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  // Get title from archived db before deleting the row.
   const archived = getArchivedSessions(target.workspaceId).find((a) => a.sessionId === agentSessionId);
   const title = archived?.title ?? agentSessionId;
-  await defaultOpenCodeCoordinator.restoreAgentSession(target, agentSessionId);
+  await defaultPiCoordinator.restoreAgentSession(target, agentSessionId);
   defaultAgentEventManager.markSessionRestored(target.workspaceId, agentSessionId, title);
   return getKnownAgentSessions(target);
 }
@@ -143,38 +185,22 @@ export async function attachAgentSession(target: AgentWorkspaceTarget, agentSess
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
   defaultAgentEventManager.syncKnownSessions(
     target.workspaceId,
-    await defaultOpenCodeCoordinator.refreshAgentSessions(target),
+    await defaultPiCoordinator.refreshAgentSessions(target),
   );
-  const session = await defaultOpenCodeCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+  const session = await defaultPiCoordinator.ensureAgentTerminalSession(target, agentSessionId);
   defaultAgentEventManager.markSessionOpen(target.workspaceId, agentSessionId);
   void defaultAgentEventManager.reconcileWorkspace(target.workspaceId);
   return session;
 }
 
 export async function respondToAgentPermission(
-  target: AgentWorkspaceTarget,
+  _target: AgentWorkspaceTarget,
   _agentSessionId: string,
-  permissionId: string,
-  response: 'allow' | 'deny',
+  _permissionId: string,
+  _response: 'allow' | 'deny',
 ): Promise<boolean> {
-  await ensureAgentControlInitialized();
-  defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  const runtime = await defaultOpenCodeRuntimeManager.getWorkspaceRuntime(target.workspaceId);
-  if (!runtime) return false;
-
-  const { OpenCodeClient } = await import('../../agents/opencode-client.js');
-  const { createOpenCodeBasicAuthHeader } = await import('../../agents/opencode-runtime.js');
-  const client = new OpenCodeClient({
-    baseUrl: runtime.baseUrl,
-    directory: target.workspacePath,
-    fetch: (input, init) =>
-      fetch(input as RequestInfo, {
-        ...init,
-        headers: {
-          ...(init?.headers ?? {}),
-          authorization: createOpenCodeBasicAuthHeader(runtime),
-        },
-      }),
-  });
-  return client.respondToPermission(permissionId, response);
+  // Pi handles permissions through its own TUI — the user responds directly
+  // in the attached terminal session. This is a no-op for now.
+  // TODO: implement Pi permission handling via RPC or extension when needed.
+  return false;
 }
