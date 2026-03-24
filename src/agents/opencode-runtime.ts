@@ -4,6 +4,7 @@ declare const Bun: any;
 
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getGitspaceDir } from '../core/config.js';
 import {
@@ -77,6 +78,21 @@ async function checkHealth(info: OpenCodeRuntimeInfo): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function isPortInUse(hostname: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: hostname, port });
+    const finish = (value: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(250);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
 }
 
 async function waitForHealthy(info: OpenCodeRuntimeInfo, timeoutMs = 10000): Promise<void> {
@@ -210,7 +226,7 @@ export class OpenCodeRuntimeManager {
         startedAt: new Date().toISOString(),
       };
 
-      if (await checkHealth(info)) {
+      if (await isPortInUse(info.hostname, port)) {
         continue;
       }
 

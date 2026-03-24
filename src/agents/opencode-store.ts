@@ -82,6 +82,7 @@ export async function listStoredRuntimes(): Promise<StoredOpenCodeRuntime[]> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];
     }
+    logger.error(`[opencode-store] Failed to list runtimes: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   }
 }
