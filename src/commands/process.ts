@@ -5,6 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { listSessions } from '../lib/tmux-lite/cli.js';
+import { basename } from 'node:path';
 import {
   getProcessSpecs,
   startProcessInstance,
@@ -39,7 +40,7 @@ function resolveWorkspacePath(): string {
 }
 
 function getWorkspaceId(workspacePath: string): string {
-  return workspacePath.split('/').pop() ?? workspacePath;
+  return basename(workspacePath) || workspacePath;
 }
 
 function getSpecEndpoints(

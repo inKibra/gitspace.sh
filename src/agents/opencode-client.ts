@@ -42,11 +42,13 @@ function requireData<T>(value: T | undefined, message: string): T {
 export class OpenCodeClient {
   readonly baseUrl: string;
   readonly directory?: string;
+  private readonly fetchImpl?: OpenCodeFetch;
   private readonly client: SdkClient;
 
   constructor(options: OpenCodeClientOptions) {
     this.baseUrl = trimTrailingSlash(options.baseUrl);
     this.directory = options.directory;
+    this.fetchImpl = options.fetch;
     this.client = createOpencodeClient({
       baseUrl: this.baseUrl,
       // Cast needed: our OpenCodeFetch is a simplified subset of the native fetch
@@ -61,6 +63,7 @@ export class OpenCodeClient {
   withDirectory(directory: string): OpenCodeClient {
     return new OpenCodeClient({
       baseUrl: this.baseUrl,
+      fetch: this.fetchImpl,
       directory,
     });
   }

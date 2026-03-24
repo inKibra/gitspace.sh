@@ -40,9 +40,8 @@ function getLevelColor(level: string): string {
 }
 
 export function EventsTui(props: UseEventsReturn) {
-  const { filtered, selectedIndex, selected } = props;
+  const { filtered, selectedIndex, selected, showingSourceEvents } = props;
   const timeline = (selected?.timeline ?? []) as TimelineEntry[];
-  const showingSourceEvents = filtered.length > 0 && filtered[0]?.kind === 'source';
 
   return (
     <box flexDirection="column" flexGrow={1} width="100%" height="100%">

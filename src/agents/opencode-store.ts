@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { OpenCodeRuntimeInfo } from './opencode-types.js';
 import { logger } from '../utils/logger.js';
@@ -53,23 +53,35 @@ async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await rename(tempPath, filePath);
 }
 
-export async function readStoredRuntime(_workspaceId?: string): Promise<StoredOpenCodeRuntime | null> {
-  return readJsonFile<StoredOpenCodeRuntime>(getStoredRuntimePath());
+export async function readStoredRuntime(runtimeKey = MACHINE_RUNTIME_KEY): Promise<StoredOpenCodeRuntime | null> {
+  return readJsonFile<StoredOpenCodeRuntime>(getStoredRuntimePath(runtimeKey));
 }
 
 export async function writeStoredRuntime(runtime: StoredOpenCodeRuntime): Promise<void> {
   await writeJsonFile(getStoredRuntimePath(runtime.runtimeKey), runtime);
 }
 
-export async function deleteStoredRuntime(_workspaceId?: string): Promise<void> {
+export async function deleteStoredRuntime(runtimeKey = MACHINE_RUNTIME_KEY): Promise<void> {
   try {
-    await rm(getStoredRuntimePath());
+    await rm(getStoredRuntimePath(runtimeKey));
   } catch {
     // non-fatal
   }
 }
 
 export async function listStoredRuntimes(): Promise<StoredOpenCodeRuntime[]> {
-  const runtime = await readStoredRuntime();
-  return runtime ? [runtime] : [];
+  try {
+    const entries = await readdir(getRuntimeDir(), { withFileTypes: true });
+    const runtimes = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .map((entry) => readJsonFile<StoredOpenCodeRuntime>(join(getRuntimeDir(), entry.name))),
+    );
+    return runtimes.filter((runtime): runtime is StoredOpenCodeRuntime => runtime !== null);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
 }

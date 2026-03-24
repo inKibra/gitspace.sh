@@ -269,8 +269,10 @@ export async function createWorktreeFromRemoteRef(
   localBranchName: string,
   remoteRef: string
 ): Promise<void> {
-  const remote = remoteRef.split('/')[0];
-  if (!remote) {
+  const separator = remoteRef.indexOf('/');
+  const remote = separator > 0 ? remoteRef.slice(0, separator) : '';
+  const branch = separator > 0 ? remoteRef.slice(separator + 1) : '';
+  if (!remote || !branch) {
     throw new SpacesError(
       `Invalid remote ref: ${remoteRef}. Use form remote/branch (e.g. origin/feature/foo).`,
       'USER_ERROR',
