@@ -260,6 +260,47 @@ export async function createWorktree(
 }
 
 /**
+ * Create a worktree from a remote ref (e.g. origin/feature/foo).
+ * Fetches the remote then runs: git worktree add -b <localBranch> <path> <remoteRef>
+ */
+export async function createWorktreeFromRemoteRef(
+  repoPath: string,
+  workspacePath: string,
+  localBranchName: string,
+  remoteRef: string
+): Promise<void> {
+  const separator = remoteRef.indexOf('/');
+  const remote = separator > 0 ? remoteRef.slice(0, separator) : '';
+  const branch = separator > 0 ? remoteRef.slice(separator + 1) : '';
+  if (!remote || !branch) {
+    throw new SpacesError(
+      `Invalid remote ref: ${remoteRef}. Use form remote/branch (e.g. origin/feature/foo).`,
+      'USER_ERROR',
+      1
+    );
+  }
+  try {
+    if (existsSync(workspacePath)) {
+      throw new SpacesError(`Worktree path already exists: ${workspacePath}`, 'USER_ERROR', 1);
+    }
+    await execAsync(`git fetch ${escapeShellArg(remote)}`, { cwd: repoPath });
+    await execAsync(
+      `git worktree add -b ${escapeShellArg(localBranchName)} ${escapeShellArg(workspacePath)} ${escapeShellArg(remoteRef)}`,
+      { cwd: repoPath }
+    );
+  } catch (error) {
+    if (error instanceof SpacesError) {
+      throw error;
+    }
+    throw new SpacesError(
+      `Failed to create worktree from ${remoteRef}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'SYSTEM_ERROR',
+      2
+    );
+  }
+}
+
+/**
  * Remove a git worktree
  */
 export async function removeWorktree(

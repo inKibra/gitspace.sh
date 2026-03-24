@@ -1,13 +1,11 @@
 /**
  * Core review operations
  *
- * Manages ReviewThread storage in <workspace>/.gitspace/review/<workspaceName>/notes.json
- * Threads are namespaced by workspace name so that workspaces branched from each
- * other don't share the same thread store.
+ * Manages ReviewThread storage in <workspace>/.gitspace/workspace/<workspaceName>/review.json
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import type {
@@ -16,30 +14,28 @@ import type {
   ReviewComment,
   ThreadTarget,
   HunkDecision,
+  HunkTarget,
 } from '../types/review.js';
 import { generateId } from '../utils/id.js';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
+import { ensureWorkspaceStorageIgnored, getWorkspaceReviewPath } from './workspace-metadata.js';
 
 const execAsync = promisify(exec);
+
+export interface ReviewWriteOptions {
+  allowPrompt?: boolean;
+}
 
 // ============================================================================
 // Path Helpers
 // ============================================================================
 
 /**
- * Returns the directory where review notes are stored for this workspace.
- * Path: <workspacePath>/.gitspace/review/<workspaceName>/
- */
-function getReviewDir(workspacePath: string, workspaceName: string): string {
-  return join(workspacePath, '.gitspace', 'review', workspaceName);
-}
-
-/**
- * Returns the path to the notes.json file for this workspace.
+ * Returns the path to the review.json file for this workspace.
  */
 function getNotesPath(workspacePath: string, workspaceName: string): string {
-  return join(getReviewDir(workspacePath, workspaceName), 'notes.json');
+  return getWorkspaceReviewPath(workspacePath, workspaceName);
 }
 
 // ============================================================================
@@ -151,11 +147,12 @@ export async function createThread(
   target: ThreadTarget,
   body: string,
   decision?: HunkDecision,
-  author = 'local'
+  author = 'local',
+  options: ReviewWriteOptions = {}
 ): Promise<ReviewThread> {
   // Ensure .gitignore decision is handled before reading/writing session state so
   // concurrent CRUD writes cannot be overwritten after an async gap.
-  await ensureGitignore(workspacePath, workspaceName);
+  await prepareReviewStorage(workspacePath, workspaceName, options);
 
   const session = readReviewSession(workspacePath, workspaceName, baseBranch);
   const now = new Date().toISOString();
@@ -252,6 +249,42 @@ export function updateThread(
   return thread;
 }
 
+export async function approveHunk(
+  workspacePath: string,
+  workspaceName: string,
+  baseBranch: string,
+  target: HunkTarget,
+  author = 'local',
+  options: ReviewWriteOptions = {},
+): Promise<ReviewThread> {
+  const session = readReviewSession(workspacePath, workspaceName, baseBranch);
+  const existing = session.threads.find((thread) => (
+    thread.target.kind === 'hunk' &&
+    thread.target.file === target.file &&
+    thread.target.hunkHeader === target.hunkHeader
+  ));
+
+  if (existing) {
+    if (existing.decision !== 'approved') {
+      existing.decision = 'approved';
+      existing.updatedAt = new Date().toISOString();
+      writeReviewSession(workspacePath, workspaceName, session);
+    }
+    return existing;
+  }
+
+  return createThread(
+    workspacePath,
+    workspaceName,
+    baseBranch,
+    target,
+    'Approved hunk via folder approval shortcut.',
+    'approved',
+    author,
+    options,
+  );
+}
+
 /**
  * Update the body of a specific comment in a thread.
  */
@@ -327,63 +360,21 @@ export function deleteComment(
 // .gitignore Management
 // ============================================================================
 
-const GITIGNORE_ENTRY = '.gitspace/review/';
-const GITIGNORE_MARKER = '# gssh workspace review — workspace review notes';
+async function ensureGitignore(
+  workspacePath: string,
+  _workspaceName: string,
+  options: ReviewWriteOptions = {}
+): Promise<void> {
+  void options;
+  ensureWorkspaceStorageIgnored(workspacePath);
+}
 
-/**
- * Ensure that .gitspace/review/ is handled appropriately in .gitignore.
- * On first note creation, prompts the user whether to gitignore or commit.
- * Remembers the choice in a local marker file so it's not asked again.
- */
-async function ensureGitignore(workspacePath: string, workspaceName: string): Promise<void> {
-  const reviewDir = getReviewDir(workspacePath, workspaceName);
-  const markerPath = join(reviewDir, '.gitignore-decided');
-
-  // Already decided — skip
-  if (existsSync(markerPath)) return;
-
-  const gitignorePath = join(workspacePath, '.gitignore');
-  const alreadyIgnored =
-    existsSync(gitignorePath) &&
-    readFileSync(gitignorePath, 'utf-8').includes(GITIGNORE_ENTRY);
-
-  if (alreadyIgnored) {
-    // Already ignored — write marker and return
-    mkdirSync(dirname(markerPath), { recursive: true });
-    writeFileSync(markerPath, 'gitignored\n', 'utf-8');
-    return;
-  }
-
-  let keepPrivate = true;
-
-  // Only prompt when running interactively (stdin is a TTY).
-  // When called from the serve daemon there is no TTY, so we silently
-  // default to keeping notes private.
-  const isTTY = Boolean(process.stdin.isTTY);
-  if (isTTY) {
-    try {
-      const { confirm } = await import('@inquirer/prompts');
-      keepPrivate = await confirm({
-        message:
-          'Review notes found. Keep them private (add to .gitignore) or share with the team (commit alongside branch)?',
-        default: true,
-      });
-    } catch {
-      // Prompt cancelled or non-interactive — default to private
-      keepPrivate = true;
-    }
-  }
-
-  if (keepPrivate) {
-    appendFileSync(
-      gitignorePath,
-      `\n${GITIGNORE_MARKER}\n${GITIGNORE_ENTRY}\n`,
-      'utf-8'
-    );
-  }
-
-  mkdirSync(dirname(markerPath), { recursive: true });
-  writeFileSync(markerPath, keepPrivate ? 'gitignored\n' : 'committed\n', 'utf-8');
+export async function prepareReviewStorage(
+  workspacePath: string,
+  workspaceName: string,
+  options: ReviewWriteOptions = {}
+): Promise<void> {
+  await ensureGitignore(workspacePath, workspaceName, options);
 }
 
 // ============================================================================

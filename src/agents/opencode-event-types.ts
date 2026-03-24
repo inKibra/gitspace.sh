@@ -78,6 +78,41 @@ export interface EventMessagePartUpdated {
   };
 }
 
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface QuestionInfo {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
+export interface PendingQuestion {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  tool?: { messageID: string; callID: string };
+}
+
+export interface EventQuestionAsked {
+  type: 'question.asked';
+  properties: PendingQuestion;
+}
+
+export interface EventQuestionReplied {
+  type: 'question.replied';
+  properties: { sessionID: string; requestID: string };
+}
+
+export interface EventQuestionRejected {
+  type: 'question.rejected';
+  properties: { sessionID: string; requestID: string };
+}
+
 export interface EventServerConnected {
   type: 'server.connected';
   properties: Record<string, unknown>;
@@ -92,6 +127,9 @@ export type OpenCodeEvent =
   | EventSessionDeleted
   | EventPermissionUpdated
   | EventPermissionReplied
+  | EventQuestionAsked
+  | EventQuestionReplied
+  | EventQuestionRejected
   | EventMessagePartUpdated
   | EventServerConnected
   | { type: string; properties?: unknown };

@@ -10,9 +10,9 @@ export function encodeWorkspacePathForRoute(workspacePath: string): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-export function buildOpenCodeWebUrl(runtime: OpenCodeRuntimeInfo, sessionId?: string): string {
+export function buildOpenCodeWebUrl(runtime: OpenCodeRuntimeInfo, workspacePath: string, sessionId?: string): string {
   const base = new URL(buildAuthenticatedOpenCodeUrl(runtime));
-  const encodedDir = encodeWorkspacePathForRoute(runtime.workspacePath);
+  const encodedDir = encodeWorkspacePathForRoute(workspacePath);
   if (sessionId) {
     base.pathname = `/${encodedDir}/session/${encodeURIComponent(sessionId)}`;
   } else {

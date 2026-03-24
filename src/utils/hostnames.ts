@@ -1,3 +1,5 @@
+import { createHash } from 'crypto';
+
 const MAX_LABEL_LENGTH = 63;
 const MAX_HOSTNAME_LENGTH = 253;
 
@@ -22,22 +24,47 @@ export function buildProcessHostname(
   workspaceId: string,
   processName: string,
   instance: number,
-  portLabel: string
+  portLabel: string,
+  machineName?: string
 ): string {
   const workspaceSegment = normalizeHostLabel(workspaceId);
   const processSegment = normalizeHostLabel(processName);
   const portSegment = normalizeHostLabel(portLabel);
+  const machineSegment = machineName ? normalizeHostLabel(machineName) : undefined;
 
-  const base = `${portSegment}.${processSegment}-${instance}`;
+  const base = buildProcessHostLabel(machineSegment, workspaceSegment, processSegment, instance, portSegment);
   const suffix = `.${serveDomain}`;
-  let hostname = `${base}.${workspaceSegment}${suffix}`;
+  let hostname = `${base}${suffix}`;
 
   if (hostname.length <= MAX_HOSTNAME_LENGTH) {
     return hostname;
   }
 
-  const availableWorkspace = MAX_HOSTNAME_LENGTH - base.length - suffix.length - 1;
-  const trimmedWorkspace = clampLabel(workspaceSegment, Math.max(1, availableWorkspace));
-  hostname = `${base}.${trimmedWorkspace}${suffix}`;
+  const availableBase = MAX_HOSTNAME_LENGTH - suffix.length;
+  const trimmedBase = clampLabel(base, Math.max(1, availableBase));
+  hostname = `${trimmedBase}${suffix}`;
   return hostname;
+}
+
+function buildProcessHostLabel(
+  machineSegment: string | undefined,
+  workspaceSegment: string,
+  processSegment: string,
+  instance: number,
+  portSegment: string
+): string {
+  const label = [machineSegment, workspaceSegment, processSegment, String(instance), portSegment]
+    .filter(Boolean)
+    .join('-');
+  if (label.length <= MAX_LABEL_LENGTH) {
+    return label;
+  }
+
+  const hash = createHash('sha256').update(label).digest('hex').slice(0, 8);
+  const suffix = `-${instance}-${hash}`;
+  const prefix = clampLabel(
+    [machineSegment, workspaceSegment, processSegment, portSegment].filter(Boolean).join('-'),
+    Math.max(1, MAX_LABEL_LENGTH - suffix.length)
+  );
+  return `${prefix}${suffix}`;
 }

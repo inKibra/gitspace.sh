@@ -48,6 +48,8 @@ export interface UseReviewReturn {
   importGitHub: (prNumber?: number) => Promise<{ imported: number }>;
   /** Push local review to GitHub as a formal PR review */
   pushGitHub: (prNumber?: number) => Promise<{ prNumber: number; url: string }>;
+  /** Approve every hunk under a file or folder path */
+  approvePath: (path: string, pathKind: 'file' | 'folder') => Promise<{ approvedCount: number }>;
 }
 
 export function useReview({ sendReviewRequest, projectName, workspaceName }: UseReviewOptions): UseReviewReturn {
@@ -228,6 +230,26 @@ export function useReview({ sendReviewRequest, projectName, workspaceName }: Use
     });
   }, [run, sendReviewRequest, projectName, workspaceName]);
 
+  const approvePath = useCallback(async (
+    path: string,
+    pathKind: 'file' | 'folder',
+  ): Promise<{ approvedCount: number }> => {
+    return run(async () => {
+      const result = await sendReviewRequest({
+        op: 'approve_path',
+        projectName,
+        workspaceName,
+        path,
+        pathKind,
+      });
+      if (result.op === 'path_approved') {
+        setThreads(result.threads);
+        return { approvedCount: result.approvedCount };
+      }
+      throw new Error(`Unexpected response from approve_path: ${result.op}`);
+    });
+  }, [run, sendReviewRequest, projectName, workspaceName]);
+
   return {
     threads,
     diff,
@@ -244,5 +266,6 @@ export function useReview({ sendReviewRequest, projectName, workspaceName }: Use
     deleteComment,
     importGitHub,
     pushGitHub,
+    approvePath,
   };
 }

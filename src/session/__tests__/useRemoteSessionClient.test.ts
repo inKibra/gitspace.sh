@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
 import type { NotificationConfig } from '../../notifications/types.js'
-import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager.js'
+import type { AgentStateUpdateDelta } from '../../lib/tmux-lite/agent-event-manager.js'
 import type {
   AttachSessionParams,
   BackendDescriptor,

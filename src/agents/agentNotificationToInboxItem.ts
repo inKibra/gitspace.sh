@@ -1,5 +1,21 @@
 import type { InboxItem } from '../lib/tmux-lite/protocol.js';
-import type { AgentNotification } from './useWorkspaceAgentEvents.js';
+
+export type AgentNotificationType = 'permission_needed' | 'agent_idle' | 'agent_error';
+
+export interface AgentNotification {
+  type: AgentNotificationType;
+  workspaceId: string;
+  sessionId: string;
+  sessionTitle: string;
+  /** For permission_needed */
+  permissionId?: string;
+  permissionTitle?: string;
+  /** For agent_idle */
+  messagePreview?: string;
+  /** For agent_error */
+  errorMessage?: string;
+  timestamp: number;
+}
 
 let _idCounter = 0;
 function nextId(): string {

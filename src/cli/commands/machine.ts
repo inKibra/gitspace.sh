@@ -35,7 +35,7 @@ export function registerMachineCommands(parent: Command): void {
     }));
 
   // --------------------------------------------------------------------------
-  // gssh machine tmux [start|stop|status|list|new|attach|kill|replay]
+  // gssh machine tmux [start|stop|status|list|new|attach|kill|replay|hosting]
   // --------------------------------------------------------------------------
   registerMachineTmuxCommands(cmd);
 }
@@ -253,5 +253,60 @@ function registerMachineTmuxCommands(machine: Command): void {
     .action(withErrorHandler(async () => {
       const { pruneTmuxReplays } = await import('../../commands/tmux.js');
       pruneTmuxReplays({ sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
+
+  const hosting = tmux
+    .command('hosting')
+    .description('Configure tmux-lite service hosting');
+  configureTmuxSandbox(hosting);
+
+  hosting
+    .command('status')
+    .description('Show tmux-lite hosting status')
+    .action(withErrorHandler(async () => {
+      const { statusTmuxHosting } = await import('../../commands/tmux.js');
+      await statusTmuxHosting({ sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
+
+  hosting
+    .command('select')
+    .description('Select the base host used for tmux-lite service hosting')
+    .argument('[host]', 'Hosting base host, reserved name, or reserved .serve name')
+    .action(withErrorHandler(async (host) => {
+      const { selectTmuxHosting } = await import('../../commands/tmux.js');
+      await selectTmuxHosting(host, { sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
+
+  hosting
+    .command('set-name')
+    .description('Set the machine name used in hosted service routes')
+    .argument('<name>', 'Machine name')
+    .action(withErrorHandler(async (name) => {
+      const { setTmuxHostingMachineName } = await import('../../commands/tmux.js');
+      await setTmuxHostingMachineName(name, { sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
+
+  hosting
+    .command('enable')
+    .description('Enable tmux-lite service hosting')
+    .action(withErrorHandler(async () => {
+      const { enableTmuxHosting } = await import('../../commands/tmux.js');
+      await enableTmuxHosting({ sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
+
+  hosting
+    .command('disable')
+    .description('Disable tmux-lite service hosting')
+    .action(withErrorHandler(async () => {
+      const { disableTmuxHosting } = await import('../../commands/tmux.js');
+      await disableTmuxHosting({ sandbox: getTmuxLiteSandbox() });
+    }, { skipSetupCheck: true }));
+
+  hosting
+    .command('clear')
+    .description('Clear tmux-lite hosting configuration')
+    .action(withErrorHandler(async () => {
+      const { clearTmuxHosting } = await import('../../commands/tmux.js');
+      await clearTmuxHosting({ sandbox: getTmuxLiteSandbox() });
     }, { skipSetupCheck: true }));
 }

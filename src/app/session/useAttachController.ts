@@ -4,6 +4,7 @@ import type {
   BundleRefreshAttachParams,
   UseBundleRefreshAttachFlowResult,
 } from '../../session/useBundleRefreshAttachFlow.js'
+import type { BackendKey } from '../../session/backend.js'
 
 export interface AttachSelectionParams {
   sessionId?: string
@@ -38,7 +39,14 @@ export interface AttachTerminalSize {
 export interface UseAttachControllerOptions {
   flow: Pick<UseFlowReturn, 'showInput' | 'showMessage' | 'close'>
   attachSessionWithBundleRefresh: UseBundleRefreshAttachFlowResult['attachSessionWithBundleRefresh']
+  /**
+   * When non-null, a previous workspace attach failed in a recoverable way.
+   * Provided by `useBundleRefreshAttachFlow().recoverableParams`.
+   * `attachAnyway()` will retry with `scriptPolicy: 'skip'` using these params.
+   */
+  recoverableAttachParams?: BundleRefreshAttachParams | null
   defaultProjectName?: string | null
+  defaultBackendKey?: BackendKey
   resolveProjectName?: (workspaceId: string) => string | null
   getAttachSize?: () => AttachTerminalSize | null
   sessionNamePrompt?: SessionNamePromptConfig
@@ -53,6 +61,10 @@ export interface UseAttachControllerOptions {
 export interface UseAttachControllerResult {
   attach: (params: BundleRefreshAttachParams) => Promise<boolean>
   attachFromSelection: (selection: AttachSelectionParams) => Promise<void>
+  /** True when the last workspace attach failed in a recoverable way. */
+  canAttachAnyway: boolean
+  /** Retry the last failed workspace attach with `scriptPolicy: 'skip'`. */
+  attachAnyway: () => Promise<boolean>
 }
 
 function parseProjectNameFromWorkspaceId(workspaceId: string): string | null {
@@ -77,15 +89,17 @@ function toErrorMessage(error: unknown): string {
 
 const DEFAULT_PROMPT: SessionNamePromptConfig = {
   title: 'New Session',
-  label: 'Session name (optional):',
-  placeholder: 'Leave empty for auto-generated name',
+  label: 'Session name (required):',
+  placeholder: 'Enter a session name, e.g. "debug" or "feature-x"',
 }
 
 export function useAttachController(options: UseAttachControllerOptions): UseAttachControllerResult {
   const {
     flow,
     attachSessionWithBundleRefresh,
+    recoverableAttachParams,
     defaultProjectName,
+    defaultBackendKey = 'local',
     resolveProjectName,
     getAttachSize,
     sessionNamePrompt,
@@ -135,9 +149,8 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     await onBeforeAttach?.(context)
 
     try {
-      const attached = await attachSessionWithBundleRefresh(attachParams, {
-        projectName,
-      })
+      const ref = { backendKey: defaultBackendKey, workspaceId: attachParams.workspaceId ?? '' }
+      const attached = await attachSessionWithBundleRefresh(ref, attachParams)
 
       if (!attached) {
         await onAttachCancelled?.(context)
@@ -166,6 +179,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     }
   }, [
     attachSessionWithBundleRefresh,
+    defaultBackendKey,
     defaultProjectName,
     flow,
     onAttachCancelled,
@@ -175,6 +189,17 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     resolveProjectName,
     withAttachSize,
   ])
+
+  const attachAnyway = useCallback(async (): Promise<boolean> => {
+    if (!recoverableAttachParams) {
+      return false
+    }
+
+    return attach({
+      ...recoverableAttachParams,
+      scriptPolicy: 'skip',
+    })
+  }, [attach, recoverableAttachParams])
 
   const attachFromSelection = useCallback(async (selection: AttachSelectionParams): Promise<void> => {
     if (selection.sessionId) {
@@ -201,13 +226,14 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     const prompt = sessionNamePrompt ?? DEFAULT_PROMPT
     flow.showInput({
       ...prompt,
+      validation: (value) => (value.trim().length > 0 ? null : 'Session name is required'),
       onSubmit: async (sessionName) => {
         if (closePromptOnSubmit ?? true) {
           flow.close()
         }
         await attach({
           workspaceId: selection.workspaceId,
-          sessionName: sessionName || undefined,
+          sessionName: sessionName.trim() || undefined,
         })
       },
     })
@@ -216,5 +242,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
   return {
     attach,
     attachFromSelection,
+    canAttachAnyway: !!recoverableAttachParams,
+    attachAnyway,
   }
 }

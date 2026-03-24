@@ -47,9 +47,9 @@ export interface NotificationConfig {
  */
 export const DEFAULT_NOTIFICATION_TYPES: NotificationTypeConfig = {
   exit: true,
-  idle: true,
+  idle: false,
   bell: true,
-  title: true,
+  title: false,
   osc: true,
 };
 
@@ -219,6 +219,12 @@ export interface BundleConfirmHistoryEntry {
 }
 
 /**
+ * GitSpace-internal kanban phase for a workspace.
+ * Stored per workspace in project config; synced via owner-sync.
+ */
+export type WorkspacePhase = 'plan' | 'code' | 'review' | 'ship';
+
+/**
  * Project-specific configuration stored in ~/gitspace/{PROJECT_NAME}/.config.json
  */
 export interface ProjectConfig {
@@ -230,16 +236,6 @@ export interface ProjectConfig {
   baseBranch: string;
   /** Wide events configuration */
   events?: EventsConfig;
-  /**
-   * @deprecated Use user-level Linear config instead.
-   * Deprecated project-level field; values are lifted to user-level config on read.
-   */
-  linearApiKey?: string;
-  /**
-   * @deprecated Use linearTeams instead.
-   * Deprecated project-level field; values are lifted to user-level config on read.
-   */
-  linearTeamKey?: string;
   /** Linear teams this project uses (subset of user's teams) */
   linearTeams?: string[];
   /** ISO timestamp when project was created */

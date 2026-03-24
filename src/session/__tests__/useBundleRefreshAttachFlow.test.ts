@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test'
-import { renderHook } from '@testing-library/react'
+import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
+import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js'
 import { useBundleRefreshAttachFlow } from '../useBundleRefreshAttachFlow.js'
+
+const TEST_REF: BackendScopedWorkspaceRef = { backendKey: 'local', workspaceId: 'test-project:test-workspace' }
 
 const domWindow = new Window()
 const originalWindow = globalThis.window
@@ -66,8 +69,8 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const promise = result.current.attachSessionWithBundleRefresh({
-      workspaceId: 'test-project:test-workspace',
+    const promise = result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      workspaceId: TEST_REF.workspaceId,
     })
 
     await Promise.resolve()
@@ -97,8 +100,7 @@ describe('useBundleRefreshAttachFlow', () => {
 
     const applySubmissionCalls: BundleRefreshSubmission[] = []
     const applyBundleRefresh = mock(async (
-      _projectName: string,
-      _workspaceId: string,
+      _ref: BackendScopedWorkspaceRef,
       submission: BundleRefreshSubmission
     ) => {
       applySubmissionCalls.push(submission)
@@ -140,8 +142,8 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const attached = await result.current.attachSessionWithBundleRefresh({
-      workspaceId: 'test-project:test-workspace',
+    const attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      workspaceId: TEST_REF.workspaceId,
     })
 
     expect(attached).toBe(true)
@@ -200,8 +202,8 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const attached = await result.current.attachSessionWithBundleRefresh({
-      workspaceId: 'test-project:test-workspace',
+    const attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      workspaceId: TEST_REF.workspaceId,
     })
 
     expect(attached).toBe(true)
@@ -221,8 +223,7 @@ describe('useBundleRefreshAttachFlow', () => {
 
     const applySubmissionCalls: BundleRefreshSubmission[] = []
     const applyBundleRefresh = mock(async (
-      _projectName: string,
-      _workspaceId: string,
+      _ref: BackendScopedWorkspaceRef,
       submission: BundleRefreshSubmission
     ) => {
       applySubmissionCalls.push(submission)
@@ -265,8 +266,8 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const attached = await result.current.attachSessionWithBundleRefresh({
-      workspaceId: 'test-project:test-workspace',
+    const attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      workspaceId: TEST_REF.workspaceId,
     })
 
     expect(attached).toBe(true)
@@ -288,8 +289,7 @@ describe('useBundleRefreshAttachFlow', () => {
 
     const applySubmissionCalls: BundleRefreshSubmission[] = []
     const applyBundleRefresh = mock(async (
-      _projectName: string,
-      _workspaceId: string,
+      _ref: BackendScopedWorkspaceRef,
       submission: BundleRefreshSubmission
     ) => {
       applySubmissionCalls.push(submission)
@@ -332,8 +332,8 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const attached = await result.current.attachSessionWithBundleRefresh({
-      workspaceId: 'test-project:test-workspace',
+    const attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      workspaceId: TEST_REF.workspaceId,
     })
 
     expect(attached).toBe(true)
@@ -342,7 +342,7 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(applySubmissionCalls[0]?.secretValues).toEqual({ PULUMI_ACCESS_TOKEN: 'token-value' })
   })
 
-  it('shows script failure message and leaves retry to caller', async () => {
+  it('shows script failure message and sets recoverableParams', async () => {
     const attachParamsSeen: Array<{ scriptPolicy?: 'auto' | 'skip' }> = []
     const attachSession = mock(async (params: { scriptPolicy?: 'auto' | 'skip' }) => {
       attachParamsSeen.push({ scriptPolicy: params.scriptPolicy })
@@ -371,9 +371,14 @@ describe('useBundleRefreshAttachFlow', () => {
       })
     )
 
-    const attached = await result.current.attachSessionWithBundleRefresh({
+    const attachParams = {
       workspaceId: 'test-project:test-workspace',
-      scriptPolicy: 'auto',
+      scriptPolicy: 'auto' as const,
+    }
+
+    let attached = false
+    await act(async () => {
+      attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, attachParams)
     })
 
     expect(attached).toBe(false)
@@ -384,6 +389,47 @@ describe('useBundleRefreshAttachFlow', () => {
       title: 'Workspace Script Failed',
       variant: 'error',
     })
+    // Recovery params must be set so callers can offer "attach anyway"
+    expect(result.current.recoverableParams).toMatchObject({
+      workspaceId: 'test-project:test-workspace',
+    })
+  })
+
+  it('clears recoverableParams at the start of the next attach attempt', async () => {
+    let calls = 0
+    const attachSession = mock(async () => {
+      calls += 1
+      if (calls === 1) {
+        const error = new Error('Script failed') as Error & { code?: string }
+        error.code = 'SETUP_SCRIPT_FAILED'
+        throw error
+      }
+    })
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: () => {},
+          showWizard: () => {},
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+      })
+    )
+
+    await act(async () => {
+      await result.current.attachSessionWithBundleRefresh(TEST_REF, { workspaceId: TEST_REF.workspaceId })
+    })
+    expect(result.current.recoverableParams).not.toBeNull()
+
+    await act(async () => {
+      await result.current.attachSessionWithBundleRefresh(TEST_REF, { workspaceId: TEST_REF.workspaceId })
+    })
+    // Second attempt succeeded; recovery should be cleared
+    expect(result.current.recoverableParams).toBeNull()
   })
 
   it('does not replay stale script errors on a later attach attempt', async () => {
@@ -414,8 +460,8 @@ describe('useBundleRefreshAttachFlow', () => {
       }
     )
 
-    const attached = await result.current.attachSessionWithBundleRefresh({
-      workspaceId: 'test-project:test-workspace',
+    const attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      workspaceId: TEST_REF.workspaceId,
     })
     expect(attached).toBe(true)
     expect(attachSession).toHaveBeenCalledTimes(1)

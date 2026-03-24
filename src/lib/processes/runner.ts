@@ -10,6 +10,7 @@ import { WideEventCollector } from "../events/collector.js";
 import { buildProcessEventsConfig } from "./events-config.js";
 import { loadProcessesConfig, getProcessDefinition } from "./config.js";
 import { recordProcessExit } from "./state.js";
+import { buildProcessHostname } from "../../utils/hostnames.js";
 import type { WideEvent } from "../../types/events.js";
 
 interface RunnerOptions {
@@ -71,16 +72,30 @@ async function run(): Promise<void> {
 
   const cwd = definition.cwd ? join(opts.workspacePath, definition.cwd) : opts.workspacePath;
   const commandArgs = [definition.command, ...(definition.args ?? [])];
+  const workspaceId = opts.workspacePath.split("/").pop() ?? opts.workspacePath;
+  // Inject PORT from the first declared port (gitspace owns port allocation)
+  const firstPort = definition.ports?.[0];
+  const serveDomain = process.env.GITSPACE_SERVE_DOMAIN;
+  const portEnv: Record<string, string> = {};
+  if (firstPort?.port) {
+    portEnv.PORT = String(firstPort.port);
+  }
+  if (serveDomain && firstPort) {
+    const portLabel = firstPort.name?.trim() || String(firstPort.port);
+    const hostname = buildProcessHostname(serveDomain, workspaceId, opts.processName, opts.instance, portLabel);
+    portEnv.GITSPACE_SERVE_URL = `https://${hostname}`;
+  }
+
   const env = {
     ...process.env,
     ...(definition.env ?? {}),
+    ...portEnv,
     GITSPACE_PROCESS_NAME: opts.processName,
     GITSPACE_PROCESS_INSTANCE: String(opts.instance),
     TMUX_LITE: process.env.TMUX_LITE ?? "runner",
   } as Record<string, string>;
 
   const processName = opts.processName;
-  const workspaceId = opts.workspacePath.split("/").pop() ?? opts.workspacePath;
   const projectName = opts.workspacePath.split("/").slice(-3, -2)[0] ?? "";
   const eventsConfig = buildProcessEventsConfig(projectName, definition);
 

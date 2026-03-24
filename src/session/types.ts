@@ -9,6 +9,17 @@ import type { NotificationConfig } from '../notifications/types.js';
 import type { BackendDescriptor, BackendKey } from './backend.js';
 import type { WideEvent, SavedEventFilter } from '../types/events.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
+import type { MachineSnapshot } from '../lib/tmux-lite/machine/protocol.js';
+
+export interface AttachedSessionMeta {
+  sessionName?: string | null;
+  processTitle?: string | null;
+  terminalTitle?: string | null;
+  lastAlertKind?: import('../lib/tmux-lite/protocol.js').InboxItem['type'] | null;
+  lastAlertPreview?: string | null;
+  lastAlertAt?: number | null;
+  unreadAlertCount?: number | null;
+}
 
 export interface ScriptRuntimeState {
   phase: ScriptOutputResponse['phase'];
@@ -27,6 +38,7 @@ export interface BackendSessionState {
   workspaces: WorkspaceInfo[];
   sessions: SessionInfo[];
   replays: ReplayInfo[];
+  machineSnapshot: MachineSnapshot | null;
 
   inbox: InboxItem[];
   inboxUnreadCount: number;
@@ -36,6 +48,8 @@ export interface BackendSessionState {
   mode: 'browsing' | 'attached';
   attachedSessionId: string | null;
   attachedSessionName: string | null;
+  attachedSessionMeta: AttachedSessionMeta | null;
+  attachedWorkspaceId: string | null;
 
   scriptState: ScriptRuntimeState | null;
 
@@ -64,6 +78,7 @@ export type SessionEngineAction =
   | { type: 'SET_WORKSPACES'; backendKey: BackendKey; workspaces: WorkspaceInfo[] }
   | { type: 'SET_SESSIONS'; backendKey: BackendKey; sessions: SessionInfo[] }
   | { type: 'SET_REPLAYS'; backendKey: BackendKey; replays: ReplayInfo[] }
+  | { type: 'SET_MACHINE_SNAPSHOT'; backendKey: BackendKey; snapshot: MachineSnapshot | null }
   | {
       type: 'SET_INBOX';
       backendKey: BackendKey;
@@ -85,6 +100,13 @@ export type SessionEngineAction =
       backendKey: BackendKey;
       sessionId: string | null;
       sessionName?: string | null;
+      meta?: AttachedSessionMeta | null;
+      workspaceId?: string | null;
+    }
+  | {
+      type: 'SET_ATTACHED_SESSION_META';
+      backendKey: BackendKey;
+      meta: AttachedSessionMeta | null;
     }
   | {
       type: 'SET_COMMAND_ERROR';

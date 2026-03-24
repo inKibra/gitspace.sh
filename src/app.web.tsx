@@ -1,16 +1,13 @@
 /** @jsxImportSource react */
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { SessionTerminal, type SessionTerminalHandle } from "./components/SessionTerminal.web";
+import type { SessionTerminalHandle } from "./components/SessionTerminal.web";
 import { ReplayTerminalWeb } from './components/ReplayTerminal.web';
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
 import {
-  TerminalControls,
   applyModifiersToInput,
   type ModifierState,
 } from "./components/TerminalControls.web";
-import { FloatingControls } from "./components/FloatingControls.web";
-import { useTerminal } from "./hooks/useTerminal.web";
-import { useRelayConnection } from "./hooks/useRelayConnection.web";
+import { AttachedTerminalPaneWeb } from './components/AttachedTerminalPane.web.js';
 import { IdentityGate } from "./components/IdentityGate.web";
 import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
@@ -21,38 +18,29 @@ import { useUserActivity } from "./hooks/index.js";
 import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
 import { useBundleConfigFlow } from './session/useBundleConfigFlow.js';
 import { useAttachController } from './app/session/useAttachController.js';
-import { CONNECTION_STATUS_LABELS } from './app/session/types.js';
 import { useProcessActions } from './app/session/useProcessActions.js';
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
-import { useWorkspaceAgentSessions } from './agents/useWorkspaceAgentSessions.js';
-import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
-import { collectAgentSessionCounts, collectWorkspaceSyncIds } from './agents/remote-agent-browser.js';
 
-// Import shared components and hooks
+// Shared components and hooks
 import {
-  useMachineList,
-  useProjectList,
-  useSpacesBrowser,
   useFlow,
   getDefaultShortcuts,
-  type MachineInfo,
   type ReplayInfo,
   type WorkspaceInfo,
 } from "./components/index.js";
-import { MachineListWeb } from "./components/MachineList.web.js";
-import { ProjectListWeb } from './components/ProjectList.web.js';
-import { SpacesBrowserWeb } from "./components/SpacesBrowser.web.js";
+// ProjectListWeb and SpacesBrowserWeb removed — browsing view now uses full-width kanban board
+import { BoardPage } from "./pages/BoardPage.web.js";
+import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
-import { useInbox } from "./components/Inbox.js";
+import { useInboxPageModel } from './app/shared/inbox/useInboxPageModel.js';
 import { InboxWeb } from "./components/Inbox.web.js";
-import { useWorkspaceAgentEvents } from './agents/useWorkspaceAgentEvents.js';
-import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
+import type { WorkspacePhase } from './types/config.js';
 import {
   useNotifications,
   type ToastNotification,
@@ -62,11 +50,48 @@ import {
 } from "./notifications/index.js";
 import {
   resolveInboxCommand,
-  resolveMachineListCommand,
-  resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
+import {
+  useCommandPaletteState,
+  COMMAND_PALETTE_COMMAND_DEFS,
+} from './app/workspaces/index.js';
+import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
+import { ProcessStartCancelledError, isPortConflictError, promptToResolveProcessStartConflict } from './app/session/resolveProcessStartConflict.js';
+import { executeCommandPaletteAction } from './app/shared/command-palette/executeCommandPaletteAction.js';
+import { resolveSelectedProjectName, resolveSelectedWorkspace } from './app/shared/command-palette/workspace-selection.js';
+import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
+import { showReplayHistorySelect } from './app/shared/workspace-detail/showReplayHistorySelect.js';
+import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/types.js';
 
-type View = "machines" | "terminal" | "review" | "replay";
+// Multi-backend layer (browser-side)
+import {
+  useMultiBackends,
+} from './machine/multi/useMultiBackends.js';
+import type { BackendScopedWorkspaceRef, BackendScopedAgentSessionRef } from './machine/multi/types.js';
+import { useWorkspaceController } from './machine/controllers/useWorkspaceController.js';
+import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
+import { selectBackendSnapshot, selectAllWorkspaces } from './machine/multi/selectors.js';
+import type { BackendKey } from './session/backend.js';
+import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
+
+// Agent session helpers (platform-neutral)
+import { openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
+
+// Browser-specific factories for useMultiBackends
+import {
+  createBrowserRemoteSessionBackend,
+} from './app/session/createSessionBackend.web.js';
+import { browserRelaySocketAdapter } from './relay-client/adapters/browser.js';
+import { signRelayMessage } from './session/crypto/relay-signing.web.js';
+import { getStoredDeviceCert } from './lib/storage/identity-store.web.js';
+import type { RelayDescriptor } from './relay-client/index.js';
+
+// Replay helper
+import type { ReplayFrame, ReplayFrameTarget, ReplayTimeline } from './lib/tmux-lite/replay/index.js';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type View = "terminal" | "review" | "replay";
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
@@ -87,9 +112,26 @@ const SCRIPT_ERROR_CODES = new Set([
   'REMOVE_SCRIPT_FAILED',
 ]);
 
+// ─── Browser relay signer factory ────────────────────────────────────────────
+
+function createBrowserRelaySigner(identity: Identity) {
+  return <T extends object>(message: T): T => signRelayMessage(message, identity);
+}
+
+// ─── Browser device cert getter ───────────────────────────────────────────────
+
+async function getBrowserDeviceCert(_identity: Identity): Promise<string> {
+  const cert = getStoredDeviceCert();
+  if (!cert) {
+    throw new Error('No device certificate found. Re-run identity setup.');
+  }
+  return cert;
+}
+
+// ─── App component ───────────────────────────────────────────────────────────
+
 export default function App() {
-  const [view, setView] = useState<View>("machines");
-  const [selectedMachine, setSelectedMachine] = useState<MachineInfo | null>(null);
+  const [view, setView] = useState<View>("terminal");
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
@@ -108,7 +150,7 @@ export default function App() {
     useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
-  const [showDismissedReplays, setShowDismissedReplays] = useState(false);
+  const [showDismissedReplays] = useState(false);
   const showDismissedReplaysRef = useRef(showDismissedReplays);
   const pendingProcessEditWorkspacesRef = useRef<unknown[] | null>(null);
   const pendingProcessEditValidationArmedRef = useRef(false);
@@ -128,29 +170,286 @@ export default function App() {
   const [reviewWorkspace, setReviewWorkspace] = useState<{
     projectName: string;
     workspaceId: string;
+    backendKey: BackendKey;
     workspaceLabel?: string;
   } | null>(null);
+
   // Identity state (resolved by IdentityGate before relay connection)
   const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
 
-  // Relay connection (for machine list)
-  const relay = useRelayConnection({ identity: resolvedIdentity });
+  // ─── Relay descriptor (same-origin WS) ────────────────────────────────────
 
-  // Terminal connection (for PTY)
-  const terminal = useTerminal();
+  const relayDescriptor = useMemo<RelayDescriptor | null>(() => {
+    if (!resolvedIdentity) return null;
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return { url: `${wsProtocol}//${location.host}/ws`, source: 'local' };
+  }, [resolvedIdentity]);
+
+  // ─── Multi-backend hook (browser: no local backend, remote via relay) ───────
+
+  const multi = useMultiBackends({
+    enabled: Boolean(resolvedIdentity),
+    relay: relayDescriptor,
+    identity: resolvedIdentity,
+    createLocalBackend: null, // No local tmux-lite server in browser
+    createRemoteBackend: createBrowserRemoteSessionBackend,
+    relaySocketAdapter: browserRelaySocketAdapter,
+    createRelaySigner: createBrowserRelaySigner,
+    getDeviceCertificate: getBrowserDeviceCert,
+  });
+
+  const multiMachineState = multi.state;
+
+  // ─── Active backend (the one currently attached / first connected) ─────────
+
+  const activeBackendKey = multi.activeBackendKey;
+  const activeBackendState = activeBackendKey ? multi.getBackendState(activeBackendKey) : null;
+
+  // Find the backend that is currently in "attached" mode
+  const attachedBackendKey = useMemo(() => {
+    for (const key of multi.state.backendOrder) {
+      const st = multi.getBackendState(key);
+      if (st?.mode === 'attached') return key;
+    }
+    return null;
+  }, [multi]);
+
+  const attachedBackendState = attachedBackendKey ? multi.getBackendState(attachedBackendKey) : null;
+  const terminalStatus = activeBackendState?.status ?? 'disconnected';
+  const terminalMode = attachedBackendState?.mode ?? (activeBackendState?.mode ?? 'browsing');
+  const attachedSessionName = attachedBackendState?.attachedSessionName ?? null;
+  const attachedSessionMeta = attachedBackendState?.attachedSessionMeta ?? null;
+  const commandError = attachedBackendState?.commandError ?? activeBackendState?.commandError ?? null;
+  const scriptState = attachedBackendState?.scriptState ?? activeBackendState?.scriptState ?? null;
+  const notificationConfig = activeBackendState?.notificationConfig ?? null;
+
+  // ─── PTY backend ref ──────────────────────────────────────────────────────
+
+  const ptyBackendRef = useRef<RemoteSessionPtyBackend | null>(null);
+  const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  useEffect(() => {
+    const key = attachedBackendKey ?? activeBackendKey;
+    if (!key) return;
+    ptyBackendRef.current = multi.getBackend(key) as RemoteSessionPtyBackend | null;
+  }, [attachedBackendKey, activeBackendKey, multi]);
+
+  const sendPty = useCallback((data: Uint8Array) => {
+    const b = ptyBackendRef.current;
+    if (b?.writePtyData) void b.writePtyData(data).catch(() => undefined);
+  }, []);
+
+  const resizePty = useCallback((cols: number, rows: number) => {
+    const b = ptyBackendRef.current;
+    if (b?.resizePty) void b.resizePty(cols, rows).catch(() => undefined);
+  }, []);
+
+  const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    writeCallbackRef.current = fn;
+    ptyBackendRef.current?.setPtyOutputHandler?.(fn);
+  }, []);
+
+  // Re-attach write callback when backend changes
+  useEffect(() => {
+    const key = attachedBackendKey ?? activeBackendKey;
+    if (!key) return;
+    const b = multi.getBackend(key) as RemoteSessionPtyBackend | null;
+    ptyBackendRef.current = b;
+    b?.setPtyOutputHandler?.(writeCallbackRef.current);
+  }, [attachedBackendKey, activeBackendKey, multi]);
+
+  // ─── Projects & workspaces from snapshot ──────────────────────────────────
+
+  const allProjects = useMemo(() => {
+    const key = activeBackendKey;
+    if (!key) return [];
+    const snapshot = selectBackendSnapshot(multiMachineState, key);
+    if (!snapshot) return [];
+    return snapshot.projectOrder.map((id) => snapshot.projectsById[id]).filter(Boolean);
+  }, [multiMachineState, activeBackendKey]);
+
+  // ─── Workspace / kanban controllers ───────────────────────────────────────
+
+  const workspaceController = useWorkspaceController({ state: multiMachineState });
+  const {
+    boardState: workspaceBoardState,
+    handleSelectWorkspace: handleBoardSelectWorkspace,
+    worktreeCount,
+    loading: boardLoading,
+    selectedWorkspaceProjectName,
+  } = useBoardPageModel({
+    state: multiMachineState,
+    selectedRef: workspaceController.selectedRef,
+    setSelectedRef: workspaceController.setSelectedRef,
+    clearSelectedRef: workspaceController.clearSelectedRef,
+    onSetWorkspacePhase: async (ref, phase) => {
+      await multi.setWorkspaceStatus(ref, phase);
+    },
+    resolveRefForWorkspaceId: (workspaceId) => {
+      const ws = selectAllWorkspaces(multiMachineState).find((item) => item.workspace.id === workspaceId);
+      return ws ? { backendKey: ws.backendKey, workspaceId } : null;
+    },
+    connected: terminalStatus === 'connected',
+    mode: terminalMode,
+    activeBackendKey,
+    activeBackendHasSnapshot: activeBackendState?.machineSnapshot != null,
+  });
+  const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
+
+  // ─── Session / replay data (from active backend) ──────────────────────────
+
+  const selectedBackendKey = workspaceController.selectedRef?.backendKey ?? activeBackendKey;
+  const selectedBackendState = selectedBackendKey ? multi.getBackendState(selectedBackendKey) : null;
+  const backendSessions = useMemo(() => {
+    if (!selectedBackendKey) return [];
+    return selectedBackendState?.sessions ?? [];
+  }, [selectedBackendState?.sessions, selectedBackendKey]);
+
+  const backendReplays = useMemo(() => {
+    if (!selectedBackendKey) return [];
+    return selectedBackendState?.replays ?? [];
+  }, [selectedBackendState?.replays, selectedBackendKey]);
+
+  const backendInbox = activeBackendState?.inbox ?? [];
+  const backendInboxUnreadCount = activeBackendState?.inboxUnreadCount ?? 0;
+  const backendEvents = activeBackendState?.events ?? [];
+  const backendLiveEventIds = activeBackendState?.liveEventIds ?? [];
+  const backendSavedEventFilters = activeBackendState?.savedEventFilters ?? [];
+  const backendAttachedSessionId = attachedBackendState?.attachedSessionId ?? null;
+
+  // Filtered to selected project
+  const filteredWorkspaces: WorkspaceInfo[] = useMemo(
+    () => workspaceRuntime.workspaces.filter((workspace) => workspace.backendKey === selectedBackendKey),
+    [workspaceRuntime.workspaces, selectedBackendKey],
+  );
+
+  const filteredWorkspaceIds = useMemo(
+    () => new Set(filteredWorkspaces.map((w) => w.id)),
+    [filteredWorkspaces],
+  );
+
+  const filteredSessions = useMemo(
+    () => workspaceRuntime.sessions.filter((s) => filteredWorkspaceIds.has(s.workspaceId)),
+    [workspaceRuntime.sessions, filteredWorkspaceIds],
+  );
+
+  const filteredReplays = useMemo(
+    () => backendReplays,
+    [backendReplays],
+  );
+
+  // Selected workspace detail
+  const selectedRef = workspaceController.selectedRef;
+  const backendAttachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
+  const selectedWorkspaceForDetail = useMemo(
+    () => selectedRef
+      ? filteredWorkspaces.find((w) => w.id === selectedRef.workspaceId) ?? null
+      : null,
+    [selectedRef, filteredWorkspaces],
+  );
+
+  // Auto-navigate to the workspace that owns the attached session.
+  // This ensures the detail view stays in sync with the PTY — when a new
+  // terminal is created or a service session is selected, the workspace detail
+  // view follows rather than requiring the user to manually re-select.
+  useEffect(() => {
+    if (!backendAttachedWorkspaceId) return;
+    if (terminalMode !== 'attached') return;
+    // Already viewing the correct workspace
+    if (selectedRef?.workspaceId === backendAttachedWorkspaceId) return;
+    handleBoardSelectWorkspace(backendAttachedWorkspaceId);
+  }, [backendAttachedWorkspaceId, terminalMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const detailSessions = useMemo(
+    () => selectedRef ? filteredSessions.filter((s) => s.workspaceId === selectedRef.workspaceId) : [],
+    [selectedRef, filteredSessions],
+  );
+
+  const detailReplays = useMemo(
+    () => selectedRef
+      ? filteredReplays.filter((r) => r.workspaceId === selectedRef.workspaceId)
+      : [],
+    [selectedRef, filteredReplays],
+  );
+
+  useEffect(() => {
+    if (!selectedRef || terminalStatus !== 'connected') return;
+    multi.listSessions(selectedRef.workspaceId);
+    multi.listReplays(selectedRef.workspaceId, showDismissedReplaysRef.current);
+  }, [selectedRef, terminalStatus, multi.listSessions, multi.listReplays]);
+
+  // ─── Active backend ref for targeting operations ───────────────────────────
+
+  /** Returns the active (first connected) backend key for operations like project creation. */
+  const getTargetBackendKey = useCallback((): BackendKey => {
+    return activeBackendKey ?? 'local';
+  }, [activeBackendKey]);
+
+  /** Returns a BackendScopedWorkspaceRef for a workspace, using its known backendKey. */
+  const getWorkspaceRef = useCallback((workspaceId: string): BackendScopedWorkspaceRef => {
+    const ws = workspaceBoardState.groups
+      .flatMap((g) => g.workspaces)
+      .find((w) => w.id === workspaceId);
+    return { backendKey: ws?.backendKey ?? getTargetBackendKey(), workspaceId };
+  }, [workspaceBoardState.groups, getTargetBackendKey]);
+
+  const getAgentRef = useCallback((workspaceId: string, agentSessionId: string): BackendScopedAgentSessionRef => ({
+    ...getWorkspaceRef(workspaceId),
+    agentSessionId,
+  }), [getWorkspaceRef]);
+
+  // ─── Agent session data ────────────────────────────────────────────────────
+
+  const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
+  const agentSessionCounts = workspaceRuntime.agentSessionCounts;
+  const pendingPermissionsByWorkspace = workspaceRuntime.pendingPermissionsByWorkspace;
+  const allWorkspaceEntries = workspaceRuntime.workspaces;
+  const workspaceStatusById = workspaceRuntime.stripStatusById;
+
+  // ─── Agent session actions ─────────────────────────────────────────────────
+
+  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
+    void multi.setAgentSessionPreference(getWorkspaceRef(workspaceId), sessionId);
+  }, [multi, getWorkspaceRef]);
+
+
+
+  const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await openAgentSession({
+      workspaceId,
+      agentSessionId,
+      persistAgentSessionSelection,
+      clearViewOnly: () => setIsViewOnlySession(false),
+      attachAgentSession: (wid, aId) =>
+        multi.attachAgentSession(getAgentRef(wid, aId)),
+    });
+  }, [multi, getAgentRef, persistAgentSessionSelection]);
+
+  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await multi.abortAgentSession(getAgentRef(workspaceId, agentSessionId));
+  }, [multi, getAgentRef]);
+
+  const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await multi.closeAgentSession(getAgentRef(workspaceId, agentSessionId));
+  }, [multi, getAgentRef]);
+
+  const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await multi.archiveAgentSession(getAgentRef(workspaceId, agentSessionId));
+  }, [multi, getAgentRef]);
+
+  const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await multi.restoreAgentSession(getAgentRef(workspaceId, agentSessionId));
+  }, [multi, getAgentRef]);
+
+  // ─── Notifications & preferences ──────────────────────────────────────────
+
   const activeNotificationConfig =
-    terminal.notificationConfig ?? localNotificationConfig ?? DEFAULT_NOTIFICATION_CONFIG;
+    notificationConfig ?? localNotificationConfig ?? DEFAULT_NOTIFICATION_CONFIG;
 
-  // Visual viewport hook for keyboard detection
   const keyboardVisible = useVisualViewport();
 
-  // Apply device-specific CSS classes and detect mobile on mount
   useEffect(() => {
     applyDeviceClasses();
-    // Show mobile controls on touch devices or mobile layout
     setShowMobileControls(isTouchDevice() || isMobileLayout());
-
-    // Listen for layout changes
     const mediaQuery = window.matchMedia('(max-width: 767px)');
     const handleChange = (e: MediaQueryListEvent) => {
       setShowMobileControls(e.matches || isTouchDevice());
@@ -159,56 +458,100 @@ export default function App() {
     return () => mediaQuery.removeEventListener('change', handleChange);
   }, []);
 
-  // Flow/Modal system
+  useEffect(() => {
+    let mounted = true;
+    void browserPreferencesService.getNotificationConfig().then((config) => {
+      if (mounted) setLocalNotificationConfig(config);
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!notificationConfig) return;
+    void browserPreferencesService.updateNotificationConfig(notificationConfig);
+    setLocalNotificationConfig(notificationConfig);
+  }, [notificationConfig]);
+
+  // ─── Flow / Modal system ───────────────────────────────────────────────────
+
   const flow = useFlow({
     onError: (error) => console.error('Flow error:', error),
   });
 
-  const resolveWebWorkspaceProjectName = useCallback((workspaceId: string) => {
-    const index = workspaceId.indexOf(':');
-    if (index > 0) {
-      return workspaceId.slice(0, index);
-    }
-    return terminal.selectedProjectName;
-  }, [terminal.selectedProjectName]);
+  // ─── Agent session actions that need flow ─────────────────────────────────
+
+  const handleCreateAgentSession = useCallback((workspaceId: string) => {
+    promptCreateAgentSession({
+      flow,
+      workspaceId,
+      getCurrentSessions: (id) => agentSessionsByWorkspace[id] ?? [],
+      createAgentSession: async (wid, title) => {
+        const sessions = await multi.createAgentSession(getWorkspaceRef(wid), title);
+        return (sessions ?? []).map((s) => ({ ...s, workspaceId: wid }));
+      },
+      attachOptions: {
+        workspaceId,
+        persistAgentSessionSelection,
+        clearViewOnly: () => setIsViewOnlySession(false),
+        attachAgentSession: (wid, aId) =>
+          multi.attachAgentSession(getAgentRef(wid, aId)),
+      },
+    });
+  }, [flow, multi, agentSessionsByWorkspace, getWorkspaceRef, getAgentRef, persistAgentSessionSelection]);
+
+
+
+  // ─── Resolve project name from workspaceId ────────────────────────────────
+
+  const resolveWorkspaceProjectName = useCallback((workspaceId: string) => {
+    const idx = workspaceId.indexOf(':');
+    if (idx > 0) return workspaceId.slice(0, idx);
+    return null;
+  }, []);
+
+  // ─── Bundle flows ──────────────────────────────────────────────────────────
 
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
     flow,
-    commandError: terminal.commandError,
-    attachSession: (params) => terminal.attachSession(params),
-    getBundleRefreshPlan: terminal.getBundleRefreshPlan,
-    applyBundleRefresh: terminal.applyBundleRefresh,
-    resolveProjectName: resolveWebWorkspaceProjectName,
+    commandError,
+    // useBundleRefreshAttachFlow expects (params) => ... (no ref); we look up the ref from the workspaceId
+    attachSession: (params) => multi.attachSession(getWorkspaceRef(params.workspaceId ?? ''), params),
+    getBundleRefreshPlan: (ref) => multi.getBundleRefreshPlan(ref),
+    applyBundleRefresh: (ref, submission) => multi.applyBundleRefresh(ref, submission),
   });
 
   const bundleConfigFlow = useBundleConfigFlow({
     flow,
-    getBundleConfigState: terminal.getBundleConfigState,
-    applyBundleConfigUpdate: terminal.applyBundleConfigUpdate,
-    resolveProjectName: resolveWebWorkspaceProjectName,
+    getBundleConfigState: (ref) => multi.getBundleConfigState(ref),
+    applyBundleConfigUpdate: (ref, submission) => multi.applyBundleConfigUpdate(ref, submission),
     onApplied: async () => {
-      terminal.requestWorkspaces();
-      terminal.requestSessions();
-      terminal.requestReplays(undefined, showDismissedReplays);
+      multi.listWorkspaces();
+      multi.listSessions();
+      multi.listReplays(undefined, showDismissedReplays);
     },
   });
+
+  // ─── Attach size ───────────────────────────────────────────────────────────
 
   const getWebAttachSize = useCallback(() => {
     return terminalRef.current?.getSize() ?? { cols: 80, rows: 24 };
   }, []);
 
+  // ─── Attach controller ─────────────────────────────────────────────────────
+
   const attachController = useAttachController({
     flow,
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
-    defaultProjectName: terminal.selectedProjectName,
+    recoverableAttachParams: bundleRefreshAttach.recoverableParams,
+    defaultProjectName: selectedWorkspaceProjectName,
+    defaultBackendKey: getTargetBackendKey(),
     getAttachSize: getWebAttachSize,
-    resolveProjectName: resolveWebWorkspaceProjectName,
+    resolveProjectName: resolveWorkspaceProjectName,
     onBeforeAttach: ({ target, params }) => {
       if (target === 'session') {
         setShowScriptTerminal(false);
         return;
       }
-
       if (params.workspaceId && !params.command) {
         lastScriptWorkspaceIdRef.current = params.workspaceId;
         setShowInbox(false);
@@ -217,21 +560,15 @@ export default function App() {
       }
     },
     onAttachCancelled: ({ target }) => {
-      if (target === 'workspace' && showScriptTerminal) {
-        return;
-      }
-      if (target === 'workspace') {
-        setShowScriptTerminal(false);
-      }
+      if (target === 'workspace' && showScriptTerminal) return;
+      if (target === 'workspace') setShowScriptTerminal(false);
     },
     onAttachError: ({ target, message }) => {
       const isWorkspaceScriptFailure = message.startsWith('Workspace scripts failed during');
-      const hasScriptRuntimeState = Boolean(terminal.scriptState);
-
+      const hasScriptRuntimeState = Boolean(scriptState);
       if (target === 'workspace' && (!isWorkspaceScriptFailure || !hasScriptRuntimeState)) {
         setShowScriptTerminal(false);
       }
-
       flow.showMessage({
         title: isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
         message,
@@ -242,19 +579,23 @@ export default function App() {
 
   const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
     flow,
-    deleteWorkspace: terminal.deleteWorkspace,
+    deleteWorkspace: (ref, params) => multi.deleteWorkspace(ref, params),
     onBeforeDelete: ({ target }) => {
       suppressDeleteScriptFailureModalRef.current = true;
       setShowInbox(false);
       setScriptWorkspaceName(target.workspaceName);
       setShowScriptTerminal(true);
     },
-    onDeleteSuccess: async () => {
+    onDeleteSuccess: async ({ target }) => {
       suppressDeleteScriptFailureModalRef.current = false;
       setShowScriptTerminal(false);
-      terminal.requestWorkspaces();
-      terminal.requestSessions();
-      terminal.requestReplays(undefined, showDismissedReplays);
+      if (workspaceBoardState.selectedWorkspaceId === target.ref.workspaceId) {
+        workspaceBoardState.setSelectedWorkspaceId(null);
+      }
+      workspaceController.clearSelectedRef();
+      multi.listWorkspaces();
+      multi.listSessions();
+      multi.listReplays(undefined, showDismissedReplays);
     },
     onDeleteCancelled: async () => {
       suppressDeleteScriptFailureModalRef.current = false;
@@ -263,119 +604,93 @@ export default function App() {
     onDeleteError: async ({ message }) => {
       suppressDeleteScriptFailureModalRef.current = false;
       setShowScriptTerminal(false);
-      flow.showMessage({
-        title: 'Delete Failed',
-        message,
-        variant: 'error',
-      });
+      flow.showMessage({ title: 'Delete Failed', message, variant: 'error' });
     },
   });
 
   const lifecycleController = useLifecycleController({
     flow,
-    listGithubRepos: terminal.listGithubRepos,
-    listRemoteBranches: terminal.listRemoteBranches,
-    listLinearIssues: terminal.listLinearIssues,
-    createProject: terminal.createProject,
-    prepareProjectCreation: terminal.prepareProjectCreation,
-    finalizeProjectCreation: terminal.finalizeProjectCreation,
-    cancelProjectCreation: terminal.cancelProjectCreation,
-    createWorkspace: terminal.createWorkspace,
-    deleteProject: terminal.deleteProject,
-    getProjectNames: () => terminal.projects.map((project) => project.name),
-    refreshProjects: () => terminal.requestProjects(),
-    refreshWorkspaces: () => terminal.requestWorkspaces(),
-    refreshSessions: () => terminal.requestSessions(),
-    onProjectCreated: ({ projectName }) => {
-      terminal.selectProject(projectName);
-    },
-    onWorkspaceCreated: ({ projectName }) => {
-      terminal.selectProject(projectName);
-    },
+    // All operations target the active backend (the machine serving this web app)
+    listGithubRepos: (org?: string) => multi.listGithubRepos(getTargetBackendKey(), org),
+    listRemoteBranches: (projectName: string) =>
+      multi.listRemoteBranches(getTargetBackendKey(), projectName),
+    listLinearIssues: (projectName: string) =>
+      multi.listLinearIssues(getTargetBackendKey(), projectName),
+    createProject: (params) =>
+      multi.createProject(getTargetBackendKey(), params),
+    prepareProjectCreation: (params) =>
+      multi.prepareProjectCreation(getTargetBackendKey(), params),
+    finalizeProjectCreation: (params) =>
+      multi.finalizeProjectCreation(getTargetBackendKey(), params),
+    cancelProjectCreation: (projectName: string) =>
+      multi.cancelProjectCreation(getTargetBackendKey(), projectName),
+    createWorkspace: (params) =>
+      multi.createWorkspace(getTargetBackendKey(), params),
+    deleteProject: (projectName: string, params) =>
+      multi.deleteProject(getTargetBackendKey(), projectName, params),
+    getProjectNames: () => allProjects.map((p) => p.name),
+    refreshProjects: () => multi.listProjects(),
+    refreshWorkspaces: () => multi.listWorkspaces(),
+    refreshSessions: () => multi.listSessions(),
+    onProjectCreated: () => undefined,
+    onWorkspaceCreated: () => undefined,
   });
 
-  useEffect(() => {
-    let mounted = true;
-    void browserPreferencesService.getNotificationConfig().then((config) => {
-      if (mounted) {
-        setLocalNotificationConfig(config);
-      }
-    });
+  // ─── Parse review deep-link on load ───────────────────────────────────────
 
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!terminal.notificationConfig) {
-      return;
-    }
-    void browserPreferencesService.updateNotificationConfig(terminal.notificationConfig);
-    setLocalNotificationConfig(terminal.notificationConfig);
-  }, [terminal.notificationConfig]);
-
-  // Parse review params from query string on load
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('view') === 'review') {
       const ws = params.get('workspace');
       const proj = params.get('project');
       if (ws && proj) {
-        setReviewWorkspace({ projectName: proj, workspaceId: ws, workspaceLabel: ws });
+        setReviewWorkspace({
+          projectName: proj,
+          workspaceId: ws,
+          backendKey: getTargetBackendKey(),
+          workspaceLabel: ws,
+        });
         setView('review');
       }
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-connect when identity becomes available.
-  // relay.status is intentionally omitted — including it would cause reconnect
-  // loops on every status transition. We only want to trigger on identity change.
-  useEffect(() => {
-    if (resolvedIdentity && relay.status === "disconnected") {
-      relay.connect();
-    }
-  }, [resolvedIdentity, relay.connect]);
+  // ─── Script terminal visibility ────────────────────────────────────────────
 
   useEffect(() => {
-    if (terminal.scriptState?.isRunning) {
+    if (scriptState?.isRunning) {
       setShowScriptTerminal(true);
     }
-
-    if (terminal.mode === 'attached' || terminal.status !== 'established') {
+    if (terminalMode === 'attached' || terminalStatus !== 'connected') {
       setShowScriptTerminal(false);
     }
-  }, [terminal.mode, terminal.scriptState?.isRunning, terminal.status]);
+  }, [terminalMode, scriptState?.isRunning, terminalStatus]);
+
+  // ─── Process edit validation ───────────────────────────────────────────────
 
   useEffect(() => {
     if (
       !pendingProcessEditWorkspaceId ||
       !pendingProcessEditValidationArmedRef.current ||
-      terminal.mode !== 'browsing'
-    ) {
-      return;
-    }
-    terminal.requestWorkspaces();
-  }, [pendingProcessEditWorkspaceId, terminal.mode, terminal.requestWorkspaces]);
+      terminalMode !== 'browsing'
+    ) return;
+    multi.listWorkspaces();
+  }, [pendingProcessEditWorkspaceId, terminalMode, multi.listWorkspaces]);
 
   useEffect(() => {
     if (
       !pendingProcessEditWorkspaceId ||
       !pendingProcessEditValidationArmedRef.current ||
-      terminal.mode !== 'browsing'
-    ) {
-      return;
-    }
+      terminalMode !== 'browsing'
+    ) return;
 
     if (
       pendingProcessEditWorkspacesRef.current &&
-      pendingProcessEditWorkspacesRef.current === terminal.workspaces
-    ) {
-      return;
-    }
+      pendingProcessEditWorkspacesRef.current === filteredWorkspaces
+    ) return;
     pendingProcessEditWorkspacesRef.current = null;
 
-    const workspace = terminal.workspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
+    const workspace = filteredWorkspaces.find((item) => item.id === pendingProcessEditWorkspaceId);
     if (!workspace) {
       pendingProcessEditValidationArmedRef.current = false;
       setPendingProcessEditWorkspaceId(null);
@@ -401,204 +716,91 @@ export default function App() {
 
     pendingProcessEditValidationArmedRef.current = false;
     setPendingProcessEditWorkspaceId(null);
-  }, [flow, pendingProcessEditWorkspaceId, terminal.mode, terminal.workspaces]);
+  }, [flow, pendingProcessEditWorkspaceId, terminalMode, filteredWorkspaces]);
+
+  // ─── Script error modals ───────────────────────────────────────────────────
 
   useEffect(() => {
-    const scriptError = terminal.scriptState?.error;
-    if (!scriptError) {
-      lastScriptErrorRef.current = null;
-      return;
-    }
-
-    if (suppressDeleteScriptFailureModalRef.current) {
-      lastScriptErrorRef.current = scriptError;
-      return;
-    }
-
-    if (terminal.commandError?.code && SCRIPT_ERROR_CODES.has(terminal.commandError.code)) {
-      lastScriptErrorRef.current = scriptError;
-      return;
-    }
-
-    if (lastScriptErrorRef.current === scriptError) {
-      return;
-    }
-
+    const scriptError = scriptState?.error;
+    if (!scriptError) { lastScriptErrorRef.current = null; return; }
+    if (suppressDeleteScriptFailureModalRef.current) { lastScriptErrorRef.current = scriptError; return; }
+    if (commandError?.code && SCRIPT_ERROR_CODES.has(commandError.code)) { lastScriptErrorRef.current = scriptError; return; }
+    if (lastScriptErrorRef.current === scriptError) return;
     lastScriptErrorRef.current = scriptError;
-    flow.showMessage({
-      title: 'Workspace Script Failed',
-      message: scriptError,
-      variant: 'error',
-    });
-  }, [flow, terminal.commandError?.code, terminal.scriptState?.error]);
+    flow.showMessage({ title: 'Workspace Script Failed', message: scriptError, variant: 'error' });
+  }, [flow, commandError?.code, scriptState?.error]);
 
   useEffect(() => {
-    if (!terminal.commandError) {
-      lastCommandErrorRef.current = null;
-      return;
-    }
-
-    const key = `${terminal.commandError.code ?? ''}:${terminal.commandError.message}`;
-    if (lastCommandErrorRef.current === key) {
-      return;
-    }
+    if (!commandError) { lastCommandErrorRef.current = null; return; }
+    const key = `${commandError.code ?? ''}:${commandError.message}`;
+    if (lastCommandErrorRef.current === key) return;
     lastCommandErrorRef.current = key;
 
-    if (
-      suppressDeleteScriptFailureModalRef.current &&
-      terminal.commandError.code &&
-      DELETE_ERROR_CODES.has(terminal.commandError.code)
-    ) {
-      return;
-    }
+    if (suppressDeleteScriptFailureModalRef.current && commandError.code && DELETE_ERROR_CODES.has(commandError.code)) return;
 
-    const isScriptFailure = terminal.commandError.code
-      ? SCRIPT_ERROR_CODES.has(terminal.commandError.code)
-      : false;
-
+    const isScriptFailure = commandError.code ? SCRIPT_ERROR_CODES.has(commandError.code) : false;
     if (isScriptFailure) {
-      if (!terminal.scriptState) {
-        flow.showMessage({
-          title: 'Workspace Script Failed',
-          message: terminal.commandError.message,
-          variant: 'error',
-        });
+      if (!scriptState) {
+        flow.showMessage({ title: 'Workspace Script Failed', message: commandError.message, variant: 'error' });
         setShowScriptTerminal(false);
       }
       return;
     }
 
-    if (terminal.commandError.code === 'BUNDLE_REFRESH_REQUIRED') {
-      return;
-    }
+    if (commandError.code === 'BUNDLE_REFRESH_REQUIRED') return;
 
-    if (terminal.commandError.code === 'SESSION_TAKEN_OVER') {
-      flow.showMessage({
-        title: 'Session Taken Over',
-        message: terminal.commandError.message,
-        variant: 'warning',
-      });
-      return;
-    }
+    flow.showMessage({ title: 'Session Failed', message: commandError.message, variant: 'error' });
+    if (scriptState?.isRunning !== true) setShowScriptTerminal(false);
+  }, [flow, commandError, scriptState?.isRunning]);
 
-    flow.showMessage({
-      title: 'Session Failed',
-      message: terminal.commandError.message,
-      variant: 'error',
-    });
+  // ─── Attach session ────────────────────────────────────────────────────────
 
-    if (terminal.scriptState?.isRunning !== true) {
-      setShowScriptTerminal(false);
-    }
-  }, [flow, terminal.commandError, terminal.scriptState?.isRunning]);
-
-  // Handle machine selection - go directly to terminal/workspaces view
-  const handleMachineConnect = async (machine: MachineInfo) => {
-    if (!machine.online) return;
-
-    // Get WebSocket and identity from relay connection
-    const ws = relay.getWebSocket();
-    const identity = relay.identity;
-    const deviceCertificate = relay.deviceCertificate;
-    if (!ws || !identity || !deviceCertificate) {
-      console.error("No WebSocket, identity, or device certificate available");
-      return;
-    }
-
-    setSelectedMachine(machine);
-    setView("terminal");
-    setShowScriptTerminal(false);
-    setScriptWorkspaceName('workspace');
-
-    // Connect to the machine using existing WebSocket (no new connection needed).
-    // relayUrl is saved so reconnect can open a fresh WebSocket automatically.
-    await terminal.connect({
-      ws,
-      identity,
-      machineId: machine.machineId,
-      deviceCertificate,
-      relayUrl: relay.relayUrl,
-    });
-  };
-
-  // Handle back to machine list
-  const handleBackToMachines = () => {
-    terminal.disconnect();
-    setSelectedMachine(null);
-    setShowScriptTerminal(false);
-    setShowEvents(false);
-    setInputMode(false); // Reset input mode when leaving terminal
-    setView("machines");
-  };
-
-  // Handle full disconnect (just refresh the page for simplicity)
-  const handleDisconnect = () => {
-    terminal.disconnect();
-    relay.disconnect();
-    setSelectedMachine(null);
-    setShowScriptTerminal(false);
-    setShowEvents(false);
-    setView("machines");
-    // Reconnect automatically
-    relay.connect();
-  };
-
-  // ========== Shared Hooks ==========
-
-  // Machine list hook - convert relay machines to shared MachineInfo format
-  const machineListProps = useMachineList({
-    machines: relay.machines,
-    status: relay.status,
-    error: relay.error,
-    publicKey: relay.publicKey,
-    onConnect: handleMachineConnect,
-    onRefresh: relay.refreshMachines,
-  });
-
-  // Handle attach session - show modal for new sessions
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
     setIsViewOnlySession(params.viewOnly ?? false);
     await attachController.attachFromSelection(params);
   }, [attachController]);
 
+  // ─── Process actions ───────────────────────────────────────────────────────
+
   const processActions = useProcessActions({
-    sessions: terminal.sessions,
-    startProcess: terminal.startProcess,
-    stopProcess: terminal.stopProcess,
+    sessions: backendSessions,
+    startProcess: async (workspaceId, processName, instance) => {
+      const ref = getWorkspaceRef(workspaceId);
+      try {
+        await multi.startProcess(ref, processName, instance);
+      } catch (error) {
+        if (isPortConflictError(error)) {
+          const resolved = await promptToResolveProcessStartConflict({ error, showConfirm: flow.showConfirm });
+          if (resolved) {
+            await multi.startProcess(ref, processName, instance);
+            return;
+          }
+          throw new ProcessStartCancelledError();
+        }
+        throw error;
+      }
+    },
+    stopProcess: (workspaceId, processName) => {
+      const ref = getWorkspaceRef(workspaceId);
+      return multi.stopProcess(ref, processName);
+    },
     attachSession: handleAttachSession,
-    onStartProcessError: (error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    },
-    onStopProcessError: (error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    },
-    onStartProcessAttachError: (error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    },
-    onAttachError: (error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    },
+    onStartProcessError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
+    onStopProcessError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
+    onStartProcessAttachError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
+    onAttachError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
     onAttachTimeout: (target) => {
       toast.error(`Process started but no active session appeared for ${target.processName}#${target.instance}.`);
     },
-    pendingAttachCancelSignal: terminal.commandError,
+    pendingAttachCancelSignal: commandError,
   });
 
-  // Handle opening review for a workspace
-  const handleOpenReview = useCallback((workspace: WorkspaceInfo) => {
-    setReviewWorkspace({
-      projectName: workspace.projectName,
-      workspaceId: workspace.id,
-      workspaceLabel: workspace.name,
-    });
-    setView('review');
-  }, []);
+  // ─── Edit processes ────────────────────────────────────────────────────────
 
-  // Open editor on .gitspace/processes.json in the workspace
   const handleEditProcesses = useCallback(({ workspaceId }: { workspaceId: string }) => {
     setIsViewOnlySession(false);
     pendingProcessEditValidationArmedRef.current = false;
-    pendingProcessEditWorkspacesRef.current = terminal.workspaces;
+    pendingProcessEditWorkspacesRef.current = filteredWorkspaces;
     setPendingProcessEditWorkspaceId(workspaceId);
     const commandSpec = buildEditProcessesCommand();
     void attachController.attach({
@@ -612,76 +814,35 @@ export default function App() {
         setPendingProcessEditWorkspaceId(null);
         return;
       }
-
       pendingProcessEditValidationArmedRef.current = true;
     });
-  }, [attachController, terminal.workspaces]);
-
-  const handleProcessDisabled = useCallback((params: { workspaceId: string; processName: string }) => {
-    const workspace = terminal.workspaces.find((item) => item.id === params.workspaceId);
-    const workspaceLabel = workspace?.name ?? params.workspaceId;
-    toast.error(`Process "${params.processName}" is disabled in ${workspaceLabel} (instances: 0).`);
-  }, [terminal.workspaces]);
+  }, [attachController, filteredWorkspaces]);
 
   const handleManageBundleConfig = useCallback(async ({ workspaceId }: { workspaceId: string }) => {
-    const workspace = terminal.workspaces.find((item) => item.id === workspaceId);
-    const projectName = workspace?.projectName ?? terminal.selectedProjectName;
-    await bundleConfigFlow.openBundleConfig({ workspaceId, projectName });
-  }, [bundleConfigFlow, terminal.selectedProjectName, terminal.workspaces]);
+    const ref = getWorkspaceRef(workspaceId);
+    await bundleConfigFlow.openBundleConfig(ref);
+  }, [bundleConfigFlow, getWorkspaceRef]);
 
-  const selectedProjectName = terminal.selectedProjectName;
-  const filteredWorkspaces = useMemo(
-    () => selectedProjectName
-      ? terminal.workspaces.filter((workspace) => workspace.projectName === selectedProjectName)
-      : [],
-    [selectedProjectName, terminal.workspaces]
-  );
-  const filteredWorkspaceIds = useMemo(
-    () => new Set(filteredWorkspaces.map((workspace) => workspace.id)),
-    [filteredWorkspaces]
-  );
-  const filteredSessions = useMemo(
-    () => selectedProjectName
-      ? terminal.sessions.filter((session) => filteredWorkspaceIds.has(session.workspaceId))
-      : [],
-    [filteredWorkspaceIds, selectedProjectName, terminal.sessions]
-  );
-
-  const filteredReplays = useMemo(
-    () => selectedProjectName
-      ? terminal.replays.filter((replay) => replay.projectName === selectedProjectName)
-      : [],
-    [selectedProjectName, terminal.replays]
-  );
+  // ─── Replay ────────────────────────────────────────────────────────────────
 
   const refreshReplayList = useCallback(() => {
-    terminal.requestReplays(undefined, showDismissedReplays);
-  }, [terminal, showDismissedReplays]);
+    multi.listReplays(undefined, showDismissedReplays);
+  }, [multi, showDismissedReplays]);
 
-  useEffect(() => {
-    showDismissedReplaysRef.current = showDismissedReplays;
-  }, [showDismissedReplays]);
-
-  const toggleShowDismissedReplayFilter = useCallback(() => {
-    setShowDismissedReplays((value) => {
-      const next = !value;
-      terminal.requestReplays(undefined, next);
-      return next;
-    });
-  }, [terminal]);
+  useEffect(() => { showDismissedReplaysRef.current = showDismissedReplays; }, [showDismissedReplays]);
 
   const handleOpenReplay = useCallback(async (replayId: string) => {
-    const replay = terminal.replays.find((item) => item.replayId === replayId);
+    const replay = backendReplays.find((item) => item.replayId === replayId);
     if (!replay) {
       flow.showMessage({ title: 'Replay Missing', message: 'Could not find replay metadata.', variant: 'error' });
       return;
     }
-
     setActiveReplay(replay);
     setView('replay');
-  }, [flow, terminal]);
+  }, [flow, backendReplays]);
 
   const toggleReplayDismissed = useCallback(async (replay: ReplayInfo): Promise<boolean> => {
+    const key = getTargetBackendKey();
     try {
       if (!replay.dismissedAt && replay.status === 'running') {
         flow.showMessage({
@@ -691,25 +852,21 @@ export default function App() {
         });
         return false;
       }
-
       if (replay.dismissedAt) {
-        await terminal.undismissReplay(replay.replayId);
-        setActiveReplay((current) => current && current.replayId === replay.replayId
-          ? {
-            ...current,
-            dismissedAt: undefined,
-            dismissedBy: undefined,
-          }
-          : current);
+        await multi.undismissReplay(key, replay.replayId);
+        setActiveReplay((current) =>
+          current && current.replayId === replay.replayId
+            ? { ...current, dismissedAt: undefined, dismissedBy: undefined }
+            : current,
+        );
         return false;
       } else {
-        await terminal.dismissReplay(replay.replayId);
-        setActiveReplay((current) => current && current.replayId === replay.replayId
-          ? {
-            ...current,
-            dismissedAt: Date.now(),
-          }
-          : current);
+        await multi.dismissReplay(key, replay.replayId);
+        setActiveReplay((current) =>
+          current && current.replayId === replay.replayId
+            ? { ...current, dismissedAt: Date.now() }
+            : current,
+        );
         return true;
       }
     } catch (error) {
@@ -722,210 +879,34 @@ export default function App() {
     } finally {
       refreshReplayList();
     }
-  }, [activeReplay?.replayId, flow, refreshReplayList, terminal]);
+  }, [getTargetBackendKey, flow, multi, refreshReplayList]);
 
-  const loadReplayFrame = useCallback((replayId: string, target?: { atMs?: number; atSeq?: number }) => {
-    return terminal.getReplayFrame(replayId, target);
-  }, [terminal]);
+  const loadReplayFrame = useCallback((replayId: string, target?: ReplayFrameTarget): Promise<ReplayFrame> => {
+    return multi.getReplayFrame(getTargetBackendKey(), replayId, target);
+  }, [multi, getTargetBackendKey]);
 
-  const loadReplayTimeline = useCallback((replayId: string) => {
-    return terminal.getReplayTimeline(replayId);
-  }, [terminal]);
+  const loadReplayTimeline = useCallback((replayId: string): Promise<ReplayTimeline> => {
+    return multi.getReplayTimeline(getTargetBackendKey(), replayId);
+  }, [multi, getTargetBackendKey]);
 
-  const webBackend = terminal.sessionBackend;
-
-  const workspaceAgentSessions = useWorkspaceAgentSessions({
-    backend: webBackend,
-  });
-
-  // Agent event subscription — machine-side push state
-  const [agentInboxItems, setAgentInboxItems] = useState<import('./lib/tmux-lite/protocol.js').InboxItem[]>([]);
-
-  const agentEvents = useWorkspaceAgentEvents({
-    backend: webBackend,
-    onNotification: (notification) => {
-      const workspace = terminal.workspaces.find((w) => w.id === notification.workspaceId);
-      const projectName = workspace?.projectName ?? 'unknown';
-      const workspaceName = workspace?.name ?? notification.workspaceId;
-      const item = agentNotificationToInboxItem(notification, projectName, workspaceName);
-      setAgentInboxItems((prev) => [item, ...prev.slice(0, 49)]);
-    },
-  });
-
-  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
-    void webBackend?.setAgentSessionPreference(workspaceId, sessionId);
-  }, [webBackend]);
-
-  // Memoize agent session counts to preserve referential stability for useSpacesBrowser
-  const agentSessionCounts = useMemo(() => {
-    return collectAgentSessionCounts({
-      sessionsByWorkspace: workspaceAgentSessions.sessionsByWorkspace,
-      workspaceStates: agentEvents.workspaceStates,
-      snapshotByWorkspace: webBackend?.getAgentStateSnapshot() ?? {},
-    });
-  }, [agentEvents.workspaceStates, webBackend, workspaceAgentSessions.sessionsByWorkspace]);
-
-  const agentSessionsByWorkspace = useMemo(() => {
-    const merged: Record<string, typeof workspaceAgentSessions.sessionsByWorkspace[string]> = {};
-    const workspaceIds = new Set([
-      ...Object.keys(workspaceAgentSessions.sessionsByWorkspace),
-      ...Object.keys(agentEvents.workspaceStates),
-      ...Object.keys(webBackend?.getAgentStateSnapshot() ?? {}),
-    ]);
-
-    for (const workspaceId of workspaceIds) {
-      const baseSessions = workspaceAgentSessions.sessionsByWorkspace[workspaceId] ?? [];
-      const liveStates = agentEvents.workspaceStates[workspaceId] ?? {};
-      const snapshotSessions = (webBackend?.getAgentStateSnapshot()[workspaceId]?.sessions ?? []).map((session) => ({
-        id: session.id,
-        workspaceId,
-        title: session.title,
-        updatedAt: undefined,
-        closed: 'closed' in session ? Boolean(session.closed) : undefined,
-      }));
-      const combined = new Map<string, (typeof baseSessions)[number]>();
-      for (const session of snapshotSessions) combined.set(session.id, session);
-      for (const session of baseSessions) combined.set(session.id, session);
-      for (const sessionId of Object.keys(liveStates)) {
-        if (!combined.has(sessionId)) {
-          combined.set(sessionId, {
-            id: sessionId,
-            workspaceId,
-            title: sessionId,
-            updatedAt: undefined,
-            closed: false,
-          });
-        }
-      }
-      merged[workspaceId] = Array.from(combined.values()).map((session) => {
-        const live = liveStates[session.id];
-        if (!live) return session;
-        return {
-          ...session,
-          status: live.status,
-          pendingPermissionCount: Object.keys(live.pendingPermissions).length,
-          errorMessage: live.errorMessage,
-        };
-      });
-    }
-
-    return merged;
-  }, [agentEvents.workspaceStates, webBackend, workspaceAgentSessions.sessionsByWorkspace]);
-
-  const syncWorkspaceAgentSessions = workspaceAgentSessions.syncWorkspaceSessions;
-
-  const refreshAgentSessions = useCallback(async ({
-    expandedWorkspaceIds,
-    selectedWorkspaceId,
-  }: {
-    expandedWorkspaceIds: string[];
-    selectedWorkspaceId: string | null;
+  const handleOpenReplayHistory = useCallback((args: {
+    workspaceId: string;
+    workspaceName: string;
+    replayRows: WorkspaceDetailReplayRow[];
   }) => {
-    await syncWorkspaceAgentSessions(
-      collectWorkspaceSyncIds(terminal.workspaces, expandedWorkspaceIds, selectedWorkspaceId),
-    );
-  }, [syncWorkspaceAgentSessions, terminal.workspaces]);
+    showReplayHistorySelect({
+      workspaceName: args.workspaceName,
+      replayRows: args.replayRows,
+      showSelect: (config) => flow.showSelect<string>(config),
+      onSelectReplay: handleOpenReplay,
+    });
+  }, [flow, handleOpenReplay]);
 
-  const allWorkspaceSyncKey = useMemo(
-    () => terminal.workspaces.map((workspace) => workspace.id).sort().join('|'),
-    [terminal.workspaces],
-  );
-  const lastAllWorkspaceSyncKeyRef = useRef<string | null>(null);
-
-  // Spaces browser hook
-  const spacesBrowserProps = useSpacesBrowser({
-    workspaces: filteredWorkspaces,
-    sessions: filteredSessions,
-    replays: filteredReplays,
-    onRequestSessions: () => terminal.requestSessions(),
-    onAttachSession: handleAttachSession,
-    onOpenReplay: handleOpenReplay,
-    onEditProcesses: handleEditProcesses,
-    onManageBundleConfig: handleManageBundleConfig,
-    onStartProcess: (params) => processActions.handleStartProcess(params),
-    onStartProcessAttach: (params) => processActions.handleStartProcessAttach(params),
-    onStopProcess: (params) => processActions.handleStopProcess(params),
-    onProcessDisabled: handleProcessDisabled,
-    onOpenEvents: (workspaceId) => {
-      const workspace = terminal.workspaces.find(w => w.id === workspaceId);
-      if (workspace) {
-        setEventsWorkspacePath(workspace.path);
-        setEventsWorkspaceLabel(workspace.name);
-        setShowEvents(true);
-        terminal.requestEvents(workspace.path, undefined, undefined, undefined);
-      }
-    },
-    onOpenAgents: async (workspaceId) => {
-      await workspaceAgentSessions.loadWorkspaceSessions(workspaceId);
-    },
-    onOpenAgentSession: async (workspaceId, agentSessionId) => {
-      if (!webBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      await openAgentSession({
-        flow,
-        workspaceId,
-        agentSessionId,
-        persistAgentSessionSelection,
-        clearViewOnly: () => setIsViewOnlySession(false),
-        checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
-        attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
-        afterAttach: async () => {
-          setView('terminal');
-        },
-      });
-    },
-    onCreateAgentSession: async (workspaceId) => {
-      if (!webBackend?.attachAgentSession) {
-        throw new Error('Agent attach unavailable');
-      }
-      promptCreateAgentSession({
-        flow,
-        workspaceId,
-        getCurrentSessions: (id) => workspaceAgentSessions.sessionsByWorkspace[id] ?? [],
-        createAgentSession: workspaceAgentSessions.createSession,
-        attachOptions: {
-          flow,
-          workspaceId,
-          persistAgentSessionSelection,
-          clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
-          attachAgentSession: webBackend.attachAgentSession.bind(webBackend),
-          afterAttach: async () => {
-            setView('terminal');
-          },
-        },
-      });
-    },
-    agentSessionsByWorkspace,
-    agentSessionCounts,
-    pendingPermissionsByWorkspace: agentEvents.pendingPermissionsByWorkspace,
-    onRefresh: () => { terminal.requestWorkspaces(); refreshReplayList(); },
-    onRefreshSessions: () => { terminal.requestSessions(); refreshReplayList(); },
-    onRefreshAgents: refreshAgentSessions,
-    onBack: handleBackToMachines,
-    machineName: selectedProjectName
-      ? `${selectedProjectName} - ${selectedMachine?.label || selectedMachine?.machineId || 'machine'}`
-      : selectedMachine?.label || selectedMachine?.machineId,
-    showProjectHeaders: false,
-  });
-
-  const handleOpenHelp = useCallback(() => {
-    flow.showHelp(getDefaultShortcuts());
-  }, [flow]);
-
-  const handleOpenCreateMenu = useCallback(() => {
-    lifecycleController.openCreateMenu(selectedProjectName);
-  }, [lifecycleController, selectedProjectName]);
-
-  const handleCreateWorkspaceForProject = useCallback((projectName: string) => {
-    lifecycleController.openCreateWorkspaceFlow(projectName);
-  }, [lifecycleController]);
-
+  const handleOpenHelp = useCallback(() => flow.showHelp(getDefaultShortcuts()), [flow]);
+  const handleOpenCreateMenu = useCallback(() => lifecycleController.openCreateMenu(selectedWorkspaceProjectName), [lifecycleController, selectedWorkspaceProjectName]);
   const handleDeleteProject = useCallback((projectName: string) => {
     lifecycleController.openDeleteProjectFlow(projectName);
   }, [lifecycleController]);
-
   const handleDeleteSession = useCallback((sessionId: string, sessionName: string) => {
     flow.showConfirm({
       title: 'Kill Session',
@@ -933,10 +914,15 @@ export default function App() {
       variant: 'warning',
       confirmLabel: 'Kill',
       onConfirm: () => {
-        terminal.killSession(sessionId);
+        if (attachedBackendState?.attachedSessionId === sessionId) {
+          const ref: BackendScopedWorkspaceRef = { backendKey: attachedBackendKey ?? getTargetBackendKey(), workspaceId: '' };
+          void multi.detachSession(ref);
+        }
+        const sessionRef = { backendKey: getTargetBackendKey(), sessionId };
+        void multi.killSession(sessionRef);
       },
     });
-  }, [flow, terminal]);
+  }, [flow, attachedBackendState, attachedBackendKey, getTargetBackendKey, multi]);
 
   const handleDeleteWorkspace = useCallback((workspace: WorkspaceInfo) => {
     const sessionCount = workspace.sessionCount || 0;
@@ -946,115 +932,150 @@ export default function App() {
       confirmText: workspace.name,
       warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
       onConfirm: async () => {
-        await deleteWorkspaceWithPrompt({
-          projectName: workspace.projectName,
-          workspaceId: workspace.id,
-          workspaceName: workspace.name,
-        });
+        const ref = getWorkspaceRef(workspace.id);
+        await deleteWorkspaceWithPrompt({ ref, workspaceName: workspace.name });
       },
     });
-  }, [deleteWorkspaceWithPrompt, flow]);
+  }, [deleteWorkspaceWithPrompt, flow, getWorkspaceRef]);
 
-  const projectListProps = useProjectList({
-    projects: terminal.projects,
-    selectedProjectName,
-    onSelect: (project) => {
-      terminal.selectProject(project.name);
-    },
-    onCreateNew: lifecycleController.openCreateProjectFlow,
-    onDelete: (project) => {
-      handleDeleteProject(project.name);
-    },
-    onRefresh: () => terminal.requestProjects(),
-  });
+  const handleOpenReview = useCallback((workspaceId: string) => {
+    const workspace = filteredWorkspaces.find((item) => item.id === workspaceId);
+    if (!workspace) {
+      toast.error('Select a workspace first.');
+      return;
+    }
+    setReviewWorkspace({
+      projectName: workspace.projectName,
+      workspaceId: workspace.id,
+      backendKey: getWorkspaceRef(workspace.id).backendKey,
+      workspaceLabel: workspace.name,
+    });
+    setView('review');
+  }, [filteredWorkspaces, getWorkspaceRef]);
 
-  // Inbox hook — merges PTY inbox with agent notifications
-  const allWebInboxItems = useMemo(
-    () => [...terminal.inbox, ...agentInboxItems],
-    [terminal.inbox, agentInboxItems],
+  const handleOpenGitHubPullRequest = useCallback((workspaceId: string) => {
+    const workspace = filteredWorkspaces.find((item) => item.id === workspaceId);
+    const url = workspace?.pullRequest?.url;
+    if (!url) {
+      toast.info('No GitHub pull request found for this workspace.');
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }, [filteredWorkspaces]);
+
+  // ─── Command palette ───────────────────────────────────────────────────────
+
+  const commandPaletteCommands = useMemo(
+    () => COMMAND_PALETTE_COMMAND_DEFS.map((d) => ({ id: d.id, label: d.label, shortcut: d.shortcut })),
+    [],
   );
 
-  const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
-    if (!webBackend?.attachAgentSession) {
-      throw new Error('Agent attach unavailable');
-    }
-    await handleInboxSessionSelection({
-      sessionId,
-      agentInboxItems,
-      flow,
-      respondToPermission: agentEvents.respondToPermission,
-      markAgentInboxItemRead: (id) => {
-        setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
-      },
-      openAgentSession: async (workspaceId, agentSessionId) => {
-        await openAgentSession({
-          flow,
-          workspaceId,
-          agentSessionId,
-          persistAgentSessionSelection,
-          clearViewOnly: () => setIsViewOnlySession(false),
-          checkAgentSessionTakeover: webBackend.checkAgentSessionTakeover?.bind(webBackend),
-          attachAgentSession: webBackend.attachAgentSession!.bind(webBackend),
-          afterAttach: async () => {
-            setView('terminal');
-          },
-        });
-      },
-      attachRegularSession: async (id) => {
-        await attachController.attach({ sessionId: id });
-      },
-    });
-  }, [agentEvents, agentInboxItems, attachController, flow, persistAgentSessionSelection, webBackend]);
+  const selectedWorkspaceForCommands = resolveSelectedWorkspace({
+    selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
+    selectedDetailWorkspaceId: selectedRef?.workspaceId ?? selectedWorkspaceForDetail?.id ?? null,
+    workspaces: filteredWorkspaces,
+  });
+  const selectedProjectForCommands = resolveSelectedProjectName({ selectedProjectName: selectedWorkspaceProjectName });
 
-  const inboxProps = useInbox({
-    items: allWebInboxItems,
-    unreadCount: terminal.inboxUnreadCount + agentInboxItems.filter((i) => !i.read).length,
-    onClearItem: async (id) => {
-      if (agentInboxItems.some((i) => i.id === id)) {
-        setAgentInboxItems((prev) => prev.filter((i) => i.id !== id));
-      } else {
-        terminal.clearInboxItem(id);
-      }
+  const handleCommandPaletteSelect = useCallback(
+    (id: string) => {
+      executeCommandPaletteAction({
+        commandId: id as (typeof COMMAND_PALETTE_COMMAND_DEFS)[number]['id'],
+        workspace: selectedWorkspaceForCommands,
+        projectName: selectedProjectForCommands,
+        showSelect: (config) => flow.showSelect<string>(config),
+        showMessage: ({ message, variant }) => {
+          if (variant === 'error') {
+            toast.error(message);
+          } else if (variant === 'warning') {
+            toast.warning(message);
+          } else if (variant === 'success') {
+            toast.success(message);
+          } else {
+            toast.info(message);
+          }
+        },
+        onOpenUrl: async (url) => {
+          window.open(url, '_blank', 'noopener,noreferrer');
+        },
+        onAddRepo: () => lifecycleController.openCreateProjectFlow(),
+        onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+        onSetStatus: (workspace) => {
+          showWorkspaceStatusSelect({
+            showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
+            onSelectPhase: (phase) => {
+              workspaceBoardState.setPhase(workspace.id, phase);
+              flow.close();
+            },
+          });
+        },
+        onDeleteWorkspace: handleDeleteWorkspace,
+        onEditBundleConfig: async (workspace) => {
+          await handleManageBundleConfig({ workspaceId: workspace.id });
+        },
+        onEditProcessConfig: async (workspace) => {
+          await handleEditProcesses({ workspaceId: workspace.id });
+        },
+        onDeleteRepo: handleDeleteProject,
+        onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
+        onOpenReview: (workspace) => handleOpenReview(workspace.id),
+      });
     },
-    onClearAll: async () => {
-      setAgentInboxItems([]);
-      terminal.clearInboxItem();
-    },
-    onMarkRead: async (id) => {
-      if (agentInboxItems.some((i) => i.id === id)) {
-        setAgentInboxItems((prev) => prev.map((i) => i.id === id ? { ...i, read: true } : i));
-      } else {
-        terminal.markInboxItemRead(id);
-      }
-    },
+    [
+      lifecycleController,
+      handleDeleteProject,
+      handleDeleteWorkspace,
+      handleManageBundleConfig,
+      handleEditProcesses,
+      handleOpenGitHubPullRequest,
+      handleOpenReview,
+      workspaceBoardState,
+      flow,
+      selectedProjectForCommands,
+      selectedWorkspaceForCommands,
+    ],
+  );
+
+  const commandPalette = useCommandPaletteState({
+    commands: commandPaletteCommands,
+    onSelect: handleCommandPaletteSelect,
+  });
+
+  // ─── Inbox ─────────────────────────────────────────────────────────────────
+
+  const inboxProps = useInboxPageModel({
+    items: backendInbox,
+    unreadCount: backendInboxUnreadCount,
+    onClearItem: async (id) => { await multi.clearInbox(id); },
+    onClearAll: async () => { await multi.clearInbox(); },
+    onMarkRead: async (id) => { await multi.markInboxRead(id); },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      await attachFromInboxSessionId(sessionId);
+      await attachController.attachFromSelection({ sessionId });
     },
     onClose: () => setShowInbox(false),
   });
 
-  // Events hook
-  const eventsItems: WideEventItem[] = terminal.events.map(toWideEventItem);
+  // ─── Events ────────────────────────────────────────────────────────────────
+
+  const eventsItems: WideEventItem[] = backendEvents.map(toWideEventItem);
 
   const eventsProps = useEvents({
     events: eventsItems,
-    liveEventIds: terminal.liveEventIds,
-    savedFilters: terminal.savedEventFilters,
+    liveEventIds: backendLiveEventIds,
+    savedFilters: backendSavedEventFilters,
     onSelectFilter: (filter) => {
       if (!eventsWorkspacePath) return;
+      const ws = filteredWorkspaces.find((w) => w.path === eventsWorkspacePath);
+      if (!ws) return;
+      const ref = getWorkspaceRef(ws.id);
       if (filter) {
         const sinceMs = filter.sinceMinutes
           ? Date.now() - filter.sinceMinutes * 60 * 1000
           : undefined;
-        terminal.requestEvents(
-          eventsWorkspacePath,
-          filter.filter as WideEventFilter,
-          undefined,
-          sinceMs
-        );
+        void multi.requestEvents(ref, filter.filter as WideEventFilter, undefined, sinceMs);
       } else {
-        terminal.requestEvents(eventsWorkspacePath);
+        void multi.requestEvents(ref);
       }
     },
     onClose: () => {
@@ -1070,41 +1091,37 @@ export default function App() {
     };
   }, [eventsProps.selectedIndex, eventsProps.selectIndex]);
 
-  // Events polling when events view is active
+  // Events polling when view is active
   useEffect(() => {
     if (!showEvents || !eventsWorkspacePath) return;
-
     const interval = setInterval(() => {
+      const ws = filteredWorkspaces.find((w) => w.path === eventsWorkspacePath);
+      if (!ws) return;
+      const ref = getWorkspaceRef(ws.id);
       const activeFilter = eventsProps.activeFilterName
-        ? terminal.savedEventFilters.find((filter) => filter.name === eventsProps.activeFilterName) ?? null
+        ? backendSavedEventFilters.find((f) => f.name === eventsProps.activeFilterName) ?? null
         : null;
-
       if (activeFilter) {
         const sinceMs = activeFilter.sinceMinutes
           ? Date.now() - activeFilter.sinceMinutes * 60 * 1000
           : undefined;
-        terminal.requestEvents(
-          eventsWorkspacePath,
-          activeFilter.filter as WideEventFilter,
-          undefined,
-          sinceMs
-        );
+        void multi.requestEvents(ref, activeFilter.filter as WideEventFilter, undefined, sinceMs);
       } else {
-        terminal.requestEvents(eventsWorkspacePath);
+        void multi.requestEvents(ref);
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, terminal.savedEventFilters, terminal.requestEvents]);
+  }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, backendSavedEventFilters, filteredWorkspaces, getWorkspaceRef, multi.requestEvents]);
 
-  // ========== Activity Tracking for Notifications ==========
+  // ─── Activity tracking for notifications ──────────────────────────────────
 
   const holdWhenIdleMs = activeNotificationConfig.toast.holdWhenIdleMs ?? 15000;
   const { isUserActive, markActivity: handleTerminalActivity } = useUserActivity({
-    isActivityTracked: view === "terminal" && terminal.mode === "attached",
+    isActivityTracked: view === "terminal" && terminalMode === "attached",
     holdWhenIdleMs,
   });
 
-  // ========== Notification Toasts ==========
+  // ─── Notification toasts ───────────────────────────────────────────────────
 
   const handleShowToast = useCallback((notification: ToastNotification) => {
     const description = notification.preview
@@ -1116,368 +1133,149 @@ export default function App() {
       duration: 8000,
       action: {
         label: "Attach",
-        onClick: () => {
-          void attachFromInboxSessionId(notification.sessionId);
-        },
+        onClick: () => { void attachController.attachFromSelection({ sessionId: notification.sessionId }); },
       },
     });
-  }, [attachFromInboxSessionId]);
+  }, [attachController]);
 
   const notifications = useNotifications({
-    items: allWebInboxItems,
+    items: backendInbox,
     config: activeNotificationConfig,
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
-      void attachFromInboxSessionId(sessionId);
+      void attachController.attachFromSelection({ sessionId });
     },
     onMarkRead: async (itemId) => {
-      if (agentInboxItems.some((i) => i.id === itemId)) {
-        setAgentInboxItems((prev) => prev.map((i) => i.id === itemId ? { ...i, read: true } : i));
-      } else {
-        terminal.markInboxItemRead(itemId);
-      }
+      await multi.markInboxRead(itemId);
     },
     pollIntervalMs: 5000,
     onRefreshInbox: async () => {
-      if (terminal.status === "established") {
-        terminal.requestInbox();
+      if (terminalStatus === "connected") {
+        multi.requestInbox();
       }
     },
     isUserActive,
-    currentSessionId: terminal.attachedSessionId ?? undefined,
+    currentSessionId: backendAttachedSessionId ?? undefined,
   });
 
-  // Request workspaces when connection is established and view is "terminal"
+  // ─── Data refresh when connected ───────────────────────────────────────────
+
   useEffect(() => {
-    if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
-      terminal.requestProjects();
-      terminal.requestWorkspaces();
-      terminal.requestSessions();
-      terminal.requestNotificationConfig();
+    if (terminalStatus === "connected" && terminalMode === "browsing") {
+      multi.listProjects();
+      multi.listWorkspaces();
+      multi.listSessions();
+      multi.getNotificationConfig();
     }
   }, [
-    view,
-    terminal.status,
-    terminal.mode,
-    terminal.requestProjects,
-    terminal.requestWorkspaces,
-    terminal.requestSessions,
-    terminal.requestNotificationConfig,
+    terminalStatus,
+    terminalMode,
+    multi.listProjects,
+    multi.listWorkspaces,
+    multi.listSessions,
+    multi.getNotificationConfig,
   ]);
 
   useEffect(() => {
-    if (view !== 'terminal' || terminal.status !== 'established' || terminal.mode !== 'browsing' || terminal.workspaces.length === 0) {
-      lastAllWorkspaceSyncKeyRef.current = null;
-      return;
+    if (terminalStatus === "connected" && terminalMode === "browsing") {
+      multi.listReplays(undefined, showDismissedReplaysRef.current);
     }
-    if (lastAllWorkspaceSyncKeyRef.current === allWorkspaceSyncKey) {
-      return;
-    }
-    lastAllWorkspaceSyncKeyRef.current = allWorkspaceSyncKey;
-    terminal.requestSessions();
-    void syncWorkspaceAgentSessions(terminal.workspaces.map((workspace) => workspace.id)).catch((error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    });
-  }, [allWorkspaceSyncKey, syncWorkspaceAgentSessions, terminal, view]);
+  }, [terminalStatus, terminalMode, multi.listReplays]);
 
+  // Reset view-only when detached
   useEffect(() => {
-    if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
-      terminal.requestReplays(undefined, showDismissedReplaysRef.current);
-    }
-  }, [
-    view,
-    terminal.status,
-    terminal.mode,
-    terminal.requestReplays,
-  ]);
+    if (terminalMode !== 'attached') setIsViewOnlySession(false);
+  }, [terminalMode]);
 
-  // Reset view-only state when detached
-  useEffect(() => {
-    if (terminal.mode !== 'attached') {
-      setIsViewOnlySession(false);
-    }
-  }, [terminal.mode]);
+  // ─── Keyboard handlers ─────────────────────────────────────────────────────
 
-  // ========== Keyboard Handlers ==========
-
-  // Machine list keyboard navigation
-  useEffect(() => {
-    if (view !== "machines") return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      const command = resolveMachineListCommand({ key: e.key, shift: e.shiftKey });
-      if (!command) {
-        return;
-      }
-
-      e.preventDefault();
-      if (command === 'move-up') {
-        machineListProps.moveUp();
-      } else if (command === 'move-down') {
-        machineListProps.moveDown();
-      } else if (command === 'activate') {
-        machineListProps.connectSelected();
-      } else if (command === 'refresh') {
-        void machineListProps.refresh();
-      } else if (command === 'copy') {
-        machineListProps.copyPublicKey();
-      } else if (command === 'help') {
-        flow.showHelp(getDefaultShortcuts());
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, machineListProps, flow]);
-
-  // Inbox keyboard navigation
+  // Machine list view is gone — browsing keyboard (spaces browser)
+  // Inbox keyboard
   useEffect(() => {
     if (!showInbox) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const command = resolveInboxCommand({ key: e.key, shift: e.shiftKey });
-      if (!command) {
-        return;
-      }
-
+      if (!command) return;
       e.preventDefault();
-      if (command === 'move-up') {
-        inboxProps.moveUp();
-      } else if (command === 'move-down') {
-        inboxProps.moveDown();
-      } else if (command === 'activate') {
-        if (inboxProps.isViewingThread) {
-          inboxProps.attachToSession();
-        } else {
-          inboxProps.openThread();
-        }
+      if (command === 'move-up') inboxProps.moveUp();
+      else if (command === 'move-down') inboxProps.moveDown();
+      else if (command === 'activate') {
+        if (inboxProps.isViewingThread) inboxProps.attachToSession();
+        else inboxProps.openThread();
       } else if (command === 'back') {
-        if (inboxProps.isViewingThread) {
-          inboxProps.closeThread();
-        } else {
-          setShowInbox(false);
-        }
+        if (inboxProps.isViewingThread) inboxProps.closeThread();
+        else setShowInbox(false);
       } else if (command === 'delete') {
-        if (inboxProps.isViewingThread) {
-          inboxProps.deleteThread();
-        } else {
-          inboxProps.deleteSelected();
-        }
+        if (inboxProps.isViewingThread) inboxProps.deleteThread();
+        else inboxProps.deleteSelected();
       } else if (command === 'clear') {
         inboxProps.clearAll();
       } else if (command === 'attach') {
         inboxProps.attachToSession();
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showInbox, inboxProps.moveUp, inboxProps.moveDown, inboxProps.openThread, inboxProps.closeThread, inboxProps.deleteSelected, inboxProps.deleteThread, inboxProps.clearAll, inboxProps.attachToSession, inboxProps.isViewingThread]);
 
-  // Events keyboard navigation
+  // Events keyboard
   useEffect(() => {
     if (!showEvents) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === 'Escape' || e.key === 'q') {
         e.preventDefault();
         setShowEvents(false);
         setEventsWorkspacePath(null);
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
-        const state = eventsKeyboardStateRef.current;
-        if (!state) return;
-        state.selectIndex(state.selectedIndex - 1);
+        eventsKeyboardStateRef.current?.selectIndex((eventsKeyboardStateRef.current?.selectedIndex ?? 0) - 1);
       } else if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        const state = eventsKeyboardStateRef.current;
-        if (!state) return;
-        state.selectIndex(state.selectedIndex + 1);
+        eventsKeyboardStateRef.current?.selectIndex((eventsKeyboardStateRef.current?.selectedIndex ?? 0) + 1);
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showEvents]);
 
-  // Spaces browser keyboard navigation
+  // Attached terminal (Shift+Esc to detach)
   useEffect(() => {
-    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "browsing" || showInbox || showScriptTerminal || showEvents) {
-      return;
-    }
-
+    if (view !== "terminal" || terminalStatus !== "connected" || terminalMode !== "attached") return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      const command = resolveSessionBrowserCommand({ key: e.key, shift: e.shiftKey });
-      if (!command) {
-        return;
-      }
-
-      e.preventDefault();
-      if (command === 'move-up') {
-        spacesBrowserProps.moveUp();
-      } else if (command === 'move-down') {
-        spacesBrowserProps.moveDown();
-      } else if (command === 'activate') {
-        spacesBrowserProps.activateSelected();
-      } else if (command === 'new') {
-        lifecycleController.openCreateMenu(selectedProjectName);
-      } else if (command === 'bundle') {
-        const selected = spacesBrowserProps.selectedItem;
-        const workspaceId = selected?.type === 'workspace'
-          ? selected.workspace.id
-          : selected && 'workspaceId' in selected && selected.type !== 'replay'
-            ? selected.workspaceId
-            : null;
-        if (workspaceId) {
-          void handleManageBundleConfig({ workspaceId });
-        }
-      } else if (command === 'refresh') {
-        spacesBrowserProps.refresh();
-      } else if (command === 'back') {
-        spacesBrowserProps.back();
-      } else if (command === 'help') {
-        flow.showHelp(getDefaultShortcuts());
-      } else if (command === 'kill') {
-        const selected = spacesBrowserProps.selectedItem;
-        if (selected?.type === 'session') {
-          flow.showConfirm({
-            title: 'Kill Session',
-            message: `Kill session "${selected.session.name}"?`,
-            variant: 'warning',
-            confirmLabel: 'Kill',
-            onConfirm: () => {
-              terminal.killSession(selected.session.id);
-            },
-          });
-        } else if (selected?.type === 'process' && selected.status === 'running') {
-          flow.showConfirm({
-            title: 'Stop Process',
-            message: `Stop process "${selected.processName}"?`,
-            variant: 'warning',
-            confirmLabel: 'Stop',
-            onConfirm: () => {
-              processActions.handleStopProcess({
-                workspaceId: selected.workspaceId,
-                processName: selected.processName,
-              });
-            },
-          });
-        }
-      } else if (command === 'delete') {
-        const selected = spacesBrowserProps.selectedItem;
-        if (selected?.type === 'project') {
-          lifecycleController.openDeleteProjectFlow(selected.name);
-        } else if (selected?.type === 'workspace') {
-          const sessionCount = selected.workspace.sessionCount || 0;
-          flow.showConfirmTyped({
-            title: 'Delete Workspace',
-            message: `Are you sure you want to delete workspace "${selected.workspace.name}"?`,
-            confirmText: selected.workspace.name,
-            warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
-            onConfirm: async () => {
-              await deleteWorkspaceWithPrompt({
-                projectName: selected.workspace.projectName,
-                workspaceId: selected.workspace.id,
-                workspaceName: selected.workspace.name,
-              });
-            },
-          });
-        } else if (selected?.type === 'replay') {
-          void toggleReplayDismissed(selected.replay);
-        }
-      } else if (command === 'toggle-hidden') {
-        toggleShowDismissedReplayFilter();
-      } else if (command === 'open-inbox') {
-        terminal.requestInbox();
-        setShowInbox(true);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    view,
-    terminal.status,
-    terminal.mode,
-    showInbox,
-    showScriptTerminal,
-    showEvents,
-    spacesBrowserProps,
-    selectedProjectName,
-    flow,
-    lifecycleController,
-    handleManageBundleConfig,
-    deleteWorkspaceWithPrompt,
-    toggleReplayDismissed,
-    toggleShowDismissedReplayFilter,
-  ]);
-
-  // Attached terminal mode keyboard handler (Shift+Esc to detach)
-  useEffect(() => {
-    if (view !== "terminal" || terminal.status !== "established" || terminal.mode !== "attached") {
-      return;
-    }
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Shift+Esc to detach from session
       if (e.shiftKey && e.key === "Escape") {
         e.preventDefault();
-        terminal.detachSession();
+        const ref: BackendScopedWorkspaceRef = { backendKey: attachedBackendKey ?? getTargetBackendKey(), workspaceId: '' };
+        void multi.detachSession(ref);
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, terminal.status, terminal.mode, terminal.detachSession]);
+  }, [view, terminalStatus, terminalMode, attachedBackendKey, getTargetBackendKey, multi]);
 
+  // Script terminal keyboard
   useEffect(() => {
-    if (view !== 'terminal' || terminal.status !== 'established' || terminal.mode !== 'browsing' || !showScriptTerminal) {
-      return;
-    }
-
+    if (view !== 'terminal' || terminalStatus !== 'connected' || terminalMode !== 'browsing' || !showScriptTerminal) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      if ((e.key === 'Escape' || e.key === 'q') && !terminal.scriptState?.isRunning) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.key === 'Escape' || e.key === 'q') && !scriptState?.isRunning) {
         e.preventDefault();
         setShowScriptTerminal(false);
-      } else if ((e.key === 'c' || e.key === 'C') && terminal.scriptState?.isRunning) {
+      } else if ((e.key === 'c' || e.key === 'C') && scriptState?.isRunning) {
         e.preventDefault();
-        terminal.cancelPendingScripts();
+        const ref: BackendScopedWorkspaceRef = { backendKey: getTargetBackendKey(), workspaceId: '' };
+        void multi.cancelPendingScripts(ref);
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showScriptTerminal, terminal.mode, terminal.scriptState?.isRunning, terminal.status, view]);
+  }, [showScriptTerminal, terminalMode, scriptState?.isRunning, terminalStatus, view, getTargetBackendKey, multi]);
 
-  // Global hotkey for toast-only attach (Shift+Tab)
+  // Global Shift+Tab for toast attach
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if in an input field
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      // Shift+Tab: attach to active toast's session (with confirmation)
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.shiftKey && e.key === "Tab" && notifications.activeToast) {
         e.preventDefault();
         const sessionLabel = getSessionLabel(notifications.activeToast.sessionName);
@@ -1485,46 +1283,53 @@ export default function App() {
           title: 'Switch Session',
           message: `Switch to "${sessionLabel}"?`,
           confirmLabel: 'Switch',
-          onConfirm: () => {
-            notifications.attachToActiveToast();
-          },
+          onConfirm: () => { notifications.attachToActiveToast(); },
         });
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [notifications.activeToast, notifications.attachToActiveToast, flow]);
 
-  // Show identity gate before any view (including review deep links)
+  // Global Cmd+K / Ctrl+K for command palette
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        commandPalette.toggle();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [commandPalette.toggle]);
+
+  // ─── Identity gate ─────────────────────────────────────────────────────────
+
   if (!resolvedIdentity) {
     return <IdentityGate onIdentityReady={setResolvedIdentity} />;
   }
 
-  // ========== Review View ==========
+  // ─── Review view ───────────────────────────────────────────────────────────
+
   if (view === 'review' && reviewWorkspace) {
-    if (terminal.status === 'established') {
+    if (terminalStatus === 'connected') {
+      const reviewRef: BackendScopedWorkspaceRef = {
+        backendKey: reviewWorkspace.backendKey,
+        workspaceId: reviewWorkspace.workspaceId,
+      };
       return (
         <>
           <ReviewPage
             projectName={reviewWorkspace.projectName}
             workspaceName={reviewWorkspace.workspaceId}
             workspaceLabel={reviewWorkspace.workspaceLabel}
-            machineName={selectedMachine?.label || selectedMachine?.machineId}
-            sendReviewRequest={terminal.sendReviewRequest}
-            onBack={() => {
-              setView('terminal');
-              setReviewWorkspace(null);
-            }}
+            sendReviewRequest={(operation) => multi.sendReviewRequest(reviewRef, operation)}
+            onBack={() => { setView('terminal'); setReviewWorkspace(null); }}
           />
           <Toaster theme="dark" position="top-right" richColors />
         </>
       );
     }
-
-    // Connection not yet established — show a targeted connecting screen
-    // rather than falling through to the generic machine list.
-    const statusMessage = CONNECTION_STATUS_LABELS[terminal.status];
 
     return (
       <>
@@ -1533,12 +1338,12 @@ export default function App() {
             <div className="text-lg text-[#e6edf3] mb-2">
               Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
             </div>
-            <div className="text-sm text-[#8b949e]">{statusMessage}</div>
+            <div className="text-sm text-[#8b949e]">Connecting...</div>
             <button
-              onClick={() => { setView('machines'); setReviewWorkspace(null); }}
+              onClick={() => { setView('terminal'); setReviewWorkspace(null); }}
               className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
             >
-              Back to Machines
+              Back to Workspaces
             </button>
           </div>
         </div>
@@ -1547,10 +1352,10 @@ export default function App() {
     );
   }
 
-  if (view === 'replay' && activeReplay) {
-    if (terminal.status !== 'established' || terminal.mode !== 'browsing') {
-      const statusMessage = CONNECTION_STATUS_LABELS[terminal.status];
+  // ─── Replay view ───────────────────────────────────────────────────────────
 
+  if (view === 'replay' && activeReplay) {
+    if (terminalStatus !== 'connected' || terminalMode !== 'browsing') {
       return (
         <>
           <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
@@ -1558,12 +1363,9 @@ export default function App() {
               <div className="text-lg text-[#e6edf3] mb-2">
                 Loading replay for <span className="text-[#58a6ff]">{activeReplay.sessionName}</span>
               </div>
-              <div className="text-sm text-[#8b949e]">{statusMessage}</div>
+              <div className="text-sm text-[#8b949e]">Connecting...</div>
               <button
-                onClick={() => {
-                  setView('terminal');
-                  setActiveReplay(null);
-                }}
+                onClick={() => { setView('terminal'); setActiveReplay(null); }}
                 className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
               >
                 Back to Workspaces
@@ -1580,20 +1382,16 @@ export default function App() {
       <>
         <ReplayTerminalWeb
           replay={activeReplay}
-          machineLabel={selectedMachine?.label || selectedMachine?.machineId}
           loadReplayFrame={loadReplayFrame}
           loadReplayTimeline={loadReplayTimeline}
-          onBack={() => {
-            setView('terminal');
-            setActiveReplay(null);
-          }}
+          onBack={() => { setView('terminal'); setActiveReplay(null); }}
           onDismiss={activeReplay.status === 'running'
             ? undefined
             : (replayId) => {
-              const replay = terminal.replays.find((item) => item.replayId === replayId) ?? activeReplay;
+              const replay = backendReplays.find((item) => item.replayId === replayId) ?? activeReplay;
               return toggleReplayDismissed(replay);
             }}
-          onCleanup={terminal.cancelPendingReplayRequests}
+          onCleanup={() => multi.cancelPendingReplayRequests(getTargetBackendKey())}
         />
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
@@ -1601,41 +1399,34 @@ export default function App() {
     );
   }
 
-  // ========== Spaces Browser View (browsing mode) ==========
+  // ─── Script terminal (workspace scripts running) ───────────────────────────
+
   if (
     view === 'terminal' &&
-    terminal.status === 'established' &&
-    terminal.mode === 'browsing' &&
+    terminalStatus === 'connected' &&
+    terminalMode === 'browsing' &&
     showScriptTerminal
   ) {
-    const isRunning = terminal.scriptState?.isRunning ?? true;
+    const isRunning = scriptState?.isRunning ?? true;
     return (
       <>
         <ScriptTerminal
-          phase={terminal.scriptState?.phase ?? 'pre'}
+          phase={scriptState?.phase ?? 'pre'}
           workspaceName={scriptWorkspaceName}
           isRunning={isRunning}
-          error={terminal.scriptState?.error}
-          exitCode={terminal.scriptState?.exitCode}
-          setWriteCallback={terminal.setWriteCallback}
-          canAttachAnyway={Boolean(!isRunning && terminal.scriptState?.error && lastScriptWorkspaceIdRef.current)}
+          error={scriptState?.error}
+          exitCode={scriptState?.exitCode}
+          setWriteCallback={setWriteCallback}
+          canAttachAnyway={Boolean(!isRunning && scriptState?.error && lastScriptWorkspaceIdRef.current)}
           onAttachAnyway={async () => {
             const workspaceId = lastScriptWorkspaceIdRef.current;
-            if (!workspaceId) {
-              return;
-            }
-
-            await attachController.attach({
-              workspaceId,
-              scriptPolicy: 'skip',
-            });
+            if (!workspaceId) return;
+            await attachController.attach({ workspaceId, scriptPolicy: 'skip' });
           }}
-          onBack={() => {
-            lastScriptWorkspaceIdRef.current = null;
-            setShowScriptTerminal(false);
-          }}
+          onBack={() => { lastScriptWorkspaceIdRef.current = null; setShowScriptTerminal(false); }}
           onCancel={() => {
-            terminal.cancelPendingScripts();
+            const ref: BackendScopedWorkspaceRef = { backendKey: getTargetBackendKey(), workspaceId: '' };
+            void multi.cancelPendingScripts(ref);
           }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
@@ -1644,8 +1435,13 @@ export default function App() {
     );
   }
 
-  if (view === "terminal" && terminal.status === "established" && terminal.mode === "browsing") {
-    // Show inbox if open
+  // ─── Workspace browser / detail (connected + browsing, or inline-attached) ──
+
+  if (
+    view === "terminal" &&
+    terminalStatus === "connected" &&
+    (terminalMode === "browsing" || (terminalMode === "attached" && (selectedWorkspaceForDetail || backendAttachedWorkspaceId)))
+  ) {
     if (showInbox) {
       return (
         <>
@@ -1656,7 +1452,6 @@ export default function App() {
       );
     }
 
-    // Show events if open
     if (showEvents) {
       return (
         <>
@@ -1667,388 +1462,352 @@ export default function App() {
       );
     }
 
-    return (
+    // Shared overlays (rendered in both board and detail views)
+    const overlays = (
       <>
-        <div className="h-screen w-screen flex flex-col md:flex-row bg-[#0d1117]">
-          <div className="h-[34vh] min-h-[240px] border-b border-[#30363d] md:h-full md:w-[320px] md:flex-shrink-0 md:border-b-0 md:border-r">
-            <ProjectListWeb
-              {...projectListProps}
-              embedded={true}
-              title={selectedMachine?.label || selectedMachine?.machineId || 'Projects'}
-            />
-          </div>
-          <div className="flex-1 min-h-0 flex flex-col">
-            <div className="px-3 py-2 border-b border-[#30363d] bg-[#11161d] flex items-center justify-between gap-2">
-              <div className="text-xs text-[#8b949e]">
-                Replay history: <span className="text-[#e6edf3]">{showDismissedReplays ? 'showing dismissed' : 'hiding dismissed'}</span>
-              </div>
-              <button
-                onClick={toggleShowDismissedReplayFilter}
-                className="px-3 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[36px] border border-[#30363d]"
-              >
-                {showDismissedReplays ? 'Hide Dismissed' : 'Show Dismissed'}
-              </button>
-            </div>
-            <div className="flex-1 min-h-0">
-            <SpacesBrowserWeb
-              {...spacesBrowserProps}
-              embedded={true}
-              emptyTitle={selectedProjectName ? `No workspaces in ${selectedProjectName}` : 'No project selected'}
-              emptyDescription={selectedProjectName
-                ? 'Create the first workspace for this project.'
-                : terminal.projects.length > 0
-                  ? 'Pick a project from the list to browse its workspaces.'
-                  : 'Create a project to start working from the web UI.'}
-              emptyActionLabel={selectedProjectName ? 'New Workspace' : 'New Project'}
-              onEmptyAction={selectedProjectName
-                ? () => handleCreateWorkspaceForProject(selectedProjectName)
-                : lifecycleController.openCreateProjectFlow}
-              onReview={handleOpenReview}
-              onCreate={selectedProjectName ? () => handleCreateWorkspaceForProject(selectedProjectName) : handleOpenCreateMenu}
-              onHelp={handleOpenHelp}
-              onOpenInbox={() => {
-                terminal.requestInbox();
-                setShowInbox(true);
-              }}
-              inboxUnreadCount={terminal.inboxUnreadCount}
-              onDisconnect={handleDisconnect}
-              onCreateWorkspaceForProject={handleCreateWorkspaceForProject}
-              onDeleteWorkspace={handleDeleteWorkspace}
-              onDeleteSession={handleDeleteSession}
-            />
-            </div>
-          </div>
-        </div>
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
+        {commandPalette.isOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-[10vh]"
+            role="dialog"
+            aria-label="Command palette"
+            onClick={() => commandPalette.close()}
+          >
+            <div
+              className="w-full max-w-md rounded-lg border border-[#30363d] bg-[#21262d] shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="border-b border-[#30363d] px-3 py-2">
+                <input
+                  type="text"
+                  placeholder="Filter commands..."
+                  value={commandPalette.filter}
+                  onChange={(e) => commandPalette.setFilter(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') commandPalette.close();
+                    else if (e.key === 'ArrowDown') { e.preventDefault(); commandPalette.moveSelection(1); }
+                    else if (e.key === 'ArrowUp') { e.preventDefault(); commandPalette.moveSelection(-1); }
+                    else if (e.key === 'Enter') { e.preventDefault(); commandPalette.selectCurrent(); }
+                  }}
+                  className="w-full bg-transparent text-white placeholder-[#6e7681] outline-none"
+                  autoFocus
+                />
+              </div>
+              <ul className="max-h-[50vh] overflow-y-auto py-1">
+                {commandPalette.filteredCommands.map((cmd, i) => (
+                  <li
+                    key={cmd.id}
+                    className={`cursor-pointer px-3 py-2 text-sm ${i === commandPalette.selectedIndex ? 'bg-[#388bfd] text-white' : 'text-[#c9d1d9] hover:bg-[#30363d]'}`}
+                    onClick={() => { commandPalette.setSelectedIndex(i); commandPalette.selectCurrent(); }}
+                  >
+                    {cmd.label}
+                    {cmd.shortcut ? <span className="ml-2 text-[#6e7681]">{cmd.shortcut}</span> : null}
+                  </li>
+                ))}
+              </ul>
+              <div className="border-t border-[#30363d] px-3 py-1.5 text-xs text-[#6e7681]">
+                ↑↓ select · Enter run · Esc close
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    );
+
+    const inlineAttachedRef: BackendScopedWorkspaceRef = {
+      backendKey: attachedBackendKey ?? getTargetBackendKey(),
+      workspaceId: '',
+    };
+
+    const handleInlineSendData = (data: string) => {
+      if (data === PAGE_UP && terminalRef.current?.pageUp()) return;
+      if (data === PAGE_DOWN && terminalRef.current?.pageDown()) return;
+      if (isViewOnlySession) return;
+      sendPty(new TextEncoder().encode(data));
+    };
+
+    const handleInlineKeyboardData = (data: Uint8Array) => {
+      if (isViewOnlySession) return;
+      const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
+      if (hasModifiers) {
+        const modified = applyModifiersToInput(data, modifiers);
+        sendPty(modified);
+        setModifiers({ ctrl: false, shift: false, alt: false });
+      } else {
+        sendPty(data);
+      }
+    };
+
+    const handleInlineFocusTerminal = () => terminalRef.current?.focus();
+    const toggleInlineInputMode = () => {
+      const newInputMode = !inputMode;
+      setInputMode(newInputMode);
+      if (newInputMode) terminalRef.current?.focus();
+      else terminalRef.current?.blur();
+    };
+
+    const showInlineFloatingControls = showMobileControls && !keyboardVisible;
+    const inlineTerminalContainerClass = (() => {
+      if (!showMobileControls) return 'flex-1 min-h-0';
+      if (inputMode) return 'terminal-input-mode-container';
+      return 'flex-1 min-h-0 terminal-with-floating-controls';
+    })();
+
+    // Only show inline terminal when the attached session belongs to the
+    // currently selected workspace (or no workspace tracking is available).
+    const attachedMatchesSelected = !backendAttachedWorkspaceId
+      || !selectedRef
+      || selectedRef.workspaceId === backendAttachedWorkspaceId;
+    const inlineTerminalOutlet = (terminalMode === 'attached' && attachedMatchesSelected) ? (
+      <AttachedTerminalPaneWeb
+        rootClassName="flex-1 min-h-0 flex flex-col bg-[#0d1117] overflow-hidden"
+        headerClassName="flex-shrink-0 px-3 py-2 border-b border-[#21262d] bg-[#161b22] flex items-center justify-between gap-2"
+        sessionName={attachedSessionName}
+        processTitle={attachedSessionMeta?.processTitle ?? null}
+        terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
+        lastAlertLabel={attachedSessionMeta?.lastAlertKind
+          ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
+          : null}
+        showConnectedLabel={true}
+        showMobileControls={showMobileControls}
+        inputMode={inputMode}
+        keyboardVisible={keyboardVisible}
+        onToggleInputMode={toggleInlineInputMode}
+        inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
+          inputMode
+            ? 'bg-[#22c55e] text-[#0d1117] font-medium'
+            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+        }`}
+        onDetach={() => multi.detachSession(inlineAttachedRef)}
+        detachButtonClassName="px-2 py-1 text-xs rounded border border-[#30363d] text-[#e6edf3] hover:bg-[#30363d]"
+        terminalContainerClassName={inlineTerminalContainerClass}
+        terminalRef={terminalRef}
+        onData={handleInlineKeyboardData}
+        setWriteCallback={setWriteCallback}
+        onResize={resizePty}
+        onActivity={handleTerminalActivity}
+        readOnly={isViewOnlySession}
+        allowTapFocus={inputMode || !showMobileControls}
+        allowTouchScroll={!inputMode}
+        onSendData={handleInlineSendData}
+        onFocusTerminal={handleInlineFocusTerminal}
+        modifiers={modifiers}
+        onModifiersChange={setModifiers}
+        showFloatingControls={showInlineFloatingControls}
+      />
+    ) : null;
+
+    // ── Workspace detail page (full-screen, replaces board) ────────────────
+    if (selectedWorkspaceForDetail) {
+      return (
+        <>
+          <WorkspaceDetailPage
+            workspace={selectedWorkspaceForDetail}
+            sessions={detailSessions}
+            replays={detailReplays}
+            agentSessions={selectedRef ? (agentSessionsByWorkspace[selectedRef.workspaceId] ?? []) : []}
+            agentSessionCount={selectedRef ? (agentSessionCounts[selectedRef.workspaceId] ?? 0) : 0}
+            pendingPermissions={selectedRef ? (pendingPermissionsByWorkspace[selectedRef.workspaceId] ?? 0) : 0}
+            attachedSessionId={backendAttachedSessionId}
+            allWorkspaces={allWorkspaceEntries}
+            workspaceStatusById={workspaceStatusById}
+            runtime={selectedRef ? (workspaceRuntime.runtimeByWorkspace[selectedRef.workspaceId] ?? null) : null}
+            onSelectWorkspace={(wid) => handleBoardSelectWorkspace(wid)}
+            onOpenAgentSession={handleOpenAgentSession}
+            onCreateAgentSession={handleCreateAgentSession}
+            onAbortAgentSession={handleAbortAgentSession}
+            onCloseAgentSession={handleCloseAgentSession}
+            onArchiveAgentSession={handleArchiveAgentSession}
+            onRestoreAgentSession={handleRestoreAgentSession}
+             onAttachSession={handleAttachSession}
+             onOpenReplay={handleOpenReplay}
+             onOpenReplayHistory={handleOpenReplayHistory}
+             onStartProcess={(params) => processActions.handleStartProcess(params)}
+            onStartProcessAttach={(params) => processActions.handleStartProcessAttach(params)}
+            onStopProcess={(params) => processActions.handleStopProcess(params)}
+            onEditProcesses={handleEditProcesses}
+            onManageBundleConfig={handleManageBundleConfig}
+            onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
+            onOpenReview={handleOpenReview}
+            onRequestStatusChange={(workspaceId) => {
+              showWorkspaceStatusSelect({
+                showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
+                onSelectPhase: (phase) => {
+                  workspaceBoardState.setPhase(workspaceId, phase);
+                  flow.close();
+                },
+              });
+            }}
+            onOpenEvents={(workspaceId) => {
+              const w = filteredWorkspaces.find((x) => x.id === workspaceId);
+              if (w) {
+                setEventsWorkspacePath(w.path);
+                setEventsWorkspaceLabel(w.name);
+                setShowEvents(true);
+                void multi.requestEvents(getWorkspaceRef(workspaceId));
+              }
+            }}
+            onDeleteSession={handleDeleteSession}
+            onClose={() => handleBoardSelectWorkspace(null)}
+          >
+            {inlineTerminalOutlet}
+          </WorkspaceDetailPage>
+          {overlays}
+        </>
+      );
+    }
+
+    // ── Board page (full-screen kanban, no workspace selected) ─────────────
+    return (
+      <>
+        <BoardPage
+          groups={workspaceBoardState.groups}
+          selectedWorkspaceId={workspaceBoardState.selectedWorkspaceId}
+          onSelectWorkspace={handleBoardSelectWorkspace}
+          onPhaseChange={workspaceBoardState.setPhase}
+          workspaceStatusById={workspaceRuntime.workspaceStatusById}
+          worktreeCount={worktreeCount}
+          inboxUnreadCount={backendInboxUnreadCount}
+          onOpenInbox={() => { multi.requestInbox(); setShowInbox(true); }}
+          onOpenHelp={handleOpenHelp}
+          onOpenCreateMenu={handleOpenCreateMenu}
+          onOpenCommandPalette={() => commandPalette.toggle()}
+          onRefresh={() => { multi.listWorkspaces(); multi.listProjects(); }}
+          onDisconnect={() => window.location.reload()}
+          loading={boardLoading}
+          loadingLabel="Loading worktrees..."
+        />
+        {overlays}
       </>
     );
   }
 
-  // ========== Terminal View (attached mode or reconnecting while attached) ==========
-  if (view === "terminal" && (terminal.status === "established" || terminal.status === "reconnecting") && terminal.mode === "attached") {
-    const isReconnecting = terminal.status !== 'established';
+  // ─── Terminal (attached mode) ──────────────────────────────────────────────
 
-    // Handler for sending data from mobile controls (already processed)
+  if (view === "terminal" && terminalStatus === "connected" && terminalMode === "attached") {
     const handleSendData = (data: string) => {
-      if (data === PAGE_UP && terminalRef.current?.pageUp()) {
-        return;
-      }
-
-      if (data === PAGE_DOWN && terminalRef.current?.pageDown()) {
-        return;
-      }
-
-      if (isViewOnlySession) {
-        return;
-      }
-
-      terminal.send(new TextEncoder().encode(data));
+      if (data === PAGE_UP && terminalRef.current?.pageUp()) return;
+      if (data === PAGE_DOWN && terminalRef.current?.pageDown()) return;
+      if (isViewOnlySession) return;
+      sendPty(new TextEncoder().encode(data));
     };
 
-    // Handler for keyboard input - applies virtual modifiers then resets them
     const handleKeyboardData = (data: Uint8Array) => {
-      if (isViewOnlySession) {
-        return;
-      }
-
+      if (isViewOnlySession) return;
       const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
       if (hasModifiers) {
-        // Apply modifiers and reset
         const modified = applyModifiersToInput(data, modifiers);
-        terminal.send(modified);
+        sendPty(modified);
         setModifiers({ ctrl: false, shift: false, alt: false });
       } else {
-        terminal.send(data);
+        sendPty(data);
       }
     };
 
-    // Handler for focusing terminal from mobile controls
-    const handleFocusTerminal = () => {
-      terminalRef.current?.focus();
-    };
-
-    // Toggle input mode - focus/blur terminal accordingly
+    const handleFocusTerminal = () => terminalRef.current?.focus();
     const toggleInputMode = () => {
       const newInputMode = !inputMode;
       setInputMode(newInputMode);
-      if (newInputMode) {
-        // Entering input mode - focus terminal to show keyboard
-        terminalRef.current?.focus();
-      } else {
-        // Exiting input mode - blur to hide keyboard
-        terminalRef.current?.blur();
-      }
+      if (newInputMode) terminalRef.current?.focus();
+      else terminalRef.current?.blur();
     };
 
-    // Show floating controls when keyboard is hidden on mobile
     const showFloatingControls = showMobileControls && !keyboardVisible;
-
-    // Determine terminal container classes based on mode
     const getTerminalContainerClass = () => {
-      if (!showMobileControls) {
-        // Desktop - simple flex
-        return 'flex-1';
-      }
-      if (inputMode) {
-        // Input mode - has padding for TerminalControls bar
-        return 'terminal-input-mode-container';
-      }
-      // Not input mode - add bottom padding for floating controls
+      if (!showMobileControls) return 'flex-1';
+      if (inputMode) return 'terminal-input-mode-container';
       return 'flex-1 terminal-with-floating-controls';
     };
 
+    const attachedRef: BackendScopedWorkspaceRef = { backendKey: attachedBackendKey ?? getTargetBackendKey(), workspaceId: '' };
+
     return (
       <>
-        <div className="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden">
-          <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-              <button
-                onClick={terminal.detachSession}
-                className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
-              >
-                ← <span className="hidden sm:inline ml-1">Workspaces</span>
-              </button>
-              <div className="text-sm text-[#8b949e] truncate">
-                <span className="text-[#3fb950] shadow-glow">●</span>{" "}
-                <span className="hidden sm:inline">{selectedMachine?.label || selectedMachine?.machineId}</span>
-                {terminal.attachedSessionName && (
-                  <span className="text-[#e6edf3]">
-                    <span className="hidden sm:inline text-[#6e7681] mx-1">/</span>
-                    {terminal.attachedSessionName.split(':').pop()}
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {/* Input mode toggle for mobile */}
-              {showMobileControls && (
-                <button
-                  onClick={toggleInputMode}
-                  className={`px-3 py-2 text-sm rounded min-h-[44px] transition-all ${
-                    inputMode
-                      ? 'bg-[#22c55e] text-[#0d1117] shadow-glow font-medium'
-                      : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
-                  }`}
-                >
-                  Input
-                </button>
-              )}
-              <span className="text-xs text-[#6e7681] hidden sm:inline">Shift+Esc</span>
-              <button
-                onClick={terminal.detachSession}
-                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
-              >
-                Detach
-              </button>
-            </div>
-          </div>
-          <div className={`${getTerminalContainerClass()} relative`}>
-            <SessionTerminal
-              ref={terminalRef}
-              onData={handleKeyboardData}
-              setWriteCallback={terminal.setWriteCallback}
-              onResize={terminal.resize}
-              allowTapFocus={inputMode || !showMobileControls}
-              allowTouchScroll={!inputMode}
-              onActivity={handleTerminalActivity}
-              readOnly={isViewOnlySession || terminal.status === 'reconnecting'}
-            />
-            {isReconnecting && (
-              <div className="absolute inset-0 flex items-center justify-center bg-[#0d1117]/80">
-                <div className="text-center">
-                  <div className="text-[#e6edf3] text-base mb-1 animate-pulse">Reconnecting...</div>
-                  <div className="text-[#8b949e] text-sm">Your session is preserved</div>
-                </div>
-              </div>
-            )}
-          </div>
-          {/* Mobile controls toolbar - show in input mode */}
-          {showMobileControls && inputMode && (
-            <TerminalControls
-              onSendData={handleSendData}
-              onFocusTerminal={handleFocusTerminal}
-              keyboardVisible={keyboardVisible}
-              modifiers={modifiers}
-              onModifiersChange={setModifiers}
-            />
+        <AttachedTerminalPaneWeb
+          rootClassName="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden"
+          headerClassName="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0"
+          leadingContent={(
+            <button
+              onClick={() => void multi.detachSession(attachedRef)}
+              className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+            >
+              ← <span className="hidden sm:inline ml-1">Workspaces</span>
+            </button>
           )}
-          {/* Floating controls - show when keyboard is hidden on mobile */}
-          {showFloatingControls && (
-            <FloatingControls
-              onSendData={handleSendData}
-              showJogWheel={inputMode}
-            />
-          )}
-        </div>
-        <FlowWeb flow={flow} />
+          trailingContent={<span className="text-xs text-[#6e7681] hidden sm:inline">Shift+Esc</span>}
+          sessionName={attachedSessionName}
+          processTitle={attachedSessionMeta?.processTitle ?? null}
+          terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
+          lastAlertLabel={attachedSessionMeta?.lastAlertKind
+            ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
+            : null}
+          showConnectedLabel={activeBackendState?.status === 'connected'}
+          showMobileControls={showMobileControls}
+          inputMode={inputMode}
+          keyboardVisible={keyboardVisible}
+          onToggleInputMode={toggleInputMode}
+          inputButtonClassName={`px-3 py-2 text-sm rounded min-h-[44px] transition-all ${
+            inputMode
+              ? 'bg-[#22c55e] text-[#0d1117] shadow-glow font-medium'
+              : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+          }`}
+          onDetach={() => multi.detachSession(attachedRef)}
+          detachButtonClassName="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+          terminalContainerClassName={getTerminalContainerClass()}
+          terminalRef={terminalRef}
+          onData={handleKeyboardData}
+          setWriteCallback={setWriteCallback}
+          onResize={resizePty}
+          onActivity={handleTerminalActivity}
+          readOnly={isViewOnlySession}
+          allowTapFocus={inputMode || !showMobileControls}
+          allowTouchScroll={!inputMode}
+          onSendData={handleSendData}
+          onFocusTerminal={handleFocusTerminal}
+          modifiers={modifiers}
+          onModifiersChange={setModifiers}
+          showFloatingControls={showFloatingControls}
+        />
         <Toaster theme="dark" position="top-right" richColors />
       </>
     );
   }
 
-  // ========== Terminal Connecting View ==========
-  if (view === "terminal") {
-    const statusMessage = CONNECTION_STATUS_LABELS[terminal.status];
+  // ─── Connecting / loading screen ───────────────────────────────────────────
 
-    return (
-      <>
-        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
-          <div className="text-center">
-            <div className="text-lg text-[#e6edf3] mb-2 break-words">
-              Connecting to {selectedMachine?.label || selectedMachine?.machineId}
-            </div>
-            <div className="text-sm text-[#8b949e]">{statusMessage}</div>
-            {terminal.status === "error" && (
-              <button
-                onClick={handleBackToMachines}
-                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
-              >
-                Back to Machines
-              </button>
-            )}
-          </div>
-        </div>
-        <Toaster theme="dark" position="top-right" richColors />
-      </>
-    );
-  }
+  const statusMessage = {
+    disconnected: "Disconnected — waiting for relay...",
+    connecting: "Connecting to relay...",
+    connected: "Connected, authenticating...",
+    error: "Connection failed",
+  }[terminalStatus] ?? "Loading...";
 
-  // ========== Machine List View ==========
-  // This is now the main/default view - shows machines and your identity
-  // (Identity gate is handled above, before any view rendering)
+  const isError = terminalStatus === "error";
 
   return (
     <>
-      <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
-        {/* Header with identity info */}
-        <div className="bg-[#161b22] px-4 py-3 border-b border-[#30363d]">
-          <div className="max-w-2xl mx-auto">
-            {/* Connection status */}
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${
-                  relay.status === "connected" ? "bg-[#3fb950] shadow-glow" :
-                  relay.status === "connecting" ? "bg-[#d29922] animate-pulse" :
-                  "bg-[#f85149]"
-                }`} />
-                <span className="text-sm text-[#8b949e]">
-                  {relay.status === "connected" ? "Connected" :
-                   relay.status === "connecting" ? "Connecting..." :
-                   "Disconnected"}
-                </span>
-              </div>
-              <button
-                onClick={handleOpenHelp}
-                className="text-xs text-[#6e7681] hover:text-[#e6edf3] px-2 py-1"
-              >
-                Help
-              </button>
-              <button
-                onClick={relay.refreshMachines}
-                className="text-xs text-[#6e7681] hover:text-[#e6edf3] px-2 py-1"
-              >
-                Refresh
-              </button>
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+        <div className="text-center">
+          <h1 className="text-xl font-bold text-[#e6edf3] mb-4">GitSpace</h1>
+          <div className="text-sm text-[#8b949e] mb-4">{statusMessage}</div>
+          {!isError && (
+            <div className="flex gap-1 justify-center">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="w-1.5 h-1.5 rounded-full bg-[#3fb950] animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
+              ))}
             </div>
-
-            {/* Your identity - prominent display */}
-            {relay.publicKey && (
-              <div className="bg-[#0d1117] rounded-lg p-3 border border-[#30363d]">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-[#8b949e]">Your Browser Identity</span>
-                </div>
-                <code className="block text-xs text-[#3fb950] break-all font-mono leading-relaxed mb-3">
-                  {relay.publicKey}
-                </code>
-                <p className="text-xs text-[#6e7681] mb-2">
-                  Owner-only access is enabled. This browser key must match the machine owner identity:
-                </p>
-                <p className="text-xs text-[#8b949e]">
-                  If this key does not match your machine owner identity, switch to the owner identity and reconnect.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Machine list */}
-        <div className="flex-1 overflow-auto">
-          {machineListProps.isLoading ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-[#8b949e]">Connecting to relay...</div>
-            </div>
-          ) : machineListProps.hasError ? (
-            <div className="flex items-center justify-center h-full p-4">
-              <div className="text-center max-w-xl">
-                <div className="text-[#f85149] mb-2">Could not list machines</div>
-                <p className="text-sm text-[#8b949e] mb-3">
-                  {machineListProps.error ?? 'The relay rejected or failed the machine listing request.'}
-                </p>
-                <p className="text-sm text-[#6e7681] mb-4">
-                  This usually means the browser identity is not the relay owner identity, or the relay is connected but not authorized to show any machines for this identity.
-                </p>
-                <button
-                  onClick={() => {
-                    if (machineListProps.status === 'disconnected') {
-                      void relay.connect();
-                      return;
-                    }
-
-                    relay.refreshMachines();
-                  }}
-                  className="px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg min-h-[48px] text-[#e6edf3]"
-                >
-                  {machineListProps.status === 'disconnected' ? 'Reconnect' : 'Retry'}
-                </button>
-              </div>
-            </div>
-          ) : machineListProps.status === "disconnected" && relay.machines.length === 0 ? (
-            <div className="flex items-center justify-center h-full p-4">
-              <div className="text-center max-w-xl">
-                <div className="text-[#8b949e] mb-2">Unable to connect to relay</div>
-                <p className="text-sm text-[#6e7681] mb-4">
-                  Check that your hosted or local relay is running, then reconnect and try again.
-                </p>
-                <button
-                  onClick={relay.connect}
-                  className="px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] border border-[#30363d] rounded-lg min-h-[48px] text-[#e6edf3]"
-                >
-                  Reconnect
-                </button>
-              </div>
-            </div>
-          ) : machineListProps.isEmpty ? (
-            <div className="flex items-center justify-center h-full p-4">
-              <div className="text-center max-w-xl">
-                <div className="text-[#8b949e] mb-2">No machines available</div>
-                <p className="text-sm text-[#6e7681] mb-3">
-                  The relay connection succeeded, but no machines are visible to this browser identity.
-                </p>
-                <p className="text-sm text-[#6e7681] mb-4">
-                  Make sure your machine is running `gssh machine serve start` and that this browser is using the same owner identity as the machine.
-                </p>
-                <button
-                  onClick={relay.refreshMachines}
-                  className="px-6 py-3 text-base bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium shadow-glow rounded-lg min-h-[48px]"
-                >
-                  Refresh
-                </button>
-              </div>
-            </div>
-          ) : (
-            <MachineListWeb {...machineListProps} />
+          )}
+          {isError && (
+            <button
+              onClick={() => window.location.reload()}
+              className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+            >
+              Retry
+            </button>
           )}
         </div>
-
-        {/* Footer */}
-        <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d]">
-          <p className="text-xs text-[#6e7681] text-center">
-            End-to-end encrypted via X3DH • ↑↓ Navigate • Enter Connect • ? Help
-          </p>
-        </div>
       </div>
-      <FlowWeb flow={flow} />
       <Toaster theme="dark" position="top-right" richColors />
     </>
   );

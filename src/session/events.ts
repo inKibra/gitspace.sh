@@ -9,6 +9,8 @@ import type { NotificationConfig } from '../notifications/types.js';
 import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEvent, SavedEventFilter } from '../types/events.js';
 import type { ReplayInfo } from '../lib/tmux-lite/replay/index.js';
+import type { MachineSnapshot } from '../lib/tmux-lite/machine/protocol.js';
+import type { AttachedSessionMeta } from './types.js';
 
 export type BackendEvent =
   | { type: 'status'; status: 'disconnected' | 'connecting' | 'connected' | 'error'; error?: string }
@@ -26,13 +28,14 @@ export type BackendEvent =
       exitCode?: number;
     }
   | { type: 'notification_config'; config: NotificationConfig }
-  | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean }
+  | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean; workspaceId?: string }
+  | { type: 'session_meta'; meta: AttachedSessionMeta }
   | { type: 'detached' }
   | { type: 'session_exited'; sessionId: string; exitCode?: number }
   | { type: 'command_error'; code?: string; message: string }
   | { type: 'error'; message: string }
-  | { type: 'review_response'; requestId: string; result?: ReviewResult; error?: { code: string; message: string } }
   | { type: 'events'; events: WideEvent[]; liveEventIds: string[]; savedEventFilters?: SavedEventFilter[] }
+  | { type: 'machine_snapshot'; snapshot: MachineSnapshot }
   | { type: 'process_started'; workspaceId: string; processName: string; sessionId?: string; sessionIds?: string[] }
   | { type: 'process_stopped'; workspaceId: string; processName: string };
 

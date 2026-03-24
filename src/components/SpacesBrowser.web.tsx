@@ -271,14 +271,14 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${session.attached ? 'bg-[#d29922]' : 'bg-[#3fb950]'}`} />
                   <div className="min-w-0 flex-1">
                     <span className="text-[#8b949e] truncate block">{session.name.split(':').pop()}</span>
-                    {session.processTitle && (
-                      <span className="text-xs text-[#d29922] truncate block">{session.processTitle}</span>
+                    {(item.subtitle ?? session.processTitle ?? session.terminalTitle) && (
+                      <span className="text-xs text-[#d29922] truncate block">{item.subtitle ?? session.processTitle ?? session.terminalTitle}</span>
                     )}
                   </div>
                 </div>
                 <div className="flex items-center gap-3 flex-shrink-0 ml-2">
                   <div className="text-xs text-[#6e7681] hidden sm:block">
-                    {session.attached ? 'attached' : formatTime(session.createdAt)}
+                    {item.alertLabel ?? (session.attached ? 'attached' : formatTime(session.createdAt))}
                   </div>
                   {onDeleteSession && (
                     <ActionButton
@@ -391,11 +391,11 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   <span className={`w-2.5 h-2.5 flex-shrink-0 ${statusColor}`}>{statusIcon}</span>
                   <div className="min-w-0 flex-1">
                     <span className="text-[#e6edf3] truncate block">{item.processName}#{item.instance}</span>
-                    {portInfo && <span className="text-xs text-[#8b949e] truncate block">{portInfo}</span>}
+                    <span className="text-xs text-[#8b949e] truncate block">{item.subtitle ?? portInfo}</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0 ml-2">
-                  <span className={`text-xs ${statusColor} hidden sm:inline`}>{item.status}</span>
+                  <span className={`text-xs ${statusColor} hidden sm:inline`}>{item.alertLabel ?? item.status}</span>
                   {item.status === 'running' ? (
                     <ActionButton
                       label="Stop"
@@ -508,12 +508,16 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
             const state = getAgentSessionDisplayState(item.session);
             const label = getAgentSessionDisplayLabel(item.session);
             const signal =
-              state === 'closed' ? `■ ${label}`
-              : state === 'needs-permission' ? `⚡ ${label}`
+              state === 'needs-permission' ? `⚡ ${label}`
               : state === 'error' ? `! ${label}`
               : state === 'running' ? `● ${label}`
               : state === 'retrying' ? `↻ ${label}`
               : `◦ ${label}`;
+            const signalColor =
+              state === 'needs-permission' ? 'text-[#f59e0b]'
+              : state === 'running' ? 'text-[#10b981]'
+              : state === 'waiting' ? 'text-[#3b82f6]'
+              : 'text-[#52525b]';
             return (
               <div
                 key={`agent-session-${item.workspaceId}-${item.session.id}`}
@@ -527,8 +531,8 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 `}
               >
                 <div className="min-w-0 flex-1">
-                  <div className={`truncate text-sm ${item.session.closed ? 'text-[#8b949e]' : 'text-[#c678dd]'}`}>✦ {item.session.title}</div>
-                  <div className="text-xs text-[#8b949e] truncate">
+                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
+                  <div className={`text-xs truncate ${signalColor}`}>
                     {signal}
                   </div>
                 </div>

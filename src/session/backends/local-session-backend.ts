@@ -6,7 +6,33 @@ import type {
 } from '../../lib/tmux-lite/protocol.js';
 import {
   listSessions,
+  cancelPrepareAttachSession,
+  clearTmuxInbox,
+  getTmuxInbox,
+  getTmuxNotificationConfig,
+  getTmuxBundleConfigState,
+  getTmuxBundleRefreshPlan,
+  killTmuxSession,
+  listTmuxGithubRepos,
+  listTmuxLinearIssues,
+  listTmuxRemoteBranches,
+  markTmuxInboxRead,
+  prepareAttachSession,
+  requestTmuxEvents,
+  sendTmuxReviewRequest,
+  setTmuxWorkspacePhase,
+  createTmuxProject,
+  prepareTmuxProject,
+  finalizeTmuxProject,
+  cancelTmuxProjectCreation,
+  createTmuxWorkspace,
+  deleteTmuxWorkspace,
+  deleteTmuxProject,
+  applyTmuxBundleRefresh,
+  applyTmuxBundleConfig,
+  updateTmuxNotificationConfig,
   ensureServer,
+  getMachineSnapshot,
   createSession,
   killSession,
   createCheckpoint,
@@ -17,15 +43,26 @@ import {
   getReplayText,
   getReplayMarkdown,
   getAgentState,
+  watchMachineEvents,
   watchAgentState,
   listAgentSessions as listTmuxAgentSessions,
   createAgentSession as createTmuxAgentSession,
   abortAgentSession as abortTmuxAgentSession,
-  clearAgentSession as clearTmuxAgentSession,
+  closeAgentSession as closeTmuxAgentSession,
+  archiveAgentSession as archiveTmuxAgentSession,
+  restoreAgentSession as restoreTmuxAgentSession,
   attachAgentSession as attachTmuxAgentSession,
-  getAgentSessionTakeoverState as getTmuxAgentSessionTakeoverState,
   respondToAgentPermission as respondToTmuxAgentPermission,
 } from '../../lib/tmux-lite/cli.js';
+import { MachineStateClient } from '../../machine/state/client.js';
+import {
+  machineSnapshotToAgentState,
+  machineSnapshotToKnownAgentSessions,
+  machineSnapshotToProjects,
+  machineSnapshotToSessions,
+  machineSnapshotToWorkspaces,
+} from '../../machine/state/selectors.js';
+import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import {
   listReplaysOffline,
   getReplaySnapshotOffline,
@@ -77,8 +114,6 @@ import {
   resolveWorkspaceName,
   toCanonicalWorkspaceId,
 } from '../../utils/workspace-id.js';
-import { buildSessionName } from '../session-name.js';
-import { buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -113,15 +148,18 @@ import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../.
 import { startProcessScheduler } from '../../lib/processes/scheduler.js';
 import { normalizeProcessInstanceCount } from '../../lib/processes/instances.js';
 import { readWorkspaceSnapshots } from '../../lib/events/reader.js';
+import { readWideEvents } from '../../lib/events/reader.js';
+import { listProcessEventsDirs } from '../../lib/events/paths.js';
 import { resolveWorkspaceRef } from '../../lib/events/paths.js';
 import { loadSavedEventFilters } from '../../lib/events/filters.js';
 import { readProjectConfig } from '../../core/config.js';
 import { existsSync } from 'fs';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../serve/agent-event-manager.js';
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { ReviewRequestError } from '../../types/errors.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -138,6 +176,8 @@ export interface LocalSessionBackendDependencies {
   getReplayMarkdown: typeof getReplayMarkdown;
   getReplayFrame: typeof getReplayFrameOffline;
   getReplayTimeline: typeof getReplayTimelineOffline;
+  getMachineSnapshot: typeof getMachineSnapshot;
+  watchMachineEvents: typeof watchMachineEvents;
   dismissReplay: typeof dismissReplayOffline;
   undismissReplay: typeof undismissReplayOffline;
   getNotificationConfig: typeof getNotificationConfig;
@@ -190,8 +230,9 @@ interface LocalAgentControl {
   listSessions: typeof listTmuxAgentSessions;
   createSession: typeof createTmuxAgentSession;
   abortSession: typeof abortTmuxAgentSession;
-  clearSession: typeof clearTmuxAgentSession;
-  checkTakeover: typeof getTmuxAgentSessionTakeoverState;
+  closeSession: typeof closeTmuxAgentSession;
+  archiveSession: typeof archiveTmuxAgentSession;
+  restoreSession: typeof restoreTmuxAgentSession;
   attachSession: typeof attachTmuxAgentSession;
   respondToPermission: typeof respondToTmuxAgentPermission;
 }
@@ -212,6 +253,11 @@ function toSessionInfo(
   attached: boolean;
   createdAt: number;
   processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: import('../../lib/tmux-lite/protocol.js').InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
   exitCode?: number;
   socketPath?: string;
   cwd?: string;
@@ -224,6 +270,11 @@ function toSessionInfo(
     attached: session.attached,
     createdAt: session.createdAt,
     processTitle: session.processTitle,
+    terminalTitle: session.terminalTitle,
+    lastAlertKind: session.lastAlertKind,
+    lastAlertPreview: session.lastAlertPreview,
+    lastAlertAt: session.lastAlertAt,
+    unreadAlertCount: session.unreadAlertCount,
     exitCode: session.exitCode,
     socketPath: session.socketPath,
     cwd: session.cwd,
@@ -299,17 +350,6 @@ function toExitedSessionError(session: TmuxSession): Error {
 
 function isAgentReplay(replay: { sessionName: string }): boolean {
   return replay.sessionName.startsWith('agent:');
-}
-
-function scriptFailureCodeForPhase(phase: 'pre' | 'setup' | 'select'): string {
-  if (phase === 'setup') {
-    return 'SETUP_SCRIPT_FAILED';
-  }
-  if (phase === 'select') {
-    return 'SELECT_SCRIPT_FAILED';
-  }
-
-  return 'PRE_SCRIPT_FAILED';
 }
 
 async function connectSessionSocket(
@@ -417,6 +457,8 @@ function buildDeps(
     getReplayMarkdown,
     getReplayFrame: getReplayFrameOffline,
     getReplayTimeline: getReplayTimelineOffline,
+    getMachineSnapshot,
+    watchMachineEvents,
     dismissReplay: dismissReplayOffline,
     undismissReplay: undismissReplayOffline,
     getNotificationConfig,
@@ -443,12 +485,14 @@ function buildDeps(
   };
 }
 
+
 export class LocalSessionBackend implements SessionBackend {
   readonly descriptor: BackendDescriptor;
   private readonly deps: LocalSessionBackendDependencies;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
   private connected = false;
   private attachedSessionId: string | null = null;
+  private attachedWorkspaceId: string | null = null;
   private sessionSocket: LocalSessionSocketConnection | null = null;
   private sessionSocketSessionId: string | null = null;
   private sessionSocketGeneration = 0;
@@ -458,9 +502,11 @@ export class LocalSessionBackend implements SessionBackend {
   private pendingUtf8Bytes = new Uint8Array(0);
   private viewOnly = false;
   private pendingAttachAbortController: AbortController | null = null;
+  private pendingAttachRequestId: string | null = null;
   private agentStateCache: Record<string, WorkspaceAgentState> = {};
   private readonly agentStateHandlers = new Set<(delta: AgentStateUpdateDelta) => void>();
   private stopAgentWatch: (() => void) | null = null;
+  private readonly machineStateClient = new MachineStateClient();
   private readonly agentControl: LocalAgentControl;
 
   constructor(options: LocalSessionBackendOptions = {}) {
@@ -472,8 +518,9 @@ export class LocalSessionBackend implements SessionBackend {
       listSessions: options.agentControl?.listSessions ?? listTmuxAgentSessions,
       createSession: options.agentControl?.createSession ?? createTmuxAgentSession,
       abortSession: options.agentControl?.abortSession ?? abortTmuxAgentSession,
-      clearSession: options.agentControl?.clearSession ?? clearTmuxAgentSession,
-      checkTakeover: options.agentControl?.checkTakeover ?? getTmuxAgentSessionTakeoverState,
+      closeSession: options.agentControl?.closeSession ?? closeTmuxAgentSession,
+      archiveSession: options.agentControl?.archiveSession ?? archiveTmuxAgentSession,
+      restoreSession: options.agentControl?.restoreSession ?? restoreTmuxAgentSession,
       attachSession: options.agentControl?.attachSession ?? attachTmuxAgentSession,
       respondToPermission: options.agentControl?.respondToPermission ?? respondToTmuxAgentPermission,
     };
@@ -502,29 +549,36 @@ export class LocalSessionBackend implements SessionBackend {
   async connect(): Promise<void> {
     await this.deps.ensureServer();
     try {
-      const snapshot = await this.agentControl.getState();
-      this.agentStateCache = Object.fromEntries(snapshot.map((workspace) => [workspace.workspaceId, workspace]));
+      const snapshot = await this.deps.getMachineSnapshot();
+      this.machineStateClient.replaceSnapshot(snapshot);
+      this.agentStateCache = machineSnapshotToAgentState(snapshot);
       this.stopAgentWatch?.();
-      this.stopAgentWatch = await this.agentControl.watchState({
-        onSnapshot: (workspaces) => {
-          this.agentStateCache = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
-          const delta: AgentStateUpdateDelta = { type: 'agent_state_snapshot', workspaces: this.agentStateCache };
-          for (const handler of this.agentStateHandlers) {
-            handler(delta);
-          }
+      this.stopAgentWatch = await this.deps.watchMachineEvents({
+        onSnapshot: (machineSnapshot) => {
+          this.machineStateClient.replaceSnapshot(machineSnapshot);
+          this.agentStateCache = machineSnapshotToAgentState(machineSnapshot);
+          this.broadcastAgentSnapshot();
+          this.emitDerivedMachineState();
         },
-        onUpdate: (delta) => {
-          this.applyAgentStateDelta(delta);
-          for (const handler of this.agentStateHandlers) {
-            handler(delta);
-          }
+        onEvent: (event) => {
+          const machineSnapshot = this.machineStateClient.applyEvent(event);
+          this.agentStateCache = machineSnapshotToAgentState(machineSnapshot);
+          this.broadcastAgentSnapshot();
+          this.emitDerivedMachineState();
         },
       });
+
+      // Block initial connection on full machine preload so the UI does not
+      // briefly render an empty state and then hydrate later.
+      this.emitDerivedMachineState();
+      await this.requestInbox();
+      await this.getNotificationConfig();
     } catch (error) {
       this.agentStateCache = {};
       this.stopAgentWatch = null;
       const message = error instanceof Error ? error.message : String(error);
       this.emit({ type: 'error', message: `Failed to initialize agent state watch: ${message}` });
+      throw error;
     }
     this.connected = true;
     this.emit({ type: 'status', status: 'connected' });
@@ -540,6 +594,7 @@ export class LocalSessionBackend implements SessionBackend {
     this.connected = false;
     const wasAttached = this.attachedSessionId !== null;
     this.attachedSessionId = null;
+    this.attachedWorkspaceId = null;
     this.emit({ type: 'status', status: 'disconnected' });
     if (wasAttached) {
       this.emit({ type: 'detached' });
@@ -547,56 +602,24 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listProjects(): Promise<void> {
-    const projects = this.deps.listProjectSummaries().map((project) => ({
-      name: project.name,
-      repository: project.repository,
-      workspaceCount: project.workspaceCount,
-      isCurrent: project.isCurrent,
-    }));
+    const projects = machineSnapshotToProjects(this.machineStateClient.getSnapshot());
     this.emit({ type: 'projects', projects });
   }
 
   async listGithubRepos(org?: string): Promise<string[]> {
-    return this.deps.listGithubReposForSession(org);
+    return listTmuxGithubRepos(org);
   }
 
   async listRemoteBranches(projectName: string): Promise<string[]> {
-    return this.deps.listRemoteBranchesForSession(projectName);
+    return listTmuxRemoteBranches(projectName);
   }
 
   async listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]> {
-    return this.deps.listLinearIssuesForSession(projectName);
+    return listTmuxLinearIssues(projectName);
   }
 
   async listWorkspaces(): Promise<void> {
-    const [workspaces, sessions] = await Promise.all([
-      this.deps.scanWorkspaces(),
-      this.deps.listSessions(),
-    ]);
-
-    const counts = new Map<string, number>();
-    for (const session of sessions) {
-      if (session.hidden || session.kind === 'agent') {
-        continue;
-      }
-      const current = counts.get(session.cwd) ?? 0;
-      counts.set(session.cwd, current + 1);
-    }
-
-    const mappedWorkspaces = workspaces.map((workspace) => {
-      const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
-      return {
-        ...workspace,
-        id: toCanonicalWorkspaceId(workspace),
-        sessionCount: counts.get(workspace.path) ?? 0,
-        processes: processConfig.config.processes.map((p) => ({
-          name: p.name,
-          instances: p.instances,
-          ports: p.ports,
-        })),
-        processConfigError: processConfig.error ?? undefined,
-      };
-    });
+    const mappedWorkspaces = machineSnapshotToWorkspaces(this.machineStateClient.getSnapshot());
 
     this.emit({
       type: 'workspaces',
@@ -604,43 +627,13 @@ export class LocalSessionBackend implements SessionBackend {
     });
   }
 
+  async setWorkspaceStatus(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase): Promise<void> {
+    await setTmuxWorkspacePhase(projectName, workspaceName, phase);
+    await this.listWorkspaces();
+  }
+
   async listSessions(workspaceId?: string): Promise<void> {
-    const [sessions, workspaces] = await Promise.all([
-      this.deps.listSessions(),
-      this.deps.scanWorkspaces(),
-    ]);
-
-    const workspaceByPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
-
-    const filtered = sessions
-      .filter((session) => !(session.hidden || session.kind === 'agent'))
-      .map((session) => {
-        const parsed = parseProcessSessionName(session.name);
-        let workspace = workspaceByPath.get(session.cwd);
-        if (!workspace && parsed) {
-          workspace = workspaces.find((w) => w.id === parsed.workspaceId);
-        }
-        if (!workspace) {
-          workspace = workspaces.find((w) => session.cwd.startsWith(w.path));
-        }
-        const id = workspace ? toCanonicalWorkspaceId(workspace) : (parsed?.workspaceId ? `unknown:${parsed.workspaceId}` : 'unknown');
-        const info = toSessionInfo(session, id);
-        return {
-          ...info,
-          processName: parsed?.processName,
-          processInstance: parsed?.instance,
-        };
-      })
-      .filter((session) => {
-        if (!workspaceId) {
-          return true;
-        }
-        return (
-          session.workspaceId === workspaceId ||
-          session.workspaceId.endsWith(`:${workspaceId}`)
-        );
-      });
-
+    const filtered = machineSnapshotToSessions(this.machineStateClient.getSnapshot(), workspaceId);
     this.emit({ type: 'sessions', sessions: filtered });
   }
 
@@ -705,7 +698,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async createProject(params: CreateProjectParams): Promise<void> {
     try {
-      await this.deps.createProjectForSession(params);
+      await createTmuxProject(params);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({
@@ -719,7 +712,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
     try {
-      return await this.deps.prepareProjectForSession(params);
+      return await prepareTmuxProject(params);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({
@@ -733,7 +726,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
     try {
-      await this.deps.finalizePreparedProjectForSession(params);
+      await finalizeTmuxProject(params);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({
@@ -747,7 +740,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async cancelProjectCreation(projectName: string): Promise<void> {
     try {
-      await this.deps.cancelPreparedProjectForSession(projectName);
+      await cancelTmuxProjectCreation(projectName);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({
@@ -761,7 +754,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async createWorkspace(params: CreateWorkspaceParams): Promise<void> {
     try {
-      await this.deps.createWorkspaceForSession(params);
+      await createTmuxWorkspace(params);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({
@@ -775,7 +768,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async deleteProject(projectName: string, _params: DeleteProjectParams = {}): Promise<void> {
     try {
-      await this.deps.deleteProjectForSession({ projectName });
+      await deleteTmuxProject(projectName);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({
@@ -804,124 +797,53 @@ export class LocalSessionBackend implements SessionBackend {
       if (typeof targetSession.exitCode === 'number') {
         throw toExitedSessionError(targetSession);
       }
+      // Resolve workspaceId from the machine snapshot for sessionId-based attach
+      const snapshotSession = this.machineStateClient.getSnapshot().terminalSessionsById[params.sessionId];
+      this.attachedWorkspaceId = snapshotSession?.workspaceId ?? null;
     } else if (params.workspaceId) {
-      const workspaceId = params.workspaceId;
-      const workspaces = await this.deps.scanWorkspaces();
-      const workspace = workspaces.find(
-        (item) => matchesWorkspaceId(item, workspaceId)
-      );
-      if (!workspace) {
-        throw new SpacesError(`Workspace not found: ${workspaceId}`, 'USER_ERROR', 1);
-      }
-
-      const sessions = await this.deps.listSessions();
-      const fullName = buildSessionName({
-        projectName: workspace.projectName,
-        workspaceName: workspace.id,
-        requestedName: params.sessionName,
-        sessions,
-      });
-
-      if (params.command) {
-        // Skip workspace scripts when a custom command is specified
-        targetSession = await this.deps.createSession(fullName, workspace.path, {
+      this.attachedWorkspaceId = params.workspaceId;
+      let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+      try {
+        const prepared = await prepareAttachSession({
+          workspaceId: params.workspaceId,
+          sessionName: params.sessionName,
           command: params.command,
           args: params.args,
           env: params.env,
-        });
-      } else {
-        let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-        const attachAbortController = new AbortController();
-        this.pendingAttachAbortController = attachAbortController;
-
-        const scriptResult = await this.deps.prepareWorkspaceForSession({
-          projectName: workspace.projectName,
-          workspacePath: workspace.path,
-          workspaceName: workspace.id,
-          interactiveScripts: false,
-          bundleMode: 'error-if-changed',
-          scriptPolicy: params.scriptPolicy ?? 'auto',
-          signal: attachAbortController.signal,
-          onOutput: (data) => {
-            this.emitPtyData(data);
-            this.emit({
-              type: 'script_output',
-              phase: currentPhase,
-              data,
-            });
+          scriptPolicy: params.scriptPolicy,
+          viewOnly: params.viewOnly,
+          onRequestId: (requestId) => {
+            this.pendingAttachRequestId = requestId;
           },
-          onPhaseStart: (phase) => {
-            currentPhase = phase;
-            const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
-            this.emitPtyData(banner);
-            this.emit({
-              type: 'script_output',
-              phase,
-              data: banner,
-            });
+          onScriptOutput: (event) => {
+            currentPhase = event.phase;
+            this.emitPtyData(Buffer.from(event.data, 'base64'));
+            this.emit({ type: 'script_output', phase: event.phase, data: Buffer.from(event.data, 'base64'), done: event.done, error: event.error });
           },
-        }).finally(() => {
-          if (this.pendingAttachAbortController === attachAbortController) {
-            this.pendingAttachAbortController = null;
-          }
         });
-
-        if (!scriptResult.success) {
-          const scriptsCancelled = 'cancelled' in scriptResult && scriptResult.cancelled === true;
-          const bundleNeedsRefresh =
-            'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh;
-
-          if ('bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh) {
-            this.emit({
-              type: 'command_error',
-              code: 'BUNDLE_REFRESH_REQUIRED',
-              message: scriptResult.error,
-            });
-          } else if (scriptsCancelled) {
-            this.emit({
-              type: 'command_error',
-              code: 'SCRIPT_CANCELLED',
-              message: scriptResult.error,
-            });
-          } else {
-            this.emit({
-              type: 'command_error',
-              code: scriptFailureCodeForPhase(scriptResult.phase),
-              message: scriptResult.error,
-            });
-          }
-
+        targetSession = prepared.session;
+        this.attachedWorkspaceId = prepared.workspaceId ?? this.attachedWorkspaceId;
+        this.pendingAttachRequestId = null;
+      } catch (error) {
+        this.pendingAttachRequestId = null;
+        const typedError = error instanceof Error ? error as Error & { code?: string } : undefined;
+        if (!params.command) {
           this.emit({
             type: 'script_output',
-            phase: scriptResult.phase,
+            phase: currentPhase,
             data: new Uint8Array(0),
             done: true,
-            error: scriptResult.error,
+            error: error instanceof Error ? error.message : String(error),
           });
-
-          const error = new SpacesError(
-            `Workspace scripts failed during ${scriptResult.phase}: ${scriptResult.error}`
-          ) as Error & { code?: string };
-          if (bundleNeedsRefresh) {
-            error.code = 'BUNDLE_REFRESH_REQUIRED';
-          } else if (scriptsCancelled) {
-            error.code = 'SCRIPT_CANCELLED';
-          } else {
-            error.code = scriptFailureCodeForPhase(scriptResult.phase);
-          }
-          throw error;
         }
-
-        this.emit({
-          type: 'script_output',
-          phase: currentPhase,
-          data: new Uint8Array(0),
-          done: true,
-        });
-
-        targetSession = await this.deps.createSession(fullName, workspace.path, {
-          hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
-        });
+        if (typedError?.code) {
+          this.emit({
+            type: 'command_error',
+            code: typedError.code,
+            message: typedError.message,
+          });
+        }
+        throw error;
       }
     } else {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
@@ -938,6 +860,7 @@ export class LocalSessionBackend implements SessionBackend {
     const hadAttached = this.attachedSessionId !== null;
     await this.closeSessionSocket(false);
     this.attachedSessionId = null;
+    this.attachedWorkspaceId = null;
     this.viewOnly = false;
     if (hadAttached) {
       this.emit({ type: 'detached' });
@@ -945,6 +868,10 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async cancelPendingScripts(): Promise<void> {
+    if (this.pendingAttachRequestId) {
+      await cancelPrepareAttachSession(this.pendingAttachRequestId).catch(() => undefined);
+      this.pendingAttachRequestId = null;
+    }
     this.pendingAttachAbortController?.abort();
   }
 
@@ -968,7 +895,7 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async killSession(sessionId: string): Promise<void> {
-    await this.deps.killSession(sessionId);
+    await killTmuxSession(sessionId);
   }
 
   async deleteWorkspace(
@@ -977,80 +904,30 @@ export class LocalSessionBackend implements SessionBackend {
     params: DeleteWorkspaceParams = {}
   ): Promise<void> {
     const resolvedWorkspaceId = resolveWorkspaceName(projectName, workspaceId);
-    const scriptPolicy = params.scriptPolicy ?? 'auto';
-    let emittedDone = false;
-
     try {
-      const result = await this.deps.deleteWorkspaceCore(projectName, resolvedWorkspaceId, {
-        nonInteractive: true,
-        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
-        onScriptOutput: (data) => {
+      await deleteTmuxWorkspace({
+        projectName,
+        workspaceId: resolvedWorkspaceId,
+        scriptPolicy: params.scriptPolicy,
+        onScriptOutput: (event) => {
+          const data = Buffer.from(event.data, 'base64');
           this.emitPtyData(data);
-          this.emit({
-            type: 'script_output',
-            phase: 'remove',
-            data,
-          });
+          this.emit({ type: 'script_output', phase: 'remove', data, done: event.done, error: event.error });
         },
       });
-
-      if (!result.success) {
-        const errorCode: WorkspaceDeleteErrorCode = result.errorCode ?? 'DELETE_FAILED';
-        const message = result.error ?? `Failed to delete workspace ${resolvedWorkspaceId}`;
-
-        this.emit({
-          type: 'command_error',
-          code: errorCode,
-          message,
-        });
-
-        this.emit({
-          type: 'script_output',
-          phase: 'remove',
-          data: new Uint8Array(0),
-          done: true,
-          error: message,
-        });
-        emittedDone = true;
-
-        throw new WorkspaceDeleteError(message, errorCode);
-      }
-
-      this.emit({
-        type: 'script_output',
-        phase: 'remove',
-        data: new Uint8Array(0),
-        done: true,
-      });
-      emittedDone = true;
     } catch (error) {
-      if (!emittedDone) {
-        const message = error instanceof Error ? error.message : String(error);
-        const errorCode = toWorkspaceDeleteErrorCode(error) ?? 'DELETE_FAILED';
-        this.emit({
-          type: 'script_output',
-          phase: 'remove',
-          data: new Uint8Array(0),
-          done: true,
-          error: message,
-        });
-        this.emit({
-          type: 'command_error',
-          code: errorCode,
-          message,
-        });
-
-        if (!(error instanceof WorkspaceDeleteError)) {
-          throw new WorkspaceDeleteError(message, errorCode);
-        }
+      const message = error instanceof Error ? error.message : String(error);
+      const errorCode = toWorkspaceDeleteErrorCode(error) ?? 'DELETE_FAILED';
+      this.emit({ type: 'command_error', code: errorCode, message });
+      if (!(error instanceof WorkspaceDeleteError)) {
+        throw new WorkspaceDeleteError(message, errorCode);
       }
       throw error;
     }
   }
 
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
-    const workspace = await this.resolveWorkspace(projectName, workspaceId);
-    return this.deps.getBundleRefreshPlanCore(projectName, workspace.path, workspace.id);
+    return getTmuxBundleRefreshPlan(projectName, workspaceId);
   }
 
   async applyBundleRefresh(
@@ -1058,13 +935,11 @@ export class LocalSessionBackend implements SessionBackend {
     workspaceId: string,
     submission: BundleRefreshSubmission
   ): Promise<void> {
-    const workspace = await this.resolveWorkspace(projectName, workspaceId);
-    await this.deps.applyBundleRefreshSubmission(projectName, workspace.path, submission);
+    await applyTmuxBundleRefresh(projectName, workspaceId, submission);
   }
 
   async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
-    const workspace = await this.resolveWorkspace(projectName, workspaceId);
-    return this.deps.getBundleConfigStateCore(projectName, workspace.path, workspace.id);
+    return getTmuxBundleConfigState(projectName, workspaceId);
   }
 
   async applyBundleConfigUpdate(
@@ -1072,19 +947,27 @@ export class LocalSessionBackend implements SessionBackend {
     workspaceId: string,
     submission: BundleConfigSubmission
   ): Promise<void> {
-    const workspace = await this.resolveWorkspace(projectName, workspaceId);
-    await this.deps.applyBundleConfigSubmission(projectName, workspace.path, submission);
+    await applyTmuxBundleConfig(projectName, workspaceId, submission);
   }
 
   async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {
-    return executeLocalReviewOperation(operation, this.deps.scanWorkspaces);
+    const response = await sendTmuxReviewRequest(operation);
+    if (response.error) {
+      throw new ReviewRequestError(response.error.message, response.error.code, { op: operation.op, requestId: response.requestId });
+    }
+    if (!response.result) {
+      throw new ReviewRequestError('Missing review result', 'REVIEW_FAILED', { op: operation.op, requestId: response.requestId });
+    }
+    return response.result;
   }
 
   async requestInbox(): Promise<void> {
-    const [items, sessions] = await Promise.all([
-      this.deps.getInbox(),
-      this.deps.listSessions(),
+    const [inboxResponse, sessions, workspaces] = await Promise.all([
+      getTmuxInbox(),
+      listSessions(),
+      this.deps.scanWorkspaces(),
     ]);
+    const items = inboxResponse.items as InboxItem[];
 
     const activeSessionIds = new Set(sessions.map((session) => session.id));
     const activeUnread = new Set<string>();
@@ -1099,24 +982,61 @@ export class LocalSessionBackend implements SessionBackend {
       items: items as InboxItem[],
       unreadCount: activeUnread.size,
     });
+
+    // Emit sessions from the same fetch — inbox includes exit notifications, so this keeps UI in sync
+    const filtered = this.convertSessionsToInfo(sessions, workspaces, undefined);
+    this.emit({ type: 'sessions', sessions: filtered });
+  }
+
+  private convertSessionsToInfo(
+    sessions: TmuxSession[],
+    workspaces: Awaited<ReturnType<typeof scanWorkspaces>>,
+    workspaceId?: string
+  ): import('../../lib/remote-session/protocol.js').SessionInfo[] {
+    const workspaceByPath = new Map(workspaces.map((workspace) => [workspace.path, workspace]));
+    return sessions
+      .filter((session) => !(session.hidden || session.kind === 'agent'))
+      .map((session) => {
+        const parsed = parseProcessSessionName(session.name);
+        let workspace = workspaceByPath.get(session.cwd);
+        if (!workspace && parsed) {
+          workspace = workspaces.find((w) => w.id === parsed.workspaceId);
+        }
+        if (!workspace) {
+          workspace = workspaces.find((w) => session.cwd.startsWith(w.path));
+        }
+        const id = workspace ? toCanonicalWorkspaceId(workspace) : (parsed?.workspaceId ? `unknown:${parsed.workspaceId}` : 'unknown');
+        const info = toSessionInfo(session, id);
+        return {
+          ...info,
+          processName: parsed?.processName,
+          processInstance: parsed?.instance,
+        };
+      })
+      .filter((session) => {
+        if (!workspaceId) return true;
+        return session.workspaceId === workspaceId || session.workspaceId.endsWith(`:${workspaceId}`);
+      });
   }
 
   async clearInbox(id?: string): Promise<void> {
-    await this.deps.clearInbox(id);
+    await clearTmuxInbox(id);
+    await this.requestInbox();
   }
 
   async markInboxRead(id: string): Promise<void> {
-    await this.deps.markInboxRead(id);
+    await markTmuxInboxRead(id);
+    await this.requestInbox();
   }
 
   async getNotificationConfig(): Promise<void> {
-    const config = this.deps.getNotificationConfig() as NotificationConfig;
-    this.emit({ type: 'notification_config', config });
+    const response = await getTmuxNotificationConfig();
+    this.emit({ type: 'notification_config', config: response.config as NotificationConfig });
   }
 
   async updateNotificationConfig(config: NotificationConfig): Promise<void> {
-    const updated = this.deps.updateNotificationConfig(config) as NotificationConfig;
-    this.emit({ type: 'notification_config', config: updated });
+    const response = await updateTmuxNotificationConfig(config);
+    this.emit({ type: 'notification_config', config: response.config as NotificationConfig });
   }
 
   async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
@@ -1207,54 +1127,8 @@ export class LocalSessionBackend implements SessionBackend {
     limit?: number,
     sinceMs?: number,
   ): Promise<void> {
-    const workspaceRef = resolveWorkspaceRef(workspacePath);
-    if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
-      this.emit({ type: 'events', events: [], liveEventIds: [], savedEventFilters: [] });
-      return;
-    }
-
-    const savedEventFilters = loadSavedEventFilters(workspaceRef.workspacePath);
-
-    const projectConfig = readProjectConfig(workspaceRef.projectName);
-    const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
-      maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
-      maxTimeline: projectConfig.events?.maxTimeline,
-    });
-
-    const filtered = snapshots
-      .filter((snapshot) => {
-        if (sinceMs !== undefined && snapshot.updatedAt < sinceMs) return false;
-        if (!filter) return true;
-        if (filter.processName && snapshot.processName !== filter.processName) return false;
-        if (filter.level && snapshot.level !== filter.level) return false;
-        if (filter.message && !snapshot.message.includes(filter.message)) return false;
-        if (filter.eventName && snapshot.eventName !== filter.eventName) return false;
-        if (filter.correlationId && snapshot.correlationId !== filter.correlationId) return false;
-        return true;
-      })
-      .slice(0, limit ?? 200);
-
-    const events = filtered.map((snapshot) => ({
-      eventId: snapshot.lastEventId,
-      eventName: snapshot.eventName,
-      level: snapshot.level,
-      timestamp: new Date(snapshot.updatedAt).toISOString(),
-      timestampMs: snapshot.updatedAt,
-      message: snapshot.message,
-      sessionId: '',
-      workspaceId: workspaceRef.workspaceId,
-      projectName: workspaceRef.projectName,
-      processName: snapshot.processName,
-      processInstance: snapshot.processInstance,
-      raw: snapshot.raw ?? {},
-      kind: 'wide' as const,
-      correlationId: snapshot.correlationId,
-      timeline: Object.values(snapshot.timelineMap),
-      timelineMap: snapshot.timelineMap,
-      timelineOrder: snapshot.timelineOrder,
-    }));
-
-    this.emit({ type: 'events', events, liveEventIds: [], savedEventFilters });
+    const response = await requestTmuxEvents({ workspacePath, filter, limit, sinceMs });
+    this.emit({ type: 'events', events: response.events, liveEventIds: response.liveEventIds, savedEventFilters: response.savedEventFilters ?? [] });
   }
 
   private processSchedulers = new Map<string, NodeJS.Timer>();
@@ -1320,6 +1194,19 @@ export class LocalSessionBackend implements SessionBackend {
                   sessionId: session.id,
                   sessionName: session.name,
                   viewOnly: this.viewOnly,
+                  workspaceId: this.attachedWorkspaceId ?? undefined,
+                });
+                this.emit({
+                  type: 'session_meta',
+                  meta: {
+                    sessionName: session.name,
+                    processTitle: session.processTitle ?? null,
+                    terminalTitle: session.terminalTitle ?? null,
+                    lastAlertKind: session.lastAlertKind ?? null,
+                    lastAlertPreview: session.lastAlertPreview ?? null,
+                    lastAlertAt: session.lastAlertAt ?? null,
+                    unreadAlertCount: session.unreadAlertCount ?? null,
+                  },
                 });
                 settleResolve();
                 return;
@@ -1342,6 +1229,7 @@ export class LocalSessionBackend implements SessionBackend {
               this.sessionSocket = null;
               this.sessionSocketSessionId = null;
               this.attachedSessionId = null;
+              this.attachedWorkspaceId = null;
 
               if (!settled) {
                 settleReject(new SpacesError(`Local session socket closed: ${session.name}`, 'SYSTEM_ERROR', 2));
@@ -1404,9 +1292,9 @@ export class LocalSessionBackend implements SessionBackend {
       this.sessionSocket = null;
       this.sessionSocketSessionId = null;
     }
-    this.closingSessionSocket = false;
 
     this.attachedSessionId = null;
+    this.attachedWorkspaceId = null;
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.pendingPtyChunks = [];
 
@@ -1417,11 +1305,6 @@ export class LocalSessionBackend implements SessionBackend {
 
   private handleSessionControl(event: SessionEvent, sessionId: string): void {
     if (event.type === 'kicked') {
-      this.emit({
-        type: 'command_error',
-        code: 'SESSION_TAKEN_OVER',
-        message: 'This terminal was taken over by another client.',
-      });
       void this.closeSessionSocket(true);
       return;
     }
@@ -1431,6 +1314,21 @@ export class LocalSessionBackend implements SessionBackend {
       this.emit({ type: 'session_exited', sessionId, exitCode });
       void this.closeSessionSocket(false);
       return;
+    }
+
+    if (event.type === 'session-meta') {
+      this.emit({
+        type: 'session_meta',
+        meta: {
+          sessionName: event.sessionName ?? null,
+          processTitle: event.processTitle ?? null,
+          terminalTitle: event.terminalTitle ?? null,
+          lastAlertKind: event.lastAlertKind ?? null,
+          lastAlertPreview: event.lastAlertPreview ?? null,
+          lastAlertAt: event.lastAlertAt ?? null,
+          unreadAlertCount: event.unreadAlertCount ?? null,
+        },
+      });
     }
   }
 
@@ -1499,66 +1397,18 @@ export class LocalSessionBackend implements SessionBackend {
     }
   }
 
-  private applyAgentStateDelta(delta: AgentStateUpdateDelta): void {
-    if (delta.type === 'agent_state_snapshot') {
-      this.agentStateCache = { ...delta.workspaces };
-      return;
-    }
-    if (!('workspaceId' in delta)) {
-      return;
-    }
+  private emitDerivedMachineState(): void {
+    const snapshot = this.machineStateClient.getSnapshot();
+    this.emit({ type: 'machine_snapshot', snapshot });
+    this.emit({ type: 'projects', projects: machineSnapshotToProjects(snapshot) });
+    this.emit({ type: 'workspaces', workspaces: machineSnapshotToWorkspaces(snapshot) });
+    this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(snapshot) });
+  }
 
-    const state = this.agentStateCache[delta.workspaceId] ?? {
-      workspaceId: delta.workspaceId,
-      sessions: [],
-      statuses: {},
-      pendingPermissions: {},
-      lastMessages: {},
-    };
-    this.agentStateCache[delta.workspaceId] = state;
-
-    if ('sessionId' in delta) {
-      switch (delta.type) {
-        case 'agent_session_status':
-          state.statuses[delta.sessionId] = delta.status;
-          break;
-        case 'agent_permission_added':
-          if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
-          state.pendingPermissions[delta.sessionId].push(delta.permission);
-          break;
-        case 'agent_permission_removed':
-          if (state.pendingPermissions[delta.sessionId]) {
-            state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
-              (permission) => permission.id !== delta.permissionId,
-            );
-          }
-          break;
-        case 'agent_last_message':
-          state.lastMessages[delta.sessionId] = delta.preview;
-          break;
-        case 'agent_session_created':
-          if (!state.sessions.some((session) => session.id === delta.sessionId)) {
-            state.sessions.push({ id: delta.sessionId, title: delta.title });
-          }
-          break;
-        case 'agent_session_updated': {
-          const index = state.sessions.findIndex((session) => session.id === delta.sessionId);
-          if (index === -1) {
-            state.sessions.push({ id: delta.sessionId, title: delta.title });
-          } else {
-            state.sessions[index] = { id: delta.sessionId, title: delta.title };
-          }
-          break;
-        }
-        case 'agent_session_deleted':
-          state.sessions = state.sessions.filter((session) => session.id !== delta.sessionId);
-          delete state.statuses[delta.sessionId];
-          delete state.pendingPermissions[delta.sessionId];
-          delete state.lastMessages[delta.sessionId];
-          break;
-        case 'agent_session_error':
-          break;
-      }
+  private broadcastAgentSnapshot(): void {
+    const delta: AgentStateUpdateDelta = { type: 'agent_state_snapshot', workspaces: this.agentStateCache };
+    for (const handler of this.agentStateHandlers) {
+      handler(delta);
     }
   }
 
@@ -1587,46 +1437,72 @@ export class LocalSessionBackend implements SessionBackend {
     return this.agentControl.respondToPermission(target, agentSessionId, permissionId, response);
   }
 
-  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
-    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentControl.listSessions(target, 'known');
+  async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }
 
-  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
-    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentControl.listSessions(target, 'live');
+  async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
+    return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: false });
   }
 
-  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>> {
+  async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentControl.createSession(target, title);
+    await this.agentControl.createSession(target, title);
+    const snapshot = await this.deps.getMachineSnapshot();
+    this.machineStateClient.replaceSnapshot(snapshot);
+    this.agentStateCache = machineSnapshotToAgentState(snapshot);
+    this.broadcastAgentSnapshot();
+    this.emitDerivedMachineState();
+    return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentControl.abortSession(target, agentSessionId);
+    const ok = await this.agentControl.abortSession(target, agentSessionId);
+    const snapshot = await this.deps.getMachineSnapshot();
+    this.machineStateClient.replaceSnapshot(snapshot);
+    this.agentStateCache = machineSnapshotToAgentState(snapshot);
+    this.broadcastAgentSnapshot();
+    this.emitDerivedMachineState();
+    return ok;
   }
 
-  async clearAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+  async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentControl.clearSession(target, agentSessionId);
+    await this.agentControl.closeSession(target, agentSessionId);
+    const snapshot = await this.deps.getMachineSnapshot();
+    this.machineStateClient.replaceSnapshot(snapshot);
+    this.agentStateCache = machineSnapshotToAgentState(snapshot);
+    this.broadcastAgentSnapshot();
+    this.emitDerivedMachineState();
+    return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
-  async checkAgentSessionTakeover(
-    workspaceId: string,
-    agentSessionId: string,
-  ): Promise<{ requiresTakeover: boolean; sessionName?: string }> {
+  async archiveAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentControl.checkTakeover(target, agentSessionId);
+    await this.agentControl.archiveSession(target, agentSessionId);
+    const snapshot = await this.deps.getMachineSnapshot();
+    this.machineStateClient.replaceSnapshot(snapshot);
+    this.agentStateCache = machineSnapshotToAgentState(snapshot);
+    this.broadcastAgentSnapshot();
+    this.emitDerivedMachineState();
+    return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
-  async attachAgentSession(
-    workspaceId: string,
-    agentSessionId: string,
-    options: { viewOnly?: boolean; force?: boolean } = {},
-  ): Promise<void> {
+  async restoreAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const terminalSession = await this.agentControl.attachSession(target, agentSessionId, { force: options.force });
+    await this.agentControl.restoreSession(target, agentSessionId);
+    const snapshot = await this.deps.getMachineSnapshot();
+    this.machineStateClient.replaceSnapshot(snapshot);
+    this.agentStateCache = machineSnapshotToAgentState(snapshot);
+    this.broadcastAgentSnapshot();
+    this.emitDerivedMachineState();
+    return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
+  }
+
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const terminalSession = await this.agentControl.attachSession(target, agentSessionId);
     await this.attachSession({ sessionId: terminalSession.id, viewOnly: options.viewOnly });
   }
 

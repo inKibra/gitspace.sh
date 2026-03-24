@@ -19,7 +19,7 @@ import type { ReviewOperation, ReviewResult } from '../types/review.js';
 import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
-import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../serve/agent-event-manager.js';
+import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
 
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
@@ -115,6 +115,8 @@ export interface SessionBackend {
   listRemoteBranches(projectName: string): Promise<string[]>;
   listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]>;
   listWorkspaces(): Promise<void>;
+  /** Set workspace kanban phase; then listWorkspaces is implied (local) or caller should refresh (remote). */
+  setWorkspaceStatus?(projectName: string, workspaceName: string, phase: import('../types/config.js').WorkspacePhase): Promise<void>;
   listSessions(workspaceId?: string): Promise<void>;
   listReplays?(workspaceId?: string, includeDismissed?: boolean): Promise<void>;
 
@@ -203,14 +205,15 @@ export interface SessionBackend {
   ): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
-  getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>>;
+  getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   /** Live refresh of workspace-scoped agent sessions from the runtime. */
-  listAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>>;
-  createAgentSession?(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closed?: boolean }>>;
+  listAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
+  createAgentSession?(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   abortAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
-  clearAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
-  checkAgentSessionTakeover?(workspaceId: string, agentSessionId: string): Promise<{ requiresTakeover: boolean; sessionName?: string }>;
-  attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean; force?: boolean }): Promise<void>;
+  closeAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
+  archiveAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
+  restoreAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
+  attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean }): Promise<void>;
 
   /** Retrieve the persisted last-selected agent session ID for a workspace. */
   getAgentSessionPreference(workspaceId: string): Promise<string | null>;

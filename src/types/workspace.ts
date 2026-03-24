@@ -24,6 +24,38 @@ export interface WorktreeInfo {
 	lastCommitDate: Date
 }
 
+export type WorkspaceNotePriority = 'low' | 'medium' | 'high'
+
+export interface WorkspaceNote {
+	id: string
+	body: string
+	kind: 'note' | 'todo'
+	priority?: WorkspaceNotePriority
+	doneAt?: string
+	createdAt: string
+	updatedAt: string
+}
+
+export interface WorkspaceNotesSummary {
+	total: number
+	openTodoCount: number
+	doneTodoCount: number
+	highPriorityOpenTodoCount: number
+	topOpenTodos: WorkspaceNote[]
+	recentNotes: WorkspaceNote[]
+	updatedAt?: string
+}
+
+export interface WorkspaceNotesSummary {
+	total: number
+	openTodoCount: number
+	doneTodoCount: number
+	highPriorityOpenTodoCount: number
+	topOpenTodos: WorkspaceNote[]
+	recentNotes: WorkspaceNote[]
+	updatedAt?: string
+}
+
 /**
  * Project information for listing
  */
@@ -56,6 +88,8 @@ export interface Dependency {
 	authCheck?: () => Promise<boolean>
 }
 
+import type { WorkspacePhase } from './config.js'
+
 /**
  * Options for creating a workspace
  */
@@ -70,6 +104,8 @@ export interface CreateWorkspaceOptions {
 	noShell?: boolean
 	/** Whether to skip running setup commands */
 	noSetup?: boolean
+	/** Kanban phase to assign (plan | code | review | ship). Defaults to code if omitted. */
+	status?: WorkspacePhase
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * gssh space [context|review|process|events|bundle]
+ * gssh space [context|review|notes|service|hosting|events|bundle]
  *
  * Hidden command surface intended for use inside tmux-lite workspace sessions.
  * Context is resolved from GSSH_SPACE_PROJECT / GSSH_SPACE_WORKSPACE env vars
@@ -49,9 +49,91 @@ export function registerSpaceCommands(parent: Command): void {
     }));
 
   registerSpaceReviewCommands(cmd);
-  registerSpaceProcessCommands(cmd);
+  registerSpaceNotesCommands(cmd);
+  registerSpaceServiceCommands(cmd);
+  registerSpaceHostingCommands(cmd);
   registerSpaceEventsCommands(cmd);
   registerSpaceBundleCommands(cmd);
+}
+
+function registerSpaceNotesCommands(space: Command): void {
+  const notes = space
+    .command('notes')
+    .description('Manage local workspace notes and todos');
+
+  notes
+    .command('list')
+    .description('List workspace notes')
+    .option('--format <format>', 'Output format: json (default) or text')
+    .action(withErrorHandler(async (options) => {
+      requireSessionContext();
+      const { listNotes } = await import('../../commands/notes.js');
+      await listNotes(options);
+    }));
+
+  notes
+    .command('add')
+    .description('Add a workspace note')
+    .option('--body <text>', 'Note body')
+    .option('--stdin', 'Read note body from stdin')
+    .option('--todo', 'Add as todo')
+    .option('--priority <priority>', 'Todo priority: low, medium, high')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      requireSessionContext();
+      const { addNote } = await import('../../commands/notes.js');
+      await addNote(options);
+    }));
+
+  notes
+    .command('update')
+    .description('Update a workspace note')
+    .requiredOption('--id <id>', 'Note id')
+    .option('--body <text>', 'New body')
+    .option('--todo', 'Convert to todo')
+    .option('--note', 'Convert to note')
+    .option('--priority <priority>', 'Todo priority: low, medium, high')
+    .option('--done', 'Mark todo done')
+    .option('--undone', 'Mark todo open')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      requireSessionContext();
+      const { updateNote } = await import('../../commands/notes.js');
+      await updateNote(options);
+    }));
+
+  notes
+    .command('remove')
+    .description('Remove a workspace note')
+    .requiredOption('--id <id>', 'Note id')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      requireSessionContext();
+      const { removeNote } = await import('../../commands/notes.js');
+      await removeNote(options);
+    }));
+
+  notes
+    .command('done')
+    .description('Mark a todo done')
+    .requiredOption('--id <id>', 'Note id')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      requireSessionContext();
+      const { markNoteDone } = await import('../../commands/notes.js');
+      await markNoteDone(options);
+    }));
+
+  notes
+    .command('undone')
+    .description('Mark a todo open')
+    .requiredOption('--id <id>', 'Note id')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      requireSessionContext();
+      const { markNoteUndone } = await import('../../commands/notes.js');
+      await markNoteUndone(options);
+    }));
 }
 
 function registerSpaceReviewCommands(space: Command): void {
@@ -144,48 +226,125 @@ function registerSpaceReviewCommands(space: Command): void {
     }));
 }
 
-function registerSpaceProcessCommands(space: Command): void {
-  const proc = space
-    .command('process')
-    .description('Manage workspace processes');
+function registerSpaceServiceCommands(space: Command): void {
+  const service = space
+    .command('service')
+    .description('Manage workspace services');
 
-  proc
+  service
     .command('list')
-    .description('List configured processes')
+    .description('List configured services')
     .action(withErrorHandler(async () => {
       const ctx = requireSessionContext();
       const { listProcesses } = await import('../../commands/process.js');
       await listProcesses({ workspace: getWorkspacePath(ctx.project, ctx.workspace) });
     }));
 
-  proc
+  service
     .command('start')
-    .description('Start a process by name')
-    .requiredOption('--name <name>', 'Process name')
+    .description('Start a service by name')
+    .requiredOption('--name <name>', 'Service name')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
       const { startProcess } = await import('../../commands/process.js');
       await startProcess({ workspace: getWorkspacePath(ctx.project, ctx.workspace), name: options.name });
     }));
 
-  proc
+  service
     .command('stop')
-    .description('Stop a process by name')
-    .requiredOption('--name <name>', 'Process name')
+    .description('Stop a service by name')
+    .requiredOption('--name <name>', 'Service name')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
       const { stopProcess } = await import('../../commands/process.js');
       await stopProcess({ workspace: getWorkspacePath(ctx.project, ctx.workspace), name: options.name });
     }));
 
-  proc
+  service
     .command('attach')
-    .description('Show attach hint for process')
-    .requiredOption('--name <name>', 'Process name')
+    .description('Show attach hint for service')
+    .requiredOption('--name <name>', 'Service name')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
       const { attachProcess } = await import('../../commands/process.js');
       await attachProcess({ workspace: getWorkspacePath(ctx.project, ctx.workspace), name: options.name });
+    }));
+
+  service
+    .command('open')
+    .description('Open service HTTP ports in the browser')
+    .requiredOption('--name <name>', 'Service name')
+    .option('--port <name-or-number>', 'Open a specific HTTP port by name or number')
+    .option('--all', 'Open all HTTP ports for this service')
+    .option('--local', 'Prefer local localhost URLs')
+    .option('--remote', 'Require hosted URLs')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { openProcess } = await import('../../commands/process.js');
+      await openProcess({
+        workspace: getWorkspacePath(ctx.project, ctx.workspace),
+        name: options.name,
+        port: options.port,
+        all: options.all,
+        local: options.local,
+        remote: options.remote,
+      });
+    }));
+}
+
+function registerSpaceHostingCommands(space: Command): void {
+  const hosting = space
+    .command('hosting')
+    .description('Configure tmux-lite service hosting');
+
+  hosting
+    .command('status')
+    .description('Show tmux-lite hosting status')
+    .action(withErrorHandler(async () => {
+      const { statusTmuxHosting } = await import('../../commands/tmux.js');
+      await statusTmuxHosting();
+    }));
+
+  hosting
+    .command('select')
+    .description('Select the base host used for tmux-lite service hosting')
+    .argument('[host]', 'Hosting base host, reserved name, or reserved .serve name')
+    .action(withErrorHandler(async (host) => {
+      const { selectTmuxHosting } = await import('../../commands/tmux.js');
+      await selectTmuxHosting(host);
+    }));
+
+  hosting
+    .command('set-name')
+    .description('Set the machine name used in hosted service routes')
+    .argument('<name>', 'Machine name')
+    .action(withErrorHandler(async (name) => {
+      const { setTmuxHostingMachineName } = await import('../../commands/tmux.js');
+      await setTmuxHostingMachineName(name);
+    }));
+
+  hosting
+    .command('enable')
+    .description('Enable tmux-lite service hosting')
+    .action(withErrorHandler(async () => {
+      const { enableTmuxHosting } = await import('../../commands/tmux.js');
+      await enableTmuxHosting();
+    }));
+
+  hosting
+    .command('disable')
+    .description('Disable tmux-lite service hosting')
+    .action(withErrorHandler(async () => {
+      const { disableTmuxHosting } = await import('../../commands/tmux.js');
+      await disableTmuxHosting();
+    }));
+
+  hosting
+    .command('clear')
+    .description('Clear tmux-lite hosting configuration')
+    .action(withErrorHandler(async () => {
+      const { clearTmuxHosting } = await import('../../commands/tmux.js');
+      await clearTmuxHosting();
     }));
 }
 

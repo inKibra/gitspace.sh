@@ -13,25 +13,21 @@ import {
   type MachineToClientMessage,
   type SessionInfo,
 } from "./protocol";
+import type { MachineSnapshot } from "../tmux-lite/machine/protocol.js";
 import type { SessionKeys, AccessType } from "../../types/identity.js";
 
 // Import tmux-lite API for session management
 import {
   listSessions,
+  getMachineSnapshot,
+  send as sendTmuxCommand,
+  prepareAttachSession,
+  cancelPrepareAttachSession,
+  deleteTmuxWorkspace,
   createSession,
-  killSession,
   isServerRunning,
   ensureServer,
-  getInbox,
-  clearInbox,
-  markInboxRead,
-  listAgentSessions as listTmuxAgentSessions,
-  createAgentSession as createTmuxAgentSession,
-  abortAgentSession as abortTmuxAgentSession,
-  clearAgentSession as clearTmuxAgentSession,
-  attachAgentSession as attachTmuxAgentSession,
-  getAgentSessionTakeoverState as getTmuxAgentSessionTakeoverState,
-  respondToAgentPermission as respondToTmuxAgentPermission,
+  watchMachineEvents,
   type Session,
 } from "../tmux-lite/cli";
 import {
@@ -43,7 +39,6 @@ import {
 } from '../tmux-lite/replay/service.js';
 import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
-import { AgentSessionTakeoverRequiredError } from '../../agents/opencode-coordinator.js';
 
 // Import project loading
 import { listProjectSummaries } from "../../core/project-catalog";
@@ -51,51 +46,12 @@ import { listProjectSummaries } from "../../core/project-catalog";
 // Import workspace operations
 import { deleteWorkspaceCore } from "../../core/workspace";
 import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
-import {
-  cancelPreparedProjectForSession,
-  createProjectForSession,
-  createWorkspaceForSession,
-  deleteProjectForSession,
-  finalizePreparedProjectForSession,
-  listGithubReposForSession,
-  listLinearIssuesForSession,
-  listRemoteBranchesForSession,
-  prepareProjectForSession,
-} from '../../core/session-lifecycle.js';
 
-// Import review operations
-import { executeLocalReviewOperation } from "../../core/review-executor.js";
-import type { ReviewOperation, ReviewResult } from "../../types/review.js";
-import { getNotificationConfig, updateNotificationConfig } from "../../core/config";
-import {
-  getBundleRefreshPlan,
-  applyBundleRefreshSubmission,
-  getBundleConfigState,
-  applyBundleConfigSubmission,
-} from '../../core/bundle-refresh.js';
-import { buildSessionName } from '../../session/session-name.js';
-import { buildWorkspaceSessionHooks } from '../../session/workspace-shell-hooks.js';
-import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
-
-// Process & events imports
-import { parseProcessSessionName } from "../processes/names.js";
-import { readWorkspaceSnapshots } from "../events/reader.js";
-import { resolveWorkspaceRef } from "../events/paths.js";
-import { loadSavedEventFilters } from "../events/filters.js";
-import { getProcessSpecs, startProcessInstance, stopProcessInstance } from "../processes/manager.js";
-import { autostartProcesses } from "../processes/autostart.js";
-import { startProcessScheduler } from "../processes/scheduler.js";
-import {
-  loadProcessesConfigWithDiagnostics,
-  loadProcessesConfig,
-  getProcessDefinition,
-} from "../processes/config.js";
-import { normalizeProcessInstanceCount } from "../processes/instances.js";
-import { readProjectConfig } from "../../core/config.js";
-import { existsSync } from "fs";
+// Process imports
+import { getProcessSpecs } from "../processes/manager.js";
 
 import { logger } from "../../utils/logger.js";
-import type { AgentWorkspaceTargetPayload } from '../tmux-lite/protocol.js';
+import type { Command as TmuxCommand, Response as TmuxResponse } from '../tmux-lite/protocol.js';
 
 /**
  * Session state for a connected client
@@ -177,20 +133,6 @@ function isAgentReplay(replay: { sessionName: string }): boolean {
   return replay.sessionName.startsWith('agent:');
 }
 
-const MUTATING_REVIEW_OPERATIONS = new Set<ReviewOperation['op']>([
-  'create_thread',
-  'add_reply',
-  'update_thread',
-  'update_comment',
-  'delete_comment',
-  'import_github',
-  'push_github',
-]);
-
-function isMutatingReviewOperation(operation: ReviewOperation): boolean {
-  return MUTATING_REVIEW_OPERATIONS.has(operation.op);
-}
-
 function normalizeWorkspaceIdToken(workspaceId: string): string {
   return workspaceId.includes(':') ? workspaceId.split(':').pop() ?? workspaceId : workspaceId;
 }
@@ -210,9 +152,15 @@ export interface RemoteSessionHandlerOptions {
 export class RemoteSessionHandler {
   private tmuxLiteAvailable = false;
   private processSchedulers = new Map<string, NodeJS.Timer>();
-  private pendingAttachRuns = new Map<string, AbortController>();
+  private pendingAttachRuns = new Map<string, string>();
   private processHostDomain?: string;
   private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
+
+  // Machine snapshot push state
+  private latestMachineSnapshot: MachineSnapshot | null = null;
+  private machineWatchUnsubscribe: (() => void) | null = null;
+  /** connectionId → async send function for unsolicited machine snapshot pushes */
+  private machineSnapshotWatchers = new Map<string, (msg: MachineToClientMessage) => Promise<void>>();
 
   constructor(options: RemoteSessionHandlerOptions = {}) {
     this.processHostDomain = options.processHostDomain;
@@ -220,7 +168,7 @@ export class RemoteSessionHandler {
   }
 
   /**
-   * Initialize - check if tmux-lite is available
+   * Initialize - check if tmux-lite is available and start machine event watch
    */
   async initialize(): Promise<void> {
     try {
@@ -234,6 +182,85 @@ export class RemoteSessionHandler {
       console.warn("[remote-session] tmux-lite not available:", e);
       this.tmuxLiteAvailable = false;
     }
+
+    if (this.tmuxLiteAvailable) {
+      await this.startMachineWatch();
+    }
+  }
+
+  /**
+   * Start watching machine events from tmux-lite.
+   * Keeps the latest snapshot and broadcasts to all watching remote clients.
+   */
+  private async startMachineWatch(): Promise<void> {
+    try {
+      const unsubscribe = await watchMachineEvents({
+        onSnapshot: (snapshot) => {
+          this.latestMachineSnapshot = snapshot;
+          void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot });
+        },
+        onEvent: (event) => {
+          // tmux-lite broadcasts session creation/kill, workspace changes, agent
+          // updates, etc. via machine-event / snapshot-replaced — NOT via onSnapshot.
+          // We must handle them here so remote clients see live changes.
+          if (event.type === 'snapshot-replaced') {
+            this.latestMachineSnapshot = event.snapshot;
+            void this.broadcastMachineSnapshot({
+              type: 'machine_snapshot',
+              snapshot: event.snapshot,
+            });
+          }
+        },
+        onError: (error) => {
+          console.warn('[remote-session] Machine watch error:', error.message);
+          this.machineWatchUnsubscribe = null;
+          if (this.machineSnapshotWatchers.size > 0) {
+            setTimeout(() => {
+              if (!this.machineWatchUnsubscribe && this.machineSnapshotWatchers.size > 0) {
+                void this.startMachineWatch();
+              }
+            }, 250);
+          }
+        },
+      });
+      this.machineWatchUnsubscribe = unsubscribe;
+    } catch (e) {
+      console.warn('[remote-session] Could not start machine watch:', e);
+    }
+  }
+
+  /**
+   * Register a browsing client to receive unsolicited machine snapshot pushes.
+   * Immediately sends the current snapshot if available.
+   */
+  async onClientEntersBrowsing(
+    connectionId: string,
+    sendMessage: (msg: MachineToClientMessage) => Promise<void>,
+  ): Promise<void> {
+    this.machineSnapshotWatchers.set(connectionId, sendMessage);
+    // Push current snapshot immediately so the client doesn't need to poll
+    if (this.latestMachineSnapshot) {
+      try {
+        await sendMessage({ type: 'machine_snapshot', snapshot: this.latestMachineSnapshot });
+      } catch {
+        // Non-fatal — client may disconnect
+      }
+    }
+  }
+
+  /**
+   * Unregister a client from machine snapshot pushes.
+   */
+  onClientLeavesBrowsing(connectionId: string): void {
+    this.machineSnapshotWatchers.delete(connectionId);
+  }
+
+  private async broadcastMachineSnapshot(msg: { type: 'machine_snapshot'; snapshot: MachineSnapshot }): Promise<void> {
+    const promises: Promise<void>[] = [];
+    for (const sendFn of this.machineSnapshotWatchers.values()) {
+      promises.push(sendFn(msg).catch(() => undefined));
+    }
+    await Promise.allSettled(promises);
   }
 
   /**
@@ -282,14 +309,6 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void
   ): Promise<void> {
     switch (msg.type) {
-      case "list_workspaces":
-        await this.handleListWorkspaces(session, sendResponse);
-        break;
-
-      case "list_sessions":
-        await this.handleListSessions(session, msg.workspaceId, sendResponse);
-        break;
-
       case 'list_replays':
         await this.handleListReplays(session, msg.workspaceId, msg.includeDismissed, sendResponse);
         break;
@@ -324,142 +343,6 @@ export class RemoteSessionHandler {
       // via client-session-manager using tmux-lite's SessionCtrl protocol,
       // not through this JSON-RPC handler.
 
-      case "list_projects":
-        await this.handleListProjects(session, sendResponse);
-        break;
-
-      case 'list_github_repos':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to list repositories'
-          );
-          return;
-        }
-        await this.handleListGithubRepos(session, msg.org, sendResponse);
-        break;
-
-      case 'list_remote_branches':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to list remote branches',
-            { projectName: msg.projectName }
-          );
-          return;
-        }
-        await this.handleListRemoteBranches(session, msg.projectName, sendResponse);
-        break;
-
-      case 'list_linear_issues':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to list Linear issues',
-            { projectName: msg.projectName }
-          );
-          return;
-        }
-        await this.handleListLinearIssues(session, msg.projectName, sendResponse);
-        break;
-
-      case 'create_project':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to create projects'
-          );
-          return;
-        }
-        await this.handleCreateProject(session, msg, sendResponse);
-        break;
-
-      case 'prepare_project_creation':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to create projects'
-          );
-          return;
-        }
-        await this.handlePrepareProjectCreation(session, msg, sendResponse);
-        break;
-
-      case 'finalize_project_creation':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to create projects',
-            { projectName: msg.projectName }
-          );
-          return;
-        }
-        await this.handleFinalizeProjectCreation(session, msg, sendResponse);
-        break;
-
-      case 'cancel_project_creation':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to create projects',
-            { projectName: msg.projectName }
-          );
-          return;
-        }
-        await this.handleCancelProjectCreation(session, msg.projectName, sendResponse);
-        break;
-
-      case 'create_workspace':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to create workspaces',
-            { projectName: msg.projectName }
-          );
-          return;
-        }
-        await this.handleCreateWorkspace(session, msg, sendResponse);
-        break;
-
-      case 'delete_project':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to delete projects',
-            { projectName: msg.projectName }
-          );
-          return;
-        }
-        await this.handleDeleteProject(session, msg.projectName, sendResponse);
-        break;
-
-      case "kill_session":
-        // Security: Requires management permission
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to kill sessions");
-          return;
-        }
-        await this.handleKillSession(session, msg.sessionId, sendResponse);
-        break;
-
       case "delete_workspace":
         // Security: Requires management permission
         if (!canManage(session.accessType)) {
@@ -484,218 +367,14 @@ export class RemoteSessionHandler {
         );
         break;
 
-      case "get_inbox":
-        await this.handleGetInbox(session, sendResponse);
-        break;
-
-      case "clear_inbox":
-        await this.handleClearInbox(session, msg.id, sendResponse);
-        break;
-
-      case "mark_inbox_read":
-        await this.handleMarkInboxRead(session, msg.id, sendResponse);
-        break;
-
-      case "get_notification_config":
-        await this.handleGetNotificationConfig(session, sendResponse);
-        break;
-
-      case "update_notification_config":
-        await this.handleUpdateNotificationConfig(session, msg.config, sendResponse);
-        break;
-
-      case 'get_bundle_refresh_plan':
+      case 'tmux_command':
         if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to inspect bundle refresh requirements'
-          );
-          return;
-        }
-        await this.handleGetBundleRefreshPlan(
-          session,
-          msg.projectName,
-          msg.workspaceId,
-          sendResponse
-        );
-        break;
-
-      case 'apply_bundle_refresh':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to apply bundle refresh'
-          );
-          return;
-        }
-        await this.handleApplyBundleRefresh(
-          session,
-          msg.projectName,
-          msg.workspaceId,
-          msg.submission,
-          sendResponse
-        );
-        break;
-
-      case 'get_bundle_config_state':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to inspect bundle configuration'
-          );
-          return;
-        }
-        await this.handleGetBundleConfigState(
-          session,
-          msg.projectName,
-          msg.workspaceId,
-          sendResponse
-        );
-        break;
-
-      case 'apply_bundle_config_update':
-        if (!canManage(session.accessType)) {
-          await this.sendError(
-            session,
-            sendResponse,
-            'PERMISSION_DENIED',
-            'Requires full access to update bundle configuration'
-          );
-          return;
-        }
-        await this.handleApplyBundleConfigUpdate(
-          session,
-          msg.projectName,
-          msg.workspaceId,
-          msg.submission,
-          sendResponse
-        );
-        break;
-
-      case 'review_request':
-        await this.handleReviewRequest(
-          session,
-          msg.requestId,
-          msg.operation,
-          sendResponse
-        );
-        break;
-
-      case "get_events":
-        await this.handleGetEvents(
-          session,
-          msg.workspacePath,
-          msg.processName,
-          undefined,
-          msg.filter,
-          msg.limit,
-          msg.sinceMs,
-          sendResponse
-        );
-        break;
-
-      case "start_process":
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to start processes");
-          return;
-        }
-        await this.handleStartProcess(session, msg.workspaceId, msg.processName, msg.instance, sendResponse);
-        break;
-
-      case "stop_process":
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to stop processes");
-          return;
-        }
-        await this.handleStopProcess(session, msg.workspaceId, msg.processName, sendResponse);
-        break;
-
-      case 'list_agent_sessions':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to list agent sessions', {
-            workspaceId: msg.workspaceId,
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to run tmux commands', {
             requestId: msg.requestId,
           });
           return;
         }
-        await this.handleListAgentSessions(session, msg.requestId, msg.workspaceId, msg.mode, sendResponse);
-        break;
-
-      case 'create_agent_session':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to create agent sessions', {
-            workspaceId: msg.workspaceId,
-            requestId: msg.requestId,
-          });
-          return;
-        }
-        await this.handleCreateAgentSession(session, msg.requestId, msg.workspaceId, msg.title, sendResponse);
-        break;
-
-      case 'clear_agent_session':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to clear agent sessions', {
-            workspaceId: msg.workspaceId,
-            requestId: msg.requestId,
-          });
-          return;
-        }
-        await this.handleClearAgentSession(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
-        break;
-
-      case 'abort_agent_session':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to abort agent sessions', {
-            workspaceId: msg.workspaceId,
-            requestId: msg.requestId,
-          });
-          return;
-        }
-        await this.handleAbortAgentSession(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
-        break;
-
-      case 'respond_agent_permission':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to respond to agent permissions', {
-            workspaceId: msg.workspaceId,
-            requestId: msg.requestId,
-          });
-          return;
-        }
-        await this.handleRespondAgentPermission(
-          session,
-          msg.requestId,
-          msg.workspaceId,
-          msg.agentSessionId,
-          msg.permissionId,
-          msg.response,
-          sendResponse,
-        );
-        break;
-
-      case 'attach_agent_session':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to attach agent sessions');
-          return;
-        }
-        await this.handleAttachAgentSession(session, msg.workspaceId, msg.agentSessionId, msg.viewOnly, msg.force, sendResponse);
-        break;
-
-      case 'check_agent_session_takeover':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to inspect agent sessions', {
-            workspaceId: msg.workspaceId,
-            requestId: msg.requestId,
-          });
-          return;
-        }
-        await this.handleCheckAgentSessionTakeover(session, msg.requestId, msg.workspaceId, msg.agentSessionId, sendResponse);
+        await this.handleTmuxCommand(session, msg.requestId, msg.command, sendResponse);
         break;
 
       default: {
@@ -706,116 +385,28 @@ export class RemoteSessionHandler {
     }
   }
 
-  /**
-   * Handle list_workspaces request
-   */
-  private async handleListWorkspaces(
+  private async handleTmuxCommand(
     session: RemoteClientSession,
-    sendResponse: (data: Uint8Array) => void
+    requestId: string,
+    command: TmuxCommand,
+    sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
-    const workspaces = await scanWorkspaces();
-
-    // Add session counts from tmux-lite
-    if (this.tmuxLiteAvailable) {
-      try {
-        const sessions = await listSessions();
-        for (const workspace of workspaces) {
-          // Count sessions for this workspace by matching cwd.
-          // Note: Session cwd is set once at creation time and does NOT change
-          // as users navigate within the shell. This is intentional - we want to
-          // show sessions that were *created for* this workspace.
-          const workspaceSessions = sessions.filter((s) => s.cwd === workspace.path && !(s.hidden || s.kind === 'agent'));
-          workspace.sessionCount = workspaceSessions.length;
-
-          // Load process config for the workspace
-          const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
-          workspace.processes = processConfig.config.processes.map((process) => ({
-            name: process.name,
-            instances: process.instances,
-            ports: process.ports,
-          }));
-          workspace.processConfigError = processConfig.error ?? undefined;
-        }
-      } catch {
-        // Ignore errors - just use 0 session counts
-      }
+    try {
+      await ensureServer();
+      const response = await sendTmuxCommand(command);
+      await this.sendMessage(session, sendResponse, {
+        type: 'tmux_command_response',
+        requestId,
+        response,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.sendMessage(session, sendResponse, {
+        type: 'tmux_command_response',
+        requestId,
+        response: { type: 'error', message },
+      });
     }
-
-    // Attach serve domain if configured
-    if (this.processHostDomain) {
-      for (const workspace of workspaces) {
-        workspace.serveDomain = this.processHostDomain;
-      }
-    }
-
-    await this.sendMessage(session, sendResponse, {
-      type: "workspace_list",
-      workspaces: workspaces.map((workspace) => ({
-        ...workspace,
-        id: toCanonicalWorkspaceId(workspace),
-      })),
-    });
-  }
-
-  /**
-   * Handle list_sessions request
-   */
-  private async handleListSessions(
-    session: RemoteClientSession,
-    workspaceId: string | undefined,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    let sessions: SessionInfo[] = [];
-
-    if (this.tmuxLiteAvailable) {
-      try {
-        const allSessions = await listSessions();
-        const workspaces = await scanWorkspaces();
-
-        // Build a map of workspace path -> workspace info
-        const workspacePathMap = new Map(workspaces.map(w => [w.path, w]));
-
-        sessions = allSessions
-          .filter((s) => !(s.hidden || s.kind === 'agent'))
-          .filter(s => {
-            if (!workspaceId) return true;
-            // Try process session name first
-            const parsed = parseProcessSessionName(s.name);
-            if (parsed) return matchesWorkspaceIdToken(parsed.workspaceId, workspaceId);
-            // Fall back to cwd matching
-            const ws = workspacePathMap.get(s.cwd);
-            return ws ? matchesWorkspaceId(ws, workspaceId) : false;
-          })
-          .map(s => {
-            const parsed = parseProcessSessionName(s.name);
-            let ws = workspacePathMap.get(s.cwd);
-            if (!ws && parsed) {
-              ws = workspaces.find(workspace => matchesWorkspaceId(workspace, parsed.workspaceId));
-            }
-            if (!ws) {
-              ws = workspaces.find(workspace => s.cwd.startsWith(workspace.path));
-            }
-            return {
-              id: s.id,
-              name: s.name,
-              workspaceId: ws ? toCanonicalWorkspaceId(ws) : (parsed?.workspaceId ?? "unknown"),
-              attached: s.attached,
-              createdAt: s.createdAt,
-              processTitle: s.processTitle,
-              exitCode: s.exitCode,
-              processName: (s as any).processName ?? parsed?.processName,
-              processInstance: (s as any).processInstance ?? parsed?.instance,
-            };
-          });
-      } catch (e) {
-        console.error("[remote-session] Failed to list sessions:", e);
-      }
-    }
-
-    await this.sendMessage(session, sendResponse, {
-      type: "session_list",
-      sessions,
-    });
   }
 
   private async handleListReplays(
@@ -1000,7 +591,8 @@ export class RemoteSessionHandler {
       return;
     }
 
-    pending.abort();
+    await cancelPrepareAttachSession(pending).catch(() => undefined);
+    this.pendingAttachRuns.delete(session.connectionId);
   }
 
   /**
@@ -1032,7 +624,7 @@ export class RemoteSessionHandler {
     try {
       const existingAttachRun = this.pendingAttachRuns.get(session.connectionId);
       if (existingAttachRun) {
-        existingAttachRun.abort();
+        await cancelPrepareAttachSession(existingAttachRun).catch(() => undefined);
         this.pendingAttachRuns.delete(session.connectionId);
       }
 
@@ -1040,123 +632,58 @@ export class RemoteSessionHandler {
 
       // If no session ID, create new session in workspace
       if (!msg.sessionId && msg.workspaceId) {
-        const requestedWorkspaceId = msg.workspaceId;
         // Security: Creating new sessions requires full/manage access
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to create sessions");
           return;
         }
-
-        // Find the workspace path
-        const workspaces = await scanWorkspaces();
-        const workspace = workspaces.find((w) => matchesWorkspaceId(w, requestedWorkspaceId));
-
-        if (!workspace) {
-          await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
-          return;
-        }
-
-        const sessions = await listSessions();
-        const sessionName = buildSessionName({
-          projectName: workspace.projectName,
-          workspaceName: workspace.id,
-          requestedName: msg.sessionName,
-          sessions,
-        });
-        console.log(`[remote-session] Selected session name: ${sessionName}`);
-
-        if (msg.command) {
-          // Skip workspace scripts when a custom command is specified
-          targetSession = await createSession(sessionName, workspace.path, {
+        let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+        try {
+          const prepared = await prepareAttachSession({
+            workspaceId: msg.workspaceId,
+            sessionName: msg.sessionName,
             command: msg.command,
             args: msg.args,
             env: msg.env,
-          });
-          console.log(`[remote-session] Created session (custom cmd): ${targetSession.name} (id: ${targetSession.id})`);
-        } else {
-          // Run setup/select scripts for the workspace with output streaming.
-          console.log(`[remote-session] Running workspace scripts for: ${workspace.id}`);
-
-          // Track current phase for script_output messages
-          let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-          const attachAbortController = new AbortController();
-          this.pendingAttachRuns.set(session.connectionId, attachAbortController);
-
-          const scriptResult = await prepareWorkspaceForSession({
-            projectName: workspace.projectName,
-            workspacePath: workspace.path,
-            workspaceName: workspace.id,
-            interactiveScripts: false,
-            bundleMode: 'error-if-changed',
-            scriptPolicy: msg.scriptPolicy ?? 'auto',
-            signal: attachAbortController.signal,
-            onOutput: (data) => {
+            scriptPolicy: msg.scriptPolicy,
+            viewOnly: msg.viewOnly,
+            onRequestId: (requestId) => {
+              this.pendingAttachRuns.set(session.connectionId, requestId);
+            },
+            onScriptOutput: (event) => {
+              currentPhase = event.phase;
               void this.sendMessage(session, sendResponse, {
                 type: 'script_output',
-                phase: currentPhase,
-                data: data.toString('base64'),
+                phase: event.phase,
+                data: event.data,
+                done: event.done,
+                error: event.error,
               }).catch((error) => {
                 logger.debug(`[remote-session] Failed to stream script output: ${error instanceof Error ? error.message : String(error)}`);
               });
             },
-            onPhaseStart: (phase) => {
-              currentPhase = phase;
-              const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase,
-                data: banner.toString('base64'),
-              }).catch((error) => {
-                logger.debug(`[remote-session] Failed to send script phase banner: ${error instanceof Error ? error.message : String(error)}`);
-              });
-            },
-          }).finally(() => {
-            const pending = this.pendingAttachRuns.get(session.connectionId);
-            if (pending === attachAbortController) {
-              this.pendingAttachRuns.delete(session.connectionId);
-            }
           });
-
-          if (!scriptResult.success) {
-            console.error(`[remote-session] ${scriptResult.phase} scripts failed:`, scriptResult.error);
+          this.pendingAttachRuns.delete(session.connectionId);
+          targetSession = prepared.session;
+        } catch (error) {
+          this.pendingAttachRuns.delete(session.connectionId);
+          const typedError = error instanceof Error ? error as Error & { code?: string } : undefined;
+          if (!msg.command) {
             await this.sendMessage(session, sendResponse, {
               type: 'script_output',
-              phase: scriptResult.phase,
+              phase: currentPhase,
               data: '',
               done: true,
-              error: scriptResult.error,
+              error: error instanceof Error ? error.message : String(error),
             });
-            const code =
-              'bundleNeedsRefresh' in scriptResult && scriptResult.bundleNeedsRefresh
-                ? 'BUNDLE_REFRESH_REQUIRED'
-                : 'cancelled' in scriptResult && scriptResult.cancelled
-                  ? 'SCRIPT_CANCELLED'
-                : scriptResult.phase === 'setup'
-                  ? 'SETUP_SCRIPT_FAILED'
-                  : scriptResult.phase === 'select'
-                    ? 'SELECT_SCRIPT_FAILED'
-                    : 'PRE_SCRIPT_FAILED';
-            await this.sendError(
-              session,
-              sendResponse,
-              code,
-              `Workspace scripts failed during ${scriptResult.phase} phase: ${scriptResult.error}`
-            );
-            return;
           }
-
-          // Send final script_output indicating success
-          await this.sendMessage(session, sendResponse, {
-            type: 'script_output',
-            phase: currentPhase,
-            data: '',
-            done: true,
-          });
-
-          targetSession = await createSession(sessionName, workspace.path, {
-            hooks: buildWorkspaceSessionHooks(workspace.projectName, workspace.id),
-          });
-          console.log(`[remote-session] Created session: ${targetSession.name} (id: ${targetSession.id})`);
+          await this.sendError(
+            session,
+            sendResponse,
+            typedError?.code ?? 'ATTACH_FAILED',
+            error instanceof Error ? error.message : String(error),
+          );
+          return;
         }
       } else if (msg.sessionId) {
         // Security: Check if client can attach to this session
@@ -1185,6 +712,12 @@ export class RemoteSessionHandler {
         type: "attached",
         sessionId: targetSession.id,
         sessionName: targetSession.name,
+        processTitle: targetSession.processTitle,
+        terminalTitle: (targetSession as any).terminalTitle,
+        lastAlertKind: (targetSession as any).lastAlertKind,
+        lastAlertPreview: (targetSession as any).lastAlertPreview,
+        lastAlertAt: (targetSession as any).lastAlertAt,
+        unreadAlertCount: (targetSession as any).unreadAlertCount,
         cols: msg.cols ?? 80,
         rows: msg.rows ?? 24,
       });
@@ -1192,304 +725,6 @@ export class RemoteSessionHandler {
       console.error("[remote-session] Failed to attach session:", e);
       const detail = e instanceof Error ? e.message : String(e);
       await this.sendError(session, sendResponse, "ATTACH_FAILED", `Failed to attach to session: ${detail}`);
-    }
-  }
-
-  /**
-   * Handle list_projects request
-   */
-  private async handleListProjects(
-    session: RemoteClientSession,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const projects = listProjectSummaries();
-      await this.sendMessage(session, sendResponse, {
-        type: "project_list",
-        projects: projects.map(p => ({
-          name: p.name,
-          repository: p.repository,
-          workspaceCount: p.workspaceCount,
-          isCurrent: p.isCurrent,
-        })),
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to list projects:", e);
-      await this.sendError(session, sendResponse, "LIST_FAILED", "Failed to list projects");
-    }
-  }
-
-  private async handleListGithubRepos(
-    session: RemoteClientSession,
-    org: string | undefined,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const repos = await listGithubReposForSession(org);
-      await this.sendMessage(session, sendResponse, {
-        type: 'github_repo_list',
-        repos,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to list GitHub repositories';
-      await this.sendError(session, sendResponse, 'LIST_REPOS_FAILED', message);
-    }
-  }
-
-  private async handleListRemoteBranches(
-    session: RemoteClientSession,
-    projectName: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const branches = await listRemoteBranchesForSession(projectName);
-      await this.sendMessage(session, sendResponse, {
-        type: 'remote_branch_list',
-        projectName,
-        branches,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to list remote branches';
-      await this.sendError(session, sendResponse, 'LIST_REMOTE_BRANCHES_FAILED', message, {
-        projectName,
-      });
-    }
-  }
-
-  private async handleListLinearIssues(
-    session: RemoteClientSession,
-    projectName: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const issues = await listLinearIssuesForSession(projectName);
-      await this.sendMessage(session, sendResponse, {
-        type: 'linear_issue_list',
-        projectName,
-        issues,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to list Linear issues';
-      await this.sendError(session, sendResponse, 'LIST_LINEAR_ISSUES_FAILED', message, {
-        projectName,
-      });
-    }
-  }
-
-  private async handleCreateProject(
-    session: RemoteClientSession,
-    request: {
-      repository: string;
-      projectName?: string;
-      baseBranch?: string;
-      setCurrent?: boolean;
-    },
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const result = await createProjectForSession({
-        repository: request.repository,
-        projectName: request.projectName,
-        baseBranch: request.baseBranch,
-        setCurrent: request.setCurrent,
-      });
-
-      await this.sendMessage(session, sendResponse, {
-        type: 'project_created',
-        projectName: result.projectName,
-        repository: result.repository,
-        baseBranch: result.baseBranch,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to create project';
-      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
-        projectName: request.projectName,
-      });
-    }
-  }
-
-  private async handlePrepareProjectCreation(
-    session: RemoteClientSession,
-    request: {
-      repository: string;
-      projectName?: string;
-      baseBranch?: string;
-      setCurrent?: boolean;
-    },
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const result = await prepareProjectForSession({
-        repository: request.repository,
-        projectName: request.projectName,
-        baseBranch: request.baseBranch,
-        setCurrent: request.setCurrent,
-      });
-
-      await this.sendMessage(session, sendResponse, {
-        type: 'project_creation_prepared',
-        projectName: result.projectName,
-        repository: result.repository,
-        baseBranch: result.baseBranch,
-        bundle: result.bundle,
-        confirmStatuses: result.confirmStatuses,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to prepare project creation';
-      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
-        projectName: request.projectName,
-      });
-    }
-  }
-
-  private async handleFinalizeProjectCreation(
-    session: RemoteClientSession,
-    request: {
-      projectName: string;
-      repository: string;
-      baseBranch: string;
-      bundle?: import('../../types/bundle.js').SpacesBundle;
-      inputValues?: Record<string, string>;
-      secretValues?: Record<string, string>;
-      confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>;
-      setCurrent?: boolean;
-    },
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const result = await finalizePreparedProjectForSession({
-        projectName: request.projectName,
-        repository: request.repository,
-        baseBranch: request.baseBranch,
-        bundle: request.bundle,
-        inputValues: request.inputValues,
-        secretValues: request.secretValues,
-        confirmResults: request.confirmResults,
-        setCurrent: request.setCurrent,
-      });
-
-      await this.sendMessage(session, sendResponse, {
-        type: 'project_created',
-        projectName: result.projectName,
-        repository: result.repository,
-        baseBranch: result.baseBranch,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to finalize project creation';
-      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
-        projectName: request.projectName,
-      });
-    }
-  }
-
-  private async handleCancelProjectCreation(
-    session: RemoteClientSession,
-    projectName: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      await cancelPreparedProjectForSession(projectName);
-      await this.sendMessage(session, sendResponse, {
-        type: 'project_creation_cancelled',
-        projectName,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to cancel project creation';
-      await this.sendError(session, sendResponse, 'CREATE_PROJECT_FAILED', message, {
-        projectName,
-      });
-    }
-  }
-
-  private async handleCreateWorkspace(
-    session: RemoteClientSession,
-    request: {
-      projectName: string;
-      workspaceName: string;
-      branchName?: string;
-      baseBranch?: string;
-      workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource;
-      linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
-    },
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const result = await createWorkspaceForSession({
-        projectName: request.projectName,
-        workspaceName: request.workspaceName,
-        branchName: request.branchName,
-        baseBranch: request.baseBranch,
-        workspaceSource: request.workspaceSource,
-        linearIssue: request.linearIssue,
-      });
-
-      await this.sendMessage(session, sendResponse, {
-        type: 'workspace_created',
-        projectName: result.projectName,
-        workspaceId: result.workspaceId,
-        workspaceName: result.workspaceName,
-        branchName: result.branchName,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to create workspace';
-      await this.sendError(session, sendResponse, 'CREATE_WORKSPACE_FAILED', message, {
-        projectName: request.projectName,
-      });
-    }
-  }
-
-  private async handleDeleteProject(
-    session: RemoteClientSession,
-    projectName: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      await deleteProjectForSession({ projectName });
-      await this.sendMessage(session, sendResponse, {
-        type: 'project_deleted',
-        projectName,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to delete project';
-      await this.sendError(session, sendResponse, 'DELETE_PROJECT_FAILED', message, {
-        projectName,
-      });
-    }
-  }
-
-  /**
-   * Handle kill_session request
-   */
-  private async handleKillSession(
-    session: RemoteClientSession,
-    sessionId: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    if (!this.tmuxLiteAvailable) {
-      await this.sendError(session, sendResponse, "UNAVAILABLE", "Session manager not available");
-      return;
-    }
-
-    try {
-      // Look up the session's workspaceId before killing
-      const sessions = await listSessions();
-      const workspaces = await scanWorkspaces();
-      const workspacePathMap = new Map(workspaces.map(w => [w.path, w]));
-      const targetSession = sessions.find(s => s.id === sessionId);
-      const workspace = targetSession ? workspacePathMap.get(targetSession.cwd) : undefined;
-      const workspaceId = workspace ? toCanonicalWorkspaceId(workspace) : "unknown";
-
-      await killSession(sessionId);
-      // Wait a bit for the server to process the kill
-      await new Promise(resolve => setTimeout(resolve, 100));
-      await this.sendMessage(session, sendResponse, {
-        type: "session_killed",
-        sessionId,
-        workspaceId,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to kill session:", e);
-      await this.sendError(session, sendResponse, "KILL_FAILED", "Failed to kill session");
     }
   }
 
@@ -1507,54 +742,23 @@ export class RemoteSessionHandler {
       ? workspaceId.slice(projectName.length + 1)
       : workspaceId;
     const canonicalWorkspaceId = `${projectName}:${normalizedWorkspaceId}`;
-    let emittedDone = false;
-    const emitDone = async (error?: string) => {
-      await this.sendMessage(session, sendResponse, {
-        type: 'script_output',
-        phase: 'remove',
-        data: '',
-        done: true,
-        error,
-      });
-      emittedDone = true;
-    };
-
     try {
-      const result = await deleteWorkspaceCore(projectName, normalizedWorkspaceId, {
-        nonInteractive: true, // Remote context - scripts can't prompt for input
-        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
-        onScriptOutput: (data) => {
+      await deleteTmuxWorkspace({
+        projectName,
+        workspaceId: normalizedWorkspaceId,
+        scriptPolicy,
+        onScriptOutput: (event) => {
           void this.sendMessage(session, sendResponse, {
             type: 'script_output',
             phase: 'remove',
-            data: data.toString('base64'),
+            data: event.data,
+            done: event.done,
+            error: event.error,
           }).catch((error) => {
             logger.debug(`[remote-session] Failed to stream remove script output: ${error instanceof Error ? error.message : String(error)}`);
           });
         },
       });
-
-      if (!result.success) {
-        const message = result.error || 'Failed to delete workspace';
-        await emitDone(message);
-
-        if (result.errorCode === 'REMOVE_SCRIPT_FAILED') {
-          await this.sendError(session, sendResponse, 'REMOVE_SCRIPT_FAILED', message, {
-            workspaceId: canonicalWorkspaceId,
-          });
-          return;
-        }
-
-        const errorCode = result.errorCode === 'WORKSPACE_NOT_FOUND' || message.includes('not exist')
-          ? 'NOT_FOUND'
-          : 'DELETE_FAILED';
-        await this.sendError(session, sendResponse, errorCode, message, {
-          workspaceId: canonicalWorkspaceId,
-        });
-        return;
-      }
-
-      await emitDone();
 
       await this.sendMessage(session, sendResponse, {
         type: "workspace_deleted",
@@ -1562,475 +766,16 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       console.error("[remote-session] Failed to delete workspace:", e);
-      if (!emittedDone) {
-        const message = e instanceof Error ? e.message : String(e);
-        await emitDone(message);
-      }
-      await this.sendError(session, sendResponse, "DELETE_FAILED", "Failed to delete workspace", {
+      const message = e instanceof Error ? e.message : String(e);
+      await this.sendError(session, sendResponse, "DELETE_FAILED", message, {
         workspaceId: canonicalWorkspaceId,
       });
-    }
-  }
-
-  /**
-   * Handle get_inbox request
-   * Returns unread count bounded by active sessions (one per session max).
-   */
-  private async handleGetInbox(
-    session: RemoteClientSession,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const [items, activeSessions] = await Promise.all([
-        getInbox(),
-        listSessions(),
-      ]);
-      
-      // Build a set of active session IDs
-      const activeSessionIds = new Set(activeSessions.map(s => s.id));
-      
-      // Count unique sessions that have unread items AND are still active
-      const activeSessionsWithUnread = new Set<string>();
-      for (const item of items) {
-        if (!item.read && activeSessionIds.has(item.sessionId)) {
-          activeSessionsWithUnread.add(item.sessionId);
-        }
-      }
-      
-      await this.sendMessage(session, sendResponse, {
-        type: "inbox_list",
-        items,
-        unreadCount: activeSessionsWithUnread.size,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to get inbox:", e);
-      await this.sendError(session, sendResponse, "INBOX_FAILED", "Failed to get inbox");
-    }
-  }
-
-  /**
-   * Handle clear_inbox request
-   */
-  private async handleClearInbox(
-    session: RemoteClientSession,
-    id: string | undefined,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      await clearInbox(id);
-      await this.sendMessage(session, sendResponse, {
-        type: "inbox_cleared",
-        id,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to clear inbox:", e);
-      await this.sendError(session, sendResponse, "INBOX_FAILED", "Failed to clear inbox");
-    }
-  }
-
-  /**
-   * Handle mark_inbox_read request
-   */
-  private async handleMarkInboxRead(
-    session: RemoteClientSession,
-    id: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      await markInboxRead(id);
-      await this.sendMessage(session, sendResponse, {
-        type: "inbox_marked_read",
-        id,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to mark inbox read:", e);
-      await this.sendError(session, sendResponse, "INBOX_FAILED", "Failed to mark inbox item as read");
-    }
-  }
-
-  /**
-   * Handle get_notification_config request
-   */
-  private async handleGetNotificationConfig(
-    session: RemoteClientSession,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const config = getNotificationConfig();
-      await this.sendMessage(session, sendResponse, {
-        type: "notification_config",
-        config,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to read notification config:", e);
-      await this.sendError(session, sendResponse, "CONFIG_FAILED", "Failed to read notification config");
-    }
-  }
-
-  /**
-   * Handle update_notification_config request
-   */
-  private async handleUpdateNotificationConfig(
-    session: RemoteClientSession,
-    config: import("../../notifications/types.js").NotificationConfig,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    // Security: only full-access clients can change machine preferences.
-    if (!canManage(session.accessType)) {
-      await this.sendError(session, sendResponse, "PERMISSION_DENIED", "Requires full access to update settings");
-      return;
-    }
-
-    try {
-      const updated = updateNotificationConfig(config);
-      await this.sendMessage(session, sendResponse, {
-        type: "notification_config_updated",
-        config: updated,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to update notification config:", e);
-      await this.sendError(session, sendResponse, "CONFIG_FAILED", "Failed to update notification config");
-    }
-  }
-
-  private async handleGetBundleRefreshPlan(
-    session: RemoteClientSession,
-    projectName: string,
-    workspaceId: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspace = await this.resolveWorkspace(projectName, workspaceId);
-      const plan = await getBundleRefreshPlan(projectName, workspace.path, `${projectName}:${workspace.id}`);
-      await this.sendMessage(session, sendResponse, {
-        type: 'bundle_refresh_plan',
-        plan,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to build bundle refresh plan';
-      await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_PLAN_FAILED', message);
-    }
-  }
-
-  private async handleApplyBundleRefresh(
-    session: RemoteClientSession,
-    projectName: string,
-    workspaceId: string,
-    submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspace = await this.resolveWorkspace(projectName, workspaceId);
-      await applyBundleRefreshSubmission(projectName, workspace.path, submission);
-      await this.sendMessage(session, sendResponse, {
-        type: 'bundle_refresh_applied',
-        projectName,
-        workspaceId: `${projectName}:${workspace.id}`,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to apply bundle refresh';
-      await this.sendError(session, sendResponse, 'BUNDLE_REFRESH_APPLY_FAILED', message);
-    }
-  }
-
-  private async handleGetBundleConfigState(
-    session: RemoteClientSession,
-    projectName: string,
-    workspaceId: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspace = await this.resolveWorkspace(projectName, workspaceId);
-      const state = await getBundleConfigState(projectName, workspace.path, `${projectName}:${workspace.id}`);
-      await this.sendMessage(session, sendResponse, {
-        type: 'bundle_config_state',
-        state,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load bundle configuration state';
-      await this.sendError(session, sendResponse, 'BUNDLE_CONFIG_STATE_FAILED', message);
-    }
-  }
-
-  private async handleApplyBundleConfigUpdate(
-    session: RemoteClientSession,
-    projectName: string,
-    workspaceId: string,
-    submission: import('../../types/bundle-config.js').BundleConfigSubmission,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspace = await this.resolveWorkspace(projectName, workspaceId);
-      await applyBundleConfigSubmission(projectName, workspace.path, submission);
-      await this.sendMessage(session, sendResponse, {
-        type: 'bundle_config_updated',
-        projectName,
-        workspaceId: `${projectName}:${workspace.id}`,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to apply bundle configuration update';
-      await this.sendError(session, sendResponse, 'BUNDLE_CONFIG_UPDATE_FAILED', message);
     }
   }
 
   // ============================================================================
   // Review Request Handling
   // ============================================================================
-
-  /**
-   * Handle a review_request message by dispatching to the appropriate
-   * review operation and responding with a review_response.
-   */
-  private async handleReviewRequest(
-    session: RemoteClientSession,
-    requestId: string,
-    operation: ReviewOperation,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    if (isMutatingReviewOperation(operation) && !canManage(session.accessType)) {
-      await this.sendMessage(session, sendResponse, {
-        type: 'review_response',
-        requestId,
-        error: {
-          code: 'PERMISSION_DENIED',
-          message: 'Requires full access to perform this review operation',
-        },
-      });
-      return;
-    }
-
-    try {
-      const result = await this.executeReviewOperation(operation);
-      await this.sendMessage(session, sendResponse, {
-        type: 'review_response',
-        requestId,
-        result,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.sendMessage(session, sendResponse, {
-        type: 'review_response',
-        requestId,
-        error: { code: 'REVIEW_ERROR', message },
-      });
-    }
-  }
-
-  /**
-   * Delegate to the shared executeLocalReviewOperation from review-executor.ts.
-   * This is the single authoritative implementation used by both the remote
-   * session handler and the local session backend.
-   */
-  private async executeReviewOperation(operation: ReviewOperation): Promise<ReviewResult> {
-    return executeLocalReviewOperation(operation, scanWorkspaces);
-  }
-
-  private async resolveWorkspace(
-    projectName: string,
-    workspaceId: string
-  ): Promise<{ id: string; path: string }> {
-    const normalizedWorkspaceId = workspaceId.startsWith(`${projectName}:`)
-      ? workspaceId.slice(projectName.length + 1)
-      : workspaceId;
-
-    const workspaces = await scanWorkspaces();
-    const workspace = workspaces.find(
-      (item) => item.projectName === projectName && item.id === normalizedWorkspaceId
-    );
-
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${workspaceId}`);
-    }
-
-    return {
-      id: workspace.id,
-      path: workspace.path,
-    };
-  }
-
-  private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTargetPayload> {
-    const workspaces = await scanWorkspaces();
-    const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${workspaceId}`);
-    }
-    return {
-      workspaceId: toCanonicalWorkspaceId(workspace),
-      workspaceName: workspace.id,
-      workspacePath: workspace.path,
-      projectName: workspace.projectName,
-    };
-  }
-
-  private async handleListAgentSessions(
-    _session: RemoteClientSession,
-    requestId: string,
-    workspaceId: string,
-    mode: 'known' | 'live' | undefined,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const sessions = await listTmuxAgentSessions(target, mode ?? 'live');
-      await this.sendMessage(_session, sendResponse, {
-        type: 'agent_sessions',
-        requestId,
-        workspaceId: target.workspaceId,
-        sessions,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_SESSIONS_FAILED', detail, { workspaceId, requestId });
-    }
-  }
-
-  private async handleCreateAgentSession(
-    _session: RemoteClientSession,
-    requestId: string,
-    workspaceId: string,
-    title: string | undefined,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const sessions = await createTmuxAgentSession(target, title);
-      await this.sendMessage(_session, sendResponse, {
-        type: 'agent_sessions',
-        requestId,
-        workspaceId: target.workspaceId,
-        sessions,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_CREATE_FAILED', detail, { workspaceId, requestId });
-    }
-  }
-
-  private async handleAbortAgentSession(
-    _session: RemoteClientSession,
-    requestId: string,
-    workspaceId: string,
-    agentSessionId: string,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const ok = await abortTmuxAgentSession(target, agentSessionId);
-      await this.sendMessage(_session, sendResponse, {
-        type: 'agent_bool',
-        requestId,
-        workspaceId: target.workspaceId,
-        ok,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_ABORT_FAILED', detail, { workspaceId, requestId });
-    }
-  }
-
-  private async handleClearAgentSession(
-    _session: RemoteClientSession,
-    requestId: string,
-    workspaceId: string,
-    agentSessionId: string,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const ok = await clearTmuxAgentSession(target, agentSessionId);
-      await this.sendMessage(_session, sendResponse, {
-        type: 'agent_bool',
-        requestId,
-        workspaceId: target.workspaceId,
-        ok,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_CLEAR_FAILED', detail, { workspaceId, requestId });
-    }
-  }
-
-  private async handleRespondAgentPermission(
-    _session: RemoteClientSession,
-    requestId: string,
-    workspaceId: string,
-    agentSessionId: string,
-    permissionId: string,
-    response: 'allow' | 'deny',
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const ok = await respondToTmuxAgentPermission(target, agentSessionId, permissionId, response);
-      await this.sendMessage(_session, sendResponse, {
-        type: 'agent_bool',
-        requestId,
-        workspaceId: target.workspaceId,
-        ok,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(_session, sendResponse, 'AGENT_PERMISSION_FAILED', detail, { workspaceId, requestId });
-    }
-  }
-
-  private async handleAttachAgentSession(
-    session: RemoteClientSession,
-    workspaceId: string,
-    agentSessionId: string,
-    viewOnly: boolean | undefined,
-    force: boolean | undefined,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const terminalSession = await attachTmuxAgentSession(target, agentSessionId, { force });
-
-      session.state = 'attached';
-      session.attachedSessionId = terminalSession.id;
-      session.sessionSocketPath = terminalSession.socketPath;
-      session.viewOnly = viewOnly ?? false;
-
-      await this.sendMessage(session, sendResponse, {
-        type: 'attached',
-        sessionId: terminalSession.id,
-        sessionName: terminalSession.name,
-        cols: 80,
-        rows: 24,
-      });
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      if (e instanceof AgentSessionTakeoverRequiredError) {
-        await this.sendError(session, sendResponse, 'TAKEOVER_REQUIRED', detail, { workspaceId });
-        return;
-      }
-      await this.sendError(session, sendResponse, 'ATTACH_FAILED', `Failed to attach agent session: ${detail}`);
-    }
-  }
-
-  private async handleCheckAgentSessionTakeover(
-    session: RemoteClientSession,
-    requestId: string,
-    workspaceId: string,
-    agentSessionId: string,
-    sendResponse: (data: Uint8Array) => void,
-  ): Promise<void> {
-    try {
-      const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-      const status = await getTmuxAgentSessionTakeoverState(target, agentSessionId);
-      await this.sendMessage(session, sendResponse, {
-        type: 'agent_takeover_status',
-        requestId,
-        workspaceId: target.workspaceId,
-        agentSessionId,
-        requiresTakeover: status.requiresTakeover,
-        sessionName: status.sessionName,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await this.sendError(session, sendResponse, 'AGENT_TAKEOVER_CHECK_FAILED', detail, { workspaceId, requestId });
-    }
-  }
 
   /**
    * Send an encrypted message to client
@@ -2067,241 +812,23 @@ export class RemoteSessionHandler {
   }
 
   /**
-   * Handle get_events request
-   */
-  private async handleGetEvents(
-    session: RemoteClientSession,
-    workspacePath: string,
-    processName: string | undefined,
-    _processInstance: number | undefined,
-    filter: import("../../types/events.js").WideEventFilter | undefined,
-    limit: number | undefined,
-    sinceMs: number | undefined,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspaceRef = resolveWorkspaceRef(workspacePath);
-      if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
-        return;
-      }
-
-      const savedEventFilters = loadSavedEventFilters(workspaceRef.workspacePath);
-
-      const projectConfig = readProjectConfig(workspaceRef.projectName);
-      const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
-        maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
-        maxTimeline: projectConfig.events?.maxTimeline,
-      });
-
-      const resolvedFilter = { ...filter };
-      if (processName && !resolvedFilter.processName) {
-        resolvedFilter.processName = processName;
-      }
-
-      const filtered = snapshots
-        .filter((snapshot) => {
-          if (sinceMs !== undefined && snapshot.updatedAt < sinceMs) return false;
-          if (!resolvedFilter) return true;
-          if (resolvedFilter.processName && snapshot.processName !== resolvedFilter.processName) return false;
-          if (resolvedFilter.level && snapshot.level !== resolvedFilter.level) return false;
-          if (resolvedFilter.message && !snapshot.message.includes(resolvedFilter.message)) return false;
-          if (resolvedFilter.eventName && snapshot.eventName !== resolvedFilter.eventName) return false;
-          if (resolvedFilter.correlationId && snapshot.correlationId !== resolvedFilter.correlationId) return false;
-          return true;
-        })
-        .slice(0, limit ?? 200);
-
-      const events = filtered.map((snapshot) => ({
-        eventId: snapshot.lastEventId,
-        eventName: snapshot.eventName,
-        level: snapshot.level,
-        timestamp: new Date(snapshot.updatedAt).toISOString(),
-        timestampMs: snapshot.updatedAt,
-        message: snapshot.message,
-        sessionId: '',
-        workspaceId: workspaceRef.workspaceId,
-        projectName: workspaceRef.projectName,
-        processName: snapshot.processName,
-        processInstance: snapshot.processInstance,
-        raw: snapshot.raw ?? {},
-        kind: 'wide' as const,
-        correlationId: snapshot.correlationId,
-        timeline: Object.values(snapshot.timelineMap),
-        timelineMap: snapshot.timelineMap,
-        timelineOrder: snapshot.timelineOrder,
-      }));
-
-      // Chunk responses to stay under payload limit
-      const maxPayloadBytes = 900_000;
-      const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      const buildPayload = (
-        chunk: import("../../types/events.js").WideEvent[],
-        chunkIndex: number,
-        totalChunks: number,
-      ) => ({
-        type: "events_list" as const,
-        workspaceId: workspaceRef.workspaceId,
-        events: chunk,
-        liveEventIds: [] as string[],
-        savedEventFilters,
-        requestId,
-        chunkIndex,
-        totalChunks,
-      });
-
-      const chunks: import("../../types/events.js").WideEvent[][] = [];
-      let chunk: import("../../types/events.js").WideEvent[] = [];
-      for (const event of events) {
-        chunk.push(event);
-        const payloadSize = Buffer.byteLength(JSON.stringify(buildPayload(chunk, 0, 1)));
-        if (payloadSize > maxPayloadBytes) {
-          if (chunk.length === 1) {
-            chunks.push(chunk);
-            chunk = [];
-            continue;
-          }
-          const last = chunk.pop();
-          chunks.push(chunk);
-          chunk = last ? [last] : [];
-        }
-      }
-
-      if (chunk.length > 0) {
-        chunks.push(chunk);
-      }
-
-      if (chunks.length === 0) {
-        chunks.push([]);
-      }
-
-      const totalChunks = chunks.length;
-      for (let i = 0; i < totalChunks; i += 1) {
-        await this.sendMessage(session, sendResponse, buildPayload(chunks[i], i, totalChunks));
-      }
-    } catch (e) {
-      console.error("[remote-session] Failed to get events:", e);
-      await this.sendError(session, sendResponse, "EVENTS_FAILED", "Failed to get events");
-    }
-  }
-
-  /**
-   * Handle start_process request
-   */
-  private async handleStartProcess(
-    session: RemoteClientSession,
-    workspaceId: string,
-    processName: string,
-    instance: number | undefined,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspaces = await scanWorkspaces();
-      const workspace = workspaces.find((w) => matchesWorkspaceId(w, workspaceId));
-      if (!workspace) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
-        return;
-      }
-
-      const processConfig = loadProcessesConfig(workspace.path);
-      const processDefinition = getProcessDefinition(processConfig, processName);
-      if (!processDefinition) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
-        return;
-      }
-      if (normalizeProcessInstanceCount(processDefinition.instances) === 0) {
-        await this.sendError(session, sendResponse, "PROCESS_DISABLED", `Process is disabled (instances: 0): ${processName}`);
-        return;
-      }
-
-      const specs = getProcessSpecs(workspace.path).filter(
-        (spec) => spec.name === processName && (instance === undefined || spec.instance === instance)
-      );
-      if (specs.length === 0) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
-        return;
-      }
-
-      const sessions: string[] = [];
-      for (const spec of specs) {
-        const result = await startProcessInstance(workspace.path, spec);
-        sessions.push(result.sessionId);
-      }
-      if (this.onProcessesChanged) {
-        Promise.resolve(this.onProcessesChanged(workspace.path)).catch(() => undefined);
-      }
-      if (!this.processSchedulers.has(workspace.path)) {
-        this.processSchedulers.set(workspace.path, startProcessScheduler(workspace.path));
-      }
-
-      await this.sendMessage(session, sendResponse, {
-        type: "process_started",
-        workspaceId,
-        processName,
-        sessionId: sessions[0],
-        sessionIds: sessions,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to start process:", e);
-      await this.sendError(session, sendResponse, "PROCESS_FAILED", "Failed to start process");
-    }
-  }
-
-  /**
-   * Handle stop_process request
-   */
-  private async handleStopProcess(
-    session: RemoteClientSession,
-    workspaceId: string,
-    processName: string,
-    sendResponse: (data: Uint8Array) => void
-  ): Promise<void> {
-    try {
-      const workspaces = await scanWorkspaces();
-      const workspace = workspaces.find((w) => matchesWorkspaceId(w, workspaceId));
-      if (!workspace) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Workspace not found");
-        return;
-      }
-
-      const specs = getProcessSpecs(workspace.path).filter(spec => spec.name === processName);
-      if (specs.length === 0) {
-        await this.sendError(session, sendResponse, "NOT_FOUND", "Process not found");
-        return;
-      }
-
-      for (const spec of specs) {
-        await stopProcessInstance(workspace.path, spec);
-      }
-
-      if (this.onProcessesChanged) {
-        Promise.resolve(this.onProcessesChanged(workspace.path)).catch(() => undefined);
-      }
-
-      await this.sendMessage(session, sendResponse, {
-        type: "process_stopped",
-        workspaceId,
-        processName,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to stop process:", e);
-      await this.sendError(session, sendResponse, "PROCESS_FAILED", "Failed to stop process");
-    }
-  }
-
-  /**
    * Cleanup
    */
   cleanupConnection(connectionId: string): void {
     const pending = this.pendingAttachRuns.get(connectionId);
-    if (!pending) {
-      return;
+    if (pending) {
+      void cancelPrepareAttachSession(pending).catch(() => undefined);
+      this.pendingAttachRuns.delete(connectionId);
     }
-    pending.abort();
-    this.pendingAttachRuns.delete(connectionId);
+    this.onClientLeavesBrowsing(connectionId);
   }
 
   async cleanup(): Promise<void> {
+    // Stop machine event watch
+    this.machineWatchUnsubscribe?.();
+    this.machineWatchUnsubscribe = null;
+    this.machineSnapshotWatchers.clear();
+
     // Clean up process schedulers
     for (const timer of this.processSchedulers.values()) {
       clearInterval(timer);

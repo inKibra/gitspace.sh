@@ -193,26 +193,32 @@ export function exportUserRootPublicKey(identity: Identity): string {
 }
 
 /**
- * Create a serialized device certificate for browser clients.
+ * Create a root-signed device certificate for a browser device identity.
  *
- * Browser owner auth uses a user-root identity derived from mnemonic.
- * This signs the browser device keypair and applies a 90-day expiry.
+ * The user root identity (derived from mnemonic) signs the device keypair.
+ * This is the correct model: root and device are separate identities.
+ *
+ * @param rootIdentity - User root identity derived from mnemonic (signs the cert)
+ * @param deviceIdentity - Browser device identity (random keypair being certified)
  */
-export function createSelfSignedDeviceCertificate(identity: Identity): string {
+export function createRootSignedDeviceCertificate(
+  rootIdentity: Identity,
+  deviceIdentity: Identity,
+): string {
   const issuedAt = Date.now();
   const expiresAt = issuedAt + DEVICE_CERT_TTL_MS;
   const payload = buildDeviceCertPayload(
-    identity.signing.publicKey,
-    identity.keyExchange.publicKey,
+    deviceIdentity.signing.publicKey,
+    deviceIdentity.keyExchange.publicKey,
     issuedAt,
     expiresAt,
   );
-  const signature = sign(payload, identity.signing.secretKey);
+  const signature = sign(payload, rootIdentity.signing.secretKey);
 
   const cert: DeviceCertificate = {
-    deviceSigningPublicKey: bytesToBase64(identity.signing.publicKey),
-    deviceKeyExchangePublicKey: bytesToBase64(identity.keyExchange.publicKey),
-    userRootSigningPublicKey: bytesToBase64(identity.signing.publicKey),
+    deviceSigningPublicKey: bytesToBase64(deviceIdentity.signing.publicKey),
+    deviceKeyExchangePublicKey: bytesToBase64(deviceIdentity.keyExchange.publicKey),
+    userRootSigningPublicKey: bytesToBase64(rootIdentity.signing.publicKey),
     signature: bytesToBase64(signature),
     issuedAt,
     expiresAt,

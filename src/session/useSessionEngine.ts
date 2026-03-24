@@ -1,748 +1,343 @@
+/**
+ * useSessionEngine — internal multi-backend session engine.
+ *
+ * This is a private internal module used by useRemoteSessionClient.
+ * For local TUI use, prefer useMultiBackends (src/machine/multi/useMultiBackends.ts).
+ */
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
-import type { NotificationConfig } from '../notifications/types.js';
-import type {
-  BackendKey,
-  SessionBackend,
-  AttachSessionParams,
-  CreateProjectParams,
-  FinalizeProjectParams,
-  PreparedProjectResult,
-  CreateWorkspaceParams,
-  DeleteProjectParams,
-  DeleteWorkspaceParams,
-} from './backend.js';
-import type {
-  BundleRefreshPlan,
-  BundleRefreshSubmission,
-} from '../types/bundle-refresh.js';
-import type {
-  BundleConfigState,
-  BundleConfigSubmission,
-} from '../types/bundle-config.js';
-import type { ReviewOperation, ReviewResult } from '../types/review.js';
-import type { ScriptPhase } from '../types/script-phase.js';
-import type { WideEventFilter } from '../types/events.js';
-import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
 import { BackendManager } from './backend-manager.js';
 import {
   createInitialSessionEngineState,
   sessionEngineReducer,
 } from './reducer.js';
-import {
-  getActiveBackendKey,
-  getActiveBackendState,
-  getBackendKeys,
-  getBackendState,
-} from './selectors.js';
-import type { ScriptRuntimeState } from './types.js';
+import type {
+  BackendSessionState,
+  SessionEngineState,
+} from './types.js';
+import type {
+  AttachSessionParams,
+  BackendKey,
+  CreateProjectParams,
+  CreateWorkspaceParams,
+  DeleteProjectParams,
+  DeleteWorkspaceParams,
+  FinalizeProjectParams,
+  PreparedProjectResult,
+  SessionBackend,
+} from './backend.js';
+import type { BackendManagerEvent } from './backend-manager.js';
+import type { NotificationConfig } from '../notifications/types.js';
+import type { WideEventFilter } from '../types/events.js';
+import type { SessionLinearIssueSummary } from '../types/lifecycle.js';
+import type {
+  BundleConfigState,
+  BundleConfigSubmission,
+} from '../types/bundle-config.js';
+import type { WorkspacePhase } from '../types/config.js';
+import type {
+  BundleRefreshPlan,
+  BundleRefreshSubmission,
+} from '../types/bundle-refresh.js';
+import type { ReviewOperation, ReviewResult } from '../types/review.js';
+import type {
+  ReplayFrame,
+  ReplayFrameTarget,
+  ReplayTimeline,
+  TerminalSnapshot,
+} from '../lib/tmux-lite/replay/index.js';
+import type { BackendEvent } from './events.js';
 import { SpacesError } from '../types/errors.js';
 
-function toScriptRuntimeState(event: {
-  phase: ScriptPhase;
-  done?: boolean;
-  error?: string;
-  exitCode?: number;
-}): ScriptRuntimeState {
-  return {
-    phase: event.phase,
-    isRunning: !event.done,
-    error: event.error,
-    exitCode: event.exitCode,
-  };
+function dispatchBackendEvent(
+  dispatch: React.Dispatch<import('./types.js').SessionEngineAction>,
+  backendKey: BackendKey,
+  event: BackendEvent
+): void {
+  switch (event.type) {
+    case 'status':
+      dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: event.status, error: event.error ?? null });
+      break;
+    case 'projects':
+      dispatch({ type: 'SET_PROJECTS', backendKey, projects: event.projects });
+      break;
+    case 'workspaces':
+      dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
+      if (event.savedEventFilters) {
+        dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
+      }
+      break;
+    case 'sessions':
+      dispatch({ type: 'SET_SESSIONS', backendKey, sessions: event.sessions });
+      break;
+    case 'replays':
+      dispatch({ type: 'SET_REPLAYS', backendKey, replays: event.replays });
+      break;
+    case 'inbox':
+      dispatch({ type: 'SET_INBOX', backendKey, items: event.items, unreadCount: event.unreadCount });
+      break;
+    case 'notification_config':
+      dispatch({ type: 'SET_NOTIFICATION_CONFIG', backendKey, config: event.config });
+      break;
+    case 'attached':
+      dispatch({
+        type: 'SET_ATTACHED_SESSION',
+        backendKey,
+        sessionId: event.sessionId,
+        sessionName: event.sessionName ?? null,
+        meta: {
+          sessionName: event.sessionName ?? null,
+        },
+        workspaceId: event.workspaceId ?? null,
+      });
+      break;
+    case 'session_meta':
+      dispatch({ type: 'SET_ATTACHED_SESSION_META', backendKey, meta: event.meta });
+      break;
+    case 'detached':
+    case 'session_exited':
+      dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
+      break;
+    case 'command_error':
+      dispatch({ type: 'SET_COMMAND_ERROR', backendKey, commandError: { code: event.code, message: event.message } });
+      break;
+    case 'error':
+      dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'error', error: event.message });
+      break;
+    case 'script_output':
+      dispatch({
+        type: 'SET_SCRIPT_STATE',
+        backendKey,
+        scriptState: event.done && !event.error
+          ? null
+          : { phase: event.phase, isRunning: !event.done, error: event.error, exitCode: event.exitCode },
+      });
+      break;
+    case 'events':
+      dispatch({ type: 'SET_EVENTS', backendKey, events: event.events, liveEventIds: event.liveEventIds });
+      if (event.savedEventFilters) {
+        dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
+      }
+      break;
+    case 'machine_snapshot':
+      dispatch({ type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: event.snapshot });
+      break;
+    default:
+      break;
+  }
 }
 
 export function useSessionEngine() {
   const [state, dispatch] = useReducer(sessionEngineReducer, undefined, createInitialSessionEngineState);
-
+  const stateRef = useRef<SessionEngineState>(state);
   const managerRef = useRef<BackendManager | null>(null);
-  if (!managerRef.current) {
-    managerRef.current = new BackendManager(({ backendKey, event }) => {
-      switch (event.type) {
-        case 'status':
-          dispatch({
-            type: 'SET_BACKEND_STATUS',
-            backendKey,
-            status: event.status,
-            error: event.error ?? null,
-          });
-          break;
-        case 'projects':
-          dispatch({ type: 'SET_PROJECTS', backendKey, projects: event.projects });
-          break;
-        case 'workspaces':
-          dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
-          if (event.savedEventFilters) {
-            dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-          }
-          break;
-        case 'sessions':
-          dispatch({ type: 'SET_SESSIONS', backendKey, sessions: event.sessions });
-          break;
-        case 'replays':
-          dispatch({ type: 'SET_REPLAYS', backendKey, replays: event.replays });
-          break;
-        case 'inbox':
-          dispatch({
-            type: 'SET_INBOX',
-            backendKey,
-            items: event.items,
-            unreadCount: event.unreadCount,
-          });
-          break;
-        case 'notification_config':
-          dispatch({
-            type: 'SET_NOTIFICATION_CONFIG',
-            backendKey,
-            config: event.config,
-          });
-          break;
-        case 'script_output':
-          dispatch({
-            type: 'SET_SCRIPT_STATE',
-            backendKey,
-            scriptState:
-              event.done && !event.error
-                ? null
-                : toScriptRuntimeState(event),
-          });
-          break;
-        case 'attached':
-          dispatch({
-            type: 'SET_COMMAND_ERROR',
-            backendKey,
-            commandError: null,
-          });
-          dispatch({
-            type: 'SET_ATTACHED_SESSION',
-            backendKey,
-            sessionId: event.sessionId,
-            sessionName: event.sessionName ?? null,
-          });
-          break;
-        case 'detached':
-          dispatch({
-            type: 'SET_ATTACHED_SESSION',
-            backendKey,
-            sessionId: null,
-            sessionName: null,
-          });
-          break;
-        case 'session_exited':
-          dispatch({
-            type: 'SET_ATTACHED_SESSION',
-            backendKey,
-            sessionId: null,
-            sessionName: null,
-          });
-          break;
-        case 'command_error':
-          dispatch({
-            type: 'SET_COMMAND_ERROR',
-            backendKey,
-            commandError: {
-              code: event.code,
-              message: event.message,
-            },
-          });
-          break;
-        case 'error':
-          dispatch({
-            type: 'SET_BACKEND_STATUS',
-            backendKey,
-            status: 'error',
-            error: event.message,
-          });
-          break;
-        case 'review_response':
-          // Handled directly by RemoteSessionBackend's pending map — no state dispatch needed.
-          break;
-        case 'events':
-          dispatch({
-            type: 'SET_EVENTS',
-            backendKey,
-            events: event.events,
-            liveEventIds: event.liveEventIds,
-          });
-          if (event.savedEventFilters) {
-            dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-          }
-          break;
-        case 'process_started':
-        case 'process_stopped':
-          // Refresh workspaces and sessions to reflect process state changes.
-          // Important for remote/web clients that don't immediately call refresh.
-          {
-            const backend = managerRef.current?.get(backendKey);
-            if (backend) {
-              void backend.listWorkspaces().catch(() => undefined);
-              void backend.listSessions().catch(() => undefined);
-            }
-          }
-          break;
-        default:
-          break;
-      }
-    });
-  }
 
-  const manager = managerRef.current;
+  useEffect(() => { stateRef.current = state; });
+
+  const getManager = useCallback((): BackendManager => {
+    if (!managerRef.current) {
+      managerRef.current = new BackendManager((evt: BackendManagerEvent) => {
+        dispatchBackendEvent(dispatch, evt.backendKey, evt.event);
+      });
+    }
+    return managerRef.current;
+  }, []);
 
   useEffect(() => {
     return () => {
-      void manager.disconnectAll();
+      managerRef.current?.disconnectAll().catch(() => undefined);
     };
-  }, [manager]);
+  }, []);
 
-  const registerBackend = useCallback((backend: SessionBackend) => {
-    manager.register(backend);
+  const registerBackend = useCallback((backend: SessionBackend): void => {
     dispatch({ type: 'REGISTER_BACKEND', descriptor: backend.descriptor });
-  }, [manager]);
+    getManager().register(backend);
+  }, [getManager]);
 
-  const unregisterBackend = useCallback(async (backendKey: BackendKey) => {
-    await manager.unregister(backendKey);
+  const unregisterBackend = useCallback(async (backendKey: BackendKey): Promise<void> => {
+    await getManager().unregister(backendKey);
     dispatch({ type: 'UNREGISTER_BACKEND', backendKey });
-  }, [manager]);
+  }, [getManager]);
 
-  const setActiveBackend = useCallback((backendKey: BackendKey | null) => {
+  const setActiveBackend = useCallback((backendKey: BackendKey | null): void => {
     dispatch({ type: 'SET_ACTIVE_BACKEND', backendKey });
   }, []);
 
-  const connectBackend = useCallback(async (backendKey: BackendKey) => {
-    dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'connecting', error: null });
-    await manager.connect(backendKey);
-  }, [manager]);
+  const connectBackend = useCallback(async (backendKey: BackendKey): Promise<void> => {
+    dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'connecting' });
+    await getManager().connect(backendKey);
+  }, [getManager]);
 
-  const disconnectBackend = useCallback(async (backendKey: BackendKey) => {
-    await manager.disconnect(backendKey);
-    dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'disconnected', error: null });
-  }, [manager]);
+  const disconnectBackend = useCallback(async (backendKey: BackendKey): Promise<void> => {
+    await getManager().disconnect(backendKey);
+    dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'disconnected' });
+  }, [getManager]);
 
-  const withBackend = useCallback(async (backendKey: BackendKey, fn: (backend: SessionBackend) => Promise<void>) => {
-    const backend = manager.get(backendKey);
-    if (!backend) {
-      throw new SpacesError(`Backend not found: ${backendKey}`, 'SYSTEM_ERROR', 2);
-    }
-    await fn(backend);
-  }, [manager]);
+  const getBackendState = useCallback((backendKey: BackendKey): BackendSessionState | null => {
+    return stateRef.current.backends[backendKey] ?? null;
+  }, []);
 
-  const listProjects = useCallback(async (backendKey: BackendKey) => {
-    await withBackend(backendKey, (backend) => backend.listProjects());
-  }, [withBackend]);
+  function withBackend<T>(backendKey: BackendKey, fn: (b: SessionBackend) => Promise<T>): Promise<T> {
+    const backend = managerRef.current?.get(backendKey);
+    if (!backend) throw new SpacesError(`Backend not found: ${backendKey}`, 'SYSTEM_ERROR', 2);
+    return fn(backend);
+  }
 
-  const listGithubRepos = useCallback(async (backendKey: BackendKey, org?: string): Promise<string[]> => {
-    let repos: string[] | null = null;
-    await withBackend(backendKey, async (backend) => {
-      repos = await backend.listGithubRepos(org);
-    });
+  const listProjects = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.listProjects()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (!repos) {
-      throw new SpacesError('GitHub repository list was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
+  const listGithubRepos = useCallback((backendKey: BackendKey, org?: string) =>
+    withBackend(backendKey, (b) => b.listGithubRepos(org)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return repos;
-  }, [withBackend]);
+  const listRemoteBranches = useCallback((backendKey: BackendKey, projectName: string) =>
+    withBackend(backendKey, (b) => b.listRemoteBranches(projectName)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const listRemoteBranches = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string
-  ): Promise<string[]> => {
-    let branches: string[] | null = null;
-    await withBackend(backendKey, async (backend) => {
-      branches = await backend.listRemoteBranches(projectName);
-    });
+  const listLinearIssues = useCallback((backendKey: BackendKey, projectName: string): Promise<SessionLinearIssueSummary[]> =>
+    withBackend(backendKey, (b) => b.listLinearIssues(projectName)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (!branches) {
-      throw new SpacesError('Remote branch list was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
+  const listWorkspaces = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.listWorkspaces()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return branches;
-  }, [withBackend]);
+  const setWorkspaceStatus = useCallback((backendKey: BackendKey, projectName: string, workspaceName: string, phase: WorkspacePhase) =>
+    withBackend(backendKey, (b) => b.setWorkspaceStatus?.(projectName, workspaceName, phase) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const listLinearIssues = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string
-  ): Promise<SessionLinearIssueSummary[]> => {
-    let issues: SessionLinearIssueSummary[] | null = null;
-    await withBackend(backendKey, async (backend) => {
-      issues = await backend.listLinearIssues(projectName);
-    });
+  const listSessions = useCallback((backendKey: BackendKey, workspaceId?: string) =>
+    withBackend(backendKey, (b) => b.listSessions(workspaceId)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (!issues) {
-      throw new SpacesError('Linear issue list was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
+  const listReplays = useCallback((backendKey: BackendKey, workspaceId?: string, includeDismissed?: boolean) =>
+    withBackend(backendKey, (b) => b.listReplays?.(workspaceId, includeDismissed) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return issues;
-  }, [withBackend]);
+  const createProject = useCallback((backendKey: BackendKey, params: CreateProjectParams) =>
+    withBackend(backendKey, async (b) => { await b.createProject(params); await b.listProjects(); await b.listWorkspaces(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const listWorkspaces = useCallback(async (backendKey: BackendKey) => {
-    await withBackend(backendKey, (backend) => backend.listWorkspaces());
-  }, [withBackend]);
+  const prepareProjectCreation = useCallback((backendKey: BackendKey, params: CreateProjectParams): Promise<PreparedProjectResult> =>
+    withBackend(backendKey, (b) => {
+      if (!b.prepareProjectCreation) throw new SpacesError('Project preparation unavailable', 'SYSTEM_ERROR', 2);
+      return b.prepareProjectCreation(params);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const listSessions = useCallback(async (backendKey: BackendKey, workspaceId?: string) => {
-    await withBackend(backendKey, (backend) => backend.listSessions(workspaceId));
-  }, [withBackend]);
+  const finalizeProjectCreation = useCallback((backendKey: BackendKey, params: FinalizeProjectParams) =>
+    withBackend(backendKey, async (b) => {
+      if (!b.finalizeProjectCreation) throw new SpacesError('Project finalization unavailable', 'SYSTEM_ERROR', 2);
+      await b.finalizeProjectCreation(params); await b.listProjects(); await b.listWorkspaces();
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const listReplays = useCallback(async (backendKey: BackendKey, workspaceId?: string, includeDismissed?: boolean) => {
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.listReplays) {
-        throw new SpacesError('Replay listing is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      await backend.listReplays(workspaceId, includeDismissed);
-    });
-  }, [withBackend]);
+  const cancelProjectCreation = useCallback((backendKey: BackendKey, projectName: string) =>
+    withBackend(backendKey, async (b) => {
+      if (!b.cancelProjectCreation) throw new SpacesError('Project cancellation unavailable', 'SYSTEM_ERROR', 2);
+      await b.cancelProjectCreation(projectName); await b.listProjects(); await b.listWorkspaces();
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const createProject = useCallback(async (backendKey: BackendKey, params: CreateProjectParams) => {
-    dispatch({
-      type: 'SET_COMMAND_ERROR',
-      backendKey,
-      commandError: null,
-    });
-    await withBackend(backendKey, (backend) => backend.createProject(params));
-  }, [withBackend]);
+  const createWorkspace = useCallback((backendKey: BackendKey, params: CreateWorkspaceParams) =>
+    withBackend(backendKey, async (b) => { await b.createWorkspace(params); await b.listWorkspaces(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const prepareProjectCreation = useCallback(async (
-    backendKey: BackendKey,
-    params: CreateProjectParams
-  ): Promise<PreparedProjectResult> => {
-    let result: PreparedProjectResult | null = null;
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.prepareProjectCreation) {
-        throw new SpacesError('Project preparation is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      result = await backend.prepareProjectCreation(params);
-    });
+  const deleteProject = useCallback((backendKey: BackendKey, projectName: string, params?: DeleteProjectParams) =>
+    withBackend(backendKey, async (b) => { await b.deleteProject(projectName, params); await b.listProjects(); await b.listWorkspaces(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (!result) {
-      throw new SpacesError('Project preparation was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
+  const attachSession = useCallback((backendKey: BackendKey, params: AttachSessionParams) =>
+    withBackend(backendKey, (b) => b.attachSession(params)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return result;
-  }, [withBackend]);
+  const detachSession = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.detachSession()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const finalizeProjectCreation = useCallback(async (
-    backendKey: BackendKey,
-    params: FinalizeProjectParams
-  ) => {
-    dispatch({
-      type: 'SET_COMMAND_ERROR',
-      backendKey,
-      commandError: null,
-    });
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.finalizeProjectCreation) {
-        throw new SpacesError('Project finalization is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      await backend.finalizeProjectCreation(params);
-    });
-  }, [withBackend]);
+  const cancelPendingScripts = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.cancelPendingScripts?.() ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const cancelProjectCreation = useCallback(async (backendKey: BackendKey, projectName: string) => {
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.cancelProjectCreation) {
-        return;
-      }
-      await backend.cancelProjectCreation(projectName);
-    });
-  }, [withBackend]);
+  const cancelPendingReplayRequests = useCallback((backendKey: BackendKey): void => {
+    managerRef.current?.get(backendKey)?.cancelPendingReplayRequests?.();
+  }, []);
 
-  const createWorkspace = useCallback(async (backendKey: BackendKey, params: CreateWorkspaceParams) => {
-    dispatch({
-      type: 'SET_COMMAND_ERROR',
-      backendKey,
-      commandError: null,
-    });
-    await withBackend(backendKey, (backend) => backend.createWorkspace(params));
-  }, [withBackend]);
+  const killSession = useCallback((backendKey: BackendKey, sessionId: string) =>
+    withBackend(backendKey, (b) => b.killSession(sessionId)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const deleteProject = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string,
-    params?: DeleteProjectParams
-  ) => {
-    dispatch({
-      type: 'SET_COMMAND_ERROR',
-      backendKey,
-      commandError: null,
-    });
-    await withBackend(backendKey, (backend) => backend.deleteProject(projectName, params));
-  }, [withBackend]);
+  const deleteWorkspace = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string, params?: DeleteWorkspaceParams) =>
+    withBackend(backendKey, (b) => b.deleteWorkspace(projectName, workspaceId, params)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const attachSession = useCallback(async (backendKey: BackendKey, params: AttachSessionParams) => {
-    dispatch({
-      type: 'SET_COMMAND_ERROR',
-      backendKey,
-      commandError: null,
-    });
-    dispatch({
-      type: 'SET_SCRIPT_STATE',
-      backendKey,
-      scriptState: null,
-    });
-    await withBackend(backendKey, (backend) => backend.attachSession(params));
-  }, [withBackend]);
+  const getBundleRefreshPlan = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string): Promise<BundleRefreshPlan> =>
+    withBackend(backendKey, (b) => b.getBundleRefreshPlan(projectName, workspaceId)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const detachSession = useCallback(async (backendKey: BackendKey) => {
-    await withBackend(backendKey, (backend) => backend.detachSession());
-  }, [withBackend]);
+  const applyBundleRefresh = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string, submission: BundleRefreshSubmission) =>
+    withBackend(backendKey, (b) => b.applyBundleRefresh(projectName, workspaceId, submission)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const cancelPendingScripts = useCallback(async (backendKey: BackendKey) => {
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.cancelPendingScripts) {
-        return;
-      }
-      await backend.cancelPendingScripts();
-    });
-  }, [withBackend]);
+  const getBundleConfigState = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string): Promise<BundleConfigState> =>
+    withBackend(backendKey, (b) => b.getBundleConfigState(projectName, workspaceId)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const cancelPendingReplayRequests = useCallback((backendKey: BackendKey) => {
-    void withBackend(backendKey, async (backend) => {
-      backend.cancelPendingReplayRequests?.();
-    }).catch(() => {
-      // Best-effort cleanup; backend may already be disconnected.
-    });
-  }, [withBackend]);
+  const applyBundleConfigUpdate = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string, submission: BundleConfigSubmission) =>
+    withBackend(backendKey, (b) => b.applyBundleConfigUpdate(projectName, workspaceId, submission)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const killSession = useCallback(async (backendKey: BackendKey, sessionId: string) => {
-    await withBackend(backendKey, (backend) => backend.killSession(sessionId));
-  }, [withBackend]);
+  const requestInbox = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.requestInbox()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const deleteWorkspace = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string,
-    workspaceId: string,
-    params?: DeleteWorkspaceParams
-  ) => {
-    dispatch({
-      type: 'SET_COMMAND_ERROR',
-      backendKey,
-      commandError: null,
-    });
-    dispatch({
-      type: 'SET_SCRIPT_STATE',
-      backendKey,
-      scriptState: {
-        phase: 'remove',
-        isRunning: true,
-      },
-    });
-    try {
-      await withBackend(backendKey, (backend) => backend.deleteWorkspace(projectName, workspaceId, params));
-    } catch (error) {
-      const code =
-        typeof error === 'object' && error !== null && 'code' in error
-          ? (error as { code?: unknown }).code
-          : undefined;
-      if (code !== 'REMOVE_SCRIPT_FAILED') {
-        dispatch({
-          type: 'SET_SCRIPT_STATE',
-          backendKey,
-          scriptState: null,
-        });
-      }
-      throw error;
-    }
-  }, [withBackend]);
+  const clearInbox = useCallback((backendKey: BackendKey, id?: string) =>
+    withBackend(backendKey, (b) => b.clearInbox(id)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const getBundleRefreshPlan = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string,
-    workspaceId: string
-  ): Promise<BundleRefreshPlan> => {
-    let plan: BundleRefreshPlan | null = null;
-    await withBackend(backendKey, async (backend) => {
-      plan = await backend.getBundleRefreshPlan(projectName, workspaceId);
-    });
+  const markInboxRead = useCallback((backendKey: BackendKey, id: string) =>
+    withBackend(backendKey, (b) => b.markInboxRead(id)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (!plan) {
-      throw new SpacesError('Bundle refresh plan was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
+  const getNotificationConfig = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.getNotificationConfig()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return plan;
-  }, [withBackend]);
+  const updateNotificationConfig = useCallback((backendKey: BackendKey, config: NotificationConfig) =>
+    withBackend(backendKey, (b) => b.updateNotificationConfig(config)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const applyBundleRefresh = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string,
-    workspaceId: string,
-    submission: BundleRefreshSubmission
-  ) => {
-    await withBackend(backendKey, (backend) =>
-      backend.applyBundleRefresh(projectName, workspaceId, submission)
-    );
-  }, [withBackend]);
+  const sendReviewRequest = useCallback((backendKey: BackendKey, operation: ReviewOperation): Promise<ReviewResult> =>
+    withBackend(backendKey, (b) => b.sendReviewRequest(operation)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const getBundleConfigState = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string,
-    workspaceId: string
-  ): Promise<BundleConfigState> => {
-    let stateResult: BundleConfigState | null = null;
-    await withBackend(backendKey, async (backend) => {
-      stateResult = await backend.getBundleConfigState(projectName, workspaceId);
-    });
+  const startProcess = useCallback((backendKey: BackendKey, workspaceId: string, processName: string, instance?: number) =>
+    withBackend(backendKey, (b) => b.startProcess?.(workspaceId, processName, instance) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (!stateResult) {
-      throw new SpacesError('Bundle config state was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
+  const stopProcess = useCallback((backendKey: BackendKey, workspaceId: string, processName: string) =>
+    withBackend(backendKey, (b) => b.stopProcess?.(workspaceId, processName) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return stateResult;
-  }, [withBackend]);
+  const requestEvents = useCallback((backendKey: BackendKey, workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number) =>
+    withBackend(backendKey, (b) => b.requestEvents?.(workspacePath, filter, limit, sinceMs) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const applyBundleConfigUpdate = useCallback(async (
-    backendKey: BackendKey,
-    projectName: string,
-    workspaceId: string,
-    submission: BundleConfigSubmission
-  ) => {
-    await withBackend(backendKey, (backend) =>
-      backend.applyBundleConfigUpdate(projectName, workspaceId, submission)
-    );
-  }, [withBackend]);
+  const getReplaySnapshot = useCallback((backendKey: BackendKey, replayId: string, atMs?: number, scrollbackLines?: number): Promise<TerminalSnapshot> =>
+    withBackend(backendKey, (b) => {
+      if (!b.getReplaySnapshot) throw new SpacesError('Replay snapshot unavailable', 'SYSTEM_ERROR', 2);
+      return b.getReplaySnapshot(replayId, atMs, scrollbackLines);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const requestInbox = useCallback(async (backendKey: BackendKey) => {
-    await withBackend(backendKey, (backend) => backend.requestInbox());
-  }, [withBackend]);
+  const getReplayText = useCallback((backendKey: BackendKey, replayId: string, atMs?: number, scrollbackLines?: number, includeScrollback?: boolean, trimTrailingBlankRows?: boolean): Promise<string> =>
+    withBackend(backendKey, (b) => {
+      if (!b.getReplayText) throw new SpacesError('Replay text unavailable', 'SYSTEM_ERROR', 2);
+      return b.getReplayText(replayId, atMs, scrollbackLines, includeScrollback, trimTrailingBlankRows);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const clearInbox = useCallback(async (backendKey: BackendKey, id?: string) => {
-    await withBackend(backendKey, (backend) => backend.clearInbox(id));
-  }, [withBackend]);
+  const getReplayMarkdown = useCallback((backendKey: BackendKey, replayId: string, atMs?: number, scrollbackLines?: number, includeScrollback?: boolean, trimTrailingBlankRows?: boolean): Promise<string> =>
+    withBackend(backendKey, (b) => {
+      if (!b.getReplayMarkdown) throw new SpacesError('Replay markdown unavailable', 'SYSTEM_ERROR', 2);
+      return b.getReplayMarkdown(replayId, atMs, scrollbackLines, includeScrollback, trimTrailingBlankRows);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const markInboxRead = useCallback(async (backendKey: BackendKey, id: string) => {
-    await withBackend(backendKey, (backend) => backend.markInboxRead(id));
-  }, [withBackend]);
+  const getReplayFrame = useCallback((backendKey: BackendKey, replayId: string, target?: ReplayFrameTarget): Promise<ReplayFrame> =>
+    withBackend(backendKey, (b) => {
+      if (!b.getReplayFrame) throw new SpacesError('Replay frame unavailable', 'SYSTEM_ERROR', 2);
+      return b.getReplayFrame(replayId, target);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const getNotificationConfig = useCallback(async (backendKey: BackendKey) => {
-    await withBackend(backendKey, (backend) => backend.getNotificationConfig());
-  }, [withBackend]);
+  const getReplayTimeline = useCallback((backendKey: BackendKey, replayId: string): Promise<ReplayTimeline> =>
+    withBackend(backendKey, (b) => {
+      if (!b.getReplayTimeline) throw new SpacesError('Replay timeline unavailable', 'SYSTEM_ERROR', 2);
+      return b.getReplayTimeline(replayId);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const updateNotificationConfig = useCallback(async (backendKey: BackendKey, config: NotificationConfig) => {
-    await withBackend(backendKey, (backend) => backend.updateNotificationConfig(config));
-  }, [withBackend]);
+  const dismissReplay = useCallback((backendKey: BackendKey, replayId: string) =>
+    withBackend(backendKey, (b) => b.dismissReplay?.(replayId) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sendReviewRequest = useCallback(async (
-    backendKey: BackendKey,
-    operation: ReviewOperation
-  ): Promise<ReviewResult> => {
-    let result: ReviewResult | null = null;
-    await withBackend(backendKey, async (backend) => {
-      result = await backend.sendReviewRequest(operation);
-    });
-    if (!result) {
-      throw new SpacesError('Review request was not handled by backend', 'SYSTEM_ERROR', 2);
-    }
-    return result;
-  }, [withBackend]);
+  const undismissReplay = useCallback((backendKey: BackendKey, replayId: string) =>
+    withBackend(backendKey, (b) => b.undismissReplay?.(replayId) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startProcess = useCallback(async (backendKey: BackendKey, workspaceId: string, processName: string, instance?: number) => {
-    await withBackend(backendKey, async (backend) => {
-      if (backend.startProcess) {
-        await backend.startProcess(workspaceId, processName, instance);
-      }
-    });
-  }, [withBackend]);
+  const activeBackendState = useMemo(() => {
+    if (!state.activeBackendKey) return null;
+    return state.backends[state.activeBackendKey] ?? null;
+  }, [state]);
 
-  const stopProcess = useCallback(async (backendKey: BackendKey, workspaceId: string, processName: string) => {
-    await withBackend(backendKey, async (backend) => {
-      if (backend.stopProcess) {
-        await backend.stopProcess(workspaceId, processName);
-      }
-    });
-  }, [withBackend]);
-
-  const requestEvents = useCallback(async (
-    backendKey: BackendKey,
-    workspacePath: string,
-    filter?: WideEventFilter,
-    limit?: number,
-    sinceMs?: number,
-  ) => {
-    await withBackend(backendKey, async (backend) => {
-      if (backend.requestEvents) {
-        await backend.requestEvents(workspacePath, filter, limit, sinceMs);
-      }
-    });
-  }, [withBackend]);
-
-  const createCheckpoint = useCallback(async (backendKey: BackendKey, sessionId: string) => {
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.createCheckpoint) {
-        throw new SpacesError('Checkpoint creation is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      await backend.createCheckpoint(sessionId);
-    });
-  }, [withBackend]);
-
-  const getReplaySnapshot = useCallback(async (
-    backendKey: BackendKey,
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-  ) => {
-    let snapshot = null;
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.getReplaySnapshot) {
-        throw new SpacesError('Replay snapshots are not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      snapshot = await backend.getReplaySnapshot(replayId, atMs, scrollbackLines);
-    });
-    if (!snapshot) {
-      throw new SpacesError('Replay snapshot was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
-    return snapshot;
-  }, [withBackend]);
-
-  const getReplayText = useCallback(async (
-    backendKey: BackendKey,
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-    includeScrollback?: boolean,
-    trimTrailingBlankRows?: boolean,
-  ) => {
-    let text: string | null = null;
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.getReplayText) {
-        throw new SpacesError('Replay text rendering is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      text = await backend.getReplayText(replayId, atMs, scrollbackLines, includeScrollback, trimTrailingBlankRows);
-    });
-    if (text === null) {
-      throw new SpacesError('Replay text was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
-    return text;
-  }, [withBackend]);
-
-  const getReplayMarkdown = useCallback(async (
-    backendKey: BackendKey,
-    replayId: string,
-    atMs?: number,
-    scrollbackLines?: number,
-    includeScrollback?: boolean,
-    trimTrailingBlankRows?: boolean,
-  ) => {
-    let markdown: string | null = null;
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.getReplayMarkdown) {
-        throw new SpacesError('Replay markdown rendering is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      markdown = await backend.getReplayMarkdown(replayId, atMs, scrollbackLines, includeScrollback, trimTrailingBlankRows);
-    });
-    if (markdown === null) {
-      throw new SpacesError('Replay markdown was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
-    return markdown;
-  }, [withBackend]);
-
-  const getReplayFrame = useCallback(async (
-    backendKey: BackendKey,
-    replayId: string,
-    target?: import('./backend.js').ReplayFrameTarget,
-  ) => {
-    let frame: import('./backend.js').ReplayFrame | null = null;
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.getReplayFrame) {
-        throw new SpacesError('Replay frame is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      frame = await backend.getReplayFrame(replayId, target);
-    });
-    if (!frame) {
-      throw new SpacesError('Replay frame was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
-    return frame;
-  }, [withBackend]);
-
-  const getReplayTimeline = useCallback(async (
-    backendKey: BackendKey,
-    replayId: string,
-  ) => {
-    let timeline: import('./backend.js').ReplayTimeline | null = null;
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.getReplayTimeline) {
-        throw new SpacesError('Replay timeline is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      timeline = await backend.getReplayTimeline(replayId);
-    });
-    if (!timeline) {
-      throw new SpacesError('Replay timeline was not returned by backend', 'SYSTEM_ERROR', 2);
-    }
-    return timeline;
-  }, [withBackend]);
-
-  const dismissReplay = useCallback(async (backendKey: BackendKey, replayId: string) => {
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.dismissReplay) {
-        throw new SpacesError('Replay dismissal is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      await backend.dismissReplay(replayId);
-    });
-  }, [withBackend]);
-
-  const undismissReplay = useCallback(async (backendKey: BackendKey, replayId: string) => {
-    await withBackend(backendKey, async (backend) => {
-      if (!backend.undismissReplay) {
-        throw new SpacesError('Replay restore is not supported by this backend', 'SYSTEM_ERROR', 2);
-      }
-      await backend.undismissReplay(replayId);
-    });
-  }, [withBackend]);
-
-  return useMemo(() => ({
+  return {
     state,
-    activeBackendKey: getActiveBackendKey(state),
-    activeBackendState: getActiveBackendState(state),
-    backendKeys: getBackendKeys(state),
-    getBackendState: (backendKey: BackendKey) => getBackendState(state, backendKey),
-
-    registerBackend,
-    unregisterBackend,
-    setActiveBackend,
-    connectBackend,
-    disconnectBackend,
-
-    listProjects,
-    listGithubRepos,
-    listRemoteBranches,
-    listLinearIssues,
-    listWorkspaces,
-    listSessions,
-    listReplays,
-    createProject,
-    prepareProjectCreation,
-    finalizeProjectCreation,
-    cancelProjectCreation,
-    createWorkspace,
-    deleteProject,
-    attachSession,
-    detachSession,
-    cancelPendingScripts,
-    cancelPendingReplayRequests,
-    killSession,
-    deleteWorkspace,
-    getBundleRefreshPlan,
-    applyBundleRefresh,
-    getBundleConfigState,
-    applyBundleConfigUpdate,
-
-    requestInbox,
-    clearInbox,
-    markInboxRead,
-    getNotificationConfig,
-    updateNotificationConfig,
-    sendReviewRequest,
-
-    startProcess,
-    stopProcess,
-    requestEvents,
-    createCheckpoint,
-    getReplaySnapshot,
-    getReplayText,
-    getReplayMarkdown,
-    getReplayFrame,
-    getReplayTimeline,
-    dismissReplay,
-    undismissReplay,
-  }), [
-    state,
+    activeBackendKey: state.activeBackendKey,
+    activeBackendState,
+    backendKeys: state.backendOrder,
+    getBackendState,
     registerBackend,
     unregisterBackend,
     setActiveBackend,
@@ -753,6 +348,7 @@ export function useSessionEngine() {
     listRemoteBranches,
     listLinearIssues,
     listWorkspaces,
+    setWorkspaceStatus,
     listSessions,
     listReplays,
     createProject,
@@ -780,7 +376,6 @@ export function useSessionEngine() {
     startProcess,
     stopProcess,
     requestEvents,
-    createCheckpoint,
     getReplaySnapshot,
     getReplayText,
     getReplayMarkdown,
@@ -788,5 +383,7 @@ export function useSessionEngine() {
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
-  ]);
+  };
 }
+
+export type UseSessionEngineResult = ReturnType<typeof useSessionEngine>;

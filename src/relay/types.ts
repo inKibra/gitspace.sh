@@ -44,9 +44,11 @@ export interface Pipe {
 }
 
 /**
- * Relay configuration
+ * Relay server startup configuration.
+ * Distinct from RelayEnrollment (persisted client-side enrollment) and
+ * RelayDescriptor (TUI/client connection descriptor).
  */
-export interface RelayConfig {
+export interface RelayServerConfig {
   /** Port to listen on */
   port: number;
   /** Address to bind to (default: 0.0.0.0) */

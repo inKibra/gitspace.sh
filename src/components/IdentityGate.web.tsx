@@ -3,10 +3,24 @@
  * Identity gate screen shown before relay connection.
  *
  * Handles the full identity bootstrap flow:
- * - Returning user with stored mnemonic → PIN unlock
- * - New user → GitHub OAuth → cloud backup recovery
- * - Fallback → manual 24-word mnemonic entry
- * - PIN creation for encrypting identity in localStorage
+ *
+ * New device (no stored device identity):
+ *   1. GitHub OAuth → cloud backup → decrypt mnemonic → create device identity
+ *   2. Or: manual mnemonic entry → create device identity
+ *   In both cases: root identity (from mnemonic) signs a device cert, then
+ *   the device keypair is encrypted with a PIN and stored in localStorage.
+ *   The mnemonic is never persisted.
+ *
+ * Returning device (device identity already stored):
+ *   PIN unlock → decrypt device keypair → load device cert → ready
+ *
+ * What gets stored in localStorage:
+ *   - Encrypted device keypair (PIN-protected)
+ *   - Plaintext root-signed device certificate (public data, not sensitive)
+ *
+ * Legacy migration:
+ *   If old-format mnemonic storage is detected, the user is prompted to
+ *   re-enter their PIN to migrate to the new device keypair format.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -17,11 +31,14 @@ import {
   type CloudBackup,
 } from '../lib/identity-backup.web';
 import {
-  hasStoredMnemonic,
-  unlockMnemonic,
-  storeMnemonic,
-  getUnlockedIdentity,
-  clearStoredMnemonic,
+  hasStoredDeviceIdentity,
+  unlockDeviceIdentity,
+  generateAndStoreDeviceIdentity,
+  clearStoredDeviceIdentity,
+  hasLegacyMnemonicStorage,
+  decryptLegacyMnemonic,
+  clearLegacyMnemonicStorage,
+  deriveRootIdentityFromMnemonic,
 } from '../lib/storage/identity-store.web';
 import {
   isValidMnemonic,
@@ -32,6 +49,7 @@ import type { Identity } from '../types/identity';
 type GateStep =
   | 'checking'
   | 'unlock-pin'
+  | 'legacy-migrate-pin'
   | 'login'
   | 'fetching-backup'
   | 'backup-password'
@@ -59,24 +77,27 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
 
   // Backup data from cloud
   const backupRef = useRef<CloudBackup | null>(null);
-  // Mnemonic ready to be stored with a PIN
+  // Mnemonic ready to be used for device identity creation
   const pendingMnemonicRef = useRef<string | null>(null);
 
   // ================================================================
-  // Initial check: do we have a stored mnemonic or an auth token?
+  // Initial check
   // ================================================================
   useEffect(() => {
-    // Only run during the initial check phase — don't clobber user progress
-    // if auth state changes while they're mid-flow (e.g. at create-pin).
     if (step !== 'checking') return;
 
-    if (hasStoredMnemonic()) {
+    if (hasStoredDeviceIdentity()) {
       setStep('unlock-pin');
       return;
     }
 
+    // Legacy: old-format mnemonic storage needs migration
+    if (hasLegacyMnemonicStorage()) {
+      setStep('legacy-migrate-pin');
+      return;
+    }
+
     if (auth.isLoggedIn) {
-      // Already have a token (e.g. just came back from OAuth redirect)
       setStep('fetching-backup');
       return;
     }
@@ -85,7 +106,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
   }, [auth.isLoggedIn, step]);
 
   // ================================================================
-  // When step transitions to fetching-backup, auto-fetch
+  // Auto-fetch cloud backup
   // ================================================================
   useEffect(() => {
     if (step !== 'fetching-backup' || !auth.token) return;
@@ -116,31 +137,54 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
   // Handlers
   // ================================================================
 
-  const completeWithIdentity = useCallback(() => {
-    const identity = getUnlockedIdentity('Browser Owner');
-    if (identity) {
-      onIdentityReady(identity);
-    } else {
-      setError('Failed to derive identity from mnemonic.');
-      setStep('error');
-    }
+  /**
+   * Given a confirmed mnemonic, generate a device identity and call
+   * onIdentityReady. Must be called after the PIN has been confirmed.
+   */
+  const createDeviceIdentityFromMnemonic = useCallback(async (mnemonic: string, pin: string) => {
+    const rootIdentity = deriveRootIdentityFromMnemonic(mnemonic);
+    const deviceIdentity = await generateAndStoreDeviceIdentity(rootIdentity, pin);
+    onIdentityReady(deviceIdentity);
   }, [onIdentityReady]);
 
+  /** Unlock with PIN (new device format). */
   const handleUnlockPin = useCallback(async () => {
     if (!pinValue.trim()) return;
     setLoading(true);
     setError(null);
 
     try {
-      await unlockMnemonic(pinValue);
-      completeWithIdentity();
+      const identity = await unlockDeviceIdentity(pinValue);
+      onIdentityReady(identity);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unlock failed');
       setPinValue('');
     } finally {
       setLoading(false);
     }
-  }, [pinValue, completeWithIdentity]);
+  }, [pinValue, onIdentityReady]);
+
+  /**
+   * Legacy migration: user has old mnemonic storage.
+   * Decrypt with their PIN, re-derive root identity, create new device identity.
+   */
+  const handleLegacyMigratePin = useCallback(async () => {
+    if (!pinValue.trim()) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      const mnemonic = await decryptLegacyMnemonic(pinValue);
+      clearLegacyMnemonicStorage();
+      // Migrate: create device identity using the recovered mnemonic
+      await createDeviceIdentityFromMnemonic(mnemonic, pinValue);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Migration failed');
+      setPinValue('');
+    } finally {
+      setLoading(false);
+    }
+  }, [pinValue, createDeviceIdentityFromMnemonic]);
 
   const handleBackupPassword = useCallback(async () => {
     if (!passwordValue.trim() || !backupRef.current) return;
@@ -215,20 +259,19 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
     setError(null);
 
     try {
-      await storeMnemonic(pendingMnemonicRef.current, newPinValue);
+      await createDeviceIdentityFromMnemonic(pendingMnemonicRef.current, newPinValue);
       // Clear sensitive data from memory
       pendingMnemonicRef.current = null;
       setPasswordValue('');
       setMnemonicValue('');
       setNewPinValue('');
       setConfirmPinValue('');
-      completeWithIdentity();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to store identity');
+      setError(err instanceof Error ? err.message : 'Failed to create device identity');
     } finally {
       setLoading(false);
     }
-  }, [newPinValue, confirmPinValue, completeWithIdentity]);
+  }, [newPinValue, confirmPinValue, createDeviceIdentityFromMnemonic]);
 
   const handleKeyDown = useCallback((handler: () => void) => {
     return (e: React.KeyboardEvent) => {
@@ -287,10 +330,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
               </button>
               <button
                 onClick={() => {
-                  // Full reset: clear stored identity and auth token so the
-                  // user re-authenticates with a fresh token instead of
-                  // hitting fetching-backup with a potentially expired one.
-                  clearStoredMnemonic();
+                  clearStoredDeviceIdentity();
                   auth.logout();
                   setStep('login');
                   setError(null);
@@ -299,6 +339,48 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 className="w-full mt-2 px-5 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] transition-all"
               >
                 Reset browser identity
+              </button>
+            </>
+          )}
+
+          {step === 'legacy-migrate-pin' && (
+            <>
+              <h2 className="text-lg font-medium text-[#e6edf3] mb-4">Migrate Identity</h2>
+              <p className="text-sm text-[#8b949e] mb-4">
+                Your browser identity is being upgraded to the new secure format.
+                Enter your existing PIN to continue.
+              </p>
+              <input
+                type="password"
+                value={pinValue}
+                onChange={(e) => setPinValue(e.target.value)}
+                onKeyDown={handleKeyDown(handleLegacyMigratePin)}
+                placeholder="Enter existing PIN"
+                autoFocus
+                disabled={loading}
+                className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] placeholder:text-[#6e7681] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all disabled:opacity-50"
+              />
+              {error && (
+                <p className="mt-2 text-sm text-[#f85149]">{error}</p>
+              )}
+              <button
+                onClick={handleLegacyMigratePin}
+                disabled={loading || !pinValue.trim()}
+                className="w-full mt-4 px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow transition-all disabled:bg-[#21262d] disabled:border-[#30363d] disabled:text-[#6e7681] disabled:cursor-not-allowed disabled:shadow-none"
+              >
+                {loading ? 'Migrating...' : 'Continue'}
+              </button>
+              <button
+                onClick={() => {
+                  clearLegacyMnemonicStorage();
+                  auth.logout();
+                  setStep('login');
+                  setError(null);
+                  setPinValue('');
+                }}
+                className="w-full mt-2 px-5 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] transition-all"
+              >
+                Reset and start over
               </button>
             </>
           )}
@@ -426,7 +508,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
             <>
               <h2 className="text-lg font-medium text-[#e6edf3] mb-2">Create Browser PIN</h2>
               <p className="text-sm text-[#8b949e] mb-4">
-                Create a PIN to unlock your identity on this browser. This is stored locally and protects your identity at rest.
+                Create a PIN to unlock your identity on this browser. This protects your device keys at rest.
               </p>
               <input
                 type="password"

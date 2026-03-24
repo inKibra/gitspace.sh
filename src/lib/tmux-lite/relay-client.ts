@@ -29,7 +29,6 @@ import type {
   X3DHResultMessage,
 } from "../../types/identity.js";
 import { signMessage, type SignatureBlock } from "../../relay/signing.js";
-import { logger } from "../../utils/logger.js";
 
 /** Relay client configuration (identity/X3DH handshake) */
 export interface RelayClientConfig {
@@ -65,12 +64,6 @@ export interface RelayClientEvents {
   onStateChange?: (state: ConnectionState) => void;
   /** Called when handshake completes */
   onHandshakeComplete?: (peerIdentityId: string, accessType: AccessType, sessionId?: string) => void;
-  /**
-   * Called after a successful reconnect + re-handshake.
-   * `previousSessionId` is the tmux-lite session ID that was active before the
-   * disconnect (if any), allowing the consumer to re-attach to the same session.
-   */
-  onReconnected?: (previousTmuxSessionId: string | null) => void;
 }
 
 /**
@@ -84,13 +77,6 @@ export class RelayClient {
   private events: RelayClientEvents;
   private state: ConnectionState = "disconnected";
   private reconnectAttempts = 0;
-  /**
-   * True after the first successful handshake completes. Never reset to false.
-   * Used to distinguish the initial connect from subsequent reconnects, since
-   * `reconnectAttempts` is reset to 0 in `onopen` (before the handshake
-   * finishes), making it an unreliable reconnect indicator at handshake time.
-   */
-  private hasEverConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readKey: Buffer | null = null;
   private writeKey: Buffer | null = null;
@@ -101,13 +87,6 @@ export class RelayClient {
   private peerIdentityId: string | null = null;
   private accessType: AccessType | null = null;
   private sessionId: string | undefined = undefined;
-
-  /**
-   * The tmux-lite session ID that was active before the most recent disconnect.
-   * Preserved across reconnects so consumers can re-attach to the same session.
-   * Set by the consumer via `setActiveTmuxSessionId()` when a session is attached.
-   */
-  private activeTmuxSessionId: string | null = null;
 
   /** Maximum reconnect attempts */
   private readonly maxReconnectAttempts = 10;
@@ -150,20 +129,6 @@ export class RelayClient {
   /** Get current session ID */
   getSessionId(): string | undefined {
     return this.sessionId;
-  }
-
-  /**
-   * Record the currently attached tmux-lite session ID.
-   * Call this after successfully attaching to a session so the client can
-   * re-attach to it automatically after a reconnect.
-   */
-  setActiveTmuxSessionId(sessionId: string | null): void {
-    this.activeTmuxSessionId = sessionId;
-  }
-
-  /** Get the tmux-lite session ID that was active before the last disconnect */
-  getActiveTmuxSessionId(): string | null {
-    return this.activeTmuxSessionId;
   }
 
   /**
@@ -253,8 +218,6 @@ export class RelayClient {
         );
         this.ws = null;
         this.handshakeState = null;
-        // NOTE: activeTmuxSessionId is intentionally NOT cleared here so the
-        // reconnect path can re-attach to the same tmux-lite session.
         this.events.onDisconnect?.(event.code, event.reason);
 
         // Auto-reconnect unless explicitly disconnected
@@ -465,24 +428,10 @@ export class RelayClient {
           this.writeKey = Buffer.from(result.sessionKeys.sendKey);
           this.readKey = Buffer.from(result.sessionKeys.receiveKey);
 
-          const isReconnect = this.hasEverConnected;
-          const previousTmuxSessionId = isReconnect ? this.activeTmuxSessionId : null;
-
-          logger.log(
-            isReconnect
-              ? `[relay-client] Reconnected successfully.${previousTmuxSessionId ? ` Will re-attach to session ${previousTmuxSessionId}.` : ""}`
-              : "[relay-client] Handshake complete, session established",
-          );
-
-          this.hasEverConnected = true;
-          this.reconnectAttempts = 0;
+          console.log("[relay-client] Handshake complete, session established");
           this.setState("connected");
           this.events.onConnect?.();
           this.events.onHandshakeComplete?.(this.peerIdentityId, this.accessType, this.sessionId);
-
-          if (isReconnect) {
-            this.events.onReconnected?.(previousTmuxSessionId);
-          }
           break;
         }
 

@@ -4,51 +4,33 @@ import type { OpenCodeRuntimeInfo } from './opencode-types.js';
 import { logger } from '../utils/logger.js';
 import { getGitspaceDir } from '../core/config.js';
 
-const workspaceWriteQueues = new Map<string, Promise<void>>();
-
 export interface StoredOpenCodeRuntime extends OpenCodeRuntimeInfo {
   projectName?: string;
   pid?: number;
   lastSeenAt?: string;
 }
 
-export interface StoredWorkspaceAgentSession {
-  id: string;
-  title: string;
-  rawTitle?: string;
-  parentID?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  lastSeenAt?: string;
-  lastKnownStatus?: string;
-  terminalSessionId?: string;
-  terminalSessionName?: string;
-  managed?: boolean;
+const MACHINE_RUNTIME_KEY = 'machine';
+const OPENCODE_RUNTIME_STORE_DIR_ENV = 'OPENCODE_RUNTIME_STORE_DIR';
+
+export function getOpenCodeRoot(): string {
+  const override = process.env[OPENCODE_RUNTIME_STORE_DIR_ENV]?.trim();
+  if (override) {
+    return override;
+  }
+  return join(getGitspaceDir(), '.opencode');
 }
 
-export interface StoredWorkspaceAgentSessionHistory {
-  workspaceId: string;
-  sessions: Record<string, StoredWorkspaceAgentSession>;
-}
-
-function getGitspaceHome(): string {
-  return getGitspaceDir();
-}
-
-function getOpenCodeRoot(): string {
-  return join(getGitspaceHome(), '.opencode');
-}
-
-function getRuntimeDir(): string {
+export function getRuntimeDir(): string {
   return join(getOpenCodeRoot(), 'runtimes');
 }
 
-function getSessionDir(): string {
-  return join(getOpenCodeRoot(), 'sessions');
+function runtimeFileName(runtimeKey = MACHINE_RUNTIME_KEY): string {
+  return `${encodeURIComponent(runtimeKey)}.json`;
 }
 
-function fileNameForWorkspace(workspaceId: string): string {
-  return `${encodeURIComponent(workspaceId)}.json`;
+export function getStoredRuntimePath(runtimeKey = MACHINE_RUNTIME_KEY): string {
+  return join(getRuntimeDir(), runtimeFileName(runtimeKey));
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -64,26 +46,6 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
-async function withWorkspaceWriteLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
-  const previous = workspaceWriteQueues.get(workspaceId) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.catch(() => undefined).then(() => current);
-  workspaceWriteQueues.set(workspaceId, queued);
-
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (workspaceWriteQueues.get(workspaceId) === queued) {
-      workspaceWriteQueues.delete(workspaceId);
-    }
-  }
-}
-
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -91,17 +53,17 @@ async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await rename(tempPath, filePath);
 }
 
-export async function readStoredRuntime(workspaceId: string): Promise<StoredOpenCodeRuntime | null> {
-  return readJsonFile<StoredOpenCodeRuntime>(join(getRuntimeDir(), fileNameForWorkspace(workspaceId)));
+export async function readStoredRuntime(runtimeKey = MACHINE_RUNTIME_KEY): Promise<StoredOpenCodeRuntime | null> {
+  return readJsonFile<StoredOpenCodeRuntime>(getStoredRuntimePath(runtimeKey));
 }
 
 export async function writeStoredRuntime(runtime: StoredOpenCodeRuntime): Promise<void> {
-  await writeJsonFile(join(getRuntimeDir(), fileNameForWorkspace(runtime.workspaceId)), runtime);
+  await writeJsonFile(getStoredRuntimePath(runtime.runtimeKey), runtime);
 }
 
-export async function deleteStoredRuntime(workspaceId: string): Promise<void> {
+export async function deleteStoredRuntime(runtimeKey = MACHINE_RUNTIME_KEY): Promise<void> {
   try {
-    await rm(join(getRuntimeDir(), fileNameForWorkspace(workspaceId)));
+    await rm(getStoredRuntimePath(runtimeKey));
   } catch {
     // non-fatal
   }
@@ -109,95 +71,18 @@ export async function deleteStoredRuntime(workspaceId: string): Promise<void> {
 
 export async function listStoredRuntimes(): Promise<StoredOpenCodeRuntime[]> {
   try {
-    const entries = await readdir(getRuntimeDir());
+    const entries = await readdir(getRuntimeDir(), { withFileTypes: true });
     const runtimes = await Promise.all(
-      entries.map((entry) => readJsonFile<StoredOpenCodeRuntime>(join(getRuntimeDir(), entry))),
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .map((entry) => readJsonFile<StoredOpenCodeRuntime>(join(getRuntimeDir(), entry.name))),
     );
     return runtimes.filter((runtime): runtime is StoredOpenCodeRuntime => runtime !== null);
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    logger.error(`[opencode-store] Failed to list runtimes: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   }
-}
-
-export async function readStoredSessionHistory(workspaceId: string): Promise<StoredWorkspaceAgentSessionHistory> {
-  const stored = await readJsonFile<StoredWorkspaceAgentSessionHistory>(join(getSessionDir(), fileNameForWorkspace(workspaceId)));
-  return stored ?? { workspaceId, sessions: {} };
-}
-
-export async function writeStoredSessionHistory(history: StoredWorkspaceAgentSessionHistory): Promise<void> {
-  await writeJsonFile(join(getSessionDir(), fileNameForWorkspace(history.workspaceId)), history);
-}
-
-export async function upsertStoredSession(
-  workspaceId: string,
-  session: StoredWorkspaceAgentSession,
-): Promise<void> {
-  await withWorkspaceWriteLock(workspaceId, async () => {
-    const history = await readStoredSessionHistory(workspaceId);
-    history.sessions[session.id] = {
-      ...history.sessions[session.id],
-      ...session,
-      lastSeenAt: session.lastSeenAt ?? new Date().toISOString(),
-    };
-    await writeStoredSessionHistory(history);
-  });
-}
-
-export async function replaceStoredSessions(
-  workspaceId: string,
-  sessions: StoredWorkspaceAgentSession[],
-): Promise<void> {
-  await withWorkspaceWriteLock(workspaceId, async () => {
-    const existing = await readStoredSessionHistory(workspaceId);
-    const next: Record<string, StoredWorkspaceAgentSession> = {};
-    const seenIds = new Set<string>();
-    for (const session of sessions) {
-      seenIds.add(session.id);
-      next[session.id] = {
-        ...existing.sessions[session.id],
-        ...session,
-        lastKnownStatus: session.lastKnownStatus,
-        lastSeenAt: session.lastSeenAt ?? new Date().toISOString(),
-      };
-    }
-    for (const [sessionId, stored] of Object.entries(existing.sessions)) {
-      if (seenIds.has(sessionId)) {
-        continue;
-      }
-      next[sessionId] = {
-        ...stored,
-        lastKnownStatus: 'closed',
-        lastSeenAt: new Date().toISOString(),
-        terminalSessionId: undefined,
-        terminalSessionName: undefined,
-      };
-    }
-    await writeStoredSessionHistory({ workspaceId, sessions: next });
-  });
-}
-
-export async function markStoredSessionClosed(workspaceId: string, sessionId: string): Promise<void> {
-  await withWorkspaceWriteLock(workspaceId, async () => {
-    const history = await readStoredSessionHistory(workspaceId);
-    const existing = history.sessions[sessionId];
-    if (!existing) {
-      return;
-    }
-    history.sessions[sessionId] = {
-      ...existing,
-      lastKnownStatus: 'closed',
-      lastSeenAt: new Date().toISOString(),
-      terminalSessionId: undefined,
-      terminalSessionName: undefined,
-    };
-    await writeStoredSessionHistory(history);
-  });
-}
-
-export async function deleteStoredSession(workspaceId: string, sessionId: string): Promise<void> {
-  await withWorkspaceWriteLock(workspaceId, async () => {
-    const history = await readStoredSessionHistory(workspaceId);
-    delete history.sessions[sessionId];
-    await writeStoredSessionHistory(history);
-  });
 }

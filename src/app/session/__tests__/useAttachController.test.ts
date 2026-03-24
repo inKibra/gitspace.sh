@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test'
-import { renderHook } from '@testing-library/react'
+import { act, renderHook } from '@testing-library/react'
 import { Window } from 'happy-dom'
 import { useAttachController } from '../useAttachController.js'
 
@@ -50,11 +50,12 @@ describe('useAttachController', () => {
     expect(attachSessionWithBundleRefresh).toHaveBeenCalledTimes(1)
     expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
       {
+        backendKey: 'local',
         workspaceId: 'my-project:my-workspace',
-        sessionName: 'custom-name',
       },
       {
-        projectName: 'my-project',
+        sessionName: 'custom-name',
+        workspaceId: 'my-project:my-workspace',
       }
     )
   })
@@ -116,10 +117,11 @@ describe('useAttachController', () => {
     expect(attachSessionWithBundleRefresh).toHaveBeenCalledTimes(1)
     expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
       {
-        sessionId: 'session-2',
+        backendKey: 'local',
+        workspaceId: '',
       },
       {
-        projectName: null,
+        sessionId: 'session-2',
       }
     )
   })
@@ -142,11 +144,12 @@ describe('useAttachController', () => {
 
     expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
       {
-        sessionId: 'session-view',
-        viewOnly: true,
+        backendKey: 'local',
+        workspaceId: '',
       },
       {
-        projectName: null,
+        sessionId: 'session-view',
+        viewOnly: true,
       }
     )
   })
@@ -154,7 +157,7 @@ describe('useAttachController', () => {
   it('runs lifecycle callbacks for cancelled and failed attach attempts', async () => {
     const onAttachCancelled = mock(() => {})
     const onAttachError = mock(() => {})
-    const attachSessionWithBundleRefresh = mock(async (params: { sessionId?: string }) => {
+    const attachSessionWithBundleRefresh = mock(async (_ref: { backendKey: string; workspaceId: string }, params: { sessionId?: string }) => {
       if (params.sessionId === 'cancelled') {
         return false
       }
@@ -205,25 +208,96 @@ describe('useAttachController', () => {
     expect(attachSessionWithBundleRefresh).toHaveBeenNthCalledWith(
       1,
       {
+        backendKey: 'local',
+        workspaceId: '',
+      },
+      {
         sessionId: 'session-3',
         cols: 132,
         rows: 41,
-      },
-      {
-        projectName: null,
       }
     )
 
     expect(attachSessionWithBundleRefresh).toHaveBeenNthCalledWith(
       2,
       {
+        backendKey: 'local',
+        workspaceId: '',
+      },
+      {
         sessionId: 'session-4',
         cols: 90,
         rows: 22,
-      },
-      {
-        projectName: null,
       }
     )
+  })
+
+  it('canAttachAnyway is true when recoverableAttachParams is provided and calls attach with scriptPolicy skip', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const recoverableParams = {
+      workspaceId: 'my-project:my-workspace',
+      sessionName: 'debug-shell',
+      cols: 120,
+      rows: 40,
+    }
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+        recoverableAttachParams: recoverableParams,
+      })
+    )
+
+    expect(result.current.canAttachAnyway).toBe(true)
+
+    let retried = false
+    await act(async () => {
+      retried = await result.current.attachAnyway()
+    })
+
+    expect(retried).toBe(true)
+    expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
+      {
+        backendKey: 'local',
+        workspaceId: 'my-project:my-workspace',
+      },
+      {
+        workspaceId: 'my-project:my-workspace',
+        sessionName: 'debug-shell',
+        cols: 120,
+        rows: 40,
+        scriptPolicy: 'skip',
+      }
+    )
+  })
+
+  it('canAttachAnyway is false when recoverableAttachParams is null', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+        recoverableAttachParams: null,
+      })
+    )
+
+    expect(result.current.canAttachAnyway).toBe(false)
+
+    let retried = true
+    await act(async () => {
+      retried = await result.current.attachAnyway()
+    })
+    expect(retried).toBe(false)
   })
 })

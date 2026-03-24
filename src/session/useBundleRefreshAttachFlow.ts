@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BundleRefreshPlan, BundleRefreshStep, BundleRefreshSubmission } from '../types/bundle-refresh.js';
 import type { ConfirmStepResult } from '../types/bundle.js';
 import type { FlowWizardStep, UseFlowReturn } from '../components/Flow.js';
+import type { BackendScopedWorkspaceRef } from '../machine/multi/types.js';
 
 export interface BundleRefreshCommandError {
   code?: string;
@@ -26,9 +27,8 @@ export interface BundleRefreshAttachParams {
 }
 
 interface PendingAttach {
+  ref: BackendScopedWorkspaceRef;
   params: BundleRefreshAttachParams;
-  workspaceId: string;
-  projectName: string | null;
   attemptId: number;
   createdAt: number;
 }
@@ -81,22 +81,11 @@ export interface UseBundleRefreshAttachFlowOptions {
   >;
   commandError: BundleRefreshCommandError | null;
   attachSession: (params: BundleRefreshAttachParams) => Promise<void> | void;
-  getBundleRefreshPlan?: (projectName: string, workspaceId: string) => Promise<BundleRefreshPlan>;
+  getBundleRefreshPlan?: (ref: BackendScopedWorkspaceRef) => Promise<BundleRefreshPlan>;
   applyBundleRefresh?: (
-    projectName: string,
-    workspaceId: string,
+    ref: BackendScopedWorkspaceRef,
     submission: BundleRefreshSubmission
   ) => Promise<void>;
-  resolveProjectName?: (workspaceId: string) => string | null;
-}
-
-function parseProjectNameFromWorkspaceId(workspaceId: string): string | null {
-  const separatorIndex = workspaceId.indexOf(':');
-  if (separatorIndex <= 0) {
-    return null;
-  }
-
-  return workspaceId.slice(0, separatorIndex) || null;
 }
 
 function getErrorCode(error: unknown): string | undefined {
@@ -275,9 +264,15 @@ function applyWizardValues(
 
 export interface UseBundleRefreshAttachFlowResult {
   attachSessionWithBundleRefresh: (
-    params: BundleRefreshAttachParams,
-    options?: { projectName?: string | null }
+    ref: BackendScopedWorkspaceRef,
+    params: BundleRefreshAttachParams
   ) => Promise<boolean>;
+  /**
+   * When non-null, the last workspace attach failed in a recoverable way
+   * (script failure, bundle refresh cancelled, etc.).
+   * Retry with `scriptPolicy: 'skip'` to bypass scripts entirely.
+   */
+  recoverableParams: BundleRefreshAttachParams | null;
 }
 
 export function useBundleRefreshAttachFlow(
@@ -287,6 +282,7 @@ export function useBundleRefreshAttachFlow(
   const pendingAttachRef = useRef<PendingAttach | null>(null);
   const pendingAttachTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptCounterRef = useRef(0);
+  const [recoverableParams, setRecoverableParams] = useState<BundleRefreshAttachParams | null>(null);
   const lastHandledAttemptRef = useRef(0);
   const refreshInProgressRef = useRef(false);
 
@@ -331,6 +327,7 @@ export function useBundleRefreshAttachFlow(
           message: 'This backend does not support bundle refresh onboarding yet.',
           variant: 'error',
         });
+        setRecoverableParams(pending.params);
         return false;
       }
 
@@ -341,26 +338,12 @@ export function useBundleRefreshAttachFlow(
       refreshInProgressRef.current = true;
 
       try {
-        const projectName =
-          pending.projectName ||
-          currentOptions.resolveProjectName?.(pending.workspaceId) ||
-          parseProjectNameFromWorkspaceId(pending.workspaceId);
-
-        if (!projectName) {
-          currentOptions.flow.showMessage({
-            title: 'Bundle Refresh Failed',
-            message: `Could not determine project for workspace "${pending.workspaceId}".`,
-            variant: 'error',
-          });
-          return false;
-        }
-
         currentOptions.flow.showLoading({
           title: 'Bundle Refresh',
           message: 'Loading refresh requirements...',
         });
 
-        const plan = await currentOptions.getBundleRefreshPlan(projectName, pending.workspaceId);
+        const plan = await currentOptions.getBundleRefreshPlan(pending.ref);
 
         if (!plan.hasBundle) {
           currentOptions.flow.showMessage({
@@ -379,6 +362,7 @@ export function useBundleRefreshAttachFlow(
               message: 'Bundle refresh was required by backend, and retry was cancelled.',
               variant: 'warning',
             });
+            setRecoverableParams(pending.params);
             return false;
           }
 
@@ -396,6 +380,7 @@ export function useBundleRefreshAttachFlow(
             message: 'Bundle refresh is required before creating this session.',
             variant: 'warning',
           });
+          setRecoverableParams(pending.params);
           return false;
         }
 
@@ -409,6 +394,7 @@ export function useBundleRefreshAttachFlow(
               message: 'Bundle refresh was cancelled.',
               variant: 'warning',
             });
+            setRecoverableParams(pending.params);
             return false;
           }
 
@@ -420,7 +406,7 @@ export function useBundleRefreshAttachFlow(
           message: 'Applying refreshed configuration...',
         });
 
-        await currentOptions.applyBundleRefresh(projectName, pending.workspaceId, submission);
+        await currentOptions.applyBundleRefresh(pending.ref, submission);
 
         // Ensure lifecycle script output is visible in ScriptTerminal during retry.
         currentOptions.flow.close();
@@ -436,6 +422,7 @@ export function useBundleRefreshAttachFlow(
           message: toErrorMessage(error, 'Failed to refresh bundle configuration.'),
           variant: 'error',
         });
+        setRecoverableParams(pending.params);
         return false;
       } finally {
         lastHandledAttemptRef.current = pending.attemptId;
@@ -451,9 +438,10 @@ export function useBundleRefreshAttachFlow(
       const currentOptions = optionsRef.current;
       currentOptions.flow.showMessage({
         title: 'Workspace Script Failed',
-        message: `${message}\n\nClose this dialog to inspect script output.`,
+        message: `${message}\n\nClose this dialog to inspect script output, or attach anyway to skip scripts.`,
         variant: 'error',
       });
+      setRecoverableParams(pending.params);
       lastHandledAttemptRef.current = pending.attemptId;
       clearPendingAttach(pending.attemptId);
       return false;
@@ -463,25 +451,17 @@ export function useBundleRefreshAttachFlow(
 
   const attachSessionWithBundleRefresh = useCallback(
     async (
-      params: BundleRefreshAttachParams,
-      attachOptions: { projectName?: string | null } = {}
+      ref: BackendScopedWorkspaceRef,
+      params: BundleRefreshAttachParams
     ): Promise<boolean> => {
+      // Clear any previous recovery state for this new attempt.
+      setRecoverableParams(null);
       const currentOptions = optionsRef.current;
-
-      if (!params.workspaceId) {
-        clearPendingAttach();
-        await Promise.resolve(currentOptions.attachSession(params));
-        return true;
-      }
 
       const attemptId = ++attemptCounterRef.current;
       const pending: PendingAttach = {
-        params,
-        workspaceId: params.workspaceId,
-        projectName:
-          attachOptions.projectName ??
-          currentOptions.resolveProjectName?.(params.workspaceId) ??
-          parseProjectNameFromWorkspaceId(params.workspaceId),
+        ref,
+        params: { ...params, workspaceId: params.workspaceId ?? ref.workspaceId },
         attemptId,
         createdAt: Date.now(),
       };
@@ -560,5 +540,6 @@ export function useBundleRefreshAttachFlow(
 
   return {
     attachSessionWithBundleRefresh,
+    recoverableParams,
   };
 }

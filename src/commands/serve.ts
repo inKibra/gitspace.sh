@@ -29,7 +29,6 @@ import {
   loadKeypair,
   readMachineIdentity,
   getPublicKeyWithoutPassword,
-  shouldDeferLocalStoreUnlockForLegacyIdentityMigration,
   writeRelayConfig,
 } from '../core/identity.js';
 import { loadUserRootIdentity, createLocalDeviceCertificate } from '../core/user-identity.js';
@@ -83,10 +82,14 @@ import {
   type RelayCandidate,
 } from '../core/relay-discovery.js';
 import {
-  bindPersistedOwnerIdentity,
   bindControlRelayIdentity,
+  bindControlOwner,
   ensureControlStore,
+  readControlMeta,
+  getControlOwnerIdentityId,
+  getVaultMeta,
   resetControlStore,
+  setVaultMeta,
 } from '../relay/control/store.js';
 import {
   connectMachineRelay,
@@ -103,18 +106,6 @@ import {
   type DeviceIdentityPasswordContext,
 } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
-import {
-  ensureLocalStorePassword,
-  LOCAL_STORE_PASSWORD_ENV,
-  type LocalStorePasswordContext,
-} from './local-store-password.js';
-import { unlockLocalSecureStore } from '../core/local-secure-store.js';
-import {
-  formatStartupControlStateMismatch,
-  formatStartupControlStateTakeoverPrompt,
-  formatStartupControlStateTakeoverWarning,
-  planStartupControlState,
-} from '../core/control-state-startup.js';
 
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
@@ -146,23 +137,45 @@ export async function ensureServeOwnerBindingForStartup(
 ): Promise<{ tookOver: boolean }> {
   ensureControlStore();
 
-  const plan = planStartupControlState({
-    ownerUserRootId,
-    currentRelay: options.currentRelay,
-  });
+  const currentVaultOwner = getVaultMeta('owner_user_root_id');
+  const currentControlOwner = getControlOwnerIdentityId();
+  const controlMeta = readControlMeta();
+  const hasPinnedRelayIdentity = Boolean(
+    controlMeta.relayIdentityId || controlMeta.relaySigningPublicKey || controlMeta.relayFingerprint,
+  );
+  const currentRelayIdentityId = options.currentRelay ? computeIdentityId(options.currentRelay.publicKey) : undefined;
+  const relayMismatch = Boolean(
+    options.currentRelay
+      && (
+        (controlMeta.relayIdentityId && controlMeta.relayIdentityId !== currentRelayIdentityId)
+        || (controlMeta.relaySigningPublicKey && controlMeta.relaySigningPublicKey !== options.currentRelay.publicKey)
+        || (controlMeta.relayFingerprint && controlMeta.relayFingerprint !== options.currentRelay.fingerprint)
+      ),
+  );
+
+  const needsTakeover = (currentVaultOwner && currentVaultOwner !== ownerUserRootId)
+    || (currentControlOwner && currentControlOwner !== ownerUserRootId)
+    || relayMismatch;
 
   const shouldForceResetForTakeover = Boolean(
     options.takeover
-    && !plan.needsTakeover
-    && (plan.ownerBinding.controlOwnerId || plan.ownerBinding.vaultOwnerId || plan.hasPinnedRelayIdentity),
+    && !needsTakeover
+    && (currentVaultOwner || currentControlOwner || hasPinnedRelayIdentity),
   );
 
-  if (plan.needsTakeover || shouldForceResetForTakeover) {
+  if (needsTakeover || shouldForceResetForTakeover) {
     if (!options.takeover) {
-      const mismatchMessage = formatStartupControlStateMismatch(plan, {
-        subject: 'machine serve',
-        takeoverCommand: 'gssh machine serve start --takeover',
-      });
+      const mismatchMessage = [
+        'Persisted relay control state belongs to a different identity.',
+        '',
+        `  Current user: ${ownerUserRootId.slice(0, 8)}...`,
+        currentControlOwner ? `  Control owner: ${currentControlOwner.slice(0, 8)}...` : null,
+        currentVaultOwner ? `  Vault owner:   ${currentVaultOwner.slice(0, 8)}...` : null,
+        relayMismatch ? `  Pinned relay:  ${controlMeta.relayFingerprint ?? controlMeta.relayIdentityId}` : null,
+        relayMismatch ? `  Current relay: ${options.currentRelay?.fingerprint}` : null,
+        '',
+        'Re-run with `gssh machine serve start --takeover` to clear the persisted relay control state and bind it to the recovered identity.',
+      ].filter((line): line is string => line !== null).join('\n');
 
       logger.error(`[serve] owner binding mismatch during startup.\n${mismatchMessage}`);
       throw new SpacesError(
@@ -173,11 +186,10 @@ export async function ensureServeOwnerBindingForStartup(
     }
 
     if (!options.yes) {
-        const confirmed = await promptConfirm(
-          formatStartupControlStateTakeoverPrompt(plan, {
-            subject: 'machine serve',
-            takeoverCommand: 'gssh machine serve start --takeover',
-          }),
+      const confirmed = await promptConfirm(
+        needsTakeover
+          ? 'Persisted relay control state belongs to a different identity. Clear it and rebind this machine to the current recovered identity?'
+          : 'Clear persisted relay control state and relay identity pins before starting machine serve?',
         false,
       );
       if (!confirmed) {
@@ -186,18 +198,24 @@ export async function ensureServeOwnerBindingForStartup(
     }
 
     logger.warning(
-      formatStartupControlStateTakeoverWarning(plan, {
-        subject: 'machine serve',
-        takeoverCommand: 'gssh machine serve start --takeover',
-      }),
+      needsTakeover
+        ? 'Clearing persisted relay control state and rebinding machine serve ownership to the current identity.'
+        : 'Clearing persisted relay control state and relay identity pins before machine serve startup.',
     );
     resetControlStore();
     ensureControlStore();
-    bindPersistedOwnerIdentity(ownerUserRootId);
+    bindControlOwner(ownerUserRootId);
+    setVaultMeta('owner_user_root_id', ownerUserRootId);
     return { tookOver: true };
   }
 
-  bindPersistedOwnerIdentity(ownerUserRootId);
+  if (!currentControlOwner) {
+    bindControlOwner(ownerUserRootId);
+  }
+
+  if (!currentVaultOwner) {
+    setVaultMeta('owner_user_root_id', ownerUserRootId);
+  }
 
   return { tookOver: false };
 }
@@ -380,7 +398,7 @@ async function verifyRelayTrust(
     logger.error(`Received:  ${computedFingerprint}`);
     logger.log('');
     logger.error('The relay identity has changed. This could indicate a man-in-the-middle attack.');
-    logger.error('If this is expected, remove the old relay entry from ~/.gitspace/.identity/trusted-relays.json and retry.');
+    logger.error('If this is expected, remove the old relay entry from ~/gitspace/.identity/trusted-relays.json and retry.');
     return { trusted: false, reason: 'Relay identity mismatch - possible security threat' };
   }
 
@@ -804,7 +822,12 @@ class ServeProcessHostManager {
 }
 
 async function startServeProcessHosting(hostConfig: HostConfig): Promise<ServeProcessHostManager | null> {
-  const serveSubdomain = hostConfig.serveSubdomain ?? `${hostConfig.subdomain}.serve`;
+  const serveSubdomain = hostConfig.serveSubdomain?.trim();
+  if (!serveSubdomain) {
+    logger.warning(`No serve subdomain is configured for ${hostConfig.subdomain}.gitspace.sh`);
+    logger.dim(`Run: gssh user host reserve ${hostConfig.subdomain}`);
+    return null;
+  }
   const serveDomain = `${serveSubdomain}.gitspace.sh`;
   const tunnelToken = await getSecret(getServeTokenKey(hostConfig.subdomain));
 
@@ -1018,10 +1041,7 @@ export async function serveStart(options: {
   takeover?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
-  const sharedPasswordContext: DeviceIdentityPasswordContext & LocalStorePasswordContext =
-    createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
-  const devicePasswordContext: DeviceIdentityPasswordContext = sharedPasswordContext;
-  const localStorePasswordContext: LocalStorePasswordContext = sharedPasswordContext;
+  const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
 
   // Check if already running
   if (isServeRunning()) {
@@ -1034,7 +1054,6 @@ export async function serveStart(options: {
   const skipOwnerBindingCheck = process.env.GITSPACE_SKIP_OWNER_BINDING_CHECK === '1';
 
   let password: string | null = null;
-  let localStorePassword: string | null = null;
   let identity: Identity | null = null;
   let signingPrivateKey: Uint8Array | null = null;
   let publicIdentity: PublicIdentity | null = null;
@@ -1054,44 +1073,22 @@ export async function serveStart(options: {
         throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
       }
     } else {
-      localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
-      if (!localStorePassword) {
-        logger.info('Cancelled');
-        return;
-      }
-      if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
-        await unlockLocalSecureStore(localStorePassword);
-      }
-      devicePasswordContext.password = localStorePassword;
-
       password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
       if (!password) {
         logger.info('Cancelled');
         return;
       }
 
-      // Validate secure store + identity before daemonizing
+      // Validate password before daemonizing
       const loadedIdentity = await loadKeypair(password);
       if (!loadedIdentity) {
         throw new SpacesError(
-          'Failed to unlock local secure store identity. Check your password.',
+          'Failed to unlock identity. Check your password.',
           'USER_ERROR',
           1
         );
       }
 
-    }
-
-    if (usingUnlockMode) {
-      localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
-      if (!localStorePassword) {
-        logger.info('Cancelled');
-        return;
-      }
-      if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
-        await unlockLocalSecureStore(localStorePassword);
-      }
-      devicePasswordContext.password = localStorePassword;
     }
 
     if (!options.relay) {
@@ -1172,14 +1169,13 @@ export async function serveStart(options: {
       env: {
         ...process.env,
         GITSPACE_SKIP_OWNER_BINDING_CHECK: '1',
-        ...(localStorePassword ? { [LOCAL_STORE_PASSWORD_ENV]: localStorePassword } : {}),
       },
     });
 
     // Send password via stdin (non-unlock mode)
     if (!usingUnlockMode) {
       if (!password) {
-        throw new SpacesError('Failed to pass local secure store password to serve daemon startup.', 'SYSTEM_ERROR', 2);
+        throw new SpacesError('Failed to pass identity password to serve daemon startup.', 'SYSTEM_ERROR', 2);
       }
 
       child.stdin.write(password);
@@ -1205,17 +1201,6 @@ export async function serveStart(options: {
       throw new SpacesError('Failed to start serve daemon. Check log above for details.', 'SYSTEM_ERROR', 2);
     }
   }
-
-  localStorePassword = await ensureLocalStorePassword({ yes: options.yes }, localStorePasswordContext);
-  if (!localStorePassword) {
-    logger.info('Cancelled');
-    cleanupServeFiles();
-    return;
-  }
-  if (!shouldDeferLocalStoreUnlockForLegacyIdentityMigration()) {
-    await unlockLocalSecureStore(localStorePassword);
-  }
-  devicePasswordContext.password = localStorePassword;
 
   // Foreground mode identity resolution
   if (usingUnlockMode) {
@@ -1252,7 +1237,7 @@ export async function serveStart(options: {
     if (!identity) {
       cleanupServeFiles();
       throw new SpacesError(
-        'Failed to unlock local secure store identity. Check your password.',
+        'Failed to unlock identity. Check your password.',
         'USER_ERROR',
         1
       );
@@ -1409,6 +1394,8 @@ export async function serveStart(options: {
     try {
       processHostManager = await startServeProcessHosting(hostConfig);
       if (processHostManager) {
+        // Expose serve domain so process runners can build serve URLs
+        process.env.GITSPACE_SERVE_DOMAIN = processHostManager.domain;
         processHostRefreshTimer = setInterval(() => {
           void processHostManager?.refresh();
         }, SERVE_REFRESH_INTERVAL_MS);
@@ -1446,7 +1433,7 @@ export async function serveStart(options: {
     throw error;
   }
 
-  const applyAgentDelta = (delta: import('../serve/agent-event-manager.js').AgentStateUpdateDelta): void => {
+  const applyAgentDelta = (delta: import('../lib/tmux-lite/agent-event-manager.js').AgentStateUpdateDelta): void => {
     if (delta.type === 'agent_state_snapshot') {
       currentAgentSnapshot = { ...delta.workspaces };
       return;
@@ -1505,14 +1492,13 @@ export async function serveStart(options: {
     }
   };
 
-  let currentAgentSnapshot: Record<string, import('../serve/agent-event-manager.js').WorkspaceAgentState> = {};
+  let currentAgentSnapshot: Record<string, import('../lib/tmux-lite/agent-event-manager.js').WorkspaceAgentState> = {};
   let stopAgentWatch: (() => void) | null = null;
   try {
     currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((workspace) => [workspace.workspaceId, workspace]));
     stopAgentWatch = await watchAgentState({
       onSnapshot: (workspaces) => {
         currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
-        void sessionManager.broadcastAgentStateSnapshot(currentAgentSnapshot);
       },
       onUpdate: (delta) => {
         applyAgentDelta(delta);
@@ -1531,45 +1517,19 @@ export async function serveStart(options: {
   const eventHandler: ServeEventHandler = (event) => {
     switch (event.type) {
       case 'relay_connected':
-        updateDaemonState({
-          relay: {
-            url: effectiveRelayUrl,
-            status: 'connected',
-            reconnectAttempt: 0,
-            nextRetryAt: undefined,
-          },
-        });
+        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
         break;
       case 'relay_disconnected':
-        updateDaemonState({
-          relay: {
-            url: effectiveRelayUrl,
-            status: 'disconnected',
-            reconnectAttempt: undefined,
-            nextRetryAt: undefined,
-          },
-        });
+        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'disconnected' } });
         break;
-      case 'relay_reconnecting': {
-        const nextRetryAt = event.nextRetryMs !== undefined
-          ? Date.now() + event.nextRetryMs
-          : undefined;
-        logger.log(
-          `[serve] Relay reconnecting (attempt ${event.attempt})${nextRetryAt ? `, next retry in ${Math.round((nextRetryAt - Date.now()) / 1000)}s` : ''}`,
-        );
-        updateDaemonState({
-          relay: {
-            url: effectiveRelayUrl,
-            status: 'reconnecting',
-            reconnectAttempt: event.attempt,
-            nextRetryAt,
-          },
-        });
+      case 'relay_reconnecting':
+        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'reconnecting' } });
         break;
-      }
       case 'client_authenticated': {
         updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
+        if (Object.keys(currentAgentSnapshot).length > 0) {
+          void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
+        }
         break;
       }
       case 'client_disconnected':
@@ -1605,6 +1565,8 @@ export async function serveStart(options: {
         relayFingerprint: trustedRelayIdentity.relayFingerprint,
       });
     }
+
+    updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
   } catch (error) {
     const originalError = error;
     try {
@@ -1733,23 +1695,11 @@ export async function serveStatus(): Promise<void> {
     const statusIcon = status.relay.status === 'connected' ? '\x1b[32m●\x1b[0m' : '\x1b[33m●\x1b[0m';
     const relayStatus = status.relay.status === 'connected' ? 'connected' : status.relay.status;
 
-    const relayStatusLine = (() => {
-      if (status.relay.status === 'reconnecting' && status.relay.reconnectAttempt !== undefined) {
-        const attempt = status.relay.reconnectAttempt;
-        const nextRetryAt = status.relay.nextRetryAt;
-        const countdown = nextRetryAt
-          ? ` (next retry in ${Math.max(0, Math.round((nextRetryAt - Date.now()) / 1000))}s)`
-          : '';
-        return `${relayStatus} — attempt ${attempt}${countdown}`;
-      }
-      return relayStatus;
-    })();
-
     const lines = [
       `Status:   ${statusIcon} running (pid ${status.pid})`,
       `Version:  ${status.version}`,
       `Relay:    ${status.relay.url}`,
-      `          ${relayStatusLine}`,
+      `          ${relayStatus}`,
       `Clients:  ${status.clients} active`,
       `Uptime:   ${formatUptime(status.uptime)}`,
     ];

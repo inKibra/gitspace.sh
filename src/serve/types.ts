@@ -4,7 +4,6 @@
  * Defines configuration, session state, and events for the machine-side daemon.
  */
 
-import type { PTYSession } from "./pty-session.js";
 import type { Identity, SessionKeys, AccessType } from "../types/identity.js";
 import type { RemoteSessionHandlerOptions } from "../lib/remote-session/index.js";
 import { FrameType } from "../lib/tmux-lite/protocol.js";
@@ -88,8 +87,6 @@ export interface ClientSession {
   state: ClientSessionState;
   /** When handshake started (Unix ms) */
   handshakeStartedAt: number;
-  /** PTY session (created after attach_session) - legacy, use tmuxSocket instead */
-  ptySession?: PTYSession;
   /** tmux-lite session socket connection */
   tmuxSocket?: Awaited<ReturnType<typeof Bun.connect>>;
   /** Buffered writer for tmux-lite socket (Bun sockets can partially write under backpressure) */
@@ -147,7 +144,7 @@ export type ServeEvent =
   | { type: "client_disconnected"; connectionId: string; reason: string }
   | { type: "relay_connected" }
   | { type: "relay_disconnected"; code: number; reason: string }
-  | { type: "relay_reconnecting"; attempt: number; nextRetryMs?: number }
+  | { type: "relay_reconnecting"; attempt: number }
   | { type: "error"; connectionId?: string; error: Error };
 
 /** Event handler for serve events */

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import type { AgentStateUpdateDelta } from '../../serve/agent-event-manager';
 import type { Identity } from '../../types/identity';
 import type { BackendEvent } from '../events';
 import {
@@ -125,6 +124,13 @@ function makeRelayDataPayload(codec: RemoteSessionCryptoAdapter, payload: unknow
   });
 }
 
+function makeRelayBinaryPayload(codec: RemoteSessionCryptoAdapter, payload: Uint8Array): string {
+  return JSON.stringify({
+    type: 'data',
+    data: codec.encodeBase64(payload),
+  });
+}
+
 function decodeRelayDataCommand(codec: RemoteSessionCryptoAdapter, raw: string): unknown {
   const relay = JSON.parse(raw) as { type: string; data?: string };
   if (relay.type !== 'data' || !relay.data) {
@@ -134,12 +140,35 @@ function decodeRelayDataCommand(codec: RemoteSessionCryptoAdapter, raw: string):
   return JSON.parse(new TextDecoder().decode(decoded));
 }
 
+function createEmptyMachineSnapshot() {
+  return {
+    snapshotNonce: 1,
+    generatedAt: new Date().toISOString(),
+    projectsById: {},
+    projectOrder: [],
+    workspacesById: {},
+    workspaceOrder: [],
+    workspaceIdsByProjectId: {},
+    terminalSessionsById: {},
+    terminalSessionIdsByWorkspaceId: {},
+    agentSessionsById: {},
+    agentSessionIdsByWorkspaceId: {},
+    processesById: {},
+    processIdsByWorkspaceId: {},
+    replaysById: {},
+    replayIdsByWorkspaceId: {},
+    notificationsById: {},
+    notificationOrder: [],
+  };
+}
+
 async function connectAndHandshake(
   backend: RemoteSessionBackend<FakeSocket, FakeHandshakeState, FakeServerHello, FakeServerAuth>,
   socket: FakeSocket
 ): Promise<void> {
   const connectPromise = backend.connect();
   socket.handlers?.onMessage(JSON.stringify({ type: 'connection_established' }));
+  await Bun.sleep(0);
   socket.handlers?.onMessage(
     makeRelayDataPayload(cryptoAdapter, {
       type: 'handshake',
@@ -147,6 +176,7 @@ async function connectAndHandshake(
       data: { hello: true },
     })
   );
+  await Bun.sleep(0);
   socket.handlers?.onMessage(
     makeRelayDataPayload(cryptoAdapter, {
       type: 'handshake',
@@ -154,6 +184,19 @@ async function connectAndHandshake(
       data: { auth: true },
     })
   );
+  for (let i = 0; i < 5; i += 1) {
+    await Bun.sleep(0);
+    if (((backend as unknown) as { isConnected?: boolean }).isConnected) {
+      break;
+    }
+  }
+  socket.handlers?.onMessage(
+    makeRelayDataPayload(cryptoAdapter, {
+      type: 'machine_snapshot',
+      snapshot: createEmptyMachineSnapshot(),
+    })
+  );
+  await Bun.sleep(0);
   await connectPromise;
 }
 
@@ -225,21 +268,28 @@ describe('RemoteSessionBackend', () => {
     expect(events[0]).toEqual({ type: 'status', status: 'connecting' });
     expect(events[1]).toEqual({ type: 'status', status: 'connected' });
 
-    await backend.listProjects();
-    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
-    expect(command).toEqual({ type: 'list_projects' });
-
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'project_list',
-        projects: [
-          {
-            name: 'alpha',
-            repository: 'org/alpha',
-            workspaceCount: 1,
-            isCurrent: true,
-          },
-        ],
+        type: 'machine_snapshot',
+        snapshot: {
+          snapshotNonce: 1,
+          generatedAt: new Date().toISOString(),
+          projectsById: { alpha: { id: 'alpha', name: 'alpha', path: '/tmp/alpha', repository: 'org/alpha', workspaceIds: ['alpha:ws-1'], workspaceCount: 1, activeWorkspaceId: 'alpha:ws-1', current: true } },
+          projectOrder: ['alpha'],
+          workspacesById: {},
+          workspaceOrder: [],
+          workspaceIdsByProjectId: { alpha: [] },
+          terminalSessionsById: {},
+          terminalSessionIdsByWorkspaceId: {},
+          agentSessionsById: {},
+          agentSessionIdsByWorkspaceId: {},
+          processesById: {},
+          processIdsByWorkspaceId: {},
+          replaysById: {},
+          replayIdsByWorkspaceId: {},
+          notificationsById: {},
+          notificationOrder: [],
+        },
       })
     );
     await Bun.sleep(0);
@@ -253,17 +303,7 @@ describe('RemoteSessionBackend', () => {
     );
     await Bun.sleep(0);
 
-    expect(events).toContainEqual({
-      type: 'projects',
-      projects: [
-        {
-          name: 'alpha',
-          repository: 'org/alpha',
-          workspaceCount: 1,
-          isCurrent: true,
-        },
-      ],
-    });
+    expect(events.some((event) => event.type === 'projects' && event.projects[0]?.name === 'alpha' && event.projects[0]?.repository === 'org/alpha')).toBe(true);
 
     expect(events).toContainEqual({
       type: 'script_output',
@@ -298,202 +338,53 @@ describe('RemoteSessionBackend', () => {
 
     await connectAndHandshake(backend, socket);
 
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_snapshot',
+        snapshot: {
+          snapshotNonce: 1,
+          generatedAt: new Date().toISOString(),
+          projectsById: { project: { id: 'project', name: 'project', path: '/tmp/project', repository: 'org/project', workspaceIds: ['project:workspace'], workspaceCount: 1 } },
+          projectOrder: ['project'],
+          workspacesById: { 'project:workspace': { id: 'project:workspace', name: 'workspace', path: '/tmp/project/workspaces/workspace', projectName: 'project', branch: 'workspace', summary: { terminalCount: 0, managedProcessCount: 0, runningProcessCount: 0, idleAgentCount: 0, activeAgentCount: 0 }, updatedAt: new Date().toISOString() } },
+          workspaceOrder: ['project:workspace'],
+          workspaceIdsByProjectId: { project: ['project:workspace'] },
+          terminalSessionsById: {},
+          terminalSessionIdsByWorkspaceId: {},
+          agentSessionsById: {},
+          agentSessionIdsByWorkspaceId: {},
+          processesById: {},
+          processIdsByWorkspaceId: {},
+          replaysById: {},
+          replayIdsByWorkspaceId: {},
+          notificationsById: {},
+          notificationOrder: [],
+        },
+      }),
+    );
+    await Bun.sleep(0);
+
     const pending = backend.listAgentSessions('project:workspace');
-    await Promise.resolve();
+    await Bun.sleep(0);
     const sent = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { requestId: string; type: string };
-    expect(sent.type).toBe('list_agent_sessions');
+    expect(sent.type).toBe('tmux_command');
 
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'agent_sessions',
+        type: 'tmux_command_response',
         requestId: sent.requestId,
-        workspaceId: 'project:workspace',
-        sessions: [
-          { id: 'agent-1', title: 'Investigate auth', updatedAt: '2026-03-15T12:00:00.000Z' },
-        ],
+        response: {
+          type: 'agent-sessions',
+          sessions: [
+            { id: 'agent-1', title: 'Investigate auth', updatedAt: '2026-03-15T12:00:00.000Z' },
+          ],
+        },
       }),
     );
 
     await expect(pending).resolves.toEqual([
       { id: 'agent-1', title: 'Investigate auth', updatedAt: '2026-03-15T12:00:00.000Z' },
     ]);
-  });
-
-  it('checks whether an agent session takeover is required', async () => {
-    const socket = createFakeSocket();
-    const backend = new RemoteSessionBackend({
-      descriptor: {
-        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
-        kind: 'remote',
-        label: 'Machine 1',
-        relayUrl: 'wss://relay.test/ws',
-        machineId: 'machine-1',
-      },
-      socket,
-      socketAdapter,
-      identity,
-      machineId: 'machine-1',
-      deviceCertificate: 'test-device-cert',
-      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
-      crypto: cryptoAdapter,
-      handshake: handshakeAdapter,
-    });
-
-    await connectAndHandshake(backend, socket);
-
-    const pending = backend.checkAgentSessionTakeover('project:workspace', 'agent-1');
-    await Bun.sleep(0);
-    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as {
-      type: string;
-      requestId: string;
-    };
-    expect(command.type).toBe('check_agent_session_takeover');
-
-    socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'agent_takeover_status',
-        requestId: command.requestId,
-        workspaceId: 'project:workspace',
-        agentSessionId: 'agent-1',
-        requiresTakeover: true,
-        sessionName: 'agent:workspace:1234abcd',
-      })
-    );
-
-    await expect(pending).resolves.toEqual({
-      requiresTakeover: true,
-      sessionName: 'agent:workspace:1234abcd',
-    });
-  });
-
-  it('treats unsupported takeover checks as no-takeover instead of crashing', async () => {
-    const socket = createFakeSocket();
-    const backend = new RemoteSessionBackend({
-      descriptor: {
-        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
-        kind: 'remote',
-        label: 'Machine 1',
-        relayUrl: 'wss://relay.test/ws',
-        machineId: 'machine-1',
-      },
-      socket,
-      socketAdapter,
-      identity,
-      machineId: 'machine-1',
-      deviceCertificate: 'test-device-cert',
-      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
-      crypto: cryptoAdapter,
-      handshake: handshakeAdapter,
-    });
-
-    await connectAndHandshake(backend, socket);
-
-    const pending = backend.checkAgentSessionTakeover('project:workspace', 'agent-1');
-    await Bun.sleep(0);
-    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as {
-      requestId: string;
-    };
-
-    socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'error',
-        code: 'UNKNOWN_COMMAND',
-        message: 'Unknown command',
-        requestId: command.requestId,
-        workspaceId: 'project:workspace',
-      })
-    );
-
-    await expect(pending).resolves.toEqual({ requiresTakeover: false });
-    await expect(backend.checkAgentSessionTakeover('project:workspace', 'agent-1')).resolves.toEqual({
-      requiresTakeover: false,
-    });
-  });
-
-  it('builds remote agent snapshot from deltas without initial snapshot', async () => {
-    const socket = createFakeSocket();
-    const backend = new RemoteSessionBackend({
-      descriptor: {
-        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
-        kind: 'remote',
-        label: 'Machine 1',
-        relayUrl: 'wss://relay.test/ws',
-        machineId: 'machine-1',
-      },
-      socket,
-      socketAdapter,
-      identity,
-      machineId: 'machine-1',
-      deviceCertificate: 'test-device-cert',
-      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
-      crypto: cryptoAdapter,
-      handshake: handshakeAdapter,
-    });
-
-    await connectAndHandshake(backend, socket);
-
-    const deltas: AgentStateUpdateDelta[] = [
-      { type: 'agent_session_created', workspaceId: 'project:workspace', sessionId: 'agent-1', title: 'Draft plan' },
-      { type: 'agent_session_status', workspaceId: 'project:workspace', sessionId: 'agent-1', status: { type: 'busy' } },
-      { type: 'agent_session_updated', workspaceId: 'project:workspace', sessionId: 'agent-2', title: 'Follow up' },
-    ];
-
-    for (const delta of deltas) {
-      socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'agent_state_update', delta }));
-    }
-
-    await Bun.sleep(0);
-
-    expect(backend.getAgentStateSnapshot()).toEqual({
-      'project:workspace': {
-        workspaceId: 'project:workspace',
-        sessions: [
-          { id: 'agent-1', title: 'Draft plan' },
-          { id: 'agent-2', title: 'Follow up' },
-        ],
-        statuses: {
-          'agent-1': { type: 'busy' },
-        },
-        pendingPermissions: {},
-        lastMessages: {},
-      },
-    });
-  });
-
-  it('emits a taken-over notice when the attached session is kicked', async () => {
-    const socket = createFakeSocket();
-    const backend = new RemoteSessionBackend({
-      descriptor: {
-        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
-        kind: 'remote',
-        label: 'Machine 1',
-        relayUrl: 'wss://relay.test/ws',
-        machineId: 'machine-1',
-      },
-      socket,
-      socketAdapter,
-      identity,
-      machineId: 'machine-1',
-      deviceCertificate: 'test-device-cert',
-      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
-      crypto: cryptoAdapter,
-      handshake: handshakeAdapter,
-    });
-    const events: BackendEvent[] = [];
-    backend.onEvent((event) => events.push(event));
-
-    await connectAndHandshake(backend, socket);
-
-    (backend as any).mode = 'attached';
-    (backend as any).attachedSessionId = 'sess-1';
-    (backend as any).handleSessionEvent({ type: 'kicked' });
-
-    expect(events).toContainEqual({
-      type: 'command_error',
-      code: 'SESSION_TAKEN_OVER',
-      message: 'This terminal was taken over by another client.',
-    });
-    expect(events).toContainEqual({ type: 'detached' });
   });
 
   it('buffers PTY output while no callback is registered and flushes on restore', async () => {
@@ -537,11 +428,10 @@ describe('RemoteSessionBackend', () => {
     );
     await connectPromise;
 
+    ((backend as unknown) as { mode: 'attached' | 'browsing' }).mode = 'attached';
+
     socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'pty_output',
-        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('snapshot-before-handler')),
-      })
+      makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('snapshot-before-handler'))
     );
     await Bun.sleep(0);
 
@@ -550,10 +440,7 @@ describe('RemoteSessionBackend', () => {
     });
 
     socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'pty_output',
-        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('live-after-handler')),
-      })
+      makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('live-after-handler'))
     );
     await Bun.sleep(0);
 
@@ -855,21 +742,17 @@ describe('RemoteSessionBackend', () => {
       callbackOneOutput.push(new TextDecoder().decode(data));
     });
 
+    ((backend as unknown) as { mode: 'attached' | 'browsing' }).mode = 'attached';
+
     socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'pty_output',
-        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('before-clear')),
-      })
+      makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('before-clear'))
     );
     await Bun.sleep(0);
 
     backend.setPtyOutputHandler(null);
 
     socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'pty_output',
-        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('while-cleared')),
-      })
+      makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('while-cleared'))
     );
     await Bun.sleep(0);
 
@@ -878,10 +761,7 @@ describe('RemoteSessionBackend', () => {
     });
 
     socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'pty_output',
-        data: cryptoAdapter.encodeBase64(new TextEncoder().encode('after-restore')),
-      })
+      makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('after-restore'))
     );
     await Bun.sleep(0);
 
@@ -889,7 +769,7 @@ describe('RemoteSessionBackend', () => {
     expect(callbackTwoOutput).toEqual(['while-cleared', 'after-restore']);
   });
 
-  it('emits workspace-scoped saved filters from events_list', async () => {
+  it('emits workspace-scoped saved filters from tmux events response', async () => {
     const socket = createFakeSocket();
     const events: BackendEvent[] = [];
 
@@ -916,15 +796,20 @@ describe('RemoteSessionBackend', () => {
 
     const savedFilters = [{ name: 'Errors', filter: { level: 'error' as const }, sinceMinutes: 30 }];
 
+    const sentBefore = socket.sent.length;
+    const requestPromise = backend.requestEvents('/tmp/alpha/workspaces/ws-2');
+    await Bun.sleep(0);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[sentBefore]);
+    expect(command).toMatchObject({ type: 'tmux_command' });
+    const requestId = (command as { requestId: string }).requestId;
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'events_list',
-        workspaceId: 'alpha:ws-2',
-        events: [],
-        liveEventIds: [],
-        savedEventFilters: savedFilters,
+        type: 'tmux_command_response',
+        requestId,
+        response: { type: 'events-list', workspaceId: 'alpha:ws-2', events: [], liveEventIds: [], savedEventFilters: savedFilters },
       })
     );
+    await requestPromise;
     await Bun.sleep(0);
 
     expect(events).toContainEqual({
@@ -935,7 +820,7 @@ describe('RemoteSessionBackend', () => {
     });
   });
 
-  it('preserves saved filters when merging chunked events_list payloads', async () => {
+  it('emits saved filters from tmux events response', async () => {
     const socket = createFakeSocket();
     const events: BackendEvent[] = [];
 
@@ -961,30 +846,18 @@ describe('RemoteSessionBackend', () => {
     await connectAndHandshake(backend, socket);
 
     const savedFilters = [{ name: 'Web', filter: { processName: 'web' } }];
-    const common = {
-      type: 'events_list' as const,
-      workspaceId: 'alpha:ws-2',
-      requestId: 'req-1',
-      totalChunks: 2,
-      liveEventIds: [],
-      savedEventFilters: savedFilters,
-    };
-
+    const sentBefore = socket.sent.length;
+    const requestPromise = backend.requestEvents('/tmp/alpha/workspaces/ws-2');
+    await Bun.sleep(0);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[sentBefore]) as { requestId: string };
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        ...common,
-        chunkIndex: 0,
-        events: [],
+        type: 'tmux_command_response',
+        requestId: command.requestId,
+        response: { type: 'events-list', workspaceId: 'alpha:ws-2', events: [], liveEventIds: [], savedEventFilters: savedFilters },
       })
     );
-
-    socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        ...common,
-        chunkIndex: 1,
-        events: [],
-      })
-    );
+    await requestPromise;
     await Bun.sleep(0);
 
     expect(events).toContainEqual({
@@ -1032,10 +905,7 @@ describe('RemoteSessionBackend', () => {
       .slice(sentBefore)
       .map((raw) => decodeRelayDataCommand(cryptoAdapter, raw));
 
-    expect(commands).toEqual([
-      { type: 'list_workspaces' },
-      { type: 'list_sessions', workspaceId: 'alpha:ws-1' },
-    ]);
+    expect(commands).toEqual([]);
   });
 
   it('refreshes full session list after kill when workspace is unknown', async () => {
@@ -1075,10 +945,7 @@ describe('RemoteSessionBackend', () => {
       .slice(sentBefore)
       .map((raw) => decodeRelayDataCommand(cryptoAdapter, raw));
 
-    expect(commands).toEqual([
-      { type: 'list_workspaces' },
-      { type: 'list_sessions' },
-    ]);
+    expect(commands).toEqual([]);
   });
 
   it('sends scriptPolicy only for workspace attach retries', async () => {

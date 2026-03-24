@@ -40,6 +40,12 @@ export interface ScriptTerminalProps {
   exitCode?: number;
   modalOpen?: boolean;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
+  showTopBanner?: boolean;
+  showHintBar?: boolean;
+  /** Reserved columns for layout chrome (e.g. sidebar) when embedded. */
+  reservedCols?: number;
+  /** Additional reserved rows for layout chrome (header, tab bar, status bar) when embedded. */
+  reservedRowsExtra?: number;
 }
 
 const COLORS = {
@@ -59,7 +65,11 @@ const PHASE_NAMES: Record<ScriptPhase, string> = {
   remove: 'Remove',
 };
 
-function getTerminalSize(reservedRows: number) {
+function getTerminalSize(
+  reservedRows: number,
+  reservedCols: number = 0,
+  reservedRowsExtra: number = 0
+) {
   let cols = process.stdout.columns || 0;
   let rows = process.stdout.rows || 0;
   if (cols <= 0 || rows <= 0) {
@@ -69,9 +79,11 @@ function getTerminalSize(reservedRows: number) {
       rows = size[1];
     }
   }
+  const viewportCols = cols > 0 ? cols : 80;
+  const viewportRows = rows > 0 ? rows : 24;
   return {
-    cols: cols > 0 ? cols : 80,
-    rows: Math.max(1, (rows > 0 ? rows : 24) - reservedRows),
+    cols: Math.max(40, viewportCols - reservedCols),
+    rows: Math.max(1, viewportRows - reservedRows - reservedRowsExtra),
   };
 }
 
@@ -143,6 +155,10 @@ export function ScriptTerminal({
   exitCode,
   modalOpen = false,
   setWriteCallback,
+  showTopBanner = true,
+  showHintBar = true,
+  reservedCols = 0,
+  reservedRowsExtra = 0,
 }: ScriptTerminalProps) {
   const renderer = useRenderer();
 
@@ -162,8 +178,14 @@ export function ScriptTerminal({
   const showWaitingOutput = isRunning && !!activeEntry && activeEntry.outputChunks.length === 0;
 
   const showErrorBanner = !!activeError && !isRunning;
-  const reservedRows = 3 + (showErrorBanner ? 1 : 0) + (showWaitingOutput ? 1 : 0);
-  const [termSize, setTermSize] = useState(() => getTerminalSize(reservedRows));
+  const reservedRows =
+    (showTopBanner ? 1 : 0) +
+    (showHintBar ? 1 : 0) +
+    (showWaitingOutput ? 1 : 0) +
+    (showErrorBanner ? 1 : 0);
+  const [termSize, setTermSize] = useState(() =>
+    getTerminalSize(reservedRows, reservedCols, reservedRowsExtra)
+  );
 
   useEffect(() => {
     phaseEntriesRef.current = phaseEntries;
@@ -171,14 +193,14 @@ export function ScriptTerminal({
 
   useEffect(() => {
     const onResize = () => {
-      setTermSize(getTerminalSize(reservedRows));
+      setTermSize(getTerminalSize(reservedRows, reservedCols, reservedRowsExtra));
     };
-    setTermSize(getTerminalSize(reservedRows));
+    setTermSize(getTerminalSize(reservedRows, reservedCols, reservedRowsExtra));
     process.on('SIGWINCH', onResize);
     return () => {
       process.removeListener('SIGWINCH', onResize);
     };
-  }, [reservedRows]);
+  }, [reservedRows, reservedCols, reservedRowsExtra]);
 
   useEffect(() => {
     const switchedPhase = previousPhaseRef.current !== phase;
@@ -430,32 +452,36 @@ export function ScriptTerminal({
       : '[[/]] Phase  [↑/↓ PgUp/PgDn] Scroll  [mouse] Select+copy';
   return (
     <box flexDirection="column" flexGrow={1}>
-      <box
-        height={1}
-        width="100%"
-        backgroundColor={COLORS.statusBar}
-        flexDirection="row"
-        paddingLeft={1}
-        paddingRight={1}
-      >
-        <box flexGrow={1} flexDirection="row">
-          {phaseEntries.map((entry, index) => {
-            const isActive = index === displayPhaseIndex;
-            const color = isActive ? COLORS.phaseActive : COLORS.phase;
-            return (
-              <text key={entry.id} fg={color}>
-                {index > 0 ? ' ' : ''}[{PHASE_NAMES[entry.phase]}{getPhaseMarker(entry.status)}]
-              </text>
-            );
-          })}
-          <text fg={COLORS.textDim}> - {workspaceName}</text>
+      {showTopBanner && (
+        <box
+          height={1}
+          width="100%"
+          backgroundColor={COLORS.statusBar}
+          flexDirection="row"
+          paddingLeft={1}
+          paddingRight={1}
+        >
+          <box flexGrow={1} flexDirection="row">
+            {phaseEntries.map((entry, index) => {
+              const isActive = index === displayPhaseIndex;
+              const color = isActive ? COLORS.phaseActive : COLORS.phase;
+              return (
+                <text key={entry.id} fg={color}>
+                  {index > 0 ? ' ' : ''}[{PHASE_NAMES[entry.phase]}{getPhaseMarker(entry.status)}]
+                </text>
+              );
+            })}
+            <text fg={COLORS.textDim}> - {workspaceName}</text>
+          </box>
+          <text fg={statusColor}>{statusText}</text>
         </box>
-        <text fg={statusColor}>{statusText}</text>
-      </box>
+      )}
 
-      <box height={1} width="100%" backgroundColor="#222222" paddingLeft={1}>
-        <text fg={COLORS.textDim}>{phaseHint}</text>
-      </box>
+      {showHintBar && (
+        <box height={1} width="100%" backgroundColor="#222222" paddingLeft={1}>
+          <text fg={COLORS.textDim}>{phaseHint}</text>
+        </box>
+      )}
 
       {showWaitingOutput && (
         <box height={1} width="100%" backgroundColor="#1a1a1a" paddingLeft={1}>

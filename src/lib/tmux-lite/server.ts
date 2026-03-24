@@ -11,7 +11,7 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
-import { getNotificationConfig, type NotificationConfig } from "../../core/config.js";
+import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import { resolveWorkspaceRef } from "../events/paths.js";
 import {
@@ -48,17 +48,53 @@ import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/typ
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
   attachAgentSession as ensureAgentTerminalSession,
+  archiveAgentSession,
   abortAgentSession,
-  clearAgentSession,
+  closeAgentSession,
   createAgentSession,
   ensureAgentControlInitialized,
   getAgentControlSnapshot,
-  getAgentSessionTakeoverState,
   getKnownAgentSessions,
   listLiveAgentSessions,
   respondToAgentPermission,
+  restoreAgentSession,
   subscribeAgentControl,
+  syncKnownWorkspaces,
 } from './agent-control.js';
+import { defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
+import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
+import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
+import { buildMachineSnapshot } from './machine/build.js';
+import type { MachineSnapshot } from './machine/protocol.js';
+import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
+import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
+import { matchesWorkspaceId } from '../../utils/workspace-id.js';
+import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
+import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
+import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
+import { executeLocalReviewOperation } from '../../core/review-executor.js';
+import { readWorkspaceSnapshots, readWideEvents } from '../events/reader.js';
+import { loadSavedEventFilters } from '../events/filters.js';
+import { listProcessEventsDirs, resolveWorkspaceRef } from '../events/paths.js';
+import { readProjectConfig } from '../../core/config.js';
+import {
+  listGithubReposForSession,
+  listRemoteBranchesForSession,
+  listLinearIssuesForSession,
+  createProjectForSession,
+  prepareProjectForSession,
+  finalizePreparedProjectForSession,
+  cancelPreparedProjectForSession,
+  createWorkspaceForSession,
+  deleteProjectForSession,
+} from '../../core/session-lifecycle.js';
+import { deleteWorkspaceCore } from '../../core/workspace.js';
+import {
+  getBundleRefreshPlan as getBundleRefreshPlanCore,
+  applyBundleRefreshSubmission,
+  getBundleConfigState as getBundleConfigStateCore,
+  applyBundleConfigSubmission,
+} from '../../core/bundle-refresh.js';
 
 // Chunk size for large PTY data (leave room for frame header overhead)
 // Using 512KB to be well under the 1MB limit
@@ -80,6 +116,7 @@ const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
 const REPLAY_CHECKPOINT_BYTE_INTERVAL = 128 * 1024;
 const REPLAY_CHECKPOINT_OUTPUT_EVENT_INTERVAL = 256;
+const pendingAttachControllers = new Map<string, AbortController>();
 
 // Load notification config (with fallback to defaults)
 let notificationConfig: NotificationConfig;
@@ -156,6 +193,11 @@ interface SessionData {
   attachPending: boolean;
   attachTimer: any;
   processTitle: string;   // Title set by running process (via OSC 0)
+  terminalTitle: string;
+  lastAlertKind?: InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount: number;
   lastInteraction: number;  // Timestamp of last user input
   lastDetached: number;  // Timestamp of last detach (for grace period)
   lastAttached: number;  // Timestamp of last attach (for grace period)
@@ -167,6 +209,7 @@ const sessions = new Map<string, SessionData>();
 const inbox: InboxItem[] = [];
 let routerListener: any = null;
 let shuttingDown = false;
+let machineSnapshotNonce = 0;
 
 function stopListener(listener: any): void {
   if (!listener || typeof listener.stop !== "function") {
@@ -210,15 +253,17 @@ interface RouterSocketState {
   buffer: Buffer;
   writer: any;
   watchesAgentState: boolean;
+  watchesMachineState: boolean;
 }
 
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
 const agentStateWatchers = new Set<object>();
+const machineStateWatchers = new Set<object>();
 
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
   if (!state) {
-    state = { buffer: Buffer.alloc(0), writer: null, watchesAgentState: false };
+    state = { buffer: Buffer.alloc(0), writer: null, watchesAgentState: false, watchesMachineState: false };
     routerSocketStates.set(socket, state);
   }
   return state;
@@ -226,6 +271,7 @@ function getRouterSocketState(socket: object): RouterSocketState {
 
 function clearRouterSocketState(socket: object): void {
   agentStateWatchers.delete(socket);
+  machineStateWatchers.delete(socket);
   routerSocketStates.delete(socket);
 }
 
@@ -235,7 +281,7 @@ function sendRouterResponse(socket: any, response: Response): void {
   else socket.write(encodeRouterMessage(response));
 }
 
-function broadcastAgentStateDelta(delta: import('../../serve/agent-event-manager.js').AgentStateUpdateDelta): void {
+function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
   for (const socket of agentStateWatchers) {
     try {
       sendRouterResponse(socket, { type: 'agent-state-update', delta });
@@ -245,22 +291,157 @@ function broadcastAgentStateDelta(delta: import('../../serve/agent-event-manager
   }
 }
 
+async function buildCurrentMachineSnapshot(options: { bumpNonce?: boolean } = {}): Promise<MachineSnapshot> {
+  await syncKnownWorkspaces();
+  try {
+    await getAgentControlReady();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[server] machine snapshot proceeding without agent runtime: ${message}`);
+  }
+  if (options.bumpNonce || machineSnapshotNonce === 0) {
+    machineSnapshotNonce += 1;
+  }
+  const workspaceSnapshot = await getWorkspaceRuntimeSnapshot({
+    sessions: Array.from(sessions.values()).map(getSessionInfo),
+    agentStateByWorkspaceId: getAgentControlSnapshot(),
+  });
+  return buildMachineSnapshot({
+    snapshotNonce: machineSnapshotNonce,
+    terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
+    workspaces: workspaceSnapshot,
+    agentStateByWorkspaceId: getAgentControlSnapshot(),
+  });
+}
+
+async function broadcastMachineSnapshotReplacement(): Promise<void> {
+  if (machineStateWatchers.size === 0) return;
+  const snapshot = await buildCurrentMachineSnapshot({ bumpNonce: true });
+  for (const socket of machineStateWatchers) {
+    try {
+      sendRouterResponse(socket, {
+        type: 'machine-event',
+        event: {
+          type: 'snapshot-replaced',
+          snapshotNonce: snapshot.snapshotNonce,
+          snapshot,
+        },
+      });
+    } catch {
+      machineStateWatchers.delete(socket);
+    }
+  }
+}
+
 let agentControlSubscribed = false;
+let workspacePmSubscribed = false;
 
 async function getAgentControlReady(): Promise<void> {
   await ensureAgentControlInitialized();
   if (!agentControlSubscribed) {
     subscribeAgentControl((delta) => {
       broadcastAgentStateDelta(delta);
+      void broadcastMachineSnapshotReplacement().catch(() => {
+        // non-fatal
+      });
     });
     agentControlSubscribed = true;
   }
+}
+
+function ensureWorkspacePmSubscribed(): void {
+  if (workspacePmSubscribed) {
+    return;
+  }
+  subscribeWorkspacePmUpdates(() => {
+    void broadcastMachineSnapshotReplacement().catch(() => {
+      // non-fatal
+    });
+  });
+  workspacePmSubscribed = true;
 }
 
 void getAgentControlReady().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[server] failed to initialize agent control: ${message}`);
 });
+
+ensureWorkspacePmSubscribed();
+
+function getSessionInfo(s: SessionData): Session {
+  return {
+    ...s.info,
+    processTitle: s.processTitle || undefined,
+    terminalTitle: s.terminalTitle || undefined,
+    lastAlertKind: s.lastAlertKind,
+    lastAlertPreview: s.lastAlertPreview,
+    lastAlertAt: s.lastAlertAt,
+    unreadAlertCount: s.unreadAlertCount || undefined,
+  };
+}
+
+function getUnreadInboxCountForSession(sessionId: string): number {
+  let count = 0;
+  for (const item of inbox) {
+    if (item.sessionId === sessionId && !item.read) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function pushSessionMeta(session: SessionData): void {
+  if (!session.client) {
+    return;
+  }
+  writeToClient(session, encodeControl({
+    type: 'session-meta',
+    sessionName: session.info.name,
+    processTitle: session.processTitle || undefined,
+    terminalTitle: session.terminalTitle || undefined,
+    lastAlertKind: session.lastAlertKind,
+    lastAlertPreview: session.lastAlertPreview,
+    lastAlertAt: session.lastAlertAt,
+    unreadAlertCount: session.unreadAlertCount || undefined,
+  }));
+}
+
+function updateSessionAlertState(sessionId: string, updates: {
+  kind?: InboxItem['type'];
+  preview?: string;
+  at?: number;
+  unreadDelta?: number;
+}): void {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+  if (updates.kind) {
+    session.lastAlertKind = updates.kind;
+  }
+  if (updates.preview !== undefined) {
+    session.lastAlertPreview = updates.preview;
+  }
+  if (updates.at !== undefined) {
+    session.lastAlertAt = updates.at;
+  }
+  if (typeof updates.unreadDelta === 'number') {
+    session.unreadAlertCount = Math.max(0, session.unreadAlertCount + updates.unreadDelta);
+  } else {
+    session.unreadAlertCount = getUnreadInboxCountForSession(sessionId);
+  }
+  pushSessionMeta(session);
+}
+
+function updateSessionTitleState(sessionId: string, title: string): void {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+  session.terminalTitle = title;
+  session.processTitle = title;
+  pushSessionMeta(session);
+}
 
 function clearIdleTimer(session: SessionData): void {
   if (session.idleState.idleTimer) {
@@ -308,6 +489,9 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
   stopListener(routerListener);
   safeUnlink(PID_FILE);
   safeUnlink(ROUTER_SOCKET);
+  void defaultOpenCodeRuntimeManager.shutdown().catch(() => {
+    // non-fatal during shutdown
+  });
 }
 
 // How long after last interaction before we consider the user "inactive"
@@ -812,6 +996,12 @@ function addInboxItem(item: Omit<InboxItem, 'id' | 'read'>): void {
     id: genInboxId(),
     read: false,
   });
+  updateSessionAlertState(item.sessionId, {
+    kind: item.type,
+    preview: item.context,
+    at: item.timestamp,
+    unreadDelta: 1,
+  });
   console.log(`[inbox] ${item.type}: ${item.sessionName} - ${item.context.substring(0, 50)}`);
 
   // Update titles for all attached sessions to show new inbox count
@@ -831,6 +1021,7 @@ function pruneInboxForSession(sessionId: string): void {
       inbox.splice(i, 1);
     }
   }
+  updateSessionAlertState(sessionId, { unreadDelta: 0 });
   console.log(`[inbox] Pruned notifications for session ${sessionId}`);
 }
 
@@ -990,12 +1181,12 @@ function setupXtermEventHandlers(
     processTitle = title;
     const session = sessions.get(id);
     if (session) {
-      session.processTitle = title;
+      updateSessionTitleState(id, title);
       recordReplayEvent(session, { type: "process-title", processTitle: title });
       syncReplayManifest(session, { processTitle: title, title });
       // Update client's terminal title if attached
       if (session.client) {
-        sendTitle(session.client, sessionName, title);
+        sendTitle(session, sessionName, title);
       }
 
       // Create inbox notification for ANY title change when not actively using
@@ -1215,6 +1406,7 @@ function handleProcessExit(
 
     xterm.dispose();
     cleanupSessionResources(session);
+    void broadcastMachineSnapshotReplacement().catch(() => {});
     console.log(`[${sessionName}] exited (${code})`);
   };
 }
@@ -1361,6 +1553,7 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
         session.attaching = false;
 
         writeToClient(session, encodeControl({ type: "attached" }));
+        pushSessionMeta(session);
 
         // Set terminal title
         sendTitle(session, sessionName, session.processTitle);
@@ -1775,14 +1968,16 @@ function createSession(
     attaching: false,
     attachBuffer: [],
     attachPending: false,
-      attachTimer: null,
-      processTitle: '',
-      lastInteraction: 0,  // No interaction yet
-      lastDetached: 0,  // Never detached yet
-      lastAttached: 0,  // Never attached yet (will be set on first attach)
-      replay,
-      replayCheckpointPending: false,
-    });
+    attachTimer: null,
+    processTitle: '',
+    terminalTitle: '',
+    unreadAlertCount: 0,
+    lastInteraction: 0,
+    lastDetached: 0,
+    lastAttached: 0,
+    replay,
+    replayCheckpointPending: false,
+  });
 
   const session = sessions.get(id);
   if (session?.replay) {
@@ -1825,12 +2020,10 @@ routerListener = Bun.listen({
       for (const message of decoded.messages) {
         const cmd = message as Command;
         let res: Response;
-
-        // Helper to get session info with current processTitle
-        const getSessionInfo = (s: SessionData): Session => ({
-          ...s.info,
-          processTitle: s.processTitle || undefined,
-        });
+        const writeResponse = (response: Response) => {
+          if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
+          else socket.write(encodeRouterMessage(response));
+        };
 
         switch (cmd.type) {
           case "list":
@@ -1923,6 +2116,7 @@ routerListener = Bun.listen({
                 recordReplay: cmd.recordReplay,
                 metadata: cmd.metadata,
               });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: "session", session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -1930,6 +2124,77 @@ routerListener = Bun.listen({
               res = { type: "error", message: `Failed to create session: ${errMsg}` };
             }
             break;
+
+          case 'attach-prepare':
+            try {
+              let targetSession: Session;
+              let workspaceId: string | undefined;
+              if (cmd.sessionId) {
+                const s = sessions.get(cmd.sessionId);
+                if (!s) {
+                  res = { type: 'error', message: `Session ${cmd.sessionId} not found` };
+                  break;
+                }
+                targetSession = getSessionInfo(s);
+              } else if (cmd.workspaceId) {
+                let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+                const prepared = await attachWorkspaceSession({
+                  scanWorkspaces,
+                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.name })),
+                  createSession: async (name, cwd, options) => createSession(name, cwd, options),
+                  prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
+                }, {
+                  workspaceId: cmd.workspaceId,
+                  sessionName: cmd.sessionName,
+                  command: cmd.command,
+                  args: cmd.args,
+                  env: cmd.env,
+                  scriptPolicy: cmd.scriptPolicy,
+                  onAbortController: (controller) => {
+                    if (controller) {
+                      pendingAttachControllers.set(cmd.requestId, controller);
+                    } else {
+                      pendingAttachControllers.delete(cmd.requestId);
+                    }
+                  },
+                  onOutput: (data, phase) => {
+                    currentPhase = phase;
+                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: Buffer.from(data).toString('base64') });
+                  },
+                  onPhaseStart: (phase) => {
+                    currentPhase = phase;
+                    const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
+                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: banner.toString('base64') });
+                  },
+                });
+                if (!cmd.command) {
+                  writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
+                }
+                targetSession = prepared.session;
+                workspaceId = prepared.workspace.id;
+              } else {
+                res = { type: 'error', message: 'attach-prepare requires sessionId or workspaceId' };
+                break;
+              }
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              writeResponse({ type: 'attach-prepared', requestId: cmd.requestId, session: targetSession, workspaceId, viewOnly: cmd.viewOnly });
+              continue;
+            } catch (e) {
+              pendingAttachControllers.delete(cmd.requestId);
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to prepare attach: ${errMsg}` };
+            }
+            break;
+
+          case 'attach-cancel': {
+            const controller = pendingAttachControllers.get(cmd.requestId);
+            if (controller) {
+              controller.abort();
+              pendingAttachControllers.delete(cmd.requestId);
+            }
+            res = { type: 'ok' };
+            break;
+          }
 
           case "attach": {
             const s = sessions.get(cmd.id);
@@ -1950,6 +2215,7 @@ routerListener = Bun.listen({
             } else {
               // Use SIGKILL to forcefully terminate - SIGTERM is often ignored by shells
               s.proc.kill(9);
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: "ok" };
             }
             break;
@@ -1974,6 +2240,335 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to start agent watch: ${errMsg}` };
+            }
+            break;
+
+          case 'machine-snapshot':
+            try {
+              const snapshot = await buildCurrentMachineSnapshot();
+              res = { type: 'machine-snapshot', snapshot };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to load machine snapshot: ${errMsg}` };
+            }
+            break;
+
+          case 'machine-watch':
+            try {
+              const snapshot = await buildCurrentMachineSnapshot();
+              socketState.watchesMachineState = true;
+              machineStateWatchers.add(socket);
+              writeResponse({ type: 'machine-snapshot', snapshot });
+              res = { type: 'machine-watch-started' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start machine watch: ${errMsg}` };
+            }
+            break;
+
+
+          case 'workspace-set-phase':
+            try {
+              setWorkspaceStatus(cmd.projectName, cmd.workspaceName, cmd.phase);
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set workspace phase: ${errMsg}` };
+            }
+            break;
+
+          case 'service-start':
+            try {
+              const workspaces = await scanWorkspaces();
+              const workspace = workspaces.find((w) => matchesWorkspaceId(w, cmd.workspaceId));
+              if (!workspace) {
+                res = { type: 'error', message: `Workspace not found: ${cmd.workspaceId}` };
+                break;
+              }
+              const specs = getProcessSpecs(workspace.path).filter(
+                (spec) => spec.name === cmd.processName && (cmd.instance === undefined || spec.instance === cmd.instance),
+              );
+              if (specs.length === 0) {
+                res = { type: 'error', message: `Service not found: ${cmd.processName}` };
+                break;
+              }
+              const sessionIds: string[] = [];
+              for (const spec of specs) {
+                const result = await startProcessInstance(workspace.path, spec);
+                sessionIds.push(result.sessionId);
+              }
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = {
+                type: 'service-started',
+                workspaceId: cmd.workspaceId,
+                processName: cmd.processName,
+                sessionId: sessionIds[0],
+                sessionIds,
+              };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start service: ${errMsg}` };
+            }
+            break;
+
+          case 'service-stop':
+            try {
+              const workspaces = await scanWorkspaces();
+              const workspace = workspaces.find((w) => matchesWorkspaceId(w, cmd.workspaceId));
+              if (!workspace) {
+                res = { type: 'error', message: `Workspace not found: ${cmd.workspaceId}` };
+                break;
+              }
+              const specs = getProcessSpecs(workspace.path).filter((spec) => spec.name === cmd.processName);
+              if (specs.length === 0) {
+                res = { type: 'error', message: `Service not found: ${cmd.processName}` };
+                break;
+              }
+              for (const spec of specs) {
+                await stopProcessInstance(workspace.path, spec);
+              }
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'service-stopped', workspaceId: cmd.workspaceId, processName: cmd.processName };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to stop service: ${errMsg}` };
+            }
+            break;
+
+          case 'github-repos':
+            try {
+              res = { type: 'github-repos', repos: await listGithubReposForSession(cmd.org) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'remote-branches':
+            try {
+              res = { type: 'remote-branches', projectName: cmd.projectName, branches: await listRemoteBranchesForSession(cmd.projectName) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'linear-issues':
+            try {
+              res = { type: 'linear-issues', projectName: cmd.projectName, issues: await listLinearIssuesForSession(cmd.projectName) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'project-create':
+            try {
+              const result = await createProjectForSession(cmd);
+              res = { type: 'project-created', ...result };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'project-prepare':
+            try {
+              res = { type: 'project-prepared', result: await prepareProjectForSession(cmd) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'project-finalize':
+            try {
+              const result = await finalizePreparedProjectForSession(cmd);
+              res = { type: 'project-created', ...result };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'project-cancel':
+            try {
+              await cancelPreparedProjectForSession(cmd.projectName);
+              res = { type: 'project-cancelled', projectName: cmd.projectName };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-create':
+            try {
+              res = { type: 'workspace-created', ...(await createWorkspaceForSession(cmd)) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'project-delete':
+            try {
+              await deleteProjectForSession({ projectName: cmd.projectName });
+              res = { type: 'project-deleted', projectName: cmd.projectName };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-delete':
+            try {
+              const normalizedWorkspaceId = cmd.workspaceId.startsWith(`${cmd.projectName}:`)
+                ? cmd.workspaceId.slice(cmd.projectName.length + 1)
+                : cmd.workspaceId;
+              const canonicalWorkspaceId = `${cmd.projectName}:${normalizedWorkspaceId}`;
+              const result = await deleteWorkspaceCore(cmd.projectName, normalizedWorkspaceId, {
+                nonInteractive: true,
+                removeScriptPolicy: cmd.scriptPolicy === 'skip' ? 'skip' : 'enforce',
+                onScriptOutput: (data) => {
+                  writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: data.toString('base64') });
+                },
+              });
+              if (!result.success) {
+                const message = result.error ?? `Failed to delete workspace ${normalizedWorkspaceId}`;
+                writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: message });
+                res = { type: 'error', message };
+                break;
+              }
+              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'workspace-deleted', requestId: cmd.requestId, workspaceId: canonicalWorkspaceId };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: errMsg });
+              res = { type: 'error', message: errMsg };
+            }
+            break;
+
+          case 'bundle-refresh-plan':
+            try {
+              const workspaceRef = resolveWorkspaceRef(cmd.workspaceId.includes(':') ? cmd.workspaceId : cmd.workspaceId);
+              const workspaces = await scanWorkspaces();
+              const workspace = workspaces.find((w) => matchesWorkspaceId(w, cmd.workspaceId) && w.projectName === cmd.projectName);
+              if (!workspace) {
+                res = { type: 'error', message: `Workspace not found: ${cmd.workspaceId}` };
+                break;
+              }
+              res = { type: 'bundle-refresh-plan', plan: await getBundleRefreshPlanCore(cmd.projectName, workspace.path, `${cmd.projectName}:${workspace.id}`) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'bundle-refresh-apply':
+            try {
+              const workspaces = await scanWorkspaces();
+              const workspace = workspaces.find((w) => matchesWorkspaceId(w, cmd.workspaceId) && w.projectName === cmd.projectName);
+              if (!workspace) {
+                res = { type: 'error', message: `Workspace not found: ${cmd.workspaceId}` };
+                break;
+              }
+              await applyBundleRefreshSubmission(cmd.projectName, workspace.path, cmd.submission);
+              res = { type: 'bundle-refresh-applied', projectName: cmd.projectName, workspaceId: `${cmd.projectName}:${workspace.id}` };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'bundle-config-state':
+            try {
+              const workspaces = await scanWorkspaces();
+              const workspace = workspaces.find((w) => matchesWorkspaceId(w, cmd.workspaceId) && w.projectName === cmd.projectName);
+              if (!workspace) {
+                res = { type: 'error', message: `Workspace not found: ${cmd.workspaceId}` };
+                break;
+              }
+              res = { type: 'bundle-config-state', state: await getBundleConfigStateCore(cmd.projectName, workspace.path, `${cmd.projectName}:${workspace.id}`) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'bundle-config-apply':
+            try {
+              const workspaces = await scanWorkspaces();
+              const workspace = workspaces.find((w) => matchesWorkspaceId(w, cmd.workspaceId) && w.projectName === cmd.projectName);
+              if (!workspace) {
+                res = { type: 'error', message: `Workspace not found: ${cmd.workspaceId}` };
+                break;
+              }
+              await applyBundleConfigSubmission(cmd.projectName, workspace.path, cmd.submission);
+              res = { type: 'bundle-config-applied', projectName: cmd.projectName, workspaceId: `${cmd.projectName}:${workspace.id}` };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'review-request':
+            try {
+              const result = await executeLocalReviewOperation(cmd.operation, scanWorkspaces, { allowPrompt: false });
+              res = { type: 'review-response', requestId: cmd.requestId, result };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'review-response', requestId: cmd.requestId, error: { code: 'REVIEW_ERROR', message: errMsg } };
+            }
+            break;
+
+          case 'events-request':
+            try {
+              const workspaceRef = resolveWorkspaceRef(cmd.workspacePath);
+              if (!workspaceRef || !existsSync(workspaceRef.workspacePath)) {
+                res = { type: 'events-list', workspaceId: cmd.workspacePath, events: [], liveEventIds: [], savedEventFilters: [] };
+                break;
+              }
+              const savedEventFilters = loadSavedEventFilters(workspaceRef.workspacePath);
+              const projectConfig = readProjectConfig(workspaceRef.projectName);
+              const snapshots = readWorkspaceSnapshots(workspaceRef.workspacePath, {
+                maxBytes: projectConfig.events?.snapshotCacheMaxBytes,
+                maxTimeline: projectConfig.events?.maxTimeline,
+              });
+              const filtered = snapshots
+                .filter((snapshot) => {
+                  if (cmd.sinceMs !== undefined && snapshot.updatedAt < cmd.sinceMs) return false;
+                  const filter = cmd.filter;
+                  if (!filter) return true;
+                  if (filter.processName && snapshot.processName !== filter.processName) return false;
+                  if (filter.level && snapshot.level !== filter.level) return false;
+                  if (filter.message && !snapshot.message.includes(filter.message)) return false;
+                  if (filter.eventName && snapshot.eventName !== filter.eventName) return false;
+                  if (filter.correlationId && snapshot.correlationId !== filter.correlationId) return false;
+                  return true;
+                })
+                .slice(0, cmd.limit ?? 200);
+              const events = filtered.length > 0
+                ? filtered.map((snapshot) => ({
+                    eventId: snapshot.lastEventId,
+                    eventName: snapshot.eventName,
+                    level: snapshot.level,
+                    timestamp: new Date(snapshot.updatedAt).toISOString(),
+                    timestampMs: snapshot.updatedAt,
+                    message: snapshot.message,
+                    sessionId: '',
+                    workspaceId: workspaceRef.workspaceId,
+                    projectName: workspaceRef.projectName,
+                    processName: snapshot.processName,
+                    processInstance: snapshot.processInstance,
+                    raw: snapshot.raw ?? {},
+                    kind: 'wide' as const,
+                    correlationId: snapshot.correlationId,
+                    timeline: Object.values(snapshot.timelineMap),
+                    timelineMap: snapshot.timelineMap,
+                    timelineOrder: snapshot.timelineOrder,
+                  }))
+                : listProcessEventsDirs(workspaceRef.workspacePath)
+                    .flatMap((eventsDir) => readWideEvents({
+                      eventsDir,
+                      filter: { ...(cmd.filter ?? {}), kind: cmd.filter?.kind ?? 'source' },
+                      limit: cmd.limit,
+                      sinceMs: cmd.sinceMs,
+                    }))
+                    .sort((a, b) => b.timestampMs - a.timestampMs)
+                    .slice(0, cmd.limit ?? 200);
+              res = { type: 'events-list', workspaceId: workspaceRef.workspaceId, events, liveEventIds: [], savedEventFilters };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to load events: ${errMsg}` };
             }
             break;
 
@@ -2012,44 +2607,47 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'agent-clear':
+          case 'agent-close':
             try {
               await getAgentControlReady();
-              const ok = await clearAgentSession(cmd.target, cmd.agentSessionId);
-              res = { type: 'agent-bool', ok };
+              const sessions = await closeAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-sessions', sessions };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to clear agent session: ${errMsg}` };
+              res = { type: 'error', message: `Failed to close agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-archive':
+            try {
+              await getAgentControlReady();
+              const sessions = await archiveAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-sessions', sessions };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to archive agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-restore':
+            try {
+              await getAgentControlReady();
+              const sessions = await restoreAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-sessions', sessions };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to restore agent session: ${errMsg}` };
             }
             break;
 
           case 'agent-attach':
             try {
               await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { force: cmd.force });
+              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
               res = { type: 'session', session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
-            }
-            break;
-
-          case 'agent-takeover-status':
-            try {
-              await getAgentControlReady();
-              const status = await getAgentSessionTakeoverState(cmd.target, cmd.agentSessionId);
-              res = {
-                type: 'agent-takeover-status',
-                status: {
-                  workspaceId: cmd.target.workspaceId,
-                  agentSessionId: cmd.agentSessionId,
-                  requiresTakeover: status.requiresTakeover,
-                  sessionName: status.sessionName,
-                },
-              };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to inspect agent session: ${errMsg}` };
             }
             break;
 
@@ -2088,9 +2686,15 @@ routerListener = Bun.listen({
           case "inbox-clear":
             if (cmd.id) {
               const idx = inbox.findIndex(i => i.id === cmd.id);
-              if (idx !== -1) inbox.splice(idx, 1);
+              if (idx !== -1) {
+                const [removed] = inbox.splice(idx, 1);
+                if (removed) updateSessionAlertState(removed.sessionId, { unreadDelta: 0 });
+              }
             } else {
               inbox.length = 0;
+              for (const session of sessions.values()) {
+                updateSessionAlertState(session.info.id, { unreadDelta: 0 });
+              }
             }
             broadcastTitleUpdate();
             res = { type: "ok" };
@@ -2098,11 +2702,23 @@ routerListener = Bun.listen({
 
           case "inbox-read": {
             const item = inbox.find(i => i.id === cmd.id);
-            if (item) item.read = true;
+            if (item) {
+              item.read = true;
+              updateSessionAlertState(item.sessionId, { unreadDelta: 0 });
+            }
             broadcastTitleUpdate();
             res = { type: "ok" };
             break;
           }
+
+          case 'notification-config-get':
+            res = { type: 'notification-config', config: notificationConfig };
+            break;
+
+          case 'notification-config-update':
+            notificationConfig = updateNotificationConfig(cmd.config);
+            res = { type: 'notification-config', config: notificationConfig };
+            break;
 
           case "version":
             res = {
@@ -2135,6 +2751,10 @@ routerListener = Bun.listen({
         if (res.type === 'agent-watch-started') {
           sendRouterResponse(socket, { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) });
         }
+        if (res.type === 'machine-watch-started') {
+          const snapshot = await buildCurrentMachineSnapshot();
+          sendRouterResponse(socket, { type: 'machine-snapshot', snapshot });
+        }
       }
     },
     drain(socket) {
@@ -2154,6 +2774,9 @@ function cleanupAndExit(signal: string) {
       s.proc.kill(9);
     } catch {}
   }
+  void defaultOpenCodeRuntimeManager.shutdown().catch(() => {
+    // non-fatal during shutdown
+  });
   // Clean up PID file
   try { unlinkSync(PID_FILE); } catch {}
   process.exit(0);

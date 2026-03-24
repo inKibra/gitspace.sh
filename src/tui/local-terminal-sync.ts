@@ -1,4 +1,4 @@
-export type AppView = 'machines' | 'projects' | 'terminal' | 'replay' | 'inbox' | 'scripts' | 'events'
+export type AppView = 'projects' | 'workspace-detail' | 'terminal' | 'replay' | 'inbox' | 'scripts' | 'events'
 
 export type LocalSessionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 export type LocalSessionMode = 'browsing' | 'attached'

@@ -67,6 +67,7 @@ export interface UseEventsProps {
 
 export interface UseEventsReturn {
   filtered: WideEventItem[];
+  showingSourceEvents: boolean;
   selectedIndex: number;
   selected: WideEventItem | null;
   liveEventIds: string[];
@@ -84,8 +85,14 @@ export function useEvents(props: UseEventsProps): UseEventsReturn {
 
   const filtered = useMemo(() => {
     const wideEvents = props.events.filter((event) => event.kind === 'wide');
-    return [...wideEvents].sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
+    const sourceEvents = props.events.filter((event) => event.kind !== 'wide');
+    const visibleEvents = wideEvents.length > 0 ? wideEvents : sourceEvents;
+    return [...visibleEvents].sort((a, b) => getEventTimestamp(b) - getEventTimestamp(a));
   }, [props.events]);
+  const showingSourceEvents = useMemo(
+    () => props.events.filter((event) => event.kind === 'wide').length === 0,
+    [props.events],
+  );
 
   useEffect(() => {
     if (!selectedKey && filtered.length > 0) {
@@ -125,6 +132,7 @@ export function useEvents(props: UseEventsProps): UseEventsReturn {
 
   return {
     filtered,
+    showingSourceEvents,
     selectedIndex,
     selected,
     liveEventIds: props.liveEventIds,

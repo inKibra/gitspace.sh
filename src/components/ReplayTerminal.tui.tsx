@@ -478,13 +478,8 @@ export function ReplayTerminal({
       : replay.status === 'running'
         ? 'running'
         : 'closed';
-    const workspace = replay.workspaceName
-      ? ` · ${replay.projectName}/${replay.workspaceName}`
-      : replay.projectName
-        ? ` · ${replay.projectName}`
-        : '';
     const age = replay.endedAt ? `  ${formatAge(replay.endedAt)}` : '';
-    return { name: replay.sessionName, state, workspace, age };
+    return { name: replay.sessionName, state, age };
   }, [replay]);
 
   const statusColor = replay.status === 'crashed' ? COLORS.crashed : COLORS.title;
@@ -518,7 +513,6 @@ export function ReplayTerminal({
       >
         <box flexGrow={1} flexDirection="row">
           <text fg={statusColor}>{statusLabel.name}</text>
-          <text fg={COLORS.textMuted}>{statusLabel.workspace}</text>
           <text fg={COLORS.textDim}> ({statusLabel.state}){statusLabel.age}</text>
           <text fg={COLORS.textDim}>  {timeLabel}</text>
           <text fg={COLORS.textDim}>  {stepLabel}</text>

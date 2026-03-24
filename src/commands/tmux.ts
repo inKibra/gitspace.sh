@@ -44,9 +44,36 @@ import {
   getReplayStorageSummaryOffline,
   type ReplayInfo,
 } from '../lib/tmux-lite/replay/service.js';
+import {
+  clearTmuxHostingState,
+  readTmuxHostingState,
+  resolveTmuxHostingState,
+  writeTmuxHostingState,
+} from '../lib/tmux-lite/hosting/state.js';
+import {
+  getTmuxHostingRuntimeStatus,
+  refreshTmuxHosting,
+  stopTmuxHosting,
+} from '../lib/tmux-lite/hosting/supervisor.js';
+import { resolveHostingSubdomains } from './host.js';
+import { selectOne } from '../utils/prompts.js';
 
 interface TmuxCommandOptions {
   sandbox?: string;
+}
+
+function normalizeHostingBaseHost(input: string): string {
+  const trimmed = input.trim().toLowerCase();
+  if (!trimmed) {
+    throw new Error('Hosting route cannot be empty');
+  }
+  if (trimmed.endsWith('.gitspace.sh')) {
+    return trimmed;
+  }
+  if (trimmed.endsWith('.serve')) {
+    return `${trimmed}.gitspace.sh`;
+  }
+  return `${trimmed}.serve.gitspace.sh`;
 }
 
 function applyTmuxSandbox(options?: TmuxCommandOptions): void {
@@ -146,6 +173,7 @@ export async function stopTmux(options: { force?: boolean; sandbox?: string } = 
   }
 
   logger.log("Stopping tmux-lite server...");
+  await stopTmuxHosting();
   await killServer();
   logger.success("tmux-lite server stopped");
 }
@@ -253,6 +281,99 @@ export async function listTmux(options: TmuxCommandOptions = {}): Promise<void> 
     logger.log(`  ${status} ${s.id}: ${s.name} (${ageStr})${title}${exited}`);
     logger.dim(`      ${s.cwd}`);
   }
+}
+
+export async function statusTmuxHosting(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
+  const state = resolveTmuxHostingState();
+  const runtime = await getTmuxHostingRuntimeStatus();
+  logger.log('tmux-lite hosting:');
+  logger.log(`  enabled: ${state.enabled ? 'yes' : 'no'}`);
+  logger.log(`  base host: ${state.baseHost ?? 'not selected'}`);
+  logger.log(`  machine name: ${state.machineName ?? 'unknown'}`);
+  logger.log(`  cloudflared: ${runtime.active ? 'running' : 'stopped'}`);
+  logger.log(`  routes: ${runtime.routeCount}`);
+  if (runtime.reason) {
+    logger.log(`  status: ${runtime.reason}`);
+  }
+}
+
+export async function selectTmuxHosting(baseHost: string | undefined, options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
+
+  let selectedBaseHost = baseHost?.trim();
+  if (!selectedBaseHost) {
+    const subdomains = await resolveHostingSubdomains();
+    if (subdomains.length === 0) {
+      logger.warning('No reserved hosting routes found.');
+      logger.dim('Reserve one with: gssh user host reserve <name>');
+      return;
+    }
+    if (!process.stdout.isTTY || !process.stdin.isTTY) {
+      selectedBaseHost = `${subdomains[0]}.gitspace.sh`;
+    } else {
+      const selected = await selectOne(
+        subdomains.map((subdomain) => ({
+          label: `${subdomain}.gitspace.sh`,
+          value: `${subdomain}.gitspace.sh`,
+        })),
+        'Select a tmux-lite hosting route'
+      );
+      if (!selected) {
+        logger.info('Cancelled');
+        return;
+      }
+      selectedBaseHost = selected;
+    }
+  }
+
+  const state = writeTmuxHostingState({ baseHost: normalizeHostingBaseHost(selectedBaseHost), enabled: true });
+  const refreshed = await refreshTmuxHosting();
+  logger.success(`tmux-lite hosting route selected: ${state.baseHost}`);
+  logger.log(`  Machine name: ${state.machineName}`);
+  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+}
+
+export async function setTmuxHostingMachineName(machineName: string, options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
+  const state = writeTmuxHostingState({ machineName });
+  const refreshed = await refreshTmuxHosting();
+  logger.success(`tmux-lite hosting machine name set: ${state.machineName}`);
+  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+}
+
+export async function enableTmuxHosting(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
+  const current = readTmuxHostingState();
+  if (!current?.baseHost) {
+    logger.warning('No tmux-lite hosting route selected.');
+    logger.dim('Run: gssh machine tmux hosting select');
+    return;
+  }
+  const state = writeTmuxHostingState({ enabled: true });
+  const refreshed = await refreshTmuxHosting();
+  logger.success(`tmux-lite hosting enabled for ${state.baseHost}`);
+  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+}
+
+export async function disableTmuxHosting(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
+  const current = readTmuxHostingState();
+  if (!current) {
+    logger.info('tmux-lite hosting is not configured');
+    return;
+  }
+  writeTmuxHostingState({ enabled: false });
+  await stopTmuxHosting();
+  const state = resolveTmuxHostingState();
+  logger.success(`tmux-lite hosting disabled for ${state.baseHost ?? 'unselected route'}`);
+}
+
+export async function clearTmuxHosting(options: TmuxCommandOptions = {}): Promise<void> {
+  applyTmuxSandbox(options);
+  await stopTmuxHosting();
+  clearTmuxHostingState();
+  logger.success('Cleared tmux-lite hosting configuration');
 }
 
 /**

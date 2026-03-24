@@ -14,6 +14,7 @@ import {
   getAllProjectNames,
   projectExists,
 } from '../core/config.js';
+import { setWorkspaceStatus } from '../core/workspace-metadata.js';
 import { checkCommandExists, checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
@@ -453,7 +454,9 @@ export async function addWorkspace(
     existsRemotely
   );
 
-  logger.success(`Created worktree from ${baseBranch}`);
+  const phase = options.status ?? 'code';
+  setWorkspaceStatus(currentProject, workspaceName, phase);
+  logger.success(`Created worktree from ${baseBranch} (phase: ${phase})`);
 
   // Register workspace bundle requirements in project-level metadata.
   const bundleSync = syncBundleWorkspaceState(currentProject, workspacePath);
@@ -490,3 +493,4 @@ export async function addWorkspace(
     logger.log(`\nTo navigate:\n  cd ${workspacePath}`);
   }
 }
+

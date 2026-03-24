@@ -1,10 +1,10 @@
 import { useCallback } from 'react';
 import type { UseFlowReturn } from '../../components/Flow.js';
 import type { DeleteWorkspaceParams } from '../../session/backend.js';
+import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js';
 
 export interface WorkspaceDeleteTarget {
-  projectName: string;
-  workspaceId: string;
+  ref: BackendScopedWorkspaceRef;
   workspaceName: string;
 }
 
@@ -22,8 +22,7 @@ export interface WorkspaceDeleteErrorContext extends WorkspaceDeleteContext {
 export interface UseWorkspaceDeleteFlowOptions {
   flow: Pick<UseFlowReturn, 'showLoading' | 'showConfirm' | 'showMessage' | 'close'>;
   deleteWorkspace: (
-    projectName: string,
-    workspaceId: string,
+    ref: BackendScopedWorkspaceRef,
     params?: DeleteWorkspaceParams
   ) => Promise<void>;
   onBeforeDelete?: (context: WorkspaceDeleteContext) => void | Promise<void>;
@@ -115,7 +114,7 @@ export function useWorkspaceDeleteFlow(
     }
 
     try {
-      await deleteWorkspace(target.projectName, target.workspaceId, params);
+      await deleteWorkspace(target.ref, params);
       flow.close();
       await onDeleteSuccess?.(context);
       return true;

@@ -7,8 +7,11 @@ export interface OpenCodeRuntimeTarget {
 }
 
 export interface OpenCodeRuntimeInfo {
-  workspaceId: string;
-  workspacePath: string;
+  /** Machine/runtime-scoped identifier. */
+  runtimeKey: string;
+  /** Legacy fields kept during migration; no longer authoritative. */
+  workspaceId?: string;
+  workspacePath?: string;
   hostname: string;
   port: number;
   baseUrl: string;

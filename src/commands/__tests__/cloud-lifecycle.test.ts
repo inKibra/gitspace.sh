@@ -20,7 +20,7 @@ import { cloudDestroy, cloudResume, cloudStop } from '../cloud.js';
 import { writeRelayConfig } from '../../core/identity.js';
 import { addTrustedRelay } from '../../core/trusted-relays.js';
 import {
-  bindPersistedOwnerIdentity,
+  bindControlOwner,
   bindControlRelayIdentity,
   ensureControlStore,
   getCloudWorkspace,
@@ -87,7 +87,7 @@ function setup() {
   process.env.HOME = testDir;
   process.env.GITSPACE_CONTROL_DIR = join(testDir, '.relay', 'control');
   ensureControlStore();
-  bindPersistedOwnerIdentity(OWNER_ID);
+  bindControlOwner(OWNER_ID);
 }
 
 function seedSavedRelayConfig(args: { relayUrl: string; cloudRelayUrl?: string }) {

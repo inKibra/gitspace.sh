@@ -27,6 +27,9 @@ const COLORS = {
   newSession: '#00AAFF',
   stale: '#666666',
   sessionCount: '#00FF00',
+  amber: '#f59e0b',
+  green: '#10b981',
+  blue: '#3b82f6',
 };
 
 // ============================================================================
@@ -84,9 +87,7 @@ function getSpacesBrowserHint(selectedItem: TreeItem | null | undefined): string
       : '[↑↓] Navigate  [Enter] Expand Agents  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'agent-session') {
-    return selectedItem.session.closed
-      ? '[↑↓] Navigate  [d] Clear Closed Agent  [r] Refresh  [q] Back'
-      : '[↑↓] Navigate  [Enter] Open Agent Session  [x] Close Agent  [r] Refresh  [q] Back';
+    return '[↑↓] Navigate  [Enter] Open Agent Session  [r] Refresh  [q] Back';
   }
   if (selectedItem?.type === 'new-agent-session') {
     return '[↑↓] Navigate  [Enter] New Agent Session  [r] Refresh  [q] Back';
@@ -191,15 +192,15 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             const indicatorColor = session.attached ? COLORS.sessionAttached : COLORS.sessionCount;
             const displayName = session.name.split(':').pop() || session.name;
             const prefix = isSelected ? '>' : ' ';
-            const processInfo = session.processTitle ? ` [${session.processTitle}]` : '';
-            const timeInfo = session.attached ? '(attached)' : formatTime(session.createdAt);
+            const processInfo = item.subtitle ?? (session.processTitle ? `[${session.processTitle}]` : session.terminalTitle ? `[${session.terminalTitle}]` : '');
+            const timeInfo = item.alertLabel ? `(${item.alertLabel})` : session.attached ? '(attached)' : formatTime(session.createdAt);
 
             return (
               <box key={`session-${session.id}`} flexDirection="row" height={1}>
                 <text fg={textColor}>{prefix}   </text>
                 <text fg={indicatorColor}>{indicator}</text>
                 <text fg={textColor}> {displayName}</text>
-                {session.processTitle && <text fg={COLORS.sessionAttached}>{processInfo}</text>}
+                {processInfo && <text fg={COLORS.sessionAttached}> {processInfo}</text>}
                 <text fg={COLORS.textDim}> {timeInfo}</text>
               </box>
             );
@@ -252,15 +253,15 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
             const statusColor = item.status === 'running' ? '#00FF00' : item.status === 'failed' ? '#FF4444' : COLORS.textDim;
             const textColor = isSelected ? COLORS.selected : COLORS.text;
             const prefix = isSelected ? '>' : ' ';
-            const portInfo = item.ports?.length ? ` :${item.ports.map(p => p.port).join(',')}` : '';
+            const portInfo = item.subtitle ?? (item.ports?.length ? `:${item.ports.map(p => p.port).join(',')}` : '');
 
             return (
               <box key={`process-${item.workspaceId}-${item.processName}-${item.instance}`} flexDirection="row" height={1}>
                 <text fg={textColor}>{prefix}   </text>
                 <text fg={statusColor}>{statusIcon}</text>
                 <text fg={textColor}> {item.processName}#{item.instance}</text>
-                {portInfo && <text fg={COLORS.textDim}>{portInfo}</text>}
-                <text fg={statusColor}> ({item.status})</text>
+                {portInfo && <text fg={COLORS.textDim}> {portInfo}</text>}
+                <text fg={statusColor}> ({item.alertLabel ?? item.status})</text>
               </box>
             );
           }
@@ -311,22 +312,26 @@ export function SpacesBrowserTUI(props: SpacesBrowserTUIProps) {
           }
 
           if (item.type === 'agent-session') {
-            const textColor = isSelected ? COLORS.selected : item.session.closed ? COLORS.textDim : '#C678DD';
+            const textColor = isSelected ? COLORS.selected : '#C678DD';
             const prefix = isSelected ? '>' : ' ';
             const state = getAgentSessionDisplayState(item.session);
             const label = getAgentSessionDisplayLabel(item.session);
             const signal =
-              state === 'closed' ? '■'
-              : state === 'needs-permission' ? '⚡'
+              state === 'needs-permission' ? '⚡'
               : state === 'error' ? '!'
               : state === 'running' ? '●'
               : state === 'retrying' ? '↻'
               : '◦';
+            const signalColor =
+              state === 'needs-permission' ? COLORS.amber
+              : state === 'running' ? COLORS.green
+              : state === 'waiting' ? COLORS.blue
+              : COLORS.textDim;
             const timeInfo = item.session.updatedAt ? formatTime(new Date(item.session.updatedAt).getTime()) : '';
             return (
               <box key={`agent-session-${item.workspaceId}-${item.session.id}`} flexDirection="row" height={1}>
                 <text fg={textColor}>{prefix}     ✦ {item.session.title}</text>
-                <text fg={COLORS.textDim}> {signal} {label}</text>
+                <text fg={signalColor}> {signal} {label}</text>
                 {timeInfo && <text fg={COLORS.textDim}> {timeInfo}</text>}
               </box>
             );

@@ -2,18 +2,11 @@ import { useCallback } from 'react';
 import type { UseFlowReturn, FlowWizardStep } from '../components/Flow.js';
 import type { ConfirmStepResult } from '../types/bundle.js';
 import type { BundleConfigState, BundleConfigStep, BundleConfigSubmission } from '../types/bundle-config.js';
+import type { BackendScopedWorkspaceRef } from '../machine/multi/types.js';
 
 const MAX_VALIDATION_PATTERN_LENGTH = 256;
 const MAX_VALIDATION_INPUT_LENGTH = 512;
 const UNSET_SECRET_TOKEN = '-';
-
-function parseProjectNameFromWorkspaceId(workspaceId: string): string | null {
-  const separatorIndex = workspaceId.indexOf(':');
-  if (separatorIndex <= 0) {
-    return null;
-  }
-  return workspaceId.slice(0, separatorIndex) || null;
-}
 
 function toErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) {
@@ -196,18 +189,16 @@ function buildSubmission(
 
 export interface UseBundleConfigFlowOptions {
   flow: Pick<UseFlowReturn, 'showLoading' | 'showMessage' | 'showWizard' | 'close'>;
-  getBundleConfigState: (projectName: string, workspaceId: string) => Promise<BundleConfigState>;
+  getBundleConfigState: (ref: BackendScopedWorkspaceRef) => Promise<BundleConfigState>;
   applyBundleConfigUpdate: (
-    projectName: string,
-    workspaceId: string,
+    ref: BackendScopedWorkspaceRef,
     submission: BundleConfigSubmission
   ) => Promise<void>;
-  resolveProjectName?: (workspaceId: string) => string | null;
   onApplied?: () => Promise<void> | void;
 }
 
 export interface UseBundleConfigFlowResult {
-  openBundleConfig: (params: { workspaceId: string; projectName?: string | null }) => Promise<boolean>;
+  openBundleConfig: (ref: BackendScopedWorkspaceRef) => Promise<boolean>;
 }
 
 export function useBundleConfigFlow(
@@ -217,34 +208,19 @@ export function useBundleConfigFlow(
     flow,
     getBundleConfigState,
     applyBundleConfigUpdate,
-    resolveProjectName,
     onApplied,
   } = options;
 
   const openBundleConfig = useCallback(async (
-    params: { workspaceId: string; projectName?: string | null }
+    ref: BackendScopedWorkspaceRef
   ): Promise<boolean> => {
-    const projectName =
-      params.projectName ??
-      resolveProjectName?.(params.workspaceId) ??
-      parseProjectNameFromWorkspaceId(params.workspaceId);
-
-    if (!projectName) {
-      flow.showMessage({
-        title: 'Bundle Config Unavailable',
-        message: `Could not resolve project for workspace ${params.workspaceId}.`,
-        variant: 'error',
-      });
-      return false;
-    }
-
     try {
       flow.showLoading({
         title: 'Bundle Config',
         message: 'Loading current bundle configuration...',
       });
 
-      const state = await getBundleConfigState(projectName, params.workspaceId);
+      const state = await getBundleConfigState(ref);
 
       if (!state.hasBundle) {
         flow.showMessage({
@@ -279,11 +255,7 @@ export function useBundleConfigFlow(
         message: 'Applying bundle configuration updates...',
       });
 
-      await applyBundleConfigUpdate(
-        projectName,
-        params.workspaceId,
-        buildSubmission(state, values)
-      );
+      await applyBundleConfigUpdate(ref, buildSubmission(state, values));
 
       await onApplied?.();
       flow.showMessage({
@@ -300,7 +272,7 @@ export function useBundleConfigFlow(
       });
       return false;
     }
-  }, [applyBundleConfigUpdate, flow, getBundleConfigState, onApplied, resolveProjectName]);
+  }, [applyBundleConfigUpdate, flow, getBundleConfigState, onApplied]);
 
   return { openBundleConfig };
 }

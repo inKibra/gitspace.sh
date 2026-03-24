@@ -36,9 +36,9 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
   minCommandDurationMs: 10000,
   types: {
     exit: true,
-    idle: true,
+    idle: false,
     bell: true,
-    title: true,
+    title: false,
     osc: true,
   },
   toast: {
