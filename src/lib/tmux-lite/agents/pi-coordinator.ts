@@ -5,7 +5,7 @@ import {
 } from '../cli.js';
 import type { Session as TmuxSession } from '../protocol.js';
 import { setupPiEnvironment, ensureOmpInstalled } from './pi-runtime.js';
-import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
+import { listPiSessions, findPiSessionFile, getDefaultSessionsRoot } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
   getAgentSessionDisplayTitle,
@@ -13,6 +13,10 @@ import {
 } from '../../../agents/session-display.js';
 
 export const PI_AGENT_TMUX_SESSION_KIND = 'agent';
+
+/** Max time to wait for Pi to create its session file after spawning. */
+const SESSION_DISCOVERY_TIMEOUT_MS = 10_000;
+const SESSION_DISCOVERY_POLL_MS = 200;
 
 export interface PiWorkspaceTarget {
   workspaceId: string;
@@ -30,7 +34,6 @@ export interface PiAgentSessionSummary {
   archivedAt?: string;
 }
 
-
 function buildAgentTerminalSessionName(target: PiWorkspaceTarget, agentSessionId: string): string {
   return `agent:${target.workspaceName}:${agentSessionId.slice(-8)}`;
 }
@@ -41,23 +44,22 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
     && session.metadata?.agentSessionId === agentSessionId;
 }
 
-function findTmuxSessionForWorkspace(sessions: TmuxSession[], workspaceId: string): TmuxSession | undefined {
-  return sessions.find(
-    (s) => s.kind === PI_AGENT_TMUX_SESSION_KIND
-      && s.metadata?.workspaceId === workspaceId
-      && s.exitCode === undefined,
-  );
-}
-
 export class PiCoordinator {
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
+  /** Maps "workspaceId:piSessionId" → tmuxSessionId for sessions created with placeholder IDs */
+  private readonly sessionIdMap = new Map<string, string>();
+  private readonly sessionsRoot: string | undefined;
+
+  constructor(sessionsRoot?: string) {
+    this.sessionsRoot = sessionsRoot;
+  }
 
   /**
    * List Pi agent sessions for a workspace by reading session files on disk.
    * Session IDs come from Pi's JSONL files — these are the canonical IDs.
    */
   async refreshAgentSessions(target: PiWorkspaceTarget): Promise<PiAgentSessionSummary[]> {
-    const sessions = listPiSessions(target.workspacePath);
+    const sessions = listPiSessions(target.workspacePath, this.sessionsRoot);
     return sessions
       .filter((s) => shouldDisplayAgentSession({ id: s.id, title: s.title ?? s.firstMessage }))
       .map((s) => ({
@@ -74,13 +76,14 @@ export class PiCoordinator {
 
   /**
    * Create a new Pi agent session.
-   * Spawns omp in a tmux-lite PTY. Pi creates its own session file on startup.
-   * We discover Pi's session ID after startup by reading the session directory.
+   * Spawns omp in a tmux-lite PTY. Polls for Pi's session file to discover
+   * the canonical session ID (replaces the old fixed-timeout approach).
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    // Snapshot existing sessions before spawning
-    const before = await this.refreshAgentSessions(target);
-    const beforeIds = new Set(before.map((s) => s.id));
+    // Snapshot existing session IDs before spawning
+    const beforeIds = new Set(
+      listPiSessions(target.workspacePath, this.sessionsRoot).map((s) => s.id),
+    );
 
     // Spawn omp in a tmux-lite PTY (fresh session, no --session flag)
     const ompBin = await ensureOmpInstalled();
@@ -99,44 +102,42 @@ export class PiCoordinator {
         recordReplay: false,
         metadata: {
           workspaceId: target.workspaceId,
-          agentSessionId: placeholderId, // temporary until we discover Pi's ID
+          agentSessionId: placeholderId,
         },
       },
     );
 
-    // Give Pi a moment to create its session file, then discover the new ID
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const after = await this.refreshAgentSessions(target);
-    const newSession = after.find((s) => !beforeIds.has(s.id));
+    // Poll for Pi's session file to appear (replaces racy fixed timeout)
+    const newSessionId = await this.pollForNewSession(
+      target.workspacePath,
+      beforeIds,
+    );
 
-    if (newSession) {
-      // Update the tmux session metadata with Pi's actual session ID
-      // (We can't update metadata on an existing tmux session, so we store
-      // the mapping for lookups. The tmux session still has the placeholder.)
-      this.sessionIdMap.set(`${target.workspaceId}:${newSession.id}`, tmuxSession.id);
+    if (newSessionId) {
+      this.sessionIdMap.set(`${target.workspaceId}:${newSessionId}`, tmuxSession.id);
     }
 
+    const sessions = await this.refreshAgentSessions(target);
     const created: PiAgentSessionSummary = {
-      id: newSession?.id ?? placeholderId,
+      id: newSessionId ?? placeholderId,
       workspaceId: target.workspaceId,
-      title: title ?? newSession?.title ?? `New session`,
+      title: title ?? sessions.find((s) => s.id === newSessionId)?.title ?? 'New session',
       updatedAt: new Date().toISOString(),
     };
 
-    return mergeCreatedSession(after, created);
+    return mergeCreatedSession(sessions, created);
   }
 
   async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<void> {
     try {
       const sessions = await listTmuxSessions();
-      // Check both direct metadata match and our ID mapping
       const pty = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
         ?? this.findMappedTmuxSession(sessions, target.workspaceId, agentSessionId);
       if (pty) await killTmuxSession(pty.id);
     } catch {
       // non-fatal
     }
-    this.cleanupSessionMapping(target.workspaceId, agentSessionId);
+    this.sessionIdMap.delete(`${target.workspaceId}:${agentSessionId}`);
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {
@@ -155,6 +156,7 @@ export class PiCoordinator {
   /**
    * Ensure a tmux-lite PTY session exists for a Pi agent session.
    * Uses Pi's session ID to find and resume the right JSONL file.
+   * Throws if the session file is not found (prevents silent mismatch).
    */
   async ensureAgentTerminalSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
     const key = `${target.workspaceId}:${agentSessionId}`;
@@ -181,18 +183,21 @@ export class PiCoordinator {
     const ompBin = await ensureOmpInstalled();
     const env = setupPiEnvironment(target);
 
-    // Find the Pi session file to resume
-    const match = findPiSessionFile(target.workspacePath, agentSessionId);
-    const ompArgs = match?.path
-      ? ['--session', match.path]
-      : [];
+    // Find the Pi session file to resume — fail if not found
+    const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!match) {
+      throw new Error(
+        `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
+        `The session file may have been deleted or the ID is stale.`,
+      );
+    }
 
-    const tmuxSession = await createTmuxSession(
+    return createTmuxSession(
       buildAgentTerminalSessionName(target, agentSessionId),
       target.workspacePath,
       {
         command: ompBin,
-        args: ompArgs,
+        args: ['--session', match.path],
         env,
         kind: PI_AGENT_TMUX_SESSION_KIND,
         hidden: true,
@@ -203,16 +208,29 @@ export class PiCoordinator {
         },
       },
     );
-
-    return tmuxSession;
   }
 
   // -------------------------------------------------------------------------
-  // Session ID mapping (tmux placeholder ID → Pi's actual session ID)
+  // Private helpers
   // -------------------------------------------------------------------------
 
-  /** Maps "workspaceId:piSessionId" → tmuxSessionId for sessions created with placeholder IDs */
-  private readonly sessionIdMap = new Map<string, string>();
+  /**
+   * Poll the session directory until a new session file appears (one that
+   * wasn't in beforeIds). Returns the new session ID, or null on timeout.
+   */
+  private async pollForNewSession(
+    workspacePath: string,
+    beforeIds: Set<string>,
+  ): Promise<string | null> {
+    const deadline = Date.now() + SESSION_DISCOVERY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const sessions = listPiSessions(workspacePath, this.sessionsRoot);
+      const newSession = sessions.find((s) => !beforeIds.has(s.id));
+      if (newSession) return newSession.id;
+      await new Promise((resolve) => setTimeout(resolve, SESSION_DISCOVERY_POLL_MS));
+    }
+    return null;
+  }
 
   private findMappedTmuxSession(
     tmuxSessions: TmuxSession[],
@@ -222,10 +240,6 @@ export class PiCoordinator {
     const mappedTmuxId = this.sessionIdMap.get(`${workspaceId}:${agentSessionId}`);
     if (!mappedTmuxId) return undefined;
     return tmuxSessions.find((s) => s.id === mappedTmuxId);
-  }
-
-  private cleanupSessionMapping(workspaceId: string, agentSessionId: string): void {
-    this.sessionIdMap.delete(`${workspaceId}:${agentSessionId}`);
   }
 }
 

@@ -39,7 +39,7 @@ interface SessionHeader {
 /**
  * Encode a working directory path the way Pi does for session storage.
  */
-function encodeSessionDirName(cwd: string): string {
+export function encodeSessionDirName(cwd: string): string {
   const resolved = resolve(cwd);
   const home = resolve(homedir());
   const tmp = resolve(tmpdir());
@@ -61,19 +61,27 @@ function encodeSessionDirName(cwd: string): string {
 }
 
 /**
+ * Get the default sessions root directory.
+ */
+export function getDefaultSessionsRoot(): string {
+  return join(getPiAgentDir(), 'sessions');
+}
+
+/**
  * Get the session directory for a specific workspace cwd.
  */
-function getSessionDirForCwd(cwd: string): string {
-  const sessionsRoot = join(getPiAgentDir(), 'sessions');
-  return join(sessionsRoot, encodeSessionDirName(cwd));
+function getSessionDirForCwd(cwd: string, sessionsRoot?: string): string {
+  const root = sessionsRoot ?? getDefaultSessionsRoot();
+  return join(root, encodeSessionDirName(cwd));
 }
 
 /**
  * List all Pi sessions for a given workspace cwd.
  * Reads session JSONL files directly from disk.
+ * @param sessionsRoot Override the sessions root directory (for testing).
  */
-export function listPiSessions(cwd: string): PiSessionFileInfo[] {
-  const sessionDir = getSessionDirForCwd(cwd);
+export function listPiSessions(cwd: string, sessionsRoot?: string): PiSessionFileInfo[] {
+  const sessionDir = getSessionDirForCwd(cwd, sessionsRoot);
   if (!existsSync(sessionDir)) return [];
 
   const files = readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl'));
@@ -141,8 +149,9 @@ export function listPiSessions(cwd: string): PiSessionFileInfo[] {
 
 /**
  * Find a specific session file by ID for a given workspace cwd.
+ * @param sessionsRoot Override the sessions root directory (for testing).
  */
-export function findPiSessionFile(cwd: string, sessionId: string): PiSessionFileInfo | null {
-  const sessions = listPiSessions(cwd);
+export function findPiSessionFile(cwd: string, sessionId: string, sessionsRoot?: string): PiSessionFileInfo | null {
+  const sessions = listPiSessions(cwd, sessionsRoot);
   return sessions.find((s) => s.id === sessionId) ?? null;
 }

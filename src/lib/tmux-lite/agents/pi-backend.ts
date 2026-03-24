@@ -1,9 +1,7 @@
 import {
-  SessionManager,
   createAgentSession,
   type AgentSession,
 } from '@oh-my-pi/pi-coding-agent';
-import { join } from 'node:path';
 import type {
   AgentBackend,
   AgentBackendStatus,
@@ -14,7 +12,7 @@ import type {
   AgentWorkspaceTarget,
   CreateAgentSessionInput,
 } from '../../../agents/backend.js';
-import { setupPiEnvironment, getPiAgentDir } from './pi-runtime.js';
+import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 
 class PiSessionHandle implements AgentSessionHandle {
   readonly summary: AgentSessionSummary;
@@ -80,21 +78,16 @@ export class PiBackend implements AgentBackend {
   private readonly activeSessions = new Map<string, AgentSession>();
 
   async detect(_target: AgentWorkspaceTarget): Promise<AgentBackendStatus> {
-    // Pi SDK is embedded — always installed, no server needed
     return {
       backendId: this.id,
       installed: true,
-      serverRunning: true, // in-process, always "running"
+      serverRunning: true,
     };
   }
 
-  async ensureInstalled(_target: AgentWorkspaceTarget): Promise<void> {
-    // Pi SDK is a dependency — nothing to install at runtime
-  }
+  async ensureInstalled(_target: AgentWorkspaceTarget): Promise<void> {}
 
   async ensureServer(_target: AgentWorkspaceTarget): Promise<AgentServerHandle> {
-    // Pi is in-process, no HTTP server. Return a synthetic handle
-    // for compatibility with the AgentBackend interface.
     return {
       backendId: this.id,
       baseUrl: 'pi://in-process',
@@ -105,21 +98,14 @@ export class PiBackend implements AgentBackend {
   async listSessions(target: AgentWorkspaceTarget): Promise<AgentSessionSummary[]> {
     const cwd = target.workspacePath;
     if (!cwd) return [];
-
-    const sessionDir = join(getPiAgentDir(), 'sessions');
-    try {
-      const sessions = await SessionManager.list(cwd, sessionDir);
-      return sessions.map((s) =>
-        toSummary(target, {
-          id: s.id,
-          title: s.title ?? s.firstMessage ?? undefined,
-          createdAt: s.created?.toISOString(),
-          updatedAt: s.modified?.toISOString(),
-        }),
-      );
-    } catch {
-      return [];
-    }
+    return listPiSessions(cwd).map((s) =>
+      toSummary(target, {
+        id: s.id,
+        title: s.title ?? s.firstMessage ?? undefined,
+        createdAt: s.created?.toISOString(),
+        updatedAt: s.modified?.toISOString(),
+      }),
+    );
   }
 
   async createSession(
@@ -129,28 +115,27 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    const env = setupPiEnvironment(target);
-    const prevEnv = applyEnv(env);
-    try {
-      const sessionManager = SessionManager.create(cwd);
-      const { session } = await createAgentSession({
-        sessionManager,
-        cwd,
-      });
+    // Set env before creating session so Pi writes to our managed dir
+    process.env.PI_CODING_AGENT_DIR = require('./pi-runtime.js').getPiAgentDir();
 
-      const sessionId = session.sessionId;
-      this.activeSessions.set(sessionId, session);
+    const { SessionManager } = await import('@oh-my-pi/pi-coding-agent');
+    const sessionManager = SessionManager.create(cwd);
+    const { session } = await createAgentSession({
+      sessionManager,
+      cwd,
+    });
 
-      const summary = toSummary(target, {
+    const sessionId = session.sessionId;
+    this.activeSessions.set(sessionId, session);
+
+    return new PiSessionHandle(
+      toSummary(target, {
         id: sessionId,
         title: input.title,
         createdAt: new Date().toISOString(),
-      });
-
-      return new PiSessionHandle(summary, session);
-    } finally {
-      restoreEnv(prevEnv);
-    }
+      }),
+      session,
+    );
   }
 
   async resumeSession(
@@ -160,7 +145,6 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    // Check if we already have this session active
     const existing = this.activeSessions.get(sessionId);
     if (existing) {
       return new PiSessionHandle(
@@ -169,62 +153,36 @@ export class PiBackend implements AgentBackend {
       );
     }
 
-    const env = setupPiEnvironment(target);
-    const prevEnv = applyEnv(env);
-    try {
-      // Find the session file and open it
-      const sessions = await SessionManager.list(cwd);
-      const match = sessions.find((s) => s.id === sessionId);
-      if (!match?.path) {
-        throw new Error(`Pi session ${sessionId} not found in ${cwd}`);
-      }
-
-      const sessionManager = await SessionManager.open(match.path);
-      const { session } = await createAgentSession({
-        sessionManager,
-        cwd,
-      });
-
-      this.activeSessions.set(sessionId, session);
-
-      return new PiSessionHandle(
-        toSummary(target, {
-          id: sessionId,
-          title: match.firstMessage ?? undefined,
-        }),
-        session,
-      );
-    } finally {
-      restoreEnv(prevEnv);
+    const match = findPiSessionFile(cwd, sessionId);
+    if (!match) {
+      throw new Error(`Pi session ${sessionId} not found in ${cwd}`);
     }
+
+    process.env.PI_CODING_AGENT_DIR = require('./pi-runtime.js').getPiAgentDir();
+
+    const { SessionManager } = await import('@oh-my-pi/pi-coding-agent');
+    const sessionManager = await SessionManager.open(match.path);
+    const { session } = await createAgentSession({
+      sessionManager,
+      cwd,
+    });
+
+    this.activeSessions.set(sessionId, session);
+
+    return new PiSessionHandle(
+      toSummary(target, {
+        id: sessionId,
+        title: match.title ?? match.firstMessage ?? undefined,
+      }),
+      session,
+    );
   }
 
-  async destroySession(target: AgentWorkspaceTarget, sessionId: string): Promise<void> {
+  async destroySession(_target: AgentWorkspaceTarget, sessionId: string): Promise<void> {
     const session = this.activeSessions.get(sessionId);
     if (session) {
       session.dispose();
       this.activeSessions.delete(sessionId);
-    }
-  }
-}
-
-/** Temporarily apply env vars, returning previous values for restore. */
-function applyEnv(env: Record<string, string>): Record<string, string | undefined> {
-  const prev: Record<string, string | undefined> = {};
-  for (const [key, value] of Object.entries(env)) {
-    prev[key] = process.env[key];
-    process.env[key] = value;
-  }
-  return prev;
-}
-
-/** Restore env vars to previous values. */
-function restoreEnv(prev: Record<string, string | undefined>): void {
-  for (const [key, value] of Object.entries(prev)) {
-    if (value === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = value;
     }
   }
 }
