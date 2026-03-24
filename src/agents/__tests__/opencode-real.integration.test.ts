@@ -88,7 +88,7 @@ describe.if(shouldRun)('real opencode integration', () => {
         });
         const createdSession = await client.createSession({ title: 'integration test' });
         const created = [{ id: createdSession.id, title: createdSession.title ?? createdSession.id }];
-        const storedRuntime = await readStoredRuntime('demo:ws-1');
+        const storedRuntime = await readStoredRuntime();
         const ps = runtime?.pid
           ? spawnSync('ps', ['-p', String(runtime.pid), '-o', 'command='], { encoding: 'utf8' }).stdout.trim()
           : '';
@@ -646,7 +646,7 @@ describe.if(shouldRun)('real opencode integration', () => {
         }
         await backend.attachAgentSession('demo:ws-1', created[0].id);
 
-        const storedRuntime = await readStoredRuntime('demo:ws-1');
+        const storedRuntime = await readStoredRuntime();
         const runtimePath = getStoredRuntimePath();
         const ps = runtime.pid
           ? spawnSync('ps', ['-p', String(runtime.pid), '-o', 'command='], { encoding: 'utf8' }).stdout.trim()
