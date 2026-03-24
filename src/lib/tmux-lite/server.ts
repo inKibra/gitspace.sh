@@ -102,7 +102,7 @@ const PTY_CHUNK_SIZE = 512 * 1024;
 
 // Max scrollback lines to include in serialized state during attach
 // This is a limit - if less scrollback exists, we'll send what's available
-const SERIALIZE_SCROLLBACK_LINES = 10_000;
+const SERIALIZE_SCROLLBACK_LINES = 2_000;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
@@ -1839,9 +1839,8 @@ function createSession(
   const xterm = new XTerminal({
     cols,
     rows,
-    // Keep stored scrollback bounded; match ghostty-web default (10k).
-    // Note: attach serialization is additionally capped by SERIALIZE_SCROLLBACK_LINES.
-    scrollback: 10_000,
+    // Keep stored scrollback bounded.
+    scrollback: 2_000,
     allowProposedApi: true,
   });
 
