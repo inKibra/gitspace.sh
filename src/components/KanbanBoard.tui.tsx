@@ -5,7 +5,7 @@
 
 import type { ScrollBoxRenderable } from '@opentui/core';
 import { useRef, useEffect } from 'react';
-import type { WorkspaceBoardGroup, MovingState, KanbanWorkspaceItem } from '../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../machine/controllers/useKanbanViewController.js';
 import { PHASE_LABELS } from '../machine/controllers/useKanbanViewController.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
@@ -23,9 +23,6 @@ const COLORS = {
   dotRed: '#ef4444',
   cardBg: '#161618',
   cardSelectedBg: '#162236',
-  ghostBorder: '#FFAA00',
-  ghostBg: '#1a1a0a',
-  ghostText: '#FFAA00',
 };
 
 
@@ -41,8 +38,6 @@ export interface KanbanBoardTUIProps {
   machineLabel?: string;
   focused?: boolean;
   focusedLaneIndex?: number;
-  /** Moving mode state from useWorkspaceBoardState. */
-  moving?: MovingState | null;
 }
 
 function getPrimaryStatusColor(status: WorkspaceStatusSummary | undefined): string {
@@ -143,7 +138,6 @@ function WorkspaceCard({
   onSelect,
   status,
   machineLabel,
-  ghost = false,
 }: {
   key?: string;
   entry: KanbanWorkspaceItem;
@@ -152,16 +146,15 @@ function WorkspaceCard({
   status?: WorkspaceStatusSummary;
   /** When provided, shows a machine badge below the workspace name */
   machineLabel?: string;
-  ghost?: boolean;
 }) {
   const name = getWorkspaceDisplayName(entry);
 
-  const borderColor = ghost ? COLORS.ghostBorder : isSelected ? COLORS.selected : COLORS.border;
-  const bgColor = ghost ? COLORS.ghostBg : isSelected ? COLORS.cardSelectedBg : COLORS.cardBg;
-  const textColor = ghost ? COLORS.ghostText : COLORS.text;
-  const dimColor = ghost ? COLORS.ghostText : COLORS.textDim;
-  const subtleTextColor = ghost ? COLORS.ghostText : COLORS.textMid;
-  const primaryColor = ghost ? COLORS.ghostText : getPrimaryStatusColor(status);
+  const borderColor = isSelected ? COLORS.selected : COLORS.border;
+  const bgColor = isSelected ? COLORS.cardSelectedBg : COLORS.cardBg;
+  const textColor = COLORS.text;
+  const dimColor = COLORS.textDim;
+  const subtleTextColor = COLORS.textMid;
+  const primaryColor = getPrimaryStatusColor(status);
   const pullRequestSummary = getPullRequestSummary(entry);
   const changeAuthors = entry.pullRequest?.changesRequestedBy.map((actor) => actor.login) ?? [];
 
@@ -169,7 +162,7 @@ function WorkspaceCard({
     <box
       flexDirection="column"
       marginBottom={1}
-      borderStyle={ghost ? 'single' : 'single'}
+      borderStyle="single"
       borderColor={borderColor}
       backgroundColor={bgColor}
       paddingLeft={1}
@@ -181,9 +174,9 @@ function WorkspaceCard({
       <box flexDirection="row">
         <text
           fg={textColor}
-          {...(ghost ? {} : { onClick: onSelect } as object)}
+          {...({ onClick: onSelect } as object)}
         >
-          {ghost ? '⇢ ' : isSelected ? '▸ ' : '  '}
+          {isSelected ? '▸ ' : '  '}
           {name}
         </text>
         <box flexGrow={1} />
@@ -195,31 +188,31 @@ function WorkspaceCard({
         <text fg={subtleTextColor}>  by @{entry.pullRequest.author.login}</text>
       )}
       {(entry.pullRequest?.requestedReviewers.length ?? 0) > 0 && (
-        <text fg={ghost ? COLORS.ghostText : COLORS.dotAmber}>
+        <text fg={COLORS.dotAmber}>
           {'  '}
           requested {entry.pullRequest?.requestedReviewers.length ?? 0}
         </text>
       )}
       {(entry.pullRequest?.reviewers.length ?? 0) > 0 && (
-        <text fg={ghost ? COLORS.ghostText : COLORS.dot}>
+        <text fg={COLORS.dot}>
           {'  '}
           reviewed {entry.pullRequest?.reviewers.length ?? 0}
         </text>
       )}
       {changeAuthors.length > 0 && (
-        <text fg={ghost ? COLORS.ghostText : COLORS.dotRed}>  changes {formatActorList(changeAuthors)}</text>
+        <text fg={COLORS.dotRed}>  changes {formatActorList(changeAuthors)}</text>
       )}
       {entry.linear?.syncState === 'ready' && entry.linear.identifier && (
-        <text fg={ghost ? COLORS.ghostText : COLORS.dotBlue}>
+        <text fg={COLORS.dotBlue}>
           {'  '}
           {entry.linear.stateName ? `${entry.linear.identifier} ${entry.linear.stateName}` : entry.linear.identifier}
         </text>
       )}
       {entry.linear?.syncState === 'unconfigured' && (
-        <text fg={ghost ? COLORS.ghostText : COLORS.textDim}>  Linear setup</text>
+        <text fg={COLORS.textDim}>  Linear setup</text>
       )}
       {entry.linear?.syncState === 'identifier_missing' && (
-        <text fg={ghost ? COLORS.ghostText : COLORS.textDim}>  no issue key</text>
+        <text fg={COLORS.textDim}>  no issue key</text>
       )}
       <StatusRow
         label="Agents"
@@ -238,10 +231,6 @@ function WorkspaceCard({
         green={status?.terminals.green ?? 0}
         red={status?.terminals.red ?? 0}
       />
-      {/* Moving mode hint on ghost card */}
-      {ghost && (
-        <text fg={COLORS.ghostText}>  Shift+←/→ move · ↵ confirm · esc cancel</text>
-      )}
     </box>
   );
 }
@@ -254,7 +243,6 @@ export function KanbanBoardTUI({
   machineLabel = 'local',
   focused = false,
   focusedLaneIndex = 0,
-  moving = null,
 }: KanbanBoardTUIProps) {
   const boardScrollRef = useRef<ScrollBoxRenderable | null>(null);
 
@@ -264,11 +252,6 @@ export function KanbanBoardTUI({
     const targetX = focusedLaneIndex * LANE_WIDTH;
     boardScrollRef.current.scrollTo({ x: Math.max(0, targetX), y: 0 });
   }, [focused, focusedLaneIndex]);
-
-  // Find the workspace entry for the ghost card
-  const movingEntry = moving
-    ? groups.flatMap((g) => g.workspaces).find((w) => w.selectionKey === moving.workspaceKey) ?? null
-    : null;
 
   return (
     <scrollbox
@@ -281,7 +264,6 @@ export function KanbanBoardTUI({
     >
       <box flexDirection="row" flexGrow={1} width="100%" gap={2} minWidth={Math.max(112, groups.length * 28)}>
         {groups.map((group, index) => {
-          const isMovingTarget = moving && group.phase === moving.targetPhase && group.phase !== moving.originPhase;
           return (
             <box
               key={group.phase}
@@ -290,25 +272,20 @@ export function KanbanBoardTUI({
               flexGrow={1}
               borderStyle="single"
               borderColor={
-                isMovingTarget
-                  ? COLORS.ghostBorder
-                  : focused && focusedLaneIndex === index
-                    ? COLORS.selected
-                    : COLORS.border
+                focused && focusedLaneIndex === index
+                  ? COLORS.selected
+                  : COLORS.border
               }
               paddingLeft={1}
               paddingRight={1}
               paddingTop={1}
               paddingBottom={1}
             >
-              {/* Uppercase header + count badge */}
               <box flexDirection="row">
                 <text fg={
-                  isMovingTarget
-                    ? COLORS.ghostBorder
-                    : focused && focusedLaneIndex === index
-                      ? COLORS.selected
-                      : COLORS.phaseTitle
+                  focused && focusedLaneIndex === index
+                    ? COLORS.selected
+                    : COLORS.phaseTitle
                 }>
                   {(PHASE_LABELS[group.phase] ?? group.phase).toUpperCase()}
                 </text>
@@ -316,46 +293,16 @@ export function KanbanBoardTUI({
                 <text fg={COLORS.textDim}>[{group.workspaces.length}]</text>
               </box>
               <box flexDirection="column" marginTop={1}>
-                {/* Ghost card at the target lane (same vertical position) */}
-                {isMovingTarget && movingEntry && (
+                {group.workspaces.map((w: KanbanWorkspaceItem) => (
                   <WorkspaceCard
-                    entry={movingEntry}
-                    isSelected={false}
-                    onSelect={() => {}}
-                    status={workspaceStatusById[movingEntry.selectionKey]}
-                    machineLabel={machineLabel}
-                    ghost={true}
+                    key={w.selectionKey}
+                    entry={w}
+                    isSelected={w.selectionKey === selectedWorkspaceId}
+                    onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
+                    status={workspaceStatusById[w.selectionKey]}
+                    machineLabel={w.isRemote ? w.machineLabel : undefined}
                   />
-                )}
-                {group.workspaces.map((w: KanbanWorkspaceItem) => {
-                  // Hide the card in its origin lane when in moving mode
-                  const isBeingMoved = moving && w.selectionKey === moving.workspaceKey;
-                  if (isBeingMoved && moving.targetPhase !== moving.originPhase) {
-                    // Show a dimmed placeholder in the origin lane
-                    return (
-                      <box
-                        key={w.selectionKey}
-                        marginBottom={1}
-                        borderStyle="single"
-                        borderColor={COLORS.ghostBorder}
-                        paddingLeft={1}
-                        paddingRight={1}
-                      >
-                        <text fg={COLORS.textDim}>  {getWorkspaceDisplayName(w)} (moving...)</text>
-                      </box>
-                    );
-                  }
-                  return (
-                    <WorkspaceCard
-                      key={w.selectionKey}
-                      entry={w}
-                      isSelected={w.selectionKey === selectedWorkspaceId}
-                      onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
-                      status={workspaceStatusById[w.selectionKey]}
-                      machineLabel={w.isRemote ? w.machineLabel : undefined}
-                    />
-                  );
-                })}
+                ))}
               </box>
             </box>
           );

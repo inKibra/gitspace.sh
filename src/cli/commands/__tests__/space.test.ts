@@ -74,7 +74,9 @@ describe('registerSpaceCommands commit', () => {
 
     expect(mockEnsureOmpInstalled).toHaveBeenCalledTimes(1);
     expect(mockSpawn).toHaveBeenCalledTimes(1);
-    const [command, args, options] = mockSpawn.mock.calls[0] as [string, string[], { cwd: string; stdio: string; env: NodeJS.ProcessEnv }];
+    const firstCall = mockSpawn.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const [command, args, options] = firstCall as unknown as [string, string[], { cwd: string; stdio: string; env: NodeJS.ProcessEnv }];
     expect(command).toBe('/tmp/gitspace/.pi/node_modules/.bin/omp');
     expect(args).toEqual(['commit']);
     expect(options).toEqual(expect.objectContaining({

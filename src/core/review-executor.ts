@@ -292,8 +292,9 @@ export async function executeLocalReviewOperation(
 
       const existingApprovedHunks = new Set(
         getThreads(workspace.path, workspace.id, workspace.baseBranch)
-          .filter((thread) => thread.target.kind === 'hunk' && thread.decision === 'approved')
-          .map((thread) => hunkKey(thread.target.file, thread.target.hunkHeader)),
+          .flatMap((thread) => thread.target.kind === 'hunk' && thread.decision === 'approved'
+            ? [hunkKey(thread.target.file, thread.target.hunkHeader)]
+            : []),
       );
 
       let approvedCount = 0;

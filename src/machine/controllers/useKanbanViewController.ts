@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import type { WorkspacePhase } from '../../types/config.js';
 import {
   type MultiMachineState,
@@ -48,12 +48,6 @@ export interface WorkspaceBoardGroup {
   workspaces: KanbanWorkspaceItem[];
 }
 
-/** Moving-mode state: the user is repositioning a workspace between lanes. */
-export interface MovingState {
-  workspaceKey: string;
-  originPhase: WorkspacePhase;
-  targetPhase: WorkspacePhase;
-}
 
 export interface UseKanbanViewControllerArgs {
   state: MultiMachineState;
@@ -63,7 +57,6 @@ export interface UseKanbanViewControllerArgs {
 }
 
 export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
-  const [moving, setMoving] = useState<MovingState | null>(null);
   const workspaces = useMemo(() => {
     return selectAllWorkspaces(args.state).map(({ backendKey, workspace }) => {
       const backendState = args.state.byBackend[backendKey];
@@ -97,30 +90,6 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
     return args.onSetWorkspacePhase?.({ backendKey: workspace.backendKey, workspaceId: workspace.id }, phase);
   }, [args, workspaces]);
 
-  const startMoving = useCallback((workspaceKey: string, currentPhase: WorkspacePhase) => {
-    setMoving({ workspaceKey, originPhase: currentPhase, targetPhase: currentPhase });
-  }, []);
-
-  const shiftMovingTarget = useCallback((delta: -1 | 1) => {
-    setMoving((prev) => {
-      if (!prev) return prev;
-      const currentIndex = PHASES.indexOf(prev.targetPhase);
-      const nextIndex = currentIndex + delta;
-      if (nextIndex < 0 || nextIndex >= PHASES.length) return prev;
-      return { ...prev, targetPhase: PHASES[nextIndex]! };
-    });
-  }, []);
-
-  const confirmMoving = useCallback(() => {
-    if (!moving) return;
-    if (moving.targetPhase !== moving.originPhase) {
-      void setPhase(moving.workspaceKey, moving.targetPhase);
-    }
-    setMoving(null);
-  }, [moving, setPhase]);
-
-  const cancelMoving = useCallback(() => setMoving(null), []);
-
   const groups = useMemo(() => PHASES.map((phase) => ({
     phase,
     workspaces: workspaces.filter((workspace) => workspace.phase === phase),
@@ -138,11 +107,6 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
       const workspace = workspaces.find((item) => item.selectionKey === workspaceKey);
       args.onSelectRef(workspace ? { backendKey: workspace.backendKey, workspaceId: workspace.id } : null);
     },
-    moving,
-    startMoving,
-    shiftMovingTarget,
-    confirmMoving,
-    cancelMoving,
     setPhase,
   };
 }

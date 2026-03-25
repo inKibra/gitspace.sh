@@ -141,6 +141,7 @@ import { executeCommandPaletteAction } from './app/shared/command-palette/execut
 import { resolveSelectedProjectName, resolveSelectedWorkspace } from './app/shared/command-palette/workspace-selection.js';
 import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
+import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
 
 // Types
@@ -401,6 +402,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       await multi.setWorkspaceStatus(ref, phase);
     },
   });
+
   const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
 
   const currentProject =
@@ -1156,6 +1158,16 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       sessionCount: workspaceRuntime.runtimeByWorkspace[runtimeWorkspace.selectionKey]?.sessions.length ?? 0,
     };
   }, [workspaceController.selectedRef, workspaceRuntime]);
+
+  const attachedDetailOwnsKeyboard = Boolean(
+    state.view === 'workspace-detail'
+      && selectedWorkspaceForDetail
+      && (
+        (localAttachedSessionId && localAttachedWorkspaceId === selectedWorkspaceForDetail.id)
+        || attachedAgentSession?.workspaceId === selectedWorkspaceForDetail.id
+        || (localScriptState?.isRunning && lastScriptWorkspaceIdRef.current === selectedWorkspaceForDetail.id)
+      ),
+  );
   const detailSessions = useMemo(
     () => selectedWorkspaceForDetail
       ? workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.sessions ?? []
@@ -1596,7 +1608,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           showWorkspaceStatusSelect({
             showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
             onSelectPhase: (phase) => {
-              workspaceBoardState.setPhase(workspace.id, phase);
+              workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
               flow.close();
             },
           });
@@ -2053,6 +2065,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       return;
     }
 
+    // When a workspace-detail inline terminal/script is attached, it owns the keyboard.
+    // Global app shortcuts must not steal input until the user explicitly releases focus.
+    if (attachedDetailOwnsKeyboard) {
+      return;
+    }
+
     // Global shortcuts
     if (key.raw === '?') {
       flow.showHelp(getDefaultShortcuts());
@@ -2261,20 +2279,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     }
 
     if (state.view === 'projects') {
-      // Moving mode: intercept all keys when repositioning a workspace between lanes
-      if (workspaceBoardState.moving) {
-        if (key.shift && key.name === 'left') {
-          workspaceBoardState.shiftMovingTarget(-1);
-        } else if (key.shift && key.name === 'right') {
-          workspaceBoardState.shiftMovingTarget(1);
-        } else if (key.name === 'return') {
-          workspaceBoardState.confirmMoving();
-        } else if (key.name === 'escape') {
-          workspaceBoardState.cancelMoving();
-        }
-        return;
-      }
-
       const moveFocusedLane = (delta: number) => {
         const laneCount = Math.max(1, workspaceBoardState.groups.length);
         const nextIndex = delta < 0
@@ -2293,6 +2297,18 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       // Tab cycles lanes only; command palette is Ctrl+Shift+P only
       if (key.name === 'tab') {
         moveFocusedLane(key.shift ? -1 : 1);
+        return;
+      }
+
+      if (key.shift && (key.name === 'left' || key.name === 'right')) {
+        const change = getShiftArrowPhaseChange({
+          groups: workspaceBoardState.groups,
+          selectedWorkspaceId: workspaceBoardState.selectedWorkspaceId,
+          direction: key.name === 'left' ? -1 : 1,
+        });
+        if (change) {
+          workspaceBoardState.setPhase(change.workspaceKey, change.phase);
+        }
         return;
       }
 
@@ -2327,20 +2343,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           raw: key.raw,
           shift: key.shift,
         });
-
-        // Shift+Left/Right: enter moving mode when a workspace is selected
-        if (key.shift && (key.name === 'left' || key.name === 'right')) {
-          const selectedId = workspaceBoardState.selectedWorkspaceId;
-          if (selectedId) {
-            const entry = laneWorkspaces.find((w) => w.selectionKey === selectedId);
-            if (entry) {
-              workspaceBoardState.startMoving(entry.selectionKey, entry.phase);
-              // Immediately shift in the pressed direction
-              workspaceBoardState.shiftMovingTarget(key.name === 'left' ? -1 : 1);
-            }
-          }
-          return;
-        }
 
         if (command === 'move-up') {
           moveLaneSelection(-1);
@@ -2629,11 +2631,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           onClose={() => handleBoardSelectWorkspace(null)}
           machineLabel={machineLabel}
           onBack={() => handleBoardSelectWorkspace(null)}
-          onChangeStatus={(wid, phase) => workspaceBoardState.setPhase(wid, phase)}
+          onChangeStatus={(_, phase) => workspaceBoardState.setPhase(selectedWorkspaceForDetail.selectionKey, phase)}
           allWorkspaces={allWorkspaceEntries}
           workspaceStatusById={workspaceStatusById}
           runtime={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null}
-          onSelectWorkspace={(workspaceId) => handleBoardSelectWorkspace(workspaceId)}
+          onSelectWorkspace={(workspaceSelectionKey) => handleBoardSelectWorkspace(workspaceSelectionKey)}
           onAbortAgentSession={handleAbortAgentSession}
           onCloseAgentSession={handleCloseAgentSession}
           onArchiveAgentSession={handleArchiveAgentSession}
@@ -2718,7 +2720,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             machineLabel={machineLabel}
             focused={true}
             focusedLaneIndex={focusedLaneIndex}
-            moving={workspaceBoardState.moving}
           />
           {/* Detail pane removed: Enter on a card now navigates to 'workspace-detail' view */}
         </box>

@@ -2,7 +2,7 @@
  * Machine-side agent database.
  *
  * Only archived sessions are persisted here. All other session state is
- * ephemeral and derived from OpenCode at startup or via SSE.
+ * ephemeral and derived from the live runtime snapshot plus in-process updates.
  */
 
 import { Database } from 'bun:sqlite';

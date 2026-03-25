@@ -55,10 +55,8 @@ export async function syncKnownWorkspaces(): Promise<void> {
 export function ensureAgentControlInitialized(): Promise<void> {
   if (!initializePromise) {
     initializePromise = (async () => {
-      // Pi is in-process — no runtime server to start.
-      // Skip defaultAgentEventManager.initialize() which tries to connect
-      // to OpenCode's SSE stream. Instead, seed sessions from Pi's session
-      // files on disk for each known workspace and mirror live Pi session
+      // Pi is in-process — there is no separate runtime service to subscribe to.
+      // Seed sessions from Pi's session files on disk and mirror live Pi
       // events into the shared snapshot model.
       defaultPiCoordinator.setEventHandler((target, event) => {
         switch (event.type) {

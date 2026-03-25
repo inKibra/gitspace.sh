@@ -370,10 +370,13 @@ export async function connectToRemote(
     logger.log('');
 
     await startTerminalSession({
-      ...backend,
+      disconnect: () => backend.disconnect(),
       connect: () => backend.connect(),
       attachSession: (params) => backend.attachSession(params),
       initialAttachedSessionId: attached.sessionId,
+      onEvent: (handler) => backend.onEvent(handler),
+      writePtyData: (data) => backend.writePtyData(data),
+      resizePty: (cols, rows) => backend.resizePty(cols, rows),
     });
     backendConnected = false;
   } finally {

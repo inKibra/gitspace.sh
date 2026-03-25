@@ -171,6 +171,9 @@ export interface LocalSessionBackendDependencies {
   getInbox: typeof getInbox;
   clearInbox: typeof clearInbox;
   markInboxRead: typeof markInboxRead;
+  prepareAttachSession: typeof prepareAttachSession;
+  cancelPrepareAttachSession: typeof cancelPrepareAttachSession;
+  deleteTmuxWorkspace: typeof deleteTmuxWorkspace;
   getReplaySnapshot: typeof getReplaySnapshotOffline;
   getReplayText: typeof getReplayTextOffline;
   getReplayMarkdown: typeof getReplayMarkdown;
@@ -452,6 +455,9 @@ function buildDeps(
     getInbox,
     clearInbox,
     markInboxRead,
+    prepareAttachSession,
+    cancelPrepareAttachSession,
+    deleteTmuxWorkspace,
     getReplaySnapshot: getReplaySnapshotOffline,
     getReplayText: getReplayTextOffline,
     getReplayMarkdown,
@@ -466,12 +472,12 @@ function buildDeps(
     listProjectSummaries,
     listGithubReposForSession,
     listRemoteBranchesForSession,
-      listLinearIssuesForSession,
-      createProjectForSession,
-      prepareProjectForSession,
-      finalizePreparedProjectForSession,
-      cancelPreparedProjectForSession,
-      createWorkspaceForSession,
+    listLinearIssuesForSession,
+    createProjectForSession,
+    prepareProjectForSession,
+    finalizePreparedProjectForSession,
+    cancelPreparedProjectForSession,
+    createWorkspaceForSession,
     deleteProjectForSession,
     scanWorkspaces,
     deleteWorkspaceCore,
@@ -802,7 +808,7 @@ export class LocalSessionBackend implements SessionBackend {
       this.attachedWorkspaceId = params.workspaceId;
       let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
       try {
-        const prepared = await prepareAttachSession({
+        const prepared = await this.deps.prepareAttachSession({
           workspaceId: params.workspaceId,
           sessionName: params.sessionName,
           command: params.command,
@@ -867,7 +873,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async cancelPendingScripts(): Promise<void> {
     if (this.pendingAttachRequestId) {
-      await cancelPrepareAttachSession(this.pendingAttachRequestId).catch(() => undefined);
+      await this.deps.cancelPrepareAttachSession(this.pendingAttachRequestId).catch(() => undefined);
       this.pendingAttachRequestId = null;
     }
     this.pendingAttachAbortController?.abort();
@@ -903,7 +909,7 @@ export class LocalSessionBackend implements SessionBackend {
   ): Promise<void> {
     const resolvedWorkspaceId = resolveWorkspaceName(projectName, workspaceId);
     try {
-      await deleteTmuxWorkspace({
+      await this.deps.deleteTmuxWorkspace({
         projectName,
         workspaceId: resolvedWorkspaceId,
         scriptPolicy: params.scriptPolicy,
@@ -961,8 +967,8 @@ export class LocalSessionBackend implements SessionBackend {
 
   async requestInbox(): Promise<void> {
     const [inboxResponse, sessions, workspaces] = await Promise.all([
-      getTmuxInbox(),
-      listSessions(),
+      this.deps.getInbox(),
+      this.deps.listSessions(),
       this.deps.scanWorkspaces(),
     ]);
     const items = inboxResponse.items as InboxItem[];
@@ -1028,12 +1034,12 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async getNotificationConfig(): Promise<void> {
-    const response = await getTmuxNotificationConfig();
+    const response = await this.deps.getNotificationConfig();
     this.emit({ type: 'notification_config', config: response.config as NotificationConfig });
   }
 
   async updateNotificationConfig(config: NotificationConfig): Promise<void> {
-    const response = await updateTmuxNotificationConfig(config);
+    const response = await this.deps.updateNotificationConfig(config);
     this.emit({ type: 'notification_config', config: response.config as NotificationConfig });
   }
 

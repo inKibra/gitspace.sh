@@ -203,7 +203,7 @@ export async function ensureServer(): Promise<void> {
       env: process.env as Record<string, string>,
     });
 
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {
       await Bun.sleep(100);
       if (await isServerRunning()) {
         await send({ type: 'agent-state' });

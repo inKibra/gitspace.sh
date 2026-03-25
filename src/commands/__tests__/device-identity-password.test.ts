@@ -12,7 +12,9 @@ describe('device identity password context', () => {
     const generateAndSaveKeypairMock = mock(async () => undefined);
     const readPasswordFromStdinMock = mock(async () => 'stdin-password');
 
+    const realPrompts = await import('../../utils/prompts.js');
     mock.module('../../utils/prompts.js', () => ({
+      ...realPrompts,
       promptPassword: promptPasswordMock,
       promptConfirm: promptConfirmMock,
     }));

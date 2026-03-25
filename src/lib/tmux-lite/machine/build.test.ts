@@ -11,6 +11,7 @@ function makeWorkspace(): WorkspaceRuntimeRecord {
     path: '/tmp/demo/ws-1',
     projectName: 'demo',
     status: 'code',
+    sessionCount: 0,
     terminals: { sessionCount: 0, attachedCount: 0, runningCount: 0, failedCount: 0 },
     agents: { sessionCount: 1, busyCount: 0, waitingCount: 1, needsPermissionCount: 0, errorCount: 0, closedCount: 0, archivedCount: 0 },
     processSummary: { configuredCount: 0, runningCount: 0, failedCount: 0 },

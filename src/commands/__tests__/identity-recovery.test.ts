@@ -13,7 +13,9 @@ describe('ensureUserRootIdentityWithRecovery', () => {
     const authLoginMock = mock(async () => undefined);
     const recoverUserRootFromCloudBackupMock = mock(async () => null);
 
+    const realPrompts = await import('../../utils/prompts.js');
     mock.module('../../utils/prompts.js', () => ({
+      ...realPrompts,
       promptConfirm: promptConfirmMock,
       promptPassword: promptPasswordMock,
     }));

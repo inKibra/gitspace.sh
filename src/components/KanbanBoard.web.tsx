@@ -57,8 +57,8 @@ function getPullRequestChip(entry: KanbanWorkspaceItem): { label: string; tone: 
 export interface KanbanBoardWebProps {
   groups: WorkspaceBoardGroup[];
   selectedWorkspaceId: string | null;
-  onSelectWorkspace: (workspaceId: string | null) => void;
-  onPhaseChange?: (workspaceId: string, phase: WorkspacePhase) => void;
+  onSelectWorkspace: (workspaceKey: string | null) => void;
+  onPhaseChange?: (workspaceKey: string, phase: WorkspacePhase) => void;
   workspaceStatusById?: Record<string, WorkspaceStatusSummary>;
   /** When true, lanes stretch vertically to fill the container. */
   fullHeight?: boolean;
@@ -79,7 +79,7 @@ function WorkspaceCard({
   entry: KanbanWorkspaceItem;
   isSelected: boolean;
   onSelect: () => void;
-  onPhaseChange?: (workspaceId: string, phase: WorkspacePhase) => void;
+  onPhaseChange?: (workspaceKey: string, phase: WorkspacePhase) => void;
   status?: WorkspaceStatusSummary;
 }) {
   const name = getWorkspaceDisplayName(entry);
@@ -195,7 +195,7 @@ function WorkspaceCard({
               key={phase}
               type="button"
               title={`Move to ${PHASE_LABELS[phase]}`}
-              onClick={() => entry.phase !== phase && onPhaseChange(entry.id, phase)}
+              onClick={() => entry.phase !== phase && onPhaseChange(entry.selectionKey, phase)}
               className={
                 'text-xs px-1.5 py-0.5 rounded ' +
                 (entry.phase === phase

@@ -4,7 +4,7 @@ import type {
   Permission,
   QuestionInfo,
   SessionStatus,
-} from '../../../../agents/opencode-event-types.js';
+} from '../../../../agents/agent-runtime-types.js';
 import { sendPiRuntimeUpdate } from '../pi-runtime-status.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {

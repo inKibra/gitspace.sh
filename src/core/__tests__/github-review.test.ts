@@ -1,10 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { importGitHubReview, pushGitHubReview } from '../github-review.js';
-import { readReviewSession, updateComment, writeReviewSession } from '../review.js';
 import type { ReviewComment, ReviewThread } from '../../types/review.js';
+
+const realReviewModule = await import(`../review.js?real=${Date.now()}`);
+mock.module('../review.js', () => realReviewModule);
+
+async function loadGithubReviewModule() {
+  return import(`../github-review.js?test=${Date.now()}`);
+}
+
+const { readReviewSession, updateComment, writeReviewSession } = realReviewModule;
+const importGitHubReview = async (...args: Parameters<(typeof import('../github-review.js'))['importGitHubReview']>) => {
+  const mod = await loadGithubReviewModule();
+  return mod.importGitHubReview(...args);
+};
+const pushGitHubReview = async (...args: Parameters<(typeof import('../github-review.js'))['pushGitHubReview']>) => {
+  const mod = await loadGithubReviewModule();
+  return mod.pushGitHubReview(...args);
+};
 
 const OWNER = 'acme';
 const REPO = 'widget';

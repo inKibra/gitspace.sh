@@ -25,7 +25,12 @@ mock.module('../identity-recovery.js', () => ({
   ensureUserRootIdentityWithRecovery: async () => ({ id: 'user-root-test' }),
 }));
 
-const { connectToRemote, listRemoteMachines } = await import('../connect.js');
+const realUserIdentity = await import('../../core/user-identity.js');
+mock.module('../../core/user-identity.js', () => realUserIdentity);
+
+async function loadConnectModule() {
+  return import(`../connect.js?test=${Date.now()}`);
+}
 
 let originalHome: string | undefined;
 let testDir: string;
@@ -83,6 +88,7 @@ describe('connect command relay trust flow', () => {
     const relayUrl = `ws://127.0.0.1:${server.port}/ws`;
 
     try {
+      const { connectToRemote } = await loadConnectModule();
       await expect(
         connectToRemote('machine-test', {
           relay: relayUrl,
@@ -103,6 +109,7 @@ describe('connect command relay trust flow', () => {
     const relayUrl = `ws://[::ffff:127.0.0.1]:${server.port}/ws`;
 
     try {
+      const { connectToRemote } = await loadConnectModule();
       await connectToRemote('machine-test', {
         relay: relayUrl,
         yes: true,
@@ -123,6 +130,7 @@ describe('connect command relay trust flow', () => {
     promptPasswordValue = null;
 
     try {
+      const { listRemoteMachines } = await loadConnectModule();
       await listRemoteMachines({
         relay: relayUrl,
         relayPubkey: relayPubkey,
@@ -146,6 +154,7 @@ describe('connect command relay trust flow', () => {
     addTrustedRelay(relayUrl, trustedPubkey, 'existing-relay');
 
     try {
+      const { listRemoteMachines } = await loadConnectModule();
       await expect(
         listRemoteMachines({
           relay: relayUrl,
@@ -166,6 +175,7 @@ describe('connect command relay trust flow', () => {
     promptPasswordValue = 'wrong-password';
 
     try {
+      const { listRemoteMachines } = await loadConnectModule();
       await expect(
         listRemoteMachines({
           relay: relayUrl,

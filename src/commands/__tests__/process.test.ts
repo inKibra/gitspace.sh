@@ -4,6 +4,7 @@
 
 import { describe, expect, it, mock, beforeEach } from 'bun:test';
 import { SpacesError } from '../../types/errors.js';
+import { buildProcessHostname } from '../../utils/hostnames.js';
 import type { ProcessInstanceSpec } from '../../types/processes.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -63,11 +64,15 @@ mock.module('../../lib/tmux-lite/hosting/state.js', () => ({
   clearTmuxHostingState: mock(() => undefined),
 }));
 
+const realPrompts = await import('../../utils/prompts.js');
 mock.module('../../utils/prompts.js', () => ({
+  ...realPrompts,
   selectOne: mockSelectOne,
 }));
 
+const realPorts = await import('../../lib/processes/ports.js');
 mock.module('../../lib/processes/ports.js', () => ({
+  ...realPorts,
   PortConflictError: MockPortConflictError,
   resolvePortConflict: mockResolvePortConflict,
 }));
@@ -343,7 +348,7 @@ describe('openProcess', () => {
 
     await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web' });
 
-    expect(mockOpenBrowserUrl).toHaveBeenCalledWith('https://macbook-demo-web-1-app.brad.serve.gitspace.sh');
+    expect(mockOpenBrowserUrl).toHaveBeenCalledWith(`https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'app', 'macbook')}`);
   });
 
   it('opens all configured http ports and skips tcp ports with --all', async () => {
@@ -365,8 +370,8 @@ describe('openProcess', () => {
     await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web', all: true });
 
     expect(mockOpenBrowserUrl).toHaveBeenCalledTimes(2);
-    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, 'https://macbook-demo-web-1-app.brad.serve.gitspace.sh');
-    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, 'https://macbook-demo-web-1-admin.brad.serve.gitspace.sh');
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, `https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'app', 'macbook')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, `https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'admin', 'macbook')}`);
   });
 
   it('falls back to localhost when no hosted url exists', async () => {

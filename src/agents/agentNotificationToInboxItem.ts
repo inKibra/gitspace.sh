@@ -46,7 +46,7 @@ export function agentNotificationToInboxItem(
         context: notification.permissionTitle ?? 'Permission requested',
         timestamp: notification.timestamp,
         read: false,
-        processTitle: 'opencode',
+        processTitle: 'agent',
         agentAction: {
           workspaceId: notification.workspaceId,
           agentSessionId: notification.sessionId,
@@ -64,7 +64,7 @@ export function agentNotificationToInboxItem(
         context: notification.messagePreview ?? 'Agent finished and is waiting',
         timestamp: notification.timestamp,
         read: false,
-        processTitle: 'opencode',
+        processTitle: 'agent',
         agentAction: {
           workspaceId: notification.workspaceId,
           agentSessionId: notification.sessionId,
@@ -81,7 +81,7 @@ export function agentNotificationToInboxItem(
         context: notification.errorMessage ?? 'Agent error',
         timestamp: notification.timestamp,
         read: false,
-        processTitle: 'opencode',
+        processTitle: 'agent',
         agentAction: {
           workspaceId: notification.workspaceId,
           agentSessionId: notification.sessionId,

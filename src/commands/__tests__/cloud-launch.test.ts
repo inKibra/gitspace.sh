@@ -3,7 +3,6 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CloudLaunchDependencies, CloudLaunchProvider } from '../cloud.js';
-import { cloudLaunch } from '../cloud.js';
 import { writeRelayConfig } from '../../core/identity.js';
 import { addTrustedRelay } from '../../core/trusted-relays.js';
 import {
@@ -42,6 +41,7 @@ let mockWriteImpl: (id: string, opts: Record<string, unknown>) => Promise<{ path
 let originalHome: string | undefined;
 let originalControlDir: string | undefined;
 let testDir: string;
+let cloudLaunchFn: typeof import('../cloud.js').cloudLaunch;
 
 function makeLaunchProvider(): CloudLaunchProvider {
   return {
@@ -121,7 +121,10 @@ function teardown() {
 }
 
 describe('cloudLaunch', () => {
-  beforeEach(setup);
+  beforeEach(async () => {
+    setup();
+    ({ cloudLaunch: cloudLaunchFn } = await import(`../cloud.js?test=${Date.now()}`));
+  });
   afterEach(teardown);
 
   test('creates workspace record in bootstrapping state', async () => {
@@ -131,7 +134,7 @@ describe('cloudLaunch', () => {
       return { providerWorkspaceId: 'sprite-happy-1', rawState: 'running' };
     };
 
-    await cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps());
+    await cloudLaunchFn({ repo: 'owner/repo', branch: 'main' }, makeDeps());
 
     expect(createdWorkspaceId).toBeTruthy();
     const ws = getCloudWorkspace(createdWorkspaceId!);
@@ -150,7 +153,7 @@ describe('cloudLaunch', () => {
       return { providerWorkspaceId: 'sprite-machine-first', rawState: 'running' };
     };
 
-    await cloudLaunch({}, makeDeps());
+    await cloudLaunchFn({}, makeDeps());
 
     expect(createOptions).not.toBeNull();
     const resolvedCreateOptions = createOptions!;
@@ -172,7 +175,7 @@ describe('cloudLaunch', () => {
       return { providerWorkspaceId: 'sprite-repo-only', rawState: 'running' };
     };
 
-    await cloudLaunch({ repo: 'owner/repo' }, makeDeps());
+    await cloudLaunchFn({ repo: 'owner/repo' }, makeDeps());
 
     expect(createOptions).not.toBeNull();
     const resolvedCreateOptions = createOptions!;
@@ -184,7 +187,7 @@ describe('cloudLaunch', () => {
   });
 
   test('rejects branch metadata without repo metadata', async () => {
-    await expect(cloudLaunch({ branch: 'main' }, makeDeps())).rejects.toThrow(/--branch.*requires.*--repo/i);
+    await expect(cloudLaunchFn({ branch: 'main' }, makeDeps())).rejects.toThrow(/--branch.*requires.*--repo/i);
   });
 
   test('logs launch_started and vm_created events on success', async () => {
@@ -194,7 +197,7 @@ describe('cloudLaunch', () => {
       return { providerWorkspaceId: 'sprite-ev-1', rawState: 'running' };
     };
 
-    await cloudLaunch({ repo: 'owner/repo', branch: 'feature' }, makeDeps());
+    await cloudLaunchFn({ repo: 'owner/repo', branch: 'feature' }, makeDeps());
 
     const events = listCloudEvents({ workspaceId: capturedId! });
     const eventTypes = events.map((e) => e.eventType);
@@ -211,7 +214,7 @@ describe('cloudLaunch', () => {
       return { exitCode: 0, stdout: 'ok', stderr: '' };
     };
 
-    await cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps());
+    await cloudLaunchFn({ repo: 'owner/repo', branch: 'main' }, makeDeps());
 
     expect(execCalls).toHaveLength(1);
     const env = execCalls[0].opts.env as Record<string, string>;
@@ -228,7 +231,7 @@ describe('cloudLaunch', () => {
       return { path: String(opts.path ?? '/tmp/bootstrap.mjs'), size: 123, mode: '0644' };
     };
 
-    await cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps());
+    await cloudLaunchFn({ repo: 'owner/repo', branch: 'main' }, makeDeps());
 
     expect(writeCalls).toHaveLength(1);
     expect(writeCalls[0]?.opts.path).toBe('/tmp/gssh-cloud-bootstrap.mjs');
@@ -237,7 +240,7 @@ describe('cloudLaunch', () => {
 
   test('throws SpacesError when no sprites token configured', async () => {
     await expect(
-      cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps({ token: '' }))
+      cloudLaunchFn({ repo: 'owner/repo', branch: 'main' }, makeDeps({ token: '' }))
     ).rejects.toThrow(/sprites token/i);
   });
 
@@ -253,7 +256,7 @@ describe('cloudLaunch', () => {
       cloudRelayUrl: 'wss://relay.public.test/ws',
     });
 
-    await cloudLaunch(
+    await cloudLaunchFn(
       { repo: 'owner/repo', branch: 'main' },
       makeDeps({ relayInfo: undefined }),
     );
@@ -273,7 +276,7 @@ describe('cloudLaunch', () => {
       relayUrl: 'wss://relay.legacy.test/ws',
     });
 
-    await cloudLaunch(
+    await cloudLaunchFn(
       { repo: 'owner/repo', branch: 'main' },
       makeDeps({ relayInfo: undefined }),
     );
@@ -294,7 +297,7 @@ describe('cloudLaunch', () => {
       cloudRelayUrl: 'ws://127.0.0.1:4480/ws',
     });
 
-    await cloudLaunch(
+    await cloudLaunchFn(
       { repo: 'owner/repo', branch: 'main' },
       makeDeps({ relayInfo: undefined }),
     );
@@ -309,7 +312,7 @@ describe('cloudLaunch', () => {
     });
 
     await expect(
-      cloudLaunch(
+      cloudLaunchFn(
         { repo: 'owner/repo', branch: 'main' },
         makeDeps({ relayInfo: undefined }),
       ),
@@ -337,7 +340,7 @@ describe('cloudLaunch', () => {
       relayFingerprint: undefined,
     });
 
-    await cloudLaunch(
+    await cloudLaunchFn(
       { repo: 'owner/repo', branch: 'main' },
       makeDeps({ relayInfo: undefined }),
     );
@@ -363,7 +366,7 @@ describe('cloudLaunch', () => {
     });
 
     await expect(
-      cloudLaunch(
+      cloudLaunchFn(
         { repo: 'owner/repo', branch: 'main' },
         makeDeps({ relayInfo: undefined }),
       ),
@@ -378,7 +381,7 @@ describe('cloudLaunch', () => {
     addTrustedRelay('wss://relay.test/ws', Buffer.from('different-relay-key').toString('base64'), 'other-relay');
 
     await expect(
-      cloudLaunch(
+      cloudLaunchFn(
         { repo: 'owner/repo', branch: 'main' },
         makeDeps({ relayInfo: undefined }),
       ),
@@ -392,7 +395,7 @@ describe('cloudLaunch', () => {
       throw new Error('Sprites API unavailable');
     };
 
-    await expect(cloudLaunch({ repo: 'owner/repo', branch: 'main' }, makeDeps())).rejects.toThrow(/sprites api unavailable/i);
+    await expect(cloudLaunchFn({ repo: 'owner/repo', branch: 'main' }, makeDeps())).rejects.toThrow(/sprites api unavailable/i);
 
     const ws = getCloudWorkspace(capturedId!);
     expect(ws?.status).toBe('error');
@@ -402,7 +405,7 @@ describe('cloudLaunch', () => {
     const workspaceId = 'ws-enroll-fail';
 
     await expect(
-      cloudLaunch(
+      cloudLaunchFn(
         { repo: 'owner/repo', branch: 'main' },
         makeDeps({
           workspaceId,

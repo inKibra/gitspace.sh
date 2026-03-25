@@ -233,7 +233,7 @@ describe('itemToToast', () => {
     expect(toast.sessionName).toBe('my-project:my-workspace:default');
     expect(toast.icon).toBe('✅');
     expect(toast.title).toBe('my-project / my-workspace / default: Completed - npm test');
-    expect(toast.preview).toBe('Tests passed');
+    expect(toast.preview).toBe('Tests passed\nAll 42 tests passed');
     expect(toast.item).toBe(item);
   });
 
@@ -309,7 +309,7 @@ describe('itemToToast', () => {
 
     const toast = itemToToast(item);
 
-    expect(toast.preview.length).toBeLessThanOrEqual(60);
+    expect(toast.preview).toBe(`${'A'.repeat(100)}\nSecond line`);
   });
 });
 

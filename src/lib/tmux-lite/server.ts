@@ -62,8 +62,7 @@ import {
   subscribeAgentControl,
   syncKnownWorkspaces,
 } from './agent-control.js';
-import { defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
-import { normalizeWorkspacePath } from '../../agents/opencode-runtime-shared.js';
+import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { configurePiRuntimeEnvironment, verifyPiRuntimeUpdateCommand } from './agents/pi-runtime-status.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
@@ -510,9 +509,6 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
   stopListener(routerListener);
   safeUnlink(PID_FILE);
   safeUnlink(ROUTER_SOCKET);
-  void defaultOpenCodeRuntimeManager.shutdown().catch(() => {
-    // non-fatal during shutdown
-  });
 }
 
 // How long after last interaction before we consider the user "inactive"
@@ -2823,9 +2819,6 @@ function cleanupAndExit(signal: string) {
       s.proc.kill(9);
     } catch {}
   }
-  void defaultOpenCodeRuntimeManager.shutdown().catch(() => {
-    // non-fatal during shutdown
-  });
   // Clean up PID file
   try { unlinkSync(PID_FILE); } catch {}
   process.exit(0);

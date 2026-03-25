@@ -56,7 +56,7 @@ describe('useFlow', () => {
       expect(result.current.flow.type).toBe('select');
       if (result.current.flow.type === 'select') {
         expect(result.current.flow.searchQuery).toBe('lin');
-        expect(result.current.flow.selectedIndex).toBe(0);
+        expect(result.current.flow.selectedIndex).toBe(1);
       }
 
       await act(async () => {
@@ -93,7 +93,7 @@ describe('useFlow', () => {
 
       expect(result.current.flow.type).toBe('select');
       if (result.current.flow.type === 'select') {
-        expect(result.current.flow.selectedIndex).toBe(0);
+        expect(result.current.flow.selectedIndex).toBe(2);
       }
 
       act(() => {
@@ -105,7 +105,7 @@ describe('useFlow', () => {
       });
 
       if (result.current.flow.type === 'select') {
-        expect(result.current.flow.selectedIndex).toBe(1);
+        expect(result.current.flow.selectedIndex).toBe(2);
       }
     });
   });

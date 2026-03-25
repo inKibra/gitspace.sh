@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { ReviewThread } from '../../types/review.js';
+import type { HunkTarget, ReviewThread } from '../../types/review.js';
 
 const mockGetThreads = mock<(workspacePath: string, workspaceName: string, baseBranch: string) => ReviewThread[]>(() => []);
-const mockApproveHunk = mock(async () => {
+const mockApproveHunk = mock<(
+  workspacePath: string,
+  workspaceName: string,
+  baseBranch: string,
+  target: HunkTarget,
+  author?: string,
+  options?: unknown,
+ ) => Promise<ReviewThread>>(async () => {
   throw new Error('approveHunk mock not initialized');
 });
-const mockGetWorkspaceChangedFiles = mock(async () => ({
+const mockGetWorkspaceChangedFiles = mock(async (): Promise<{ files: Array<{ filePath: string; prevFilePath?: string }>; baseBranch: string; headBranch: string }> => ({
   files: [],
   baseBranch: 'main',
   headBranch: 'feature',
@@ -123,6 +130,7 @@ describe('review executor approve_path', () => {
     });
 
     expect(result.op).toBe('path_approved');
+    if (result.op !== 'path_approved') throw new Error(`unexpected result: ${result.op}`);
     expect(result.approvedCount).toBe(1);
     expect(mockApproveHunk).toHaveBeenCalledTimes(1);
     expect(threads.find((thread) => thread.id === 'thread-pending')?.decision).toBe('approved');

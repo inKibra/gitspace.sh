@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { PendingQuestion, Permission } from '../../../agents/opencode-event-types.js';
+import type { PendingQuestion, Permission } from '../../../agents/agent-runtime-types.js';
 import {
   buildPiRuntimeChildEnvironment,
   createPiRuntimeUpdateCommand,

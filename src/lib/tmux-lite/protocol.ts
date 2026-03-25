@@ -354,9 +354,9 @@ export type Command =
       signature: string;
       sessionId: string;
       workspacePath: string;
-      status: import('../../agents/opencode-event-types.js').SessionStatus;
-      pendingPermissions: import('../../agents/opencode-event-types.js').Permission[];
-      pendingQuestions: import('../../agents/opencode-event-types.js').PendingQuestion[];
+      status: import('../../agents/agent-runtime-types.js').SessionStatus;
+      pendingPermissions: import('../../agents/agent-runtime-types.js').Permission[];
+      pendingQuestions: import('../../agents/agent-runtime-types.js').PendingQuestion[];
       errorMessage?: string;
       lastMessage?: string;
     }
@@ -490,7 +490,7 @@ export interface InboxItem {
   /** Present only for agent_* item types — carries routing metadata for the app layer */
   agentAction?: {
     workspaceId: string;
-    agentSessionId: string;    // OpenCode session ID
+    agentSessionId: string;    // agent runtime session ID
     permissionId?: string;     // only for agent_permission
     permissionTitle?: string;
     messagePreview?: string;   // for agent_idle

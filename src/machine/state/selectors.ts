@@ -1,5 +1,5 @@
 import type { WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
-import type { SessionStatus } from '../../agents/opencode-event-types.js';
+import type { SessionStatus } from '../../agents/agent-runtime-types.js';
 import type { ProjectInfo, SessionInfo, WorkspaceInfo } from '../../lib/remote-session/protocol.js';
 import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import { selectProjects, selectWorkspaces } from './client.js';

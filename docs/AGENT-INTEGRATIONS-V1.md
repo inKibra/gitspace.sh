@@ -2,9 +2,9 @@
 
 ## Goals
 
-- Use native OpenCode server as the default agent runtime.
-- Mount a GitSpace shell around an OpenCode core in both TUI and web.
-- Design the runtime layer so later we can add `sandbox-agent` or other OpenCode-compatible backends.
+- Use a native agent runtime as the default agent backend.
+- Mount a GitSpace shell around the agent core in both TUI and web.
+- Design the runtime layer so later we can add `sandbox-agent` or other compatible backends.
 - Add a typed integrations/plugins system for installing tools and capturing portable config or credentials.
 - Use real user paths for materialization in V1.
 
@@ -20,10 +20,10 @@
   - `terminal`
   - `agent`
 - `agent` runtime is backed by an `AgentBackend`.
-- V1 ships `OpenCodeBackend` only.
+- V1 ships a single native backend.
 - GitSpace owns workspace selection, access control, relay transport, and session lifecycle.
-- OpenCode owns the agent runtime and session protocol.
-- Remote clients reach workspace OpenCode runtimes through a GitSpace-managed HTTP and SSE bridge over the encrypted relay channel.
+- The backend runtime owns the agent session protocol.
+- Remote clients reach workspace agent runtimes through a GitSpace-managed HTTP and SSE bridge over the encrypted relay channel.
 
 ## Agent Backend Contract
 
@@ -35,9 +35,9 @@
 
 ## V1 Agent Backend
 
-- `OpenCodeBackend`
-  - starts and connects to `opencode serve`
-  - uses OpenCode HTTP and SSE APIs
+- Native backend
+  - starts and connects to the local agent runtime
+  - uses the runtime HTTP and SSE APIs
   - supports multiple concurrent sessions in a workspace
   - is the single backend surfaced by the UI in V1
   - is run once per workspace, not once per machine
@@ -47,9 +47,9 @@
 - Workspace UI offers:
   - `Terminal`
   - `Agent`
-- `Agent` uses a GitSpace session picker for OpenCode sessions per workspace.
-- V1 launches native `opencode attach` inside GitSpace terminal surfaces for both TUI and web clients.
-- GitSpace wraps backend selection, connection state, and workspace context around the OpenCode core.
+- `Agent` uses a GitSpace session picker for agent sessions per workspace.
+- V1 launches the native attach flow inside GitSpace terminal surfaces for both TUI and web clients.
+- GitSpace wraps backend selection, connection state, and workspace context around the agent core.
 
 ## Integrations
 
@@ -96,7 +96,7 @@ Examples of portable V1 integrations:
 
 Examples of V1 local auth only:
 
-- `opencode` OAuth
+- agent runtime OAuth
 - `claude` OAuth
 - `codex` OAuth
 
@@ -104,7 +104,7 @@ Examples of V1 local auth only:
 
 - Future agent backends:
   - `sandbox-agent`
-  - other OpenCode-compatible runtimes
+  - other compatible runtimes
 - Future credential strategies:
   - helper or proxy delivery
   - sandbox adapter for isolated execution
@@ -112,8 +112,8 @@ Examples of V1 local auth only:
 
 ## Suggested Implementation Order
 
-1. Add `AgentBackend` types and `OpenCodeClient`.
-2. Add `OpenCodeBackend` foundation.
+1. Add `AgentBackend` types and a native runtime client.
+2. Add the initial backend foundation.
 3. Add integration and plugin manifest types.
 4. Add built-in integration registry.
 5. Wire backend and integration foundations into UI and workspace lifecycle.

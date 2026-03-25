@@ -271,7 +271,7 @@ describe("tmux-lite replay capture", () => {
       const earlyTextResponse = await sendRouterCommand({
         type: 'replay-text',
         replayId: replayInfo!.replayId,
-        atMs: 50,
+        atMs: 150,
       });
       expect(earlyTextResponse.type).toBe('replay-text');
       expect(earlyTextResponse.text).toContain('frame zero');
@@ -279,7 +279,7 @@ describe("tmux-lite replay capture", () => {
       const middleTextResponse = await sendRouterCommand({
         type: 'replay-text',
         replayId: replayInfo!.replayId,
-        atMs: 450,
+        atMs: 500,
       });
       expect(middleTextResponse.type).toBe('replay-text');
       expect(middleTextResponse.text).toContain('frame one');
@@ -287,22 +287,22 @@ describe("tmux-lite replay capture", () => {
       const lateTextResponse = await sendRouterCommand({
         type: 'replay-text',
         replayId: replayInfo!.replayId,
-        atMs: 800,
+        atMs: 850,
       });
       expect(lateTextResponse.type).toBe('replay-text');
       expect(lateTextResponse.text).toContain('frame two');
 
       const earlyPng = await writeReplayScreenshot(replayInfo!.replayId, {
         outputPath: join(checkpointsDir, 'frame-zero.png'),
-        atMs: 50,
+        atMs: 150,
       });
       const middlePng = await writeReplayScreenshot(replayInfo!.replayId, {
         outputPath: join(checkpointsDir, 'frame-one.png'),
-        atMs: 450,
+        atMs: 500,
       });
       const latePng = await writeReplayScreenshot(replayInfo!.replayId, {
         outputPath: join(checkpointsDir, 'frame-two.png'),
-        atMs: 800,
+        atMs: 850,
       });
 
       for (const pngPath of [earlyPng, middlePng, latePng]) {

@@ -74,6 +74,7 @@ import {
 } from './machine/multi/types.js';
 import { useWorkspaceController } from './machine/controllers/useWorkspaceController.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
+import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { selectBackendSnapshot } from './machine/multi/selectors.js';
 import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
@@ -386,6 +387,33 @@ export default function App() {
       : null,
     [filteredWorkspaces, selectedRef],
   );
+
+  useEffect(() => {
+    if (!selectedWorkspaceForDetail || flow.isOpen) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTypingField = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || target?.isContentEditable === true;
+      if (isTypingField || event.defaultPrevented || !event.shiftKey) return;
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+
+      const change = getShiftArrowPhaseChange({
+        groups: workspaceBoardState.groups,
+        selectedWorkspaceId: selectedWorkspaceForDetail.selectionKey,
+        direction: event.key === 'ArrowLeft' ? -1 : 1,
+      });
+      if (!change) return;
+
+      event.preventDefault();
+      workspaceBoardState.setPhase(change.workspaceKey, change.phase);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [flow.isOpen, selectedWorkspaceForDetail, workspaceBoardState]);
 
   useEffect(() => {
     if (!attachedWorkspaceSelectionKey) return;
@@ -1047,7 +1075,7 @@ export default function App() {
           showWorkspaceStatusSelect({
             showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
             onSelectPhase: (phase) => {
-              workspaceBoardState.setPhase(workspace.id, phase);
+              workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
               flow.close();
             },
           });
@@ -1683,11 +1711,11 @@ export default function App() {
             onManageBundleConfig={handleManageBundleConfig}
             onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
             onOpenReview={handleOpenReview}
-            onRequestStatusChange={(workspaceId) => {
+            onRequestStatusChange={() => {
               showWorkspaceStatusSelect({
                 showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
                 onSelectPhase: (phase) => {
-                  workspaceBoardState.setPhase(workspaceId, phase);
+                  workspaceBoardState.setPhase(selectedWorkspaceForDetail.selectionKey, phase);
                   flow.close();
                 },
               });

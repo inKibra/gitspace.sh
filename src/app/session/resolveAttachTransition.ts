@@ -1,5 +1,5 @@
 import type { AttachTarget } from './useAttachController.js'
-import type { AppView } from '../tui/local-terminal-sync.js'
+import type { AppView } from '../../tui/local-terminal-sync.js'
 
 export interface AttachSuccessTransitionParams {
   view: AppView

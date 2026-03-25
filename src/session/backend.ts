@@ -194,8 +194,8 @@ export interface SessionBackend {
   /** Get the current full agent state snapshot (all workspaces). */
   getAgentStateSnapshot(): Record<string, WorkspaceAgentState>;
   /**
-   * Respond to an OpenCode permission request.
-   * workspaceId identifies which workspace's OpenCode runtime handles this.
+   * Respond to an agent permission request.
+   * workspaceId identifies which workspace owns the agent session.
    */
   respondToAgentPermission(
     workspaceId: string,

@@ -1,8 +1,12 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock, beforeEach, afterEach } from 'bun:test';
 import { LocalSessionBackend, type LocalSessionBackendDependencies } from '../backends/local-session-backend';
 import type { BackendEvent } from '../events';
 import type { NotificationConfig } from '../../notifications/types';
-
+import { applyTmuxLiteSandboxEnvironment, getTmuxLitePathsForSandbox } from '../../lib/tmux-lite/protocol.js';
+import { killServer } from '../../lib/tmux-lite/cli.js';
+import { rmSync } from 'node:fs';
+import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
+import type { Session as TmuxSession, WorkspaceRuntimeRecord } from '../../lib/tmux-lite/protocol.js';
 const notificationConfig: NotificationConfig = {
   enabled: true,
   minCommandDurationMs: 1000,
@@ -18,6 +22,325 @@ const notificationConfig: NotificationConfig = {
     holdWhenIdleMs: 5000,
   },
 };
+
+let sandboxCounter = 0;
+let currentSandboxName: string | null = null;
+let previousTmuxEnv: Record<string, string | undefined> | null = null;
+
+function captureTmuxEnv(): Record<string, string | undefined> {
+  return {
+    TMUX_LITE_SANDBOX: process.env.TMUX_LITE_SANDBOX,
+    TMUX_LITE_SOCKET: process.env.TMUX_LITE_SOCKET,
+    TMUX_LITE_SESSION_DIR: process.env.TMUX_LITE_SESSION_DIR,
+    TMUX_LITE_PID_FILE: process.env.TMUX_LITE_PID_FILE,
+    TMUX_LITE_REPLAY_DIR: process.env.TMUX_LITE_REPLAY_DIR,
+  };
+}
+
+function restoreTmuxEnv(env: Record<string, string | undefined>): void {
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+function cleanupSandbox(name: string): void {
+  const paths = getTmuxLitePathsForSandbox(name);
+  rmSync(paths.sessionDir, { recursive: true, force: true });
+  rmSync(paths.replayDir, { recursive: true, force: true });
+  try { rmSync(paths.routerSocket, { force: true }); } catch {}
+  try { rmSync(paths.pidFile, { force: true }); } catch {}
+}
+
+beforeEach(() => {
+  previousTmuxEnv = captureTmuxEnv();
+  currentSandboxName = `local-backend-${process.pid}-${sandboxCounter++}`;
+  cleanupSandbox(currentSandboxName);
+  applyTmuxLiteSandboxEnvironment(currentSandboxName);
+});
+
+afterEach(async () => {
+  try { await killServer(); } catch {}
+  if (currentSandboxName) {
+    cleanupSandbox(currentSandboxName);
+  }
+  if (previousTmuxEnv) {
+    restoreTmuxEnv(previousTmuxEnv);
+  }
+  currentSandboxName = null;
+  previousTmuxEnv = null;
+});
+
+function toCanonicalWorkspaceId(projectName: string, workspaceId: string): string {
+  return workspaceId.includes(':') ? workspaceId : `${projectName}:${workspaceId}`;
+}
+
+function toRuntimeWorkspace(workspace: {
+  id: string;
+  name: string;
+  path: string;
+  projectName: string;
+  branch?: string;
+  sessionCount?: number;
+  isStale?: boolean;
+  processes?: WorkspaceRuntimeRecord['processes'];
+}): WorkspaceRuntimeRecord {
+  const sessionCount = workspace.sessionCount ?? 0;
+  const canonicalId = toCanonicalWorkspaceId(workspace.projectName, workspace.id);
+  const configuredProcessCount = workspace.processes?.length ?? 0;
+  return {
+    id: canonicalId,
+    name: workspace.name,
+    path: workspace.path,
+    projectName: workspace.projectName,
+    branch: workspace.branch,
+    sessionCount,
+    isStale: workspace.isStale,
+    processes: workspace.processes,
+    status: 'code',
+    terminals: {
+      sessionCount,
+      attachedCount: 0,
+      runningCount: sessionCount,
+      failedCount: 0,
+    },
+    agents: {
+      sessionCount: 0,
+      busyCount: 0,
+      waitingCount: 0,
+      needsPermissionCount: 0,
+      errorCount: 0,
+      closedCount: 0,
+      archivedCount: 0,
+    },
+    processSummary: {
+      configuredCount: configuredProcessCount,
+      runningCount: 0,
+      failedCount: 0,
+    },
+  };
+}
+
+function toTerminalSession(session: {
+  id: string;
+  name: string;
+  socketPath: string;
+  pid: number;
+  attached: boolean;
+  cwd: string;
+  createdAt: number;
+  kind?: TmuxSession['kind'];
+  hidden?: boolean;
+  metadata?: Record<string, string>;
+  exitCode?: number;
+  processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: TmuxSession['lastAlertKind'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
+}): TmuxSession {
+  return {
+    ...session,
+    kind: session.kind ?? 'shell',
+    hidden: session.hidden ?? false,
+  };
+}
+
+async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencies>): Promise<MachineSnapshot> {
+  const workspaces = await (deps.scanWorkspaces?.() ?? Promise.resolve([]));
+  const sessions = await (deps.listSessions?.() ?? Promise.resolve([]));
+  const terminalSessions = sessions.map((session) => toTerminalSession(session as Parameters<typeof toTerminalSession>[0]));
+  const runtimeWorkspaces = workspaces.map((workspace) => {
+    const visibleSessionCount = terminalSessions.filter((session) => {
+      const sameWorkspace = session.cwd === workspace.path || session.cwd.startsWith(`${workspace.path}/`);
+      return sameWorkspace && session.kind !== 'agent' && session.hidden !== true;
+    }).length;
+    return toRuntimeWorkspace({
+      ...(workspace as Parameters<typeof toRuntimeWorkspace>[0]),
+      sessionCount: visibleSessionCount,
+    });
+  });
+  const projectSummaries = deps.listProjectSummaries?.() ?? [];
+  const projectsById = Object.fromEntries(
+    projectSummaries.map((project) => [project.name, {
+      id: project.name,
+      name: project.name,
+      repository: project.repository,
+      isCurrent: project.isCurrent,
+      workspaceIds: runtimeWorkspaces.filter((workspace) => workspace.projectName === project.name).map((workspace) => workspace.id),
+      workspaceCount: runtimeWorkspaces.filter((workspace) => workspace.projectName === project.name).length,
+    }]),
+  );
+  const workspaceIdsByProjectId = Object.fromEntries(
+    Object.keys(projectsById).map((projectId) => [projectId, runtimeWorkspaces.filter((workspace) => workspace.projectName === projectId).map((workspace) => workspace.id)]),
+  );
+  const workspacesById = Object.fromEntries(runtimeWorkspaces.map((workspace) => [workspace.id, {
+    id: workspace.id,
+    name: workspace.name,
+    projectId: workspace.projectName,
+    projectName: workspace.projectName,
+    path: workspace.path,
+    branch: workspace.branch,
+    phase: workspace.status,
+    isStale: workspace.isStale,
+    serveDomain: workspace.serveDomain,
+    processes: workspace.processes,
+    processConfigError: workspace.processConfigError,
+    notesSummary: workspace.notesSummary,
+    terminalSessionIds: terminalSessions.filter((session) => (session.cwd === workspace.path || session.cwd.startsWith(`${workspace.path}/`)) && session.kind !== 'agent' && session.hidden !== true).map((session) => session.id),
+    agentSessionIds: [],
+    processIds: [],
+    replayIds: [],
+    summary: {
+      terminalCount: workspace.terminals.sessionCount,
+      attachedTerminalCount: workspace.terminals.attachedCount,
+      runningTerminalCount: workspace.terminals.runningCount,
+      failedTerminalCount: workspace.terminals.failedCount,
+      agentCount: 0,
+      runningAgentCount: 0,
+      waitingAgentCount: 0,
+      permissionAgentCount: 0,
+      retryingAgentCount: 0,
+      closedAgentCount: 0,
+      archivedAgentCount: 0,
+      configuredProcessCount: workspace.processSummary.configuredCount,
+      runningProcessCount: workspace.processSummary.runningCount,
+      failedProcessCount: workspace.processSummary.failedCount,
+    },
+  }]));
+  const terminalSessionsById = Object.fromEntries(terminalSessions.map((session) => {
+    const workspace = runtimeWorkspaces.find((item) => session.cwd === item.path || session.cwd.startsWith(`${item.path}/`));
+    const isAgentPty = session.kind === 'agent';
+    return [session.id, {
+      id: session.id,
+      name: session.name,
+      workspaceId: workspace?.id,
+      projectId: workspace?.projectName,
+      cwd: session.cwd,
+      kind: isAgentPty ? 'agent-pty' : 'shell',
+      hidden: session.hidden,
+      state: session.attached ? 'attached' : 'running',
+      attached: session.attached,
+      createdAt: session.createdAt,
+      exitCode: session.exitCode,
+      processTitle: session.processTitle,
+      terminalTitle: session.terminalTitle,
+      lastAlertKind: session.lastAlertKind,
+      lastAlertPreview: session.lastAlertPreview,
+      lastAlertAt: session.lastAlertAt,
+      unreadAlertCount: session.unreadAlertCount,
+      processName: undefined,
+      processInstance: undefined,
+      linkedAgentSessionId: session.metadata?.agentSessionId,
+      metadata: session.metadata,
+    }];
+  }));
+  const terminalSessionIdsByWorkspaceId = Object.fromEntries(runtimeWorkspaces.map((workspace) => [workspace.id, terminalSessions.filter((session) => (session.cwd === workspace.path || session.cwd.startsWith(`${workspace.path}/`)) && session.kind !== 'agent' && session.hidden !== true).map((session) => session.id)]));
+  return {
+    snapshotNonce: 1,
+    generatedAt: new Date().toISOString(),
+    projectsById,
+    projectOrder: Object.keys(projectsById),
+    workspacesById,
+    workspaceOrder: runtimeWorkspaces.map((workspace) => workspace.id),
+    workspaceIdsByProjectId,
+    terminalSessionsById,
+    terminalSessionIdsByWorkspaceId,
+    agentSessionsById: {},
+    agentSessionIdsByWorkspaceId: {},
+    processesById: {},
+    processIdsByWorkspaceId: {},
+    replaysById: {},
+    replayIdsByWorkspaceId: {},
+    notificationsById: {},
+    notificationOrder: [],
+  };
+}
+
+function createBackend(
+  deps: Partial<LocalSessionBackendDependencies>,
+  options: {
+    descriptor?: ConstructorParameters<typeof LocalSessionBackend>[0]['descriptor'];
+    agentControl?: ConstructorParameters<typeof LocalSessionBackend>[0]['agentControl'];
+  } = {},
+) {
+  const effectiveDeps: Partial<LocalSessionBackendDependencies> = {
+    ...deps,
+    getMachineSnapshot: deps.getMachineSnapshot ?? (() => buildSnapshotForDeps(deps)),
+    watchMachineEvents: deps.watchMachineEvents ?? (async () => () => {}),
+    getInbox: async () => {
+      const result = await (deps.getInbox?.() ?? Promise.resolve([]));
+      return Array.isArray(result) ? { items: result, unreadCount: result.filter((item) => !item.read).length } : result;
+    },
+    clearInbox: deps.clearInbox ?? (async () => undefined),
+    markInboxRead: deps.markInboxRead ?? (async () => undefined),
+    getNotificationConfig: async () => {
+      const result = await (deps.getNotificationConfig?.() ?? Promise.resolve({ config: notificationConfig }));
+      return 'config' in result ? result : { config: result as NotificationConfig };
+    },
+    updateNotificationConfig: async (config) => {
+      const result = await (deps.updateNotificationConfig?.(config) ?? Promise.resolve({ config }));
+      return 'config' in result ? result : { config: result as NotificationConfig };
+    },
+    prepareAttachSession: deps.prepareAttachSession ?? (async (params) => {
+      const workspaceList = await (deps.scanWorkspaces?.() ?? Promise.resolve([]));
+      const workspace = workspaceList.find((item) => item.id === params.workspaceId || toCanonicalWorkspaceId(item.projectName, item.id) === params.workspaceId);
+      if (!workspace) {
+        throw new Error(`Workspace not found: ${params.workspaceId}`);
+      }
+      let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+      const prep = await (deps.prepareWorkspaceForSession?.({
+        workspaceId: params.workspaceId,
+        sessionName: params.sessionName,
+        command: params.command,
+        args: params.args,
+        env: params.env,
+        scriptPolicy: params.scriptPolicy,
+        viewOnly: params.viewOnly,
+        onRequestId: params.onRequestId,
+        onPhaseStart: (phase: 'pre' | 'setup' | 'select') => {
+          currentPhase = phase;
+          params.onScriptOutput?.({ phase, data: Buffer.from(`\r\n==> ${phase} scripts...\r\n`).toString('base64'), done: false });
+        },
+        onOutput: (data: Uint8Array) => {
+          params.onScriptOutput?.({ phase: currentPhase, data: Buffer.from(data).toString('base64'), done: false });
+        },
+      }) ?? Promise.resolve({ success: true }));
+      if (!prep.success) {
+        const phase = prep.phase ?? 'setup';
+        const code = phase === 'pre' ? 'PRE_SCRIPT_FAILED' : phase === 'select' ? 'SELECT_SCRIPT_FAILED' : 'SETUP_SCRIPT_FAILED';
+        throw Object.assign(new Error(prep.error ?? `${phase} failed`), { code });
+      }
+      params.onScriptOutput?.({ phase: 'select', data: '', done: true });
+      const sessions = await (deps.listSessions?.() ?? Promise.resolve([]));
+      const existingCount = sessions.filter((session) => session.cwd === workspace.path && !session.hidden).length;
+      const nextIndex = existingCount + 1;
+      const sessionName = params.sessionName ?? `${workspace.projectName}:${workspace.id}:${nextIndex}`;
+      const session = await (deps.createSession
+        ? deps.createSession(sessionName, workspace.path, { command: params.command, args: params.args, env: params.env, viewOnly: params.viewOnly })
+        : Promise.resolve({ id: 'sess-new', name: sessionName, socketPath: '/tmp/socket-new', pid: 1, attached: false, cwd: workspace.path, createdAt: Date.now() }));
+      return { session, workspaceId: toCanonicalWorkspaceId(workspace.projectName, workspace.id) };
+    }),
+    cancelPrepareAttachSession: deps.cancelPrepareAttachSession ?? (async () => undefined),
+    deleteTmuxWorkspace: deps.deleteTmuxWorkspace ?? (async ({ projectName, workspaceId, scriptPolicy, onScriptOutput }) => {
+      const result = await (deps.deleteWorkspaceCore?.(projectName, workspaceId, {
+        removeScriptPolicy: scriptPolicy ?? 'enforce',
+        onScriptOutput: (data) => onScriptOutput?.({ phase: 'remove', data: Buffer.from(data).toString('base64'), done: false }),
+      }) ?? Promise.resolve({ success: true, workspaceName: workspaceId, branchDeleted: false, sessionsKilled: 0 }));
+      if (!result.success) {
+        onScriptOutput?.({ phase: 'remove', data: '', done: true, error: result.error });
+        throw Object.assign(new Error(result.error ?? 'Delete failed'), { code: result.errorCode });
+      }
+      onScriptOutput?.({ phase: 'remove', data: '', done: true });
+      return result;
+    }),
+  };
+  return new LocalSessionBackend({ descriptor: options.descriptor, deps: effectiveDeps, agentControl: options.agentControl });
+}
 
 describe('LocalSessionBackend', () => {
   it('emits local project/workspace/session/inbox and attach events', async () => {
@@ -117,13 +440,12 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({
+    const backend = createBackend(deps, {
       descriptor: {
         key: 'local',
         kind: 'local',
         label: 'Local',
       },
-      deps,
     });
 
     backend.onEvent((event) => events.push(event));
@@ -238,7 +560,7 @@ describe('LocalSessionBackend', () => {
       listSessions: async () => [],
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -319,7 +641,7 @@ describe('LocalSessionBackend', () => {
       }),
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -403,7 +725,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
     await backend.attachSession({ sessionId: 'sess-1' });
 
@@ -483,7 +805,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
 
     backend.setPtyOutputHandler((data) => {
@@ -583,7 +905,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
 
     backend.setPtyOutputHandler((data) => {
@@ -675,7 +997,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -765,7 +1087,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -818,7 +1140,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
 
     await backend.connect();
     await expect(backend.attachSession({ sessionId: 'sess-exited' })).rejects.toThrow(
@@ -899,7 +1221,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
     await backend.attachSession({ sessionId: 'sess-1' });
 
@@ -951,11 +1273,11 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
-    await expect(backend.attachSession({ workspaceId: 'ws-1' })).rejects.toThrow('setup');
+    await expect(backend.attachSession({ workspaceId: 'ws-1' })).rejects.toThrow('install failed');
 
     expect(events).toContainEqual({
       type: 'command_error',
@@ -1018,7 +1340,7 @@ describe('LocalSessionBackend', () => {
       }),
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
     await backend.attachSession({ workspaceId: 'ws-1', scriptPolicy: 'skip' });
 
@@ -1040,16 +1362,16 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.deleteWorkspace('alpha', 'alpha:ws-1');
 
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'script_output',
       phase: 'remove',
       data: new TextEncoder().encode('remove:ws-1'),
-    });
+    }));
     expect(events).toContainEqual({
       type: 'script_output',
       phase: 'remove',
@@ -1087,7 +1409,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await expect(backend.deleteWorkspace('alpha', 'ws-1')).rejects.toMatchObject({
@@ -1128,7 +1450,7 @@ describe('LocalSessionBackend', () => {
       }),
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await expect(backend.deleteWorkspace('alpha', 'ws-missing')).rejects.toMatchObject({
@@ -1224,7 +1546,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.listReplays('ws-1');
@@ -1265,7 +1587,7 @@ describe('LocalSessionBackend', () => {
       undismissReplay: (replayId) => { undismissCalls.push(replayId); },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     const frame = await backend.getReplayFrame('replay-1');
     expect(frame.replayId).toBe('replay-1');
     expect(frame.events).toHaveLength(1);
@@ -1318,9 +1640,10 @@ describe('LocalSessionBackend', () => {
       ],
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
+    await backend.connect();
     await backend.listWorkspaces();
     await backend.listSessions();
 
@@ -1384,8 +1707,7 @@ describe('LocalSessionBackend', () => {
         close: () => handlers.onClose(),
       }),
     };
-    const backend = new LocalSessionBackend({
-      deps,
+    const backend = createBackend(deps, {
       agentControl: {
         getState: mock(async () => []),
         watchState: mock(async () => () => {}),

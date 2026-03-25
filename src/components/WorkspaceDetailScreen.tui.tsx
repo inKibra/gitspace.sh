@@ -88,7 +88,7 @@ export interface WorkspaceDetailScreenProps extends WorkspaceDetailPaneProps {
   /** Shared workspace status summary for sibling pills. */
   workspaceStatusById?: Record<string, WorkspaceDetailStripStatus>;
   /** Select another workspace from top pills */
-  onSelectWorkspace?: (workspaceId: string) => void;
+  onSelectWorkspace?: (workspaceSelectionKey: string) => void;
   /** Inline terminal bindings for active attached session */
   terminalBindings?: {
     attachedSessionId: string | null;
@@ -263,6 +263,27 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
   const showInlineSessionTerminal = Boolean(
     terminalBindings && !showInlineScriptTerminal && (attachedWorkspaceSession || attachedAgentSession || attachedWorkspaceMatchesCurrent)
   );
+
+  const activeInlineTerminalKey = useMemo(
+    () => attachedWorkspaceSession?.id
+      ?? attachedAgentSession?.id
+      ?? (showInlineScriptTerminal ? `${workspace.id}:${scriptBindings?.scriptState?.phase ?? 'script'}` : null),
+    [attachedAgentSession?.id, attachedWorkspaceSession?.id, scriptBindings?.scriptState?.phase, showInlineScriptTerminal, workspace.id],
+  );
+
+  const previousInlineTerminalKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!activeInlineTerminalKey) {
+      previousInlineTerminalKeyRef.current = null;
+      return;
+    }
+    if (previousInlineTerminalKeyRef.current === activeInlineTerminalKey) {
+      return;
+    }
+    previousInlineTerminalKeyRef.current = activeInlineTerminalKey;
+    setFocus('terminal');
+  }, [activeInlineTerminalKey]);
   const attachedServiceIdentity = useMemo(
     () => attachedWorkspaceSession?.processName
       ? {
@@ -443,12 +464,22 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     setFocus('sidebar');
   }, [statusPickerCursor, onChangeStatus, workspace.id]);
 
+  const moveWorkspacePhase = useCallback((delta: -1 | 1) => {
+    if (!onChangeStatus) return;
+    const currentIndex = PHASES.indexOf(phaseStr as WorkspacePhase);
+    if (currentIndex < 0) return;
+    const nextPhase = PHASES[currentIndex + delta];
+    if (!nextPhase) return;
+    onChangeStatus(workspace.id, nextPhase);
+  }, [onChangeStatus, phaseStr, workspace.id]);
+
   const activateWorkspacePill = useCallback(() => {
     const selected = siblingWorkspaces[workspacePillCursor];
-    if (!selected) {
+    const selectionKey = selected?.selectionKey;
+    if (!selectionKey) {
       return;
     }
-    detailActions.selectWorkspace(selected.id);
+    detailActions.selectWorkspace(selectionKey);
   }, [siblingWorkspaces, workspacePillCursor, detailActions]);
 
   const openSelectedServiceLauncher = useCallback(() => {
@@ -530,6 +561,10 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         if (focus === 'sidebar' || focus === 'workspace-pills') {
           if (key.name === 'escape') {
             onBack();
+            return;
+          }
+          if (key.shift && (key.name === 'left' || key.name === 'right')) {
+            moveWorkspacePhase(key.name === 'left' ? -1 : 1);
             return;
           }
         }
@@ -632,6 +667,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         clampSidebar,
         activateCurrentSidebarItem,
         applyStatusPicker,
+        moveWorkspacePhase,
         onAbortAgentSession,
         onCloseAgentSession,
         onArchiveAgentSession,
@@ -670,8 +706,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         : focus === 'terminal'
           ? `[Shift+Esc] UI${attachAnywayHint}`
           : focus === 'workspace-pills'
-            ? `[←→] Switch workspace  [Enter] Open  [Tab] Sidebar  [Esc] Back${attachAnywayHint}`
-            : `${sidebarHint}  [x] Close/Stop  [X] Archive  [k] Abort${attachAnywayHint}`;
+            ? `[←→] Switch workspace  [Shift+←/→] Move phase  [Enter] Open  [Tab] Sidebar  [Esc] Back${attachAnywayHint}`
+            : `${sidebarHint}  [Shift+←/→] Move phase  [x] Close/Stop  [X] Archive  [k] Abort${attachAnywayHint}`;
 
   return (
     <box flexDirection="column" flexGrow={1} width="100%" backgroundColor={COLORS.bg}>

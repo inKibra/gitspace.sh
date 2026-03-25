@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createConnection } from 'node:net';
-import type { PendingQuestion, Permission, SessionStatus } from '../../../agents/opencode-event-types.js';
+import type { PendingQuestion, Permission, SessionStatus } from '../../../agents/agent-runtime-types.js';
 
 export const PI_RUNTIME_SOCKET_ENV = 'GITSPACE_PI_RUNTIME_SOCKET';
 export const PI_RUNTIME_SECRET_ENV = 'GITSPACE_PI_RUNTIME_SECRET';

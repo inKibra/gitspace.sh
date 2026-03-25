@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Miniflare } from 'miniflare';
-import { ed25519 } from '@noble/curves/ed25519';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { startMockUpstream, type MockUpstream } from './mock-upstream';
 
 const WORKER_DIR = dirname(dirname(import.meta.dir));
@@ -108,7 +108,7 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
         upstream.registerGitHubUser(githubToken, options.githubUser);
       }
 
-      const privateKey = ed25519.utils.randomPrivateKey();
+      const privateKey = ed25519.utils.randomSecretKey();
       const publicKey = ed25519.getPublicKey(privateKey);
       const timestamp = Date.now();
       const signature = ed25519.sign(
