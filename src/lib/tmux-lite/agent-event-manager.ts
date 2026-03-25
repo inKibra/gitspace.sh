@@ -69,6 +69,7 @@ export class AgentEventManager {
   private readonly previousStatuses = new Map<string, SessionStatus>();
   private readonly workspacePaths = new Map<string, string>();
   private readonly archivedSessionIds = new Map<string, Set<string>>();
+  private readonly suppressedSessionIds = new Map<string, Set<string>>();
 
   async initialize(): Promise<void> {
     // No external runtime bootstrap remains. Pi session discovery and in-process
@@ -97,7 +98,7 @@ export class AgentEventManager {
     let changed = false;
 
     for (const session of sessions) {
-      if (!shouldDisplayAgentSession(session)) {
+      if (!shouldDisplayAgentSession(session) || this.suppressedSessionIds.get(workspaceId)?.has(session.id)) {
         continue;
       }
 
@@ -153,6 +154,53 @@ export class AgentEventManager {
     return snapshot;
   }
 
+  suppressSession(workspaceId: string, sessionId: string): void {
+    let suppressed = this.suppressedSessionIds.get(workspaceId);
+    if (!suppressed) {
+      suppressed = new Set();
+      this.suppressedSessionIds.set(workspaceId, suppressed);
+    }
+    const wasSuppressed = suppressed.has(sessionId);
+    suppressed.add(sessionId);
+
+    const state = this.workspaceStates.get(workspaceId);
+    let deleted = false;
+    if (state) {
+      const nextSessions = state.sessions.filter((session) => session.id !== sessionId);
+      if (nextSessions.length !== state.sessions.length) {
+        state.sessions = nextSessions;
+        deleted = true;
+      }
+      if (state.statuses[sessionId] !== undefined) {
+        delete state.statuses[sessionId];
+        deleted = true;
+      }
+      if (state.pendingPermissions[sessionId] !== undefined) {
+        delete state.pendingPermissions[sessionId];
+        deleted = true;
+      }
+      if (state.pendingQuestions[sessionId] !== undefined) {
+        delete state.pendingQuestions[sessionId];
+        deleted = true;
+      }
+      if (state.lastMessages[sessionId] !== undefined) {
+        delete state.lastMessages[sessionId];
+        deleted = true;
+      }
+      if (state.errorMessages[sessionId] !== undefined) {
+        delete state.errorMessages[sessionId];
+        deleted = true;
+      }
+    }
+    this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
+    if (deleted) {
+      this.emit({ type: 'agent_session_deleted', workspaceId, sessionId });
+    }
+    if (deleted || !wasSuppressed) {
+      this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    }
+  }
+
   markSessionClosed(workspaceId: string, sessionId: string): void {
     const state = this.workspaceStates.get(workspaceId);
     if (!state) return;
@@ -171,6 +219,7 @@ export class AgentEventManager {
   }
 
   markSessionOpen(workspaceId: string, sessionId: string): void {
+    this.unsuppressSession(workspaceId, sessionId);
     const state = this.workspaceStates.get(workspaceId);
     if (!state) return;
     const index = state.sessions.findIndex((session) => session.id === sessionId);
@@ -221,6 +270,7 @@ export class AgentEventManager {
     sessionId: string,
     update: ExternalSessionRuntimeState,
   ): void {
+    this.unsuppressSession(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     if (state.sessions.findIndex((session) => session.id === sessionId) === -1) {
       this.ensureSessionEntry(workspaceId, sessionId, sessionId);
@@ -273,6 +323,7 @@ export class AgentEventManager {
     delete state.lastMessages[sessionId];
     delete state.errorMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
+    this.suppressedSessionIds.get(workspaceId)?.delete(sessionId);
     let archived = this.archivedSessionIds.get(workspaceId);
     if (!archived) {
       archived = new Set();
@@ -284,6 +335,7 @@ export class AgentEventManager {
 
   markSessionRestored(workspaceId: string, sessionId: string, title: string): void {
     this.archivedSessionIds.get(workspaceId)?.delete(sessionId);
+    this.unsuppressSession(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     const existing = state.sessions.find((session) => session.id === sessionId);
     if (existing) {
@@ -312,10 +364,15 @@ export class AgentEventManager {
     updatedAt?: string,
   ): boolean {
     if (this.archivedSessionIds.get(workspaceId)?.has(id)) return false;
+    if (this.suppressedSessionIds.get(workspaceId)?.has(id)) return false;
     const state = this.getOrCreateState(workspaceId);
     if (state.sessions.some((session) => session.id === id)) return false;
     state.sessions.push({ id, title, closedAt: new Date().toISOString(), updatedAt });
     return true;
+  }
+
+  private unsuppressSession(workspaceId: string, sessionId: string): void {
+    this.suppressedSessionIds.get(workspaceId)?.delete(sessionId);
   }
 
   private getOrCreateState(workspaceId: string): WorkspaceAgentState {

@@ -4,6 +4,7 @@ import type { PendingQuestion, Permission, SessionStatus } from '../../../agents
 
 export const PI_RUNTIME_SOCKET_ENV = 'GITSPACE_PI_RUNTIME_SOCKET';
 export const PI_RUNTIME_SECRET_ENV = 'GITSPACE_PI_RUNTIME_SECRET';
+export const PI_RUNTIME_TERMINAL_SESSION_ENV = 'GITSPACE_PI_TERMINAL_SESSION_ID';
 const PI_RUNTIME_SIGNATURE_WINDOW_MS = 30_000;
 const ROUTER_FRAME_HEADER_BYTES = 4;
 
@@ -11,6 +12,7 @@ let piRuntimeSecret: string | null = null;
 
 export interface PiRuntimeStateSnapshot {
   sessionId: string;
+  terminalSessionId: string;
   workspacePath: string;
   status: SessionStatus;
   pendingPermissions: Permission[];
@@ -29,6 +31,7 @@ function serializePiRuntimePayload(update: Omit<PiRuntimeUpdateCommand, 'type' |
   return JSON.stringify({
     timestamp: update.timestamp,
     sessionId: update.sessionId,
+    terminalSessionId: update.terminalSessionId,
     workspacePath: update.workspacePath,
     status: update.status,
     pendingPermissions: update.pendingPermissions,
@@ -74,6 +77,7 @@ export function createPiRuntimeUpdateCommand(
   const payload = {
     timestamp,
     sessionId: snapshot.sessionId,
+    terminalSessionId: snapshot.terminalSessionId,
     workspacePath: snapshot.workspacePath,
     status: snapshot.status,
     pendingPermissions: snapshot.pendingPermissions,
@@ -102,6 +106,7 @@ export function verifyPiRuntimeUpdateCommand(
   const payload = {
     timestamp: command.timestamp,
     sessionId: command.sessionId,
+    terminalSessionId: command.terminalSessionId,
     workspacePath: command.workspacePath,
     status: command.status,
     pendingPermissions: command.pendingPermissions,

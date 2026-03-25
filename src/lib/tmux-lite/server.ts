@@ -57,13 +57,19 @@ import {
   getKnownAgentSessions,
   listLiveAgentSessions,
   promptAgentSession,
+  rebindPiTerminalSessionOwnership,
+  releasePiTerminalSessionOwnership,
   respondToAgentPermission,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
-import { configurePiRuntimeEnvironment, verifyPiRuntimeUpdateCommand } from './agents/pi-runtime-status.js';
+import {
+  configurePiRuntimeEnvironment,
+  PI_RUNTIME_TERMINAL_SESSION_ENV,
+  verifyPiRuntimeUpdateCommand,
+} from './agents/pi-runtime-status.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
@@ -481,6 +487,7 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
 
   const workspaceId = session.info.metadata?.workspaceId;
   const agentSessionId = session.info.metadata?.agentSessionId;
+  releasePiTerminalSessionOwnership(session.info.id);
   if (workspaceId && agentSessionId) {
     applyPiRuntimeUpdate(workspaceId, agentSessionId, {
       status: { type: 'idle' },
@@ -1902,9 +1909,11 @@ function createSession(
   const spawnCmd = options?.command
     ? [options.command, ...(options.args ?? [])]
     : [shell];
-  const spawnEnv = options?.env
-    ? { ...shellEnv, ...options.env }
-    : shellEnv;
+  const spawnEnv = {
+    ...shellEnv,
+    ...(options?.env ?? {}),
+    ...(options?.kind === 'agent' ? { [PI_RUNTIME_TERMINAL_SESSION_ENV]: id } : {}),
+  };
 
   const proc = Bun.spawn(spawnCmd, {
     terminal: ptyTerminal,
@@ -2298,13 +2307,45 @@ routerListener = Bun.listen({
                 res = { type: 'error', message: `Workspace not found for Pi runtime update: ${cmd.workspacePath}` };
                 break;
               }
-              applyPiRuntimeUpdate(workspaceId, cmd.sessionId, {
-                status: cmd.status,
-                pendingPermissions: cmd.pendingPermissions,
-                pendingQuestions: cmd.pendingQuestions,
-                errorMessage: cmd.errorMessage,
-                lastMessage: cmd.lastMessage,
-              });
+              const reportingSession = sessions.get(cmd.terminalSessionId);
+              if (!reportingSession) {
+                res = { type: 'error', message: `Terminal session not found for Pi runtime update: ${cmd.terminalSessionId}` };
+                break;
+              }
+              if (reportingSession.info.kind !== 'agent') {
+                res = { type: 'error', message: `Pi runtime update can only target agent PTYs: ${cmd.terminalSessionId}` };
+                break;
+              }
+              if (reportingSession.info.metadata?.workspaceId !== workspaceId) {
+                res = {
+                  type: 'error',
+                  message: `Terminal session workspace mismatch for Pi runtime update: ${cmd.terminalSessionId}`,
+                };
+                break;
+              }
+              const previousAgentSessionId = reportingSession.info.metadata?.agentSessionId;
+              const reassignment = rebindPiTerminalSessionOwnership(workspaceId, cmd.terminalSessionId, cmd.sessionId);
+              reportingSession.info.metadata = {
+                ...reportingSession.info.metadata,
+                workspaceId,
+                agentSessionId: cmd.sessionId,
+              };
+              applyPiRuntimeUpdate(
+                workspaceId,
+                cmd.sessionId,
+                {
+                  status: cmd.status,
+                  pendingPermissions: cmd.pendingPermissions,
+                  pendingQuestions: cmd.pendingQuestions,
+                  errorMessage: cmd.errorMessage,
+                  lastMessage: cmd.lastMessage,
+                },
+                {
+                  previousSessionId: previousAgentSessionId ?? reassignment.previousAgentSessionId,
+                  suppressPreviousSession: (previousAgentSessionId ?? reassignment.previousAgentSessionId) !== cmd.sessionId
+                    && reassignment.previousOwnerCount === 0,
+                },
+              );
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

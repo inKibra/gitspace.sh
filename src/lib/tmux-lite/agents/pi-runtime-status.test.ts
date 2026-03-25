@@ -31,6 +31,7 @@ describe('pi-runtime-status', () => {
 
     const command = createPiRuntimeUpdateCommand({
       sessionId: 'session-1',
+      terminalSessionId: 'pty-1',
       workspacePath: '/tmp/demo/ws-1',
       status: { type: 'busy' },
       pendingPermissions: [pendingPermission],
@@ -48,6 +49,7 @@ describe('pi-runtime-status', () => {
     const secret = env.GITSPACE_PI_RUNTIME_SECRET;
     const command = createPiRuntimeUpdateCommand({
       sessionId: 'session-1',
+      terminalSessionId: 'pty-1',
       workspacePath: '/tmp/demo/ws-1',
       status: { type: 'idle' },
       pendingPermissions: [],

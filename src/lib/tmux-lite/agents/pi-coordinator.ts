@@ -54,10 +54,16 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
     && session.metadata?.agentSessionId === agentSessionId;
 }
 
+interface TerminalSessionBinding {
+  workspaceId: string;
+  agentSessionId: string;
+}
+
 
 export class PiCoordinator {
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
-  private readonly sessionIdMap = new Map<string, string>();
+  private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
+  private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
   private readonly activeSessions = new Map<string, AgentSession>();
   private readonly sessionUnsubscribers = new Map<string, () => void>();
   private readonly sessionsRoot: string | undefined;
@@ -135,9 +141,8 @@ export class PiCoordinator {
   }
 
   async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
-    this.disposeActiveSession(agentSessionId);
-
     let killed = false;
+    let killedTerminalSessionId: string | null = null;
     try {
       const sessions = await listTmuxSessions();
       const pty = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
@@ -145,11 +150,17 @@ export class PiCoordinator {
       if (pty) {
         await killTmuxSession(pty.id);
         killed = true;
+        killedTerminalSessionId = pty.id;
       }
     } catch {
       // non-fatal
     }
-    this.sessionIdMap.delete(`${target.workspaceId}:${agentSessionId}`);
+    if (killedTerminalSessionId) {
+      this.releaseTerminalSession(killedTerminalSessionId);
+    }
+    if (!this.hasTerminalOwners(target.workspaceId, agentSessionId)) {
+      this.disposeActiveSession(agentSessionId);
+    }
     return killed;
   }
 
@@ -169,6 +180,53 @@ export class PiCoordinator {
 
   async restoreAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<void> {
     deleteArchivedSession(target.workspaceId, agentSessionId);
+  }
+
+  getTerminalBinding(terminalSessionId: string): TerminalSessionBinding | null {
+    return this.terminalBindings.get(terminalSessionId) ?? null;
+  }
+
+  hasTerminalOwners(workspaceId: string, agentSessionId: string): boolean {
+    return this.getTerminalOwnerCount(workspaceId, agentSessionId) > 0;
+  }
+
+  rebindTerminalSession(
+    workspaceId: string,
+    terminalSessionId: string,
+    nextAgentSessionId: string,
+  ): { previousAgentSessionId?: string; previousOwnerCount: number; nextOwnerCount: number } {
+    const existing = this.terminalBindings.get(terminalSessionId);
+    if (existing && existing.workspaceId !== workspaceId) {
+      throw new Error(
+        `Cannot rebind tmux session '${terminalSessionId}' from workspace '${existing.workspaceId}' to '${workspaceId}'.`,
+      );
+    }
+    const previous = this.unbindTerminalSession(terminalSessionId);
+    const nextOwnerCount = this.bindTerminalSession(workspaceId, terminalSessionId, nextAgentSessionId);
+    const previousOwnerCount = previous ? this.getTerminalOwnerCount(previous.workspaceId, previous.agentSessionId) : 0;
+    if (previous && previousOwnerCount === 0 && previous.agentSessionId !== nextAgentSessionId) {
+      this.disposeActiveSession(previous.agentSessionId);
+    }
+    return {
+      previousAgentSessionId: previous?.agentSessionId,
+      previousOwnerCount,
+      nextOwnerCount,
+    };
+  }
+
+  releaseTerminalSession(
+    terminalSessionId: string,
+  ): { workspaceId: string; agentSessionId: string; remainingOwnerCount: number } | null {
+    const binding = this.unbindTerminalSession(terminalSessionId);
+    if (!binding) return null;
+    const remainingOwnerCount = this.getTerminalOwnerCount(binding.workspaceId, binding.agentSessionId);
+    if (remainingOwnerCount === 0) {
+      this.disposeActiveSession(binding.agentSessionId);
+    }
+    return {
+      ...binding,
+      remainingOwnerCount,
+    };
   }
 
   /**
@@ -195,7 +253,13 @@ export class PiCoordinator {
     const tmuxSessions = await listTmuxSessions();
     const existing = tmuxSessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
       ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
-    if (existing && existing.exitCode === undefined) return existing;
+    if (existing) {
+      if (existing.exitCode === undefined) {
+        this.bindTerminalSession(target.workspaceId, existing.id, agentSessionId);
+        return existing;
+      }
+      this.releaseTerminalSession(existing.id);
+    }
 
     const ompBin = await ensureOmpInstalled();
     const env = {
@@ -237,7 +301,7 @@ export class PiCoordinator {
         },
       },
     );
-    this.sessionIdMap.set(`${target.workspaceId}:${agentSessionId}`, tmuxSession.id);
+    this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
     return tmuxSession;
   }
 
@@ -339,6 +403,43 @@ export class PiCoordinator {
     }
   }
 
+  private getBindingKey(workspaceId: string, agentSessionId: string): string {
+    return `${workspaceId}:${agentSessionId}`;
+  }
+
+  private getTerminalOwnerCount(workspaceId: string, agentSessionId: string): number {
+    return this.terminalSessionIdsByAgentKey.get(this.getBindingKey(workspaceId, agentSessionId))?.size ?? 0;
+  }
+
+  private bindTerminalSession(
+    workspaceId: string,
+    terminalSessionId: string,
+    agentSessionId: string,
+  ): number {
+    const key = this.getBindingKey(workspaceId, agentSessionId);
+    let terminalIds = this.terminalSessionIdsByAgentKey.get(key);
+    if (!terminalIds) {
+      terminalIds = new Set();
+      this.terminalSessionIdsByAgentKey.set(key, terminalIds);
+    }
+    terminalIds.add(terminalSessionId);
+    this.terminalBindings.set(terminalSessionId, { workspaceId, agentSessionId });
+    return terminalIds.size;
+  }
+
+  private unbindTerminalSession(terminalSessionId: string): TerminalSessionBinding | null {
+    const binding = this.terminalBindings.get(terminalSessionId);
+    if (!binding) return null;
+    this.terminalBindings.delete(terminalSessionId);
+    const key = this.getBindingKey(binding.workspaceId, binding.agentSessionId);
+    const terminalIds = this.terminalSessionIdsByAgentKey.get(key);
+    terminalIds?.delete(terminalSessionId);
+    if (terminalIds && terminalIds.size === 0) {
+      this.terminalSessionIdsByAgentKey.delete(key);
+    }
+    return binding;
+  }
+
   private async waitForSessionFile(
     workspacePath: string,
     sessionId: string,
@@ -359,9 +460,17 @@ export class PiCoordinator {
     workspaceId: string,
     agentSessionId: string,
   ): TmuxSession | undefined {
-    const mappedTmuxId = this.sessionIdMap.get(`${workspaceId}:${agentSessionId}`);
-    if (!mappedTmuxId) return undefined;
-    return tmuxSessions.find((s) => s.id === mappedTmuxId);
+    const key = this.getBindingKey(workspaceId, agentSessionId);
+    const mappedTmuxIds = this.terminalSessionIdsByAgentKey.get(key);
+    if (!mappedTmuxIds || mappedTmuxIds.size === 0) return undefined;
+    for (const mappedTmuxId of [...mappedTmuxIds]) {
+      const match = tmuxSessions.find((s) => s.id === mappedTmuxId);
+      if (match) {
+        return match;
+      }
+      this.releaseTerminalSession(mappedTmuxId);
+    }
+    return undefined;
   }
 }
 

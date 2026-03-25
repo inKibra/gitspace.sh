@@ -10,6 +10,11 @@ import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 
+export interface ApplyPiRuntimeUpdateOptions {
+  previousSessionId?: string;
+  suppressPreviousSession?: boolean;
+}
+
 export type AgentWorkspaceTarget = PiWorkspaceTarget;
 export type AgentSessionSummary = PiAgentSessionSummary;
 
@@ -132,8 +137,24 @@ export function applyPiRuntimeUpdate(
   workspaceId: string,
   sessionId: string,
   runtime: ExternalSessionRuntimeState,
+  options: ApplyPiRuntimeUpdateOptions = {},
 ): void {
+  if (options.previousSessionId && options.previousSessionId !== sessionId && options.suppressPreviousSession) {
+    defaultAgentEventManager.suppressSession(workspaceId, options.previousSessionId);
+  }
   defaultAgentEventManager.syncExternalRuntimeState(workspaceId, sessionId, runtime);
+}
+
+export function rebindPiTerminalSessionOwnership(
+  workspaceId: string,
+  terminalSessionId: string,
+  agentSessionId: string,
+): { previousAgentSessionId?: string; previousOwnerCount: number; nextOwnerCount: number } {
+  return defaultPiCoordinator.rebindTerminalSession(workspaceId, terminalSessionId, agentSessionId);
+}
+
+export function releasePiTerminalSessionOwnership(terminalSessionId: string): void {
+  defaultPiCoordinator.releaseTerminalSession(terminalSessionId);
 }
 
 /**
@@ -187,10 +208,12 @@ export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promi
     (snapshot[target.workspaceId]?.sessions ?? []).map((s) => [s.id, s]),
   );
 
-  return liveSessions.map((s) => ({
-    ...s,
-    closedAt: snapshotMap.get(s.id)?.closedAt,
-  }));
+  return liveSessions
+    .filter((s) => snapshotMap.has(s.id))
+    .map((s) => ({
+      ...s,
+      closedAt: snapshotMap.get(s.id)?.closedAt,
+    }));
 }
 
 export async function createAgentSession(target: AgentWorkspaceTarget, title?: string): Promise<AgentSessionSummary[]> {
@@ -206,7 +229,7 @@ export async function createAgentSession(target: AgentWorkspaceTarget, title?: s
       defaultAgentEventManager.markSessionOpen(target.workspaceId, session.id);
     }
   }
-  return sessions;
+  return getKnownAgentSessions(target);
 }
 
 export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string): Promise<void> {

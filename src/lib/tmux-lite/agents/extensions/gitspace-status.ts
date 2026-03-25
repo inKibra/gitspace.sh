@@ -5,7 +5,7 @@ import type {
   QuestionInfo,
   SessionStatus,
 } from '../../../../agents/agent-runtime-types.js';
-import { sendPiRuntimeUpdate } from '../pi-runtime-status.js';
+import { PI_RUNTIME_TERMINAL_SESSION_ENV, sendPiRuntimeUpdate } from '../pi-runtime-status.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -129,6 +129,7 @@ function permissionIdFromPayload(payload: unknown): string | null {
 
 export default function gitspaceStatusExtension(pi: ExtensionAPI): void {
   let sessionId = '';
+  let terminalSessionId = '';
   let workspacePath = '';
   let activeAgentRuns = 0;
   let currentStatus: SessionStatus = { type: 'idle' };
@@ -139,17 +140,19 @@ export default function gitspaceStatusExtension(pi: ExtensionAPI): void {
 
   function syncIdentity(ctx: ExtensionContext): void {
     sessionId = ctx.sessionManager.getSessionId();
+    terminalSessionId = process.env[PI_RUNTIME_TERMINAL_SESSION_ENV]?.trim() ?? '';
     workspacePath = ctx.sessionManager.getCwd() || ctx.cwd;
   }
 
   function queuePublish(): void {
-    if (!sessionId || !workspacePath) {
+    if (!sessionId || !terminalSessionId || !workspacePath) {
       return;
     }
     publishChain = publishChain
       .catch(() => {})
       .then(() => sendPiRuntimeUpdate({
         sessionId,
+        terminalSessionId,
         workspacePath,
         status: currentStatus,
         pendingPermissions,

@@ -19,11 +19,11 @@ function makeWorkspace(): WorkspaceRuntimeRecord {
   };
 }
 
-function makeAgentPty(): Session {
+function makeAgentPty(id = 'pty-1', agentSessionId = 'agent-1'): Session {
   return {
-    id: 'pty-1',
-    name: 'agent:ws-1:abcd1234',
-    socketPath: '/tmp/pty.sock',
+    id,
+    name: `agent:ws-1:${agentSessionId.slice(-8)}`,
+    socketPath: `/tmp/${id}.sock`,
     pid: 123,
     attached: true,
     cwd: '/tmp/demo/ws-1',
@@ -32,7 +32,7 @@ function makeAgentPty(): Session {
     hidden: true,
     metadata: {
       workspaceId: 'demo:ws-1',
-      agentSessionId: 'agent-1',
+      agentSessionId,
     },
   };
 }
@@ -100,6 +100,37 @@ describe('buildMachineSnapshot', () => {
     expect(snapshot.agentSessionsById['agent-1']?.pendingQuestionCount).toBe(1);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.permissionAgentCount).toBe(1);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.runningAgentCount).toBe(0);
+  });
+
+  it('keeps PTY linkage per terminal when one PTY forks to a new Pi session', () => {
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: 1,
+      terminalSessions: [
+        makeAgentPty('pty-a', 'agent-old'),
+        makeAgentPty('pty-b', 'agent-new'),
+      ],
+      workspaces: [makeWorkspace()],
+      agentStateByWorkspaceId: {
+        'demo:ws-1': {
+          workspaceId: 'demo:ws-1',
+          sessions: [
+            { id: 'agent-old', title: 'Original session' },
+            { id: 'agent-new', title: 'Forked session' },
+          ],
+          statuses: { 'agent-new': { type: 'busy' } },
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+        } satisfies WorkspaceAgentState,
+      },
+    });
+
+    expect(snapshot.terminalSessionsById['pty-a']?.linkedAgentSessionId).toBe('agent-old');
+    expect(snapshot.terminalSessionsById['pty-b']?.linkedAgentSessionId).toBe('agent-new');
+    expect(snapshot.agentSessionsById['agent-old']?.linkedTerminalSessionId).toBe('pty-a');
+    expect(snapshot.agentSessionsById['agent-new']?.linkedTerminalSessionId).toBe('pty-b');
+    expect(snapshot.workspacesById['demo:ws-1']?.agentSessionIds).toEqual(['agent-old', 'agent-new']);
   });
 
 });

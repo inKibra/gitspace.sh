@@ -90,4 +90,43 @@ describe('deriveWorkspaceRuntimeModel', () => {
     expect(model.workspaceStatusById[selectionKey]?.primaryColor).toBe('green');
     expect(model.runtimeByWorkspace[selectionKey]?.statusSummary.primaryColor).toBe('green');
   });
+  it('surfaces only the sessions present in the machine snapshot after PTY reassignment', () => {
+    const snapshot = createEmptyMachineSnapshot();
+    const workspace = makeWorkspace({ agentCount: 1, runningAgentCount: 0, waitingAgentCount: 1 });
+    workspace.agentSessionIds = ['agent-new'];
+    snapshot.projectsById.demo = {
+      id: 'demo',
+      name: 'demo',
+      repository: 'demo/demo',
+      isCurrent: true,
+      workspaceIds: ['ws-1'],
+      workspaceCount: 1,
+    };
+    snapshot.projectOrder = ['demo'];
+    snapshot.workspacesById['ws-1'] = workspace;
+    snapshot.workspaceOrder = ['ws-1'];
+    snapshot.workspaceIdsByProjectId.demo = ['ws-1'];
+    snapshot.agentSessionsById['agent-new'] = makeAgent('agent-new', 'waiting');
+    snapshot.agentSessionIdsByWorkspaceId['ws-1'] = ['agent-new'];
+
+    const state: MultiMachineState = {
+      backendOrder: ['local'],
+      activeBackendKey: 'local',
+      byBackend: {
+        local: {
+          status: 'connected',
+          snapshot,
+          label: 'Local',
+          lastError: null,
+        },
+      },
+    };
+
+    const model = deriveWorkspaceRuntimeModel(state);
+    const selectionKey = toBackendScopedWorkspaceKey({ backendKey: 'local', workspaceId: 'ws-1' });
+
+    expect(model.runtimeByWorkspace[selectionKey]?.agentSessionCount).toBe(1);
+    expect(model.runtimeByWorkspace[selectionKey]?.agentSessions.map((session) => session.id)).toEqual(['agent-new']);
+  });
+
 });
