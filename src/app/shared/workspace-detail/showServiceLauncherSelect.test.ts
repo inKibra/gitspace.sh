@@ -31,6 +31,6 @@ describe('showServiceLauncherSelect', () => {
     const firstCall = (showSelect as { mock: { calls: unknown[][] } }).mock.calls[0];
     expect(firstCall).toBeDefined();
     const config = firstCall![0] as unknown as { options: Array<{ label: string; description?: string }> };
-    expect(config.options.map((option) => option.label)).toEqual(['Open local app']);
+    expect(config.options.map((option) => option.label)).toEqual(['Open remote app', 'Open local app']);
   });
 });

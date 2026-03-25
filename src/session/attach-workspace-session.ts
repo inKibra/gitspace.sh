@@ -115,10 +115,11 @@ export async function attachWorkspaceSession(
   });
 
   if (args.command) {
+    const workspaceHooks = buildWorkspaceSessionHooks(workspace.projectName, workspace.id);
     const session = await deps.createSession(fullName, workspace.path, {
       command: args.command,
       args: args.args,
-      env: args.env,
+      env: { ...workspaceHooks.env, ...(args.env ?? {}) },
     });
     return { session, workspace };
   }

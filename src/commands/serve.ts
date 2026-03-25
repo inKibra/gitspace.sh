@@ -822,12 +822,7 @@ class ServeProcessHostManager {
 }
 
 async function startServeProcessHosting(hostConfig: HostConfig): Promise<ServeProcessHostManager | null> {
-  const serveSubdomain = hostConfig.serveSubdomain?.trim();
-  if (!serveSubdomain) {
-    logger.warning(`No serve subdomain is configured for ${hostConfig.subdomain}.gitspace.sh`);
-    logger.dim(`Run: gssh user host reserve ${hostConfig.subdomain}`);
-    return null;
-  }
+  const serveSubdomain = hostConfig.serveSubdomain?.trim() || `${hostConfig.subdomain}.serve`;
   const serveDomain = `${serveSubdomain}.gitspace.sh`;
   const tunnelToken = await getSecret(getServeTokenKey(hostConfig.subdomain));
 

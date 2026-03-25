@@ -67,10 +67,14 @@ import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/typ
 import {
   useMultiBackends,
 } from './machine/multi/useMultiBackends.js';
-import type { BackendScopedWorkspaceRef, BackendScopedAgentSessionRef } from './machine/multi/types.js';
+import {
+  type BackendScopedWorkspaceRef,
+  type BackendScopedAgentSessionRef,
+  toBackendScopedWorkspaceKey,
+} from './machine/multi/types.js';
 import { useWorkspaceController } from './machine/controllers/useWorkspaceController.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
-import { selectBackendSnapshot, selectAllWorkspaces } from './machine/multi/selectors.js';
+import { selectBackendSnapshot } from './machine/multi/selectors.js';
 import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
 
@@ -170,7 +174,7 @@ export default function App() {
   const [reviewWorkspace, setReviewWorkspace] = useState<{
     projectName: string;
     workspaceId: string;
-    backendKey: BackendKey;
+    backendKey: BackendKey | null;
     workspaceLabel?: string;
   } | null>(null);
 
@@ -284,10 +288,6 @@ export default function App() {
     onSetWorkspacePhase: async (ref, phase) => {
       await multi.setWorkspaceStatus(ref, phase);
     },
-    resolveRefForWorkspaceId: (workspaceId) => {
-      const ws = selectAllWorkspaces(multiMachineState).find((item) => item.workspace.id === workspaceId);
-      return ws ? { backendKey: ws.backendKey, workspaceId } : null;
-    },
     connected: terminalStatus === 'connected',
     mode: terminalMode,
     activeBackendKey,
@@ -295,8 +295,7 @@ export default function App() {
   });
   const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
 
-  // ─── Session / replay data (from active backend) ──────────────────────────
-
+  // ─── Session / replay data (from the selected backend) ──────────────────────
   const selectedBackendKey = workspaceController.selectedRef?.backendKey ?? activeBackendKey;
   const selectedBackendState = selectedBackendKey ? multi.getBackendState(selectedBackendKey) : null;
   const backendSessions = useMemo(() => {
@@ -316,59 +315,95 @@ export default function App() {
   const backendSavedEventFilters = activeBackendState?.savedEventFilters ?? [];
   const backendAttachedSessionId = attachedBackendState?.attachedSessionId ?? null;
 
-  // Filtered to selected project
-  const filteredWorkspaces: WorkspaceInfo[] = useMemo(
+  const filteredWorkspaces = useMemo(
     () => workspaceRuntime.workspaces.filter((workspace) => workspace.backendKey === selectedBackendKey),
     [workspaceRuntime.workspaces, selectedBackendKey],
   );
+  const filteredReplays = useMemo(() => backendReplays, [backendReplays]);
 
-  const filteredWorkspaceIds = useMemo(
-    () => new Set(filteredWorkspaces.map((w) => w.id)),
-    [filteredWorkspaces],
-  );
+  const findWorkspaceEntry = useCallback((workspaceId: string, backendKey?: BackendKey | null) => {
+    const preferredBackendKey =
+      backendKey ?? workspaceController.selectedRef?.backendKey ?? selectedBackendKey ?? activeBackendKey ?? null;
+    if (preferredBackendKey) {
+      const preferredMatch = workspaceRuntime.workspaces.find(
+        (workspace) => workspace.id === workspaceId && workspace.backendKey === preferredBackendKey,
+      );
+      if (preferredMatch) {
+        return preferredMatch;
+      }
+    }
+    return workspaceRuntime.workspaces.find(
+      (workspace) => workspace.id === workspaceId && (backendKey == null || workspace.backendKey === backendKey),
+    ) ?? null;
+  }, [activeBackendKey, selectedBackendKey, workspaceController.selectedRef, workspaceRuntime.workspaces]);
 
-  const filteredSessions = useMemo(
-    () => workspaceRuntime.sessions.filter((s) => filteredWorkspaceIds.has(s.workspaceId)),
-    [workspaceRuntime.sessions, filteredWorkspaceIds],
-  );
+  const getWorkspaceRef = useCallback((workspaceId: string, backendKey?: BackendKey | null): BackendScopedWorkspaceRef => {
+    const workspace = findWorkspaceEntry(workspaceId, backendKey);
+    if (workspace) {
+      return { backendKey: workspace.backendKey as BackendKey, workspaceId: workspace.id };
+    }
+    return {
+      backendKey: backendKey ?? workspaceController.selectedRef?.backendKey ?? selectedBackendKey ?? activeBackendKey ?? 'local',
+      workspaceId,
+    };
+  }, [activeBackendKey, findWorkspaceEntry, selectedBackendKey, workspaceController.selectedRef]);
 
-  const filteredReplays = useMemo(
-    () => backendReplays,
-    [backendReplays],
-  );
+  const getSessionRef = useCallback((sessionId: string, preferredBackendKey?: BackendKey | null) => {
+    const candidateKeys = [
+      preferredBackendKey,
+      selectedBackendKey,
+      attachedBackendKey,
+      activeBackendKey,
+      ...multiMachineState.backendOrder,
+    ].filter((value, index, values): value is BackendKey =>
+      typeof value === 'string' && values.indexOf(value) === index,
+    );
 
-  // Selected workspace detail
+    for (const backendKey of candidateKeys) {
+      const state = multi.getBackendState(backendKey);
+      if (state?.sessions?.some((session) => session.id === sessionId)) {
+        return { backendKey, sessionId };
+      }
+    }
+
+    return candidateKeys[0] ? { backendKey: candidateKeys[0], sessionId } : null;
+  }, [activeBackendKey, attachedBackendKey, multi, multiMachineState.backendOrder, selectedBackendKey]);
+
+  const getAgentRef = useCallback((workspaceId: string, agentSessionId: string): BackendScopedAgentSessionRef => ({
+    ...getWorkspaceRef(workspaceId),
+    agentSessionId,
+  }), [getWorkspaceRef]);
+
+  // ─── Selected workspace detail ───────────────────────────────────────────────
   const selectedRef = workspaceController.selectedRef;
   const backendAttachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
+  const attachedWorkspaceSelectionKey = attachedBackendKey && backendAttachedWorkspaceId
+    ? toBackendScopedWorkspaceKey({ backendKey: attachedBackendKey, workspaceId: backendAttachedWorkspaceId })
+    : null;
   const selectedWorkspaceForDetail = useMemo(
     () => selectedRef
       ? filteredWorkspaces.find((w) => w.id === selectedRef.workspaceId) ?? null
       : null,
-    [selectedRef, filteredWorkspaces],
+    [filteredWorkspaces, selectedRef],
   );
 
-  // Auto-navigate to the workspace that owns the attached session.
-  // This ensures the detail view stays in sync with the PTY — when a new
-  // terminal is created or a service session is selected, the workspace detail
-  // view follows rather than requiring the user to manually re-select.
   useEffect(() => {
-    if (!backendAttachedWorkspaceId) return;
+    if (!attachedWorkspaceSelectionKey) return;
     if (terminalMode !== 'attached') return;
-    // Already viewing the correct workspace
-    if (selectedRef?.workspaceId === backendAttachedWorkspaceId) return;
-    handleBoardSelectWorkspace(backendAttachedWorkspaceId);
-  }, [backendAttachedWorkspaceId, terminalMode]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (workspaceBoardState.selectedWorkspaceId === attachedWorkspaceSelectionKey) return;
+    handleBoardSelectWorkspace(attachedWorkspaceSelectionKey);
+  }, [attachedWorkspaceSelectionKey, handleBoardSelectWorkspace, terminalMode, workspaceBoardState.selectedWorkspaceId]);
 
   const detailSessions = useMemo(
-    () => selectedRef ? filteredSessions.filter((s) => s.workspaceId === selectedRef.workspaceId) : [],
-    [selectedRef, filteredSessions],
+    () => selectedRef ? backendSessions.filter((session) => session.workspaceId === selectedRef.workspaceId) : [],
+    [backendSessions, selectedRef],
   );
 
   const detailReplays = useMemo(
     () => selectedRef
-      ? filteredReplays.filter((r) => r.workspaceId === selectedRef.workspaceId)
+      ? filteredReplays.filter((replay) => replay.workspaceId === selectedRef.workspaceId)
       : [],
-    [selectedRef, filteredReplays],
+    [filteredReplays, selectedRef],
   );
 
   useEffect(() => {
@@ -378,27 +413,12 @@ export default function App() {
   }, [selectedRef, terminalStatus, multi.listSessions, multi.listReplays]);
 
   // ─── Active backend ref for targeting operations ───────────────────────────
-
   /** Returns the active (first connected) backend key for operations like project creation. */
   const getTargetBackendKey = useCallback((): BackendKey => {
     return activeBackendKey ?? 'local';
   }, [activeBackendKey]);
 
-  /** Returns a BackendScopedWorkspaceRef for a workspace, using its known backendKey. */
-  const getWorkspaceRef = useCallback((workspaceId: string): BackendScopedWorkspaceRef => {
-    const ws = workspaceBoardState.groups
-      .flatMap((g) => g.workspaces)
-      .find((w) => w.id === workspaceId);
-    return { backendKey: ws?.backendKey ?? getTargetBackendKey(), workspaceId };
-  }, [workspaceBoardState.groups, getTargetBackendKey]);
-
-  const getAgentRef = useCallback((workspaceId: string, agentSessionId: string): BackendScopedAgentSessionRef => ({
-    ...getWorkspaceRef(workspaceId),
-    agentSessionId,
-  }), [getWorkspaceRef]);
-
   // ─── Agent session data ────────────────────────────────────────────────────
-
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
   const agentSessionCounts = workspaceRuntime.agentSessionCounts;
   const pendingPermissionsByWorkspace = workspaceRuntime.pendingPermissionsByWorkspace;
@@ -406,7 +426,6 @@ export default function App() {
   const workspaceStatusById = workspaceRuntime.stripStatusById;
 
   // ─── Agent session actions ─────────────────────────────────────────────────
-
   const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
     void multi.setAgentSessionPreference(getWorkspaceRef(workspaceId), sessionId);
   }, [multi, getWorkspaceRef]);
@@ -544,7 +563,8 @@ export default function App() {
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
     recoverableAttachParams: bundleRefreshAttach.recoverableParams,
     defaultProjectName: selectedWorkspaceProjectName,
-    defaultBackendKey: getTargetBackendKey(),
+    defaultBackendKey: selectedBackendKey ?? getTargetBackendKey(),
+    resolveWorkspaceRef: (workspaceId) => getWorkspaceRef(workspaceId),
     getAttachSize: getWebAttachSize,
     resolveProjectName: resolveWorkspaceProjectName,
     onBeforeAttach: ({ target, params }) => {
@@ -589,7 +609,7 @@ export default function App() {
     onDeleteSuccess: async ({ target }) => {
       suppressDeleteScriptFailureModalRef.current = false;
       setShowScriptTerminal(false);
-      if (workspaceBoardState.selectedWorkspaceId === target.ref.workspaceId) {
+      if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
       workspaceController.clearSelectedRef();
@@ -647,13 +667,30 @@ export default function App() {
         setReviewWorkspace({
           projectName: proj,
           workspaceId: ws,
-          backendKey: getTargetBackendKey(),
+          backendKey: null,
           workspaceLabel: ws,
         });
         setView('review');
       }
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!reviewWorkspace || reviewWorkspace.backendKey !== null) return;
+    const workspace = workspaceRuntime.workspaces.find(
+      (item) => item.projectName === reviewWorkspace.projectName && item.id === reviewWorkspace.workspaceId,
+    );
+    if (!workspace) return;
+    setReviewWorkspace((current) => {
+      if (!current || current.backendKey !== null) return current;
+      if (current.projectName !== workspace.projectName || current.workspaceId !== workspace.id) return current;
+      return {
+        ...current,
+        backendKey: workspace.backendKey as BackendKey,
+        workspaceLabel: current.workspaceLabel ?? workspace.name,
+      };
+    });
+  }, [reviewWorkspace, workspaceRuntime.workspaces]);
 
   // ─── Script terminal visibility ────────────────────────────────────────────
 
@@ -757,8 +794,11 @@ export default function App() {
 
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
     setIsViewOnlySession(params.viewOnly ?? false);
-    await attachController.attachFromSelection(params);
-  }, [attachController]);
+    await attachController.attachFromSelection({
+      ...params,
+      backendKey: params.sessionId ? (selectedBackendKey ?? attachedBackendKey ?? activeBackendKey ?? undefined) : undefined,
+    });
+  }, [activeBackendKey, attachController, attachedBackendKey, selectedBackendKey]);
 
   // ─── Process actions ───────────────────────────────────────────────────────
 
@@ -841,8 +881,9 @@ export default function App() {
     setView('replay');
   }, [flow, backendReplays]);
 
+  const replayBackendKey = selectedBackendKey ?? getTargetBackendKey();
+
   const toggleReplayDismissed = useCallback(async (replay: ReplayInfo): Promise<boolean> => {
-    const key = getTargetBackendKey();
     try {
       if (!replay.dismissedAt && replay.status === 'running') {
         flow.showMessage({
@@ -853,22 +894,21 @@ export default function App() {
         return false;
       }
       if (replay.dismissedAt) {
-        await multi.undismissReplay(key, replay.replayId);
+        await multi.undismissReplay(replayBackendKey, replay.replayId);
         setActiveReplay((current) =>
           current && current.replayId === replay.replayId
             ? { ...current, dismissedAt: undefined, dismissedBy: undefined }
             : current,
         );
         return false;
-      } else {
-        await multi.dismissReplay(key, replay.replayId);
-        setActiveReplay((current) =>
-          current && current.replayId === replay.replayId
-            ? { ...current, dismissedAt: Date.now() }
-            : current,
-        );
-        return true;
       }
+      await multi.dismissReplay(replayBackendKey, replay.replayId);
+      setActiveReplay((current) =>
+        current && current.replayId === replay.replayId
+          ? { ...current, dismissedAt: Date.now() }
+          : current,
+      );
+      return true;
     } catch (error) {
       flow.showMessage({
         title: replay.dismissedAt ? 'Restore Failed' : 'Dismiss Failed',
@@ -879,15 +919,15 @@ export default function App() {
     } finally {
       refreshReplayList();
     }
-  }, [getTargetBackendKey, flow, multi, refreshReplayList]);
+  }, [flow, multi, refreshReplayList, replayBackendKey]);
 
   const loadReplayFrame = useCallback((replayId: string, target?: ReplayFrameTarget): Promise<ReplayFrame> => {
-    return multi.getReplayFrame(getTargetBackendKey(), replayId, target);
-  }, [multi, getTargetBackendKey]);
+    return multi.getReplayFrame(replayBackendKey, replayId, target);
+  }, [multi, replayBackendKey]);
 
   const loadReplayTimeline = useCallback((replayId: string): Promise<ReplayTimeline> => {
-    return multi.getReplayTimeline(getTargetBackendKey(), replayId);
-  }, [multi, getTargetBackendKey]);
+    return multi.getReplayTimeline(replayBackendKey, replayId);
+  }, [multi, replayBackendKey]);
 
   const handleOpenReplayHistory = useCallback((args: {
     workspaceId: string;
@@ -914,15 +954,18 @@ export default function App() {
       variant: 'warning',
       confirmLabel: 'Kill',
       onConfirm: () => {
-        if (attachedBackendState?.attachedSessionId === sessionId) {
-          const ref: BackendScopedWorkspaceRef = { backendKey: attachedBackendKey ?? getTargetBackendKey(), workspaceId: '' };
-          void multi.detachSession(ref);
+        const sessionRef = getSessionRef(sessionId, selectedBackendKey ?? attachedBackendKey ?? activeBackendKey);
+        if (!sessionRef) {
+          toast.error(`Could not resolve session backend for ${sessionName}.`);
+          return;
         }
-        const sessionRef = { backendKey: getTargetBackendKey(), sessionId };
+        if (attachedBackendState?.attachedSessionId === sessionId && attachedBackendKey === sessionRef.backendKey) {
+          void multi.detachSession({ backendKey: sessionRef.backendKey, workspaceId: '' });
+        }
         void multi.killSession(sessionRef);
       },
     });
-  }, [flow, attachedBackendState, attachedBackendKey, getTargetBackendKey, multi]);
+  }, [activeBackendKey, attachedBackendKey, attachedBackendState?.attachedSessionId, flow, getSessionRef, multi, selectedBackendKey]);
 
   const handleDeleteWorkspace = useCallback((workspace: WorkspaceInfo) => {
     const sessionCount = workspace.sessionCount || 0;
@@ -947,11 +990,11 @@ export default function App() {
     setReviewWorkspace({
       projectName: workspace.projectName,
       workspaceId: workspace.id,
-      backendKey: getWorkspaceRef(workspace.id).backendKey,
+      backendKey: workspace.backendKey as BackendKey,
       workspaceLabel: workspace.name,
     });
     setView('review');
-  }, [filteredWorkspaces, getWorkspaceRef]);
+  }, [filteredWorkspaces]);
 
   const handleOpenGitHubPullRequest = useCallback((workspaceId: string) => {
     const workspace = filteredWorkspaces.find((item) => item.id === workspaceId);
@@ -1051,7 +1094,8 @@ export default function App() {
     onMarkRead: async (id) => { await multi.markInboxRead(id); },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
-      await attachController.attachFromSelection({ sessionId });
+      const sessionRef = getSessionRef(sessionId);
+      await attachController.attachFromSelection({ sessionId, backendKey: sessionRef?.backendKey });
     },
     onClose: () => setShowInbox(false),
   });
@@ -1068,7 +1112,7 @@ export default function App() {
       if (!eventsWorkspacePath) return;
       const ws = filteredWorkspaces.find((w) => w.path === eventsWorkspacePath);
       if (!ws) return;
-      const ref = getWorkspaceRef(ws.id);
+      const ref = getWorkspaceRef(ws.id, ws.backendKey as BackendKey);
       if (filter) {
         const sinceMs = filter.sinceMinutes
           ? Date.now() - filter.sinceMinutes * 60 * 1000
@@ -1097,7 +1141,7 @@ export default function App() {
     const interval = setInterval(() => {
       const ws = filteredWorkspaces.find((w) => w.path === eventsWorkspacePath);
       if (!ws) return;
-      const ref = getWorkspaceRef(ws.id);
+      const ref = getWorkspaceRef(ws.id, ws.backendKey as BackendKey);
       const activeFilter = eventsProps.activeFilterName
         ? backendSavedEventFilters.find((f) => f.name === eventsProps.activeFilterName) ?? null
         : null;
@@ -1133,17 +1177,21 @@ export default function App() {
       duration: 8000,
       action: {
         label: "Attach",
-        onClick: () => { void attachController.attachFromSelection({ sessionId: notification.sessionId }); },
+        onClick: () => {
+          const sessionRef = getSessionRef(notification.sessionId);
+          void attachController.attachFromSelection({ sessionId: notification.sessionId, backendKey: sessionRef?.backendKey });
+        },
       },
     });
-  }, [attachController]);
+  }, [attachController, getSessionRef]);
 
   const notifications = useNotifications({
     items: backendInbox,
     config: activeNotificationConfig,
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
-      void attachController.attachFromSelection({ sessionId });
+      const sessionRef = getSessionRef(sessionId);
+      void attachController.attachFromSelection({ sessionId, backendKey: sessionRef?.backendKey });
     },
     onMarkRead: async (itemId) => {
       await multi.markInboxRead(itemId);
@@ -1246,13 +1294,14 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.shiftKey && e.key === "Escape") {
         e.preventDefault();
-        const ref: BackendScopedWorkspaceRef = { backendKey: attachedBackendKey ?? getTargetBackendKey(), workspaceId: '' };
-        void multi.detachSession(ref);
+        if (attachedBackendKey) {
+          void multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [view, terminalStatus, terminalMode, attachedBackendKey, getTargetBackendKey, multi]);
+  }, [view, terminalStatus, terminalMode, attachedBackendKey, multi]);
 
   // Script terminal keyboard
   useEffect(() => {
@@ -1264,13 +1313,14 @@ export default function App() {
         setShowScriptTerminal(false);
       } else if ((e.key === 'c' || e.key === 'C') && scriptState?.isRunning) {
         e.preventDefault();
-        const ref: BackendScopedWorkspaceRef = { backendKey: getTargetBackendKey(), workspaceId: '' };
-        void multi.cancelPendingScripts(ref);
+        const workspaceId = lastScriptWorkspaceIdRef.current;
+        if (!workspaceId) return;
+        void multi.cancelPendingScripts(getWorkspaceRef(workspaceId));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showScriptTerminal, terminalMode, scriptState?.isRunning, terminalStatus, view, getTargetBackendKey, multi]);
+  }, [getWorkspaceRef, scriptState?.isRunning, showScriptTerminal, terminalMode, terminalStatus, view, multi]);
 
   // Global Shift+Tab for toast attach
   useEffect(() => {
@@ -1312,7 +1362,7 @@ export default function App() {
   // ─── Review view ───────────────────────────────────────────────────────────
 
   if (view === 'review' && reviewWorkspace) {
-    if (terminalStatus === 'connected') {
+    if (terminalStatus === 'connected' && reviewWorkspace.backendKey) {
       const reviewRef: BackendScopedWorkspaceRef = {
         backendKey: reviewWorkspace.backendKey,
         workspaceId: reviewWorkspace.workspaceId,
@@ -1338,7 +1388,9 @@ export default function App() {
             <div className="text-lg text-[#e6edf3] mb-2">
               Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
             </div>
-            <div className="text-sm text-[#8b949e]">Connecting...</div>
+            <div className="text-sm text-[#8b949e]">
+              {terminalStatus !== 'connected' ? 'Connecting...' : 'Resolving workspace backend...'}
+            </div>
             <button
               onClick={() => { setView('terminal'); setReviewWorkspace(null); }}
               className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
@@ -1391,7 +1443,7 @@ export default function App() {
               const replay = backendReplays.find((item) => item.replayId === replayId) ?? activeReplay;
               return toggleReplayDismissed(replay);
             }}
-          onCleanup={() => multi.cancelPendingReplayRequests(getTargetBackendKey())}
+          onCleanup={() => multi.cancelPendingReplayRequests(replayBackendKey)}
         />
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
@@ -1425,8 +1477,9 @@ export default function App() {
           }}
           onBack={() => { lastScriptWorkspaceIdRef.current = null; setShowScriptTerminal(false); }}
           onCancel={() => {
-            const ref: BackendScopedWorkspaceRef = { backendKey: getTargetBackendKey(), workspaceId: '' };
-            void multi.cancelPendingScripts(ref);
+            const workspaceId = lastScriptWorkspaceIdRef.current;
+            if (!workspaceId) return;
+            void multi.cancelPendingScripts(getWorkspaceRef(workspaceId));
           }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
@@ -1516,7 +1569,7 @@ export default function App() {
     );
 
     const inlineAttachedRef: BackendScopedWorkspaceRef = {
-      backendKey: attachedBackendKey ?? getTargetBackendKey(),
+      backendKey: attachedBackendKey ?? selectedBackendKey ?? activeBackendKey ?? 'local',
       workspaceId: '',
     };
 
@@ -1606,13 +1659,13 @@ export default function App() {
             workspace={selectedWorkspaceForDetail}
             sessions={detailSessions}
             replays={detailReplays}
-            agentSessions={selectedRef ? (agentSessionsByWorkspace[selectedRef.workspaceId] ?? []) : []}
-            agentSessionCount={selectedRef ? (agentSessionCounts[selectedRef.workspaceId] ?? 0) : 0}
-            pendingPermissions={selectedRef ? (pendingPermissionsByWorkspace[selectedRef.workspaceId] ?? 0) : 0}
+            agentSessions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessions ?? []) : []}
+            agentSessionCount={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0) : 0}
+            pendingPermissions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0) : 0}
             attachedSessionId={backendAttachedSessionId}
             allWorkspaces={allWorkspaceEntries}
             workspaceStatusById={workspaceStatusById}
-            runtime={selectedRef ? (workspaceRuntime.runtimeByWorkspace[selectedRef.workspaceId] ?? null) : null}
+            runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}
             onSelectWorkspace={(wid) => handleBoardSelectWorkspace(wid)}
             onOpenAgentSession={handleOpenAgentSession}
             onCreateAgentSession={handleCreateAgentSession}
@@ -1645,7 +1698,7 @@ export default function App() {
                 setEventsWorkspacePath(w.path);
                 setEventsWorkspaceLabel(w.name);
                 setShowEvents(true);
-                void multi.requestEvents(getWorkspaceRef(workspaceId));
+                void multi.requestEvents(getWorkspaceRef(workspaceId, w.backendKey as BackendKey));
               }
             }}
             onDeleteSession={handleDeleteSession}
@@ -1720,7 +1773,10 @@ export default function App() {
       return 'flex-1 terminal-with-floating-controls';
     };
 
-    const attachedRef: BackendScopedWorkspaceRef = { backendKey: attachedBackendKey ?? getTargetBackendKey(), workspaceId: '' };
+    const attachedRef: BackendScopedWorkspaceRef = {
+      backendKey: attachedBackendKey ?? selectedBackendKey ?? activeBackendKey ?? 'local',
+      workspaceId: ''
+    };
 
     return (
       <>

@@ -14,7 +14,7 @@
  */
 
 import { join, resolve, relative } from 'node:path';
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getPiAgentDir } from './pi-runtime.js';
 
@@ -36,28 +36,44 @@ interface SessionHeader {
   timestamp?: string;
 }
 
+function resolveEquivalentPath(input: string): string {
+  const resolved = resolve(input);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  if (candidate === root) {
+    return true;
+  }
+  const rel = relative(root, candidate);
+  return rel.length > 0 && !rel.startsWith('..') && !rel.startsWith('/');
+}
+
 /**
  * Encode a working directory path the way Pi does for session storage.
  */
 export function encodeSessionDirName(cwd: string): string {
   const resolved = resolve(cwd);
-  const home = resolve(homedir());
-  const tmp = resolve(tmpdir());
+  const canonicalCwd = resolveEquivalentPath(resolved);
+  const configuredHome = process.env.HOME?.trim();
+  const home = resolveEquivalentPath(configuredHome && configuredHome.length > 0 ? configuredHome : homedir());
+  const tempRoot = resolveEquivalentPath(tmpdir());
 
-  // Paths under home: prefix "-", relative path with / → -
-  if (resolved.startsWith(home + '/') || resolved === home) {
-    const rel = relative(home, resolved).replace(/[/\\:]/g, '-');
+  if (pathIsWithin(home, canonicalCwd)) {
+    const rel = relative(home, canonicalCwd).replace(/[/\\:]/g, '-');
     return rel ? `-${rel}` : '-';
   }
 
-  // Paths under tmpdir: prefix "-tmp-", relative path with / → -
-  if (resolved.startsWith(tmp + '/') || resolved === tmp) {
-    const rel = relative(tmp, resolved).replace(/[/\\:]/g, '-');
+  if (pathIsWithin(tempRoot, canonicalCwd)) {
+    const rel = relative(tempRoot, canonicalCwd).replace(/[/\\:]/g, '-');
     return rel ? `-tmp-${rel}` : '-tmp';
   }
 
-  // Absolute path with / → -
-  return resolved.replace(/[/\\:]/g, '-');
+  return `--${resolved.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
 }
 
 /**
@@ -94,14 +110,14 @@ export function listPiSessions(cwd: string, sessionsRoot?: string): PiSessionFil
       const firstLine = content.split('\n')[0];
       if (!firstLine) continue;
 
-      const header: SessionHeader = JSON.parse(firstLine);
+      const header: SessionHeader & { title?: string } = JSON.parse(firstLine);
       if (header.type !== 'session') continue;
 
       // Count messages and find first user message
       const lines = content.split('\n').filter(Boolean);
       let messageCount = 0;
       let firstMessage: string | undefined;
-      let title: string | undefined;
+      let title: string | undefined = typeof header.title === 'string' ? header.title : undefined;
 
       for (const line of lines.slice(1)) {
         try {

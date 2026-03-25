@@ -28,12 +28,15 @@ export function showWorkspaceServiceSelect(args: ShowWorkspaceServiceSelectConfi
       continue;
     }
     for (let instance = 1; instance <= count; instance += 1) {
-      const portNames = (process.ports ?? [])
-        .filter((port) => port.protocol !== 'tcp')
-        .map((port) => port.name ?? String(port.port));
+      const browserPorts = (process.ports ?? [])
+        .filter((port) => port.protocol !== 'tcp');
+      if (browserPorts.length === 0) {
+        continue;
+      }
+      const portNames = browserPorts.map((port) => port.name ?? String(port.port));
       services.push({
         label: `${process.name}#${instance}`,
-        description: portNames.length > 0 ? portNames.join(', ') : 'No browser-openable HTTP ports',
+        description: portNames.join(', '),
         value: `${process.name}:${instance}`,
         ref: { processName: process.name, instance },
       });
@@ -43,7 +46,7 @@ export function showWorkspaceServiceSelect(args: ShowWorkspaceServiceSelectConfi
   if (services.length === 0) {
     args.showMessage({
       title: 'Open Service',
-      message: `${args.workspace.name} has no configured services.`,
+      message: `${args.workspace.name} has no browser-openable HTTP services.`,
       variant: 'info',
     });
     return;

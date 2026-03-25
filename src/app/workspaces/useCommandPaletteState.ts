@@ -4,7 +4,7 @@
  * Use from both TUI and web; platform layer handles rendering and keyboard.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 
 export interface CommandPaletteCommand {
   id: string;
@@ -45,7 +45,8 @@ export function useCommandPaletteState(
   const { commands, onSelect } = options;
   const [isOpen, setIsOpen] = useState(false);
   const [filter, setFilter] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedIndex, setSelectedIndexState] = useState(0);
+  const selectedIndexRef = useRef(0);
 
   const filteredCommands = useMemo(() => {
     if (!filter.trim()) {
@@ -58,7 +59,8 @@ export function useCommandPaletteState(
   const open = useCallback(() => {
     setIsOpen(true);
     setFilter('');
-    setSelectedIndex(0);
+    selectedIndexRef.current = 0;
+    setSelectedIndexState(0);
   }, []);
 
   const close = useCallback(() => {
@@ -70,7 +72,8 @@ export function useCommandPaletteState(
     setIsOpen((prev) => {
       if (!prev) {
         setFilter('');
-        setSelectedIndex(0);
+        selectedIndexRef.current = 0;
+        setSelectedIndexState(0);
       }
       return !prev;
     });
@@ -81,12 +84,14 @@ export function useCommandPaletteState(
 
   useEffect(() => {
     if (selectedIndex > maxIndex) {
-      setSelectedIndex(maxIndex);
+      selectedIndexRef.current = maxIndex;
+      setSelectedIndexState(maxIndex);
     }
   }, [selectedIndex, maxIndex]);
 
   const selectCurrent = useCallback(() => {
-    const cmd = filteredCommands[selectedIndexClamped];
+    const index = Math.max(0, Math.min(selectedIndexRef.current, Math.max(0, filteredCommands.length - 1)));
+    const cmd = filteredCommands[index];
     if (cmd) {
       if (cmd.onSelect) {
         cmd.onSelect();
@@ -95,17 +100,17 @@ export function useCommandPaletteState(
       }
       close();
     }
-  }, [filteredCommands, selectedIndexClamped, onSelect, close]);
+  }, [filteredCommands, onSelect, close]);
 
   const moveSelection = useCallback(
     (delta: number) => {
       const len = filteredCommands.length;
       if (len === 0) return;
-      setSelectedIndex((i) => {
+      setSelectedIndexState((i) => {
         const next = i + delta;
-        if (next < 0) return 0;
-        if (next >= len) return len - 1;
-        return next;
+        const clamped = next < 0 ? 0 : next >= len ? len - 1 : next;
+        selectedIndexRef.current = clamped;
+        return clamped;
       });
     },
     [filteredCommands.length]
@@ -119,8 +124,11 @@ export function useCommandPaletteState(
     filter,
     setFilter,
     filteredCommands,
-  selectedIndex: selectedIndexClamped,
-  setSelectedIndex,
+    selectedIndex: selectedIndexClamped,
+    setSelectedIndex: (index: number) => {
+      selectedIndexRef.current = index;
+      setSelectedIndexState(index);
+    },
   selectCurrent,
     moveSelection,
   };

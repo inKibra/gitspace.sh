@@ -196,6 +196,45 @@ export class ClientSessionManager {
     return null;
   }
 
+  private returnAttachedSessionToBrowsing(
+    connectionId: string,
+    session: ClientSession,
+    options: {
+      socket?: ClientSession['tmuxSocket'];
+      writer?: ClientSession['tmuxSocketWriter'];
+      sendDetachControl?: boolean;
+    } = {},
+  ): void {
+    const socket = options.socket ?? session.tmuxSocket;
+    const writer = options.writer ?? session.tmuxSocketWriter;
+    session.tmuxSocket = undefined;
+    session.tmuxSocketWriter = undefined;
+    session.state = 'browsing';
+    session.attachedSessionId = undefined;
+    session.viewOnly = undefined;
+    session.sessionSocketPath = undefined;
+    session.waitingForResize = undefined;
+    session.frameBuffer = undefined;
+
+    if (socket) {
+      try {
+        if (options.sendDetachControl) {
+          const frame = encodeControl({ type: 'detach' });
+          if (writer) writer.write(frame);
+          else socket.write(frame);
+        }
+        socket.end();
+      } catch {
+        // Socket may already be closed
+      }
+    }
+
+    if (session.sessionKeys) {
+      this.registerBrowsingPushes(connectionId, session.sessionKeys);
+    }
+  }
+
+
   /**
    * Handle message in attached state - route to tmux-lite session based on stream ID
    */
@@ -226,27 +265,14 @@ export class ClientSessionManager {
 
         if (msg.type === "detach") {
           // Handle detach specially - close tmux socket and send response to client
-          // Store socket reference and clear it BEFORE ending to prevent close callback
-          // from triggering handleDisconnect
+          // while keeping the authenticated connection in browsing mode.
           const socket = session.tmuxSocket;
           const writer = session.tmuxSocketWriter;
-          session.tmuxSocket = undefined;
-          session.tmuxSocketWriter = undefined;
-          session.state = "browsing";
-          session.attachedSessionId = undefined;
-          session.viewOnly = undefined;
-          session.sessionSocketPath = undefined;
-          session.waitingForResize = undefined;
-          session.frameBuffer = undefined;
-
-          // Now send detach and close the socket (using framed protocol)
-          {
-            const frame = encodeControl(msg);
-            if (writer) writer.write(frame);
-            else socket.write(frame);
-          }
-          socket.end();
-          this.registerBrowsingPushes(connectionId, session.sessionKeys);
+          this.returnAttachedSessionToBrowsing(connectionId, session, {
+            socket,
+            writer,
+            sendDetachControl: true,
+          });
 
           // Send detached response to client
           const detachedMsg = JSON.stringify({ type: "detached" });
@@ -485,16 +511,23 @@ export class ClientSessionManager {
 
                 if (event.type === "exited") {
                   console.log(`[session-manager] Session exited: ${event.code}`);
-                  // Send exit notification to client
-                  const exitMsg = JSON.stringify({ type: "session_exited", sessionId: session.attachedSessionId, exitCode: event.code });
-                  const exitData = new TextEncoder().encode(exitMsg);
-                  const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
-                  sendToClient(Buffer.from(encFrame));
-                  this.handleDisconnect(connectionId, `Session exited with code ${event.code}`);
+                  const exitedSessionId = session.attachedSessionId;
+                  this.returnAttachedSessionToBrowsing(connectionId, session);
+
+                  if (exitedSessionId) {
+                    const exitMsg = JSON.stringify({ type: "session_exited", sessionId: exitedSessionId, exitCode: event.code });
+                    const exitData = new TextEncoder().encode(exitMsg);
+                    const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
+                    sendToClient(Buffer.from(encFrame));
+                  }
                   return;
                 } else if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
-                  this.handleDisconnect(connectionId, "Session kicked");
+                  this.returnAttachedSessionToBrowsing(connectionId, session);
+                  const detachedMsg = JSON.stringify({ type: "detached" });
+                  const detachedData = new TextEncoder().encode(detachedMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                   return;
                 } else if (event.type === "wide_event") {
                   const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });

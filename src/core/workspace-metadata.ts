@@ -106,21 +106,21 @@ export function readWorkspaceMetadata(projectName: string, workspaceName: string
     updatedAt: nowIso(),
   };
 
-  if (metadata.status === undefined) {
-    const legacyStatus = readLegacyWorkspaceStatus(projectName, workspaceName);
-    if (legacyStatus !== undefined) {
-      const migrated: WorkspaceMetadata = {
-        ...metadata,
-        status: legacyStatus,
-        updatedAt: nowIso(),
-      };
-      writeWorkspaceMetadata(projectName, workspaceName, migrated);
-      clearLegacyWorkspaceStatus(projectName, workspaceName);
-      return migrated;
-    }
+  if (metadata.status !== undefined) {
+    return metadata;
   }
 
-  return metadata;
+  const legacyStatus = readLegacyWorkspaceStatus(projectName, workspaceName);
+  if (legacyStatus === undefined) {
+    return metadata;
+  }
+
+  // Legacy project-config status is read as a fallback only. Migration happens on
+  // the next explicit write so read paths do not mutate worktrees or config.
+  return {
+    ...metadata,
+    status: legacyStatus,
+  };
 }
 
 export function writeWorkspaceMetadata(projectName: string, workspaceName: string, metadata: WorkspaceMetadata): void {
@@ -141,6 +141,7 @@ export function setWorkspaceStatus(projectName: string, workspaceName: string, s
     ...current,
     status,
   });
+  clearLegacyWorkspaceStatus(projectName, workspaceName);
 }
 
 export function listWorkspaceNotes(projectName: string, workspaceName: string): WorkspaceNote[] {

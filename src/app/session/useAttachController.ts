@@ -5,11 +5,13 @@ import type {
   UseBundleRefreshAttachFlowResult,
 } from '../../session/useBundleRefreshAttachFlow.js'
 import type { BackendKey } from '../../session/backend.js'
+import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js'
 
 export interface AttachSelectionParams {
   sessionId?: string
   workspaceId?: string
   viewOnly?: boolean
+  backendKey?: BackendKey
 }
 
 export type AttachTarget = 'session' | 'workspace'
@@ -47,6 +49,7 @@ export interface UseAttachControllerOptions {
   recoverableAttachParams?: BundleRefreshAttachParams | null
   defaultProjectName?: string | null
   defaultBackendKey?: BackendKey
+  resolveWorkspaceRef?: (workspaceId: string) => BackendScopedWorkspaceRef | null
   resolveProjectName?: (workspaceId: string) => string | null
   getAttachSize?: () => AttachTerminalSize | null
   sessionNamePrompt?: SessionNamePromptConfig
@@ -100,6 +103,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     recoverableAttachParams,
     defaultProjectName,
     defaultBackendKey = 'local',
+    resolveWorkspaceRef,
     resolveProjectName,
     getAttachSize,
     sessionNamePrompt,
@@ -130,7 +134,10 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     }
   }, [getAttachSize])
 
-  const attach = useCallback(async (params: BundleRefreshAttachParams): Promise<boolean> => {
+  const attach = useCallback(async (
+    params: BundleRefreshAttachParams,
+    backendKeyOverride?: BackendKey,
+  ): Promise<boolean> => {
     const attachParams = withAttachSize(params)
     const target: AttachTarget = attachParams.workspaceId ? 'workspace' : 'session'
     const projectName = attachParams.workspaceId
@@ -149,7 +156,15 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     await onBeforeAttach?.(context)
 
     try {
-      const ref = { backendKey: defaultBackendKey, workspaceId: attachParams.workspaceId ?? '' }
+      const ref = attachParams.workspaceId
+        ? resolveWorkspaceRef?.(attachParams.workspaceId) ?? {
+            backendKey: backendKeyOverride ?? defaultBackendKey,
+            workspaceId: attachParams.workspaceId,
+          }
+        : {
+            backendKey: backendKeyOverride ?? defaultBackendKey,
+            workspaceId: '',
+          }
       const attached = await attachSessionWithBundleRefresh(ref, attachParams)
 
       if (!attached) {
@@ -187,6 +202,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     onAttachSuccess,
     onBeforeAttach,
     resolveProjectName,
+    resolveWorkspaceRef,
     withAttachSize,
   ])
 
@@ -215,7 +231,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         attachParams.viewOnly = selection.viewOnly
       }
 
-      await attach(attachParams)
+      await attach(attachParams, selection.backendKey)
       return
     }
 
@@ -234,7 +250,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         await attach({
           workspaceId: selection.workspaceId,
           sessionName: sessionName.trim() || undefined,
-        })
+        }, selection.backendKey)
       },
     })
   }, [attach, closePromptOnSubmit, flow, preflightSessionAttach, sessionNamePrompt])

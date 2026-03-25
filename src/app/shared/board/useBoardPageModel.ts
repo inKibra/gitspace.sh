@@ -8,7 +8,6 @@ export interface UseBoardPageModelArgs {
   setSelectedRef: (ref: BackendScopedWorkspaceRef | null) => void;
   clearSelectedRef: () => void;
   onSetWorkspacePhase?: (ref: BackendScopedWorkspaceRef, phase: import('../../../types/config.js').WorkspacePhase) => void | Promise<void>;
-  resolveRefForWorkspaceId: (workspaceId: string) => BackendScopedWorkspaceRef | null;
   connected?: boolean;
   mode?: 'browsing' | 'attached' | 'idle' | null;
   activeBackendKey?: string | null;
@@ -25,15 +24,7 @@ export function useBoardPageModel(args: UseBoardPageModelArgs) {
 
   const handleSelectWorkspace = useCallback((workspaceId: string | null) => {
     boardState.setSelectedWorkspaceId(workspaceId);
-    if (!workspaceId) {
-      args.clearSelectedRef();
-      return;
-    }
-    const ref = args.resolveRefForWorkspaceId(workspaceId);
-    if (ref) {
-      args.setSelectedRef(ref);
-    }
-  }, [args, boardState]);
+  }, [boardState]);
 
   const worktreeCount = useMemo(
     () => boardState.groups.reduce((count, group) => count + group.workspaces.length, 0),
@@ -44,11 +35,11 @@ export function useBoardPageModel(args: UseBoardPageModelArgs) {
     const selectedWorkspaceId = boardState.selectedWorkspaceId;
     if (!selectedWorkspaceId) return null;
     for (const group of boardState.groups) {
-      const workspace = group.workspaces.find((item) => item.id === selectedWorkspaceId);
-        if (workspace) return workspace.projectName;
-      }
-      return null;
-    }, [boardState.groups, boardState.selectedWorkspaceId]);
+      const workspace = group.workspaces.find((item) => item.selectionKey === selectedWorkspaceId);
+      if (workspace) return workspace.projectName;
+    }
+    return null;
+  }, [boardState.groups, boardState.selectedWorkspaceId]);
 
   const loading =
     args.connected === true &&

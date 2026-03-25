@@ -91,4 +91,59 @@ describe('deriveWorkspaceStatusSummary', () => {
     expect(summary.agents.red).toBe(1);
     expect(summary.primaryColor).toBe('red');
   });
+
+  it('does not count managed process sessions as terminals', () => {
+    const workspace = makeWorkspace();
+    const sessions: SessionInfo[] = [
+      {
+        id: 'proc-1',
+        name: 'proj:ws:web#1',
+        workspaceId: 'proj:ws',
+        attached: false,
+        createdAt: 1,
+        processName: 'web',
+        processInstance: 1,
+      },
+      {
+        id: 'shell-1',
+        name: 'proj:ws:shell',
+        workspaceId: 'proj:ws',
+        attached: true,
+        createdAt: 2,
+      },
+    ];
+
+    const summary = deriveWorkspaceStatusSummary(workspace, sessions, []);
+
+    expect(summary.services.green).toBe(1);
+    expect(summary.terminals.green).toBe(1);
+  });
+
+  it('treats pending Pi questions as orange attention state', () => {
+    const workspace = makeWorkspace();
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      {
+        id: 'agent-1',
+        workspaceId: 'proj:ws',
+        title: 'Claude',
+        pendingQuestionCount: 1,
+        status: { type: 'idle' },
+      },
+    ]);
+
+    expect(summary.agents.orange).toBe(1);
+    expect(summary.primaryColor).toBe('orange');
+  });
+
+  it('shows green when any agent is busy even if another is idle', () => {
+    const workspace = makeWorkspace();
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'agent-busy', workspaceId: 'proj:ws', title: 'Busy', status: { type: 'busy' } },
+      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', status: { type: 'idle' } },
+    ]);
+
+    expect(summary.agents.green).toBe(1);
+    expect(summary.agents.blue).toBe(1);
+    expect(summary.primaryColor).toBe('green');
+  });
 });

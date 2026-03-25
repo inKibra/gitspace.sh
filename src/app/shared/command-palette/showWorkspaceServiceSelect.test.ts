@@ -32,4 +32,32 @@ describe('showWorkspaceServiceSelect', () => {
     expect(config.title).toBe('Demo Services');
     expect(config.options.map((option) => option.label)).toEqual(['web#1', 'api#1']);
   });
+
+  it('skips tcp-only services from the browser picker', () => {
+    const showSelect = mock(() => undefined);
+    const showMessage = mock(() => undefined);
+
+    showWorkspaceServiceSelect({
+      workspace: {
+        id: 'demo',
+        name: 'Demo',
+        path: '/tmp/demo',
+        projectName: 'proj',
+        sessionCount: 0,
+        processes: [
+          { name: 'tcp-only', ports: [{ name: 'admin', port: 7000, protocol: 'tcp' }] },
+        ],
+      },
+      showSelect,
+      showMessage,
+      onOpenUrl: () => undefined,
+    });
+
+    expect(showSelect).not.toHaveBeenCalled();
+    expect(showMessage).toHaveBeenCalledWith({
+      title: 'Open Service',
+      message: 'Demo has no browser-openable HTTP services.',
+      variant: 'info',
+    });
+  });
 });

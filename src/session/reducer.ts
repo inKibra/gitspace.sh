@@ -254,16 +254,26 @@ export function sessionEngineReducer(
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
       const attached = !!action.sessionId;
+      const preserveContextOnExit = action.preserveContextOnExit === true && !attached;
       const nextSessionName = attached
         ? (action.sessionName ?? backend.attachedSessionName)
-        : null;
+        : preserveContextOnExit
+          ? backend.attachedSessionName
+          : null;
       const nextMeta = attached
         ? {
             ...(backend.attachedSessionMeta ?? {}),
             ...(action.meta ?? {}),
             sessionName: action.sessionName ?? action.meta?.sessionName ?? nextSessionName ?? null,
           }
-        : null;
+        : preserveContextOnExit
+          ? backend.attachedSessionMeta
+          : null;
+      const nextWorkspaceId = attached
+        ? (action.workspaceId ?? backend.attachedWorkspaceId)
+        : preserveContextOnExit
+          ? backend.attachedWorkspaceId
+          : null;
       return {
         ...state,
         backends: {
@@ -274,9 +284,7 @@ export function sessionEngineReducer(
             attachedSessionId: action.sessionId,
             attachedSessionName: nextSessionName,
             attachedSessionMeta: nextMeta,
-            attachedWorkspaceId: attached
-              ? (action.workspaceId ?? backend.attachedWorkspaceId)
-              : null,
+            attachedWorkspaceId: nextWorkspaceId,
           },
         },
       };

@@ -39,7 +39,16 @@ describe('PiBackend', () => {
     });
     expect(sessions).toEqual([]);
   });
+
+  it('resumeSession fails explicitly when the Pi session file is missing', async () => {
+    const backend = new PiBackend();
+    const tmpDir = mkdtempSync(join(tmpdir(), 'pi-test-'));
+    await expect(
+      backend.resumeSession({ workspaceId: 'test:ws', workspacePath: tmpDir }, 'missing-session'),
+    ).rejects.toThrow('Pi session missing-session not found');
+  });
 });
+
 
 describe('PiCoordinator', () => {
   it('refreshAgentSessions returns empty for fresh directory', async () => {
@@ -52,5 +61,18 @@ describe('PiCoordinator', () => {
       projectName: 'test',
     });
     expect(sessions).toEqual([]);
+  });
+
+  it('ensureAgentTerminalSession fails explicitly when the Pi session file is missing', async () => {
+    const coordinator = new PiCoordinator(join(tmpdir(), 'pi-missing-sessions'));
+    const tmpDir = mkdtempSync(join(tmpdir(), 'pi-coord-test-'));
+    await expect(
+      coordinator.ensureAgentTerminalSession({
+        workspaceId: 'test:ws',
+        workspaceName: 'ws',
+        workspacePath: tmpDir,
+        projectName: 'test',
+      }, 'missing-session'),
+    ).rejects.toThrow("Pi session 'missing-session' not found");
   });
 });

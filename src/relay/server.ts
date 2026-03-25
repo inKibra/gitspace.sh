@@ -134,6 +134,7 @@ import {
   getAllMachines,
   getMachine,
   setMachineConnection,
+  markMachineSeen,
   getRegistryStats,
 } from "./registries";
 import {
@@ -226,6 +227,7 @@ const CHALLENGE_TIMEOUT_MS = 30000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_CONNECTIONS_PER_IP = 20;
 const connectionRateLimits = new Map<string, { count: number; lastReset: number }>();
+const MACHINE_LIVENESS_TIMEOUT_MS = 45_000;
 
 function getClientIp(req: Request): string {
   const forwarded = req.headers.get("x-forwarded-for");
@@ -732,6 +734,9 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         // These are simple keepalive messages, not protocol messages
         try {
           rawMsg = JSON.parse(msgStr);
+          if (ws.data.role === 'machine' && ws.data.machineId) {
+            markMachineSeen(ws.data.machineId);
+          }
           if (rawMsg && typeof rawMsg === "object" && (rawMsg as { type?: string }).type === "ping") {
             ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
             return;
@@ -1765,7 +1770,7 @@ async function handleProtocolMessage(
         machines: visibleMachines.map((machine) => ({
           machineId: machine.machineId,
           label: machine.label,
-          online: machine.ws !== null,
+          online: machine.ws !== null && Date.now() - machine.lastSeenAt <= MACHINE_LIVENESS_TIMEOUT_MS,
           isAuthorized: true,
           accessType: "full" as const,
           lastConnectedAt: machine.lastConnectedAt,
@@ -1808,8 +1813,9 @@ async function handleProtocolMessage(
         return;
       }
 
-      // Check machine is online
-      if (!machine.ws) {
+      // Check machine is online and has not gone stale without a clean close
+      if (!machine.ws || Date.now() - machine.lastSeenAt > MACHINE_LIVENESS_TIMEOUT_MS) {
+        setMachineConnection(connectMsg.machineId, null);
         ws.send(serializeMessage(createErrorMessage("OFFLINE", "Machine is offline")));
         return;
       }

@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { getGitspaceDir } from '../../../core/config.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
+import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
 
 const OMP_PACKAGE = '@oh-my-pi/pi-coding-agent';
 const OMP_BIN_NAME = 'omp';
@@ -62,6 +63,10 @@ function getInstalledOmpVersion(agentDir: string): string | null {
 export function getOmpBinPath(): string {
   const agentDir = getPiAgentDir();
   return join(agentDir, 'node_modules', '.bin', OMP_BIN_NAME);
+}
+
+export function getGitspacePiExtensionPaths(): string[] {
+  return [join(import.meta.dir, 'extensions', 'gitspace-status.ts')];
 }
 
 /**
@@ -150,4 +155,88 @@ export function setupPiEnvironment(
     // Both upstream Pi and oh-my-pi use PI_CODING_AGENT_DIR
     PI_CODING_AGENT_DIR: agentDir,
   };
+}
+
+
+/**
+ * Create a SessionManager pinned to GitSpace's managed Pi session root for a workspace.
+ */
+export async function createPiSessionManager(cwd: string) {
+  const agentDir = ensurePiAgentDir();
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const { SessionManager } = await import('@oh-my-pi/pi-coding-agent');
+  const sessionDir = SessionManager.getDefaultSessionDir(cwd, agentDir);
+  return {
+    agentDir,
+    sessionManager: SessionManager.create(cwd, sessionDir),
+  };
+}
+
+/**
+ * Re-open an existing Pi session file in-process so GitSpace can subscribe to live SDK events
+ * again after a tmux-lite restart.
+ */
+export async function openPiSession(cwd: string, sessionFilePath: string) {
+  const agentDir = ensurePiAgentDir();
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const {
+    SessionManager,
+    createAgentSession,
+    discoverAuthStorage,
+    ModelRegistry,
+  } = await import('@oh-my-pi/pi-coding-agent');
+  const { getBundledModel } = await import('@oh-my-pi/pi-ai');
+  const sessionManager = await SessionManager.open(sessionFilePath);
+  const sessionContext = sessionManager.buildSessionContext();
+  const authStorage = await discoverAuthStorage(agentDir);
+  const modelRegistry = new ModelRegistry(authStorage);
+  await modelRegistry.refresh('online-if-uncached');
+
+  let restoredModel;
+  const storedModel = sessionContext.models.default;
+  if (storedModel) {
+    const slashIndex = storedModel.indexOf('/');
+    if (slashIndex > 0) {
+      const provider = storedModel.slice(0, slashIndex);
+      const modelId = storedModel.slice(slashIndex + 1);
+      restoredModel = modelRegistry.find(provider, modelId) ?? undefined;
+      if (!restoredModel) {
+        try {
+          restoredModel = getBundledModel(provider as Parameters<typeof getBundledModel>[0], modelId);
+        } catch {
+          restoredModel = undefined;
+        }
+      }
+    }
+  }
+
+  const { session } = await createAgentSession({
+    agentDir,
+    sessionManager,
+    cwd,
+    authStorage,
+    modelRegistry,
+    model: restoredModel,
+    additionalExtensionPaths: getGitspacePiExtensionPaths(),
+  });
+  if (restoredModel && !session.model) {
+    await session.setModel(restoredModel);
+  }
+  return {
+    agentDir,
+    sessionManager,
+    session,
+  };
+}
+
+/**
+ * Persist the initially selected model into the session file immediately.
+ * Without this, reopening an untouched session after tmux-lite restart can lose the transient
+ * in-memory model choice and later prompts fail with "No model selected".
+ */
+export async function persistInitialPiSessionModel(session: AgentSession): Promise<void> {
+  if (!session.model) {
+    return;
+  }
+  await session.setModel(session.model);
 }

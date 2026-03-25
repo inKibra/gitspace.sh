@@ -539,11 +539,9 @@ export class LocalSessionBackend implements SessionBackend {
       return;
     }
 
-    const pending = [...this.pendingPtyChunks];
+    const pending = concatUint8Array(this.pendingPtyChunks);
     this.pendingPtyChunks = [];
-    for (const chunk of pending) {
-      this.emitPtyData(chunk);
-    }
+    this.emitPtyData(pending);
   }
 
   async connect(): Promise<void> {

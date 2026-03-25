@@ -95,16 +95,18 @@ async function resolveManagedSession(pid: number): Promise<PortConflictInfo | nu
     const session = sessionByPid.get(currentPid);
     if (session) {
       const parsed = parseProcessSessionName(session.name);
-      return {
-        port: 0,
-        protocol: 'http',
-        pid,
-        managedSessionId: session.id,
-        managedSessionName: session.name,
-        managedWorkspaceId: parsed?.workspaceId,
-        managedProcessName: parsed?.processName,
-        managedInstance: parsed?.instance,
-      };
+      if (parsed?.processName) {
+        return {
+          port: 0,
+          protocol: 'http',
+          pid,
+          managedSessionId: session.id,
+          managedSessionName: session.name,
+          managedWorkspaceId: parsed.workspaceId,
+          managedProcessName: parsed.processName,
+          managedInstance: parsed.instance,
+        };
+      }
     }
     currentPid = getParentPid(currentPid);
   }

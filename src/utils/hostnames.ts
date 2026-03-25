@@ -25,8 +25,8 @@ export function buildProcessHostname(
   processName: string,
   instance: number,
   portLabel: string,
-  machineName?: string
-): string {
+  machineName?: string,
+ ): string {
   const workspaceSegment = normalizeHostLabel(workspaceId);
   const processSegment = normalizeHostLabel(processName);
   const portSegment = normalizeHostLabel(portLabel);
@@ -51,19 +51,35 @@ function buildProcessHostLabel(
   workspaceSegment: string,
   processSegment: string,
   instance: number,
-  portSegment: string
-): string {
-  const label = [machineSegment, workspaceSegment, processSegment, String(instance), portSegment]
+  portSegment: string,
+ ): string {
+  const label = [
+    machineSegment ? `m-${machineSegment}` : null,
+    `w-${workspaceSegment}`,
+    `p-${processSegment}`,
+    `i-${instance}`,
+    `o-${portSegment}`,
+  ]
     .filter(Boolean)
     .join('-');
   if (label.length <= MAX_LABEL_LENGTH) {
     return label;
   }
 
-  const hash = createHash('sha256').update(label).digest('hex').slice(0, 8);
-  const suffix = `-${instance}-${hash}`;
+  const hash = createHash('sha256')
+    .update(JSON.stringify({ machineSegment, workspaceSegment, processSegment, instance, portSegment }))
+    .digest('hex')
+    .slice(0, 8);
+  const suffix = `-i-${instance}-${hash}`;
   const prefix = clampLabel(
-    [machineSegment, workspaceSegment, processSegment, portSegment].filter(Boolean).join('-'),
+    [
+      machineSegment ? `m-${machineSegment}` : null,
+      `w-${workspaceSegment}`,
+      `p-${processSegment}`,
+      `o-${portSegment}`,
+    ]
+      .filter(Boolean)
+      .join('-'),
     Math.max(1, MAX_LABEL_LENGTH - suffix.length)
   );
   return `${prefix}${suffix}`;

@@ -195,7 +195,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             }
             const w = di.workspace;
             const isCurrent = w.id === workspace.id;
-            const primaryColor = getWorkspaceStripColor(w.id, workspaceStatusById);
+            const primaryColor = getWorkspaceStripColor(w, workspaceStatusById);
             const dotColorClass =
               primaryColor === 'orange' ? 'text-[#f59e0b]' :
               primaryColor === 'red'    ? 'text-[#ff7b72]' :
@@ -217,7 +217,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               >
                 <span className={dotColorClass}>●</span>
                 <span>{w.name}</span>
-                {workspaceStatusById[w.id]?.primaryColor === 'orange' && (
+                {getWorkspaceStripColor(w, workspaceStatusById) === 'orange' && (
                   <span className="text-[#f59e0b]">⚡</span>
                 )}
               </button>
@@ -395,14 +395,37 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                             att
                           </button>
                         )}
-                        {service.state === 'running' && localUrl && (
+                        {service.state === 'running' && localUrl && (() => {
+                          const portLabel = service.portLabel?.split(':')[1] ?? String(service.instance);
+                          const servedHostname = workspace.serveDomain
+                            ? buildProcessHostname(
+                                workspace.serveDomain,
+                                workspace.id,
+                                service.processName,
+                                service.instance,
+                                portLabel,
+                              )
+                            : null;
+                          const targetUrl = servedHostname ? `https://${servedHostname}` : `http://${localUrl}`;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => window.open(targetUrl, '_blank', 'noopener,noreferrer')}
+                              className="text-[10px] text-[#484f58] hover:text-[#58a6ff] flex-shrink-0 px-1"
+                              title={`Open ${targetUrl}` }
+                            >
+                              ↗
+                            </button>
+                          );
+                        })()}
+                        {service.state === 'running' && onStopProcess && (
                           <button
                             type="button"
-                            onClick={() => window.open(`http://${localUrl}`, '_blank', 'noopener,noreferrer')}
-                            className="text-[10px] text-[#484f58] hover:text-[#58a6ff] flex-shrink-0 px-1"
-                            title={`Open http://${localUrl}`}
+                            onClick={() => onStopProcess({ workspaceId: workspace.id, processName: service.processName })}
+                            className="text-[10px] text-[#484f58] hover:text-[#ff7b72] flex-shrink-0 px-1"
+                            title="Stop service"
                           >
-                            ↗
+                            stop
                           </button>
                         )}
                       </div>

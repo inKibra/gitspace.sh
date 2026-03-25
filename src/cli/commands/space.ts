@@ -1,5 +1,5 @@
 /**
- * gssh space [context|review|notes|service|hosting|events|bundle]
+ * gssh space [context|commit|review|notes|service|hosting|events|bundle]
  *
  * Hidden command surface intended for use inside tmux-lite workspace sessions.
  * Context is resolved from GSSH_SPACE_PROJECT / GSSH_SPACE_WORKSPACE env vars
@@ -8,6 +8,9 @@
  * @module cli/commands/space
  */
 
+import { spawn } from 'node:child_process';
+import { SpacesError } from '../../types/errors.js';
+import { ensureOmpInstalled } from '../../lib/tmux-lite/agents/pi-runtime.js';
 import type { Command } from 'commander';
 import { withErrorHandler } from '../error.js';
 import { useSessionContext, getWorkspacePath } from '../workspace-context.js';
@@ -33,6 +36,37 @@ function requireSessionContext(): { project: string; workspace: string } {
   };
 }
 
+async function runSpaceCommit(): Promise<void> {
+  const ctx = requireSessionContext();
+  const workspacePath = getWorkspacePath(ctx.project, ctx.workspace);
+
+  const ompBin = await ensureOmpInstalled();
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    const child = spawn(ompBin, ['commit'], {
+      cwd: workspacePath,
+      stdio: 'inherit',
+      env: process.env,
+    });
+
+    child.once('error', (error) => {
+      reject(new SpacesError(`Failed to launch \`omp commit\`: ${error.message}`, 'SYSTEM_ERROR', 2));
+    });
+
+    child.once('close', (code, signal) => {
+      if (signal) {
+        reject(new SpacesError(`\`omp commit\` terminated by signal ${signal}.`, 'SYSTEM_ERROR', 2));
+        return;
+      }
+      resolve(code ?? 0);
+    });
+  });
+
+  if (exitCode !== 0) {
+    process.exit(exitCode);
+  }
+}
+
 export function registerSpaceCommands(parent: Command): void {
   const cmd = parent
     .command('space', { hidden: true })
@@ -48,6 +82,7 @@ export function registerSpaceCommands(parent: Command): void {
       await showSpaceContext(options);
     }));
 
+  registerSpaceCommitCommands(cmd);
   registerSpaceReviewCommands(cmd);
   registerSpaceNotesCommands(cmd);
   registerSpaceServiceCommands(cmd);
@@ -55,6 +90,16 @@ export function registerSpaceCommands(parent: Command): void {
   registerSpaceEventsCommands(cmd);
   registerSpaceBundleCommands(cmd);
 }
+
+function registerSpaceCommitCommands(space: Command): void {
+  space
+    .command('commit')
+    .description('Run `omp commit` in this workspace')
+    .action(withErrorHandler(async () => {
+      await runSpaceCommit();
+    }));
+}
+
 
 function registerSpaceNotesCommands(space: Command): void {
   const notes = space

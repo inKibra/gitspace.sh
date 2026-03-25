@@ -407,7 +407,8 @@ export async function prepareAttachSession(options: AttachPrepareOptions): Promi
               if (response.type === 'error') {
                 settled = true;
                 cleanup();
-                reject(new Error(response.message));
+                const error = Object.assign(new Error(response.message), response.code ? { code: response.code } : {});
+                reject(error);
                 return;
               }
             }
@@ -905,6 +906,18 @@ export async function attachAgentSession(
   await ensureServer();
   const res = await send({ type: 'agent-attach', target, agentSessionId });
   if (res.type === 'session') return res.session;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function promptAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+  text: string,
+): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: 'agent-prompt', target, agentSessionId, text });
+  if (res.type === 'ok') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }

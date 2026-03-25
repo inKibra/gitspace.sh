@@ -1,6 +1,7 @@
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
 import type { MachineAgentSessionRecord, MachineTerminalSessionRecord } from '../../../lib/tmux-lite/machine/types.js';
 import type { MultiMachineState } from '../../../machine/multi/types.js';
+import { toBackendScopedWorkspaceKey } from '../../../machine/multi/types.js';
 import { selectAllWorkspaces } from '../../../machine/multi/selectors.js';
 import { getAgentSessionDisplayTitle } from '../../../agents/session-display.js';
 import type { AgentSessionInfo, SessionInfo } from '../../../components/SpacesBrowser.js';
@@ -27,6 +28,14 @@ function toSessionInfo(session: MachineTerminalSessionRecord): SessionInfo {
 }
 
 function toAgentSessionInfo(agent: MachineAgentSessionRecord): AgentSessionInfo {
+  const status = agent.state === 'running'
+    ? { type: 'busy' as const }
+    : agent.state === 'retrying'
+      ? { type: 'retry' as const, attempt: 1, message: agent.errorMessage ?? 'retrying', next: Date.now() + 1000 }
+      : agent.state === 'waiting' || agent.state === 'permission-needed'
+        ? { type: 'idle' as const }
+        : undefined;
+
   return {
     id: agent.id,
     workspaceId: agent.workspaceId,
@@ -34,14 +43,9 @@ function toAgentSessionInfo(agent: MachineAgentSessionRecord): AgentSessionInfo 
     updatedAt: agent.updatedAt,
     closedAt: agent.closedAt,
     archivedAt: agent.archivedAt,
-    status: agent.state === 'running'
-      ? { type: 'busy' }
-      : agent.state === 'retrying'
-        ? { type: 'retry', attempt: 1, message: agent.errorMessage ?? 'retrying', next: Date.now() + 1000 }
-        : !agent.closedAt && agent.state !== 'archived'
-          ? { type: 'idle' }
-          : undefined,
+    status,
     pendingPermissionCount: agent.pendingPermissionCount,
+    pendingQuestionCount: agent.pendingQuestionCount,
     errorMessage: agent.errorMessage,
   };
 }
@@ -80,6 +84,7 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
     linear: workspace.linear,
     backendKey,
     machineLabel: state.byBackend[backendKey]?.label ?? backendKey,
+    selectionKey: toBackendScopedWorkspaceKey({ backendKey, workspaceId: workspace.id }),
   }));
 
   const sessions: SessionInfo[] = [];
@@ -116,14 +121,26 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
   const runtimeByWorkspace: Record<string, WorkspaceRuntimeEntry> = {};
 
   for (const workspace of workspaces) {
-    const workspaceSessions = sessions
-      .filter((session) => session.workspaceId === workspace.id)
+    const snapshot = state.byBackend[workspace.backendKey]?.snapshot;
+    const workspaceSessions = (snapshot?.terminalSessionIdsByWorkspaceId[workspace.id] ?? [])
+      .map((id) => snapshot?.terminalSessionsById[id])
+      .filter(Boolean)
+      .map((session) => toSessionInfo(session!))
       .sort((a, b) => {
         const aProcess = a.processName ? 0 : 1;
         const bProcess = b.processName ? 0 : 1;
         if (aProcess !== bProcess) return aProcess - bProcess;
         return a.name.localeCompare(b.name);
       });
+    const workspaceAgentSessions = (snapshot?.agentSessionIdsByWorkspaceId[workspace.id] ?? [])
+      .map((id) => snapshot?.agentSessionsById[id])
+      .filter(Boolean)
+      .map((agent) => toAgentSessionInfo(agent!));
+    const agentSessionCount = workspaceAgentSessions.filter((session) => !session.closedAt && !session.archivedAt).length;
+    const pendingPermissionCount = workspaceAgentSessions.reduce(
+      (count, session) => count + (session.pendingPermissionCount ?? 0),
+      0,
+    );
     const shellSessions = workspaceSessions.filter((session) => !session.processName);
     const processSessions = workspaceSessions.filter((session) => !!session.processName);
     const sessionRows = shellSessions.map((session) => ({
@@ -178,20 +195,20 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
     const summary = deriveWorkspaceStatusSummary(
       workspace,
       workspaceSessions,
-      agentSessionsByWorkspace[workspace.id] ?? [],
+      workspaceAgentSessions,
     );
-    workspaceStatusById[workspace.id] = summary;
-    stripStatusById[workspace.id] = { primaryColor: summary.primaryColor };
-    runtimeByWorkspace[workspace.id] = {
+    workspaceStatusById[workspace.selectionKey] = summary;
+    stripStatusById[workspace.selectionKey] = { primaryColor: summary.primaryColor };
+    runtimeByWorkspace[workspace.selectionKey] = {
       workspace,
       sessions: workspaceSessions,
       shellSessions,
       processSessions,
       sessionRows,
       processRows,
-      agentSessions: agentSessionsByWorkspace[workspace.id] ?? [],
-      agentSessionCount: agentSessionCounts[workspace.id] ?? 0,
-      pendingPermissionCount: pendingPermissionsByWorkspace[workspace.id] ?? 0,
+      agentSessions: workspaceAgentSessions,
+      agentSessionCount,
+      pendingPermissionCount,
       statusSummary: summary,
       stripStatus: { primaryColor: summary.primaryColor },
     };

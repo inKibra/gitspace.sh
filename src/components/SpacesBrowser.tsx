@@ -84,7 +84,7 @@ export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSes
   if (session.closedAt) {
     return 'closed';
   }
-  if ((session.pendingPermissionCount ?? 0) > 0) {
+  if ((session.pendingPermissionCount ?? 0) > 0 || (session.pendingQuestionCount ?? 0) > 0) {
     return 'needs-permission';
   }
   if (session.errorMessage) {

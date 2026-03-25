@@ -369,7 +369,12 @@ export async function connectToRemote(
     logger.dim('Press Ctrl+D to disconnect');
     logger.log('');
 
-    await startTerminalSession(backend);
+    await startTerminalSession({
+      ...backend,
+      connect: () => backend.connect(),
+      attachSession: (params) => backend.attachSession(params),
+      initialAttachedSessionId: attached.sessionId,
+    });
     backendConnected = false;
   } finally {
     await disconnectBackend();
@@ -493,6 +498,9 @@ export async function listRemoteMachines(options: {
  */
 interface ConnectedTerminalBackend {
   disconnect: () => Promise<void>;
+  connect?: () => Promise<void>;
+  attachSession?: (params: { sessionId?: string; workspaceId?: string; sessionName?: string; cols?: number; rows?: number }) => Promise<void>;
+  initialAttachedSessionId?: string | null;
   writePtyData?: (data: Uint8Array) => Promise<void>;
   resizePty?: (cols: number, rows: number) => Promise<void>;
   onEvent: (handler: (event: BackendEvent) => void) => () => void;
@@ -540,17 +548,70 @@ async function startTerminalSession(backend: ConnectedTerminalBackend): Promise<
       }
     };
 
+    let attachedSessionId = backend.initialAttachedSessionId ?? null;
+    let reconnecting = false;
+
+    const reconnect = async () => {
+      if (reconnecting || stopping || !backend.connect || !backend.attachSession || !attachedSessionId) {
+        if (!stopping) {
+          await stop('Disconnected');
+        }
+        return;
+      }
+
+      reconnecting = true;
+      logger.info('Connection lost. Attempting to reconnect...');
+      try {
+        await backend.connect();
+        const size = getTerminalSize();
+        const attachWait = waitForBackendEvent(
+          backend,
+          (event): event is Extract<BackendEvent, { type: 'attached' }> => event.type === 'attached',
+          15000,
+          're-attach confirmation'
+        );
+        try {
+          await backend.attachSession({
+            sessionId: attachedSessionId,
+            cols: size.cols,
+            rows: size.rows,
+          });
+          const attached = await attachWait.promise;
+          attachedSessionId = attached.sessionId;
+          logger.success(`Reconnected to ${attached.sessionName ?? attached.sessionId}`);
+        } catch (error) {
+          attachWait.cancel();
+          throw error;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        await stop(`Disconnected (${detail})`);
+      } finally {
+        reconnecting = false;
+      }
+    };
+
     const unsubEvents = backend.onEvent((event) => {
+      if (event.type === 'attached') {
+        attachedSessionId = event.sessionId;
+        return;
+      }
+
       if (event.type === 'session_exited') {
         void stop(`Session exited${typeof event.exitCode === 'number' ? ` (${event.exitCode})` : ''}`);
+        return;
       }
 
       if (event.type === 'detached') {
-        void stop('Detached');
+        if (!reconnecting) {
+          void stop('Detached');
+        }
+        return;
       }
 
       if (event.type === 'status' && event.status === 'disconnected') {
-        void stop('Disconnected');
+        void reconnect();
+        return;
       }
 
       if (event.type === 'error') {

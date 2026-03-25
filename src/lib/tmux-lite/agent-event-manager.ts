@@ -44,6 +44,7 @@ export interface WorkspaceAgentState {
   /** Pending question tool invocations keyed by sessionID. */
   pendingQuestions: Record<string, PendingQuestion[]>;
   lastMessages: Record<string, string>;
+  errorMessages: Record<string, string>;
 }
 
 export type AgentStateUpdateDelta =
@@ -58,6 +59,14 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_session_created'; workspaceId: string; sessionId: string; title: string }
   | { type: 'agent_session_updated'; workspaceId: string; sessionId: string; title: string }
   | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string };
+
+export interface ExternalSessionRuntimeState {
+  status: SessionStatus;
+  pendingPermissions: Permission[];
+  pendingQuestions: PendingQuestion[];
+  errorMessage?: string;
+  lastMessage?: string;
+}
 
 const LAST_MESSAGE_MAX_CHARS = 120;
 const LAST_MESSAGE_DEBOUNCE_MS = 300;
@@ -208,6 +217,7 @@ export class AgentEventManager {
     delete state.pendingPermissions[sessionId];
     delete state.pendingQuestions[sessionId];
     delete state.lastMessages[sessionId];
+    delete state.errorMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.textAccumulators.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
@@ -234,6 +244,80 @@ export class AgentEventManager {
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
+  setExternalStatus(workspaceId: string, sessionId: string, status: SessionStatus): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    state.statuses[sessionId] = status;
+    delete state.errorMessages[sessionId];
+    this.previousStatuses.set(`${workspaceId}:${sessionId}`, status);
+    this.emit({ type: 'agent_session_status', workspaceId, sessionId, status });
+  }
+
+  setExternalLastMessage(workspaceId: string, sessionId: string, preview: string): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    const trimmed = preview.trim();
+    if (!trimmed) return;
+    const normalized = trimmed.slice(-LAST_MESSAGE_MAX_CHARS);
+    state.lastMessages[sessionId] = normalized;
+    delete state.errorMessages[sessionId];
+    this.emit({ type: 'agent_last_message', workspaceId, sessionId, preview: normalized });
+  }
+
+  setExternalError(workspaceId: string, sessionId: string, errorMessage: string): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    state.errorMessages[sessionId] = errorMessage;
+    this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage });
+  }
+
+  syncExternalRuntimeState(
+    workspaceId: string,
+    sessionId: string,
+    update: ExternalSessionRuntimeState,
+  ): void {
+    const state = this.getOrCreateState(workspaceId);
+    const existingIdx = state.sessions.findIndex((session) => session.id === sessionId);
+    if (existingIdx === -1) {
+      this.ensureSessionEntry(workspaceId, sessionId, sessionId);
+    }
+    const sessionIdx = state.sessions.findIndex((session) => session.id === sessionId);
+    if (sessionIdx !== -1 && state.sessions[sessionIdx]?.closedAt) {
+      state.sessions[sessionIdx] = { ...state.sessions[sessionIdx], closedAt: undefined };
+    }
+
+    state.statuses[sessionId] = update.status;
+    this.previousStatuses.set(`${workspaceId}:${sessionId}`, update.status);
+
+    if (update.pendingPermissions.length > 0) {
+      state.pendingPermissions[sessionId] = update.pendingPermissions;
+    } else {
+      delete state.pendingPermissions[sessionId];
+    }
+
+    if (update.pendingQuestions.length > 0) {
+      state.pendingQuestions[sessionId] = update.pendingQuestions;
+    } else {
+      delete state.pendingQuestions[sessionId];
+    }
+
+    const normalizedMessage = update.lastMessage?.trim();
+    if (normalizedMessage) {
+      state.lastMessages[sessionId] = normalizedMessage.slice(-LAST_MESSAGE_MAX_CHARS);
+    } else if (update.lastMessage !== undefined) {
+      delete state.lastMessages[sessionId];
+    }
+
+    const normalizedError = update.errorMessage?.trim();
+    if (normalizedError) {
+      state.errorMessages[sessionId] = normalizedError;
+    } else {
+      delete state.errorMessages[sessionId];
+    }
+
+    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+  }
+
   markSessionArchived(workspaceId: string, sessionId: string): void {
     const state = this.workspaceStates.get(workspaceId);
     if (!state) return;
@@ -242,6 +326,7 @@ export class AgentEventManager {
     delete state.pendingPermissions[sessionId];
     delete state.pendingQuestions[sessionId];
     delete state.lastMessages[sessionId];
+    delete state.errorMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.textAccumulators.delete(`${workspaceId}:${sessionId}`);
     // Mirror into the in-memory set so ensureSessionEntry blocks future re-insertion.
@@ -300,7 +385,7 @@ export class AgentEventManager {
   private getOrCreateState(workspaceId: string): WorkspaceAgentState {
     let state = this.workspaceStates.get(workspaceId);
     if (!state) {
-      state = { workspaceId, sessions: [], statuses: {}, pendingPermissions: {}, pendingQuestions: {}, lastMessages: {} };
+      state = { workspaceId, sessions: [], statuses: {}, pendingPermissions: {}, pendingQuestions: {}, lastMessages: {}, errorMessages: {} };
       this.workspaceStates.set(workspaceId, state);
     }
     return state;
@@ -387,6 +472,7 @@ export class AgentEventManager {
       state.pendingPermissions = {};
       state.pendingQuestions = {};
       state.lastMessages = {};
+      state.errorMessages = {};
       void this.reconcileStatuses(info, workspaceId, workspacePath);
     }
 
@@ -593,6 +679,8 @@ export class AgentEventManager {
         if (!workspaceId) break;
         this.markSessionOpen(workspaceId, props.sessionID);
         const errorMsg = props.error?.data?.message ?? 'Unknown error';
+        const state = this.getOrCreateState(workspaceId);
+        state.errorMessages[props.sessionID] = errorMsg;
         this.emit({ type: 'agent_session_error', workspaceId, sessionId: props.sessionID, errorMessage: errorMsg });
         break;
       }
@@ -714,6 +802,13 @@ export class AgentEventManager {
         state.pendingQuestions = questionsBySession;
         changed = true;
       }
+
+      for (const sessionId of Object.keys(state.errorMessages)) {
+        if (state.statuses[sessionId]?.type !== 'retry') {
+          delete state.errorMessages[sessionId];
+        }
+      }
+
 
       if (changed) {
         this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });

@@ -28,6 +28,7 @@ export interface AgentSessionInfo {
   archivedAt?: string;
   status?: SessionStatus;
   pendingPermissionCount?: number;
+  pendingQuestionCount?: number;
   errorMessage?: string;
   /** Timestamp (ms) of the last observed activity from the live event stream. */
   lastActivityAt?: number;

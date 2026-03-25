@@ -347,6 +347,19 @@ export type Command =
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string }
+  | {
+      type: 'pi-runtime-update';
+      timestamp: number;
+      signature: string;
+      sessionId: string;
+      workspacePath: string;
+      status: import('../../agents/opencode-event-types.js').SessionStatus;
+      pendingPermissions: import('../../agents/opencode-event-types.js').Permission[];
+      pendingQuestions: import('../../agents/opencode-event-types.js').PendingQuestion[];
+      errorMessage?: string;
+      lastMessage?: string;
+    }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
   | { type: 'github-repos'; org?: string }
@@ -436,7 +449,7 @@ export type Response =
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; code?: string }
   | { type: "inbox"; items: InboxItem[] }
   | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
   | { type: "version"; version: string; protocol: number }

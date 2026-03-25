@@ -13,7 +13,6 @@ import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
 import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
-import { resolveWorkspaceRef } from "../events/paths.js";
 import {
   applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
@@ -48,6 +47,7 @@ import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/typ
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
   attachAgentSession as ensureAgentTerminalSession,
+  applyPiRuntimeUpdate,
   archiveAgentSession,
   abortAgentSession,
   closeAgentSession,
@@ -56,19 +56,22 @@ import {
   getAgentControlSnapshot,
   getKnownAgentSessions,
   listLiveAgentSessions,
+  promptAgentSession,
   respondToAgentPermission,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
 } from './agent-control.js';
 import { defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
+import { normalizeWorkspacePath } from '../../agents/opencode-runtime-shared.js';
+import { configurePiRuntimeEnvironment, verifyPiRuntimeUpdateCommand } from './agents/pi-runtime-status.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
 import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
-import { matchesWorkspaceId } from '../../utils/workspace-id.js';
+import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
 import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
@@ -102,7 +105,7 @@ const PTY_CHUNK_SIZE = 512 * 1024;
 
 // Max scrollback lines to include in serialized state during attach
 // This is a limit - if less scrollback exists, we'll send what's available
-const SERIALIZE_SCROLLBACK_LINES = 2_000;
+const SERIALIZE_SCROLLBACK_LINES = 250;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
@@ -111,6 +114,7 @@ if (rawArgs.includes("--test")) {
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
+configurePiRuntimeEnvironment(ROUTER_SOCKET);
 const SERVER_START_TIME = Date.now();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
@@ -189,7 +193,7 @@ interface SessionData {
   ctrlBuffer: Buffer;
   pendingWrites: number;  // Track pending xterm writes
   attaching: boolean;
-  attachBuffer: Buffer[];
+  attachDirty: boolean;
   attachPending: boolean;
   attachTimer: any;
   processTitle: string;   // Title set by running process (via OSC 0)
@@ -361,6 +365,13 @@ function ensureWorkspacePmSubscribed(): void {
   workspacePmSubscribed = true;
 }
 
+async function resolveWorkspaceIdForRuntimePath(workspacePath: string): Promise<string | null> {
+  const normalizedPath = normalizeWorkspacePath(workspacePath);
+  const workspaces = await scanWorkspaces();
+  const match = workspaces.find((workspace) => normalizeWorkspacePath(workspace.path) === normalizedPath);
+  return match ? toCanonicalWorkspaceId(match) : null;
+}
+
 void getAgentControlReady().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[server] failed to initialize agent control: ${message}`);
@@ -456,7 +467,7 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   clearAttachTimer(session);
   session.attachPending = false;
   session.attaching = false;
-  session.attachBuffer = [];
+  session.attachDirty = false;
   session.info.attached = false;
   session.clientWriter = null;
   if (session.client) {
@@ -467,6 +478,16 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   safeUnlink(session.info.socketPath);
   if (options.removeFromMap !== false) {
     sessions.delete(session.info.id);
+  }
+
+  const workspaceId = session.info.metadata?.workspaceId;
+  const agentSessionId = session.info.metadata?.agentSessionId;
+  if (workspaceId && agentSessionId) {
+    applyPiRuntimeUpdate(workspaceId, agentSessionId, {
+      status: { type: 'idle' },
+      pendingPermissions: [],
+      pendingQuestions: [],
+    });
   }
 }
 
@@ -1336,16 +1357,17 @@ function createPtyDataHandler(
     // Our custom OSC 777 exit sequences are harmless - terminals ignore unknown OSC
     // Converting to string and back was corrupting cursor movement/screen control sequences
 
-    if (session.attaching) {
-      session.attachBuffer.push(Buffer.from(data));
-      return;
-    }
-
-    // Feed data to xterm-headless for state tracking
+    // Keep xterm state current during attach so the client can be seeded
+    // from the latest terminal snapshot instead of replaying queued output.
     session.pendingWrites++;
     xterm.write(data, () => {
       session.pendingWrites--;
     });
+
+    if (session.attaching) {
+      session.attachDirty = true;
+      return;
+    }
 
     // Send to client (buffered - avoid framed protocol desync on backpressure)
     writeToClient(session, encodePTY(data));
@@ -1514,39 +1536,27 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
     session.attachPending = false;
     clearAttachTimer(session);
 
-    // Wait for any pending xterm writes to complete
-    const sendState = () => {
+    const settleAndSendState = () => {
       if (session.pendingWrites > 0) {
-        setTimeout(sendState, 10);
+        setTimeout(settleAndSendState, 10);
         return;
       }
 
+      session.attachDirty = false;
       sendSerializedState(session, sessionName);
       sendCursorState(session);
 
       writeToClient(session, encodeControl({ type: "attach-ready", cols: session.xterm.cols, rows: session.xterm.rows }));
 
-      const drainAttachBuffer = () => {
-        const buffered = session.attachBuffer;
-        session.attachBuffer = [];
-        for (const chunk of buffered) {
-          session.pendingWrites++;
-          session.xterm.write(chunk, () => {
-            session.pendingWrites--;
-          });
-          writeToClient(session, encodePTY(chunk));
-        }
-      };
-
       const attachStart = Date.now();
       const finalizeAttach = () => {
-        if (session.attachBuffer.length > 0) {
-          drainAttachBuffer();
+        if (session.pendingWrites > 0 && Date.now() - attachStart < 500) {
+          setTimeout(finalizeAttach, 10);
+          return;
         }
 
-        if ((session.pendingWrites > 0 || session.attachBuffer.length > 0) &&
-            Date.now() - attachStart < 200) {
-          setTimeout(finalizeAttach, 10);
+        if (session.attachDirty && Date.now() - attachStart < 500) {
+          setTimeout(settleAndSendState, 10);
           return;
         }
 
@@ -1562,7 +1572,7 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
       finalizeAttach();
     };
 
-    sendState();
+    settleAndSendState();
   };
 }
 
@@ -1593,7 +1603,7 @@ function createSessionSocketHandlers(
 
       session.attaching = true;
       session.attachPending = true;
-      session.attachBuffer = [];
+      session.attachDirty = false;
       session.client = socket;
       session.clientWriter = createBufferedSocketWriter(socket);
       session.info.attached = true;
@@ -1672,7 +1682,7 @@ function createSessionSocketHandlers(
             session.attaching = false;
             session.attachPending = false;
             clearAttachTimer(session);
-            session.attachBuffer = [];
+            session.attachDirty = false;
             session.lastDetached = Date.now(); // Record detach time for grace period
             socket.end();
             console.log(`[${sessionName}] detached`);
@@ -1724,7 +1734,7 @@ function createSessionSocketHandlers(
         session.attaching = false;
         session.attachPending = false;
         clearAttachTimer(session);
-        session.attachBuffer = [];
+        session.attachDirty = false;
         console.log(`[${sessionName}] disconnected`);
       }
     }
@@ -1965,7 +1975,7 @@ function createSession(
     ctrlBuffer: Buffer.alloc(0),
     pendingWrites: 0,
     attaching: false,
-    attachBuffer: [],
+    attachDirty: false,
     attachPending: false,
     attachTimer: null,
     processTitle: '',
@@ -2139,7 +2149,7 @@ routerListener = Bun.listen({
                 let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
                 const prepared = await attachWorkspaceSession({
                   scanWorkspaces,
-                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.name })),
+                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.info.name })),
                   createSession: async (name, cwd, options) => createSession(name, cwd, options),
                   prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
                 }, {
@@ -2180,8 +2190,11 @@ routerListener = Bun.listen({
               continue;
             } catch (e) {
               pendingAttachControllers.delete(cmd.requestId);
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to prepare attach: ${errMsg}` };
+              const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+              const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
+              res = typedError?.code
+                ? { type: 'error', message, code: typedError.code }
+                : { type: 'error', message };
             }
             break;
 
@@ -2265,6 +2278,43 @@ routerListener = Bun.listen({
             }
             break;
 
+
+          case 'agent-prompt':
+            try {
+              await getAgentControlReady();
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'pi-runtime-update':
+            try {
+              await getAgentControlReady();
+              if (!verifyPiRuntimeUpdateCommand(cmd)) {
+                res = { type: 'error', code: 'UNAUTHORIZED', message: 'Unauthorized Pi runtime update.' };
+                break;
+              }
+              const workspaceId = await resolveWorkspaceIdForRuntimePath(cmd.workspacePath);
+              if (!workspaceId) {
+                res = { type: 'error', message: `Workspace not found for Pi runtime update: ${cmd.workspacePath}` };
+                break;
+              }
+              applyPiRuntimeUpdate(workspaceId, cmd.sessionId, {
+                status: cmd.status,
+                pendingPermissions: cmd.pendingPermissions,
+                pendingQuestions: cmd.pendingQuestions,
+                errorMessage: cmd.errorMessage,
+                lastMessage: cmd.lastMessage,
+              });
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to apply Pi runtime update: ${errMsg}` };
+            }
+            break;
 
           case 'workspace-set-phase':
             try {

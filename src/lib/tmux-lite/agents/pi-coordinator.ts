@@ -1,16 +1,26 @@
+import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
 import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
   createSession as createTmuxSession,
 } from '../cli.js';
-import type { Session as TmuxSession } from '../protocol.js';
-import { setupPiEnvironment, ensureOmpInstalled } from './pi-runtime.js';
-import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
+import { getRouterSocket, type Session as TmuxSession } from '../protocol.js';
+import {
+  setupPiEnvironment,
+  ensureOmpInstalled,
+  createPiSessionManager,
+  getGitspacePiExtensionPaths,
+  openPiSession,
+  persistInitialPiSessionModel,
+} from './pi-runtime.js';
+import { buildPiRuntimeChildEnvironment } from './pi-runtime-status.js';
+import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
   getAgentSessionDisplayTitle,
   shouldDisplayAgentSession,
 } from '../../../agents/session-display.js';
+import type { AgentEvent } from '../../../agents/backend.js';
 
 export const PI_AGENT_TMUX_SESSION_KIND = 'agent';
 
@@ -44,14 +54,21 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
     && session.metadata?.agentSessionId === agentSessionId;
 }
 
+
 export class PiCoordinator {
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
-  /** Maps "workspaceId:piSessionId" → tmuxSessionId for sessions created with placeholder IDs */
   private readonly sessionIdMap = new Map<string, string>();
+  private readonly activeSessions = new Map<string, AgentSession>();
+  private readonly sessionUnsubscribers = new Map<string, () => void>();
   private readonly sessionsRoot: string | undefined;
+  private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
 
   constructor(sessionsRoot?: string) {
     this.sessionsRoot = sessionsRoot;
+  }
+
+  setEventHandler(handler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null): void {
+    this.eventHandler = handler;
   }
 
   /**
@@ -75,60 +92,51 @@ export class PiCoordinator {
   }
 
   /**
-   * Create a new Pi agent session.
-   * Spawns omp in a tmux-lite PTY. Polls for Pi's session file to discover
-   * the canonical session ID (replaces the old fixed-timeout approach).
+   * Create a new Pi agent session in-process so we get the canonical session ID
+   * immediately and can subscribe to live events. tmux terminals are created later
+   * when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    // Snapshot existing session IDs before spawning
-    const beforeIds = new Set(
-      listPiSessions(target.workspacePath, this.sessionsRoot).map((s) => s.id),
-    );
+    const { createAgentSession: createPiAgentSession } = await import('@oh-my-pi/pi-coding-agent');
+    const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
+    const { session } = await createPiAgentSession({
+      agentDir,
+      sessionManager,
+      cwd: target.workspacePath,
+      additionalExtensionPaths: getGitspacePiExtensionPaths(),
+    });
+    if (title) {
+      await sessionManager.setSessionName(title);
+    }
+    await persistInitialPiSessionModel(session);
+    await sessionManager.rewriteEntries();
 
-    // Spawn omp in a tmux-lite PTY (fresh session, no --session flag)
-    const ompBin = await ensureOmpInstalled();
-    const env = setupPiEnvironment(target);
-    const placeholderId = `pending-${Date.now().toString(36)}`;
+    const sessionId = session.sessionId;
+    this.activeSessions.set(sessionId, session);
+    this.bindSessionEvents(target, sessionId, title, session);
 
-    const tmuxSession = await createTmuxSession(
-      buildAgentTerminalSessionName(target, placeholderId),
-      target.workspacePath,
-      {
-        command: ompBin,
-        args: [],
-        env,
-        kind: PI_AGENT_TMUX_SESSION_KIND,
-        hidden: true,
-        recordReplay: false,
-        metadata: {
-          workspaceId: target.workspaceId,
-          agentSessionId: placeholderId,
-        },
-      },
-    );
-
-    // Poll for Pi's session file to appear (replaces racy fixed timeout)
-    const newSessionId = await this.pollForNewSession(
-      target.workspacePath,
-      beforeIds,
-    );
-
-    if (newSessionId) {
-      this.sessionIdMap.set(`${target.workspaceId}:${newSessionId}`, tmuxSession.id);
+    const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
+    if (!sessionFile) {
+      this.disposeActiveSession(sessionId);
+      throw new Error(
+        `Timed out waiting for Pi to create a session file for workspace '${target.workspaceId}'.`,
+      );
     }
 
     const sessions = await this.refreshAgentSessions(target);
-    const created: PiAgentSessionSummary = {
-      id: newSessionId ?? placeholderId,
+    const created = sessions.find((existing) => existing.id === sessionId) ?? {
+      id: sessionId,
       workspaceId: target.workspaceId,
-      title: title ?? sessions.find((s) => s.id === newSessionId)?.title ?? 'New session',
-      updatedAt: new Date().toISOString(),
+      title: title ?? sessionFile.title ?? sessionFile.firstMessage ?? 'New session',
+      updatedAt: sessionFile.modified.toISOString(),
     };
 
     return mergeCreatedSession(sessions, created);
   }
 
   async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+    this.disposeActiveSession(agentSessionId);
+
     let killed = false;
     try {
       const sessions = await listTmuxSessions();
@@ -143,6 +151,11 @@ export class PiCoordinator {
     }
     this.sessionIdMap.delete(`${target.workspaceId}:${agentSessionId}`);
     return killed;
+  }
+
+  async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string): Promise<void> {
+    const session = await this.ensureActiveSession(target, agentSessionId);
+    await session.prompt(text);
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {
@@ -179,16 +192,17 @@ export class PiCoordinator {
     target: PiWorkspaceTarget,
     agentSessionId: string,
   ): Promise<TmuxSession> {
-    // Check for existing running tmux session (direct metadata or mapped)
     const tmuxSessions = await listTmuxSessions();
     const existing = tmuxSessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
       ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
     if (existing && existing.exitCode === undefined) return existing;
 
     const ompBin = await ensureOmpInstalled();
-    const env = setupPiEnvironment(target);
+    const env = {
+      ...setupPiEnvironment(target),
+      ...buildPiRuntimeChildEnvironment(getRouterSocket()),
+    };
 
-    // Find the Pi session file to resume — fail if not found
     const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
@@ -197,12 +211,22 @@ export class PiCoordinator {
       );
     }
 
-    return createTmuxSession(
+    void this.ensureActiveSession(target, agentSessionId, match).catch(() => {
+      // Non-fatal for attach: the terminal should still open even if SDK rehydration fails.
+      // promptAgentSession() performs the same rehydration synchronously and will surface errors there.
+    });
+
+    const extensionArgs = getGitspacePiExtensionPaths().flatMap((extensionPath) => [
+      '--extension',
+      extensionPath,
+    ]);
+
+    const tmuxSession = await createTmuxSession(
       buildAgentTerminalSessionName(target, agentSessionId),
       target.workspacePath,
       {
         command: ompBin,
-        args: ['--session', match.path],
+        args: ['--session', match.path, ...extensionArgs],
         env,
         kind: PI_AGENT_TMUX_SESSION_KIND,
         hidden: true,
@@ -213,25 +237,118 @@ export class PiCoordinator {
         },
       },
     );
+    this.sessionIdMap.set(`${target.workspaceId}:${agentSessionId}`, tmuxSession.id);
+    return tmuxSession;
   }
 
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
 
-  /**
-   * Poll the session directory until a new session file appears (one that
-   * wasn't in beforeIds). Returns the new session ID, or null on timeout.
-   */
-  private async pollForNewSession(
+  private async ensureActiveSession(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    sessionFile: PiSessionFileInfo | null = null,
+  ): Promise<AgentSession> {
+    const existing = this.activeSessions.get(agentSessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!match) {
+      throw new Error(
+        `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
+        `The session file may have been deleted or the ID is stale.`,
+      );
+    }
+
+    const { session } = await openPiSession(target.workspacePath, match.path);
+    if (session.sessionId !== agentSessionId) {
+      session.dispose();
+      throw new Error(
+        `Pi session file '${match.path}' reopened as '${session.sessionId}', expected '${agentSessionId}'.`,
+      );
+    }
+
+    this.activeSessions.set(agentSessionId, session);
+    this.bindSessionEvents(
+      target,
+      agentSessionId,
+      match.title ?? match.firstMessage ?? undefined,
+      session,
+    );
+    return session;
+  }
+
+
+  private bindSessionEvents(
+    target: PiWorkspaceTarget,
+    sessionId: string,
+    title: string | undefined,
+    session: AgentSession,
+  ): void {
+    const existing = this.sessionUnsubscribers.get(sessionId);
+    existing?.();
+
+    const summaryTitle = title ?? sessionId;
+    const unsubscribe = session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
+      if (!this.eventHandler || typeof piEvent.type !== 'string') {
+        return;
+      }
+
+      if (piEvent.type === 'message_update') {
+        this.eventHandler(target, {
+          type: 'message',
+          sessionId,
+          payload: { ...piEvent, title: summaryTitle },
+        });
+        return;
+      }
+
+      if (piEvent.type === 'agent_start') {
+        this.eventHandler(target, {
+          type: 'status',
+          sessionId,
+          payload: { type: 'busy', event: piEvent },
+        });
+        return;
+      }
+
+      if (piEvent.type === 'agent_end') {
+        this.eventHandler(target, {
+          type: 'status',
+          sessionId,
+          payload: { type: 'idle', event: piEvent },
+        });
+      }
+    });
+
+    this.sessionUnsubscribers.set(sessionId, unsubscribe);
+  }
+
+  private disposeActiveSession(sessionId: string): void {
+    const unsubscribe = this.sessionUnsubscribers.get(sessionId);
+    unsubscribe?.();
+    this.sessionUnsubscribers.delete(sessionId);
+
+    const session = this.activeSessions.get(sessionId);
+    if (session) {
+      session.dispose();
+      this.activeSessions.delete(sessionId);
+    }
+  }
+
+  private async waitForSessionFile(
     workspacePath: string,
-    beforeIds: Set<string>,
-  ): Promise<string | null> {
+    sessionId: string,
+  ): Promise<PiSessionFileInfo | null> {
     const deadline = Date.now() + SESSION_DISCOVERY_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const sessions = listPiSessions(workspacePath, this.sessionsRoot);
-      const newSession = sessions.find((s) => !beforeIds.has(s.id));
-      if (newSession) return newSession.id;
+      const match = findPiSessionFile(workspacePath, sessionId, this.sessionsRoot);
+      if (match) {
+        return match;
+      }
       await new Promise((resolve) => setTimeout(resolve, SESSION_DISCOVERY_POLL_MS));
     }
     return null;

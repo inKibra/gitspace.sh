@@ -329,6 +329,8 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
 
   const footerActions = useMemo(() => {
     const actions: WorkspaceDetailModel['footerActions'] = [
+      { id: 'open-review', label: 'Open Review' },
+      { id: 'launch-commit', label: 'Auto Commit Changes (Alpha)' },
       { id: 'edit-bundle-config', label: 'Edit Bundle Config' },
       { id: 'edit-process-config', label: 'Edit Process Config' },
       { id: 'change-status', label: 'Change Status', rightLabel: `[${phase}]` },
@@ -336,7 +338,6 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     if (workspace.pullRequest?.url) {
       actions.unshift({ id: 'open-github-pr', label: 'Open GitHub PR' });
     }
-    actions.splice(actions.findIndex((item) => item.id === 'change-status'), 0, { id: 'open-review', label: 'Open Review' });
     return actions;
   }, [phase, workspace.pullRequest?.url]);
 
@@ -378,6 +379,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     footerAction: (id) => {
       if (id === 'open-github-pr') return actions.onOpenGitHubPullRequest?.(workspace.id);
       if (id === 'open-review') return actions.onOpenReview?.(workspace.id);
+      if (id === 'launch-commit') return actions.onLaunchCommit?.(workspace.id);
       if (id === 'edit-bundle-config') return actions.onManageBundleConfig?.({ workspaceId: workspace.id });
       if (id === 'edit-process-config') return actions.onEditProcesses?.({ workspaceId: workspace.id });
       return actions.onRequestStatusChange?.(workspace.id, workspace.projectName);

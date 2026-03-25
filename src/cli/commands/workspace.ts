@@ -72,9 +72,14 @@ export function registerWorkspaceCommands(parent: Command): void {
       const ctx = useExplicitContext(options);
       const phase = options.status as string | undefined;
       const validPhases = ['plan', 'code', 'review', 'ship'] as const;
-      const status = phase && validPhases.includes(phase as typeof validPhases[number])
-        ? (phase as typeof validPhases[number])
-        : undefined;
+      if (phase && !validPhases.includes(phase as typeof validPhases[number])) {
+        throw new SpacesError(
+          `Invalid status: ${phase}. Use one of: ${validPhases.join(', ')}` ,
+          'USER_ERROR',
+          1,
+        );
+      }
+      const status = phase as typeof validPhases[number] | undefined;
       const { addWorkspace } = await import('../../commands/add.js');
       await addWorkspace(workspaceName, {
         project: ctx.project,

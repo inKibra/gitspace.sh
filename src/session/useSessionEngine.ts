@@ -94,8 +94,10 @@ function dispatchBackendEvent(
       dispatch({ type: 'SET_ATTACHED_SESSION_META', backendKey, meta: event.meta });
       break;
     case 'detached':
-    case 'session_exited':
       dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
+      break;
+    case 'session_exited':
+      dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null, preserveContextOnExit: true });
       break;
     case 'command_error':
       dispatch({ type: 'SET_COMMAND_ERROR', backendKey, commandError: { code: event.code, message: event.message } });

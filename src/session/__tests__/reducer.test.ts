@@ -78,3 +78,62 @@ describe('sessionEngineReducer', () => {
     expect(switched.backends['remote:relay:machine-a'].descriptor.label).toBe('Machine A');
   });
 });
+
+it('preserves attached session context on session exit while returning to browsing mode', () => {
+  const registered = sessionEngineReducer(createInitialSessionEngineState(), {
+    type: 'REGISTER_BACKEND',
+    descriptor: { key: 'local', kind: 'local', label: 'Local' },
+  });
+
+  const attached = sessionEngineReducer(registered, {
+    type: 'SET_ATTACHED_SESSION',
+    backendKey: 'local',
+    sessionId: 'session-1',
+    sessionName: 'acme:ws-1:1',
+    meta: { sessionName: 'acme:ws-1:1', processTitle: 'gssh space commit' },
+    workspaceId: 'acme:ws-1',
+  });
+
+  const exited = sessionEngineReducer(attached, {
+    type: 'SET_ATTACHED_SESSION',
+    backendKey: 'local',
+    sessionId: null,
+    preserveContextOnExit: true,
+  });
+
+  expect(exited.backends.local.mode).toBe('browsing');
+  expect(exited.backends.local.attachedSessionId).toBeNull();
+  expect(exited.backends.local.attachedSessionName).toBe('acme:ws-1:1');
+  expect(exited.backends.local.attachedWorkspaceId).toBe('acme:ws-1');
+  expect(exited.backends.local.attachedSessionMeta).toMatchObject({
+    sessionName: 'acme:ws-1:1',
+    processTitle: 'gssh space commit',
+  });
+});
+
+it('clears attached session context on normal detach', () => {
+  const registered = sessionEngineReducer(createInitialSessionEngineState(), {
+    type: 'REGISTER_BACKEND',
+    descriptor: { key: 'local', kind: 'local', label: 'Local' },
+  });
+
+  const attached = sessionEngineReducer(registered, {
+    type: 'SET_ATTACHED_SESSION',
+    backendKey: 'local',
+    sessionId: 'session-1',
+    sessionName: 'acme:ws-1:1',
+    workspaceId: 'acme:ws-1',
+  });
+
+  const detached = sessionEngineReducer(attached, {
+    type: 'SET_ATTACHED_SESSION',
+    backendKey: 'local',
+    sessionId: null,
+  });
+
+  expect(detached.backends.local.mode).toBe('browsing');
+  expect(detached.backends.local.attachedSessionId).toBeNull();
+  expect(detached.backends.local.attachedSessionName).toBeNull();
+  expect(detached.backends.local.attachedWorkspaceId).toBeNull();
+  expect(detached.backends.local.attachedSessionMeta).toBeNull();
+});

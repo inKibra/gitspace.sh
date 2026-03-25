@@ -808,15 +808,17 @@ export function processClientAuth(
         return null; // Expired certificate — reject handshake
       }
 
+      const certDeviceSigningKey = new Uint8Array(Buffer.from(cert.deviceSigningPublicKey, 'base64'));
+      const certUserRootSigningKey = new Uint8Array(Buffer.from(cert.userRootSigningPublicKey, 'base64'));
+
       // Reject self-signed certs where the device key IS the root key.
-      // A correctly-issued device cert must have deviceSigningPublicKey !== userRootSigningPublicKey.
-      // Self-signed certs collapse root/device separation and are not permitted.
-      if (cert.deviceSigningPublicKey === cert.userRootSigningPublicKey) {
+      // A correctly-issued device cert must have distinct decoded key bytes even if
+      // the base64 strings differ in formatting.
+      if (arraysEqual(certDeviceSigningKey, certUserRootSigningKey)) {
         return null; // Self-root-as-device cert — reject handshake
       }
 
       // Verify the certificate's device signing key matches the client's identity key
-      const certDeviceSigningKey = new Uint8Array(Buffer.from(cert.deviceSigningPublicKey, 'base64'));
       if (!arraysEqual(certDeviceSigningKey, clientIdentityKey)) {
         return null; // Certificate doesn't match client identity — reject handshake
       }

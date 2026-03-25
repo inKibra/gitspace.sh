@@ -12,6 +12,7 @@ import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/type
 export type WorkspaceDetailStripWorkspace = WorkspaceStatusInput & {
   name: string;
   projectName: string;
+  selectionKey?: string;
 };
 
 export type WorkspaceDetailStripStatus = Pick<WorkspaceStatusSummary, 'primaryColor'>;
@@ -33,6 +34,7 @@ export interface WorkspaceDetailPaneProps {
   onManageBundleConfig: (params: { workspaceId: string }) => void;
   onOpenReview?: (workspaceId: string) => void | Promise<void>;
   onOpenGitHubPullRequest?: (workspaceId: string) => void | Promise<void>;
+  onLaunchCommit?: (workspaceId: string) => void | Promise<void>;
   onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
   onOpenEvents: (workspaceId: string) => void;
   onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;

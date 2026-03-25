@@ -92,6 +92,7 @@ export interface WorkspaceDetailScreenProps extends WorkspaceDetailPaneProps {
   /** Inline terminal bindings for active attached session */
   terminalBindings?: {
     attachedSessionId: string | null;
+    attachedWorkspaceId?: string | null;
     attachedAgentSessionId?: string | null;
     attachedSessionName?: string | null;
     attachedSessionMeta?: {
@@ -136,6 +137,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     onOpenReplay,
     onOpenReplayHistory,
     onStartProcess,
+    onStartProcessAttach,
     onStopProcess,
     onManageBundleConfig,
     onEditProcesses,
@@ -148,6 +150,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     machineLabel = 'local',
     onBack,
     onChangeStatus,
+    onLaunchCommit,
     allWorkspaces = [],
     workspaceStatusById = {},
     onSelectWorkspace,
@@ -178,12 +181,13 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
       onAttachSession,
       onOpenReplay,
       onOpenReplayHistory,
-      onStartProcessAttach: onStartProcess,
+      onStartProcessAttach: onStartProcessAttach ?? onStartProcess,
       onStopProcess,
       onManageBundleConfig,
       onEditProcesses,
       onOpenReview,
       onOpenGitHubPullRequest,
+      onLaunchCommit,
       onRequestStatusChange: onChangeStatus ? (workspaceId) => onChangeStatus(workspaceId, PHASES[statusPickerCursor] ?? 'code') : undefined,
       onOpenAgentSession,
       onCreateAgentSession,
@@ -249,11 +253,15 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     () => agentSessions.find((session) => session.id === terminalBindings?.attachedAgentSessionId) ?? null,
     [agentSessions, terminalBindings?.attachedAgentSessionId],
   );
+  const attachedWorkspaceMatchesCurrent = Boolean(
+    terminalBindings?.attachedWorkspaceId === workspace.id
+      && (terminalBindings.attachedSessionId || terminalBindings.attachedSessionName),
+  );
   const showInlineScriptTerminal = Boolean(
     scriptBindings?.scriptState && scriptBindings.workspaceId === workspace.id
   );
   const showInlineSessionTerminal = Boolean(
-    terminalBindings && !showInlineScriptTerminal && (attachedWorkspaceSession || attachedAgentSession)
+    terminalBindings && !showInlineScriptTerminal && (attachedWorkspaceSession || attachedAgentSession || attachedWorkspaceMatchesCurrent)
   );
   const attachedServiceIdentity = useMemo(
     () => attachedWorkspaceSession?.processName
@@ -278,6 +286,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
      | { kind: 'history-see-all'; label: string }
      | { kind: 'open-github-pr' }
      | { kind: 'open-review' }
+     | { kind: 'launch-commit' }
      | { kind: 'event-logs' }
      | { kind: 'bundle-config' }
      | { kind: 'process-config' }
@@ -319,12 +328,13 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     for (const action of footerActions) {
       if (action.id === 'open-github-pr') items.push({ kind: 'open-github-pr' });
       else if (action.id === 'open-review' && onOpenReview) items.push({ kind: 'open-review' });
+      else if (action.id === 'launch-commit' && onLaunchCommit) items.push({ kind: 'launch-commit' });
       else if (action.id === 'edit-bundle-config') items.push({ kind: 'bundle-config' });
       else if (action.id === 'edit-process-config') items.push({ kind: 'process-config' });
       else if (action.id === 'change-status') items.push({ kind: 'change-status' });
     }
     return items;
-  }, [agentRows, archivedAgentSessions.length, footerActions, hasMoreReplayRows, onOpenReview, seeAllReplayLabel, showArchivedAgents, visibleReplayRows, workspace.processes, workspaceSessions, sessionRows]);
+  }, [agentRows, archivedAgentSessions.length, footerActions, hasMoreReplayRows, onLaunchCommit, onOpenReview, seeAllReplayLabel, showArchivedAgents, visibleReplayRows, workspace.processes, workspaceSessions, sessionRows]);
 
   const clampSidebar = useCallback(
     (idx: number) => Math.max(0, Math.min(sidebarItems.length - 1, idx)),
@@ -394,6 +404,10 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         break;
       case 'open-review':
         void detailActions.footerAction('open-review');
+        break;
+      case 'launch-commit':
+        void detailActions.footerAction('launch-commit');
+        setFocus('terminal');
         break;
       case 'event-logs':
         onOpenEvents(workspace.id);
@@ -565,6 +579,13 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             }
             return;
           }
+          if (key.raw === 'k') {
+            const item = sidebarItems[sidebarCursor];
+            if (item?.kind === 'agent' && !item.closedAt && onAbortAgentSession) {
+              void onAbortAgentSession(workspace.id, item.id);
+              return;
+            }
+          }
           if (key.shift && key.name?.toLowerCase() === 'x') {
             const item = sidebarItems[sidebarCursor];
             if (item?.kind === 'agent' && onArchiveAgentSession && flow) {
@@ -690,7 +711,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
               const w = di.workspace;
               const isCurrent = w.id === workspace.id;
               const isFocused = focus === 'workspace-pills' && siblingWorkspaces[workspacePillCursor]?.id === w.id;
-              const status = workspaceStatusById[w.id];
+              const status = workspaceStatusById[w.selectionKey ?? w.id];
               const dotColor = getStatusColor(status);
               const labelColor = isFocused
                 ? COLORS.selected
@@ -1029,43 +1050,40 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             {pendingPermissions > 0 && (
               <text fg={COLORS.amber}>⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}</text>
             )}
-            {(() => {
-              const githubSelected = isSidebarItemSelected((item) => item.kind === 'open-github-pr');
-              const reviewSelected = isSidebarItemSelected((item) => item.kind === 'open-review');
-              const bundleSelected = isSidebarItemSelected((item) => item.kind === 'bundle-config');
-              const processSelected = isSidebarItemSelected((item) => item.kind === 'process-config');
-              const statusSelected = isSidebarItemSelected((item) => item.kind === 'change-status');
+            {footerActions.map((action) => {
+              const selected = isSidebarItemSelected((item) => {
+                if (action.id === 'open-github-pr') return item.kind === 'open-github-pr';
+                if (action.id === 'open-review') return item.kind === 'open-review';
+                if (action.id === 'launch-commit') return item.kind === 'launch-commit';
+                if (action.id === 'edit-bundle-config') return item.kind === 'bundle-config';
+                if (action.id === 'edit-process-config') return item.kind === 'process-config';
+                return item.kind === 'change-status';
+              });
+
+              if (action.id === 'open-github-pr') {
+                if (!pullRequest?.url) return null;
+                return (
+                  <box key={action.id} backgroundColor={selected ? COLORS.bgSelected : undefined}>
+                    <text fg={selected ? COLORS.selected : COLORS.textMid}>{action.label}</text>
+                  </box>
+                );
+              }
+
+              if (action.id === 'change-status') {
+                return (
+                  <box key={action.id} flexDirection="row" gap={1} backgroundColor={selected ? COLORS.bgSelected : undefined}>
+                    <text fg={selected ? COLORS.selected : COLORS.textMid}>{action.label}</text>
+                    <text fg={COLORS.blue}>{action.rightLabel?.replace(/^[\[]|[\]]$/g, '') ?? phaseStr}</text>
+                  </box>
+                );
+              }
+
               return (
-                <>
-                  {footerActions.some((action) => action.id === 'open-github-pr') && pullRequest?.url && (
-                    <box backgroundColor={githubSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={githubSelected ? COLORS.selected : COLORS.textMid}>Open GitHub PR</text>
-                    </box>
-                  )}
-                  {footerActions.some((action) => action.id === 'open-review') && onOpenReview && (
-                    <box backgroundColor={reviewSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={reviewSelected ? COLORS.selected : COLORS.textMid}>Open Review</text>
-                    </box>
-                  )}
-                  {footerActions.some((action) => action.id === 'edit-bundle-config') && (
-                    <box backgroundColor={bundleSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={bundleSelected ? COLORS.selected : COLORS.textMid}>Edit bundle config</text>
-                    </box>
-                  )}
-                  {footerActions.some((action) => action.id === 'edit-process-config') && (
-                    <box backgroundColor={processSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={processSelected ? COLORS.selected : COLORS.textMid}>Edit process config</text>
-                    </box>
-                  )}
-                  {footerActions.find((action) => action.id === 'change-status') && (
-                    <box flexDirection="row" gap={1} backgroundColor={statusSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={statusSelected ? COLORS.selected : COLORS.textMid}>Change Status</text>
-                      <text fg={COLORS.blue}>{footerActions.find((action) => action.id === 'change-status')?.rightLabel?.replace(/^[\[]|[\]]$/g, '') ?? phaseStr}</text>
-                    </box>
-                  )}
-                </>
+                <box key={action.id} backgroundColor={selected ? COLORS.bgSelected : undefined}>
+                  <text fg={selected ? COLORS.selected : COLORS.textMid}>{action.label}</text>
+                </box>
               );
-            })()}
+            })}
           </box>
         </box>
 

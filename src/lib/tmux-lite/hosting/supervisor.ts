@@ -13,7 +13,7 @@ import { resolveWorkspaceRef } from '../../events/paths.js';
 import { loadProcessesConfig } from '../../processes/config.js';
 import type { ProcessPortConfig } from '../../../types/processes.js';
 import { getServeTokenKey } from '../../../commands/host.js';
-import { readTmuxHostingState, writeTmuxHostingState } from './state.js';
+import { readTmuxHostingState, writeTmuxHostingState, type TmuxHostingState } from './state.js';
 
 interface HostedServiceRoute {
   hostname: string;
@@ -87,6 +87,66 @@ async function waitForCloudflaredReady(proc: Subprocess): Promise<boolean> {
   return result.code === null;
 }
 
+async function readProcessCommand(pid: number): Promise<string | null> {
+  if (!isProcessRunning(pid)) {
+    return null;
+  }
+
+  try {
+    const proc = spawn(['ps', '-o', 'command=', '-p', String(pid)], {
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    const output = await new Response(proc.stdout).text();
+    await proc.exited.catch(() => null);
+    const command = output.trim();
+    return command.length > 0 ? command : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveManagedCloudflaredPid(state: TmuxHostingState | null): Promise<number | null> {
+  const pid = state?.cloudflaredPid;
+  if (typeof pid !== 'number') {
+    return null;
+  }
+
+  const command = await readProcessCommand(pid);
+  if (!command || !command.includes('cloudflared') || !command.includes(' tunnel ')) {
+    return null;
+  }
+
+  const expectedConfigPath = state?.cloudflaredConfigPath?.trim();
+  if (expectedConfigPath && !command.includes(expectedConfigPath)) {
+    return null;
+  }
+
+  return pid;
+}
+
+function clearManagedCloudflaredRuntime(): void {
+  writeTmuxHostingState({
+    cloudflaredPid: undefined,
+    cloudflaredConfigPath: undefined,
+  });
+}
+
+async function stopManagedCloudflared(state: TmuxHostingState | null): Promise<void> {
+  const pid = await resolveManagedCloudflaredPid(state);
+  if (pid) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Best effort.
+    }
+  }
+  if (state?.cloudflaredPid || state?.cloudflaredConfigPath) {
+    clearManagedCloudflaredRuntime();
+  }
+}
+
 export async function collectHostedServiceRoutes(): Promise<HostedServiceRoute[]> {
   const state = readTmuxHostingState();
   if (!state?.baseHost) {
@@ -151,24 +211,28 @@ export async function collectHostedServiceRoutes(): Promise<HostedServiceRoute[]
 export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: HostedServiceRoute[]; reason?: string }> {
   const state = readTmuxHostingState();
   if (!state?.enabled) {
-    await stopTmuxHosting();
+    await stopManagedCloudflared(state);
     return { active: false, routes: [], reason: 'disabled' };
   }
   if (!state.baseHost) {
+    await stopManagedCloudflared(state);
     return { active: false, routes: [], reason: 'no base host selected' };
   }
 
   const parsedBaseHost = parseBaseHost(state.baseHost);
   if (!parsedBaseHost) {
+    await stopManagedCloudflared(state);
     return { active: false, routes: [], reason: 'invalid hosting base host' };
   }
 
   if (!await isCloudflaredInstalled()) {
+    await stopManagedCloudflared(state);
     return { active: false, routes: [], reason: 'cloudflared not installed' };
   }
 
   const tunnelToken = await getSecret(getServeTokenKey(parsedBaseHost.rootSubdomain));
   if (!tunnelToken) {
+    await stopManagedCloudflared(state);
     return { active: false, routes: [], reason: `missing serve tunnel token for ${parsedBaseHost.rootSubdomain}` };
   }
 
@@ -181,14 +245,22 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
     writeFileSync(configPath, config, 'utf-8');
   }
 
-  const currentPid = state.cloudflaredPid;
-  const currentAlive = typeof currentPid === 'number' && isProcessRunning(currentPid);
-  if (currentAlive && previousHash === configHash) {
+  const currentPid = await resolveManagedCloudflaredPid(state);
+  if (!currentPid && (state?.cloudflaredPid || state?.cloudflaredConfigPath)) {
+    clearManagedCloudflaredRuntime();
+  }
+
+  if (currentPid && previousHash === configHash) {
     return { active: true, routes };
   }
 
-  if (currentAlive && currentPid) {
-    try { process.kill(currentPid); } catch {}
+  if (currentPid) {
+    try {
+      process.kill(currentPid);
+    } catch {
+      // Best effort.
+    }
+    clearManagedCloudflaredRuntime();
   }
 
   const proc = spawn(['cloudflared', 'tunnel', '--config', configPath, 'run'], {
@@ -203,7 +275,12 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
 
   const ready = await waitForCloudflaredReady(proc);
   if (!ready) {
-    try { proc.kill(); } catch {}
+    try {
+      proc.kill();
+    } catch {
+      // Best effort.
+    }
+    clearManagedCloudflaredRuntime();
     return { active: false, routes, reason: 'cloudflared failed to start' };
   }
 
@@ -213,12 +290,7 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
 
 export async function stopTmuxHosting(): Promise<void> {
   const state = readTmuxHostingState();
-  if (state?.cloudflaredPid && isProcessRunning(state.cloudflaredPid)) {
-    try { process.kill(state.cloudflaredPid); } catch {}
-  }
-  if (state) {
-    writeTmuxHostingState({ cloudflaredPid: undefined, cloudflaredConfigPath: state.cloudflaredConfigPath, enabled: false });
-  }
+  await stopManagedCloudflared(state);
 }
 
 export async function getTmuxHostingRuntimeStatus(): Promise<{ active: boolean; reason?: string; routeCount: number }> {
@@ -227,7 +299,7 @@ export async function getTmuxHostingRuntimeStatus(): Promise<{ active: boolean; 
     return { active: false, routeCount: 0, reason: 'disabled' };
   }
   const routes = await collectHostedServiceRoutes();
-  const active = Boolean(state.cloudflaredPid && isProcessRunning(state.cloudflaredPid));
+  const active = (await resolveManagedCloudflaredPid(state)) !== null;
   return {
     active,
     routeCount: routes.length,

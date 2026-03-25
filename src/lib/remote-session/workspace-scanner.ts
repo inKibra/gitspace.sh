@@ -71,7 +71,12 @@ async function scanProjectWorkspaces(
       if (!entry.isDirectory()) continue;
 
       const workspacePath = join(workspacesDir, entry.name);
-      const status = getWorkspaceStatus(projectName, entry.name);
+      let status: WorkspacePhase | undefined;
+      try {
+        status = getWorkspaceStatus(projectName, entry.name);
+      } catch {
+        status = undefined;
+      }
       const info = await getWorkspaceInfo(projectName, entry.name, workspacePath, status);
       if (info) {
         workspaces.push(info);
@@ -110,7 +115,12 @@ async function getWorkspaceInfo(
 
     // Count sessions (we'll get this from tmux-lite later)
     const sessionCount = 0;
-    const notesSummary = summarizeWorkspaceNotes(listWorkspaceNotes(projectName, workspaceName));
+    let notesSummary: ReturnType<typeof summarizeWorkspaceNotes> | undefined;
+    try {
+      notesSummary = summarizeWorkspaceNotes(listWorkspaceNotes(projectName, workspaceName));
+    } catch {
+      notesSummary = undefined;
+    }
 
     return {
       id: workspaceName,
@@ -121,7 +131,7 @@ async function getWorkspaceInfo(
       sessionCount,
       isStale,
       ...(status !== undefined && { status }),
-      ...(notesSummary.total > 0 ? { notesSummary } : {}),
+      ...(notesSummary && notesSummary.total > 0 ? { notesSummary } : {}),
     };
   } catch {
     return null;

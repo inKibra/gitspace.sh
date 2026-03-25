@@ -236,12 +236,12 @@ export function KanbanBoardWeb({
           <div className="mt-2 flex flex-col gap-0.5">
             {group.workspaces.map((w) => (
               <WorkspaceCard
-                key={w.id}
+                key={w.selectionKey}
                 entry={w}
-                isSelected={w.id === selectedWorkspaceId}
-                onSelect={() => onSelectWorkspace(w.id === selectedWorkspaceId ? null : w.id)}
+                isSelected={w.selectionKey === selectedWorkspaceId}
+                onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
                 onPhaseChange={onPhaseChange}
-                status={workspaceStatusById[w.id]}
+                status={workspaceStatusById[w.selectionKey]}
               />
             ))}
           </div>

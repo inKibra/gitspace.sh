@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
 import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core';
-import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
+import { TailGhosttyTerminalRenderable } from './TailGhosttyTerminal.tui.js';
+import { getTailWindowOffset } from './session-terminal-tail-window.js';
 import { findUtf8Boundary } from '../utils/utf8.js';
 import { BracketedPasteModeTracker, wrapPaste } from './terminal-bracketed-paste.tui.js';
 import { toast } from '@opentui-ui/toast';
@@ -21,7 +22,7 @@ import {
   restoreKittyKeyboard,
 } from '../tui/kitty-keyboard.js';
 
-extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
+extend({ 'tail-ghostty-terminal': TailGhosttyTerminalRenderable });
 
 const COLORS = {
   statusBar: '#333333',
@@ -30,7 +31,7 @@ const COLORS = {
   detachHint: '#FFAA00',
 };
 
-const SCROLLBACK_LIMIT = 2_000;
+const TAIL_WINDOW_LIMIT = 250;
 const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
 const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
 
@@ -113,11 +114,10 @@ export function SessionTerminal({
   const [termSize, setTermSize] = useState(() =>
     getTerminalSize(reservedRows, reservedCols, reservedRowsExtra)
   );
-  const [initialData] = useState<Buffer>(() => Buffer.alloc(0));
+  const [initialData, setInitialData] = useState<Buffer>(() => Buffer.alloc(0));
 
-  const terminalRef = useRef<GhosttyTerminalRenderable | null>(null);
+  const terminalRef = useRef<TailGhosttyTerminalRenderable | null>(null);
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null);
-  const pendingPtyDataRef = useRef<Buffer[]>([]);
   const ptyUtf8BufferRef = useRef<Buffer>(Buffer.alloc(0));
   const followScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bracketedPasteRef = useRef(new BracketedPasteModeTracker());
@@ -165,6 +165,18 @@ export function SessionTerminal({
       return;
     }
 
+    const desiredOffset = getTailWindowOffset(terminal.totalLines, TAIL_WINDOW_LIMIT);
+    if (terminal.offset !== desiredOffset) {
+      terminal.offset = desiredOffset;
+      if (!followScrollTimeoutRef.current) {
+        followScrollTimeoutRef.current = setTimeout(() => {
+          followScrollTimeoutRef.current = null;
+          scrollToCursorIfFollowing();
+        }, 0);
+      }
+      return;
+    }
+
     let cursor: [number, number];
     try {
       cursor = terminal.getCursor();
@@ -175,10 +187,6 @@ export function SessionTerminal({
     const lineCount = terminal.lineCount ?? 0;
     if (lineCount <= 0) {
       return;
-    }
-
-    if (lineCount > SCROLLBACK_LIMIT) {
-      terminal.feed(Buffer.from('\x1b[3J'));
     }
 
     const cursorLine = Math.max(0, lineCount - terminal.rows + cursor[1]);
@@ -245,7 +253,7 @@ export function SessionTerminal({
     bracketedPasteRef.current.update(combined);
 
     if (!terminalRef.current) {
-      pendingPtyDataRef.current.push(combined);
+      setInitialData((previous) => (previous.length > 0 ? Buffer.concat([previous, combined]) : combined));
       return;
     }
 
@@ -257,22 +265,12 @@ export function SessionTerminal({
     setWriteCallback(feedChunk);
     return () => {
       setWriteCallback(null);
-      pendingPtyDataRef.current = [];
       ptyUtf8BufferRef.current = Buffer.alloc(0);
       setTerminalMounted(false);
+      setInitialData(Buffer.alloc(0));
     };
   }, [feedChunk, setWriteCallback]);
 
-  useEffect(() => {
-    if (!terminalMounted || !terminalRef.current || pendingPtyDataRef.current.length === 0) {
-      return;
-    }
-
-    const pending = Buffer.concat(pendingPtyDataRef.current);
-    pendingPtyDataRef.current = [];
-    terminalRef.current.feed(pending);
-    scheduleScrollFollow();
-  }, [scheduleScrollFollow, terminalMounted]);
 
   useEffect(() => {
     if (!terminalMounted) {
@@ -312,11 +310,11 @@ export function SessionTerminal({
       }
 
       if (isUiModeToggleSequence(sequence)) {
-        if (onShiftEsc) {
-          onShiftEsc();
-          return true;
-        }
         if (uiModeEnabledRef.current) {
+          if (onShiftEsc) {
+            onShiftEsc();
+            return true;
+          }
           forceDisableKeyboard();
         }
         setUiModeEnabled((prev) => !prev);
@@ -383,8 +381,12 @@ export function SessionTerminal({
     }
 
     if (key.shift && key.name === 'escape') {
-      forceDisableKeyboard();
-      setUiModeEnabled(false);
+      if (onShiftEsc) {
+        onShiftEsc();
+      } else {
+        forceDisableKeyboard();
+        setUiModeEnabled(false);
+      }
       return;
     }
 
@@ -467,8 +469,8 @@ export function SessionTerminal({
         stickyStart="bottom"
         onMouseUp={handleMouseUp}
       >
-        <ghostty-terminal
-          ref={(el: GhosttyTerminalRenderable | null) => {
+        <tail-ghostty-terminal
+          ref={(el: TailGhosttyTerminalRenderable | null) => {
             const wasNull = terminalRef.current === null;
             terminalRef.current = el;
             if (el && wasNull) {
@@ -480,6 +482,8 @@ export function SessionTerminal({
           cursorStyle="block"
           cols={termSize.cols}
           rows={termSize.rows}
+          limit={TAIL_WINDOW_LIMIT}
+          offset={0}
           ansi={initialData}
         />
       </scrollbox>

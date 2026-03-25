@@ -82,6 +82,7 @@ import type { OnboardingStep } from './types/bundle.js';
 export type { RelayDescriptor as RelayConfig } from './relay-client/index.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 import { useMultiBackends, LOCAL_BACKEND_KEY, type LocalSessionPtyBackend } from './machine/multi/useMultiBackends.js';
+import { toBackendScopedWorkspaceKey } from './machine/multi/types.js';
 import { createBunLocalSessionBackend, createBunRemoteSessionBackend } from './machine/local/createSessionBackend.bun.js';
 import { nodeRelaySocketAdapter } from './relay-client/index.js';
 import { createNodeRelaySigner } from './session/index.js';
@@ -95,6 +96,7 @@ import { ProcessStartCancelledError, isPortConflictError, promptToResolveProcess
 import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
 import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { buildEditProcessesCommand } from './lib/processes/editor.js';
+import { buildWorkspaceSessionCommand } from './session/workspace-shell-hooks.js';
 import { loadProcessesConfigWithDiagnostics } from './lib/processes/config.js';
 import {
   consumeLegacyCleanupReminderForTui,
@@ -105,6 +107,11 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 import { resolveLocalTerminalSyncAction, type AppView } from './tui/local-terminal-sync.js';
+import {
+  resolveAttachCancelledTransition,
+  resolveAttachErrorTransition,
+  resolveAttachSuccessTransition,
+} from './app/session/resolveAttachTransition.js';
 import {
   getKeyboardInputChunk,
   getNumericInputChunk,
@@ -333,6 +340,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const localInbox = localState?.inbox ?? [];
   const localInboxUnreadCount = localState?.inboxUnreadCount ?? 0;
   const localAttachedSessionId = localState?.attachedSessionId ?? null;
+  const localAttachedWorkspaceId = localState?.attachedWorkspaceId ?? null;
   const localAttachedSessionName = localState?.attachedSessionName ?? null;
   const localAttachedSessionMeta = localState?.attachedSessionMeta ?? null;
   const localScriptState = localState?.scriptState ?? null;
@@ -392,7 +400,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onSetWorkspacePhase: async (ref, phase) => {
       await multi.setWorkspaceStatus(ref, phase);
     },
-    resolveRefForWorkspaceId: (workspaceId) => ({ backendKey: LOCAL_BACKEND_KEY, workspaceId }),
   });
   const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
 
@@ -484,31 +491,45 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         }
       }
     },
-    onAttachSuccess: () => {
-      if (state.view === 'workspace-detail') {
-        return;
+    onAttachSuccess: ({ params }) => {
+      const transition = resolveAttachSuccessTransition({
+        view: state.view,
+        command: params.command,
+      });
+      if (transition.resetSessionSwitching) {
+        sessionSwitchingRef.current = false;
       }
-      dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      if (transition.nextView) {
+        dispatch({ type: 'SET_VIEW', view: transition.nextView });
+      }
     },
     onAttachCancelled: ({ target }) => {
-      if (target === 'workspace' && state.view === 'scripts') {
-        return;
+      const transition = resolveAttachCancelledTransition({
+        view: state.view,
+        target,
+      });
+      if (transition.resetSessionSwitching) {
+        sessionSwitchingRef.current = false;
       }
-      if (target === 'workspace' && state.view === 'workspace-detail') {
-        return;
+      if (transition.nextView) {
+        dispatch({ type: 'SET_VIEW', view: transition.nextView });
       }
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onAttachError: ({ target, message }) => {
-      const isWorkspaceScriptFailure = message.startsWith('Workspace scripts failed during');
-      const showScriptView = target === 'workspace';
-
-      if (!isWorkspaceScriptFailure || !showScriptView) {
-        dispatch({ type: 'SET_VIEW', view: 'projects' });
+      const transition = resolveAttachErrorTransition({
+        view: state.view,
+        target,
+        message,
+      });
+      if (transition.resetSessionSwitching) {
+        sessionSwitchingRef.current = false;
+      }
+      if (transition.nextView) {
+        dispatch({ type: 'SET_VIEW', view: transition.nextView });
       }
 
       flow.showMessage({
-        title: isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
+        title: transition.isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
         message,
         variant: 'error',
       });
@@ -524,7 +545,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     },
     onDeleteSuccess: async ({ target }) => {
       // Clean up stale selection and tab state for the deleted workspace
-      if (workspaceBoardState.selectedWorkspaceId === target.ref.workspaceId) {
+      if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
       workspaceController.clearSelectedRef();
@@ -687,6 +708,17 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       }
     });
   }, [attachLocal, localWorkspaces]);
+
+  const handleLaunchCommit = useCallback(async (workspaceId: string) => {
+    setIsViewOnlySession(false);
+    setAttachedAgentSession(null);
+    const commandSpec = buildWorkspaceSessionCommand(['commit']);
+    await attachLocal({
+      workspaceId,
+      command: commandSpec.command,
+      args: commandSpec.args,
+    });
+  }, [attachLocal]);
 
   const handleManageBundleConfig = useCallback(async ({ workspaceId }: { workspaceId: string }) => {
     await bundleConfigFlow.openBundleConfig({ backendKey: LOCAL_BACKEND_KEY, workspaceId });
@@ -1078,12 +1110,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         .filter((workspace) => workspace.projectName === currentProject)
         .map((workspace) => ({
           id: workspace.id,
+          selectionKey: workspace.selectionKey,
           name: workspace.name,
           path: workspace.path,
           projectName: workspace.projectName,
           branch: workspace.branch,
           phase: workspace.phase ?? ('code' as import('./types/config.js').WorkspacePhase),
-          sessionCount: workspaceRuntime.runtimeByWorkspace[workspace.id]?.sessions.length ?? 0,
+          sessionCount: workspaceRuntime.runtimeByWorkspace[workspace.selectionKey]?.sessions.length ?? 0,
           isStale: workspace.isStale,
           processes: workspace.processes,
           processConfigError: workspace.processConfigError,
@@ -1108,48 +1141,32 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     : [];
 
   const selectedWorkspaceForDetail = useMemo(() => {
-    if (!workspaceController.selectedRef || !workspaceController.workspace) {
+    const selectedRef = workspaceController.selectedRef;
+    if (!selectedRef) {
       return null;
     }
-    const workspace = workspaceRuntime.workspaces.find((item) => item.id === workspaceController.workspace!.id) ?? workspaceController.workspace;
+    const runtimeWorkspace = workspaceRuntime.workspaces.find(
+      (item) => item.selectionKey === toBackendScopedWorkspaceKey(selectedRef),
+    );
+    if (!runtimeWorkspace) {
+      return null;
+    }
     return {
-      id: workspace.id,
-      name: workspace.name,
-      path: workspace.path,
-      projectName: workspace.projectName,
-      branch: workspace.branch,
-      sessionCount: workspaceRuntime.runtimeByWorkspace[workspace.id]?.sessions.length ?? 0,
-      isStale: workspace.isStale,
-      processes: workspace.processes,
-      processConfigError: workspace.processConfigError,
-      serveDomain: workspace.serveDomain,
-      pullRequest: workspace.pullRequest,
-      linear: workspace.linear,
+      ...runtimeWorkspace,
+      sessionCount: workspaceRuntime.runtimeByWorkspace[runtimeWorkspace.selectionKey]?.sessions.length ?? 0,
     };
-  }, [workspaceController.selectedRef, workspaceController.workspace, workspaceRuntime]);
+  }, [workspaceController.selectedRef, workspaceRuntime]);
   const detailSessions = useMemo(
-    () => {
-      const workspaceId = workspaceController.selectedRef?.workspaceId;
-      if (!workspaceId) {
-        return [];
-      }
-      const byId = new Map<string, (typeof localSessions)[number]>();
-      for (const session of sessionInfos.filter((s) => s.workspaceId === workspaceId)) {
-        byId.set(session.id, session);
-      }
-      for (const session of localSessions.filter((s) => s.workspaceId === workspaceId || s.workspaceId.endsWith(`:${workspaceId}`))) {
-        byId.set(session.id, { ...(byId.get(session.id) ?? session), ...session });
-      }
-      return Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
-    },
-    [localSessions, sessionInfos, workspaceController.selectedRef]
+    () => selectedWorkspaceForDetail
+      ? workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.sessions ?? []
+      : [],
+    [selectedWorkspaceForDetail, workspaceRuntime.runtimeByWorkspace]
   );
   const detailReplays = useMemo(
-    () =>
-      workspaceController.selectedRef?.workspaceId
-        ? localReplays.filter((r) => (r as { workspaceId?: string }).workspaceId === workspaceController.selectedRef?.workspaceId)
-        : [],
-    [localReplays, workspaceController.selectedRef]
+    () => selectedWorkspaceForDetail
+      ? localReplays.filter((r) => (r as { workspaceId?: string }).workspaceId === selectedWorkspaceForDetail.id)
+      : [],
+    [localReplays, selectedWorkspaceForDetail]
   );
 
   // Agent inbox items — generated from useWorkspaceAgentEvents notifications
@@ -1537,20 +1554,28 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     () => COMMAND_PALETTE_COMMAND_DEFS.map((d) => ({ id: d.id, label: d.label, shortcut: d.shortcut })),
     []
   );
-  const selectedWorkspaceForCommands = resolveSelectedWorkspace({
-    selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
-    selectedDetailWorkspaceId: selectedWorkspaceForDetail?.id ?? null,
-    selectedBrowserWorkspaceId:
-      spacesBrowserProps.selectedItem?.type === 'workspace'
-        ? spacesBrowserProps.selectedItem.workspace.id
-        : null,
-    workspaces: workspaceInfos,
-  });
+  const selectedWorkspaceForCommands = useMemo(() => {
+    if (workspaceBoardState.selectedWorkspaceId) {
+      return allWorkspaceEntries.find(
+        (workspace) => workspace.selectionKey === workspaceBoardState.selectedWorkspaceId,
+      ) ?? null;
+    }
+    if (selectedWorkspaceForDetail) {
+      return allWorkspaceEntries.find(
+        (workspace) => workspace.selectionKey === selectedWorkspaceForDetail.selectionKey,
+      ) ?? null;
+    }
+    const selectedBrowserItem = spacesBrowserProps.selectedItem;
+    if (selectedBrowserItem && selectedBrowserItem.type === 'workspace') {
+      return allWorkspaceEntries.find(
+        (workspace) => workspace.id === selectedBrowserItem.workspace.id && workspace.backendKey === LOCAL_BACKEND_KEY,
+      ) ?? null;
+    }
+    return null;
+  }, [allWorkspaceEntries, selectedWorkspaceForDetail, spacesBrowserProps.selectedItem, workspaceBoardState.selectedWorkspaceId]);
+
   const selectedProjectForCommands = resolveSelectedProjectName({ selectedProjectName: selectedWorkspaceProjectName });
-  const selectedWorkspaceForPmActions = useMemo(
-    () => allWorkspaceEntries.find((workspace) => workspace.id === selectedWorkspaceForCommands?.id) ?? null,
-    [allWorkspaceEntries, selectedWorkspaceForCommands?.id],
-  );
+  const selectedWorkspaceForPmActions = selectedWorkspaceForCommands;
   const handleCommandPaletteSelect = useCallback(
     (id: string) => {
       executeCommandPaletteAction({
@@ -2261,7 +2286,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             : focusedLaneIndex + 1;
         setFocusedLaneIndex(nextIndex);
         handleBoardSelectWorkspace(
-          workspaceBoardState.groups[nextIndex]?.workspaces[0]?.id ?? null
+          workspaceBoardState.groups[nextIndex]?.workspaces[0]?.selectionKey ?? null
         );
       };
 
@@ -2287,7 +2312,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         const moveLaneSelection = (delta: number) => {
           if (laneWorkspaces.length === 0) return;
           const currentIndex = laneWorkspaces.findIndex(
-            (w) => w.id === workspaceBoardState.selectedWorkspaceId
+            (w) => w.selectionKey === workspaceBoardState.selectedWorkspaceId
           );
           const nextIndex =
             currentIndex < 0
@@ -2295,7 +2320,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
                 ? 0
                 : laneWorkspaces.length - 1
               : Math.max(0, Math.min(laneWorkspaces.length - 1, currentIndex + delta));
-          handleBoardSelectWorkspace(laneWorkspaces[nextIndex]?.id ?? null);
+          handleBoardSelectWorkspace(laneWorkspaces[nextIndex]?.selectionKey ?? null);
         };
         const command = resolveSessionBrowserCommand({
           name: key.name,
@@ -2307,9 +2332,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         if (key.shift && (key.name === 'left' || key.name === 'right')) {
           const selectedId = workspaceBoardState.selectedWorkspaceId;
           if (selectedId) {
-            const entry = laneWorkspaces.find((w) => w.id === selectedId);
+            const entry = laneWorkspaces.find((w) => w.selectionKey === selectedId);
             if (entry) {
-              workspaceBoardState.startMoving(entry.id, entry.phase);
+              workspaceBoardState.startMoving(entry.selectionKey, entry.phase);
               // Immediately shift in the pressed direction
               workspaceBoardState.shiftMovingTarget(key.name === 'left' ? -1 : 1);
             }
@@ -2324,13 +2349,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         } else if (command === 'activate') {
           if (laneWorkspaces.length > 0) {
             const currentIndex = laneWorkspaces.findIndex(
-              (w) => w.id === workspaceBoardState.selectedWorkspaceId
+              (w) => w.selectionKey === workspaceBoardState.selectedWorkspaceId
             );
-            const targetId =
+            const targetEntry =
               currentIndex >= 0
-                ? laneWorkspaces[currentIndex].id
-                : laneWorkspaces[0].id;
-            handleBoardSelectWorkspace(targetId);
+                ? laneWorkspaces[currentIndex]
+                : laneWorkspaces[0];
+            handleBoardSelectWorkspace(targetEntry?.selectionKey ?? null);
             // Always navigate to workspace-detail; sessions are managed
             // from the sidebar once the workspace detail view is open.
             dispatch({ type: 'SET_VIEW', view: 'workspace-detail' });
@@ -2343,15 +2368,21 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           // Requires a workspace to be selected on the board
           const selectedId = workspaceBoardState.selectedWorkspaceId;
           if (selectedId) {
-            await handleManageBundleConfig({ workspaceId: selectedId });
+            const entry = laneWorkspaces.find((w) => w.selectionKey === selectedId);
+            if (entry) {
+              await handleManageBundleConfig({ workspaceId: entry.id });
+            }
           }
         } else if (command === 'delete') {
           // Requires a workspace to be selected on the board
           const selectedId = workspaceBoardState.selectedWorkspaceId;
           if (selectedId) {
-            const workspace = workspaceInfos.find((item) => item.id === selectedId);
-            if (workspace) {
-              handleDeleteWorkspace(workspace);
+            const entry = laneWorkspaces.find((w) => w.selectionKey === selectedId);
+            if (entry) {
+              const workspace = workspaceInfos.find((item) => item.id === entry.id);
+              if (workspace) {
+                handleDeleteWorkspace(workspace);
+              }
             }
           }
         } else if (command === 'refresh') {
@@ -2577,9 +2608,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           workspace={selectedWorkspaceForDetail}
           sessions={detailSessions}
           replays={detailReplays}
-          agentSessions={agentSessionsByWorkspace[selectedWorkspaceForDetail.id]}
-          agentSessionCount={agentSessionCounts[selectedWorkspaceForDetail.id]}
-          pendingPermissions={pendingPermissionsByWorkspace[selectedWorkspaceForDetail.id]}
+          agentSessions={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessions ?? []}
+          agentSessionCount={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0}
+          pendingPermissions={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0}
            onAttachSession={handleAttachSession}
            onOpenReplay={handleOpenReplay}
            onOpenReplayHistory={handleOpenReplayHistory}
@@ -2590,6 +2621,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           onManageBundleConfig={handleManageBundleConfig}
           onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
           onOpenReview={handleOpenReview}
+          onLaunchCommit={handleLaunchCommit}
           onOpenEvents={handleOpenEvents}
           onOpenAgentSession={handleOpenAgentSession}
           onCreateAgentSession={handleCreateAgentSession}
@@ -2600,7 +2632,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           onChangeStatus={(wid, phase) => workspaceBoardState.setPhase(wid, phase)}
           allWorkspaces={allWorkspaceEntries}
           workspaceStatusById={workspaceStatusById}
-          runtime={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.id] ?? null}
+          runtime={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null}
           onSelectWorkspace={(workspaceId) => handleBoardSelectWorkspace(workspaceId)}
           onAbortAgentSession={handleAbortAgentSession}
           onCloseAgentSession={handleCloseAgentSession}
@@ -2609,6 +2641,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           flow={flow}
           terminalBindings={{
              attachedSessionId: localAttachedSessionId,
+             attachedWorkspaceId: localAttachedWorkspaceId,
              attachedAgentSessionId: attachedAgentSession?.sessionId ?? null,
              attachedSessionName: localAttachedSessionName,
              attachedSessionMeta: localAttachedSessionMeta,
@@ -2617,7 +2650,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             onDetach: handleTerminalDetach,
             setWriteCallback: setLocalWriteCallback,
             modalOpen: flow.isOpen,
-            readOnly: isViewOnlySession,
+            readOnly: isViewOnlySession || localSessionMode !== 'attached',
           }}
           scriptBindings={{
             workspaceId: lastScriptWorkspaceIdRef.current,

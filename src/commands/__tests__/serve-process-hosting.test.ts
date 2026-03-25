@@ -26,7 +26,7 @@ describe("process hosting helpers", () => {
       "web"
     );
 
-    expect(hostname).toBe("my-workspace-web-api-2-web.brad.serve.gitspace.sh");
+    expect(hostname).toBe('w-my-workspace-p-web-api-i-2-o-web.brad.serve.gitspace.sh');
   });
 
   test("buildServeIngressConfig adds fallback", () => {
@@ -67,5 +67,24 @@ describe("process hosting helpers", () => {
       subdomain: 'brad',
       createdAt: Date.now(),
     })).toBe('wss://brad.gitspace.sh/ws');
+  });
+
+  test('buildProcessHostname preserves field-boundary uniqueness', () => {
+    const first = buildProcessHostname(
+      'brad.serve.gitspace.sh',
+      'alpha-beta',
+      'api',
+      1,
+      'web',
+    );
+    const second = buildProcessHostname(
+      'brad.serve.gitspace.sh',
+      'alpha',
+      'beta-api',
+      1,
+      'web',
+    );
+
+    expect(first).not.toBe(second);
   });
 });

@@ -67,8 +67,11 @@ function normalizeHostingBaseHost(input: string): string {
   if (!trimmed) {
     throw new Error('Hosting route cannot be empty');
   }
-  if (trimmed.endsWith('.gitspace.sh')) {
+  if (trimmed.endsWith('.serve.gitspace.sh')) {
     return trimmed;
+  }
+  if (trimmed.endsWith('.gitspace.sh')) {
+    throw new Error('Hosting route must use a .serve.gitspace.sh hostname');
   }
   if (trimmed.endsWith('.serve')) {
     return `${trimmed}.gitspace.sh`;
@@ -176,7 +179,12 @@ export async function stopTmux(options: { force?: boolean; sandbox?: string } = 
   await stopTmuxHosting();
   await killServer();
   logger.success("tmux-lite server stopped");
+  const hostingState = readTmuxHostingState();
+  if (hostingState?.enabled) {
+    logger.dim(`tmux-lite hosting remains enabled for ${hostingState.baseHost ?? 'the selected route'}`);
+  }
 }
+
 
 /**
  * Show tmux-lite server status
@@ -310,12 +318,13 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
       return;
     }
     if (!process.stdout.isTTY || !process.stdin.isTTY) {
-      selectedBaseHost = `${subdomains[0]}.gitspace.sh`;
+      selectedBaseHost = `${subdomains[0]}.serve.gitspace.sh`;
     } else {
       const selected = await selectOne(
         subdomains.map((subdomain) => ({
-          label: `${subdomain}.gitspace.sh`,
-          value: `${subdomain}.gitspace.sh`,
+          label: `${subdomain}.serve.gitspace.sh`,
+          value: `${subdomain}.serve.gitspace.sh`,
+          description: `${subdomain}.gitspace.sh remains the root host; tmux hosting uses the .serve subdomain.`,
         })),
         'Select a tmux-lite hosting route'
       );
@@ -327,7 +336,8 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
     }
   }
 
-  const state = writeTmuxHostingState({ baseHost: normalizeHostingBaseHost(selectedBaseHost), enabled: true });
+  const normalizedBaseHost = normalizeHostingBaseHost(selectedBaseHost);
+  const state = writeTmuxHostingState({ baseHost: normalizedBaseHost, enabled: true });
   const refreshed = await refreshTmuxHosting();
   logger.success(`tmux-lite hosting route selected: ${state.baseHost}`);
   logger.log(`  Machine name: ${state.machineName}`);

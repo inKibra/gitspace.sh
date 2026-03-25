@@ -1,5 +1,10 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
-import { defaultAgentEventManager, type AgentStateUpdateDelta, type WorkspaceAgentState } from './agent-event-manager.js';
+import {
+  defaultAgentEventManager,
+  type AgentStateUpdateDelta,
+  type ExternalSessionRuntimeState,
+  type WorkspaceAgentState,
+} from './agent-event-manager.js';
 import { getArchivedSessions } from '../../agents/agent-db.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
@@ -10,6 +15,31 @@ export type AgentSessionSummary = PiAgentSessionSummary;
 
 let initializePromise: Promise<void> | null = null;
 let scanWorkspacesCache: WorkspaceInfo[] = [];
+
+
+function extractPiMessagePreview(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const candidate = payload as {
+    assistantMessageEvent?: { type?: string; delta?: string };
+    message?: { content?: unknown };
+  };
+  if (candidate.assistantMessageEvent?.type === 'text_delta' && typeof candidate.assistantMessageEvent.delta === 'string') {
+    return candidate.assistantMessageEvent.delta;
+  }
+  const content = candidate.message?.content;
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    const textPart = content.find((part) => typeof part === 'object' && part !== null && (part as { type?: unknown }).type === 'text');
+    if (textPart && typeof (textPart as { text?: unknown }).text === 'string') {
+      return (textPart as { text: string }).text;
+    }
+  }
+  return null;
+}
 
 export async function syncKnownWorkspaces(): Promise<void> {
   const workspaces = await scanWorkspaces();
@@ -28,7 +58,29 @@ export function ensureAgentControlInitialized(): Promise<void> {
       // Pi is in-process — no runtime server to start.
       // Skip defaultAgentEventManager.initialize() which tries to connect
       // to OpenCode's SSE stream. Instead, seed sessions from Pi's session
-      // files on disk for each known workspace.
+      // files on disk for each known workspace and mirror live Pi session
+      // events into the shared snapshot model.
+      defaultPiCoordinator.setEventHandler((target, event) => {
+        switch (event.type) {
+          case 'status':
+            if (event.payload && typeof event.payload === 'object' && (event.payload as { type?: unknown }).type === 'busy') {
+              defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'busy' });
+            } else {
+              defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'idle' });
+            }
+            break;
+          case 'message': {
+            const preview = extractPiMessagePreview(event.payload);
+            if (preview) {
+              defaultAgentEventManager.setExternalLastMessage(target.workspaceId, event.sessionId, preview);
+            }
+            break;
+          }
+          case 'error':
+            defaultAgentEventManager.setExternalError(target.workspaceId, event.sessionId, event.error);
+            break;
+        }
+      });
       await syncKnownWorkspaces();
       await seedPiSessions();
     })().catch((error) => {
@@ -76,6 +128,14 @@ export function subscribeAgentControl(handler: (delta: AgentStateUpdateDelta) =>
 
 export function getAgentControlSnapshot(): Record<string, WorkspaceAgentState> {
   return defaultAgentEventManager.getSnapshot();
+}
+
+export function applyPiRuntimeUpdate(
+  workspaceId: string,
+  sessionId: string,
+  runtime: ExternalSessionRuntimeState,
+): void {
+  defaultAgentEventManager.syncExternalRuntimeState(workspaceId, sessionId, runtime);
 }
 
 /**
@@ -138,9 +198,23 @@ export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promi
 export async function createAgentSession(target: AgentWorkspaceTarget, title?: string): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
+  const previousIds = new Set(
+    (defaultAgentEventManager.getSnapshot()[target.workspaceId]?.sessions ?? []).map((session) => session.id),
+  );
   const sessions = await defaultPiCoordinator.createAgentSession(target, title);
   defaultAgentEventManager.syncKnownSessions(target.workspaceId, sessions);
+  for (const session of sessions) {
+    if (!previousIds.has(session.id)) {
+      defaultAgentEventManager.markSessionOpen(target.workspaceId, session.id);
+    }
+  }
   return sessions;
+}
+
+export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string): Promise<void> {
+  await ensureAgentControlInitialized();
+  defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
+  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text);
 }
 
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {

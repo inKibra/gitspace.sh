@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
+import { buildWorkspaceSessionCommand, buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
 
 describe('buildWorkspaceSessionHooks', () => {
   it('injects workspace environment context', () => {
@@ -30,5 +30,14 @@ describe('buildWorkspaceSessionHooks', () => {
 
     expect(hooks.shellInit?.bash).toBe(expected);
     expect(hooks.shellInit?.zsh).toBe(expected);
+  });
+});
+
+describe('buildWorkspaceSessionCommand', () => {
+  it('reuses the current launcher strategy for workspace commands', () => {
+    expect(buildWorkspaceSessionCommand(['commit'], ['bun', '/tmp/dev repo/src/index.ts'])).toEqual({
+      command: 'bun',
+      args: ['/tmp/dev repo/src/index.ts', 'space', 'commit'],
+    });
   });
 });

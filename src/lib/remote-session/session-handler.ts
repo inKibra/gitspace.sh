@@ -723,8 +723,14 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       console.error("[remote-session] Failed to attach session:", e);
-      const detail = e instanceof Error ? e.message : String(e);
-      await this.sendError(session, sendResponse, "ATTACH_FAILED", `Failed to attach to session: ${detail}`);
+      const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+      const detail = typedError?.message ?? String(e);
+      await this.sendError(
+        session,
+        sendResponse,
+        typedError?.code ?? "ATTACH_FAILED",
+        `Failed to attach to session: ${detail}`
+      );
     }
   }
 
@@ -766,8 +772,9 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       console.error("[remote-session] Failed to delete workspace:", e);
-      const message = e instanceof Error ? e.message : String(e);
-      await this.sendError(session, sendResponse, "DELETE_FAILED", message, {
+      const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+      const message = typedError?.message ?? String(e);
+      await this.sendError(session, sendResponse, typedError?.code ?? "DELETE_FAILED", message, {
         workspaceId: canonicalWorkspaceId,
       });
     }

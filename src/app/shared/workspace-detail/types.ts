@@ -25,6 +25,7 @@ export interface WorkspaceDetailModelInput {
     onEditProcesses?: (params: { workspaceId: string }) => void;
     onOpenReview?: (workspaceId: string) => void | Promise<void>;
     onOpenGitHubPullRequest?: (workspaceId: string) => void | Promise<void>;
+    onLaunchCommit?: (workspaceId: string) => void | Promise<void>;
     onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
     onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
@@ -112,7 +113,7 @@ export interface WorkspaceDetailModel {
     actionable?: boolean;
   }>;
   footerActions: Array<{
-    id: 'open-github-pr' | 'open-review' | 'edit-bundle-config' | 'edit-process-config' | 'change-status';
+    id: 'open-github-pr' | 'open-review' | 'launch-commit' | 'edit-bundle-config' | 'edit-process-config' | 'change-status';
     label: string;
     rightLabel?: string;
   }>;
@@ -124,7 +125,7 @@ export interface WorkspaceDetailModel {
     openReplay: (replayId: string) => void | Promise<void>;
     openReplayHistory: () => void | Promise<void>;
     activateService: (processName: string, instance: number, state: 'running' | 'stopped' | 'failed' | 'disabled') => void | Promise<void>;
-    footerAction: (id: 'open-github-pr' | 'open-review' | 'edit-bundle-config' | 'edit-process-config' | 'change-status') => void | Promise<void>;
+    footerAction: (id: 'open-github-pr' | 'open-review' | 'launch-commit' | 'edit-bundle-config' | 'edit-process-config' | 'change-status') => void | Promise<void>;
     openAgentSession: (agentSessionId: string) => void | Promise<void>;
     createAgentSession: () => void | Promise<void>;
     abortAgentSession: (agentSessionId: string) => void | Promise<void>;

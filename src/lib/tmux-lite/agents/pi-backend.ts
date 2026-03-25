@@ -1,7 +1,4 @@
-import {
-  createAgentSession,
-  type AgentSession,
-} from '@oh-my-pi/pi-coding-agent';
+import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
 import type {
   AgentBackend,
   AgentBackendStatus,
@@ -12,6 +9,11 @@ import type {
   AgentWorkspaceTarget,
   CreateAgentSessionInput,
 } from '../../../agents/backend.js';
+import {
+  createPiSessionManager,
+  getGitspacePiExtensionPaths,
+  persistInitialPiSessionModel,
+} from './pi-runtime.js';
 import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 
 class PiSessionHandle implements AgentSessionHandle {
@@ -38,19 +40,18 @@ class PiSessionHandle implements AgentSessionHandle {
             payload: piEvent,
           });
           break;
-        case 'tool_execution_start':
-        case 'tool_execution_end':
+        case 'agent_start':
           handler({
             type: 'status',
             sessionId: this.summary.id,
-            payload: piEvent,
+            payload: { type: 'busy', event: piEvent },
           });
           break;
         case 'agent_end':
           handler({
             type: 'status',
             sessionId: this.summary.id,
-            payload: { type: 'idle' },
+            payload: { type: 'idle', event: piEvent },
           });
           break;
       }
@@ -115,15 +116,19 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    // Set env before creating session so Pi writes to our managed dir
-    process.env.PI_CODING_AGENT_DIR = require('./pi-runtime.js').getPiAgentDir();
-
-    const { SessionManager } = await import('@oh-my-pi/pi-coding-agent');
-    const sessionManager = SessionManager.create(cwd);
+    const { createAgentSession } = await import('@oh-my-pi/pi-coding-agent');
+    const { agentDir, sessionManager } = await createPiSessionManager(cwd);
     const { session } = await createAgentSession({
+      agentDir,
       sessionManager,
       cwd,
+      additionalExtensionPaths: getGitspacePiExtensionPaths(),
     });
+    if (input.title) {
+      await sessionManager.setSessionName(input.title);
+    }
+    await persistInitialPiSessionModel(session);
+    await sessionManager.rewriteEntries();
 
     const sessionId = session.sessionId;
     this.activeSessions.set(sessionId, session);
@@ -158,23 +163,9 @@ export class PiBackend implements AgentBackend {
       throw new Error(`Pi session ${sessionId} not found in ${cwd}`);
     }
 
-    process.env.PI_CODING_AGENT_DIR = require('./pi-runtime.js').getPiAgentDir();
-
-    const { SessionManager } = await import('@oh-my-pi/pi-coding-agent');
-    const sessionManager = await SessionManager.open(match.path);
-    const { session } = await createAgentSession({
-      sessionManager,
-      cwd,
-    });
-
-    this.activeSessions.set(sessionId, session);
-
-    return new PiSessionHandle(
-      toSummary(target, {
-        id: sessionId,
-        title: match.title ?? match.firstMessage ?? undefined,
-      }),
-      session,
+    throw new Error(
+      `Pi session '${sessionId}' exists on disk but is not active in this process. ` +
+      `Refusing to open a new unrelated conversation for that ID.`,
     );
   }
 

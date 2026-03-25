@@ -276,6 +276,7 @@ export async function executeLocalReviewOperation(
     }
 
     case 'approve_path': {
+      const hunkKey = (filePath: string, hunkHeader: string) => `${filePath}@@${normalizeHunkHeader(hunkHeader)}`;
       const workspace = await resolveWorkspaceByName(
         operation.projectName,
         operation.workspaceName,
@@ -289,6 +290,12 @@ export async function executeLocalReviewOperation(
           : file.filePath === operation.path
       ));
 
+      const existingApprovedHunks = new Set(
+        getThreads(workspace.path, workspace.id, workspace.baseBranch)
+          .filter((thread) => thread.target.kind === 'hunk' && thread.decision === 'approved')
+          .map((thread) => hunkKey(thread.target.file, thread.target.hunkHeader)),
+      );
+
       let approvedCount = 0;
       for (const file of matchingFiles) {
         const fileDiff = await getWorkspaceFileDiff(
@@ -299,6 +306,10 @@ export async function executeLocalReviewOperation(
         );
         const headers = extractHunkHeaders(fileDiff.diff);
         for (const hunkHeader of headers) {
+          const key = hunkKey(file.filePath, hunkHeader);
+          if (existingApprovedHunks.has(key)) {
+            continue;
+          }
           await approveHunk(
             workspace.path,
             workspace.id,
@@ -311,6 +322,7 @@ export async function executeLocalReviewOperation(
             undefined,
             writeOptions
           );
+          existingApprovedHunks.add(key);
           approvedCount += 1;
         }
       }

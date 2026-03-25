@@ -267,7 +267,7 @@ export function KanbanBoardTUI({
 
   // Find the workspace entry for the ghost card
   const movingEntry = moving
-    ? groups.flatMap((g) => g.workspaces).find((w) => w.id === moving.workspaceId) ?? null
+    ? groups.flatMap((g) => g.workspaces).find((w) => w.selectionKey === moving.workspaceKey) ?? null
     : null;
 
   return (
@@ -322,19 +322,19 @@ export function KanbanBoardTUI({
                     entry={movingEntry}
                     isSelected={false}
                     onSelect={() => {}}
-                    status={workspaceStatusById[movingEntry.id]}
+                    status={workspaceStatusById[movingEntry.selectionKey]}
                     machineLabel={machineLabel}
                     ghost={true}
                   />
                 )}
                 {group.workspaces.map((w: KanbanWorkspaceItem) => {
                   // Hide the card in its origin lane when in moving mode
-                  const isBeingMoved = moving && w.id === moving.workspaceId;
+                  const isBeingMoved = moving && w.selectionKey === moving.workspaceKey;
                   if (isBeingMoved && moving.targetPhase !== moving.originPhase) {
                     // Show a dimmed placeholder in the origin lane
                     return (
                       <box
-                        key={w.id}
+                        key={w.selectionKey}
                         marginBottom={1}
                         borderStyle="single"
                         borderColor={COLORS.ghostBorder}
@@ -347,11 +347,11 @@ export function KanbanBoardTUI({
                   }
                   return (
                     <WorkspaceCard
-                      key={w.id}
+                      key={w.selectionKey}
                       entry={w}
-                      isSelected={w.id === selectedWorkspaceId}
-                      onSelect={() => onSelectWorkspace(w.id === selectedWorkspaceId ? null : w.id)}
-                      status={workspaceStatusById[w.id]}
+                      isSelected={w.selectionKey === selectedWorkspaceId}
+                      onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
+                      status={workspaceStatusById[w.selectionKey]}
                       machineLabel={w.isRemote ? w.machineLabel : undefined}
                     />
                   );

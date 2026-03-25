@@ -175,9 +175,9 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
 
     try {
       const mnemonic = await decryptLegacyMnemonic(pinValue);
-      clearLegacyMnemonicStorage();
-      // Migrate: create device identity using the recovered mnemonic
+      // Migrate only after the new device identity is durably stored.
       await createDeviceIdentityFromMnemonic(mnemonic, pinValue);
+      clearLegacyMnemonicStorage();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Migration failed');
       setPinValue('');
