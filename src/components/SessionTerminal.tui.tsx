@@ -35,6 +35,11 @@ const TAIL_WINDOW_LIMIT = 250;
 const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
 const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
 
+const RENDER_BATCH_DELAY_MS = 24;
+const RENDER_BURST_GAP_MS = 12;
+const RENDER_BURST_CHUNK_BYTES = 512;
+const RENDER_BATCH_FORCE_FLUSH_BYTES = 8 * 1024;
+
 function isUiModeToggleSequence(sequence: string): boolean {
   return SHIFT_ESCAPE_SEQUENCES.has(sequence);
 }
@@ -119,6 +124,9 @@ export function SessionTerminal({
   const terminalRef = useRef<TailGhosttyTerminalRenderable | null>(null);
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null);
   const ptyUtf8BufferRef = useRef<Buffer>(Buffer.alloc(0));
+  const renderBatchBufferRef = useRef<Buffer>(Buffer.alloc(0));
+  const renderBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRenderFlushAtRef = useRef(0);
   const followScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bracketedPasteRef = useRef(new BracketedPasteModeTracker());
   const textEncoderRef = useRef(new TextEncoder());
@@ -229,6 +237,57 @@ export function SessionTerminal({
     renderer.clearSelection();
   }, [renderer]);
 
+  const flushRenderBatch = useCallback(() => {
+    const terminal = terminalRef.current;
+    const buffered = renderBatchBufferRef.current;
+    renderBatchBufferRef.current = Buffer.alloc(0);
+    if (renderBatchTimerRef.current) {
+      clearTimeout(renderBatchTimerRef.current);
+      renderBatchTimerRef.current = null;
+    }
+    if (!terminal || buffered.length === 0) {
+      return;
+    }
+    terminal.feed(buffered);
+    lastRenderFlushAtRef.current = Date.now();
+    scheduleScrollFollow();
+  }, [scheduleScrollFollow]);
+
+  const enqueueRenderChunk = useCallback((chunk: Buffer) => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      setInitialData((previous) => (previous.length > 0 ? Buffer.concat([previous, chunk]) : chunk));
+      return;
+    }
+
+    const now = Date.now();
+    const shouldBatch = chunk.length >= RENDER_BURST_CHUNK_BYTES
+      || (now - lastRenderFlushAtRef.current) <= RENDER_BURST_GAP_MS
+      || renderBatchBufferRef.current.length > 0;
+
+    if (!shouldBatch) {
+      terminal.feed(chunk);
+      lastRenderFlushAtRef.current = now;
+      scheduleScrollFollow();
+      return;
+    }
+
+    renderBatchBufferRef.current = renderBatchBufferRef.current.length > 0
+      ? Buffer.concat([renderBatchBufferRef.current, chunk])
+      : chunk;
+
+    if (renderBatchBufferRef.current.length >= RENDER_BATCH_FORCE_FLUSH_BYTES) {
+      flushRenderBatch();
+      return;
+    }
+
+    if (!renderBatchTimerRef.current) {
+      renderBatchTimerRef.current = setTimeout(() => {
+        flushRenderBatch();
+      }, RENDER_BATCH_DELAY_MS);
+    }
+  }, [flushRenderBatch, scheduleScrollFollow]);
+
   const feedChunk = useCallback((chunk: Uint8Array) => {
     const incoming = Buffer.from(chunk);
 
@@ -257,15 +316,19 @@ export function SessionTerminal({
       return;
     }
 
-    terminalRef.current.feed(combined);
-    scheduleScrollFollow();
-  }, [scheduleScrollFollow]);
+    enqueueRenderChunk(combined);
+  }, [enqueueRenderChunk]);
 
   useEffect(() => {
     setWriteCallback(feedChunk);
     return () => {
       setWriteCallback(null);
       ptyUtf8BufferRef.current = Buffer.alloc(0);
+      renderBatchBufferRef.current = Buffer.alloc(0);
+      if (renderBatchTimerRef.current) {
+        clearTimeout(renderBatchTimerRef.current);
+        renderBatchTimerRef.current = null;
+      }
       setTerminalMounted(false);
       setInitialData(Buffer.alloc(0));
     };
@@ -278,6 +341,13 @@ export function SessionTerminal({
     }
     scheduleScrollFollow();
   }, [initialData, scheduleScrollFollow, terminalMounted]);
+
+  useEffect(() => {
+    if (!terminalMounted) {
+      return;
+    }
+    flushRenderBatch();
+  }, [flushRenderBatch, terminalMounted]);
 
   useEffect(() => {
     const { cols, rows } = getTerminalSize(reservedRows, reservedCols, reservedRowsExtra);
