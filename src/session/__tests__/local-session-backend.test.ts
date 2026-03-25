@@ -506,12 +506,13 @@ describe('LocalSessionBackend', () => {
       config: notificationConfig,
     });
 
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'attached',
       sessionId: 'sess-new',
       sessionName: 'alpha:ws-1:2',
       viewOnly: false,
-    });
+      workspaceId: 'alpha:ws-1',
+    }));
 
     const scriptStreamChunks = events
       .filter((event): event is Extract<BackendEvent, { type: 'script_output' }> =>
@@ -654,7 +655,7 @@ describe('LocalSessionBackend', () => {
     expect(sentControls).toContainEqual({ type: 'resize', cols: 100, rows: 30 });
     expect(sentControls).toContainEqual({ type: 'detach' });
     expect(sentPty).toEqual([new Uint8Array([0x41])]);
-    expect(events).toContainEqual({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1', viewOnly: false });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1', viewOnly: false, workspaceId: 'alpha:ws-1' }));
     expect(events).toContainEqual({ type: 'detached' });
   });
 
@@ -1011,12 +1012,13 @@ describe('LocalSessionBackend', () => {
     const detachedEvents = events.filter((event) => event.type === 'detached');
 
     expect(attachedEvents).toEqual([
-      {
+      expect.objectContaining({
         type: 'attached',
         sessionId: 'sess-1',
         sessionName: 'alpha:ws-1:1',
         viewOnly: false,
-      },
+        workspaceId: 'alpha:ws-1',
+      }),
     ]);
     expect(detachedEvents).toEqual([{ type: 'detached' }]);
   });
@@ -1094,12 +1096,13 @@ describe('LocalSessionBackend', () => {
     await backend.attachSession({ sessionId: 'sess-1' });
 
     expect(connectAttempts).toBe(2);
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'attached',
       sessionId: 'sess-1',
       sessionName: 'alpha:ws-1:1',
       viewOnly: false,
-    });
+      workspaceId: 'alpha:ws-1',
+    }));
   });
 
   it('fails fast when attaching to an exited session', async () => {
@@ -1657,8 +1660,9 @@ describe('LocalSessionBackend', () => {
     });
   });
 
-  it('attaches agent sessions through the shared tmux session from the coordinator', async () => {
-    const ensureAgentTerminalSession = mock(async () => ({
+  it('refreshes machine state before attaching a newly created agent session terminal', async () => {
+    const events: BackendEvent[] = [];
+    const agentTerminalSession = {
       id: 'tmux-agent-1',
       name: 'agent:ws-1:abcd1234',
       socketPath: '/tmp/socket-agent',
@@ -1669,34 +1673,34 @@ describe('LocalSessionBackend', () => {
       kind: 'agent' as const,
       hidden: true,
       metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
-    }));
+    };
+    const ensureAgentTerminalSession = mock(async () => agentTerminalSession);
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      branch: 'main',
+      sessionCount: 0,
+      isStale: false,
+    };
+    const staleSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [],
+    });
+    const refreshedSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [agentTerminalSession],
+    });
+    const snapshots = [staleSnapshot, refreshedSnapshot];
+    const getMachineSnapshot = mock(async () => snapshots.shift() ?? refreshedSnapshot);
+
     const deps: Partial<LocalSessionBackendDependencies> = {
       ensureServer: async () => {},
-      scanWorkspaces: async () => [
-        {
-          id: 'ws-1',
-          name: 'ws-1',
-          path: '/tmp/ws-1',
-          projectName: 'alpha',
-          branch: 'main',
-          sessionCount: 0,
-          isStale: false,
-        },
-      ],
-      listSessions: async () => [
-        {
-          id: 'tmux-agent-1',
-          name: 'agent:ws-1:abcd1234',
-          socketPath: '/tmp/socket-agent',
-          pid: 999,
-          attached: false,
-          cwd: '/tmp/ws-1',
-          createdAt: 10,
-          kind: 'agent',
-          hidden: true,
-          metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
-        },
-      ],
+      getMachineSnapshot,
+      watchMachineEvents: async () => () => {},
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [agentTerminalSession],
       connectSessionSocket: async (_socketPath, handlers) => ({
         sendControl: (control) => {
           if (control.type === 'attach-init') {
@@ -1718,11 +1722,22 @@ describe('LocalSessionBackend', () => {
         respondToPermission: mock(async () => true),
       },
     });
+    backend.onEvent((event) => events.push(event));
+
+    await backend.connect();
     await backend.attachAgentSession('alpha:ws-1', 'agent-ses-1');
 
+    expect(getMachineSnapshot).toHaveBeenCalledTimes(2);
     expect(ensureAgentTerminalSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: 'alpha:ws-1', workspacePath: '/tmp/ws-1' }),
       'agent-ses-1',
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'attached',
+        sessionId: 'tmux-agent-1',
+        workspaceId: 'alpha:ws-1',
+      }),
     );
   });
 });

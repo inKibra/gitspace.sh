@@ -791,6 +791,7 @@ export class LocalSessionBackend implements SessionBackend {
     this.viewOnly = params.viewOnly ?? false;
 
     let targetSession: TmuxSession | null = null;
+    let targetWorkspaceId: string | null = null;
 
     if (params.sessionId) {
       const sessions = await this.deps.listSessions();
@@ -801,11 +802,15 @@ export class LocalSessionBackend implements SessionBackend {
       if (typeof targetSession.exitCode === 'number') {
         throw toExitedSessionError(targetSession);
       }
-      // Resolve workspaceId from the machine snapshot for sessionId-based attach
+      // Resolve workspaceId from the machine snapshot for sessionId-based attach.
+      // attachToSessionSocket() tears down any existing socket first, so keep the
+      // resolved workspace separate and re-apply it for each attach attempt.
       const snapshotSession = this.machineStateClient.getSnapshot().terminalSessionsById[params.sessionId];
-      this.attachedWorkspaceId = snapshotSession?.workspaceId ?? null;
+      targetWorkspaceId = snapshotSession?.workspaceId ?? null;
+      this.attachedWorkspaceId = targetWorkspaceId;
     } else if (params.workspaceId) {
-      this.attachedWorkspaceId = params.workspaceId;
+      targetWorkspaceId = params.workspaceId;
+      this.attachedWorkspaceId = targetWorkspaceId;
       let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
       try {
         const prepared = await this.deps.prepareAttachSession({
@@ -826,7 +831,8 @@ export class LocalSessionBackend implements SessionBackend {
           },
         });
         targetSession = prepared.session;
-        this.attachedWorkspaceId = prepared.workspaceId ?? this.attachedWorkspaceId;
+        targetWorkspaceId = prepared.workspaceId ?? targetWorkspaceId;
+        this.attachedWorkspaceId = targetWorkspaceId;
         this.pendingAttachRequestId = null;
       } catch (error) {
         this.pendingAttachRequestId = null;
@@ -853,7 +859,7 @@ export class LocalSessionBackend implements SessionBackend {
       throw new SpacesError('attachSession requires sessionId or workspaceId', 'USER_ERROR', 1);
     }
 
-    await this.attachToSessionSocketWithRetry(targetSession, params);
+    await this.attachToSessionSocketWithRetry(targetSession, params, targetWorkspaceId);
   }
 
   async detachSession(): Promise<void> {
@@ -971,7 +977,7 @@ export class LocalSessionBackend implements SessionBackend {
       this.deps.listSessions(),
       this.deps.scanWorkspaces(),
     ]);
-    const items = inboxResponse.items as InboxItem[];
+    const items = (Array.isArray(inboxResponse) ? inboxResponse : inboxResponse.items) as InboxItem[];
 
     const activeSessionIds = new Set(sessions.map((session) => session.id));
     const activeUnread = new Set<string>();
@@ -1035,12 +1041,14 @@ export class LocalSessionBackend implements SessionBackend {
 
   async getNotificationConfig(): Promise<void> {
     const response = await this.deps.getNotificationConfig();
-    this.emit({ type: 'notification_config', config: response.config as NotificationConfig });
+    const config = (response && typeof response === 'object' && 'config' in response ? response.config : response) as NotificationConfig;
+    this.emit({ type: 'notification_config', config });
   }
 
   async updateNotificationConfig(config: NotificationConfig): Promise<void> {
     const response = await this.deps.updateNotificationConfig(config);
-    this.emit({ type: 'notification_config', config: response.config as NotificationConfig });
+    const resolved = (response && typeof response === 'object' && 'config' in response ? response.config : response) as NotificationConfig;
+    this.emit({ type: 'notification_config', config: resolved });
   }
 
   async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
@@ -1139,9 +1147,11 @@ export class LocalSessionBackend implements SessionBackend {
 
   private async attachToSessionSocket(
     session: TmuxSession,
-    params: AttachSessionParams
+    params: AttachSessionParams,
+    workspaceId: string | null,
   ): Promise<void> {
-    await this.closeSessionSocket(true);
+    await this.closeSessionSocket(true, { preserveWorkspaceId: true });
+    this.attachedWorkspaceId = workspaceId;
 
     const size = getDefaultTerminalSize();
     const cols = params.cols ?? size.cols;
@@ -1262,10 +1272,11 @@ export class LocalSessionBackend implements SessionBackend {
 
   private async attachToSessionSocketWithRetry(
     session: TmuxSession,
-    params: AttachSessionParams
+    params: AttachSessionParams,
+    workspaceId: string | null,
   ): Promise<void> {
     try {
-      await this.attachToSessionSocket(session, params);
+      await this.attachToSessionSocket(session, params, workspaceId);
       return;
     } catch (error) {
       if (!isAttachRetryableError(error)) {
@@ -1280,10 +1291,10 @@ export class LocalSessionBackend implements SessionBackend {
       throw toExitedSessionError(refreshed);
     }
 
-    await this.attachToSessionSocket(refreshed, params);
+    await this.attachToSessionSocket(refreshed, params, workspaceId);
   }
 
-  private async closeSessionSocket(emitDetached: boolean): Promise<void> {
+  private async closeSessionSocket(emitDetached: boolean, options: { preserveWorkspaceId?: boolean } = {}): Promise<void> {
     const socket = this.sessionSocket;
     const hadAttached = this.attachedSessionId !== null;
 
@@ -1298,7 +1309,9 @@ export class LocalSessionBackend implements SessionBackend {
     }
 
     this.attachedSessionId = null;
-    this.attachedWorkspaceId = null;
+    if (!options.preserveWorkspaceId) {
+      this.attachedWorkspaceId = null;
+    }
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.pendingPtyChunks = [];
 
@@ -1416,6 +1429,15 @@ export class LocalSessionBackend implements SessionBackend {
     }
   }
 
+  private async refreshMachineSnapshotState(): Promise<MachineSnapshot> {
+    const snapshot = await this.deps.getMachineSnapshot();
+    this.machineStateClient.replaceSnapshot(snapshot);
+    this.agentStateCache = machineSnapshotToAgentState(snapshot);
+    this.broadcastAgentSnapshot();
+    this.emitDerivedMachineState();
+    return snapshot;
+  }
+
   // ============================================================================
   // Agent state — backed by tmux-lite agent control
   // ============================================================================
@@ -1452,61 +1474,42 @@ export class LocalSessionBackend implements SessionBackend {
   async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     await this.agentControl.createSession(target, title);
-    const snapshot = await this.deps.getMachineSnapshot();
-    this.machineStateClient.replaceSnapshot(snapshot);
-    this.agentStateCache = machineSnapshotToAgentState(snapshot);
-    this.broadcastAgentSnapshot();
-    this.emitDerivedMachineState();
+    const snapshot = await this.refreshMachineSnapshotState();
     return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const ok = await this.agentControl.abortSession(target, agentSessionId);
-    const snapshot = await this.deps.getMachineSnapshot();
-    this.machineStateClient.replaceSnapshot(snapshot);
-    this.agentStateCache = machineSnapshotToAgentState(snapshot);
-    this.broadcastAgentSnapshot();
-    this.emitDerivedMachineState();
+    await this.refreshMachineSnapshotState();
     return ok;
   }
 
   async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     await this.agentControl.closeSession(target, agentSessionId);
-    const snapshot = await this.deps.getMachineSnapshot();
-    this.machineStateClient.replaceSnapshot(snapshot);
-    this.agentStateCache = machineSnapshotToAgentState(snapshot);
-    this.broadcastAgentSnapshot();
-    this.emitDerivedMachineState();
+    const snapshot = await this.refreshMachineSnapshotState();
     return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
   async archiveAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     await this.agentControl.archiveSession(target, agentSessionId);
-    const snapshot = await this.deps.getMachineSnapshot();
-    this.machineStateClient.replaceSnapshot(snapshot);
-    this.agentStateCache = machineSnapshotToAgentState(snapshot);
-    this.broadcastAgentSnapshot();
-    this.emitDerivedMachineState();
+    const snapshot = await this.refreshMachineSnapshotState();
     return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
   async restoreAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     await this.agentControl.restoreSession(target, agentSessionId);
-    const snapshot = await this.deps.getMachineSnapshot();
-    this.machineStateClient.replaceSnapshot(snapshot);
-    this.agentStateCache = machineSnapshotToAgentState(snapshot);
-    this.broadcastAgentSnapshot();
-    this.emitDerivedMachineState();
+    const snapshot = await this.refreshMachineSnapshotState();
     return machineSnapshotToKnownAgentSessions(snapshot, workspaceId, { includeArchived: true });
   }
 
   async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const terminalSession = await this.agentControl.attachSession(target, agentSessionId);
+    await this.refreshMachineSnapshotState();
     await this.attachSession({ sessionId: terminalSession.id, viewOnly: options.viewOnly });
   }
 
