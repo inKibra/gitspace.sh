@@ -21,6 +21,7 @@ import {
 } from '../core/identity-backup.js';
 import { sign, serializeIdentity } from '../lib/tmux-lite/crypto/identity.js';
 
+import { GITSPACE_API_BASE as API_BASE, fetchWorkerPublicConfig, getWorkerCompatibilityWarnings } from '../core/gitspace-api.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { printHostSyncReport, syncHostConfig } from './host.js';
@@ -31,9 +32,6 @@ import {
   type DeviceIdentityPasswordContext,
 } from './device-identity-password.js';
 import type { UserRootIdentity } from '../types/identity.js';
-
-// API Configuration
-const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
 
 function canPromptInteractively(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
@@ -127,11 +125,10 @@ async function maybeOfferIdentityBackupAfterLogin(options: {
  * Fetch GitHub Client ID from the API
  */
 async function getGitHubClientId(): Promise<string> {
-  const res = await fetch(`${API_BASE}/config`);
-  if (!res.ok) {
-    throw new SpacesError('Failed to fetch config from API', 'SYSTEM_ERROR');
+  const config = await fetchWorkerPublicConfig();
+  for (const warning of getWorkerCompatibilityWarnings(config)) {
+    logger.warning(warning);
   }
-  const config = await res.json() as { github_client_id: string };
   if (!config.github_client_id) {
     throw new SpacesError('GitHub Client ID not configured on server', 'SYSTEM_ERROR');
   }

@@ -94,7 +94,12 @@ describe('authLogin identity recovery', () => {
           : input.url;
 
       if (url.endsWith('/config')) {
-        return Response.json({ github_client_id: 'client-id' });
+        return Response.json({
+          github_client_id: 'client-id',
+          version: '1.0.0',
+          apiVersion: 1,
+          subdomainsSchemaVersion: 2,
+        });
       }
 
       if (url === 'https://github.com/login/device/code') {

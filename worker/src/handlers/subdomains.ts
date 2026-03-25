@@ -50,6 +50,17 @@ interface ExistingSubdomainRecord extends StoredSubdomainRecord {
   is_primary: number;
 }
 
+interface ListedSubdomainRecord {
+  id: string;
+  subdomain: string;
+  status: string;
+  is_primary: number;
+  created_at: number;
+  updated_at: number;
+  serveSubdomain: string | null;
+  serveStatus: string | null;
+}
+
 async function getStoredTunnelToken(env: Env, record: Pick<ExistingSubdomainRecord, 'tunnel_token_encrypted'>): Promise<string> {
   return decryptToken(env, record.tunnel_token_encrypted);
 }
@@ -171,14 +182,28 @@ app.get('/', async (c) => {
 
   const subdomains = await c.env.DB.prepare(
     `
-    SELECT id, subdomain, status, is_primary, created_at, updated_at
-    FROM subdomains
-    WHERE user_id = ? AND status != 'deleted' AND subdomain NOT LIKE '%.serve'
-    ORDER BY is_primary DESC, created_at DESC
+    SELECT
+      primary_subdomains.id,
+      primary_subdomains.subdomain,
+      primary_subdomains.status,
+      primary_subdomains.is_primary,
+      primary_subdomains.created_at,
+      primary_subdomains.updated_at,
+      serve_subdomains.subdomain AS serveSubdomain,
+      serve_subdomains.status AS serveStatus
+    FROM subdomains AS primary_subdomains
+    LEFT JOIN subdomains AS serve_subdomains
+      ON serve_subdomains.user_id = primary_subdomains.user_id
+      AND serve_subdomains.subdomain = primary_subdomains.subdomain || '.serve'
+      AND serve_subdomains.status != 'deleted'
+    WHERE primary_subdomains.user_id = ?
+      AND primary_subdomains.status != 'deleted'
+      AND primary_subdomains.subdomain NOT LIKE '%.serve'
+    ORDER BY primary_subdomains.is_primary DESC, primary_subdomains.created_at DESC
   `
   )
     .bind(user.id)
-    .all();
+    .all<ListedSubdomainRecord>();
 
   return c.json(subdomains.results);
 });

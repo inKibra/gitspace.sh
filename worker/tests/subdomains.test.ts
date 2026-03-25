@@ -13,7 +13,19 @@ afterEach(async () => {
 });
 
 describe('subdomain routes', () => {
-  test('protects bare /subdomains and provisions companion serve token data', async () => {
+  test('publishes worker API compatibility metadata from /config', async () => {
+    const response = await harness.request('/config');
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      github_client_id: 'github-client-id',
+      version: '1.0.0',
+      apiVersion: 1,
+      subdomainsSchemaVersion: 2,
+    });
+  });
+
+
+  test('protects bare /subdomains and lists companion serve metadata with provisioned Cloudflare resources', async () => {
     const unauthenticated = await harness.request('/subdomains');
     expect(unauthenticated.status).toBe(401);
 
@@ -43,8 +55,39 @@ describe('subdomain routes', () => {
 
     const listResponse = await harness.request('/subdomains', { headers: session.headers });
     expect(listResponse.status).toBe(200);
-    const subdomains = await listResponse.json() as Array<{ subdomain: string }>;
-    expect(subdomains.map((entry) => entry.subdomain)).toEqual(['brad']);
+    const subdomains = await listResponse.json() as Array<{
+      subdomain: string;
+      serveSubdomain: string | null;
+      serveStatus: string | null;
+      is_primary: number;
+    }>;
+    expect(subdomains).toEqual([
+      expect.objectContaining({
+        subdomain: 'brad',
+        serveSubdomain: 'brad.serve',
+        serveStatus: 'active',
+        is_primary: 1,
+      }),
+    ]);
+
+    const configuredHostnames = harness.upstream
+      .listTunnelConfigurations()
+      .flatMap((entry) => entry.ingress.map((rule) => rule.hostname).filter((hostname): hostname is string => Boolean(hostname)))
+      .sort();
+    expect(configuredHostnames).toEqual([
+      '*.brad.gitspace.sh',
+      '*.brad.serve.gitspace.sh',
+      'brad.gitspace.sh',
+      'brad.serve.gitspace.sh',
+    ]);
+
+    const dnsNames = harness.upstream.listDnsRecords().map((record) => record.name).sort();
+    expect(dnsNames).toEqual([
+      '*.brad.gitspace.sh',
+      '*.brad.serve.gitspace.sh',
+      'brad.gitspace.sh',
+      'brad.serve.gitspace.sh',
+    ]);
 
     const serveTokenResponse = await harness.request('/subdomains/brad.serve/token', {
       headers: session.headers,
@@ -121,6 +164,52 @@ describe('subdomain routes', () => {
     expect(subdomains).toHaveLength(1);
     expect(subdomains[0]?.subdomain).toBe('brad');
   });
+
+  test('set-primary updates only primary subdomains while preserving serve companion metadata', async () => {
+    const session = await harness.createDeviceSession();
+
+    for (const subdomain of ['brad', 'alice']) {
+      const response = await harness.request('/subdomains', {
+        method: 'POST',
+        headers: {
+          ...session.headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ subdomain }),
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const setPrimaryResponse = await harness.request('/subdomains/alice/set-primary', {
+      method: 'POST',
+      headers: session.headers,
+    });
+    expect(setPrimaryResponse.status).toBe(200);
+
+    const listResponse = await harness.request('/subdomains', { headers: session.headers });
+    expect(listResponse.status).toBe(200);
+    const subdomains = await listResponse.json() as Array<{
+      subdomain: string;
+      serveSubdomain: string | null;
+      serveStatus: string | null;
+      is_primary: number;
+    }>;
+
+    expect(subdomains).toHaveLength(2);
+    expect(subdomains[0]).toEqual(expect.objectContaining({
+      subdomain: 'alice',
+      serveSubdomain: 'alice.serve',
+      serveStatus: 'active',
+      is_primary: 1,
+    }));
+    expect(subdomains[1]).toEqual(expect.objectContaining({
+      subdomain: 'brad',
+      serveSubdomain: 'brad.serve',
+      serveStatus: 'active',
+      is_primary: 0,
+    }));
+  });
+
 
   test('keeps the current primary when replacement provisioning fails', async () => {
     const session = await harness.createDeviceSession();

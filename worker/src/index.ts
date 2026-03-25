@@ -42,11 +42,17 @@ app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: Date.now() });
 });
 
-// Public config (for CLI to fetch GitHub Client ID)
+// Public config (for CLI compatibility checks and GitHub Client ID)
+const WORKER_VERSION = '1.0.0';
+const WORKER_API_VERSION = 1;
+const SUBDOMAINS_SCHEMA_VERSION = 2;
+
 app.get('/config', (c) => {
   return c.json({
     github_client_id: c.env.GITHUB_CLIENT_ID,
-    version: '1.0.0',
+    version: WORKER_VERSION,
+    apiVersion: WORKER_API_VERSION,
+    subdomainsSchemaVersion: SUBDOMAINS_SCHEMA_VERSION,
   });
 });
 

@@ -8,6 +8,8 @@ export interface MockUpstream {
   getLastGithubOauthTokenRequest: () => Record<string, unknown> | null;
   failNextTunnelCreate: (tunnelName: string, status?: number, body?: string) => void;
   registerGitHubUser: (token: string, user: { id: number; login: string; name: string; email: string; avatar_url: string }) => void;
+  listTunnelConfigurations: () => Array<{ tunnelId: string; ingress: Array<{ hostname?: string; service: string }> }>;
+  listDnsRecords: () => Array<{ id: string; name: string; content: string }>;
   close: () => void;
 }
 
@@ -17,10 +19,17 @@ interface TunnelRecord {
   token: string;
 }
 
+interface TunnelConfigurationRecord {
+  tunnelId: string;
+  ingress: Array<{ hostname?: string; service: string }>;
+}
+
+
 export function startMockUpstream(): MockUpstream {
   const tunnels = new Map<string, TunnelRecord>();
   const dnsRecords = new Map<string, { id: string; name: string; content: string }>();
   const customHostnames = new Map<string, { id: string; hostname: string; status: string }>();
+  const tunnelConfigurations = new Map<string, TunnelConfigurationRecord>();
   const githubUsers = new Map<string, { id: number; login: string; name: string; email: string; avatar_url: string }>();
   let lastGithubOauthTokenRequest: Record<string, unknown> | null = null;
   const failingTunnelCreates = new Map<string, { status: number; body: string }>();
@@ -104,7 +113,15 @@ export function startMockUpstream(): MockUpstream {
       }
 
       if (path.includes('/cfd_tunnel/') && path.endsWith('/configurations') && request.method === 'PUT') {
-        return Response.json({ success: true });
+        return request.json().then((body: any) => {
+          const tunnelId = path.split('/').at(-2) ?? '';
+          const ingress = body?.config?.ingress;
+          tunnelConfigurations.set(tunnelId, {
+            tunnelId,
+            ingress: Array.isArray(ingress) ? ingress : [],
+          });
+          return Response.json({ success: true });
+        });
       }
 
       if (path.includes('/cfd_tunnel/') && path.endsWith('/connections') && request.method === 'DELETE') {
@@ -200,6 +217,14 @@ export function startMockUpstream(): MockUpstream {
     registerGitHubUser: (token, user) => {
       githubUsers.set(token, user);
     },
+    listTunnelConfigurations: () => Array.from(tunnelConfigurations.values()).map((entry) => ({
+      tunnelId: entry.tunnelId,
+      ingress: entry.ingress.map((rule) => ({
+        hostname: rule.hostname,
+        service: rule.service,
+      })),
+    })),
+    listDnsRecords: () => Array.from(dnsRecords.values()),
     close: () => server.stop(true),
   };
 }
