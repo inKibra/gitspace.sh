@@ -3,10 +3,10 @@ import { escapeShellArg } from '../utils/shell-escape.js';
 
 export function resolveWorkspaceSessionLauncherArgs(): string[] {
   const execPath = process.execPath;
-  const scriptPath = process.argv[1];
 
-  if (execPath.endsWith('bun') && scriptPath) {
-    return [execPath, scriptPath];
+  if (execPath.endsWith('bun')) {
+    const indexPath = new URL('../index.ts', import.meta.url).pathname;
+    return [execPath, indexPath];
   }
 
   if (execPath && !execPath.endsWith('/node') && !execPath.endsWith('node')) {

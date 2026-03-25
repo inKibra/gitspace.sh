@@ -185,6 +185,11 @@ export async function isServerRunning(): Promise<boolean> {
 // Start server if not running
 let ensureServerPromise: Promise<void> | null = null;
 
+async function refreshHostingAfterEnsure(): Promise<void> {
+  const { refreshTmuxHosting } = await import('./hosting/supervisor.js');
+  await refreshTmuxHosting().catch(() => undefined);
+}
+
 export async function ensureServer(): Promise<void> {
   if (ensureServerPromise) {
     return ensureServerPromise;
@@ -193,6 +198,7 @@ export async function ensureServer(): Promise<void> {
   ensureServerPromise = (async () => {
     if (await isServerRunning()) {
       await send({ type: 'agent-state' });
+      await refreshHostingAfterEnsure();
       return;
     }
 
@@ -207,6 +213,7 @@ export async function ensureServer(): Promise<void> {
       await Bun.sleep(100);
       if (await isServerRunning()) {
         await send({ type: 'agent-state' });
+        await refreshHostingAfterEnsure();
         return;
       }
     }

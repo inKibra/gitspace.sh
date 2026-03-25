@@ -30,10 +30,6 @@ export interface ServeStatus {
   relayStatus?: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
   clients?: number;
   uptime?: number;
-  hosting?: {
-    subdomain: string;
-    tunnelActive: boolean;
-  };
 }
 
 /** Combined daemon status */
@@ -105,7 +101,6 @@ export function useDaemonStatus(options: UseDaemonStatusOptions = {}): UseDaemon
               relayStatus: serve.relay.status,
               clients: serve.clients,
               uptime: serve.uptime,
-              hosting: serve.hosting,
             };
           } else {
             serveStatus = { running: true }; // Running but couldn't get details

@@ -78,7 +78,6 @@ export async function showStatus(): Promise<void> {
   // Check serve status
   let serveLine = '';
   let serveDetailLine = '';
-  let serveHostingLine = '';
   if (isServeRunning()) {
     try {
       const status = await queryServeStatus();
@@ -96,11 +95,6 @@ export async function showStatus(): Promise<void> {
         if (status.uptime) {
           serveDetailLine = `              uptime: ${formatUptime(status.uptime)}`;
         }
-
-        if (status.hosting) {
-          const tunnelIcon = status.hosting.tunnelActive ? chalk.green('●') : chalk.yellow('○');
-          serveHostingLine = `              hosting: ${status.hosting.subdomain} ${tunnelIcon}`;
-        }
       } else {
         serveLine = `${chalk.green('●')} serve        ${chalk.white('running')}`;
       }
@@ -113,9 +107,6 @@ export async function showStatus(): Promise<void> {
   console.log(padLine(serveLine));
   if (serveDetailLine) {
     console.log(padLine(chalk.dim(serveDetailLine)));
-  }
-  if (serveHostingLine) {
-    console.log(padLine(chalk.dim(serveHostingLine)));
   }
 
   console.log(chalk.cyan(emptyLine));

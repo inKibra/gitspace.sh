@@ -60,7 +60,7 @@ export class ClientSessionManager {
       handshakeTimeoutMs: options.handshakeTimeoutMs,
       ownerUserRootId: options.ownerUserRootId,
     });
-    this.remoteSessionHandler = new RemoteSessionHandler(options.remoteSessionOptions);
+    this.remoteSessionHandler = new RemoteSessionHandler();
   }
 
   private writeToTmuxSocket(session: ClientSession, frame: Buffer): void {

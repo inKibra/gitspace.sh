@@ -141,11 +141,6 @@ function matchesWorkspaceIdToken(parsedWorkspaceId: string, workspaceId: string)
   return normalizeWorkspaceIdToken(parsedWorkspaceId) === normalizeWorkspaceIdToken(workspaceId);
 }
 
-export interface RemoteSessionHandlerOptions {
-  processHostDomain?: string;
-  onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
-}
-
 /**
  * Remote session handler
  */
@@ -153,8 +148,6 @@ export class RemoteSessionHandler {
   private tmuxLiteAvailable = false;
   private processSchedulers = new Map<string, NodeJS.Timer>();
   private pendingAttachRuns = new Map<string, string>();
-  private processHostDomain?: string;
-  private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
 
   // Machine snapshot push state
   private latestMachineSnapshot: MachineSnapshot | null = null;
@@ -162,10 +155,6 @@ export class RemoteSessionHandler {
   /** connectionId → async send function for unsolicited machine snapshot pushes */
   private machineSnapshotWatchers = new Map<string, (msg: MachineToClientMessage) => Promise<void>>();
 
-  constructor(options: RemoteSessionHandlerOptions = {}) {
-    this.processHostDomain = options.processHostDomain;
-    this.onProcessesChanged = options.onProcessesChanged;
-  }
 
   /**
    * Initialize - check if tmux-lite is available and start machine event watch

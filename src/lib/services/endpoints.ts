@@ -26,15 +26,6 @@ export interface ServiceLauncherOption {
 }
 
 export function getHostingRouteState(): HostingRouteState {
-  const envDomain = process.env.GITSPACE_SERVE_DOMAIN?.trim();
-  if (envDomain) {
-    return {
-      baseHost: envDomain,
-      machineName: process.env.GITSPACE_MACHINE_NAME?.trim(),
-      enabled: true,
-    };
-  }
-
   const state = readTmuxHostingState();
   return {
     baseHost: state?.baseHost,

@@ -140,10 +140,6 @@ export interface StatusResponse {
     status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
   };
   clients: number;
-  hosting?: {
-    subdomain: string;
-    tunnelActive: boolean;
-  };
 }
 
 /** Control messages */
@@ -183,10 +179,6 @@ export interface DaemonState {
     status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
   };
   clients: number;
-  hosting?: {
-    subdomain: string;
-    tunnelActive: boolean;
-  };
 }
 
 /** Current daemon state - set by serve, read by status socket */
@@ -239,7 +231,6 @@ export function startStatusServer(): void {
                 uptime: Math.floor((Date.now() - state.startTime) / 1000),
                 relay: state.relay,
                 clients: state.clients,
-                hosting: state.hosting,
               };
               socket.write(JSON.stringify(response));
             } else {

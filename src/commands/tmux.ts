@@ -304,6 +304,7 @@ export async function statusTmuxHosting(options: TmuxCommandOptions = {}): Promi
   if (runtime.reason) {
     logger.log(`  status: ${runtime.reason}`);
   }
+  logger.log('  ownership: hosted service URLs are published from tmux-lite');
 }
 
 export async function selectTmuxHosting(baseHost: string | undefined, options: TmuxCommandOptions = {}): Promise<void> {
@@ -341,7 +342,7 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
   const refreshed = await refreshTmuxHosting();
   logger.success(`tmux-lite hosting route selected: ${state.baseHost}`);
   logger.log(`  Machine name: ${state.machineName}`);
-  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+  logger.log(`  Hosted services: ${refreshed.active ? 'publishing now' : refreshed.reason ?? 'not publishing'}`);
 }
 
 export async function setTmuxHostingMachineName(machineName: string, options: TmuxCommandOptions = {}): Promise<void> {
@@ -363,7 +364,7 @@ export async function enableTmuxHosting(options: TmuxCommandOptions = {}): Promi
   const state = writeTmuxHostingState({ enabled: true });
   const refreshed = await refreshTmuxHosting();
   logger.success(`tmux-lite hosting enabled for ${state.baseHost}`);
-  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+  logger.log(`  Hosted services: ${refreshed.active ? 'publishing now' : refreshed.reason ?? 'not publishing'}`);
 }
 
 export async function disableTmuxHosting(options: TmuxCommandOptions = {}): Promise<void> {

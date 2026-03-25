@@ -783,7 +783,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
     logger.dim('  (set as primary)');
   } else if (!syncReport.primarySubdomain) {
     logger.warning('Reserved the subdomain, but no primary subdomain is set for this account.');
-    logger.dim('Run `gssh user host set-primary <name>` to choose the host used for machine serve.');
+    logger.dim('Run `gssh user host set-primary <name>` to choose the default hosted relay and tmux hosting route.');
   }
 
   for (const warning of syncReport.warnings) {
@@ -791,7 +791,8 @@ export async function hostReserve(subdomain: string): Promise<void> {
   }
 
   logger.log('');
-  logger.log("Run 'gssh machine serve start' to start hosting.");
+  logger.log("Run 'gssh machine tmux hosting select' to publish hosted service URLs.");
+  logger.log("Run 'gssh machine serve start' when you also want remote terminal access.");
 }
 
 // ============================================================================
@@ -884,7 +885,7 @@ export async function hostList(): Promise<void> {
 // ============================================================================
 
 /**
- * Set a subdomain as primary for `gssh machine serve start`
+ * Set a subdomain as the default hosted relay and tmux hosting route.
  */
 export async function hostSetPrimary(subdomain: string): Promise<void> {
   const headers = await getAuthHeaders();

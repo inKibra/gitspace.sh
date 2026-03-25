@@ -4,4 +4,4 @@
 
 export * from "./protocol";
 export * from "./workspace-scanner";
-export { RemoteSessionHandler, type RemoteClientSession, type ClientState, type RemoteSessionHandlerOptions } from "./session-handler";
+export { RemoteSessionHandler, type RemoteClientSession, type ClientState } from "./session-handler";

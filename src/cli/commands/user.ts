@@ -208,7 +208,7 @@ function registerHostCommands(user: Command): void {
 
   host
     .command('set-primary')
-    .description('Set primary subdomain for `gssh machine serve start`')
+    .description('Set primary subdomain for hosted relay and tmux hosting')
     .argument('<subdomain>', 'Subdomain name')
     .action(withErrorHandler(async (subdomain) => {
       const { hostSetPrimary } = await import('../../commands/host.js');

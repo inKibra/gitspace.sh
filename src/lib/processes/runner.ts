@@ -11,6 +11,7 @@ import { buildProcessEventsConfig } from "./events-config.js";
 import { loadProcessesConfig, getProcessDefinition } from "./config.js";
 import { recordProcessExit } from "./state.js";
 import { buildProcessHostname } from "../../utils/hostnames.js";
+import { readTmuxHostingState } from "../tmux-lite/hosting/state.js";
 import type { WideEvent } from "../../types/events.js";
 
 interface RunnerOptions {
@@ -75,14 +76,16 @@ async function run(): Promise<void> {
   const workspaceId = opts.workspacePath.split("/").pop() ?? opts.workspacePath;
   // Inject PORT from the first declared port (gitspace owns port allocation)
   const firstPort = definition.ports?.[0];
-  const serveDomain = process.env.GITSPACE_SERVE_DOMAIN;
+  const hosting = readTmuxHostingState();
+  const serveDomain = hosting?.enabled ? hosting.baseHost : undefined;
+  const machineName = hosting?.machineName;
   const portEnv: Record<string, string> = {};
   if (firstPort?.port) {
     portEnv.PORT = String(firstPort.port);
   }
   if (serveDomain && firstPort) {
     const portLabel = firstPort.name?.trim() || String(firstPort.port);
-    const hostname = buildProcessHostname(serveDomain, workspaceId, opts.processName, opts.instance, portLabel);
+    const hostname = buildProcessHostname(serveDomain, workspaceId, opts.processName, opts.instance, portLabel, machineName);
     portEnv.GITSPACE_SERVE_URL = `https://${hostname}`;
   }
 

@@ -5,7 +5,6 @@
  */
 
 import type { Identity, SessionKeys, AccessType } from "../types/identity.js";
-import type { RemoteSessionHandlerOptions } from "../lib/remote-session/index.js";
 import { FrameType } from "../lib/tmux-lite/protocol.js";
 
 // ============================================================================
@@ -60,8 +59,6 @@ export interface ServeOptions {
   relay: string;
   /** Machine identity for authentication */
   identity: Identity;
-  /** Remote session handler configuration */
-  remoteSessionOptions?: RemoteSessionHandlerOptions;
   /** Shell to spawn (default: $SHELL or /bin/bash) */
   shell?: string;
   /** Extra environment variables for PTY sessions */
