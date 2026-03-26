@@ -1,0 +1,60 @@
+export interface SignalableSubprocess {
+  pid: number;
+  kill: (signal?: number | string) => void;
+}
+
+export function readProcessGroupId(
+  pid: number,
+  spawnSyncImpl: typeof Bun.spawnSync = Bun.spawnSync,
+): number | null {
+  const result = spawnSyncImpl(['ps', '-o', 'pgid=', '-p', String(pid)]);
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const value = result.stdout.toString().trim();
+  const groupId = Number(value);
+  return Number.isInteger(groupId) && groupId > 0 ? groupId : null;
+}
+
+export function signalProcessTree(
+  pid: number,
+  signal: NodeJS.Signals,
+  readProcessGroupIdImpl: (pid: number) => number | null = readProcessGroupId,
+): boolean {
+  const processGroupId = readProcessGroupIdImpl(pid);
+  if (processGroupId) {
+    try {
+      process.kill(-processGroupId, signal);
+      return true;
+    } catch {}
+  }
+
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {}
+
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {}
+
+  return false;
+}
+
+export function signalSubprocessTree(
+  proc: SignalableSubprocess,
+  signal: NodeJS.Signals,
+  readProcessGroupIdImpl: (pid: number) => number | null = readProcessGroupId,
+): boolean {
+  if (signalProcessTree(proc.pid, signal, readProcessGroupIdImpl)) {
+    return true;
+  }
+
+  try {
+    proc.kill(signal);
+    return true;
+  } catch {}
+
+  return false;
+}

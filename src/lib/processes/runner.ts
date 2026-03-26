@@ -10,8 +10,10 @@ import { WideEventCollector } from "../events/collector.js";
 import { buildProcessEventsConfig } from "./events-config.js";
 import { loadProcessesConfig, getProcessDefinition } from "./config.js";
 import { recordProcessExit } from "./state.js";
-import { buildProcessHostname } from "../../utils/hostnames.js";
-import { readTmuxHostingState } from "../tmux-lite/hosting/state.js";
+import { buildProcessHostname } from '../../utils/hostnames.js';
+import { readHostConfig } from '../../commands/host.js';
+import { parseTmuxHostingBaseHost } from '../tmux-lite/hosting/base-host.js';
+import { readTmuxHostingState } from '../tmux-lite/hosting/state.js';
 import type { WideEvent } from "../../types/events.js";
 
 interface RunnerOptions {
@@ -77,16 +79,28 @@ async function run(): Promise<void> {
   // Inject PORT from the first declared port (gitspace owns port allocation)
   const firstPort = definition.ports?.[0];
   const hosting = readTmuxHostingState();
-  const serveDomain = hosting?.enabled ? hosting.baseHost : undefined;
+  const baseHost = hosting?.enabled ? hosting.baseHost : undefined;
   const machineName = hosting?.machineName;
   const portEnv: Record<string, string> = {};
   if (firstPort?.port) {
     portEnv.PORT = String(firstPort.port);
   }
-  if (serveDomain && firstPort) {
-    const portLabel = firstPort.name?.trim() || String(firstPort.port);
-    const hostname = buildProcessHostname(serveDomain, workspaceId, opts.processName, opts.instance, portLabel, machineName);
-    portEnv.GITSPACE_SERVE_URL = `https://${hostname}`;
+  if (baseHost && firstPort) {
+    const parsedBaseHost = parseTmuxHostingBaseHost(baseHost);
+    const serveDomain = readHostConfig()?.serveNamespaces?.[parsedBaseHost.rootSubdomain]?.domain;
+    if (serveDomain) {
+      const portLabel = firstPort.name?.trim() || String(firstPort.port);
+      const hostname = buildProcessHostname(
+        serveDomain,
+        parsedBaseHost.rootSubdomain,
+        workspaceId,
+        opts.processName,
+        opts.instance,
+        portLabel,
+        machineName,
+      );
+      portEnv.GITSPACE_SERVE_URL = `http://${hostname}`;
+    }
   }
 
   const env = {

@@ -7,6 +7,7 @@ export interface MockUpstream {
   cloudflareApiBase: string;
   getLastGithubOauthTokenRequest: () => Record<string, unknown> | null;
   failNextTunnelCreate: (tunnelName: string, status?: number, body?: string) => void;
+  failNextCustomHostnameCreate: (hostname: string, status?: number, body?: string) => void;
   registerGitHubUser: (token: string, user: { id: number; login: string; name: string; email: string; avatar_url: string }) => void;
   listTunnelConfigurations: () => Array<{ tunnelId: string; ingress: Array<{ hostname?: string; service: string }> }>;
   listDnsRecords: () => Array<{ id: string; name: string; content: string }>;
@@ -17,6 +18,8 @@ interface TunnelRecord {
   id: string;
   name: string;
   token: string;
+  configSource: 'cloudflare' | 'local';
+  tunnelSecret?: string;
 }
 
 interface TunnelConfigurationRecord {
@@ -24,15 +27,24 @@ interface TunnelConfigurationRecord {
   ingress: Array<{ hostname?: string; service: string }>;
 }
 
+interface CustomHostnameRecord {
+  id: string;
+  hostname: string;
+  sslMethod: 'http' | 'txt' | 'email';
+  wildcard: boolean;
+  delegationSuffix: string;
+}
+
 
 export function startMockUpstream(): MockUpstream {
   const tunnels = new Map<string, TunnelRecord>();
   const dnsRecords = new Map<string, { id: string; name: string; content: string }>();
-  const customHostnames = new Map<string, { id: string; hostname: string; status: string }>();
+  const customHostnames = new Map<string, CustomHostnameRecord>();
   const tunnelConfigurations = new Map<string, TunnelConfigurationRecord>();
   const githubUsers = new Map<string, { id: number; login: string; name: string; email: string; avatar_url: string }>();
   let lastGithubOauthTokenRequest: Record<string, unknown> | null = null;
   const failingTunnelCreates = new Map<string, { status: number; body: string }>();
+  const failingCustomHostnameCreates = new Map<string, { status: number; body: string }>();
 
   githubUsers.set('github-access-token', {
     id: 12345,
@@ -41,6 +53,41 @@ export function startMockUpstream(): MockUpstream {
     email: 'octocat@example.com',
     avatar_url: 'https://avatars.example.com/octocat',
   });
+
+  const delegatedDcvSuffix = 'f98fb997bce4f333.dcv.cloudflare.com';
+
+  function normalizeDnsRecordName(name: string): string {
+    return name.endsWith('.gitspace.sh') ? name : `${name}.gitspace.sh`;
+  }
+
+  function getExpectedDelegatedDcvTarget(hostname: string): string {
+    return `${hostname}.${delegatedDcvSuffix}`;
+  }
+
+  function getCustomHostnameStatus(record: CustomHostnameRecord): { status: string; sslStatus: string } {
+    if (record.sslMethod === 'txt' && record.wildcard) {
+      const expectedName = `_acme-challenge.${record.hostname}`;
+      const expectedTarget = getExpectedDelegatedDcvTarget(record.hostname);
+      const delegatedRecord = Array.from(dnsRecords.values()).find((dnsRecord) => dnsRecord.name === expectedName);
+      const delegatedReady = delegatedRecord?.content === expectedTarget;
+      return delegatedReady
+        ? { status: 'active', sslStatus: 'active' }
+        : { status: 'pending', sslStatus: 'pending_validation' };
+    }
+
+    return { status: 'active', sslStatus: 'active' };
+  }
+
+  function buildDelegatedDcvRecords(record: CustomHostnameRecord) {
+    return [{
+      cname: `_acme-challenge.${record.hostname}`,
+      cname_target: getExpectedDelegatedDcvTarget(record.hostname),
+      status: getCustomHostnameStatus(record).sslStatus === 'active' ? 'active' : 'pending',
+      txt_name: `_acme-challenge.${record.hostname}`,
+      txt_value: `txt-${record.id}`,
+    }];
+  }
+
 
   const server = Bun.serve({
     port: 0,
@@ -102,13 +149,21 @@ export function startMockUpstream(): MockUpstream {
             return new Response(configuredFailure.body, { status: configuredFailure.status });
           }
 
+          const configSource = body?.config_src === 'local' ? 'local' : 'cloudflare';
           const tunnel = {
             id: crypto.randomUUID(),
             name,
             token: `token-${name}-${crypto.randomUUID()}`,
-          };
+            configSource,
+            tunnelSecret: typeof body?.tunnel_secret === 'string' ? body.tunnel_secret : undefined,
+          } satisfies TunnelRecord;
           tunnels.set(name, tunnel);
-          return Response.json({ success: true, result: { id: tunnel.id, token: tunnel.token } });
+          return Response.json({
+            success: true,
+            result: configSource === 'local'
+              ? { id: tunnel.id, name: tunnel.name, config_src: tunnel.configSource }
+              : { id: tunnel.id, name: tunnel.name, token: tunnel.token, config_src: tunnel.configSource },
+          });
         });
       }
 
@@ -147,7 +202,7 @@ export function startMockUpstream(): MockUpstream {
         return request.json().then((body: any) => {
           const record = {
             id: crypto.randomUUID(),
-            name: `${body.name}.gitspace.sh`,
+            name: normalizeDnsRecordName(body.name),
             content: body.content,
           };
           dnsRecords.set(record.id, record);
@@ -160,7 +215,7 @@ export function startMockUpstream(): MockUpstream {
         return request.json().then((body: any) => {
           dnsRecords.set(recordId, {
             id: recordId,
-            name: `${body.name}.gitspace.sh`,
+            name: normalizeDnsRecordName(body.name),
             content: body.content,
           });
           return Response.json({ success: true, result: { id: recordId } });
@@ -175,13 +230,26 @@ export function startMockUpstream(): MockUpstream {
 
       if (path.endsWith('/custom_hostnames') && request.method === 'POST') {
         return request.json().then((body: any) => {
-          const record = {
+          const hostname = body.hostname ?? 'hostname.gitspace.sh';
+          const configuredFailure = failingCustomHostnameCreates.get(hostname);
+          if (configuredFailure) {
+            failingCustomHostnameCreates.delete(hostname);
+            return new Response(configuredFailure.body, { status: configuredFailure.status });
+          }
+
+          const record: CustomHostnameRecord = {
             id: crypto.randomUUID(),
-            hostname: body.hostname,
-            status: 'pending',
+            hostname,
+            sslMethod: body?.ssl?.method ?? 'http',
+            wildcard: Boolean(body?.ssl?.wildcard),
+            delegationSuffix: delegatedDcvSuffix,
           };
           customHostnames.set(record.id, record);
-          return Response.json({ success: true, result: record });
+          const status = getCustomHostnameStatus(record);
+          return Response.json({
+            success: true,
+            result: { id: record.id, hostname: record.hostname, status: status.status },
+          });
         });
       }
 
@@ -191,7 +259,40 @@ export function startMockUpstream(): MockUpstream {
         if (!record) {
           return new Response('Not found', { status: 404 });
         }
-        return Response.json({ success: true, result: { ...record, ssl: { status: 'pending' } } });
+        const status = getCustomHostnameStatus(record);
+        return Response.json({
+          success: true,
+          result: {
+            id: record.id,
+            hostname: record.hostname,
+            status: status.status,
+            ssl: {
+              status: status.sslStatus,
+              dcv_delegation_records: buildDelegatedDcvRecords(record),
+            },
+          },
+        });
+      }
+
+      if (path.includes('/custom_hostnames/') && request.method === 'PATCH') {
+        const id = path.split('/').at(-1) ?? '';
+        const record = customHostnames.get(id);
+        if (!record) {
+          return new Response('Not found', { status: 404 });
+        }
+        const status = getCustomHostnameStatus(record);
+        return Response.json({
+          success: true,
+          result: {
+            id: record.id,
+            hostname: record.hostname,
+            status: status.status,
+            ssl: {
+              status: status.sslStatus,
+              dcv_delegation_records: buildDelegatedDcvRecords(record),
+            },
+          },
+        });
       }
 
       if (path.includes('/custom_hostnames/') && request.method === 'DELETE') {
@@ -213,6 +314,9 @@ export function startMockUpstream(): MockUpstream {
     getLastGithubOauthTokenRequest: () => lastGithubOauthTokenRequest,
     failNextTunnelCreate: (tunnelName, status = 500, body = 'tunnel create failed') => {
       failingTunnelCreates.set(tunnelName, { status, body });
+    },
+    failNextCustomHostnameCreate: (hostname, status = 500, body = 'custom hostname create failed') => {
+      failingCustomHostnameCreates.set(hostname, { status, body });
     },
     registerGitHubUser: (token, user) => {
       githubUsers.set(token, user);

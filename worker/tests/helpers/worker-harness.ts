@@ -84,6 +84,7 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
       CF_API_TOKEN: 'cf-api-token',
       CF_ACCOUNT_ID: 'cf-account-id',
       CF_ZONE_ID: 'cf-zone-id',
+      SERVE_DOMAIN: 'gitspace.sh',
       ENCRYPTION_KEY: 'worker-test-encryption-key',
       GITHUB_OAUTH_BASE: upstream.githubOauthBase,
       GITHUB_API_BASE: upstream.githubApiBase,

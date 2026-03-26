@@ -13,6 +13,7 @@ export interface Env {
   CF_API_TOKEN: string;
   CF_ACCOUNT_ID: string;
   CF_ZONE_ID: string;
+  SERVE_DOMAIN?: string;
   ENCRYPTION_KEY: string;
   GITHUB_OAUTH_BASE?: string;
   GITHUB_API_BASE?: string;
@@ -58,6 +59,9 @@ export interface Subdomain {
   tunnel_id: string;
   dns_record_ids: string;
   tunnel_token_encrypted: string;
+  tunnel_config_source: 'cloudflare' | 'local';
+  tunnel_name: string | null;
+  tunnel_secret_encrypted: string | null;
   status: 'active' | 'suspended' | 'deleted';
   is_primary: number;
   created_at: number;

@@ -1,7 +1,7 @@
-import { buildProcessHostname } from '../../utils/hostnames.js';
 import type { WorkspaceProcessPort } from '../../components/SpacesBrowser.js';
 import type { ProcessPortProtocol } from '../../types/processes.js';
 import { readTmuxHostingState } from '../tmux-lite/hosting/state.js';
+import { resolveHostedServiceUrl } from '../tmux-lite/hosting/routes.js';
 
 export interface HostingRouteState {
   baseHost?: string;
@@ -52,16 +52,15 @@ export function buildServiceEndpoints(args: {
       const protocol = normalizeServicePortProtocol(port.protocol);
       const portLabel = port.name?.trim() || String(port.port);
       const localUrl = `${protocol}://localhost:${port.port}`;
-      const remoteUrl = hosting.baseHost
-        ? `${protocol === 'http' ? 'https' : protocol}://${buildProcessHostname(
-            hosting.baseHost,
-            args.workspaceId,
-            args.processName,
-            args.instance,
-            portLabel,
-            hosting.machineName,
-          )}`
-        : undefined;
+      const remoteUrl = resolveHostedServiceUrl({
+        baseHost: hosting.baseHost,
+        machineName: hosting.machineName,
+        workspaceId: args.workspaceId,
+        processName: args.processName,
+        instance: args.instance,
+        portLabel,
+        protocol,
+      });
       return {
         protocol,
         port: port.port,

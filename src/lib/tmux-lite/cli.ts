@@ -701,11 +701,15 @@ export async function deleteTmuxWorkspace(options: {
 
 // === API convenience functions ===
 
-export async function listSessions(): Promise<Session[]> {
-  await ensureServer();
+export async function listSessionsFromRunningServer(): Promise<Session[]> {
   const res = await send({ type: "list" });
   if (res.type === "sessions") return res.sessions;
   throw new Error("Unexpected response");
+}
+
+export async function listSessions(): Promise<Session[]> {
+  await ensureServer();
+  return listSessionsFromRunningServer();
 }
 
 export async function listReplays(options: {

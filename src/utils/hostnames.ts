@@ -19,20 +19,33 @@ export function normalizeHostLabel(value: string): string {
   return clampLabel(normalized, MAX_LABEL_LENGTH);
 }
 
+export function buildServeHostnamePattern(serveDomain: string, rootSubdomain: string): string {
+  return `<service>--<workspace>--<machine>--<port>--<instance>--${buildServeNamespaceSegment(rootSubdomain)}.${serveDomain}`;
+}
+
 export function buildProcessHostname(
   serveDomain: string,
+  rootSubdomain: string,
   workspaceId: string,
   processName: string,
   instance: number,
   portLabel: string,
   machineName?: string,
- ): string {
-  const workspaceSegment = normalizeHostLabel(workspaceId);
+): string {
   const processSegment = normalizeHostLabel(processName);
-  const portSegment = normalizeHostLabel(portLabel);
+  const workspaceSegment = normalizeHostLabel(workspaceId);
   const machineSegment = machineName ? normalizeHostLabel(machineName) : undefined;
+  const portSegment = normalizeHostLabel(portLabel);
+  const userSegment = normalizeHostLabel(rootSubdomain);
 
-  const base = buildProcessHostLabel(machineSegment, workspaceSegment, processSegment, instance, portSegment);
+  const base = buildProcessHostLabel({
+    processSegment,
+    workspaceSegment,
+    machineSegment,
+    portSegment,
+    instance,
+    userSegment,
+  });
   const suffix = `.${serveDomain}`;
   let hostname = `${base}${suffix}`;
 
@@ -46,41 +59,49 @@ export function buildProcessHostname(
   return hostname;
 }
 
-function buildProcessHostLabel(
-  machineSegment: string | undefined,
-  workspaceSegment: string,
-  processSegment: string,
-  instance: number,
-  portSegment: string,
- ): string {
-  const label = [
-    machineSegment ? `m-${machineSegment}` : null,
-    `w-${workspaceSegment}`,
-    `p-${processSegment}`,
-    `i-${instance}`,
-    `o-${portSegment}`,
+function buildServeNamespaceSegment(rootSubdomain: string): string {
+  return `${normalizeHostLabel(rootSubdomain)}-srv`;
+}
+
+function buildProcessHostLabel(args: {
+  processSegment: string;
+  workspaceSegment: string;
+  machineSegment?: string;
+  portSegment: string;
+  instance: number;
+  userSegment: string;
+}): string {
+  const full = [
+    args.processSegment,
+    args.workspaceSegment,
+    args.machineSegment ?? null,
+    args.portSegment,
+    String(args.instance),
+    buildServeNamespaceSegment(args.userSegment),
   ]
     .filter(Boolean)
-    .join('-');
-  if (label.length <= MAX_LABEL_LENGTH) {
-    return label;
+    .join('--');
+  if (full.length <= MAX_LABEL_LENGTH) {
+    return full;
   }
 
   const hash = createHash('sha256')
-    .update(JSON.stringify({ machineSegment, workspaceSegment, processSegment, instance, portSegment }))
+    .update(JSON.stringify(args))
     .digest('hex')
     .slice(0, 8);
-  const suffix = `-i-${instance}-${hash}`;
-  const prefix = clampLabel(
-    [
-      machineSegment ? `m-${machineSegment}` : null,
-      `w-${workspaceSegment}`,
-      `p-${processSegment}`,
-      `o-${portSegment}`,
-    ]
-      .filter(Boolean)
-      .join('-'),
-    Math.max(1, MAX_LABEL_LENGTH - suffix.length)
-  );
-  return `${prefix}${suffix}`;
+
+  const compactPrefix = [
+    `p${clampLabel(args.processSegment, 8)}`,
+    `w${clampLabel(args.workspaceSegment, 8)}`,
+    args.machineSegment ? `m${clampLabel(args.machineSegment, 6)}` : null,
+    `o${clampLabel(args.portSegment, 6)}`,
+    `i${args.instance}`,
+    `h${hash}`,
+  ]
+    .filter(Boolean)
+    .join('-');
+
+  const namespaceSuffix = `--${buildServeNamespaceSegment(args.userSegment)}`;
+  const availablePrefixLength = Math.max(1, MAX_LABEL_LENGTH - namespaceSuffix.length);
+  return `${clampLabel(compactPrefix, availablePrefixLength)}${namespaceSuffix}`;
 }

@@ -57,27 +57,13 @@ import {
 } from '../lib/tmux-lite/hosting/supervisor.js';
 import { resolveHostingSubdomains } from './host.js';
 import { selectOne } from '../utils/prompts.js';
+import { buildServeHostnamePattern } from '../utils/hostnames.js';
+import { normalizeTmuxHostingBaseHost, parseTmuxHostingBaseHost } from '../lib/tmux-lite/hosting/base-host.js';
 
 interface TmuxCommandOptions {
   sandbox?: string;
 }
 
-function normalizeHostingBaseHost(input: string): string {
-  const trimmed = input.trim().toLowerCase();
-  if (!trimmed) {
-    throw new Error('Hosting route cannot be empty');
-  }
-  if (trimmed.endsWith('.serve.gitspace.sh')) {
-    return trimmed;
-  }
-  if (trimmed.endsWith('.gitspace.sh')) {
-    throw new Error('Hosting route must use a .serve.gitspace.sh hostname');
-  }
-  if (trimmed.endsWith('.serve')) {
-    return `${trimmed}.gitspace.sh`;
-  }
-  return `${trimmed}.serve.gitspace.sh`;
-}
 
 function applyTmuxSandbox(options?: TmuxCommandOptions): void {
   if (options?.sandbox) {
@@ -181,7 +167,7 @@ export async function stopTmux(options: { force?: boolean; sandbox?: string } = 
   logger.success("tmux-lite server stopped");
   const hostingState = readTmuxHostingState();
   if (hostingState?.enabled) {
-    logger.dim(`tmux-lite hosting remains enabled for ${hostingState.baseHost ?? 'the selected route'}`);
+    logger.dim(`Hosting config remains enabled for ${hostingState.baseHost ?? 'the selected route'} and will be reconciled when tmux-lite starts again.`);
   }
 }
 
@@ -312,20 +298,20 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
 
   let selectedBaseHost = baseHost?.trim();
   if (!selectedBaseHost) {
-    const subdomains = await resolveHostingSubdomains();
-    if (subdomains.length === 0) {
+    const baseHosts = [...new Set((await resolveHostingSubdomains()).map((subdomain) => normalizeTmuxHostingBaseHost(subdomain)))];
+    if (baseHosts.length === 0) {
       logger.warning('No reserved hosting routes found.');
       logger.dim('Reserve one with: gssh user host reserve <name>');
       return;
     }
     if (!process.stdout.isTTY || !process.stdin.isTTY) {
-      selectedBaseHost = `${subdomains[0]}.serve.gitspace.sh`;
+      selectedBaseHost = baseHosts[0];
     } else {
       const selected = await selectOne(
-        subdomains.map((subdomain) => ({
-          label: `${subdomain}.serve.gitspace.sh`,
-          value: `${subdomain}.serve.gitspace.sh`,
-          description: `${subdomain}.gitspace.sh remains the root host; tmux hosting uses the .serve subdomain.`,
+        baseHosts.map((candidateBaseHost) => ({
+          label: candidateBaseHost,
+          value: candidateBaseHost,
+          description: `${parseTmuxHostingBaseHost(candidateBaseHost).rootSubdomain}.gitspace.sh stays the relay host; tmux hosting publishes flattened service hosts under ${buildServeHostnamePattern('gitspace.sh', parseTmuxHostingBaseHost(candidateBaseHost).rootSubdomain)}.`,
         })),
         'Select a tmux-lite hosting route'
       );
@@ -337,7 +323,7 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
     }
   }
 
-  const normalizedBaseHost = normalizeHostingBaseHost(selectedBaseHost);
+  const normalizedBaseHost = normalizeTmuxHostingBaseHost(selectedBaseHost);
   const state = writeTmuxHostingState({ baseHost: normalizedBaseHost, enabled: true });
   const refreshed = await refreshTmuxHosting();
   logger.success(`tmux-lite hosting route selected: ${state.baseHost}`);

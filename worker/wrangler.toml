@@ -10,7 +10,9 @@ routes = [
 [vars]
 PORTAL_URL = "https://gitspace.sh"
 MAX_ACCOUNTS = "17"
+SERVE_DOMAIN = "gitspace.sh"
 # GITHUB_CLIENT_ID set via wrangler secret or here for dev
+# Serve routes publish exact <service>--...--<user>-srv.gitspace.sh records in the main zone.
 
 [[d1_databases]]
 binding = "DB"

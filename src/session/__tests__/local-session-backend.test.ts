@@ -7,6 +7,7 @@ import { killServer } from '../../lib/tmux-lite/cli.js';
 import { rmSync } from 'node:fs';
 import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import type { Session as TmuxSession, WorkspaceRuntimeRecord } from '../../lib/tmux-lite/protocol.js';
+import { PortConflictError } from '../../lib/processes/ports.js';
 const notificationConfig: NotificationConfig = {
   enabled: true,
   minCommandDurationMs: 1000,
@@ -265,27 +266,45 @@ function createBackend(
   deps: Partial<LocalSessionBackendDependencies>,
   options: {
     descriptor?: ConstructorParameters<typeof LocalSessionBackend>[0]['descriptor'];
-    agentControl?: ConstructorParameters<typeof LocalSessionBackend>[0]['agentControl'];
   } = {},
 ) {
   const effectiveDeps: Partial<LocalSessionBackendDependencies> = {
     ...deps,
     getMachineSnapshot: deps.getMachineSnapshot ?? (() => buildSnapshotForDeps(deps)),
     watchMachineEvents: deps.watchMachineEvents ?? (async () => () => {}),
-    getInbox: async () => {
-      const result = await (deps.getInbox?.() ?? Promise.resolve([]));
-      return Array.isArray(result) ? { items: result, unreadCount: result.filter((item) => !item.read).length } : result;
-    },
-    clearInbox: deps.clearInbox ?? (async () => undefined),
-    markInboxRead: deps.markInboxRead ?? (async () => undefined),
-    getNotificationConfig: async () => {
-      const result = await (deps.getNotificationConfig?.() ?? Promise.resolve({ config: notificationConfig }));
-      return 'config' in result ? result : { config: result as NotificationConfig };
-    },
-    updateNotificationConfig: async (config) => {
-      const result = await (deps.updateNotificationConfig?.(config) ?? Promise.resolve({ config }));
-      return 'config' in result ? result : { config: result as NotificationConfig };
-    },
+    sendTmuxCommand: deps.sendTmuxCommand ?? (async (command) => {
+      switch (command.type) {
+        case 'inbox': {
+          const items = await ((deps as { getInbox?: () => Promise<unknown> }).getInbox?.() ?? Promise.resolve([]));
+          return {
+            type: 'inbox' as const,
+            items: Array.isArray(items) ? items : ((items as { items?: unknown[] }).items ?? []),
+          };
+        }
+        case 'inbox-clear':
+          await (deps as { clearInbox?: (id?: string) => Promise<void> }).clearInbox?.(command.id);
+          return { type: 'ok' as const };
+        case 'inbox-read':
+          await (deps as { markInboxRead?: (id: string) => Promise<void> }).markInboxRead?.(command.id);
+          return { type: 'ok' as const };
+        case 'notification-config-get': {
+          const result = await ((deps as { getNotificationConfig?: () => Promise<unknown> }).getNotificationConfig?.() ?? Promise.resolve({ config: notificationConfig }));
+          return {
+            type: 'notification-config' as const,
+            config: (result && typeof result === 'object' && 'config' in result ? result.config : result) as NotificationConfig,
+          };
+        }
+        case 'notification-config-update': {
+          const result = await ((deps as { updateNotificationConfig?: (config: NotificationConfig) => Promise<unknown> }).updateNotificationConfig?.(command.config) ?? Promise.resolve({ config: command.config }));
+          return {
+            type: 'notification-config' as const,
+            config: (result && typeof result === 'object' && 'config' in result ? result.config : result) as NotificationConfig,
+          };
+        }
+        default:
+          throw new Error(`Unhandled tmux command in test helper: ${command.type}`);
+      }
+    }),
     prepareAttachSession: deps.prepareAttachSession ?? (async (params) => {
       const workspaceList = await (deps.scanWorkspaces?.() ?? Promise.resolve([]));
       const workspace = workspaceList.find((item) => item.id === params.workspaceId || toCanonicalWorkspaceId(item.projectName, item.id) === params.workspaceId);
@@ -339,7 +358,7 @@ function createBackend(
       return result;
     }),
   };
-  return new LocalSessionBackend({ descriptor: options.descriptor, deps: effectiveDeps, agentControl: options.agentControl });
+  return new LocalSessionBackend({ descriptor: options.descriptor, deps: effectiveDeps });
 }
 
 describe('LocalSessionBackend', () => {
@@ -1701,6 +1720,18 @@ describe('LocalSessionBackend', () => {
       watchMachineEvents: async () => () => {},
       scanWorkspaces: async () => [workspace],
       listSessions: async () => [agentTerminalSession],
+      sendTmuxCommand: mock(async (command) => {
+        if (command.type === 'agent-attach') {
+          return { type: 'session', session: await ensureAgentTerminalSession(command.target, command.agentSessionId) };
+        }
+        if (command.type === 'inbox') {
+          return { type: 'inbox', items: [] };
+        }
+        if (command.type === 'notification-config-get') {
+          return { type: 'notification-config', config: notificationConfig };
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      }),
       connectSessionSocket: async (_socketPath, handlers) => ({
         sendControl: (control) => {
           if (control.type === 'attach-init') {
@@ -1711,17 +1742,7 @@ describe('LocalSessionBackend', () => {
         close: () => handlers.onClose(),
       }),
     };
-    const backend = createBackend(deps, {
-      agentControl: {
-        getState: mock(async () => []),
-        watchState: mock(async () => () => {}),
-        listSessions: mock(async () => []),
-        createSession: mock(async () => []),
-        abortSession: mock(async () => true),
-        attachSession: ensureAgentTerminalSession,
-        respondToPermission: mock(async () => true),
-      },
-    });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -1740,4 +1761,37 @@ describe('LocalSessionBackend', () => {
       }),
     );
   });
+  it('rethrows structured service-start conflicts as PortConflictError', async () => {
+    const conflict = { port: 3000, protocol: 'http' as const, pid: 1234, command: 'node' };
+    const backend = createBackend({
+      sendTmuxCommand: async (command) => {
+        if (command.type === 'service-start') {
+          return {
+            type: 'error' as const,
+            code: 'PORT_CONFLICT',
+            message: 'Failed to start service: Cannot start web; port already in use: :3000 -> node (pid 1234)',
+            processName: 'web',
+            portConflicts: [conflict],
+          };
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      },
+    });
+
+    let thrown: unknown;
+    try {
+      await backend.startProcess('alpha:ws-1', 'web', 1);
+      expect.unreachable('Expected startProcess to throw');
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(PortConflictError);
+    expect(thrown).toMatchObject({
+      name: 'PortConflictError',
+      code: 'PORT_CONFLICT',
+      conflicts: [conflict],
+    });
+  });
+
 });

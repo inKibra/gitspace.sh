@@ -102,7 +102,7 @@ const PACKAGE_VERSION = '1.0.0';
 /** Default relay URL */
 // No default relay - must use hosting or explicit --relay
 
-/** Local relay port for gitspace.sh hosting */
+/** Local relay port for gitspace.sh hosting. */
 const LOCAL_RELAY_PORT = 4480;
 
 // ============================================================================

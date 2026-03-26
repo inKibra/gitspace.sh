@@ -44,8 +44,8 @@ app.get('/health', (c) => {
 
 // Public config (for CLI compatibility checks and GitHub Client ID)
 const WORKER_VERSION = '1.0.0';
-const WORKER_API_VERSION = 1;
-const SUBDOMAINS_SCHEMA_VERSION = 2;
+const WORKER_API_VERSION = 3;
+const SUBDOMAINS_SCHEMA_VERSION = 4;
 
 app.get('/config', (c) => {
   return c.json({

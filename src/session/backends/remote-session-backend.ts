@@ -32,6 +32,7 @@ import {
   WorkspaceDeleteError,
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
+import { throwServiceStartError } from './service-start-error.js';
 import type {
   AttachSessionParams,
   BackendDescriptor,
@@ -982,7 +983,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
     if (response.type === 'error') {
-      throw new Error(response.message);
+      throwServiceStartError(response);
     }
     throw new Error('Unexpected tmux service start response');
   }

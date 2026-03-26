@@ -97,8 +97,8 @@ describe('authLogin identity recovery', () => {
         return Response.json({
           github_client_id: 'client-id',
           version: '1.0.0',
-          apiVersion: 1,
-          subdomainsSchemaVersion: 2,
+          apiVersion: 3,
+          subdomainsSchemaVersion: 4,
         });
       }
 

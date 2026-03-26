@@ -40,7 +40,7 @@ import { promptConfirm, selectOne } from "../utils/prompts.js";
 import { isCloudflaredInstalled, trackCloudflaredOutput } from "../utils/cloudflared.js";
 import { ensureUserRootIdentityWithRecovery } from "./identity-recovery.js";
 
-/** Default port for relay server (4480 = "GIT0" on phone keypad) */
+/** Default port for the local relay server. */
 const DEFAULT_PORT = 4480;
 const RELAY_RUNTIME_DIR = ".relay/runtime";
 const RELAY_STATE_FILE = "relay-state.json";

@@ -981,7 +981,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
                       <text fg={isSelected ? COLORS.selected : COLORS.textMid}>{service.label}</text>
                       {service.subtitle && <text fg={COLORS.textDim}> {service.subtitle}</text>}
                       {service.portLabel ? (
-                        <text fg={COLORS.textDim}>{service.portLabel}</text>
+                        <text fg={service.hostedUrl ? COLORS.blue : COLORS.textDim}>{service.portLabel}</text>
                       ) : null}
                       {service.alertLabel && (
                         <text fg={COLORS.amber}> {service.alertLabel}</text>

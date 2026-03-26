@@ -78,6 +78,8 @@ import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
+import { signalSubprocessTree } from './process-tree.js';
+import { PortConflictError } from '../processes/ports.js';
 import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
@@ -509,7 +511,7 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
     }
     try { session.xterm.dispose(); } catch {}
     cleanupSessionResources(session, { removeFromMap: false });
-    try { session.proc.kill(9); } catch {}
+    try { signalSubprocessTree(session.proc, 'SIGKILL'); } catch {}
   }
   sessions.clear();
 
@@ -580,17 +582,7 @@ function terminalSignalsEnabled(ptyTerminal: Bun.Terminal): boolean {
 }
 
 function sendInterruptSignal(proc: Bun.Subprocess): boolean {
-  try {
-    process.kill(-proc.pid, 'SIGINT');
-    return true;
-  } catch {}
-
-  try {
-    process.kill(proc.pid, 'SIGINT');
-    return true;
-  } catch {}
-
-  return false;
+  return signalSubprocessTree(proc, 'SIGINT');
 }
 
 // ============================================================================
@@ -1811,7 +1803,7 @@ function cleanupFailedSessionCreation(
   socketPath: string
 ): void {
   try { disposeDsr(); } catch {}
-  try { proc.kill(9); } catch {}
+  try { signalSubprocessTree(proc, 'SIGKILL'); } catch {}
   try { xterm.dispose(); } catch {}
   safeUnlink(socketPath);
   console.warn(`[${sessionName}] cleaned up failed session startup`);
@@ -2230,8 +2222,8 @@ routerListener = Bun.listen({
             if (!s) {
               res = { type: "error", message: `Session ${cmd.id} not found` };
             } else {
-              // Use SIGKILL to forcefully terminate - SIGTERM is often ignored by shells
-              s.proc.kill(9);
+              // Kill the full process tree so child services do not outlive the tmux session shell.
+              signalSubprocessTree(s.proc, 'SIGKILL');
               void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: "ok" };
             }
@@ -2393,6 +2385,16 @@ routerListener = Bun.listen({
                 sessionIds,
               };
             } catch (e) {
+              if (e instanceof PortConflictError) {
+                res = {
+                  type: 'error',
+                  code: e.code,
+                  message: `Failed to start service: ${e.message}`,
+                  processName: cmd.processName,
+                  portConflicts: e.conflicts,
+                };
+                break;
+              }
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to start service: ${errMsg}` };
             }
@@ -2857,7 +2859,7 @@ function cleanupAndExit(signal: string) {
     try {
       markReplayCrashed(s);
       s.xterm.dispose();
-      s.proc.kill(9);
+      signalSubprocessTree(s.proc, 'SIGKILL');
     } catch {}
   }
   // Clean up PID file

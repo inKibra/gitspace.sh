@@ -13,7 +13,6 @@ import type { ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
-import { buildProcessHostname } from '../utils/hostnames.js';
 
 /* ─── Sidebar helpers ─────────────────────────────────────────────────────── */
 
@@ -366,7 +365,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           {serviceRows.length > 0 && (
             <SidebarSection title="Services">
               {serviceRows.map((service) => {
-                  const localUrl = service.portLabel;
+                  const localUrl = service.localUrl;
                   const isOpen = attachedServiceIdentity?.processName === service.processName
                     && attachedServiceIdentity.instance === service.instance;
                   return (
@@ -396,17 +395,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                           </button>
                         )}
                         {service.state === 'running' && localUrl && (() => {
-                          const portLabel = service.portLabel?.split(':')[1] ?? String(service.instance);
-                          const servedHostname = workspace.serveDomain
-                            ? buildProcessHostname(
-                                workspace.serveDomain,
-                                workspace.id,
-                                service.processName,
-                                service.instance,
-                                portLabel,
-                              )
-                            : null;
-                          const targetUrl = servedHostname ? `https://${servedHostname}` : `http://${localUrl}`;
+                          const targetUrl = service.hostedUrl ?? `http://${localUrl}`;
                           return (
                             <button
                               type="button"
@@ -431,19 +420,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                       </div>
                       {service.state === 'running' && localUrl && (
                         <div className="pl-5 text-[10px] text-[#484f58] truncate">
-                          {workspace.serveDomain
-                            ? (() => {
-                                const portLabel = service.portLabel?.split(':')[1] ?? String(service.instance);
-                                const hostname = buildProcessHostname(
-                                  workspace.serveDomain,
-                                  workspace.id,
-                                  service.processName,
-                                  service.instance,
-                                  portLabel
-                                );
-                                return <a href={`https://${hostname}`} target="_blank" rel="noopener noreferrer" className="hover:text-[#58a6ff] transition-colors">{hostname}</a>;
-                              })()
-                            : <span>{localUrl}</span>
+                          {service.hostedUrl
+                            ? <a href={service.hostedUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[#58a6ff] transition-colors">{service.hostedUrl.replace(/^http:\/\//, '')}</a>
+                            : localUrl ? <span>{localUrl}</span> : null
                           }
                         </div>
                       )}

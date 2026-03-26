@@ -10,6 +10,16 @@ mock.module('../tmux-lite/hosting/state.js', () => ({
   clearTmuxHostingState: mock(() => undefined),
 }));
 
+const mockResolveHostedServiceUrl = mock((args: { baseHost?: string; machineName?: string; workspaceId: string; processName: string; instance: number; portLabel: string; protocol: 'http' | 'tcp' }) => {
+  return args.protocol === 'http' && args.baseHost
+    ? `http://${buildProcessHostname('gitspace.sh', 'brad', args.workspaceId, args.processName, args.instance, args.portLabel, args.machineName)}`
+    : undefined;
+});
+
+mock.module('../tmux-lite/hosting/routes.js', () => ({
+  resolveHostedServiceUrl: mockResolveHostedServiceUrl,
+}));
+
 const { getHostingRouteState, buildServiceEndpoints } = await import('./endpoints.js');
 
 describe('service endpoints hosting cutover', () => {
@@ -28,20 +38,21 @@ describe('service endpoints hosting cutover', () => {
     } else {
       process.env.GITSPACE_MACHINE_NAME = originalMachineName;
     }
+    mockResolveHostedServiceUrl.mockClear();
   });
 
   it('prefers persisted tmux hosting state over legacy process env', () => {
-    process.env.GITSPACE_SERVE_DOMAIN = 'legacy.serve.gitspace.sh';
+    process.env.GITSPACE_SERVE_DOMAIN = 'legacy.gitspace.sh';
     process.env.GITSPACE_MACHINE_NAME = 'legacy-machine';
     hostingState = {
-      baseHost: 'brad.serve.gitspace.sh',
+      baseHost: 'brad.gitspace.sh',
       machineName: 'macbook',
       enabled: true,
       updatedAt: Date.now(),
     };
 
     expect(getHostingRouteState()).toEqual({
-      baseHost: 'brad.serve.gitspace.sh',
+      baseHost: 'brad.gitspace.sh',
       machineName: 'macbook',
       enabled: true,
     });
@@ -49,7 +60,7 @@ describe('service endpoints hosting cutover', () => {
 
   it('builds remote urls from tmux hosting state', () => {
     hostingState = {
-      baseHost: 'brad.serve.gitspace.sh',
+      baseHost: 'brad.gitspace.sh',
       machineName: 'macbook',
       enabled: true,
       updatedAt: Date.now(),
@@ -68,7 +79,7 @@ describe('service endpoints hosting cutover', () => {
         port: 3000,
         portLabel: 'app',
         localUrl: 'http://localhost:3000',
-        remoteUrl: `https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'app', 'macbook')}`,
+        remoteUrl: `http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'app', 'macbook')}`,
         hostingEnabled: true,
       },
     ]);

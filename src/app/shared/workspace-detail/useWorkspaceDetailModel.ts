@@ -9,6 +9,7 @@ import { formatTime, getAgentSessionDisplayState } from '../../../components/Spa
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
 import { parseProcessSessionName } from '../../../lib/processes/names.js';
 import { getSessionAlertLabel, getSessionSubtitle } from '../workspace-runtime/derive.js';
+import { resolveHostedServiceUrl } from '../../../lib/tmux-lite/hosting/routes.js';
 
 const REPLAY_HISTORY_PREVIEW_LIMIT = 3;
 const NOTE_TODO_PREVIEW_LIMIT = 2;
@@ -258,12 +259,23 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
           .filter((session) => session.exitCode === undefined)
           .sort((a, b) => b.createdAt - a.createdAt)[0];
         const latestSession = [...matchingSessions].sort((a, b) => b.createdAt - a.createdAt)[0];
+        const localUrl = port ? `localhost:${port.port}` : undefined;
+        const hostedUrl = runningSession && port ? resolveHostedServiceUrl({
+          baseHost: workspace.serveDomain,
+          workspaceId: workspace.id,
+          processName: process.name,
+          instance,
+          portLabel: port.name?.trim() || String(port.port),
+          protocol: port.protocol === 'tcp' ? 'tcp' : 'http',
+        }) : undefined;
         rows.push({
           key: `${process.name}:${instance}`,
           processName: process.name,
           instance,
           label: `${process.name}#${instance}`,
-          portLabel: port ? `localhost:${port.port}` : undefined,
+          portLabel: hostedUrl ? hostedUrl.replace(/^http:\/\//, '') : localUrl,
+          localUrl,
+          hostedUrl,
           state: runningSession ? 'running' : latestSession?.exitCode !== undefined ? (latestSession.exitCode === 0 ? 'stopped' : 'failed') : 'stopped',
           subtitle: latestSession ? getSessionSubtitle(runningSession ?? latestSession) : undefined,
           alertLabel: latestSession ? getSessionAlertLabel(runningSession ?? latestSession) : undefined,

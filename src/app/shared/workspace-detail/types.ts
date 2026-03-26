@@ -99,6 +99,8 @@ export interface WorkspaceDetailModel {
     instance: number;
     label: string;
     portLabel?: string;
+    localUrl?: string;
+    hostedUrl?: string;
     state: 'running' | 'stopped' | 'failed' | 'disabled';
     subtitle?: string;
     alertLabel?: string;

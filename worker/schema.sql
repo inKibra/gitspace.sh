@@ -55,19 +55,22 @@ CREATE TABLE IF NOT EXISTS identity_backups (
   updated_at INTEGER NOT NULL
 );
 
--- Subdomains (users can have MULTIPLE subdomains)
--- Free tier: 3 subdomains max
--- Paid tier: 10 subdomains max
+-- Subdomains and companion serve namespaces
+-- Free tier: 3 root subdomains max
+-- Paid tier: 10 root subdomains max
 CREATE TABLE IF NOT EXISTS subdomains (
   id TEXT PRIMARY KEY,                    -- uuid
-  subdomain TEXT UNIQUE NOT NULL,         -- "brad" (not full domain)
+  subdomain TEXT UNIQUE NOT NULL,         -- "brad" or "brad.serve" (not full domain)
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   tunnel_id TEXT NOT NULL,                -- Cloudflare tunnel UUID
   dns_record_ids TEXT NOT NULL,           -- JSON array of DNS record IDs for cleanup
-  custom_hostname_id TEXT,                -- Cloudflare for SaaS hostname ID (for *.subdomain.gitspace.sh)
-  tunnel_token_encrypted TEXT NOT NULL,   -- Encrypted tunnel token
+  custom_hostname_id TEXT,                -- Cloudflare for SaaS hostname ID
+  tunnel_token_encrypted TEXT NOT NULL,   -- Encrypted relay tunnel token or local-management placeholder
+  tunnel_config_source TEXT NOT NULL DEFAULT 'cloudflare', -- cloudflare or local
+  tunnel_name TEXT,                       -- Cloudflare tunnel display name
+  tunnel_secret_encrypted TEXT,           -- Encrypted local-managed tunnel secret
   status TEXT NOT NULL DEFAULT 'active',  -- active, suspended, deleted
-  is_primary INTEGER DEFAULT 0,           -- 1 = Primary subdomain for this user
+  is_primary INTEGER DEFAULT 0,           -- 1 = Primary root subdomain for this user
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -104,4 +107,17 @@ CREATE TABLE IF NOT EXISTS subdomain_access (
 );
 
 CREATE INDEX IF NOT EXISTS idx_subdomain_access_subdomain ON subdomain_access(subdomain_id);
+
+-- Flattened hosted-service routes under serve.gitspace.sh
+CREATE TABLE IF NOT EXISTS serve_route_records (
+  id TEXT PRIMARY KEY,
+  serve_subdomain_id TEXT NOT NULL REFERENCES subdomains(id) ON DELETE CASCADE,
+  hostname TEXT UNIQUE NOT NULL,
+  dns_record_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+ );
+
+CREATE INDEX IF NOT EXISTS idx_serve_route_records_subdomain ON serve_route_records(serve_subdomain_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_serve_route_records_hostname ON serve_route_records(hostname);
 CREATE INDEX IF NOT EXISTS idx_subdomain_access_identity ON subdomain_access(identity_id);

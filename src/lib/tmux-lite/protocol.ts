@@ -450,7 +450,7 @@ export type Response =
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }
-  | { type: "error"; message: string; code?: string }
+  | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/ports.js').PortConflictInfo[] }
   | { type: "inbox"; items: InboxItem[] }
   | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
   | { type: "version"; version: string; protocol: number }

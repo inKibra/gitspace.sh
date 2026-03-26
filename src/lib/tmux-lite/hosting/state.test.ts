@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -15,6 +15,15 @@ const originalReplay = process.env.TMUX_LITE_REPLAY_DIR;
 
 let sandboxDir: string | null = null;
 
+function configureSandbox(): string {
+  sandboxDir = mkdtempSync(join(tmpdir(), 'tmux-hosting-test-'));
+  process.env.TMUX_LITE_SESSION_DIR = sandboxDir;
+  process.env.TMUX_LITE_SOCKET = join(sandboxDir, 'tmux.sock');
+  process.env.TMUX_LITE_PID_FILE = join(sandboxDir, 'tmux.pid');
+  process.env.TMUX_LITE_REPLAY_DIR = join(sandboxDir, 'replays');
+  return join(sandboxDir, '.gitspace-hosting.json');
+}
+
 afterEach(() => {
   clearTmuxHostingState();
   if (sandboxDir) {
@@ -29,24 +38,67 @@ afterEach(() => {
 
 describe('tmux hosting state', () => {
   it('persists selected base host and machine name', () => {
-    sandboxDir = mkdtempSync(join(tmpdir(), 'tmux-hosting-test-'));
-    process.env.TMUX_LITE_SESSION_DIR = sandboxDir;
-    process.env.TMUX_LITE_SOCKET = join(sandboxDir, 'tmux.sock');
-    process.env.TMUX_LITE_PID_FILE = join(sandboxDir, 'tmux.pid');
-    process.env.TMUX_LITE_REPLAY_DIR = join(sandboxDir, 'replays');
+    configureSandbox();
 
     const written = writeTmuxHostingState({
-      baseHost: 'brad.serve.gitspace.sh',
+      baseHost: 'brad.gitspace.sh',
       machineName: 'My MacBook',
       enabled: true,
     });
 
-    expect(written.baseHost).toBe('brad.serve.gitspace.sh');
+    expect(written.baseHost).toBe('brad.gitspace.sh');
     expect(written.machineName).toBe('my-macbook');
     expect(readTmuxHostingState()).toMatchObject({
-      baseHost: 'brad.serve.gitspace.sh',
+      baseHost: 'brad.gitspace.sh',
       machineName: 'my-macbook',
       enabled: true,
+    });
+  });
+
+  it('repairs persisted double-serve hosts when reading state', () => {
+    const statePath = configureSandbox();
+    writeFileSync(statePath, `${JSON.stringify({
+      baseHost: 'brad.serve.serve.gitspace.sh',
+      machineName: 'macbook',
+      enabled: true,
+      updatedAt: 123,
+    }, null, 2)}\n`, 'utf-8');
+
+    expect(readTmuxHostingState()).toMatchObject({
+      baseHost: 'brad.gitspace.sh',
+      machineName: 'macbook',
+      enabled: true,
+      updatedAt: 123,
+    });
+    expect(JSON.parse(readFileSync(statePath, 'utf-8'))).toMatchObject({
+      baseHost: 'brad.gitspace.sh',
+      machineName: 'macbook',
+      enabled: true,
+      updatedAt: 123,
+    });
+  });
+
+  it('drops legacy router runtime state when reading persisted config', () => {
+    const statePath = configureSandbox();
+    writeFileSync(statePath, `${JSON.stringify({
+      baseHost: 'brad.gitspace.sh',
+      machineName: 'macbook',
+      enabled: true,
+      routerPid: 9999,
+      updatedAt: 123,
+    }, null, 2)}\n`, 'utf-8');
+
+    expect(readTmuxHostingState()).toEqual({
+      baseHost: 'brad.gitspace.sh',
+      machineName: 'macbook',
+      enabled: true,
+      updatedAt: 123,
+    });
+    expect(JSON.parse(readFileSync(statePath, 'utf-8'))).toEqual({
+      baseHost: 'brad.gitspace.sh',
+      machineName: 'macbook',
+      enabled: true,
+      updatedAt: 123,
     });
   });
 });

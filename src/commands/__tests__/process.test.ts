@@ -20,9 +20,11 @@ const mockListSessions = mock<() => Promise<Array<{ id: string; name: string; cw
 );
 mock.module('../../lib/tmux-lite/cli.js', () => ({
   listSessions: mockListSessions,
+  listSessionsFromRunningServer: mockListSessions,
   createSession: mock(() => Promise.resolve({ id: 'sess-1', name: 'test' })),
   killSession: mock(() => Promise.resolve()),
   isProcessRunning: mock(() => false),
+  isServerRunning: mock(() => Promise.resolve(true)),
 }));
 
 // Mock process manager
@@ -34,6 +36,11 @@ const mockListProcessSessions = mock<
 >(() => Promise.resolve([]));
 const mockOpenBrowserUrl = mock(() => Promise.resolve({ ok: true as const }));
 const mockReadTmuxHostingState = mock<() => { baseHost?: string; machineName?: string; enabled: boolean; updatedAt: number } | null>(() => null);
+const mockResolveHostedServiceUrl = mock((args: { baseHost?: string; machineName?: string; workspaceId: string; processName: string; instance: number; portLabel: string; protocol: 'http' | 'tcp' }) => {
+  return args.protocol === 'http' && args.baseHost
+    ? `http://${buildProcessHostname('gitspace.sh', 'brad', args.workspaceId, args.processName, args.instance, args.portLabel, args.machineName)}`
+    : undefined;
+});
 const mockSelectOne = mock(() => Promise.resolve<'resolve' | 'cancel'>('resolve'));
 const mockResolvePortConflict = mock(() => Promise.resolve());
 class MockPortConflictError extends Error {
@@ -62,6 +69,10 @@ mock.module('../../lib/tmux-lite/hosting/state.js', () => ({
   writeTmuxHostingState: mock(() => ({ enabled: true, updatedAt: Date.now() })),
   resolveTmuxHostingState: mock(() => ({ enabled: false, updatedAt: Date.now() })),
   clearTmuxHostingState: mock(() => undefined),
+}));
+
+mock.module('../../lib/tmux-lite/hosting/routes.js', () => ({
+  resolveHostedServiceUrl: mockResolveHostedServiceUrl,
 }));
 
 const realPrompts = await import('../../utils/prompts.js');
@@ -324,7 +335,7 @@ describe('listProcesses', () => {
       },
     }]);
     mockListProcessSessions.mockImplementation(() => Promise.resolve([]));
-    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.serve.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
+    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
 
     await listProcesses({ workspace: '/tmp/project/workspaces/demo' });
   });
@@ -336,6 +347,10 @@ describe('openProcess', () => {
     mockOpenBrowserUrl.mockReset();
     mockReadTmuxHostingState.mockReset();
     mockOpenBrowserUrl.mockResolvedValue({ ok: true });
+    mockResolveHostedServiceUrl.mockReset();
+    mockResolveHostedServiceUrl.mockImplementation((args) => args.protocol === 'http' && args.baseHost
+      ? `http://${buildProcessHostname('gitspace.sh', 'brad', args.workspaceId, args.processName, args.instance, args.portLabel, args.machineName)}`
+      : undefined);
   });
 
   it('opens hosted url by default when available', async () => {
@@ -344,11 +359,11 @@ describe('openProcess', () => {
       instance: 1,
       definition: { name: 'web', command: 'npm start', ports: [{ name: 'app', port: 3000, protocol: 'http' }] },
     }]);
-    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.serve.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
+    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
 
     await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web' });
 
-    expect(mockOpenBrowserUrl).toHaveBeenCalledWith(`https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'app', 'macbook')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenCalledWith(`http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'app', 'macbook')}`);
   });
 
   it('opens all configured http ports and skips tcp ports with --all', async () => {
@@ -365,13 +380,13 @@ describe('openProcess', () => {
         ],
       },
     }]);
-    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.serve.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
+    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
 
     await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web', all: true });
 
     expect(mockOpenBrowserUrl).toHaveBeenCalledTimes(2);
-    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, `https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'app', 'macbook')}`);
-    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, `https://${buildProcessHostname('brad.serve.gitspace.sh', 'demo', 'web', 1, 'admin', 'macbook')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, `http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'app', 'macbook')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, `http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'admin', 'macbook')}`);
   });
 
   it('falls back to localhost when no hosted url exists', async () => {

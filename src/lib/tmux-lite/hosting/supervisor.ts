@@ -2,23 +2,30 @@ import { spawn, type Subprocess } from 'bun';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { getSecret } from '../../../utils/secrets.js';
+import { readHostConfig, syncServeRouteHostnames } from '../../../commands/host.js';
 import { isCloudflaredInstalled } from '../../../utils/cloudflared.js';
-import { logger } from '../../../utils/logger.js';
 import { buildProcessHostname } from '../../../utils/hostnames.js';
 import { getGitspaceDir } from '../../../core/config.js';
-import { listSessions, isProcessRunning } from '../cli.js';
+import { listSessionsFromRunningServer, isProcessRunning, isServerRunning } from '../cli.js';
 import { parseProcessSessionName } from '../../processes/names.js';
 import { resolveWorkspaceRef } from '../../events/paths.js';
 import { loadProcessesConfig } from '../../processes/config.js';
 import type { ProcessPortConfig } from '../../../types/processes.js';
-import { getServeTokenKey } from '../../../commands/host.js';
 import { readTmuxHostingState, writeTmuxHostingState, type TmuxHostingState } from './state.js';
+import { parseTmuxHostingBaseHost } from './base-host.js';
 
 interface HostedServiceRoute {
   hostname: string;
   service: string;
 }
+
+type ParsedBaseHost = ReturnType<typeof parseTmuxHostingBaseHost>;
+type HostedServiceRouteCollection =
+  | { ok: true; routes: HostedServiceRoute[] }
+  | { ok: false; reason: string };
+type ManagedServeTunnel =
+  | { ok: true; rootSubdomain: string; serveDomain: string; tunnelId: string; credentialsPath: string }
+  | { ok: false; reason: string };
 
 const READY_TIMEOUT_MS = 5000;
 const MAX_WORKSPACE_PATH_CACHE_SIZE = 256;
@@ -33,34 +40,60 @@ function getCloudflaredConfigPath(): string {
   return join(getHostingRuntimeDir(), 'cloudflared.yml');
 }
 
+function getHostedRoutesPath(): string {
+  return join(getHostingRuntimeDir(), 'hosted-routes.json');
+}
+
 function hashConfig(config: string): string {
   return createHash('sha256').update(config).digest('hex');
 }
 
-function buildIngressConfig(entries: HostedServiceRoute[]): string {
-  const lines = ['ingress:'];
-  for (const entry of entries) {
-    lines.push(`  - hostname: ${entry.hostname}`);
-    lines.push(`    service: ${entry.service}`);
-  }
-  lines.push('  - service: http_status:404');
-  return `${lines.join('\n')}\n`;
+function buildCloudflaredConfig(args: {
+  tunnelId: string;
+  credentialsPath: string;
+  routes: HostedServiceRoute[];
+}): string {
+  const ingressLines = args.routes.flatMap((route) => [
+    `  - hostname: ${route.hostname}`,
+    `    service: ${route.service}`,
+  ]);
+
+  return [
+    '# tmux hosting manages a locally-managed Cloudflare Tunnel for the selected serve namespace.',
+    `tunnel: ${args.tunnelId}`,
+    `credentials-file: ${JSON.stringify(args.credentialsPath)}`,
+    'loglevel: info',
+    '',
+    'ingress:',
+    ...ingressLines,
+    '  - service: http_status:404',
+    '',
+  ].join('\n');
 }
 
-function parseBaseHost(baseHost: string): { serveDomain: string; rootSubdomain: string } | null {
-  const normalized = baseHost.trim().toLowerCase();
-  if (!normalized.endsWith('.gitspace.sh')) {
-    return null;
+function buildHostedHttpRoutesFile(entries: HostedServiceRoute[]): string {
+  return `${JSON.stringify(entries, null, 2)}\n`;
+}
+
+function readHostedRoutesHash(): string | null {
+  const routesPath = getHostedRoutesPath();
+  return existsSync(routesPath) ? hashConfig(readFileSync(routesPath, 'utf-8')) : null;
+}
+
+function writeHostedRoutes(entries: HostedServiceRoute[]): void {
+  const routesPath = getHostedRoutesPath();
+  writeFileSync(routesPath, buildHostedHttpRoutesFile(entries), 'utf-8');
+}
+
+function clearHostedRoutes(): void {
+  writeHostedRoutes([]);
+}
+
+function describeHostedServiceDiscoveryFailure(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return `failed to discover hosted services: ${error.message.trim()}`;
   }
-  const subdomain = normalized.slice(0, -'.gitspace.sh'.length);
-  if (!subdomain.endsWith('.serve')) {
-    return null;
-  }
-  const rootSubdomain = subdomain.slice(0, -'.serve'.length);
-  if (!rootSubdomain) {
-    return null;
-  }
-  return { serveDomain: normalized, rootSubdomain };
+  return 'failed to discover hosted services: tmux session listing failed';
 }
 
 function findWorkspacePathById(workspaceId: string): string | null {
@@ -79,7 +112,7 @@ function findWorkspacePathById(workspaceId: string): string | null {
   return null;
 }
 
-async function waitForCloudflaredReady(proc: Subprocess): Promise<boolean> {
+async function waitForProcessReady(proc: Subprocess): Promise<boolean> {
   const result = await Promise.race([
     proc.exited.then((code) => ({ code })),
     Bun.sleep(READY_TIMEOUT_MS).then(() => ({ code: null })),
@@ -147,13 +180,66 @@ async function stopManagedCloudflared(state: TmuxHostingState | null): Promise<v
   }
 }
 
-export async function collectHostedServiceRoutes(): Promise<HostedServiceRoute[]> {
-  const state = readTmuxHostingState();
-  if (!state?.baseHost) {
-    return [];
+async function clearPublishedServeRoutes(state: TmuxHostingState | null): Promise<void> {
+  const baseHost = state?.baseHost;
+  if (!baseHost) {
+    clearHostedRoutes();
+    return;
   }
 
-  const sessions = await listSessions().catch(() => []);
+  try {
+    const parsedBaseHost = parseTmuxHostingBaseHost(baseHost);
+    await syncServeRouteHostnames({
+      rootSubdomain: parsedBaseHost.rootSubdomain,
+      hostnames: [],
+    });
+  } catch {
+    // Best effort cleanup only.
+  }
+  clearHostedRoutes();
+}
+
+async function stopManagedHostingRuntime(state: TmuxHostingState | null): Promise<void> {
+  await stopManagedCloudflared(state);
+  await clearPublishedServeRoutes(state);
+}
+
+function resolveManagedServeTunnel(parsedBaseHost: ParsedBaseHost): ManagedServeTunnel {
+  const hostConfig = readHostConfig();
+  const serveNamespace = hostConfig?.serveNamespaces?.[parsedBaseHost.rootSubdomain];
+  if (!serveNamespace?.domain) {
+    return { ok: false, reason: `missing serve tunnel configuration for ${parsedBaseHost.rootSubdomain}` };
+  }
+
+  const tunnel = serveNamespace.tunnel;
+  if (!tunnel?.id || !tunnel.credentialsPath?.trim()) {
+    return { ok: false, reason: `missing serve tunnel configuration for ${parsedBaseHost.rootSubdomain}` };
+  }
+
+  return {
+    ok: true,
+    rootSubdomain: parsedBaseHost.rootSubdomain,
+    serveDomain: serveNamespace.domain,
+    tunnelId: tunnel.id,
+    credentialsPath: tunnel.credentialsPath,
+  };
+}
+
+async function collectHostedServiceRoutes(
+  state: TmuxHostingState,
+  managedTunnel: Extract<ManagedServeTunnel, { ok: true }>,
+): Promise<HostedServiceRouteCollection> {
+  if (!await isServerRunning()) {
+    return { ok: false, reason: 'tmux-lite server not running' };
+  }
+
+  let sessions: Awaited<ReturnType<typeof listSessionsFromRunningServer>>;
+  try {
+    sessions = await listSessionsFromRunningServer();
+  } catch (error) {
+    return { ok: false, reason: describeHostedServiceDiscoveryFailure(error) };
+  }
+
   const configCache = new Map<string, ReturnType<typeof loadProcessesConfig>>();
   const workspacePathCache = new Map<string, string>();
   const entries: HostedServiceRoute[] = [];
@@ -187,10 +273,11 @@ export async function collectHostedServiceRoutes(): Promise<HostedServiceRoute[]
 
     for (const port of ports) {
       if (!Number.isInteger(port.port) || port.port <= 0) continue;
+      if (port.protocol === 'tcp') continue;
       const portLabel = port.name?.trim() || String(port.port);
-      const protocol = port.protocol === 'tcp' ? 'tcp' : 'http';
       const hostname = buildProcessHostname(
-        state.baseHost,
+        managedTunnel.serveDomain,
+        managedTunnel.rootSubdomain,
         workspaceRef.workspaceId,
         processName,
         instance,
@@ -199,49 +286,83 @@ export async function collectHostedServiceRoutes(): Promise<HostedServiceRoute[]
       );
       entries.push({
         hostname,
-        service: `${protocol}://127.0.0.1:${port.port}`,
+        service: `http://127.0.0.1:${port.port}`,
       });
     }
   }
 
   const deduped = new Map(entries.map((entry) => [entry.hostname, entry]));
-  return [...deduped.values()].sort((a, b) => a.hostname.localeCompare(b.hostname));
+  return {
+    ok: true,
+    routes: [...deduped.values()].sort((a, b) => a.hostname.localeCompare(b.hostname)),
+  };
 }
 
 export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: HostedServiceRoute[]; reason?: string }> {
   const state = readTmuxHostingState();
   if (!state?.enabled) {
-    await stopManagedCloudflared(state);
+    await stopManagedHostingRuntime(state);
     return { active: false, routes: [], reason: 'disabled' };
   }
   if (!state.baseHost) {
-    await stopManagedCloudflared(state);
+    await stopManagedHostingRuntime(state);
     return { active: false, routes: [], reason: 'no base host selected' };
   }
 
-  const parsedBaseHost = parseBaseHost(state.baseHost);
-  if (!parsedBaseHost) {
-    await stopManagedCloudflared(state);
+  let parsedBaseHost: ParsedBaseHost;
+  try {
+    parsedBaseHost = parseTmuxHostingBaseHost(state.baseHost);
+  } catch {
+    await stopManagedHostingRuntime(state);
     return { active: false, routes: [], reason: 'invalid hosting base host' };
   }
 
+  const managedTunnel = resolveManagedServeTunnel(parsedBaseHost);
+  if (managedTunnel.ok === false) {
+    await stopManagedHostingRuntime(state);
+    return { active: false, routes: [], reason: managedTunnel.reason };
+  }
+
   if (!await isCloudflaredInstalled()) {
-    await stopManagedCloudflared(state);
+    await stopManagedHostingRuntime(state);
     return { active: false, routes: [], reason: 'cloudflared not installed' };
   }
 
-  const tunnelToken = await getSecret(getServeTokenKey(parsedBaseHost.rootSubdomain));
-  if (!tunnelToken) {
-    await stopManagedCloudflared(state);
-    return { active: false, routes: [], reason: `missing serve tunnel token for ${parsedBaseHost.rootSubdomain}` };
+  const routeCollection = await collectHostedServiceRoutes(state, managedTunnel);
+  if (routeCollection.ok === false) {
+    await stopManagedHostingRuntime(state);
+    return { active: false, routes: [], reason: routeCollection.reason };
+  }
+  const { routes } = routeCollection;
+
+  const previousRoutesHash = readHostedRoutesHash();
+  const nextRoutesHash = hashConfig(buildHostedHttpRoutesFile(routes));
+  if (previousRoutesHash !== nextRoutesHash) {
+    try {
+      await syncServeRouteHostnames({
+        rootSubdomain: managedTunnel.rootSubdomain,
+        hostnames: routes.map((route) => route.hostname),
+      });
+    } catch (error) {
+      await stopManagedHostingRuntime(state);
+      return {
+        active: false,
+        routes: [],
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    writeHostedRoutes(routes);
   }
 
-  const routes = await collectHostedServiceRoutes();
-  const config = buildIngressConfig(routes);
   const configPath = getCloudflaredConfigPath();
-  const configHash = hashConfig(config);
-  const previousHash = existsSync(configPath) ? hashConfig(readFileSync(configPath, 'utf-8')) : null;
-  if (previousHash !== configHash) {
+  const config = buildCloudflaredConfig({
+    tunnelId: managedTunnel.tunnelId,
+    credentialsPath: managedTunnel.credentialsPath,
+    routes,
+  });
+  const previousConfigHash = existsSync(configPath) ? hashConfig(readFileSync(configPath, 'utf-8')) : null;
+  const nextConfigHash = hashConfig(config);
+  if (previousConfigHash !== nextConfigHash) {
     writeFileSync(configPath, config, 'utf-8');
   }
 
@@ -250,7 +371,7 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
     clearManagedCloudflaredRuntime();
   }
 
-  if (currentPid && previousHash === configHash) {
+  if (currentPid && previousConfigHash === nextConfigHash) {
     return { active: true, routes };
   }
 
@@ -263,8 +384,7 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
     clearManagedCloudflaredRuntime();
   }
 
-  const proc = spawn(['cloudflared', 'tunnel', '--config', configPath, 'run'], {
-    env: { ...process.env, TUNNEL_TOKEN: tunnelToken },
+  const proc = spawn(['cloudflared', 'tunnel', '--config', configPath, 'run', managedTunnel.tunnelId], {
     stdin: 'ignore',
     stdout: 'ignore',
     stderr: 'ignore',
@@ -273,13 +393,8 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
     proc.unref();
   }
 
-  const ready = await waitForCloudflaredReady(proc);
+  const ready = await waitForProcessReady(proc);
   if (!ready) {
-    try {
-      proc.kill();
-    } catch {
-      // Best effort.
-    }
     clearManagedCloudflaredRuntime();
     return { active: false, routes, reason: 'cloudflared failed to start' };
   }
@@ -290,7 +405,7 @@ export async function refreshTmuxHosting(): Promise<{ active: boolean; routes: H
 
 export async function stopTmuxHosting(): Promise<void> {
   const state = readTmuxHostingState();
-  await stopManagedCloudflared(state);
+  await stopManagedHostingRuntime(state);
 }
 
 export async function getTmuxHostingRuntimeStatus(): Promise<{ active: boolean; reason?: string; routeCount: number }> {
@@ -298,11 +413,31 @@ export async function getTmuxHostingRuntimeStatus(): Promise<{ active: boolean; 
   if (!state?.enabled) {
     return { active: false, routeCount: 0, reason: 'disabled' };
   }
-  const routes = await collectHostedServiceRoutes();
-  const active = (await resolveManagedCloudflaredPid(state)) !== null;
+  if (!state.baseHost) {
+    return { active: false, routeCount: 0, reason: 'no base host selected' };
+  }
+
+  let parsedBaseHost: ParsedBaseHost;
+  try {
+    parsedBaseHost = parseTmuxHostingBaseHost(state.baseHost);
+  } catch {
+    return { active: false, routeCount: 0, reason: 'invalid hosting base host' };
+  }
+
+  const managedTunnel = resolveManagedServeTunnel(parsedBaseHost);
+  if (managedTunnel.ok === false) {
+    return { active: false, routeCount: 0, reason: managedTunnel.reason };
+  }
+
+  const routeCollection = await collectHostedServiceRoutes(state, managedTunnel);
+  if (routeCollection.ok === false) {
+    return { active: false, routeCount: 0, reason: routeCollection.reason };
+  }
+
+  const cloudflaredActive = (await resolveManagedCloudflaredPid(state)) !== null;
   return {
-    active,
-    routeCount: routes.length,
-    reason: active ? undefined : 'cloudflared not running',
+    active: cloudflaredActive,
+    routeCount: routeCollection.routes.length,
+    reason: cloudflaredActive ? undefined : 'cloudflared not running',
   };
 }
