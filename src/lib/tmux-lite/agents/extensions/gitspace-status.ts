@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
+import type { OmpExtensionAPI as ExtensionAPI, OmpExtensionContext as ExtensionContext } from '../omp-types.js';
 import type {
   PendingQuestion,
   Permission,

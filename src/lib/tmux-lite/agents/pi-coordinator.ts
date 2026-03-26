@@ -1,4 +1,4 @@
-import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
+import type { OmpAgentSession } from './omp-types.js';
 import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
@@ -10,6 +10,7 @@ import {
   ensureOmpInstalled,
   createPiSessionManager,
   getGitspacePiExtensionPaths,
+  importOmpModule,
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
@@ -64,7 +65,7 @@ export class PiCoordinator {
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
   private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
   private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
-  private readonly activeSessions = new Map<string, AgentSession>();
+  private readonly activeSessions = new Map<string, OmpAgentSession>();
   private readonly sessionUnsubscribers = new Map<string, () => void>();
   private readonly sessionsRoot: string | undefined;
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
@@ -103,7 +104,7 @@ export class PiCoordinator {
    * when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    const { createAgentSession: createPiAgentSession } = await import('@oh-my-pi/pi-coding-agent');
+    const { createAgentSession: createPiAgentSession } = await importOmpModule();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
     const { session } = await createPiAgentSession({
       agentDir,
@@ -313,7 +314,7 @@ export class PiCoordinator {
     target: PiWorkspaceTarget,
     agentSessionId: string,
     sessionFile: PiSessionFileInfo | null = null,
-  ): Promise<AgentSession> {
+  ): Promise<OmpAgentSession> {
     const existing = this.activeSessions.get(agentSessionId);
     if (existing) {
       return existing;
@@ -350,7 +351,7 @@ export class PiCoordinator {
     target: PiWorkspaceTarget,
     sessionId: string,
     title: string | undefined,
-    session: AgentSession,
+    session: OmpAgentSession,
   ): void {
     const existing = this.sessionUnsubscribers.get(sessionId);
     existing?.();

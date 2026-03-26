@@ -1,4 +1,4 @@
-import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
+import type { OmpAgentSession } from './omp-types.js';
 import type {
   AgentBackend,
   AgentBackendStatus,
@@ -12,15 +12,16 @@ import type {
 import {
   createPiSessionManager,
   getGitspacePiExtensionPaths,
+  importOmpModule,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
 import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 
 class PiSessionHandle implements AgentSessionHandle {
   readonly summary: AgentSessionSummary;
-  private readonly session: AgentSession;
+  private readonly session: OmpAgentSession;
 
-  constructor(summary: AgentSessionSummary, session: AgentSession) {
+  constructor(summary: AgentSessionSummary, session: OmpAgentSession) {
     this.summary = summary;
     this.session = session;
   }
@@ -76,7 +77,7 @@ function toSummary(
 
 export class PiBackend implements AgentBackend {
   readonly id = 'pi';
-  private readonly activeSessions = new Map<string, AgentSession>();
+  private readonly activeSessions = new Map<string, OmpAgentSession>();
 
   async detect(_target: AgentWorkspaceTarget): Promise<AgentBackendStatus> {
     return {
@@ -116,7 +117,7 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    const { createAgentSession } = await import('@oh-my-pi/pi-coding-agent');
+    const { createAgentSession } = await importOmpModule();
     const { agentDir, sessionManager } = await createPiSessionManager(cwd);
     const { session } = await createAgentSession({
       agentDir,

@@ -3,9 +3,10 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { getGitspaceDir } from '../../../core/config.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
-import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
+import type { OmpAgentSession, OmpModule, PiAiModule } from './omp-types.js';
 
 const OMP_PACKAGE = '@oh-my-pi/pi-coding-agent';
+const PI_AI_PACKAGE = '@oh-my-pi/pi-ai';
 const OMP_BIN_NAME = 'omp';
 
 /**
@@ -20,6 +21,15 @@ const OMP_BIN_NAME = 'omp';
  *     package.json         ← managed package manifest
  *     settings.json        ← Pi settings (tool enable/disable)
  */
+export async function importOmpModule(): Promise<OmpModule> {
+  return await import(OMP_PACKAGE) as unknown as OmpModule;
+}
+
+export async function importPiAiModule(): Promise<PiAiModule> {
+  return await import(PI_AI_PACKAGE) as unknown as PiAiModule;
+}
+
+
 export function getPiAgentDir(): string {
   return join(getGitspaceDir(), '.pi');
 }
@@ -164,7 +174,7 @@ export function setupPiEnvironment(
 export async function createPiSessionManager(cwd: string) {
   const agentDir = ensurePiAgentDir();
   process.env.PI_CODING_AGENT_DIR = agentDir;
-  const { SessionManager } = await import('@oh-my-pi/pi-coding-agent');
+  const { SessionManager } = await importOmpModule();
   const sessionDir = SessionManager.getDefaultSessionDir(cwd, agentDir);
   return {
     agentDir,
@@ -184,8 +194,8 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     createAgentSession,
     discoverAuthStorage,
     ModelRegistry,
-  } = await import('@oh-my-pi/pi-coding-agent');
-  const { getBundledModel } = await import('@oh-my-pi/pi-ai');
+  } = await importOmpModule();
+  const { getBundledModel } = await importPiAiModule();
   const sessionManager = await SessionManager.open(sessionFilePath);
   const sessionContext = sessionManager.buildSessionContext();
   const authStorage = await discoverAuthStorage(agentDir);
@@ -234,7 +244,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
  * Without this, reopening an untouched session after tmux-lite restart can lose the transient
  * in-memory model choice and later prompts fail with "No model selected".
  */
-export async function persistInitialPiSessionModel(session: AgentSession): Promise<void> {
+export async function persistInitialPiSessionModel(session: OmpAgentSession): Promise<void> {
   if (!session.model) {
     return;
   }

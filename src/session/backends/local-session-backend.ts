@@ -98,12 +98,7 @@ export interface LocalSessionBackendDependencies {
   createCheckpoint: typeof createCheckpoint;
   prepareAttachSession: typeof prepareAttachSession;
   cancelPrepareAttachSession: typeof cancelPrepareAttachSession;
-  deleteTmuxWorkspace: (options: {
-    projectName: string;
-    workspaceId: string;
-    scriptPolicy?: 'auto' | 'skip';
-    onScriptOutput?: (event: { phase: 'remove'; data: string; done?: boolean; error?: string }) => void;
-  }) => Promise<void>;
+  deleteTmuxWorkspace: typeof deleteTmuxWorkspace;
   getReplaySnapshot: typeof getReplaySnapshotOffline;
   getReplayText: typeof getReplayTextOffline;
   getReplayMarkdown: typeof getReplayMarkdown;
@@ -121,6 +116,11 @@ export interface LocalSessionBackendDependencies {
     socketPath: string,
     handlers: LocalSessionSocketHandlers
   ) => Promise<LocalSessionSocketConnection>;
+  getInbox?: () => Promise<unknown>;
+  clearInbox?: (id?: string) => Promise<void>;
+  markInboxRead?: (id: string) => Promise<void>;
+  getNotificationConfig?: () => unknown | Promise<unknown>;
+  updateNotificationConfig?: (config: NotificationConfig) => unknown | Promise<unknown>;
 }
 
 export interface LocalSessionSocketHandlers {

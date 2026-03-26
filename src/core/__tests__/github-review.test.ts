@@ -555,14 +555,14 @@ describe('github-review sync behavior', () => {
 
     const afterFirstPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
     const pushedImportedReply = afterFirstPush.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'local-reply-1') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'local-reply-1') as ReviewComment;
     expect(pushedImportedReply.githubId).toBeDefined();
     expect(pushedImportedReply.syncedToGitHubAt).toBeDefined();
 
     const pushedLocalLineRoot = afterFirstPush.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'local-line-root') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'local-line-root') as ReviewComment;
     expect(pushedLocalLineRoot.githubId).toBeDefined();
     expect(pushedLocalLineRoot.syncedToGitHubAt).toBeDefined();
 
@@ -605,8 +605,8 @@ describe('github-review sync behavior', () => {
 
     const afterFirstPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
     const firstComment = afterFirstPush.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'editable-local-root') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'editable-local-root') as ReviewComment;
     expect(firstComment.syncedToGitHubAt).toBeDefined();
     expect(firstComment.githubId).toBeDefined();
 
@@ -621,8 +621,8 @@ describe('github-review sync behavior', () => {
 
     const afterEdit = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
     const editedComment = afterEdit.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'editable-local-root') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'editable-local-root') as ReviewComment;
     expect(editedComment.body).toBe('Edited local note');
     expect(editedComment.syncedToGitHubAt).toBeDefined();
 
@@ -671,8 +671,8 @@ describe('github-review sync behavior', () => {
 
     const afterPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
     const root = afterPush.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'file-root') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'file-root') as ReviewComment;
     expect(root.githubId).toBeDefined();
     expect(root.syncedToGitHubAt).toBeDefined();
 
@@ -742,8 +742,8 @@ describe('github-review sync behavior', () => {
 
     const afterPush = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
     const root = afterPush.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'hunk-root') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'hunk-root') as ReviewComment;
     expect(root.githubId).toBeDefined();
     expect(root.syncedToGitHubAt).toBeDefined();
   });
@@ -814,8 +814,8 @@ describe('github-review sync behavior', () => {
 
     const persistedSession = readReviewSession(workspacePath, WORKSPACE_NAME, BASE_BRANCH);
     const persistedReply = persistedSession.threads
-      .flatMap((thread) => thread.comments)
-      .find((comment) => comment.id === 'local-reply-failure') as ReviewComment;
+      .flatMap((thread: ReviewThread) => thread.comments)
+      .find((comment: ReviewComment) => comment.id === 'local-reply-failure') as ReviewComment;
     expect(persistedReply.githubId).toBeDefined();
     expect(persistedReply.syncedToGitHubAt).toBeDefined();
 

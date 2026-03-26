@@ -1,5 +1,6 @@
 import { describe, expect, it, mock, beforeEach, afterEach } from 'bun:test';
 import { LocalSessionBackend, type LocalSessionBackendDependencies } from '../backends/local-session-backend';
+import type { BackendDescriptor } from '../backend';
 import type { BackendEvent } from '../events';
 import type { NotificationConfig } from '../../notifications/types';
 import { applyTmuxLiteSandboxEnvironment, getTmuxLitePathsForSandbox } from '../../lib/tmux-lite/protocol.js';
@@ -222,9 +223,9 @@ async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencie
       workspaceId: workspace?.id,
       projectId: workspace?.projectName,
       cwd: session.cwd,
-      kind: isAgentPty ? 'agent-pty' : 'shell',
-      hidden: session.hidden,
-      state: session.attached ? 'attached' : 'running',
+      kind: (isAgentPty ? 'agent-pty' : 'shell') as 'agent-pty' | 'shell',
+      hidden: session.hidden ?? false,
+      state: (session.attached ? 'attached' : 'running') as 'attached' | 'running',
       attached: session.attached,
       createdAt: session.createdAt,
       exitCode: session.exitCode,
@@ -265,7 +266,7 @@ async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencie
 function createBackend(
   deps: Partial<LocalSessionBackendDependencies>,
   options: {
-    descriptor?: ConstructorParameters<typeof LocalSessionBackend>[0]['descriptor'];
+    descriptor?: BackendDescriptor;
   } = {},
 ) {
   const effectiveDeps: Partial<LocalSessionBackendDependencies> = {
@@ -311,22 +312,32 @@ function createBackend(
       if (!workspace) {
         throw new Error(`Workspace not found: ${params.workspaceId}`);
       }
+      const requestId = 'test-request';
+      params.onRequestId?.(requestId);
       let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-      const prep = await (deps.prepareWorkspaceForSession?.({
-        workspaceId: params.workspaceId,
-        sessionName: params.sessionName,
-        command: params.command,
-        args: params.args,
-        env: params.env,
+      const prep = await ((deps.prepareWorkspaceForSession as ((options: any) => Promise<any>) | undefined)?.({
+        projectName: workspace.projectName,
+        workspacePath: workspace.path,
+        workspaceName: workspace.name,
         scriptPolicy: params.scriptPolicy,
-        viewOnly: params.viewOnly,
-        onRequestId: params.onRequestId,
         onPhaseStart: (phase: 'pre' | 'setup' | 'select') => {
           currentPhase = phase;
-          params.onScriptOutput?.({ phase, data: Buffer.from(`\r\n==> ${phase} scripts...\r\n`).toString('base64'), done: false });
+          params.onScriptOutput?.({
+            type: 'attach-script-output',
+            requestId,
+            phase,
+            data: Buffer.from(`\r\n==> ${phase} scripts...\r\n`).toString('base64'),
+            done: false,
+          });
         },
         onOutput: (data: Uint8Array) => {
-          params.onScriptOutput?.({ phase: currentPhase, data: Buffer.from(data).toString('base64'), done: false });
+          params.onScriptOutput?.({
+            type: 'attach-script-output',
+            requestId,
+            phase: currentPhase,
+            data: Buffer.from(data).toString('base64'),
+            done: false,
+          });
         },
       }) ?? Promise.resolve({ success: true }));
       if (!prep.success) {
@@ -334,28 +345,33 @@ function createBackend(
         const code = phase === 'pre' ? 'PRE_SCRIPT_FAILED' : phase === 'select' ? 'SELECT_SCRIPT_FAILED' : 'SETUP_SCRIPT_FAILED';
         throw Object.assign(new Error(prep.error ?? `${phase} failed`), { code });
       }
-      params.onScriptOutput?.({ phase: 'select', data: '', done: true });
+      params.onScriptOutput?.({ type: 'attach-script-output', requestId, phase: 'select', data: '', done: true });
       const sessions = await (deps.listSessions?.() ?? Promise.resolve([]));
       const existingCount = sessions.filter((session) => session.cwd === workspace.path && !session.hidden).length;
       const nextIndex = existingCount + 1;
       const sessionName = params.sessionName ?? `${workspace.projectName}:${workspace.id}:${nextIndex}`;
-      const session = await (deps.createSession
-        ? deps.createSession(sessionName, workspace.path, { command: params.command, args: params.args, env: params.env, viewOnly: params.viewOnly })
+      const createSessionDep = deps.createSession as typeof deps.createSession | undefined;
+      const session = await (createSessionDep
+        ? createSessionDep(sessionName, workspace.path, { command: params.command, args: params.args, env: params.env })
         : Promise.resolve({ id: 'sess-new', name: sessionName, socketPath: '/tmp/socket-new', pid: 1, attached: false, cwd: workspace.path, createdAt: Date.now() }));
-      return { session, workspaceId: toCanonicalWorkspaceId(workspace.projectName, workspace.id) };
+      return { type: 'attach-prepared' as const, requestId, session, workspaceId: toCanonicalWorkspaceId(workspace.projectName, workspace.id), viewOnly: params.viewOnly };
     }),
     cancelPrepareAttachSession: deps.cancelPrepareAttachSession ?? (async () => undefined),
     deleteTmuxWorkspace: deps.deleteTmuxWorkspace ?? (async ({ projectName, workspaceId, scriptPolicy, onScriptOutput }) => {
       const result = await (deps.deleteWorkspaceCore?.(projectName, workspaceId, {
-        removeScriptPolicy: scriptPolicy ?? 'enforce',
-        onScriptOutput: (data) => onScriptOutput?.({ phase: 'remove', data: Buffer.from(data).toString('base64'), done: false }),
+        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
+        onScriptOutput: (data) => onScriptOutput?.({
+          type: 'workspace-delete-output',
+          requestId: 'test-request',
+          data: Buffer.from(data).toString('base64'),
+          done: false,
+        }),
       }) ?? Promise.resolve({ success: true, workspaceName: workspaceId, branchDeleted: false, sessionsKilled: 0 }));
       if (!result.success) {
-        onScriptOutput?.({ phase: 'remove', data: '', done: true, error: result.error });
+        onScriptOutput?.({ type: 'workspace-delete-output', requestId: 'test-request', data: '', done: true, error: result.error });
         throw Object.assign(new Error(result.error ?? 'Delete failed'), { code: result.errorCode });
       }
-      onScriptOutput?.({ phase: 'remove', data: '', done: true });
-      return result;
+      onScriptOutput?.({ type: 'workspace-delete-output', requestId: 'test-request', data: '', done: true });
     }),
   };
   return new LocalSessionBackend({ descriptor: options.descriptor, deps: effectiveDeps });
@@ -440,7 +456,7 @@ describe('LocalSessionBackend', () => {
         sessionsKilled: 0,
       }),
       getNotificationConfig: () => notificationConfig,
-      updateNotificationConfig: (updates) => ({
+      updateNotificationConfig: async (updates: NotificationConfig) => ({
         ...notificationConfig,
         ...updates,
       }),
@@ -1693,7 +1709,7 @@ describe('LocalSessionBackend', () => {
       hidden: true,
       metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
     };
-    const ensureAgentTerminalSession = mock(async () => agentTerminalSession);
+    const ensureAgentTerminalSession = mock(async (_target: unknown, _agentSessionId: string) => agentTerminalSession);
     const workspace = {
       id: 'ws-1',
       name: 'ws-1',
@@ -1720,15 +1736,15 @@ describe('LocalSessionBackend', () => {
       watchMachineEvents: async () => () => {},
       scanWorkspaces: async () => [workspace],
       listSessions: async () => [agentTerminalSession],
-      sendTmuxCommand: mock(async (command) => {
+      sendTmuxCommand: mock(async (command): Promise<any> => {
         if (command.type === 'agent-attach') {
-          return { type: 'session', session: await ensureAgentTerminalSession(command.target, command.agentSessionId) };
+          return { type: 'session' as const, session: await ensureAgentTerminalSession(command.target, command.agentSessionId) };
         }
         if (command.type === 'inbox') {
-          return { type: 'inbox', items: [] };
+          return { type: 'inbox' as const, items: [] };
         }
         if (command.type === 'notification-config-get') {
-          return { type: 'notification-config', config: notificationConfig };
+          return { type: 'notification-config' as const, config: notificationConfig };
         }
         throw new Error(`Unexpected command: ${command.type}`);
       }),

@@ -106,7 +106,7 @@ export async function getWorkspaceRuntimeSnapshot(params: {
   const { sessions, agentStateByWorkspaceId } = params;
   const workspaces = await scanWorkspaces();
 
-  return Promise.all(workspaces.map((workspace) => {
+  return Promise.all(workspaces.map(async (workspace) => {
     const workspaceId = toCanonicalWorkspaceId(workspace);
     const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
     const processes = await resolveRuntimeProcesses(workspace.path, processConfig.config);
