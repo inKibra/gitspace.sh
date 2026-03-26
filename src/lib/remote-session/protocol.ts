@@ -125,7 +125,7 @@ export interface WorkspaceInfo {
   sessionCount: number; // Number of active sessions
   isStale?: boolean;    // No activity for 30+ days
   serveDomain?: string; // Hosting domain for process ports
-  processes?: { name: string; instances?: number; ports?: import("../../types/processes.js").ProcessPortConfig[] }[];
+  processes?: import("../../types/processes.js").RuntimeProcessDefinition[];
   processConfigError?: string;
   /** GitSpace kanban phase (plan | code | review | ship). From project config. */
   status?: import('../../types/config.js').WorkspacePhase;

@@ -41,9 +41,12 @@ const mockResolveWorkspaceRef = mock((cwd: string) => ({ workspaceId: 'demo', wo
 const mockLoadProcessesConfig = mock(() => ({
   processes: [{
     name: 'web',
-    ports: [{ port: 7777, protocol: 'http', name: 'app' }],
+    ports: [{ protocol: 'http', name: 'app' }],
   }],
 }));
+const mockResolveProcessRuntimePorts = mock(async () => [
+  { instance: 1, port: 7777, protocol: 'http' as const, name: 'app' },
+]);
 const mockSyncServeRouteHostnames = mock(async ({ hostnames }: { rootSubdomain: string; hostnames: string[] }) => ({
   serveDomain: 'gitspace.sh',
   syncedHostnames: hostnames,
@@ -99,6 +102,10 @@ mock.module('../../events/paths.js', () => ({
 mock.module('../../processes/config.js', () => ({
   loadProcessesConfig: mockLoadProcessesConfig,
 }));
+mock.module('../../processes/allocations.js', () => ({
+  reconcileProcessPortAllocations: mock(() => undefined),
+  resolveProcessRuntimePorts: mockResolveProcessRuntimePorts,
+}));
 
 mock.module('../../../utils/logger.js', () => ({
   logger: {
@@ -125,6 +132,7 @@ describe('tmux hosting supervisor', () => {
     mockIsServerRunning.mockReset();
     mockResolveWorkspaceRef.mockReset();
     mockLoadProcessesConfig.mockReset();
+    mockResolveProcessRuntimePorts.mockReset();
     mockSyncServeRouteHostnames.mockReset();
 
     Bun.sleep = sleepMock as typeof Bun.sleep;
@@ -135,9 +143,12 @@ describe('tmux hosting supervisor', () => {
     mockLoadProcessesConfig.mockReturnValue({
       processes: [{
         name: 'web',
-        ports: [{ port: 7777, protocol: 'http', name: 'app' }],
+        ports: [{ protocol: 'http', name: 'app' }],
       }],
     });
+    mockResolveProcessRuntimePorts.mockResolvedValue([
+      { instance: 1, port: 7777, protocol: 'http', name: 'app' },
+    ]);
     mockSyncServeRouteHostnames.mockResolvedValue({
       serveDomain: 'gitspace.sh',
       syncedHostnames: [],

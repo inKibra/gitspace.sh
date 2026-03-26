@@ -261,7 +261,7 @@ export interface WorkspaceRuntimeRecord {
   sessionCount: number;
   isStale?: boolean;
   serveDomain?: string;
-  processes?: { name: string; instances?: number; ports?: import('../../types/processes.js').ProcessPortConfig[] }[];
+  processes?: import('../../types/processes.js').RuntimeProcessDefinition[];
   processConfigError?: string;
   status?: import('../../types/config.js').WorkspacePhase;
   notesSummary?: import('../../types/workspace.js').WorkspaceNotesSummary;

@@ -193,7 +193,7 @@ describe('useSpacesBrowser tree building', () => {
     const ws = makeWorkspace({
       sessionCount: 0,
       processes: [
-        { name: 'web-server', instances: 1, ports: [{ port: 3000, name: 'http', protocol: 'http' }] },
+        { name: 'web-server', instances: 1, ports: [{ instance: 1, port: 3000, name: 'http', protocol: 'http' }] },
         { name: 'worker', instances: 2 },
       ],
     });

@@ -7,10 +7,10 @@ const mockReadTmuxHostingState = mock(() => ({
   enabled: true,
   updatedAt: Date.now(),
 }));
-const mockBuildServiceLauncherOptions = mock((args: { workspaceId: string; processName: string; instance: number; ports?: Array<{ name?: string; port: number; protocol?: 'http' | 'tcp' }>; hosting?: { baseHost?: string; machineName?: string; enabled: boolean } }) => {
-  const port = args.ports?.find((candidate) => (candidate.protocol ?? 'http') === 'http');
+const mockBuildServiceLauncherOptions = mock((args: { workspaceId: string; processName: string; instance: number; ports?: Array<{ instance: number; name: string; port: number; protocol?: 'http' | 'tcp' }>; hosting?: { baseHost?: string; machineName?: string; enabled: boolean } }) => {
+  const port = args.ports?.find((candidate) => candidate.instance === args.instance && (candidate.protocol ?? 'http') === 'http');
   if (!port) return [];
-  const portLabel = port.name ?? String(port.port);
+  const portLabel = port.name;
   const remoteUrl = args.hosting?.baseHost
     ? `http://${buildProcessHostname('gitspace.sh', 'brad', args.workspaceId, args.processName, args.instance, portLabel, args.hosting.machineName)}`
     : undefined;
@@ -45,8 +45,8 @@ describe('showServiceLauncherSelect', () => {
         processes: [{
           name: 'web',
           ports: [
-            { name: 'app', port: 3000, protocol: 'http' },
-            { name: 'tcp-admin', port: 7000, protocol: 'tcp' },
+            { instance: 1, name: 'app', port: 3000, protocol: 'http' },
+            { instance: 1, name: 'tcp-admin', port: 7000, protocol: 'tcp' },
           ],
         }],
       },

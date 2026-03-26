@@ -14,8 +14,8 @@ describe('showWorkspaceServiceSelect', () => {
         projectName: 'proj',
         sessionCount: 0,
         processes: [
-          { name: 'web', ports: [{ name: 'app', port: 3000, protocol: 'http' }] },
-          { name: 'api', ports: [{ name: 'api', port: 4000, protocol: 'http' }] },
+          { name: 'web', ports: [{ instance: 1, name: 'app', port: 3000, protocol: 'http' }] },
+          { name: 'api', ports: [{ instance: 1, name: 'api', port: 4000, protocol: 'http' }] },
         ],
       },
       showSelect,
@@ -45,7 +45,7 @@ describe('showWorkspaceServiceSelect', () => {
         projectName: 'proj',
         sessionCount: 0,
         processes: [
-          { name: 'tcp-only', ports: [{ name: 'admin', port: 7000, protocol: 'tcp' }] },
+          { name: 'tcp-only', ports: [{ instance: 1, name: 'admin', port: 7000, protocol: 'tcp' }] },
         ],
       },
       showSelect,

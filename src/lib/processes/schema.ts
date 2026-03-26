@@ -46,16 +46,18 @@ export function validateProcessesConfig(config: ProcessesConfig): ProcessValidat
       if (!Array.isArray(process.ports)) {
         errors.push(`process ${process.name} ports must be an array`);
       } else {
+        const portNames = new Set<string>();
         for (const port of process.ports) {
           if (!port || typeof port !== 'object') {
             errors.push(`process ${process.name} port entries must be objects`);
             continue;
           }
-          if (!Number.isInteger(port.port) || port.port <= 0 || port.port > 65535) {
-            errors.push(`process ${process.name} port must be a number between 1 and 65535`);
-          }
-          if (port.name !== undefined && typeof port.name !== 'string') {
-            errors.push(`process ${process.name} port name must be a string`);
+          if (typeof port.name !== 'string' || port.name.trim().length === 0) {
+            errors.push(`process ${process.name} port name must be a non-empty string`);
+          } else if (portNames.has(port.name)) {
+            errors.push(`process ${process.name} port names must be unique: ${port.name}`);
+          } else {
+            portNames.add(port.name);
           }
           if (port.protocol !== undefined && port.protocol !== 'http' && port.protocol !== 'tcp') {
             errors.push(`process ${process.name} port protocol must be http or tcp`);

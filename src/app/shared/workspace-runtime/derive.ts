@@ -7,7 +7,7 @@ import { getAgentSessionDisplayTitle } from '../../../agents/session-display.js'
 import type { AgentSessionInfo, SessionInfo } from '../../../components/SpacesBrowser.js';
 import { deriveWorkspaceStatusSummary } from '../../workspaces/workspace-status.js';
 import type { WorkspaceRuntimeEntry, WorkspaceRuntimeModel, WorkspaceRuntimeWorkspaceInfo } from './types.js';
-
+import { getPrimaryProcessPort } from '../../../lib/processes/runtime-ports.js';
 function toSessionInfo(session: MachineTerminalSessionRecord): SessionInfo {
   return {
     id: session.id,
@@ -171,7 +171,7 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
         );
         const runningSession = getLatestSession(matchingSessions.filter((session) => session.exitCode === undefined));
         const latestSession = getLatestSession(matchingSessions);
-        const port = (process.ports ?? [])[instance - 1] ?? (process.ports ?? [])[0] ?? null;
+        const port = getPrimaryProcessPort(process.ports, instance);
         const stateLabel: WorkspaceRuntimeEntry['processRows'][number]['state'] = runningSession
           ? 'running'
           : latestSession?.exitCode !== undefined

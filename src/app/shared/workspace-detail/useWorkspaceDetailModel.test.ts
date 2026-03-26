@@ -99,7 +99,7 @@ describe('useWorkspaceDetailModel active hosted urls', () => {
       },
       createdAt: Date.now(),
     }, null, 2), 'utf-8');
-    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web', 'macbook');
+    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web');
     writeFileSync(
       join(runtimeDir, 'hosted-routes.json'),
       `${JSON.stringify([{ hostname: activeHostname, service: 'http://127.0.0.1:7777' }], null, 2)}\n`,
@@ -110,7 +110,7 @@ describe('useWorkspaceDetailModel active hosted urls', () => {
       workspace: {
         ...makeWorkspace(),
         serveDomain: 'brad.gitspace.sh',
-        processes: [{ name: 'sample-server', instances: 1, ports: [{ port: 7777, name: 'web', protocol: 'http' }] }],
+        processes: [{ name: 'sample-server', instances: 1, ports: [{ instance: 1, port: 7777, name: 'web', protocol: 'http' }] }],
       },
       sessions: [{
         id: 'sess-1',
@@ -154,7 +154,7 @@ describe('useWorkspaceDetailModel active hosted urls', () => {
       },
       createdAt: Date.now(),
     }, null, 2), 'utf-8');
-    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web', 'macbook');
+    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web');
     writeFileSync(
       join(runtimeDir, 'hosted-routes.json'),
       `${JSON.stringify([{ hostname: activeHostname, service: 'http://127.0.0.1:7777' }], null, 2)}\n`,
@@ -165,7 +165,7 @@ describe('useWorkspaceDetailModel active hosted urls', () => {
       workspace: {
         ...makeWorkspace(),
         serveDomain: 'brad.gitspace.sh',
-        processes: [{ name: 'sample-server', instances: 1, ports: [{ port: 7777, name: 'web', protocol: 'http' }] }],
+        processes: [{ name: 'sample-server', instances: 1, ports: [{ instance: 1, port: 7777, name: 'web', protocol: 'http' }] }],
       },
       sessions: [{
         id: 'sess-1',

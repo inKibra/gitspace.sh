@@ -9,8 +9,8 @@ import { formatTime, getAgentSessionDisplayState } from '../../../components/Spa
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
 import { parseProcessSessionName } from '../../../lib/processes/names.js';
 import { getSessionAlertLabel, getSessionSubtitle } from '../workspace-runtime/derive.js';
+import { getPrimaryProcessPort } from '../../../lib/processes/runtime-ports.js';
 import { resolveHostedServiceUrl } from '../../../lib/tmux-lite/hosting/routes.js';
-
 const REPLAY_HISTORY_PREVIEW_LIMIT = 3;
 const NOTE_TODO_PREVIEW_LIMIT = 2;
 const NOTE_RECENT_PREVIEW_LIMIT = 1;
@@ -249,7 +249,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
         continue;
       }
       for (let instance = 1; instance <= count; instance += 1) {
-        const port = (process.ports ?? [])[instance - 1] ?? (process.ports ?? [])[0] ?? null;
+        const port = getPrimaryProcessPort(process.ports, instance);
         const matchingSessions = workspaceSessions.filter(
           (session) =>
             session.processName === process.name &&
@@ -265,7 +265,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
           workspaceId: workspace.id,
           processName: process.name,
           instance,
-          portLabel: port.name?.trim() || String(port.port),
+          portLabel: port.name,
           protocol: port.protocol === 'tcp' ? 'tcp' : 'http',
         }) : undefined;
         rows.push({

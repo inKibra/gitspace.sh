@@ -1,11 +1,10 @@
 /**
  * Process commands
  */
-
+import { basename } from 'node:path';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
 import { listSessions } from '../lib/tmux-lite/cli.js';
-import { basename } from 'node:path';
 import {
   getProcessSpecs,
   startProcessInstance,
@@ -14,11 +13,9 @@ import {
 } from '../lib/processes/manager.js';
 import { loadProcessesConfig, getProcessDefinition } from '../lib/processes/config.js';
 import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
+import { resolveProcessRuntimePorts } from '../lib/processes/allocations.js';
 import { openBrowserUrl } from '../utils/open-browser.js';
-import type { ProcessPortConfig } from '../types/processes.js';
 import { refreshTmuxHosting } from '../lib/tmux-lite/hosting/supervisor.js';
-import { PortConflictError, resolvePortConflict, type PortConflictInfo } from '../lib/processes/ports.js';
-import { selectOne } from '../utils/prompts.js';
 import {
   buildServiceEndpoints,
   getHostingRouteState,
@@ -43,24 +40,24 @@ function getWorkspaceId(workspacePath: string): string {
   return basename(workspacePath) || workspacePath;
 }
 
-function getSpecEndpoints(
-  spec: { name: string; instance: number; definition: { ports?: ProcessPortConfig[] } },
+async function getSpecEndpoints(
+  workspacePath: string,
+  spec: ReturnType<typeof getProcessSpecs>[number],
   workspaceId: string,
-  hosting: HostingRouteState
-): ServiceEndpoint[] {
+  hosting: HostingRouteState,
+): Promise<ServiceEndpoint[]> {
+  const ports = await resolveProcessRuntimePorts(workspacePath, spec);
   return buildServiceEndpoints({
     workspaceId,
     processName: spec.name,
     instance: spec.instance,
-    ports: spec.definition.ports,
+    ports,
     hosting,
   });
 }
 
 function formatEndpointLabel(endpoint: ServiceEndpoint): string {
-  return endpoint.portLabel === String(endpoint.port)
-    ? `${endpoint.protocol}:${endpoint.port}`
-    : `${endpoint.portLabel} (${endpoint.protocol}:${endpoint.port})`;
+  return `${endpoint.portLabel} (${endpoint.protocol}:${endpoint.port})`;
 }
 
 function selectBrowserEndpoints(endpoints: ServiceEndpoint[], options: ProcessCommandOptions): ServiceEndpoint[] {
@@ -103,36 +100,6 @@ function getOpenTargetUrl(endpoint: ServiceEndpoint, options: ProcessCommandOpti
   return endpoint.remoteUrl && endpoint.hostingEnabled ? endpoint.remoteUrl : endpoint.localUrl;
 }
 
-function describePortConflict(conflict: PortConflictInfo): string {
-  if (conflict.managedSessionId) {
-    return `:${conflict.port} used by ${conflict.managedProcessName ?? 'service'}#${conflict.managedInstance ?? 1} in ${conflict.managedWorkspaceId ?? 'another workspace'}`;
-  }
-  return `:${conflict.port} used by ${conflict.command ?? 'unknown process'} (pid ${conflict.pid}${conflict.user ? `, ${conflict.user}` : ''})`;
-}
-
-async function resolveStartConflict(specName: string, error: PortConflictError): Promise<boolean> {
-  const conflict = error.conflicts[0];
-  if (!conflict) {
-    throw error;
-  }
-
-  const choice = await selectOne([
-    {
-      label: conflict.managedSessionId ? 'Stop conflicting service' : 'Kill conflicting process',
-      value: 'resolve',
-      description: describePortConflict(conflict),
-    },
-    { label: 'Cancel', value: 'cancel', description: `Do not start ${specName}` },
-  ], `Cannot start ${specName}: ${describePortConflict(conflict)}`);
-
-  if (choice !== 'resolve') {
-    return false;
-  }
-
-  await resolvePortConflict(conflict);
-  return true;
-}
-
 export async function listProcesses(options: ProcessCommandOptions): Promise<void> {
   const workspacePath = options.workspace || resolveWorkspacePath();
   const specs = getProcessSpecs(workspacePath);
@@ -147,11 +114,11 @@ export async function listProcesses(options: ProcessCommandOptions): Promise<voi
 
   for (const spec of specs) {
     const running = sessions.find(
-      (session) => session.processName === spec.name && session.instance === spec.instance
+      (session) => session.processName === spec.name && session.instance === spec.instance,
     );
     const status = running ? 'running' : 'stopped';
     logger.log(`${spec.name}#${spec.instance} ${status}`);
-    const endpoints = getSpecEndpoints(spec, workspaceId, hosting);
+    const endpoints = await getSpecEndpoints(workspacePath, spec, workspaceId, hosting);
     if (endpoints.length === 0) {
       logger.log('  no ports configured');
       continue;
@@ -184,23 +151,9 @@ export async function startProcess(options: ProcessCommandOptions): Promise<void
   }
 
   for (const spec of specs) {
-    try {
-      const result = await startProcessInstance(workspacePath, spec);
-      const note = result.created ? 'started' : 'already running';
-      logger.log(`${spec.name}#${spec.instance} ${note} (${result.sessionId})`);
-    } catch (error) {
-      if (error instanceof PortConflictError) {
-        const resolved = await resolveStartConflict(spec.name, error);
-        if (!resolved) {
-          throw new SpacesError(`Start cancelled for ${spec.name}`, 'USER_ERROR');
-        }
-        const result = await startProcessInstance(workspacePath, spec);
-        const note = result.created ? 'started' : 'already running';
-        logger.log(`${spec.name}#${spec.instance} ${note} (${result.sessionId})`);
-        continue;
-      }
-      throw error;
-    }
+    const result = await startProcessInstance(workspacePath, spec);
+    const note = result.created ? 'started' : 'already running';
+    logger.log(`${spec.name}#${spec.instance} ${note} (${result.sessionId})`);
   }
   await refreshTmuxHosting().catch(() => undefined);
 }
@@ -257,7 +210,7 @@ export async function openProcess(options: ProcessCommandOptions): Promise<void>
     throw new SpacesError(`Process not found: ${options.name}`, 'USER_ERROR');
   }
 
-  const endpoints = specs.flatMap((spec) => getSpecEndpoints(spec, workspaceId, hosting));
+  const endpoints = (await Promise.all(specs.map((spec) => getSpecEndpoints(workspacePath, spec, workspaceId, hosting)))).flat();
   const selected = selectBrowserEndpoints(endpoints, options);
 
   for (const endpoint of selected) {

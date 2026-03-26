@@ -1,10 +1,10 @@
 import { killSession, listSessions } from '../tmux-lite/cli.js';
 import { parseProcessSessionName } from './names.js';
-import type { ProcessInstanceSpec, ProcessPortConfig } from '../../types/processes.js';
+import type { ProcessPortProtocol, ResolvedProcessPort } from '../../types/processes.js';
 
 export interface PortConflictInfo {
   port: number;
-  protocol: 'http' | 'tcp';
+  protocol: ProcessPortProtocol;
   pid: number;
   command?: string;
   user?: string;
@@ -39,11 +39,11 @@ function buildConflictMessage(processName: string, conflicts: PortConflictInfo[]
   return `Cannot start ${processName}; port already in use: ${summary}`;
 }
 
-function protocolForPort(port: ProcessPortConfig): 'http' | 'tcp' {
-  return port.protocol === 'tcp' ? 'tcp' : 'http';
+export function normalizeProcessPortProtocol(protocol?: ProcessPortProtocol): ProcessPortProtocol {
+  return protocol === 'tcp' ? 'tcp' : 'http';
 }
 
-function inspectListeningProcess(port: number): Array<{ pid: number; command?: string; user?: string; address?: string }> {
+export function inspectListeningProcess(port: number): Array<{ pid: number; command?: string; user?: string; address?: string }> {
   const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn']);
   if (result.exitCode !== 0) {
     return [];
@@ -86,7 +86,7 @@ function getParentPid(pid: number): number | null {
   return Number.isFinite(parentPid) && parentPid > 0 ? parentPid : null;
 }
 
-async function resolveManagedSession(pid: number): Promise<PortConflictInfo | null> {
+export async function resolveManagedSession(pid: number): Promise<PortConflictInfo | null> {
   const sessions = await listSessions();
   const sessionByPid = new Map(sessions.map((session) => [session.pid, session]));
 
@@ -114,17 +114,20 @@ async function resolveManagedSession(pid: number): Promise<PortConflictInfo | nu
   return null;
 }
 
-export async function detectPortConflicts(spec: ProcessInstanceSpec): Promise<PortConflictInfo[]> {
+export async function detectPortConflicts(args: {
+  processName: string;
+  ports?: ResolvedProcessPort[];
+}): Promise<PortConflictInfo[]> {
   const conflicts: PortConflictInfo[] = [];
 
-  for (const port of spec.definition.ports ?? []) {
+  for (const port of args.ports ?? []) {
     if (!Number.isInteger(port.port) || port.port <= 0) continue;
     const listeners = inspectListeningProcess(port.port);
     for (const listener of listeners) {
       const managed = await resolveManagedSession(listener.pid);
       conflicts.push({
         port: port.port,
-        protocol: protocolForPort(port),
+        protocol: normalizeProcessPortProtocol(port.protocol),
         pid: listener.pid,
         command: listener.command,
         user: listener.user,
@@ -142,10 +145,10 @@ export async function detectPortConflicts(spec: ProcessInstanceSpec): Promise<Po
   return [...deduped.values()];
 }
 
-export async function ensurePortsAvailable(spec: ProcessInstanceSpec): Promise<void> {
-  const conflicts = await detectPortConflicts(spec);
+export async function ensurePortsAvailable(args: { processName: string; ports?: ResolvedProcessPort[] }): Promise<void> {
+  const conflicts = await detectPortConflicts(args);
   if (conflicts.length > 0) {
-    throw new PortConflictError(spec.name, conflicts);
+    throw new PortConflictError(args.processName, conflicts);
   }
 }
 

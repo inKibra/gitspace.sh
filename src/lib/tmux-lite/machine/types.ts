@@ -94,7 +94,7 @@ export interface MachineWorkspaceRecord {
   phase?: WorkspacePhase;
   isStale?: boolean;
   serveDomain?: string;
-  processes?: { name: string; instances?: number; ports?: import('../../../types/processes.js').ProcessPortConfig[] }[];
+  processes?: import('../../../types/processes.js').RuntimeProcessDefinition[];
   processConfigError?: string;
   notesSummary?: WorkspaceNotesSummary;
   pullRequest?: MachineWorkspacePullRequestRecord;

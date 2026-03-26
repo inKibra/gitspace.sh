@@ -10,7 +10,7 @@ import { listSessionsFromRunningServer, isProcessRunning, isServerRunning } from
 import { parseProcessSessionName } from '../../processes/names.js';
 import { resolveWorkspaceRef } from '../../events/paths.js';
 import { loadProcessesConfig } from '../../processes/config.js';
-import type { ProcessPortConfig } from '../../../types/processes.js';
+import { reconcileProcessPortAllocations, resolveProcessRuntimePorts } from '../../processes/allocations.js';
 import { readTmuxHostingState, writeTmuxHostingState, type TmuxHostingState } from './state.js';
 import { parseTmuxHostingBaseHost } from './base-host.js';
 
@@ -268,20 +268,24 @@ async function collectHostedServiceRoutes(
 
     const config = configCache.get(workspaceRef.workspacePath) ?? loadProcessesConfig(workspaceRef.workspacePath);
     configCache.set(workspaceRef.workspacePath, config);
+    reconcileProcessPortAllocations(workspaceRef.workspacePath, config);
     const definition = config.processes.find((process) => process.name === processName);
-    const ports = (definition?.ports ?? []).filter((port): port is ProcessPortConfig => Boolean(port));
+    if (!definition) continue;
+    const ports = await resolveProcessRuntimePorts(workspaceRef.workspacePath, {
+      name: processName,
+      instance,
+      definition,
+    });
 
     for (const port of ports) {
-      if (!Number.isInteger(port.port) || port.port <= 0) continue;
       if (port.protocol === 'tcp') continue;
-      const portLabel = port.name?.trim() || String(port.port);
       const hostname = buildProcessHostname(
         managedTunnel.serveDomain,
         managedTunnel.rootSubdomain,
         workspaceRef.workspaceId,
         processName,
         instance,
-        portLabel,
+        port.name,
         state.machineName,
       );
       entries.push({

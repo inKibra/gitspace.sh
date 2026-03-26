@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import type { ProcessesConfig, ProcessDefinition, ProcessInstanceSpec } from '../../types/processes.js';
+import type { ProcessesConfig, ProcessDefinition, ProcessInstanceSpec, ProcessPortConfig } from '../../types/processes.js';
 import { validateProcessesConfig } from './schema.js';
 import { normalizeProcessInstanceCount } from './instances.js';
 
@@ -125,6 +125,47 @@ function parseJsonc(raw: string): unknown {
   return JSON.parse(withoutTrailingCommas);
 }
 
+function normalizeProcessPortConfig(port: unknown): ProcessPortConfig | null {
+  if (!port || typeof port !== 'object') {
+    return null;
+  }
+
+  const candidate = port as { name?: unknown; protocol?: unknown };
+  const normalized: ProcessPortConfig = {
+    name: typeof candidate.name === 'string' ? candidate.name : '',
+  };
+
+  if (candidate.protocol === 'http' || candidate.protocol === 'tcp') {
+    normalized.protocol = candidate.protocol;
+  }
+
+  return normalized;
+}
+
+function normalizeProcessDefinition(process: unknown): ProcessDefinition | null {
+  if (!process || typeof process !== 'object') {
+    return null;
+  }
+
+  const candidate = process as ProcessDefinition & { ports?: unknown };
+  return {
+    name: candidate.name,
+    command: candidate.command,
+    args: candidate.args,
+    cwd: candidate.cwd,
+    env: candidate.env,
+    instances: candidate.instances,
+    autostart: candidate.autostart,
+    restart: candidate.restart,
+    events: candidate.events,
+    ports: Array.isArray(candidate.ports)
+      ? candidate.ports
+        .map(normalizeProcessPortConfig)
+        .filter((port): port is ProcessPortConfig => Boolean(port))
+      : undefined,
+  };
+}
+
 export function getProcessesConfigPath(workspacePath: string): string {
   return join(workspacePath, '.gitspace', 'processes.json');
 }
@@ -152,7 +193,11 @@ export function loadProcessesConfigWithDiagnostics(workspacePath: string): Proce
   }
 
   const normalized: ProcessesConfig = {
-    processes: Array.isArray(parsed.processes) ? parsed.processes : [],
+    processes: Array.isArray(parsed.processes)
+      ? parsed.processes
+        .map(normalizeProcessDefinition)
+        .filter((process): process is ProcessDefinition => Boolean(process))
+      : [],
   };
   const validation = validateProcessesConfig(normalized);
   if (!validation.valid) {

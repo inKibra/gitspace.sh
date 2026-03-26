@@ -1,4 +1,5 @@
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
+import { getProcessPortsForInstance } from '../../../lib/processes/runtime-ports.js';
 import type { WorkspaceInfo } from '../../../components/SpacesBrowser.js';
 import { showServiceLauncherSelect } from '../workspace-detail/showServiceLauncherSelect.js';
 
@@ -28,12 +29,12 @@ export function showWorkspaceServiceSelect(args: ShowWorkspaceServiceSelectConfi
       continue;
     }
     for (let instance = 1; instance <= count; instance += 1) {
-      const browserPorts = (process.ports ?? [])
+      const browserPorts = getProcessPortsForInstance(process.ports, instance)
         .filter((port) => port.protocol !== 'tcp');
       if (browserPorts.length === 0) {
         continue;
       }
-      const portNames = browserPorts.map((port) => port.name ?? String(port.port));
+      const portNames = browserPorts.map((port) => port.name);
       services.push({
         label: `${process.name}#${instance}`,
         description: portNames.join(', '),

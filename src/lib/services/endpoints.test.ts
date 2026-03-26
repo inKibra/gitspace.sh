@@ -70,7 +70,7 @@ describe('service endpoints hosting cutover', () => {
       workspaceId: 'demo',
       processName: 'web',
       instance: 1,
-      ports: [{ name: 'app', port: 3000, protocol: 'http' }],
+      ports: [{ instance: 1, name: 'app', port: 3000, protocol: 'http' }],
     });
 
     expect(endpoints).toEqual([

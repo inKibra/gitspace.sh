@@ -1,7 +1,7 @@
-import type { WorkspaceProcessPort } from '../../components/SpacesBrowser.js';
-import type { ProcessPortProtocol } from '../../types/processes.js';
+import type { ProcessPortProtocol, ResolvedProcessPort } from '../../types/processes.js';
 import { readTmuxHostingState } from '../tmux-lite/hosting/state.js';
 import { resolveHostedServiceUrl } from '../tmux-lite/hosting/routes.js';
+import { getProcessPortsForInstance } from '../processes/runtime-ports.js';
 
 export interface HostingRouteState {
   baseHost?: string;
@@ -42,15 +42,15 @@ export function buildServiceEndpoints(args: {
   workspaceId: string;
   processName: string;
   instance: number;
-  ports?: WorkspaceProcessPort[];
+  ports?: ResolvedProcessPort[];
   hosting?: HostingRouteState;
 }): ServiceEndpoint[] {
   const hosting = args.hosting ?? getHostingRouteState();
-  return (args.ports ?? [])
+  return getProcessPortsForInstance(args.ports, args.instance)
     .filter((port) => Number.isInteger(port.port) && port.port > 0)
     .map((port) => {
       const protocol = normalizeServicePortProtocol(port.protocol);
-      const portLabel = port.name?.trim() || String(port.port);
+      const portLabel = port.name.trim();
       const localUrl = `${protocol}://localhost:${port.port}`;
       const remoteUrl = resolveHostedServiceUrl({
         baseHost: hosting.baseHost,
@@ -76,7 +76,7 @@ export function buildServiceLauncherOptions(args: {
   workspaceId: string;
   processName: string;
   instance: number;
-  ports?: WorkspaceProcessPort[];
+  ports?: ResolvedProcessPort[];
   hosting?: HostingRouteState;
 }): ServiceLauncherOption[] {
   const endpoints = buildServiceEndpoints(args).filter((endpoint) => endpoint.protocol === 'http');

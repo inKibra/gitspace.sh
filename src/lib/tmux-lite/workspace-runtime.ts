@@ -2,6 +2,7 @@ import type { Session, WorkspaceRuntimeRecord } from './protocol.js';
 import type { WorkspaceAgentState } from './agent-event-manager.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { loadProcessesConfigWithDiagnostics } from '../processes/config.js';
+import { resolveRuntimeProcesses } from '../processes/allocations.js';
 import { parseProcessSessionName } from '../processes/names.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getArchivedSessions } from '../../agents/agent-db.js';
@@ -108,11 +109,7 @@ export async function getWorkspaceRuntimeSnapshot(params: {
   return Promise.all(workspaces.map((workspace) => {
     const workspaceId = toCanonicalWorkspaceId(workspace);
     const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
-    const processes = processConfig.config.processes.map((process) => ({
-      name: process.name,
-      instances: process.instances,
-      ports: process.ports,
-    }));
+    const processes = await resolveRuntimeProcesses(workspace.path, processConfig.config);
     const terminals = summarizeWorkspaceTerminals(workspace.path, sessions);
     const agents = summarizeWorkspaceAgents(workspaceId, agentStateByWorkspaceId[workspaceId]);
     const processSummary = summarizeWorkspaceProcesses(sessions, workspaceId, workspace.id, workspace.path, processes.length);

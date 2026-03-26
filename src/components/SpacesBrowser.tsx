@@ -15,6 +15,8 @@ import type {
 import type { AgentSessionInfo } from '../machine/api/list-types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import type { WorkspaceNotesSummary } from '../types/workspace.js';
+import type { RuntimeProcessDefinition, ResolvedProcessPort } from '../types/processes.js';
+import { getProcessPortsForInstance } from '../lib/processes/runtime-ports.js';
 export type { AgentSessionInfo } from '../machine/api/list-types.js';
 
 export type { ReplayInfo };
@@ -24,17 +26,8 @@ export type { ReplayInfo };
 // ============================================================================
 
 /** Process summary for workspace */
-export interface WorkspaceProcessInfo {
-  name: string;
-  instances?: number;
-  ports?: WorkspaceProcessPort[];
-}
-
-export interface WorkspaceProcessPort {
-  port: number;
-  name?: string;
-  protocol?: 'http' | 'tcp';
-}
+export type WorkspaceProcessInfo = RuntimeProcessDefinition;
+export type WorkspaceProcessPort = ResolvedProcessPort;
 
 /** Workspace info from machine */
 export interface WorkspaceInfo {
@@ -317,7 +310,10 @@ function buildTree(
               instance: row.instance,
               workspaceId: ws.id,
               status: row.state,
-              ports: ws.processes?.find((process) => process.name === row.processName)?.ports,
+              ports: getProcessPortsForInstance(
+                ws.processes?.find((process) => process.name === row.processName)?.ports,
+                row.instance,
+              ),
               serveDomain: ws.serveDomain,
               subtitle: row.subtitle,
               alertLabel: row.alertLabel,
@@ -366,7 +362,7 @@ function buildTree(
                 instance,
                 workspaceId: ws.id,
                 status,
-                ports: process.ports,
+                ports: getProcessPortsForInstance(process.ports, instance),
                 serveDomain: ws.serveDomain,
               });
               renderedProcessKeys.add(`${process.name}:${instance}`);

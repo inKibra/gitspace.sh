@@ -11,7 +11,7 @@ import { enableProcessRestart, disableProcessRestart } from './control.js';
 import { markProcessStarted, clearProcessExit } from './state.js';
 import { resolveWorkspaceRef } from '../events/paths.js';
 import { toWorkspaceId } from '../../utils/workspace-id.js';
-import { ensurePortsAvailable } from './ports.js';
+import { reconcileProcessPortAllocations, resolveProcessRuntimePorts } from './allocations.js';
 
 export interface ProcessSessionInfo {
   sessionId: string;
@@ -70,7 +70,8 @@ export async function startProcessInstance(
     throw new Error(`Process ${spec.name} is missing a command`);
   }
 
-  await ensurePortsAvailable(spec);
+  reconcileProcessPortAllocations(workspacePath, loadProcessesConfig(workspacePath));
+  await resolveProcessRuntimePorts(workspacePath, spec);
 
   const workspaceRef = resolveWorkspaceRef(workspacePath);
   const workspaceName = workspaceRef?.workspaceId ?? (workspacePath.split('/').pop() ?? workspacePath);
