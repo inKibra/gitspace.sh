@@ -99,7 +99,7 @@ describe('useWorkspaceDetailModel active hosted urls', () => {
       },
       createdAt: Date.now(),
     }, null, 2), 'utf-8');
-    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web');
+    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web', 'macbook');
     writeFileSync(
       join(runtimeDir, 'hosted-routes.json'),
       `${JSON.stringify([{ hostname: activeHostname, service: 'http://127.0.0.1:7777' }], null, 2)}\n`,
@@ -154,7 +154,7 @@ describe('useWorkspaceDetailModel active hosted urls', () => {
       },
       createdAt: Date.now(),
     }, null, 2), 'utf-8');
-    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web');
+    const activeHostname = buildProcessHostname('gitspace.sh', 'brad', 'ws-1', 'sample-server', 1, 'web', 'macbook');
     writeFileSync(
       join(runtimeDir, 'hosted-routes.json'),
       `${JSON.stringify([{ hostname: activeHostname, service: 'http://127.0.0.1:7777' }], null, 2)}\n`,

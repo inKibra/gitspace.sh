@@ -1,4 +1,4 @@
-import { killSession, listSessions } from '../tmux-lite/cli.js';
+import { killSession, listSessionsFromRunningServer, isServerRunning } from '../tmux-lite/cli.js';
 import { parseProcessSessionName } from './names.js';
 import type { ProcessPortProtocol, ResolvedProcessPort } from '../../types/processes.js';
 
@@ -87,7 +87,21 @@ function getParentPid(pid: number): number | null {
 }
 
 export async function resolveManagedSession(pid: number): Promise<PortConflictInfo | null> {
-  const sessions = await listSessions();
+  try {
+    if (!await isServerRunning()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  let sessions: Awaited<ReturnType<typeof listSessionsFromRunningServer>>;
+  try {
+    sessions = await listSessionsFromRunningServer();
+  } catch {
+    return null;
+  }
+
   const sessionByPid = new Map(sessions.map((session) => [session.pid, session]));
 
   let currentPid: number | null = pid;
