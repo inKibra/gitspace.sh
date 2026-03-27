@@ -352,10 +352,14 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
         onMachineList: (machines) => {
           if (stopped) return;
           const onlineMachines = machines.filter((m) => m.online && m.isAuthorized);
-          const onlineIds = new Set(onlineMachines.map((m) => m.machineId));
+          const localMachineId = engineStateRef.current.backends[LOCAL_BACKEND_KEY]?.descriptor.machineId;
+          const visibleRemoteMachines = localMachineId
+            ? onlineMachines.filter((machine) => machine.machineId !== localMachineId)
+            : onlineMachines;
+          const onlineIds = new Set(visibleRemoteMachines.map((m) => m.machineId));
 
           // Register new backends for machines that just appeared
-          for (const machine of onlineMachines) {
+          for (const machine of visibleRemoteMachines) {
             if (registeredRemoteBackendsRef.current.has(machine.machineId)) continue;
             const backendKey = buildRemoteBackendKey(relayUrl, machine.machineId);
             try {

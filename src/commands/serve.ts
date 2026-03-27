@@ -96,6 +96,8 @@ import {
 } from './device-identity-password.js';
 import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 
+import { persistMachineIdentityFromServe } from './serve-machine-identity.js';
+
 /** Package version for daemon status */
 const PACKAGE_VERSION = '1.0.0';
 
@@ -1217,7 +1219,7 @@ export async function serveStart(options: {
     );
   }
 
-  // Save relay config for reconnect/bootstrap flows
+  // Save relay + machine identity config for reconnect/bootstrap flows
   try {
     writeRelayConfig({
       relayUrl: effectiveRelayUrl,
@@ -1225,10 +1227,16 @@ export async function serveStart(options: {
       machineId,
       savedAt: Date.now(),
     });
+    persistMachineIdentityFromServe({
+      existingIdentity: machineIdentity,
+      machineId,
+      relayUrl: effectiveRelayUrl,
+      publicIdentity,
+    });
   } catch (error) {
     await cleanupServeStartupFailure(sessionManager);
     throw new SpacesError(
-      `Failed to persist relay config: ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to persist machine relay identity: ${error instanceof Error ? error.message : String(error)}`,
       'SYSTEM_ERROR',
       2,
     );
