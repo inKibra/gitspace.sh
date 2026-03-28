@@ -5,48 +5,8 @@ import {
   type BackendScopedWorkspaceRef,
   toBackendScopedWorkspaceKey,
 } from '../multi/types.js';
-import type {
-  MachineWorkspaceLinearRecord,
-  MachineWorkspacePullRequestRecord,
-} from '../../lib/tmux-lite/machine/types.js';
 import { selectAllWorkspaces } from '../multi/selectors.js';
-
-export const PHASES: WorkspacePhase[] = ['plan', 'code', 'review', 'ship'];
-export const PHASE_LABELS: Record<WorkspacePhase, string> = {
-  plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship',
-};
-
-/** A workspace item as projected by useKanbanViewController for rendering. */
-export interface KanbanWorkspaceItem {
-  id: string;
-  selectionKey: string;
-  name: string;
-  path: string;
-  projectName: string;
-  branch?: string;
-  sessionCount: number;
-  /** Number of running or idle (non-archived, non-closed) agent sessions */
-  agentCount: number;
-  /** Number of agent sessions waiting for user permission (drives orange indicator) */
-  pendingPermissionCount: number;
-  isStale?: boolean;
-  serveDomain?: string;
-  processes?: import('../../types/processes.js').RuntimeProcessDefinition[];
-  processConfigError?: string;
-  phase: WorkspacePhase;
-  pullRequest?: MachineWorkspacePullRequestRecord;
-  linear?: MachineWorkspaceLinearRecord;
-  backendKey: string;
-  /** Human-readable label for the machine this workspace lives on (e.g. 'Local', 'My MacBook') */
-  machineLabel: string;
-  /** True when this workspace is on a remote machine (not the local one) */
-  isRemote: boolean;
-}
-
-export interface WorkspaceBoardGroup {
-  phase: WorkspacePhase;
-  workspaces: KanbanWorkspaceItem[];
-}
+import { PHASES } from '../../app/shared/board/types.js';
 
 
 export interface UseKanbanViewControllerArgs {

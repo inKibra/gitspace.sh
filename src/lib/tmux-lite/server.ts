@@ -11,6 +11,8 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
+import { VirtualTerminal } from './agents/virtual-terminal.js';
+import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-session-registry.js';
 import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
@@ -110,9 +112,11 @@ import {
 // Using 512KB to be well under the 1MB limit
 const PTY_CHUNK_SIZE = 512 * 1024;
 
-// Max scrollback lines to include in serialized state during attach
-// This is a limit - if less scrollback exists, we'll send what's available
-const SERIALIZE_SCROLLBACK_LINES = 250;
+// Max scrollback lines to include when serializing live state for an attach.
+const ATTACH_SERIALIZE_SCROLLBACK_LINES = 2_000;
+
+// Keep replay checkpoints smaller than full attach serialization to cap disk churn.
+const REPLAY_CHECKPOINT_SCROLLBACK_LINES = 250;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
@@ -121,7 +125,7 @@ if (rawArgs.includes("--test")) {
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
-configurePiRuntimeEnvironment(ROUTER_SOCKET);
+const PI_RUNTIME_ENV = configurePiRuntimeEnvironment(ROUTER_SOCKET);
 const SERVER_START_TIME = Date.now();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
@@ -190,11 +194,12 @@ interface ReplayRuntime {
 interface SessionData {
   info: Session;
   listener: any;
-  ptyTerminal: Bun.Terminal;
+  ptyTerminal: Bun.Terminal | null;
   xterm: XTerminal;
   serialize: SerializeAddon;
   idleState: IdleDetectionState;
-  proc: Bun.Subprocess;
+  proc: Bun.Subprocess | null;
+  virtualTerminal: VirtualTerminal | null;
   client: any;
   clientWriter: any;
   ctrlBuffer: Buffer;
@@ -511,7 +516,8 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
     }
     try { session.xterm.dispose(); } catch {}
     cleanupSessionResources(session, { removeFromMap: false });
-    try { signalSubprocessTree(session.proc, 'SIGKILL'); } catch {}
+    if (session.proc) try { signalSubprocessTree(session.proc, 'SIGKILL'); } catch {}
+    if (session.virtualTerminal) removeVirtualTerminal(session.info.id);
   }
   sessions.clear();
 
@@ -918,7 +924,7 @@ function createReplayCheckpoint(replay: ReplayRuntime, session: SessionData): Re
     },
     serializer: {
       kind: "xterm-serialize",
-      scrollbackLines: SERIALIZE_SCROLLBACK_LINES,
+      scrollbackLines: REPLAY_CHECKPOINT_SCROLLBACK_LINES,
     },
     ansiPath: `checkpoints/${checkpointId}.ansi`,
   };
@@ -933,7 +939,7 @@ function writeReplayCheckpointNow(session: SessionData): void {
   try {
     const checkpoint = createReplayCheckpoint(replay, session);
     const serialized = session.serialize.serialize({
-      scrollback: SERIALIZE_SCROLLBACK_LINES,
+      scrollback: REPLAY_CHECKPOINT_SCROLLBACK_LINES,
     });
     writeReplayCheckpoint(replay.replayId, checkpoint, serialized);
     replay.checkpointCount++;
@@ -1480,10 +1486,9 @@ function sendSerializedState(session: SessionData, sessionName: string): void {
     writeToClient(session, encodePTY(Buffer.from("\x1b[2J\x1b[H"))); // clear + home
 
     if (!skipSerialize) {
-      // Get serialized terminal state (including modes) for consistent redraws
-      // Limit scrollback to prevent oversized payloads
+      // Get serialized terminal state (including modes) for consistent redraws.
       const serialized = session.serialize.serialize({
-        scrollback: SERIALIZE_SCROLLBACK_LINES,
+        scrollback: ATTACH_SERIALIZE_SCROLLBACK_LINES,
       });
       const serializedBytes = Buffer.from(serialized);
 
@@ -1904,7 +1909,10 @@ function createSession(
   const spawnEnv = {
     ...shellEnv,
     ...(options?.env ?? {}),
-    ...(options?.kind === 'agent' ? { [PI_RUNTIME_TERMINAL_SESSION_ENV]: id } : {}),
+    ...(options?.kind === 'agent' ? {
+      ...PI_RUNTIME_ENV,
+      [PI_RUNTIME_TERMINAL_SESSION_ENV]: id,
+    } : {}),
   };
 
   const proc = Bun.spawn(spawnCmd, {
@@ -1967,6 +1975,7 @@ function createSession(
     serialize,
     idleState,
     proc,
+    virtualTerminal: null,
     client: null,
     clientWriter: null,
     ctrlBuffer: Buffer.alloc(0),
@@ -1991,6 +2000,246 @@ function createSession(
   }
 
   console.log(`[${sessionName}] created (pid ${proc.pid})`);
+  return info;
+}
+
+/**
+ * Create a virtual session backed by VirtualTerminal instead of a PTY process.
+ * The VirtualTerminal is registered in the shared registry so the coordinator
+ * (running in the same process) can retrieve it to start InteractiveMode.
+ */
+function createVirtualSession(
+  name: string | undefined,
+  cwd: string,
+  options?: {
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    metadata?: Record<string, string>;
+  }
+): Session {
+  const id = genId();
+  const sessionName = name || `virtual-${id}`;
+  const socketPath = getSessionSocketPath(id);
+  const socketDir = dirname(socketPath);
+  if (!existsSync(socketDir)) {
+    mkdirSync(socketDir, { recursive: true });
+  }
+  safeUnlink(socketPath);
+
+  const cols = 80;
+  const rows = 24;
+
+  // xterm-headless for terminal state tracking (same as PTY sessions)
+  const xterm = new XTerminal({
+    cols,
+    rows,
+    // Agent sessions are full-screen TUI; minimal scrollback needed.
+    scrollback: 100,
+    allowProposedApi: true,
+  });
+
+  const serialize = new SerializeAddon();
+  xterm.loadAddon(serialize);
+
+  const { getProcessTitle } = setupXtermEventHandlers(id, sessionName, xterm);
+
+  const idleState: IdleDetectionState = {
+    lastOutputTime: 0,
+    outputSinceIdle: 0,
+    idleTimer: null,
+  };
+
+  // VirtualTerminal writer: feeds pi-tui output into xterm-headless and clients.
+  // This mirrors what createPtyDataHandler does for PTY sessions.
+  const virtualTerminal = new VirtualTerminal(cols, rows, (data: string) => {
+    idleState.lastOutputTime = Date.now();
+    idleState.outputSinceIdle += data.length;
+
+    const session = sessions.get(id);
+    if (!session) return;
+
+    // Track pending writes for attach synchronization
+    session.pendingWrites++;
+    xterm.write(data, () => {
+      session.pendingWrites--;
+      if (session.attaching) {
+        session.attachDirty = true;
+      }
+      // Fan out to attached client
+      const encoded = encodePTY(data);
+      writeToClient(session, encoded);
+    });
+  });
+
+  registerVirtualTerminal(id, virtualTerminal);
+
+  // Session info
+  const info: Session = {
+    id,
+    name: sessionName,
+    socketPath,
+    pid: process.pid, // No child process; use server PID for identification
+    attached: false,
+    cwd,
+    createdAt: Date.now(),
+    kind: options?.kind ?? 'agent',
+    hidden: options?.hidden ?? true,
+    metadata: options?.metadata,
+  };
+
+  const startAttach = createStartAttach(sessionName);
+
+  // Socket handlers for virtual sessions — route input to VirtualTerminal
+  const socketHandlers = {
+    open(socket: any) {
+      const session = sessions.get(id);
+      if (!session) return socket.end();
+
+      if (session.client) {
+        writeToClient(session, encodeControl({ type: 'kicked' }));
+        session.client.end();
+      }
+
+      session.attaching = true;
+      session.attachPending = true;
+      session.attachDirty = false;
+      session.client = socket;
+      session.clientWriter = createBufferedSocketWriter(socket);
+      session.info.attached = true;
+      session.lastAttached = Date.now();
+      session.ctrlBuffer = Buffer.alloc(0);
+      clearAttachTimer(session);
+      session.attachTimer = setTimeout(() => {
+        if (session.attachPending) {
+          console.log(`[${sessionName}] WARN: attach-init not received after 5s, starting attach anyway`);
+          startAttach(session);
+        }
+      }, 5000);
+    },
+
+    data(socket: any, data: Buffer) {
+      const session = sessions.get(id);
+      if (!session) return;
+
+      const applyResize = (cols: number, rows: number) => {
+        try {
+          virtualTerminal.resize(cols, rows);
+          session.xterm.resize(cols, rows);
+        } catch {}
+      };
+
+      let buf = Buffer.from(data);
+      if (session.ctrlBuffer.length > 0) {
+        buf = Buffer.concat([session.ctrlBuffer, buf]);
+      }
+
+      let frames;
+      let remaining;
+      try {
+        const result = parseFrames(buf);
+        frames = result.frames;
+        remaining = result.remaining;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Frame parse error';
+        console.error(`[${sessionName}] Frame parse error: ${msg}`);
+        socket.end();
+        return;
+      }
+      session.ctrlBuffer = Buffer.from(remaining);
+
+      for (const frame of frames) {
+        if (frame.type === FrameType.CONTROL) {
+          const ctrl = decodeControl(frame.payload) as SessionCtrl;
+          if (ctrl.type === 'resize' || ctrl.type === 'attach-init') {
+            applyResize(ctrl.cols, ctrl.rows);
+            if (session.attaching && session.attachPending) {
+              startAttach(session);
+            }
+          } else if (ctrl.type === 'detach') {
+            writeToClient(session, encodePTY(TERM_RESET));
+            session.client = null;
+            session.clientWriter = null;
+            session.info.attached = false;
+            session.attaching = false;
+            session.attachPending = false;
+            clearAttachTimer(session);
+            session.attachDirty = false;
+            session.lastDetached = Date.now();
+            socket.end();
+            console.log(`[${sessionName}] detached`);
+          }
+        } else if (frame.type === FrameType.PTY) {
+          // Route client keystrokes to VirtualTerminal → pi-tui
+          const text = Buffer.from(frame.payload).toString('utf-8');
+          virtualTerminal.injectInput(text);
+          session.lastInteraction = Date.now();
+        }
+      }
+    },
+
+    drain(socket: any) {
+      const session = sessions.get(id);
+      if (session && session.client === socket) {
+        flushClient(session);
+      }
+    },
+
+    close(socket: any) {
+      const session = sessions.get(id);
+      if (session && session.client === socket) {
+        session.client = null;
+        session.clientWriter = null;
+        session.info.attached = false;
+        session.attaching = false;
+        session.attachPending = false;
+        clearAttachTimer(session);
+        session.attachDirty = false;
+        console.log(`[${sessionName}] disconnected`);
+      }
+    },
+  };
+
+  let listener;
+  try {
+    listener = Bun.listen({
+      unix: socketPath,
+      socket: socketHandlers,
+    });
+  } catch (error) {
+    removeVirtualTerminal(id);
+    try { xterm.dispose(); } catch {}
+    safeUnlink(socketPath);
+    throw error;
+  }
+
+  sessions.set(id, {
+    info,
+    listener,
+    ptyTerminal: null,
+    xterm,
+    serialize,
+    idleState,
+    proc: null,
+    virtualTerminal,
+    client: null,
+    clientWriter: null,
+    ctrlBuffer: Buffer.alloc(0),
+    pendingWrites: 0,
+    attaching: false,
+    attachDirty: false,
+    attachPending: false,
+    attachTimer: null,
+    processTitle: '',
+    terminalTitle: '',
+    unreadAlertCount: 0,
+    lastInteraction: 0,
+    lastDetached: 0,
+    lastAttached: 0,
+    replay: null,
+    replayCheckpointPending: false,
+  });
+
+  console.log(`[${sessionName}] virtual session created`);
   return info;
 }
 
@@ -2131,6 +2380,22 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'new-virtual':
+            try {
+              const session = createVirtualSession(cmd.name, cmd.cwd, {
+                kind: cmd.kind,
+                hidden: cmd.hidden,
+                metadata: cmd.metadata,
+              });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'session', session };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              console.error(`[server] createVirtualSession failed: ${errMsg}`);
+              res = { type: 'error', message: `Failed to create virtual session: ${errMsg}` };
+            }
+            break;
+
           case 'attach-prepare':
             try {
               let targetSession: Session;
@@ -2222,8 +2487,15 @@ routerListener = Bun.listen({
             if (!s) {
               res = { type: "error", message: `Session ${cmd.id} not found` };
             } else {
-              // Kill the full process tree so child services do not outlive the tmux session shell.
-              signalSubprocessTree(s.proc, 'SIGKILL');
+              if (s.proc) {
+                signalSubprocessTree(s.proc, 'SIGKILL');
+              }
+              if (s.virtualTerminal) {
+                s.virtualTerminal.stop();
+                removeVirtualTerminal(s.info.id);
+              }
+              cleanupSessionResources(s);
+              try { s.xterm.dispose(); } catch {}
               void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: "ok" };
             }

@@ -23,7 +23,7 @@ import { formatTime, getAgentSessionDisplayState } from './SpacesBrowser.js';
 import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal } from './ScriptTerminal.tui.js';
 import type { WorkspaceStatusInput } from '../app/workspaces/workspace-status.js';
-import { PHASES, PHASE_LABELS } from '../machine/controllers/useKanbanViewController.js';
+import { PHASES, PHASE_LABELS } from '../app/shared/board/types.js';
 import type { WorkspacePhase } from '../types/config.js';
 import type { UseFlowReturn } from './Flow.js';
 import type { WorkspaceDetailStripStatus } from './WorkspaceDetailPane.js';
@@ -537,7 +537,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         if (focus === 'status-picker') {
           if (key.name === 'escape') {
             setFocus('sidebar');
-          } else if (key.name === 'up' || key.raw === 'k') {
+          } else if (key.name === 'up' || (key.raw === 'k' && !key.shift)) {
             setStatusPickerCursor((i) => Math.max(0, i - 1));
           } else if (key.name === 'down' || key.raw === 'j') {
             setStatusPickerCursor((i) => Math.min(PHASES.length - 1, i + 1));
@@ -614,7 +614,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             }
             return;
           }
-          if (key.raw === 'k') {
+          if (key.raw === 'K') {
             const item = sidebarItems[sidebarCursor];
             if (item?.kind === 'agent' && !item.closedAt && onAbortAgentSession) {
               void onAbortAgentSession(workspace.id, item.id);
@@ -634,7 +634,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             }
             return;
           }
-          if (key.name === 'up' || key.raw === 'k') {
+          if (key.name === 'up' || (key.raw === 'k' && !key.shift)) {
             setSidebarCursor((i) => clampSidebar(i - 1));
           } else if (key.name === 'down' || key.raw === 'j') {
             setSidebarCursor((i) => clampSidebar(i + 1));
@@ -707,7 +707,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
           ? `[Shift+Esc] UI${attachAnywayHint}`
           : focus === 'workspace-pills'
             ? `[←→] Switch workspace  [Shift+←/→] Move phase  [Enter] Open  [Tab] Sidebar  [Esc] Back${attachAnywayHint}`
-            : `${sidebarHint}  [Shift+←/→] Move phase  [x] Close/Stop  [X] Archive  [k] Abort${attachAnywayHint}`;
+            : `${sidebarHint}  [Shift+←/→] Move phase  [x] Close/Stop  [X] Archive  [K] Abort${attachAnywayHint}`;
 
   return (
     <box flexDirection="column" flexGrow={1} width="100%" backgroundColor={COLORS.bg}>

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getGitspaceDir } from '../../../core/config.js';
+import { getWorkspaceRoot } from '../../../core/paths.js';
 import { readHostConfig } from '../../../commands/host.js';
 import { buildProcessHostname } from '../../../utils/hostnames.js';
 import { readTmuxHostingState } from './state.js';
@@ -12,7 +12,7 @@ export interface HostedServiceRouteRecord {
 }
 
 function getHostedRoutesPath(): string {
-  return join(getGitspaceDir(), '.tmux-hosting', 'hosted-routes.json');
+  return join(getWorkspaceRoot(), '.tmux-hosting', 'hosted-routes.json');
 }
 
 export function readHostedServiceRoutes(): HostedServiceRouteRecord[] {

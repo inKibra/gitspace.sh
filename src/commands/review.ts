@@ -27,7 +27,8 @@
  *     Add a line-range review thread.
  */
 
-import { readProjectConfig, readGlobalConfig, getGitspaceDir } from '../core/config.js';
+import { readProjectConfig, readGlobalConfig } from '../core/config.js';
+import { getWorkspaceRoot } from '../core/paths.js';
 import { executeLocalReviewOperation } from '../core/review-executor.js';
 import { logger } from '../utils/logger.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
@@ -47,7 +48,7 @@ import { getWorkspaceStatus, listWorkspaceNotes, summarizeWorkspaceNotes } from 
  * Returns null if no workspace context is available.
  */
 function detectWorkspaceFromCwd(): { projectName: string; workspaceName: string } | null {
-  return detectWorkspaceContextFromCwd(process.cwd(), getGitspaceDir());
+  return detectWorkspaceContextFromCwd(process.cwd(), getWorkspaceRoot());
 }
 
 function resolveCurrentWorkspace(options: {

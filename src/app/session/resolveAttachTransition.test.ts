@@ -36,6 +36,13 @@ describe('resolveAttachCancelledTransition', () => {
     })
   })
 
+  it('stays in workspace-detail on cancelled workspace attach from workspace-detail', () => {
+    expect(resolveAttachCancelledTransition({ view: 'workspace-detail', target: 'workspace' })).toEqual({
+      nextView: null,
+      resetSessionSwitching: true,
+    })
+  })
+
   it('returns to projects for cancelled session attach', () => {
     expect(resolveAttachCancelledTransition({ view: 'terminal', target: 'session' })).toEqual({
       nextView: 'projects',
@@ -57,9 +64,21 @@ describe('resolveAttachErrorTransition', () => {
     })
   })
 
-  it('returns to projects for non-script attach errors', () => {
+  it('stays in workspace-detail for non-script workspace attach errors from workspace-detail', () => {
     expect(resolveAttachErrorTransition({
       view: 'workspace-detail',
+      target: 'workspace',
+      message: 'Failed to attach session',
+    })).toEqual({
+      nextView: null,
+      resetSessionSwitching: true,
+      isWorkspaceScriptFailure: false,
+    })
+  })
+
+  it('returns to projects for non-script attach errors from non-detail views', () => {
+    expect(resolveAttachErrorTransition({
+      view: 'terminal',
       target: 'workspace',
       message: 'Failed to attach session',
     })).toEqual({
@@ -69,3 +88,4 @@ describe('resolveAttachErrorTransition', () => {
     })
   })
 })
+

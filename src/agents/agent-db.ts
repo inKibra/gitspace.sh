@@ -8,14 +8,14 @@
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { getGitspaceDir } from '../core/config.js';
+import { getWorkspaceRoot } from '../core/paths.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
 
 function getAgentDir(): string {
-  return join(getGitspaceDir(), '.agent');
+  return join(getWorkspaceRoot(), '.agent');
 }
 
 function getAgentDbPath(): string {

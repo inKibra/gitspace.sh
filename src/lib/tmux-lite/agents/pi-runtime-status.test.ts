@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { PendingQuestion, Permission } from '../../../agents/agent-runtime-types.js';
 import {
   buildPiRuntimeChildEnvironment,
+  configurePiRuntimeEnvironment,
   createPiRuntimeUpdateCommand,
   verifyPiRuntimeUpdateCommand,
 } from './pi-runtime-status.js';
@@ -58,4 +59,16 @@ describe('pi-runtime-status', () => {
 
     expect(verifyPiRuntimeUpdateCommand(command, { now: 1_700_000_031_000, secret })).toBe(false);
   });
+  test('returns runtime env without mutating process.env', () => {
+    delete process.env.GITSPACE_PI_RUNTIME_SOCKET;
+    delete process.env.GITSPACE_PI_RUNTIME_SECRET;
+
+    const env = configurePiRuntimeEnvironment('/tmp/tmux-lite-test.sock');
+
+    expect(env.GITSPACE_PI_RUNTIME_SOCKET).toBe('/tmp/tmux-lite-test.sock');
+    expect(env.GITSPACE_PI_RUNTIME_SECRET).toBeTruthy();
+    expect(process.env.GITSPACE_PI_RUNTIME_SOCKET).toBeUndefined();
+    expect(process.env.GITSPACE_PI_RUNTIME_SECRET).toBeUndefined();
+  });
+
 });

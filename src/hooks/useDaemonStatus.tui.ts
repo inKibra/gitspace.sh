@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { getStatus as getTmuxStatus, isServerRunning as isTmuxRunning } from '../lib/tmux-lite/cli.js';
-import { queryServeStatus, isServeRunning, type StatusResponse } from '../serve/daemon.js';
+import { queryServeStatus, isServeRunning } from '../serve/daemon.js';
 
 /** Package version for comparison */
 const PACKAGE_VERSION = '1.0.0';

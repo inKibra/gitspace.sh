@@ -90,6 +90,9 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
   const sessions: SessionInfo[] = [];
   const agentSessionsByWorkspace: Record<string, AgentSessionInfo[]> = {};
 
+  const toWorkspaceMapKey = (backendKey: string, workspaceId: string): string =>
+    toBackendScopedWorkspaceKey({ backendKey, workspaceId });
+
   for (const backendKey of state.backendOrder) {
     const snapshot = state.byBackend[backendKey]?.snapshot;
     if (!snapshot) continue;
@@ -102,7 +105,8 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
       }
     }
     for (const workspaceId of Object.keys(snapshot.agentSessionIdsByWorkspaceId)) {
-      agentSessionsByWorkspace[workspaceId] = (snapshot.agentSessionIdsByWorkspaceId[workspaceId] ?? [])
+      const mapKey = toWorkspaceMapKey(backendKey, workspaceId);
+      agentSessionsByWorkspace[mapKey] = (snapshot.agentSessionIdsByWorkspaceId[workspaceId] ?? [])
         .map((id) => snapshot.agentSessionsById[id])
         .filter(Boolean)
         .map((agent) => toAgentSessionInfo(agent!));
@@ -111,9 +115,13 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
 
   const agentSessionCounts: Record<string, number> = {};
   const pendingPermissionsByWorkspace: Record<string, number> = {};
-  for (const [workspaceId, entries] of Object.entries(agentSessionsByWorkspace)) {
-    agentSessionCounts[workspaceId] = entries.filter((session) => !session.closedAt && !session.archivedAt).length;
-    pendingPermissionsByWorkspace[workspaceId] = entries.reduce((count, session) => count + (session.pendingPermissionCount ?? 0), 0);
+  for (const [workspaceKey, entries] of Object.entries(agentSessionsByWorkspace)) {
+    const activeEntries = entries.filter((session) => !session.closedAt && !session.archivedAt);
+    agentSessionCounts[workspaceKey] = activeEntries.length;
+    pendingPermissionsByWorkspace[workspaceKey] = entries.reduce(
+      (count, session) => count + (session.pendingPermissionCount ?? 0),
+      0,
+    );
   }
 
   const workspaceStatusById: WorkspaceRuntimeModel['workspaceStatusById'] = {};
@@ -122,6 +130,7 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
 
   for (const workspace of workspaces) {
     const snapshot = state.byBackend[workspace.backendKey]?.snapshot;
+    const workspaceLookupKey = toWorkspaceMapKey(workspace.backendKey, workspace.id);
     const workspaceSessions = (snapshot?.terminalSessionIdsByWorkspaceId[workspace.id] ?? [])
       .map((id) => snapshot?.terminalSessionsById[id])
       .filter(Boolean)
@@ -132,10 +141,7 @@ export function deriveWorkspaceRuntimeModel(state: MultiMachineState): Workspace
         if (aProcess !== bProcess) return aProcess - bProcess;
         return a.name.localeCompare(b.name);
       });
-    const workspaceAgentSessions = (snapshot?.agentSessionIdsByWorkspaceId[workspace.id] ?? [])
-      .map((id) => snapshot?.agentSessionsById[id])
-      .filter(Boolean)
-      .map((agent) => toAgentSessionInfo(agent!));
+    const workspaceAgentSessions = agentSessionsByWorkspace[workspaceLookupKey] ?? [];
     const agentSessionCount = workspaceAgentSessions.filter((session) => !session.closedAt && !session.archivedAt).length;
     const pendingPermissionCount = workspaceAgentSessions.reduce(
       (count, session) => count + (session.pendingPermissionCount ?? 0),

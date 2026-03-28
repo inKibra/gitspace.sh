@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { getShiftArrowPhaseChange } from './phase-movement.js';
-import type { WorkspaceBoardGroup } from '../../../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup } from './types.js';
 
 const groups: WorkspaceBoardGroup[] = [
   {

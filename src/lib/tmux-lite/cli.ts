@@ -809,6 +809,29 @@ export async function createSession(
   throw new Error("Unexpected response");
 }
 
+export async function createVirtualSession(
+  name: string,
+  cwd: string,
+  options?: {
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    metadata?: Record<string, string>;
+  }
+): Promise<Session> {
+  await ensureServer();
+  const res = await send({
+    type: 'new-virtual',
+    name,
+    cwd,
+    kind: options?.kind,
+    hidden: options?.hidden,
+    metadata: options?.metadata,
+  });
+  if (res.type === 'session') return res.session;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
 export async function killSession(id: string): Promise<void> {
   await ensureServer();
   const res = await send({ type: "kill", id });

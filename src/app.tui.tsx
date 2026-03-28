@@ -18,7 +18,6 @@ import { SessionTerminal } from './components/SessionTerminal.tui.js';
 
 import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
 import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
-import { ProjectOnboardingStepTUI } from './components/ProjectOnboardingStep.tui.js';
 import {
   getReplayFrameOffline,
   getReplayTimelineOffline,
@@ -42,7 +41,7 @@ import { KanbanBoardTUI } from './components/KanbanBoard.tui.js';
 import { WorkspaceDetailScreen } from './components/WorkspaceDetailScreen.tui.js';
 import type { TreeItem } from './components/SpacesBrowser.js';
 import { InboxTUI } from './components/Inbox.tui.js';
-import { useInboxPageModel } from './app/shared/inbox/useInboxPageModel.js';
+import { useInboxPage } from './app/react/index.js';
 import { EventsTui } from './components/Events.tui.js';
 import { useEvents, toWideEventItem, type WideEventItem } from './components/Events.js';
 import type { SavedEventFilter, WideEventFilter } from './types/events.js';
@@ -55,49 +54,24 @@ import {
 } from './notifications/index.js';
 
 // Local state and config
-import { useDaemonStatus, formatRelayStatus } from './hooks/useDaemonStatus.tui.js';
-import {
-  readProjectConfig,
-  getProjectBaseDir,
-  createProject,
-  projectExists,
-} from './core/config.js';
 import { localPreferencesService } from './core/preferences-service.js';
 import type { NotificationConfig, NotificationTypeConfig, WorkspacePhase } from './types/config.js';
 
-// Git and workspace operations
-import { getDefaultBranch } from './core/git.js';
 import { extractRepoName } from './utils/sanitize.js';
 import { logger } from './utils/logger.js';
 import { openBrowserUrl } from './utils/open-browser.js';
 import { buildReviewUrl } from './utils/review-url.js';
 
-// Script execution
-import { listAllRepos, cloneRepository } from './core/github.js';
-import { detectBundleInRepo, loadBundleFromPath } from './core/bundle.js';
-import { applyProjectBundleState } from './core/project-lifecycle.js';
-import { checkCommandExists } from './utils/deps.js';
-import type { OnboardingStep } from './types/bundle.js';
-
 export type { RelayDescriptor as RelayConfig } from './relay-client/index.js';
 import type { RelayDescriptor } from './relay-client/index.js';
-import { useMultiBackends, LOCAL_BACKEND_KEY, type LocalSessionPtyBackend } from './machine/multi/useMultiBackends.js';
+import { GitSpaceProvider, useGitSpace, LOCAL_BACKEND_KEY, type SessionBackend } from './sdk/index.js';
+
+/** Local backend with PTY output handler for TUI terminal rendering. */
+type LocalSessionPtyBackend = SessionBackend & {
+  setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void;
+};
 import { toBackendScopedWorkspaceKey } from './machine/multi/types.js';
-import { createBunLocalSessionBackend, createBunRemoteSessionBackend } from './machine/local/createSessionBackend.bun.js';
-import { nodeRelaySocketAdapter } from './relay-client/index.js';
-import { createNodeRelaySigner } from './session/index.js';
-import { createLocalDeviceCertificate } from './core/user-identity.js';
-import { useUserActivity } from './hooks/index.js';
-import { useBundleRefreshAttachFlow } from './session/index.js';
-import { useBundleConfigFlow } from './session/index.js';
-import { useAttachController } from './app/session/useAttachController.js';
-import { useProcessActions } from './app/session/useProcessActions.js';
-import { ProcessStartCancelledError, isPortConflictError, promptToResolveProcessStartConflict } from './app/session/resolveProcessStartConflict.js';
-import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
-import { useLifecycleController } from './app/session/useLifecycleController.js';
-import { buildEditProcessesCommand } from './lib/processes/editor.js';
-import { buildWorkspaceSessionCommand } from './session/workspace-shell-hooks.js';
-import { loadProcessesConfigWithDiagnostics } from './lib/processes/config.js';
+import { bunPlatform } from './sdk/platforms/bun.js';
 import {
   consumeLegacyCleanupReminderForTui,
   initializeSecretRuntime,
@@ -107,11 +81,6 @@ import {
   resolveSessionBrowserCommand,
 } from './app/input/sessionCommands.js';
 import { resolveLocalTerminalSyncAction, type AppView } from './tui/local-terminal-sync.js';
-import {
-  resolveAttachCancelledTransition,
-  resolveAttachErrorTransition,
-  resolveAttachSuccessTransition,
-} from './app/session/resolveAttachTransition.js';
 import {
   getKeyboardInputChunk,
   getNumericInputChunk,
@@ -127,22 +96,25 @@ import {
   VT_KITTY_KEYBOARD_CONFIG,
   forceDisableKittyKeyboard,
 } from './tui/kitty-keyboard.js';
-import { agentNotificationToInboxItem } from './agents/agentNotificationToInboxItem.js';
-import { getAgentSessionDisplayTitle } from './agents/session-display.js';
-import { handleInboxSessionSelection, openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
 import { selectAllWorkspaces, selectBackendSnapshot } from './machine/multi/selectors.js';
-import { useWorkspaceController } from './machine/controllers/useWorkspaceController.js';
 import type { AgentSessionInfo as BrowserAgentSessionInfo } from './machine/api/list-types.js';
-import {
-  useCommandPaletteState,
-  COMMAND_PALETTE_COMMAND_DEFS,
-} from './app/workspaces/index.js';
-import { executeCommandPaletteAction } from './app/shared/command-palette/executeCommandPaletteAction.js';
-import { resolveSelectedProjectName, resolveSelectedWorkspace } from './app/shared/command-palette/workspace-selection.js';
-import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
+import { useCommandPaletteOrchestration } from './app/react/index.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
 import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
+import {
+  useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions,
+  useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions,
+  useLifecycleActions, useTuiAttachActions, usePreferencesAdapter,
+  useUserActivity, buildEditProcessesCommand,
+  useWorkspaceController,
+} from './app/react/index.js';
+import {
+  agentNotificationToInboxItem, getAgentSessionDisplayTitle,
+  readProjectConfig, getProjectBaseDir, projectExists,
+  useDaemonStatus, formatRelayStatus,
+  loadProcessesConfigWithDiagnostics, buildWorkspaceSessionCommand,
+} from './app/react/shell-adapters.tui.js';
 
 // Types
 import type { InboxItem } from './lib/tmux-lite/cli.js';
@@ -152,26 +124,10 @@ import type { Identity } from './types/identity.js';
 // Workspace Flow Types (Custom State Machine)
 // ============================================================================
 
-/** Project flow states - explicit state machine for project creation */
-type ProjectFlowState =
-  | { type: 'closed' }
-  | { type: 'loading-repos' }
-  | { type: 'repo-select'; repos: string[]; selectedIndex: number }
-  | { type: 'cloning'; repo: string }
-  | { type: 'onboarding';
-      repo: string;
-      projectName: string;
-      baseBranch: string;
-      bundleDir: string;
-      bundleName: string;
-      steps: OnboardingStep[];
-      currentStep: number;
-      collectedValues: Record<string, string>;
-      collectedSecrets: Record<string, string>;
-      inputValue: string;
-      confirmStatus?: 'checking' | 'found' | 'missing' | null;
-    }
-  | { type: 'creating'; projectName: string };
+
+// ============================================================================
+// Constants
+// ============================================================================
 
 /** Settings flow states - explicit state machine for settings modal */
 type SettingsFlowState =
@@ -180,18 +136,6 @@ type SettingsFlowState =
   | { type: 'types-menu'; selectedIndex: number; config: NotificationConfig }
   | { type: 'edit-duration'; value: string; config: NotificationConfig }
   | { type: 'edit-hold-duration'; value: string; config: NotificationConfig };
-
-function getInitialInputValueForStep(step: OnboardingStep): string {
-  if (step.type === 'input') {
-    return step.defaultValue || '';
-  }
-  // SecretStep intentionally has no defaultValue — secrets shouldn't be pre-filled
-  return '';
-}
-
-// ============================================================================
-// Constants
-// ============================================================================
 
 const COLORS = {
   border: '#555555',
@@ -253,11 +197,24 @@ export interface AppProps {
   keyboardMode: 'kitty' | 'vt';
 }
 
+interface AppInnerProps {
+  onQuit?: () => void;
+  keyboardMode: 'kitty' | 'vt';
+}
+
 // ============================================================================
 // Main App Component
 // ============================================================================
 
 function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
+  return (
+    <GitSpaceProvider platform={bunPlatform()} relay={relayConfig ?? null} identity={remoteIdentity ?? null}>
+      <AppInner onQuit={onQuit} keyboardMode={keyboardMode} />
+    </GitSpaceProvider>
+  );
+}
+
+function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const keyboardModeHint = `kbd: ${keyboardMode}`;
 
   // Force re-render counter for resize
@@ -293,14 +250,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     onError: (error) => dispatch({ type: 'SET_ERROR', error: error.message }),
   });
 
+
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState<string>('workspace');
 
   // Project creation flow (custom state machine)
-  const [projectFlow, setProjectFlow] = useState<ProjectFlowState>({ type: 'closed' });
 
   // Settings flow (custom state machine)
   const [settingsFlow, setSettingsFlow] = useState<SettingsFlowState>({ type: 'closed' });
-  const [notificationConfig, setNotificationConfig] = useState<NotificationConfig>(DEFAULT_NOTIFICATION_CONFIG);
 
   // Events view state
   const [eventsWorkspaceId, setEventsWorkspaceId] = useState<string | null>(null);
@@ -320,17 +276,19 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   const [focusedLaneIndex, setFocusedLaneIndex] = useState(0);
 
   // Multi-backend hook — manages local backend + auto-discovers remote machines via relay
-  const multi = useMultiBackends({
-    enabled: true,
-    relay: relayConfig ?? null,
-    identity: remoteIdentity ?? null,
-    createLocalBackend: () => createBunLocalSessionBackend(LOCAL_BACKEND_KEY),
-    createRemoteBackend: createBunRemoteSessionBackend,
-    relaySocketAdapter: nodeRelaySocketAdapter,
-    createRelaySigner: createNodeRelaySigner,
-    getDeviceCertificate: createLocalDeviceCertificate,
+  const { engine: multi, state: multiMachineState } = useGitSpace();
+  const workspaceLifecycleClient = useMemo(() => ({
+    multi,
+    workspaceRefs: [],
+  }), [multi]);
+
+  const { setStatus: setWorkspaceStatusAction } = useWorkspaceLifecycleActions({
+    client: workspaceLifecycleClient,
+    flow,
+    onError: (message) => {
+      dispatch({ type: 'SET_ERROR', error: message });
+    },
   });
-  const multiMachineState = multi.state;
 
   // Per-backend state for the local machine (inbox, sessions, replays, attached session, etc.)
   const localState = multi.getBackendState(LOCAL_BACKEND_KEY);
@@ -399,7 +357,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     setSelectedRef: workspaceController.setSelectedRef,
     clearSelectedRef: workspaceController.clearSelectedRef,
     onSetWorkspacePhase: async (ref, phase) => {
-      await multi.setWorkspaceStatus(ref, phase);
+      await setWorkspaceStatusAction(ref, phase);
     },
   });
 
@@ -433,12 +391,21 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     return currentProject;
   }, [currentProject]);
 
+  const sessionClient = useMemo(() => ({
+    multi,
+    workspaceRefs: [],
+  }), [multi]);
+  const { attachSession: attachSessionAction, cancelPendingScripts } = useSessionActions({
+    client: sessionClient,
+    onError: (message) => {
+      dispatch({ type: 'SET_ERROR', error: message });
+    },
+  });
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
+    client: workspaceLifecycleClient,
     flow,
     commandError: localCommandError,
-    attachSession: (params) => multi.attachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: params.workspaceId ?? '' }, params),
-    getBundleRefreshPlan: (ref) => multi.getBundleRefreshPlan(ref),
-    applyBundleRefresh: (ref, submission) => multi.applyBundleRefresh(ref, submission),
+    attachSession: (params) => attachSessionAction({ backendKey: LOCAL_BACKEND_KEY, workspaceId: params.workspaceId ?? '' }, params),
   });
 
   const {
@@ -446,116 +413,43 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     attachFromSelection: attachLocalFromSelection,
     canAttachAnyway: canAttachLocalAnyway,
     attachAnyway: attachLocalAnyway,
-  } = useAttachController({
-    flow,
-    attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
-    recoverableAttachParams: bundleRefreshAttach.recoverableParams,
-    defaultProjectName: currentProject,
-    defaultBackendKey: LOCAL_BACKEND_KEY,
-    getAttachSize: getLocalAttachSize,
-    resolveProjectName: resolveLocalWorkspaceProjectName,
-    preflightSessionAttach: async (sessionId) => {
-      const sessionInfo = localSessions.find((session: { id: string; attached: boolean }) => session.id === sessionId);
-      if (!sessionInfo) {
-        await refreshWorkspaces();
-        dispatch({ type: 'SET_ERROR', error: 'Session no longer exists. The session list has been refreshed.' });
-        return false;
-      }
-
-      if (!sessionInfo.attached) {
-        return true;
-      }
-
-      return new Promise<boolean>((resolve) => {
-        flow.showConfirm({
-          title: 'Session In Use',
-          message: 'This session is currently attached. Steal it?',
-          variant: 'warning',
-          confirmLabel: 'Steal',
-          onConfirm: () => {
-            resolve(true);
-          },
-          onCancel: () => {
-            resolve(false);
-          },
-        });
-      });
+  } = useTuiAttachActions({
+    base: {
+      flow,
+      attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
+      recoverableAttachParams: bundleRefreshAttach.recoverableParams,
+      defaultProjectName: currentProject,
+      defaultBackendKey: LOCAL_BACKEND_KEY,
+      getAttachSize: getLocalAttachSize,
+      resolveProjectName: resolveLocalWorkspaceProjectName,
     },
-    onBeforeAttach: ({ target, params }) => {
-      sessionSwitchingRef.current = true;
-        setAttachedAgentSession(null);
-
-      if (target === 'workspace' && params.workspaceId && !params.command) {
-        lastScriptWorkspaceIdRef.current = params.workspaceId;
-        setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
-        if (state.view !== 'workspace-detail') {
-          dispatch({ type: 'SET_VIEW', view: 'scripts' });
-        }
-      }
+    view: state.view,
+    dispatch,
+    setAttachedAgentSession,
+    setScriptWorkspaceName,
+    refreshWorkspaces: async () => {
+      multi.listWorkspaces();
+      multi.listSessions();
+      multi.listReplays(undefined, showDismissedReplays);
     },
-    onAttachSuccess: ({ params }) => {
-      const transition = resolveAttachSuccessTransition({
-        view: state.view,
-        command: params.command,
-      });
-      if (transition.resetSessionSwitching) {
-        sessionSwitchingRef.current = false;
-      }
-      if (transition.nextView) {
-        dispatch({ type: 'SET_VIEW', view: transition.nextView });
-      }
-    },
-    onAttachCancelled: ({ target }) => {
-      const transition = resolveAttachCancelledTransition({
-        view: state.view,
-        target,
-      });
-      if (transition.resetSessionSwitching) {
-        sessionSwitchingRef.current = false;
-      }
-      if (transition.nextView) {
-        dispatch({ type: 'SET_VIEW', view: transition.nextView });
-      }
-    },
-    onAttachError: ({ target, message }) => {
-      const transition = resolveAttachErrorTransition({
-        view: state.view,
-        target,
-        message,
-      });
-      if (transition.resetSessionSwitching) {
-        sessionSwitchingRef.current = false;
-      }
-      if (transition.nextView) {
-        dispatch({ type: 'SET_VIEW', view: transition.nextView });
-      }
-
-      flow.showMessage({
-        title: transition.isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
-        message,
-        variant: 'error',
-      });
-    },
+    localSessions,
   });
 
-  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+  const { deleteWorkspaceWithPrompt } = useWorkspaceLifecycleActions({
+    client: workspaceLifecycleClient,
     flow,
-    deleteWorkspace: (ref, params) => multi.deleteWorkspace(ref, params),
     onBeforeDelete: ({ target }) => {
       setScriptWorkspaceName(target.workspaceName);
       dispatch({ type: 'SET_VIEW', view: 'scripts' });
     },
     onDeleteSuccess: async ({ target }) => {
-      // Clean up stale selection and tab state for the deleted workspace
       if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
       workspaceController.clearSelectedRef();
       dispatch({ type: 'SET_VIEW', view: 'projects' });
-      await refreshWorkspaces();
     },
     onDeleteCancelled: () => {
-      // Return to kanban board if user declines script-failure retry
       lastScriptWorkspaceIdRef.current = null;
       dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
@@ -572,19 +466,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   // Daemon status hook (tmux-lite and serve)
   const { status: daemonStatus } = useDaemonStatus({ pollInterval: 5000 });
 
-  // Load persisted notification preferences.
-  useEffect(() => {
-    let mounted = true;
-    void localPreferencesService.getNotificationConfig().then((config) => {
-      if (mounted) {
-        setNotificationConfig(config);
-      }
-    });
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
+  const { activeNotificationConfig: notificationConfig, loadConfig: loadPreferencesConfig, updateConfig: updatePreferencesConfig } = usePreferencesAdapter({
+    service: localPreferencesService,
+    backendNotificationConfig: null,
+    defaultConfig: DEFAULT_NOTIFICATION_CONFIG,
+  });
 
   // ========== Data Loading ==========
 
@@ -601,33 +487,21 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [multi, showDismissedReplays]);
 
   const bundleConfigFlow = useBundleConfigFlow({
+    client: workspaceLifecycleClient,
     flow,
-    getBundleConfigState: (ref) => multi.getBundleConfigState(ref),
-    applyBundleConfigUpdate: (ref, submission) => multi.applyBundleConfigUpdate(ref, submission),
     onApplied: async () => {
       await refreshWorkspaces();
     },
   });
 
-  // Load inbox
-  const refreshInbox = useCallback(async () => {
-    multi.requestInbox();
-  }, [multi]);
 
-  const lifecycleController = useLifecycleController({
+  const lifecycleController = useLifecycleActions({
+    client: sessionClient,
+    backendKey: LOCAL_BACKEND_KEY,
     flow,
-    listGithubRepos: (org) => multi.listGithubRepos(LOCAL_BACKEND_KEY, org),
-    listRemoteBranches: (projectName) => multi.listRemoteBranches(LOCAL_BACKEND_KEY, projectName),
-    listLinearIssues: (projectName) => multi.listLinearIssues(LOCAL_BACKEND_KEY, projectName),
-    createProject: (params) => multi.createProject(LOCAL_BACKEND_KEY, params),
-    prepareProjectCreation: (params) => multi.prepareProjectCreation(LOCAL_BACKEND_KEY, params),
-    finalizeProjectCreation: (params) => multi.finalizeProjectCreation(LOCAL_BACKEND_KEY, params),
-    cancelProjectCreation: (name) => multi.cancelProjectCreation(LOCAL_BACKEND_KEY, name),
-    createWorkspace: (params) => multi.createWorkspace(LOCAL_BACKEND_KEY, params),
-    deleteProject: (name, params) => multi.deleteProject(LOCAL_BACKEND_KEY, name, params),
     getProjectNames: () => localProjects.map((project: { name: string }) => project.name),
-    refreshProjects,
-    refreshWorkspaces,
+    refreshProjects: () => refreshProjects(),
+    refreshWorkspaces: () => refreshWorkspaces(),
     refreshSessions: () => multi.listSessions(),
     onWorkspaceCreated: async ({ workspaceId, workspaceName }) => {
       setScriptWorkspaceName(workspaceName);
@@ -830,270 +704,9 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     lifecycleController.openCreateWorkspaceFlow(selectedWorkspaceProjectName);
   }, [selectedWorkspaceProjectName, lifecycleController]);
 
-  // ========== Project Creation (Custom State Machine) ==========
-
-  // Finalize project creation
-  const finalizeProject = useCallback(async (projectName: string) => {
-    await refreshProjects();
-    setProjectFlow({ type: 'closed' });
-    flow.showMessage({
-      title: 'Project Created',
-      message: `Project "${projectName}" has been created successfully!`,
-      variant: 'success',
-    });
-  }, [refreshProjects, flow]);
-
-  // Check if a command exists (for onboarding confirm steps)
-  const checkCommand = useCallback(
-    (command: string) => checkCommandExists(command),
-    []
-  );
-
-  // Advance to the next onboarding step
-  const advanceOnboardingStep = useCallback(async () => {
-    if (projectFlow.type !== 'onboarding') return;
-
-    const currentStep = projectFlow.steps[projectFlow.currentStep];
-    const newValues = { ...projectFlow.collectedValues };
-    const newSecrets = { ...projectFlow.collectedSecrets };
-
-    const currentValue = projectFlow.inputValue.trim();
-
-    const validateValue = (
-      required: boolean | undefined,
-      validationPattern: string | undefined,
-      validationMessage: string | undefined,
-      value: string,
-    ): string | null => {
-      if (required !== false && value.length === 0) {
-        return 'This field is required.';
-      }
-      if (validationPattern && value.length > 0) {
-        try {
-          const regex = new RegExp(validationPattern);
-          if (!regex.test(value)) {
-            return validationMessage || `Value must match pattern: ${validationPattern}`;
-          }
-        } catch {
-          return 'Invalid validation pattern in bundle.';
-        }
-      }
-      return null;
-    };
-
-    // Save current step's value if applicable
-    if (currentStep && (currentStep.type === 'input' || currentStep.type === 'secret')) {
-      const stepWithKey = currentStep as { configKey: string; defaultValue?: string };
-      const value = currentValue || stepWithKey.defaultValue || '';
-      const validationError = validateValue(
-        currentStep.required,
-        'validationPattern' in currentStep ? currentStep.validationPattern : undefined,
-        'validationMessage' in currentStep ? currentStep.validationMessage : undefined,
-        value,
-      );
-      if (validationError) {
-        flow.showMessage({
-          title: 'Invalid Value',
-          message: validationError,
-          variant: 'error',
-        });
-        return;
-      }
-
-      if (currentStep.type === 'secret') {
-        newSecrets[stepWithKey.configKey] = value;
-      } else {
-        newValues[stepWithKey.configKey] = value;
-      }
-    }
-
-    const nextStepIndex = projectFlow.currentStep + 1;
-
-    if (nextStepIndex >= projectFlow.steps.length) {
-        // All steps done - create the project
-        setProjectFlow({ type: 'creating', projectName: projectFlow.projectName });
-
-        try {
-          createProject(projectFlow.projectName, projectFlow.repo, projectFlow.baseBranch);
-
-          await applyProjectBundleState({
-            projectName: projectFlow.projectName,
-            bundle: {
-              version: '1.0',
-              name: projectFlow.bundleName,
-              onboarding: projectFlow.steps,
-            },
-            inputValues: newValues,
-            secretValues: newSecrets,
-          });
-
-          await finalizeProject(projectFlow.projectName);
-        } catch (err) {
-        flow.showMessage({
-          title: 'Error',
-          message: err instanceof Error ? err.message : 'Failed to create project',
-          variant: 'error',
-        });
-        setProjectFlow({ type: 'closed' });
-      }
-    } else {
-      // Move to next step
-        const nextStep = projectFlow.steps[nextStepIndex];
-        const defaultValue = (nextStep as { defaultValue?: string }).defaultValue || '';
-
-        // If it's a confirm step with checkCommand, start checking
-        if (nextStep.type === 'confirm' && (nextStep as { checkCommand?: string }).checkCommand) {
-          setProjectFlow({
-            ...projectFlow,
-            currentStep: nextStepIndex,
-            collectedValues: newValues,
-            collectedSecrets: newSecrets,
-            inputValue: '',
-            confirmStatus: 'checking',
-          });
-
-        const found = await checkCommand((nextStep as { checkCommand: string }).checkCommand);
-        setProjectFlow(prev =>
-          prev.type === 'onboarding'
-            ? { ...prev, confirmStatus: found ? 'found' : 'missing' }
-            : prev
-        );
-        } else {
-          setProjectFlow({
-            ...projectFlow,
-            currentStep: nextStepIndex,
-            collectedValues: newValues,
-            collectedSecrets: newSecrets,
-            inputValue: defaultValue,
-            confirmStatus: null,
-          });
-        }
-    }
-  }, [projectFlow, checkCommand, finalizeProject, flow]);
-
-  // Handle repository selection
-  const handleSelectRepo = useCallback(async (repo: string) => {
-    const projectName = extractRepoName(repo);
-
-    // Check if project already exists
-    if (projectExists(projectName)) {
-      flow.showMessage({
-        title: 'Project Exists',
-        message: `Project "${projectName}" already exists`,
-        variant: 'error',
-      });
-      setProjectFlow({ type: 'closed' });
-      return;
-    }
-
-    setProjectFlow({ type: 'cloning', repo });
-
-    try {
-      const baseDir = getProjectBaseDir(projectName);
-      await cloneRepository(repo, baseDir);
-      const baseBranch = await getDefaultBranch(baseDir);
-
-      // Check for bundle
-      const bundleDir = detectBundleInRepo(baseDir);
-      if (bundleDir) {
-        const loadedBundle = loadBundleFromPath(bundleDir);
-
-        if (loadedBundle.bundle.onboarding && loadedBundle.bundle.onboarding.length > 0) {
-          // Start onboarding flow
-          const firstStep = loadedBundle.bundle.onboarding[0];
-          const initialInputValue = getInitialInputValueForStep(firstStep);
-
-          // If first step is a confirm with checkCommand, start checking
-          if (firstStep.type === 'confirm' && (firstStep as { checkCommand?: string }).checkCommand) {
-            setProjectFlow({
-              type: 'onboarding',
-              repo,
-              projectName,
-              baseBranch,
-              bundleDir: loadedBundle.bundleDir,
-              bundleName: loadedBundle.bundle.name,
-              steps: loadedBundle.bundle.onboarding,
-              currentStep: 0,
-              collectedValues: {},
-              collectedSecrets: {},
-              inputValue: '',
-              confirmStatus: 'checking',
-            });
-
-            const found = await checkCommand((firstStep as { checkCommand: string }).checkCommand);
-            setProjectFlow(prev =>
-              prev.type === 'onboarding'
-                ? { ...prev, confirmStatus: found ? 'found' : 'missing' }
-                : prev
-            );
-          } else {
-            setProjectFlow({
-              type: 'onboarding',
-              repo,
-              projectName,
-              baseBranch,
-              bundleDir: loadedBundle.bundleDir,
-              bundleName: loadedBundle.bundle.name,
-              steps: loadedBundle.bundle.onboarding,
-              currentStep: 0,
-              collectedValues: {},
-              collectedSecrets: {},
-              inputValue: initialInputValue,
-              confirmStatus: null,
-            });
-          }
-          return;
-        }
-
-        // No onboarding, just create project (scripts are in workspace .gitspace/scripts/)
-        createProject(projectName, repo, baseBranch);
-        await applyProjectBundleState({
-          projectName,
-          bundle: loadedBundle.bundle,
-        });
-      } else {
-        // No bundle, just create project
-        createProject(projectName, repo, baseBranch);
-      }
-
-      await finalizeProject(projectName);
-    } catch (err) {
-      flow.showMessage({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to clone repository',
-        variant: 'error',
-      });
-      setProjectFlow({ type: 'closed' });
-    }
-  }, [flow, checkCommand, finalizeProject]);
-
-  // Start new project flow
-  const handleNewProjectFlow = useCallback(async () => {
-    setProjectFlow({ type: 'loading-repos' });
-
-    try {
-      const repos = await listAllRepos();
-
-      if (repos.length === 0) {
-        flow.showMessage({
-          title: 'No Repositories',
-          message: 'No GitHub repositories found. You can still create projects by entering a git remote URL.',
-          variant: 'warning',
-        });
-        setProjectFlow({ type: 'closed' });
-        return;
-      }
-
-      setProjectFlow({ type: 'repo-select', repos, selectedIndex: 0 });
-    } catch (err) {
-      flow.showMessage({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to fetch repositories',
-        variant: 'error',
-      });
-      setProjectFlow({ type: 'closed' });
-    }
-  }, [flow]);
+  const handleNewProjectFlow = useCallback(() => {
+    lifecycleController.openCreateProjectFlow();
+  }, [lifecycleController]);
 
   // ========== Shared Hooks ==========
 
@@ -1190,24 +803,23 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   );
   const inboxUnreadCount = localInboxUnreadCount + agentInboxItems.filter((i) => !i.read).length;
 
+  const processClientContext = useMemo(() => ({
+    multi,
+    workspaceRefs: localWorkspaces.map((workspace) => ({
+      backendKey: LOCAL_BACKEND_KEY,
+      workspaceId: workspace.id,
+    })),
+    selectedWorkspaceRef: workspaceController.selectedRef ?? null,
+    detailWorkspaceRef: selectedWorkspaceForDetail
+      ? { backendKey: selectedWorkspaceForDetail.backendKey, workspaceId: selectedWorkspaceForDetail.id }
+      : null,
+    preferredBackendKey: LOCAL_BACKEND_KEY,
+  }), [localWorkspaces, multi, selectedWorkspaceForDetail, workspaceController.selectedRef]);
+
   const processActions = useProcessActions({
+    client: processClientContext,
+    flow,
     sessions: sessionInfos,
-    startProcess: async (workspaceId, processName, instance) => {
-      try {
-        await multi.startProcess({ backendKey: LOCAL_BACKEND_KEY, workspaceId }, processName, instance);
-      } catch (error) {
-        if (isPortConflictError(error)) {
-          const resolved = await promptToResolveProcessStartConflict({ error, showConfirm: flow.showConfirm });
-          if (resolved) {
-            await multi.startProcess({ backendKey: LOCAL_BACKEND_KEY, workspaceId }, processName, instance);
-            return;
-          }
-          throw new ProcessStartCancelledError();
-        }
-        throw error;
-      }
-    },
-    stopProcess: (workspaceId, processName) => multi.stopProcess({ backendKey: LOCAL_BACKEND_KEY, workspaceId }, processName),
     attachSession: handleAttachSession,
     onStartProcessError: (error) => {
       flow.showMessage({
@@ -1364,46 +976,73 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     errorMessage: agent.errorMessage,
   }), []);
 
-  const respondToPermission = useCallback(async (
-    workspaceId: string,
-    agentSessionId: string,
-    permissionId: string,
-    response: 'allow' | 'deny',
-  ) => {
-    if (!localBackend) return;
-    await localBackend.respondToAgentPermission(workspaceId, agentSessionId, permissionId, response);
-  }, [localBackend]);
 
-  // Per-workspace agent session persistence — use spacesBrowser's selected workspace if available
-  // Fallback to empty string when no workspace is focused (hook is always called, ID may be empty)
-  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
-    void localBackend?.setAgentSessionPreference(workspaceId, sessionId);
-  }, [localBackend]);
+  const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
+  const agentSessionCounts = workspaceRuntime.agentSessionCounts;
+  const pendingPermissionsByWorkspace = workspaceRuntime.pendingPermissionsByWorkspace;
+
+  // Build status entries for every workspace across all backends so the kanban
+  // board (which shows all workspaces) always has a status entry per card.
+  const allWorkspaceEntries = workspaceRuntime.workspaces;
+  const workspaceStatusById = workspaceRuntime.workspaceStatusById;
+  const agentSessionClientContext = useMemo(() => ({
+    multi,
+    workspaceRefs: allWorkspaceEntries.map((workspace) => ({
+      backendKey: workspace.backendKey,
+      workspaceId: workspace.id,
+    })),
+    agentSessionsByWorkspaceKey: agentSessionsByWorkspace,
+    selectedWorkspaceRef: workspaceController.selectedRef ?? null,
+    detailWorkspaceRef: selectedWorkspaceForDetail
+      ? { backendKey: selectedWorkspaceForDetail.backendKey, workspaceId: selectedWorkspaceForDetail.id }
+      : null,
+    preferredBackendKey: LOCAL_BACKEND_KEY,
+  }), [agentSessionsByWorkspace, allWorkspaceEntries, multi, selectedWorkspaceForDetail, workspaceController.selectedRef]);
+  const {
+    open: openAgentSessionAction,
+    createAndOpen: createAgentSessionAction,
+    abort: abortAgentSessionAction,
+    close: closeAgentSessionAction,
+    archive: archiveAgentSessionAction,
+    restore: restoreAgentSessionAction,
+  } = useAgentSessionActions({
+    client: agentSessionClientContext,
+    flow,
+    beforeOpen: () => setIsViewOnlySession(false),
+    onOpenSuccess: async ({ agentSessionRef }) => {
+      setAttachedAgentSession({
+        workspaceId: agentSessionRef.workspaceId,
+        sessionId: agentSessionRef.agentSessionId,
+      });
+      if (state.view !== 'workspace-detail') {
+        dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      }
+    },
+    onError: (message) => {
+      dispatch({ type: 'SET_ERROR', error: message });
+    },
+  });
+
+  const {
+    requestInbox,
+    clearInbox,
+    markInboxRead,
+    respondToPermission,
+    attachFromInboxSessionSelection,
+  } = useInboxActions({
+    client: agentSessionClientContext,
+    flow,
+    onError: (message) => {
+      dispatch({ type: 'SET_ERROR', error: message });
+    },
+  });
 
   const attachFromInboxSessionId = useCallback(async (sessionId: string) => {
-    if (!localBackend?.attachAgentSession) {
-      throw new Error('Agent attach unavailable');
-    }
-    await handleInboxSessionSelection({
+    await attachFromInboxSessionSelection({
       sessionId,
       agentInboxItems,
-      flow,
-      respondToPermission,
       markAgentInboxItemRead: (id) => {
         setAgentInboxItems((prev) => prev.map((item) => item.sessionId === id ? { ...item, read: true } : item));
-      },
-      openAgentSession: async (workspaceId, agentSessionId) => {
-        await openAgentSession({
-          workspaceId,
-          agentSessionId,
-          persistAgentSessionSelection,
-          clearViewOnly: () => setIsViewOnlySession(false),
-          attachAgentSession: localBackend.attachAgentSession!.bind(localBackend),
-          afterAttach: async () => {
-            setAttachedAgentSession(null);
-            dispatch({ type: 'SET_VIEW', view: 'terminal' });
-          },
-        });
       },
       attachRegularSession: async (id) => {
         await handleAttachSession({ sessionId: id });
@@ -1414,18 +1053,12 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       beforeRegularAttach: async () => {
         dispatch({ type: 'SET_VIEW', view: 'projects' });
       },
+      onOpenAgentSuccess: async () => {
+        setAttachedAgentSession(null);
+        dispatch({ type: 'SET_VIEW', view: 'terminal' });
+      },
     });
-  }, [agentInboxItems, dispatch, flow, handleAttachSession, localBackend, persistAgentSessionSelection, respondToPermission]);
-
-  const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
-
-  const agentSessionCounts = workspaceRuntime.agentSessionCounts;
-  const pendingPermissionsByWorkspace = workspaceRuntime.pendingPermissionsByWorkspace;
-
-  // Build status entries for every workspace across all backends so the kanban
-  // board (which shows all workspaces) always has a status entry per card.
-  const allWorkspaceEntries = workspaceRuntime.workspaces;
-  const workspaceStatusById = workspaceRuntime.workspaceStatusById;
+  }, [agentInboxItems, attachFromInboxSessionSelection, dispatch, handleAttachSession]);
 
   const handleOpenAgents = useCallback(async (workspaceId: string) => {
     void workspaceId;
@@ -1460,75 +1093,40 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   }, [allWorkspaceEntries, flow]);
 
   const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await localBackend?.abortAgentSession?.(workspaceId, agentSessionId);
-  }, [localBackend]);
+    await abortAgentSessionAction(workspaceId, agentSessionId);
+  }, [abortAgentSessionAction]);
 
   const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await localBackend?.closeAgentSession?.(workspaceId, agentSessionId);
+    const closed = await closeAgentSessionAction(workspaceId, agentSessionId);
+    if (!closed) {
+      return;
+    }
     if (attachedAgentSession?.workspaceId === workspaceId && attachedAgentSession.sessionId === agentSessionId) {
       setAttachedAgentSession(null);
     }
-  }, [attachedAgentSession, localBackend]);
+  }, [attachedAgentSession, closeAgentSessionAction]);
 
   const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await localBackend?.archiveAgentSession?.(workspaceId, agentSessionId);
+    const archived = await archiveAgentSessionAction(workspaceId, agentSessionId);
+    if (!archived) {
+      return;
+    }
     if (attachedAgentSession?.workspaceId === workspaceId && attachedAgentSession.sessionId === agentSessionId) {
       setAttachedAgentSession(null);
     }
-  }, [attachedAgentSession, localBackend]);
+  }, [archiveAgentSessionAction, attachedAgentSession]);
 
   const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await localBackend?.restoreAgentSession?.(workspaceId, agentSessionId);
-  }, [localBackend]);
+    await restoreAgentSessionAction(workspaceId, agentSessionId);
+  }, [restoreAgentSessionAction]);
 
   const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    if (!localBackend?.attachAgentSession) {
-      throw new Error('Agent attach unavailable');
-    }
-    await openAgentSession({
-      workspaceId,
-      agentSessionId,
-      persistAgentSessionSelection,
-      clearViewOnly: () => setIsViewOnlySession(false),
-      attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
-      afterAttach: async (attachedAgentId) => {
-        setAttachedAgentSession({ workspaceId, sessionId: attachedAgentId });
-        if (state.view !== 'workspace-detail') {
-          dispatch({ type: 'SET_VIEW', view: 'terminal' });
-        }
-      },
-    });
-  }, [localBackend, persistAgentSessionSelection, state.view]);
+    await openAgentSessionAction(workspaceId, agentSessionId);
+  }, [openAgentSessionAction]);
 
-  const handleCreateAgentSession = useCallback(async (workspaceId: string) => {
-    if (!localBackend?.attachAgentSession) {
-      throw new Error('Agent attach unavailable');
-    }
-    promptCreateAgentSession({
-      flow,
-      workspaceId,
-      getCurrentSessions: (id) => agentSessionsByWorkspace[id] ?? [],
-      createAgentSession: async (wid, title) => {
-        const sessions = await localBackend?.createAgentSession?.(wid, title);
-        return (sessions ?? []).map((session) => ({
-          ...session,
-          workspaceId: wid,
-        }));
-      },
-      attachOptions: {
-        workspaceId,
-        persistAgentSessionSelection,
-        clearViewOnly: () => setIsViewOnlySession(false),
-        attachAgentSession: localBackend.attachAgentSession.bind(localBackend),
-        afterAttach: async (attachedAgentId) => {
-          setAttachedAgentSession({ workspaceId, sessionId: attachedAgentId });
-          if (state.view !== 'workspace-detail') {
-            dispatch({ type: 'SET_VIEW', view: 'terminal' });
-          }
-        },
-      },
-    });
-  }, [agentSessionsByWorkspace, flow, localBackend, persistAgentSessionSelection, state.view]);
+  const handleCreateAgentSession = useCallback((workspaceId: string) => {
+    createAgentSessionAction(workspaceId);
+  }, [createAgentSessionAction]);
 
   // Spaces browser hook (full project list; when a workspace is selected we show WorkspaceDetailPaneTUI instead)
   const spacesBrowserProps = useSpacesBrowser({
@@ -1562,107 +1160,59 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
   });
 
   // Command palette (shared state + handler)
-  const commandPaletteCommands = useMemo(
-    () => COMMAND_PALETTE_COMMAND_DEFS.map((d) => ({ id: d.id, label: d.label, shortcut: d.shortcut })),
-    []
-  );
-  const selectedWorkspaceForCommands = useMemo(() => {
-    if (workspaceBoardState.selectedWorkspaceId) {
-      return allWorkspaceEntries.find(
-        (workspace) => workspace.selectionKey === workspaceBoardState.selectedWorkspaceId,
-      ) ?? null;
-    }
-    if (selectedWorkspaceForDetail) {
-      return allWorkspaceEntries.find(
-        (workspace) => workspace.selectionKey === selectedWorkspaceForDetail.selectionKey,
-      ) ?? null;
-    }
-    const selectedBrowserItem = spacesBrowserProps.selectedItem;
-    if (selectedBrowserItem && selectedBrowserItem.type === 'workspace') {
-      return allWorkspaceEntries.find(
-        (workspace) => workspace.id === selectedBrowserItem.workspace.id && workspace.backendKey === LOCAL_BACKEND_KEY,
-      ) ?? null;
-    }
-    return null;
-  }, [allWorkspaceEntries, selectedWorkspaceForDetail, spacesBrowserProps.selectedItem, workspaceBoardState.selectedWorkspaceId]);
-
-  const selectedProjectForCommands = resolveSelectedProjectName({ selectedProjectName: selectedWorkspaceProjectName });
-  const selectedWorkspaceForPmActions = selectedWorkspaceForCommands;
-  const handleCommandPaletteSelect = useCallback(
-    (id: string) => {
-      executeCommandPaletteAction({
-        commandId: id as (typeof COMMAND_PALETTE_COMMAND_DEFS)[number]['id'],
-        workspace: selectedWorkspaceForPmActions,
-        projectName: selectedProjectForCommands,
-        showSelect: (config) => flow.showSelect<string>(config),
-        showMessage: flow.showMessage,
-        onOpenUrl: async (url) => {
-          const result = await openBrowserUrl(url);
-          if (!result.ok) {
-            flow.showMessage({ title: 'Open Service', message: result.message, variant: 'error' });
-          }
-        },
-        onAddRepo: () => lifecycleController.openCreateProjectFlow(),
-        onAddWorkspace: () => lifecycleController.openCreateMenu(null),
-        onSetStatus: (workspace) => {
-          showWorkspaceStatusSelect({
-            showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
-            onSelectPhase: (phase) => {
-              workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
-              flow.close();
-            },
-          });
-        },
-        onDeleteWorkspace: handleDeleteWorkspace,
-        onEditBundleConfig: async (workspace) => {
-          await handleManageBundleConfig({ workspaceId: workspace.id });
-        },
-        onEditProcessConfig: async (workspace) => {
-          await handleEditProcesses({ workspaceId: workspace.id });
-        },
-        onDeleteRepo: (projectName) => {
-          const project = projectInfos.find((item) => item.name === projectName);
-          if (project) handleDeleteProject(project);
-        },
-        onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
-        onOpenReview: (workspace) => handleOpenReview(workspace.id),
-      });
+  const { commandPalette } = useCommandPaletteOrchestration({
+    selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
+    selectedDetailWorkspaceId: selectedWorkspaceForDetail?.id ?? null,
+    workspaces: allWorkspaceEntries as any,
+    selectedProjectName: selectedWorkspaceProjectName,
+    showSelect: (config) => flow.showSelect<string>(config),
+    showMessage: (config) => flow.showMessage(config),
+    onOpenUrl: async (url) => {
+      const result = await openBrowserUrl(url);
+      if (!result.ok) {
+        flow.showMessage({ title: 'Open Service', message: result.message, variant: 'error' });
+      }
     },
-    [
-      lifecycleController,
-      projectInfos,
-      workspaceBoardState,
-      handleDeleteWorkspace,
-      handleDeleteProject,
-      handleManageBundleConfig,
-      handleEditProcesses,
-      handleOpenGitHubPullRequest,
-      handleOpenReview,
-      flow,
-      selectedProjectForCommands,
-      selectedWorkspaceForPmActions,
-      selectedWorkspaceForCommands,
-    ]
-  );
-  const commandPalette = useCommandPaletteState({
-    commands: commandPaletteCommands,
-    onSelect: handleCommandPaletteSelect,
+    onAddRepo: () => lifecycleController.openCreateProjectFlow(),
+    onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+    onSetWorkspacePhase: (workspace, phase) => {
+      workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
+      flow.close();
+    },
+    onDeleteWorkspace: handleDeleteWorkspace,
+    onEditBundleConfig: async (workspace) => {
+      await handleManageBundleConfig({ workspaceId: workspace.id });
+    },
+    onEditProcessConfig: async (workspace) => {
+      await handleEditProcesses({ workspaceId: workspace.id });
+    },
+    onDeleteRepo: (projectName) => {
+      const project = projectInfos.find((item) => item.name === projectName);
+      if (project) handleDeleteProject(project);
+    },
+    onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
+    onOpenReview: (workspace) => handleOpenReview(workspace.id),
   });
 
   // Inbox hook
-  const inboxProps = useInboxPageModel({
+  const refreshInbox = useCallback(async () => {
+    await requestInbox();
+  }, [requestInbox]);
+
+  // Inbox hook
+  const { inboxProps, handleInboxCommand } = useInboxPage({
     items: inboxItems,
     unreadCount: inboxUnreadCount,
     onClearItem: async (id) => {
-      await multi.clearInbox(id);
+      await clearInbox(id);
       await refreshInbox();
     },
     onClearAll: async () => {
-      await multi.clearInbox();
+      await clearInbox();
       await refreshInbox();
     },
     onMarkRead: async (id) => {
-      await multi.markInboxRead(id);
+      await markInboxRead(id);
       await refreshInbox();
     },
     onAttachSession: attachFromInboxSessionId,
@@ -1759,7 +1309,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       });
     },
     onMarkRead: async (itemId) => {
-      await multi.markInboxRead(itemId);
+      await markInboxRead(itemId);
       await refreshInbox();
     },
     pollIntervalMs: 5000,
@@ -1798,19 +1348,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         }
 
       }
-
-      if (projectFlow.type === 'onboarding') {
-        const step = projectFlow.steps[projectFlow.currentStep];
-        if (step?.type === 'input' || step?.type === 'secret') {
-          setProjectFlow({
-            ...projectFlow,
-            inputValue: projectFlow.inputValue + text,
-          });
-          event.preventDefault();
-          return;
-        }
-      }
-
       if (settingsFlow.type === 'edit-duration' || settingsFlow.type === 'edit-hold-duration') {
         const digits = getNumericInputChunk(text);
         if (!digits) {
@@ -1828,7 +1365,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     return () => {
       renderer.keyInput.off('paste', handlePaste);
     };
-  }, [flow, projectFlow, renderer, settingsFlow]);
+  }, [flow, renderer, settingsFlow]);
 
   // ========== Keyboard Handlers ==========
 
@@ -1955,7 +1492,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
     if (state.view === 'scripts') {
       if (localScriptState?.isRunning && (key.raw === 'c' || key.name === 'c')) {
         if (workspaceController.selectedRef) {
-            await multi.cancelPendingScripts(workspaceController.selectedRef);
+            await cancelPendingScripts(workspaceController.selectedRef);
           } else {
             // No selected workspace ref — detach any pending scripts
             await multi.detachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: '' });
@@ -2000,70 +1537,6 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
       return;
     }
 
-    // Handle project creation flow (custom state machine)
-    if (projectFlow.type !== 'closed') {
-      if (key.name === 'escape') {
-        setProjectFlow({ type: 'closed' });
-        return;
-      }
-
-      if (projectFlow.type === 'repo-select') {
-        if (key.name === 'up' || key.raw === 'k') {
-          setProjectFlow({
-            ...projectFlow,
-            selectedIndex: Math.max(0, projectFlow.selectedIndex - 1),
-          });
-        } else if (key.name === 'down' || key.raw === 'j') {
-          setProjectFlow({
-            ...projectFlow,
-            selectedIndex: Math.min(projectFlow.repos.length - 1, projectFlow.selectedIndex + 1),
-          });
-        } else if (key.name === 'return') {
-          const repo = projectFlow.repos[projectFlow.selectedIndex];
-          if (repo) {
-            await handleSelectRepo(repo);
-          }
-        }
-        return;
-      }
-
-      if (projectFlow.type === 'onboarding') {
-        const step = projectFlow.steps[projectFlow.currentStep];
-
-        if (step.type === 'info' || step.type === 'confirm') {
-          // For info/confirm steps, Enter to continue (if not checking)
-          if (key.name === 'return' && projectFlow.confirmStatus !== 'checking') {
-            await advanceOnboardingStep();
-          }
-          return;
-        }
-
-        if (step.type === 'input' || step.type === 'secret') {
-          if (key.name === 'return') {
-            await advanceOnboardingStep();
-          } else if (key.name === 'backspace') {
-            setProjectFlow({
-              ...projectFlow,
-              inputValue: projectFlow.inputValue.slice(0, -1),
-            });
-          } else {
-            const chunk = getKeyboardInputChunk(key);
-            if (!chunk) {
-              return;
-            }
-            setProjectFlow({
-              ...projectFlow,
-              inputValue: projectFlow.inputValue + chunk,
-            });
-          }
-          return;
-        }
-        return;
-      }
-
-      // For loading/cloning/creating states, just wait (escape to cancel handled above)
-      return;
-    }
 
     // When a workspace-detail inline terminal/script is attached, it owns the keyboard.
     // Global app shortcuts must not steal input until the user explicitly releases focus.
@@ -2090,7 +1563,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
     // Settings shortcut (global) - open settings modal
     if (key.raw === ',') {
-      const config = await localPreferencesService.getNotificationConfig();
+      const config = await loadPreferencesConfig();
       setSettingsFlow({ type: 'main-menu', selectedIndex: 0, config });
       return;
     }
@@ -2134,16 +1607,14 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           const selected = menuItems[settingsFlow.selectedIndex];
           if (selected === 'notifications-enabled') {
             const newConfig = { ...settingsFlow.config, enabled: !settingsFlow.config.enabled };
-            await localPreferencesService.updateNotificationConfig(newConfig);
-            setNotificationConfig(newConfig);
+            await updatePreferencesConfig(newConfig);
             setSettingsFlow({ ...settingsFlow, config: newConfig });
           } else if (selected === 'toast-enabled') {
             const newConfig = {
               ...settingsFlow.config,
               toast: { ...settingsFlow.config.toast, enabled: !settingsFlow.config.toast.enabled },
             };
-            await localPreferencesService.updateNotificationConfig(newConfig);
-            setNotificationConfig(newConfig);
+            await updatePreferencesConfig(newConfig);
             setSettingsFlow({ ...settingsFlow, config: newConfig });
           } else if (selected === 'min-duration') {
             const currentSec = Math.round(settingsFlow.config.minCommandDurationMs / 1000);
@@ -2154,8 +1625,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
           } else if (selected === 'types') {
             setSettingsFlow({ type: 'types-menu', selectedIndex: 0, config: settingsFlow.config });
           } else if (selected === 'reset') {
-            await localPreferencesService.updateNotificationConfig(DEFAULT_NOTIFICATION_CONFIG);
-            setNotificationConfig(DEFAULT_NOTIFICATION_CONFIG);
+            await updatePreferencesConfig(DEFAULT_NOTIFICATION_CONFIG);
             setSettingsFlow({ ...settingsFlow, config: DEFAULT_NOTIFICATION_CONFIG });
           }
         }
@@ -2188,8 +1658,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
                 ...settingsFlow.config,
                 types: { ...settingsFlow.config.types, [typeKey]: !settingsFlow.config.types[typeKey] },
               };
-              await localPreferencesService.updateNotificationConfig(newConfig);
-              setNotificationConfig(newConfig);
+              await updatePreferencesConfig(newConfig);
               setSettingsFlow({ ...settingsFlow, config: newConfig });
             }
           }
@@ -2204,8 +1673,7 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
             const newConfig = settingsFlow.type === 'edit-duration'
               ? { ...settingsFlow.config, minCommandDurationMs: num * 1000 }
               : { ...settingsFlow.config, toast: { ...settingsFlow.config.toast, holdWhenIdleMs: num * 1000 } };
-            await localPreferencesService.updateNotificationConfig(newConfig);
-            setNotificationConfig(newConfig);
+            await updatePreferencesConfig(newConfig);
             setSettingsFlow({ type: 'main-menu', selectedIndex: settingsFlow.type === 'edit-duration' ? 2 : 3, config: newConfig });
           }
         } else if (key.name === 'backspace') {
@@ -2235,34 +1703,13 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
 
     // Inbox view keyboard handling
     if (state.view === 'inbox') {
-      const command = resolveInboxCommand({
+      const handled = await handleInboxCommand({
         name: key.name,
         raw: key.raw,
         shift: key.shift,
       });
-
-      if (command === 'back') {
-        if (inboxProps.isViewingThread) {
-          inboxProps.closeThread();
-        } else {
-          inboxProps.close();
-        }
-      } else if (command === 'move-up') {
-        inboxProps.moveUp();
-      } else if (command === 'move-down') {
-        inboxProps.moveDown();
-      } else if (command === 'activate') {
-        await inboxProps.openThread();
-      } else if (command === 'delete') {
-        if (inboxProps.isViewingThread) {
-          await inboxProps.deleteThread();
-        } else {
-          await inboxProps.deleteSelected();
-        }
-      } else if (command === 'clear') {
-        await inboxProps.clearAll();
-      } else if (command === 'attach' && inboxProps.isViewingThread) {
-        await inboxProps.attachToSession();
+      if (handled) {
+        return;
       }
       return;
     }
@@ -2784,98 +2231,11 @@ function App({ relayConfig, remoteIdentity, onQuit, keyboardMode }: AppProps) {
         </box>
       )}
 
-      {/* Project creation flow modal */}
-      <ProjectFlowModal flow={projectFlow} />
 
       {/* Settings flow modal */}
       <SettingsFlowModal flow={settingsFlow} />
       </box>
     </Fragment>
-  );
-}
-
-// ============================================================================
-// Project Flow Modal Component
-// ============================================================================
-
-function ProjectFlowModal({ flow }: { flow: ProjectFlowState }) {
-  if (flow.type === 'closed') {
-    return null;
-  }
-
-  const modalWidth = 70;
-  const modalHeight = flow.type === 'repo-select' ? 18 :
-                      flow.type === 'onboarding' ? 14 :
-                      8;
-
-  return (
-    <box
-      position="absolute"
-      width="100%"
-      height="100%"
-      justifyContent="center"
-      alignItems="center"
-    >
-      <box
-        flexDirection="column"
-        width={modalWidth}
-        height={modalHeight}
-        borderStyle="rounded"
-        borderColor={COLORS.borderFocused}
-        backgroundColor="#1a1a2e"
-        padding={1}
-      >
-        {/* Loading repos state */}
-        {flow.type === 'loading-repos' && (
-          <>
-            <text fg={COLORS.title} height={1}>New Project</text>
-            <text fg={COLORS.loading} height={1} marginTop={1}>Fetching repositories...</text>
-          </>
-        )}
-
-        {/* Repository selection */}
-        {flow.type === 'repo-select' && (
-          <>
-            <text fg={COLORS.title} height={1}>Select Repository</text>
-            <box flexDirection="column" marginTop={1} flexGrow={1} overflow="hidden">
-              {flow.repos.slice(
-                Math.max(0, flow.selectedIndex - 5),
-                Math.max(0, flow.selectedIndex - 5) + 10
-              ).map((repo, i) => {
-                const actualIndex = Math.max(0, flow.selectedIndex - 5) + i;
-                return (
-                  <text key={repo} height={1} fg={actualIndex === flow.selectedIndex ? COLORS.selected : COLORS.text}>
-                    {actualIndex === flow.selectedIndex ? '▸ ' : '  '}{repo}
-                  </text>
-                );
-              })}
-            </box>
-            <text fg={COLORS.textDim} height={1}>[↑↓] Navigate  [Enter] Select  [Esc] Cancel</text>
-          </>
-        )}
-
-        {/* Cloning state */}
-        {flow.type === 'cloning' && (
-          <>
-            <text fg={COLORS.title} height={1}>Cloning Repository</text>
-            <text fg={COLORS.loading} height={1} marginTop={1}>Cloning {flow.repo}...</text>
-          </>
-        )}
-
-        {/* Onboarding steps */}
-        {flow.type === 'onboarding' && (
-          <ProjectOnboardingStepTUI flow={flow} colors={COLORS} />
-        )}
-
-        {/* Creating state */}
-        {flow.type === 'creating' && (
-          <>
-            <text fg={COLORS.title} height={1}>Creating Project</text>
-            <text fg={COLORS.loading} height={1} marginTop={1}>Setting up {flow.projectName}...</text>
-          </>
-        )}
-      </box>
-    </box>
   );
 }
 

@@ -104,11 +104,11 @@ mock.module('../../core/config.js', () => ({
 const { initializeOwnerSync, resetOwnerSyncForTests } = await import('../owner-sync.js');
 const { generateNewMnemonic, initFromMnemonic } = await import('../user-identity.js');
 const {
-  getGitspaceDir,
   readGlobalConfig,
   writeGlobalConfig,
   writeProjectConfig,
 } = await import('../config.js');
+const { getConfigRoot } = await import('../paths.js');
 const { writeRelayConfig } = await import('../identity.js');
 const { generateRelayIdentity } = await import('../../relay/identity.js');
 const { startRelayServer } = await import('../../relay/__tests__/helpers/ports.js');
@@ -129,7 +129,7 @@ let tempControlDir = '';
 let server: Server<any> | null = null;
 
 function stateFilePath(): string {
-  return join(getGitspaceDir(), '.owner-sync-state.json');
+  return join(getConfigRoot(), '.owner-sync-state.json');
 }
 
 function readOwnerSyncState(): {

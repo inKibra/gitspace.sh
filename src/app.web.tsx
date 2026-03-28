@@ -13,16 +13,7 @@ import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
-import { applyDeviceClasses, isMobileLayout, isTouchDevice } from "./utils/device.web";
-import { useUserActivity } from "./hooks/index.js";
-import { useBundleRefreshAttachFlow } from './session/useBundleRefreshAttachFlow.js';
-import { useBundleConfigFlow } from './session/useBundleConfigFlow.js';
-import { useAttachController } from './app/session/useAttachController.js';
-import { useProcessActions } from './app/session/useProcessActions.js';
-import { useWorkspaceDeleteFlow } from './app/session/useWorkspaceDeleteFlow.js';
-import { useLifecycleController } from './app/session/useLifecycleController.js';
 import { ReviewPage } from './pages/ReviewPage.web.js';
-import { buildEditProcessesCommand } from './lib/processes/editor.js';
 
 // Shared components and hooks
 import {
@@ -35,7 +26,7 @@ import {
 import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
-import { useInboxPageModel } from './app/shared/inbox/useInboxPageModel.js';
+import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
@@ -44,51 +35,29 @@ import type { WorkspacePhase } from './types/config.js';
 import {
   useNotifications,
   type ToastNotification,
-  type NotificationConfig,
   DEFAULT_NOTIFICATION_CONFIG,
   getSessionLabel,
 } from "./notifications/index.js";
-import {
-  resolveInboxCommand,
-} from './app/input/sessionCommands.js';
-import {
-  useCommandPaletteState,
-  COMMAND_PALETTE_COMMAND_DEFS,
-} from './app/workspaces/index.js';
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
-import { ProcessStartCancelledError, isPortConflictError, promptToResolveProcessStartConflict } from './app/session/resolveProcessStartConflict.js';
-import { executeCommandPaletteAction } from './app/shared/command-palette/executeCommandPaletteAction.js';
-import { resolveSelectedProjectName, resolveSelectedWorkspace } from './app/shared/command-palette/workspace-selection.js';
-import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
+import { useCommandPaletteOrchestration } from './app/react/index.js';
 import { showReplayHistorySelect } from './app/shared/workspace-detail/showReplayHistorySelect.js';
+import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
 import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/types.js';
 
 // Multi-backend layer (browser-side)
-import {
-  useMultiBackends,
-} from './machine/multi/useMultiBackends.js';
+import { GitSpaceProvider, useGitSpace } from './sdk/index.js';
 import {
   type BackendScopedWorkspaceRef,
-  type BackendScopedAgentSessionRef,
   toBackendScopedWorkspaceKey,
 } from './machine/multi/types.js';
-import { useWorkspaceController } from './machine/controllers/useWorkspaceController.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
 import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { selectBackendSnapshot } from './machine/multi/selectors.js';
 import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
+import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
 
-// Agent session helpers (platform-neutral)
-import { openAgentSession, promptCreateAgentSession } from './agents/agent-session-actions.js';
-
-// Browser-specific factories for useMultiBackends
-import {
-  createBrowserRemoteSessionBackend,
-} from './app/session/createSessionBackend.web.js';
-import { browserRelaySocketAdapter } from './relay-client/adapters/browser.js';
-import { signRelayMessage } from './session/crypto/relay-signing.web.js';
-import { getStoredDeviceCert } from './lib/storage/identity-store.web.js';
+import { browserPlatform } from './sdk/platforms/browser.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 
 // Replay helper
@@ -117,30 +86,20 @@ const SCRIPT_ERROR_CODES = new Set([
   'REMOVE_SCRIPT_FAILED',
 ]);
 
-// ─── Browser relay signer factory ────────────────────────────────────────────
-
-function createBrowserRelaySigner(identity: Identity) {
-  return <T extends object>(message: T): T => signRelayMessage(message, identity);
-}
-
-// ─── Browser device cert getter ───────────────────────────────────────────────
-
-async function getBrowserDeviceCert(_identity: Identity): Promise<string> {
-  const cert = getStoredDeviceCert();
-  if (!cert) {
-    throw new Error('No device certificate found. Re-run identity setup.');
-  }
-  return cert;
-}
 
 // ─── App component ───────────────────────────────────────────────────────────
 
-export default function App() {
+type AppInnerProps = {
+  resolvedIdentity: Identity | null;
+  setResolvedIdentity: (identity: Identity | null) => void;
+};
+
+function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [view, setView] = useState<View>("terminal");
   const [showInbox, setShowInbox] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
-  const [showMobileControls, setShowMobileControls] = useState(false);
+  const [showMobileControls] = useState(false);
   const [inputMode, setInputMode] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
@@ -151,8 +110,6 @@ export default function App() {
     shift: false,
     alt: false,
   });
-  const [localNotificationConfig, setLocalNotificationConfig] =
-    useState<NotificationConfig | null>(null);
   const [isViewOnlySession, setIsViewOnlySession] = useState(false);
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
   const [showDismissedReplays] = useState(false);
@@ -169,6 +126,7 @@ export default function App() {
   const lastScriptErrorRef = useRef<string | null>(null);
   const lastCommandErrorRef = useRef<string | null>(null);
   const lastScriptWorkspaceIdRef = useRef<string | null>(null);
+  const lastScriptWorkspaceRef = useRef<BackendScopedWorkspaceRef | null>(null);
   const suppressDeleteScriptFailureModalRef = useRef(false);
 
   // Review workspace/project state
@@ -179,40 +137,17 @@ export default function App() {
     workspaceLabel?: string;
   } | null>(null);
 
-  // Identity state (resolved by IdentityGate before relay connection)
-  const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
+  const { engine: multi, state: multiMachineState } = useGitSpace();
 
-  // ─── Relay descriptor (same-origin WS) ────────────────────────────────────
-
-  const relayDescriptor = useMemo<RelayDescriptor | null>(() => {
-    if (!resolvedIdentity) return null;
-    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return { url: `${wsProtocol}//${location.host}/ws`, source: 'local' };
-  }, [resolvedIdentity]);
-
-  // ─── Multi-backend hook (browser: no local backend, remote via relay) ───────
-
-  const multi = useMultiBackends({
-    enabled: Boolean(resolvedIdentity),
-    relay: relayDescriptor,
-    identity: resolvedIdentity,
-    createLocalBackend: null, // No local tmux-lite server in browser
-    createRemoteBackend: createBrowserRemoteSessionBackend,
-    relaySocketAdapter: browserRelaySocketAdapter,
-    createRelaySigner: createBrowserRelaySigner,
-    getDeviceCertificate: getBrowserDeviceCert,
-  });
-
-  const multiMachineState = multi.state;
-
+  const keyboardVisible = useVisualViewport();
   // ─── Active backend (the one currently attached / first connected) ─────────
 
-  const activeBackendKey = multi.activeBackendKey;
+  const activeBackendKey = multiMachineState.activeBackendKey;
   const activeBackendState = activeBackendKey ? multi.getBackendState(activeBackendKey) : null;
 
   // Find the backend that is currently in "attached" mode
   const attachedBackendKey = useMemo(() => {
-    for (const key of multi.state.backendOrder) {
+    for (const key of multiMachineState.backendOrder) {
       const st = multi.getBackendState(key);
       if (st?.mode === 'attached') return key;
     }
@@ -262,6 +197,24 @@ export default function App() {
     b?.setPtyOutputHandler?.(writeCallbackRef.current);
   }, [attachedBackendKey, activeBackendKey, multi]);
 
+  // ─── Flow / Modal system ───────────────────────────────────────────────────
+  const flow = useFlow({
+    onError: (error) => console.error('Flow error:', error),
+  });
+
+  const workspaceLifecycleClient = useMemo(() => ({
+    multi,
+    workspaceRefs: [],
+  }), [multi]);
+
+  const { setStatus: setWorkspaceStatusAction } = useWorkspaceLifecycleActions({
+    client: workspaceLifecycleClient,
+    flow,
+    onError: (message) => {
+      toast.error(message);
+    },
+  });
+
   // ─── Projects & workspaces from snapshot ──────────────────────────────────
 
   const allProjects = useMemo(() => {
@@ -287,7 +240,7 @@ export default function App() {
     setSelectedRef: workspaceController.setSelectedRef,
     clearSelectedRef: workspaceController.clearSelectedRef,
     onSetWorkspacePhase: async (ref, phase) => {
-      await multi.setWorkspaceStatus(ref, phase);
+      await setWorkspaceStatusAction(ref, phase);
     },
     connected: terminalStatus === 'connected',
     mode: terminalMode,
@@ -360,20 +313,34 @@ export default function App() {
       typeof value === 'string' && values.indexOf(value) === index,
     );
 
-    for (const backendKey of candidateKeys) {
-      const state = multi.getBackendState(backendKey);
-      if (state?.sessions?.some((session) => session.id === sessionId)) {
-        return { backendKey, sessionId };
+    if (preferredBackendKey) {
+      const preferredState = multi.getBackendState(preferredBackendKey);
+      if (preferredState?.sessions?.some((session) => session.id === sessionId)) {
+        return { backendKey: preferredBackendKey, sessionId };
       }
     }
 
-    return candidateKeys[0] ? { backendKey: candidateKeys[0], sessionId } : null;
+    let match: BackendKey | null = null;
+
+    for (const backendKey of candidateKeys) {
+      if (backendKey === preferredBackendKey) continue;
+      const state = multi.getBackendState(backendKey);
+      if (state?.sessions?.some((session) => session.id === sessionId)) {
+        if (match !== null) {
+          return null;
+        }
+
+        match = backendKey;
+      }
+    }
+
+    if (!match) {
+      return null;
+    }
+
+    return { backendKey: match, sessionId };
   }, [activeBackendKey, attachedBackendKey, multi, multiMachineState.backendOrder, selectedBackendKey]);
 
-  const getAgentRef = useCallback((workspaceId: string, agentSessionId: string): BackendScopedAgentSessionRef => ({
-    ...getWorkspaceRef(workspaceId),
-    agentSessionId,
-  }), [getWorkspaceRef]);
 
   // ─── Selected workspace detail ───────────────────────────────────────────────
   const selectedRef = workspaceController.selectedRef;
@@ -448,103 +415,74 @@ export default function App() {
 
   // ─── Agent session data ────────────────────────────────────────────────────
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
-  const agentSessionCounts = workspaceRuntime.agentSessionCounts;
-  const pendingPermissionsByWorkspace = workspaceRuntime.pendingPermissionsByWorkspace;
   const allWorkspaceEntries = workspaceRuntime.workspaces;
   const workspaceStatusById = workspaceRuntime.stripStatusById;
 
-  // ─── Agent session actions ─────────────────────────────────────────────────
-  const persistAgentSessionSelection = useCallback((workspaceId: string, sessionId: string) => {
-    void multi.setAgentSessionPreference(getWorkspaceRef(workspaceId), sessionId);
-  }, [multi, getWorkspaceRef]);
-
-
-
-  const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await openAgentSession({
-      workspaceId,
-      agentSessionId,
-      persistAgentSessionSelection,
-      clearViewOnly: () => setIsViewOnlySession(false),
-      attachAgentSession: (wid, aId) =>
-        multi.attachAgentSession(getAgentRef(wid, aId)),
-    });
-  }, [multi, getAgentRef, persistAgentSessionSelection]);
-
-  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await multi.abortAgentSession(getAgentRef(workspaceId, agentSessionId));
-  }, [multi, getAgentRef]);
-
-  const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await multi.closeAgentSession(getAgentRef(workspaceId, agentSessionId));
-  }, [multi, getAgentRef]);
-
-  const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await multi.archiveAgentSession(getAgentRef(workspaceId, agentSessionId));
-  }, [multi, getAgentRef]);
-
-  const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await multi.restoreAgentSession(getAgentRef(workspaceId, agentSessionId));
-  }, [multi, getAgentRef]);
 
   // ─── Notifications & preferences ──────────────────────────────────────────
 
-  const activeNotificationConfig =
-    notificationConfig ?? localNotificationConfig ?? DEFAULT_NOTIFICATION_CONFIG;
-
-  const keyboardVisible = useVisualViewport();
-
-  useEffect(() => {
-    applyDeviceClasses();
-    setShowMobileControls(isTouchDevice() || isMobileLayout());
-    const mediaQuery = window.matchMedia('(max-width: 767px)');
-    const handleChange = (e: MediaQueryListEvent) => {
-      setShowMobileControls(e.matches || isTouchDevice());
-    };
-    mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    void browserPreferencesService.getNotificationConfig().then((config) => {
-      if (mounted) setLocalNotificationConfig(config);
-    });
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    if (!notificationConfig) return;
-    void browserPreferencesService.updateNotificationConfig(notificationConfig);
-    setLocalNotificationConfig(notificationConfig);
-  }, [notificationConfig]);
-
-  // ─── Flow / Modal system ───────────────────────────────────────────────────
-
-  const flow = useFlow({
-    onError: (error) => console.error('Flow error:', error),
+  const { activeNotificationConfig } = usePreferencesAdapter({
+    service: browserPreferencesService,
+    backendNotificationConfig: notificationConfig,
+    defaultConfig: DEFAULT_NOTIFICATION_CONFIG,
   });
 
+
   // ─── Agent session actions that need flow ─────────────────────────────────
+  const agentSessionClientContext = useMemo(() => ({
+    multi,
+    workspaceRefs: allWorkspaceEntries.map((workspace) => ({
+      backendKey: workspace.backendKey as BackendKey,
+      workspaceId: workspace.id,
+    })),
+    agentSessionsByWorkspaceKey: agentSessionsByWorkspace,
+    selectedWorkspaceRef: selectedRef
+      ? { backendKey: selectedRef.backendKey, workspaceId: selectedRef.workspaceId }
+      : null,
+    detailWorkspaceRef: selectedWorkspaceForDetail
+      ? { backendKey: selectedWorkspaceForDetail.backendKey as BackendKey, workspaceId: selectedWorkspaceForDetail.id }
+      : null,
+    preferredBackendKey: selectedBackendKey ?? activeBackendKey ?? null,
+  }), [activeBackendKey, agentSessionsByWorkspace, allWorkspaceEntries, multi, selectedBackendKey, selectedRef, selectedWorkspaceForDetail]);
+  const {
+    open: openAgentSessionAction,
+    createAndOpen: createAgentSessionAction,
+    abort: abortAgentSessionAction,
+    close: closeAgentSessionAction,
+    archive: archiveAgentSessionAction,
+    restore: restoreAgentSessionAction,
+  } = useAgentSessionActions({
+    client: agentSessionClientContext,
+    flow,
+    beforeOpen: () => setIsViewOnlySession(false),
+    onError: (message) => {
+      toast.error(message);
+    },
+  });
+  const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await openAgentSessionAction(workspaceId, agentSessionId);
+  }, [openAgentSessionAction]);
+
+  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await abortAgentSessionAction(workspaceId, agentSessionId);
+  }, [abortAgentSessionAction]);
+
+  const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await closeAgentSessionAction(workspaceId, agentSessionId);
+  }, [closeAgentSessionAction]);
+
+  const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await archiveAgentSessionAction(workspaceId, agentSessionId);
+  }, [archiveAgentSessionAction]);
+
+  const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await restoreAgentSessionAction(workspaceId, agentSessionId);
+  }, [restoreAgentSessionAction]);
 
   const handleCreateAgentSession = useCallback((workspaceId: string) => {
-    promptCreateAgentSession({
-      flow,
-      workspaceId,
-      getCurrentSessions: (id) => agentSessionsByWorkspace[id] ?? [],
-      createAgentSession: async (wid, title) => {
-        const sessions = await multi.createAgentSession(getWorkspaceRef(wid), title);
-        return (sessions ?? []).map((s) => ({ ...s, workspaceId: wid }));
-      },
-      attachOptions: {
-        workspaceId,
-        persistAgentSessionSelection,
-        clearViewOnly: () => setIsViewOnlySession(false),
-        attachAgentSession: (wid, aId) =>
-          multi.attachAgentSession(getAgentRef(wid, aId)),
-      },
-    });
-  }, [flow, multi, agentSessionsByWorkspace, getWorkspaceRef, getAgentRef, persistAgentSessionSelection]);
+    createAgentSessionAction(workspaceId);
+  }, [createAgentSessionAction]);
+
 
 
 
@@ -557,20 +495,34 @@ export default function App() {
   }, []);
 
   // ─── Bundle flows ──────────────────────────────────────────────────────────
+  const sessionClient = useMemo(() => ({
+    multi,
+    workspaceRefs: [],
+  }), [multi]);
+  const { attachSession: attachSessionAction, cancelPendingScripts } = useSessionActions({
+    client: sessionClient,
+    onError: (message) => {
+      flow.showMessage({ title: 'Session Failed', message, variant: 'error' });
+    },
+  });
 
   const bundleRefreshAttach = useBundleRefreshAttachFlow({
+    client: workspaceLifecycleClient,
     flow,
     commandError,
-    // useBundleRefreshAttachFlow expects (params) => ... (no ref); we look up the ref from the workspaceId
-    attachSession: (params) => multi.attachSession(getWorkspaceRef(params.workspaceId ?? ''), params),
-    getBundleRefreshPlan: (ref) => multi.getBundleRefreshPlan(ref),
-    applyBundleRefresh: (ref, submission) => multi.applyBundleRefresh(ref, submission),
+    attachSession: (params) => {
+      const backendKey = (params as { backendKey?: BackendKey }).backendKey;
+      const workspaceId = params.workspaceId ?? '';
+      return attachSessionAction(
+        backendKey ? { backendKey, workspaceId } : getWorkspaceRef(workspaceId),
+        params,
+      );
+    },
   });
 
   const bundleConfigFlow = useBundleConfigFlow({
+    client: workspaceLifecycleClient,
     flow,
-    getBundleConfigState: (ref) => multi.getBundleConfigState(ref),
-    applyBundleConfigUpdate: (ref, submission) => multi.applyBundleConfigUpdate(ref, submission),
     onApplied: async () => {
       multi.listWorkspaces();
       multi.listSessions();
@@ -586,7 +538,7 @@ export default function App() {
 
   // ─── Attach controller ─────────────────────────────────────────────────────
 
-  const attachController = useAttachController({
+  const attachController = useAttachActions({
     flow,
     attachSessionWithBundleRefresh: bundleRefreshAttach.attachSessionWithBundleRefresh,
     recoverableAttachParams: bundleRefreshAttach.recoverableParams,
@@ -595,27 +547,39 @@ export default function App() {
     resolveWorkspaceRef: (workspaceId) => getWorkspaceRef(workspaceId),
     getAttachSize: getWebAttachSize,
     resolveProjectName: resolveWorkspaceProjectName,
-    onBeforeAttach: ({ target, params }) => {
+    onBeforeAttach: ({ target, params, workspaceRef }) => {
       if (target === 'session') {
+        lastScriptWorkspaceIdRef.current = null;
+        lastScriptWorkspaceRef.current = null;
         setShowScriptTerminal(false);
         return;
       }
       if (params.workspaceId && !params.command) {
         lastScriptWorkspaceIdRef.current = params.workspaceId;
+        lastScriptWorkspaceRef.current = workspaceRef ?? null;
         setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
         setShowScriptTerminal(true);
+      } else {
+        lastScriptWorkspaceIdRef.current = null;
+        lastScriptWorkspaceRef.current = null;
       }
     },
     onAttachCancelled: ({ target }) => {
       if (target === 'workspace' && showScriptTerminal) return;
-      if (target === 'workspace') setShowScriptTerminal(false);
+      if (target === 'workspace') {
+        setShowScriptTerminal(false);
+        lastScriptWorkspaceIdRef.current = null;
+        lastScriptWorkspaceRef.current = null;
+      }
     },
     onAttachError: ({ target, message }) => {
       const isWorkspaceScriptFailure = message.startsWith('Workspace scripts failed during');
       const hasScriptRuntimeState = Boolean(scriptState);
       if (target === 'workspace' && (!isWorkspaceScriptFailure || !hasScriptRuntimeState)) {
         setShowScriptTerminal(false);
+        lastScriptWorkspaceIdRef.current = null;
+        lastScriptWorkspaceRef.current = null;
       }
       flow.showMessage({
         title: isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
@@ -625,9 +589,9 @@ export default function App() {
     },
   });
 
-  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+  const { deleteWorkspaceWithPrompt } = useWorkspaceLifecycleActions({
+    client: workspaceLifecycleClient,
     flow,
-    deleteWorkspace: (ref, params) => multi.deleteWorkspace(ref, params),
     onBeforeDelete: ({ target }) => {
       suppressDeleteScriptFailureModalRef.current = true;
       setShowInbox(false);
@@ -641,9 +605,6 @@ export default function App() {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
       workspaceController.clearSelectedRef();
-      multi.listWorkspaces();
-      multi.listSessions();
-      multi.listReplays(undefined, showDismissedReplays);
     },
     onDeleteCancelled: async () => {
       suppressDeleteScriptFailureModalRef.current = false;
@@ -656,30 +617,14 @@ export default function App() {
     },
   });
 
-  const lifecycleController = useLifecycleController({
+  const lifecycleController = useLifecycleActions({
+    client: sessionClient,
+    backendKey: getTargetBackendKey(),
     flow,
-    // All operations target the active backend (the machine serving this web app)
-    listGithubRepos: (org?: string) => multi.listGithubRepos(getTargetBackendKey(), org),
-    listRemoteBranches: (projectName: string) =>
-      multi.listRemoteBranches(getTargetBackendKey(), projectName),
-    listLinearIssues: (projectName: string) =>
-      multi.listLinearIssues(getTargetBackendKey(), projectName),
-    createProject: (params) =>
-      multi.createProject(getTargetBackendKey(), params),
-    prepareProjectCreation: (params) =>
-      multi.prepareProjectCreation(getTargetBackendKey(), params),
-    finalizeProjectCreation: (params) =>
-      multi.finalizeProjectCreation(getTargetBackendKey(), params),
-    cancelProjectCreation: (projectName: string) =>
-      multi.cancelProjectCreation(getTargetBackendKey(), projectName),
-    createWorkspace: (params) =>
-      multi.createWorkspace(getTargetBackendKey(), params),
-    deleteProject: (projectName: string, params) =>
-      multi.deleteProject(getTargetBackendKey(), projectName, params),
     getProjectNames: () => allProjects.map((p) => p.name),
-    refreshProjects: () => multi.listProjects(),
-    refreshWorkspaces: () => multi.listWorkspaces(),
-    refreshSessions: () => multi.listSessions(),
+    refreshProjects: () => undefined,
+    refreshWorkspaces: () => undefined,
+    refreshSessions: () => undefined,
     onProjectCreated: () => undefined,
     onWorkspaceCreated: () => undefined,
   });
@@ -830,28 +775,25 @@ export default function App() {
 
   // ─── Process actions ───────────────────────────────────────────────────────
 
+  const processClientContext = useMemo(() => ({
+    multi,
+    workspaceRefs: allWorkspaceEntries.map((workspace) => ({
+      backendKey: workspace.backendKey as BackendKey,
+      workspaceId: workspace.id,
+    })),
+    selectedWorkspaceRef: selectedRef
+      ? { backendKey: selectedRef.backendKey, workspaceId: selectedRef.workspaceId }
+      : null,
+    detailWorkspaceRef: selectedWorkspaceForDetail
+      ? { backendKey: selectedWorkspaceForDetail.backendKey as BackendKey, workspaceId: selectedWorkspaceForDetail.id }
+      : null,
+    preferredBackendKey: selectedBackendKey ?? activeBackendKey ?? null,
+  }), [activeBackendKey, allWorkspaceEntries, multi, selectedBackendKey, selectedRef, selectedWorkspaceForDetail]);
+
   const processActions = useProcessActions({
+    client: processClientContext,
+    flow,
     sessions: backendSessions,
-    startProcess: async (workspaceId, processName, instance) => {
-      const ref = getWorkspaceRef(workspaceId);
-      try {
-        await multi.startProcess(ref, processName, instance);
-      } catch (error) {
-        if (isPortConflictError(error)) {
-          const resolved = await promptToResolveProcessStartConflict({ error, showConfirm: flow.showConfirm });
-          if (resolved) {
-            await multi.startProcess(ref, processName, instance);
-            return;
-          }
-          throw new ProcessStartCancelledError();
-        }
-        throw error;
-      }
-    },
-    stopProcess: (workspaceId, processName) => {
-      const ref = getWorkspaceRef(workspaceId);
-      return multi.stopProcess(ref, processName);
-    },
     attachSession: handleAttachSession,
     onStartProcessError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
     onStopProcessError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
@@ -909,6 +851,23 @@ export default function App() {
     setView('replay');
   }, [flow, backendReplays]);
 
+  const replayReviewClient = useMemo(() => ({
+    multi,
+    workspaceRefs: [],
+  }), [multi]);
+  const {
+    sendReviewRequest: sendReviewRequestAction,
+    toggleReplayDismissed: toggleReplayDismissedAction,
+    cancelReplayRequests,
+    loadReplayFrame: loadReplayFrameAction,
+    loadReplayTimeline: loadReplayTimelineAction,
+  } = useReplayReviewActions({
+    client: replayReviewClient,
+    onError: (message) => {
+      flow.showMessage({ title: 'Replay/Review Failed', message, variant: 'error' });
+    },
+  });
+
   const replayBackendKey = selectedBackendKey ?? getTargetBackendKey();
 
   const toggleReplayDismissed = useCallback(async (replay: ReplayInfo): Promise<boolean> => {
@@ -921,41 +880,28 @@ export default function App() {
         });
         return false;
       }
-      if (replay.dismissedAt) {
-        await multi.undismissReplay(replayBackendKey, replay.replayId);
-        setActiveReplay((current) =>
-          current && current.replayId === replay.replayId
-            ? { ...current, dismissedAt: undefined, dismissedBy: undefined }
-            : current,
-        );
-        return false;
-      }
-      await multi.dismissReplay(replayBackendKey, replay.replayId);
-      setActiveReplay((current) =>
-        current && current.replayId === replay.replayId
+      const dismissed = await toggleReplayDismissedAction(replayBackendKey, replay.replayId, Boolean(replay.dismissedAt));
+      setActiveReplay((current) => {
+        if (!current || current.replayId !== replay.replayId) return current;
+        return dismissed
           ? { ...current, dismissedAt: Date.now() }
-          : current,
-      );
-      return true;
-    } catch (error) {
-      flow.showMessage({
-        title: replay.dismissedAt ? 'Restore Failed' : 'Dismiss Failed',
-        message: error instanceof Error ? error.message : String(error),
-        variant: 'error',
+          : { ...current, dismissedAt: undefined, dismissedBy: undefined };
       });
+      return dismissed;
+    } catch {
       return false;
     } finally {
       refreshReplayList();
     }
-  }, [flow, multi, refreshReplayList, replayBackendKey]);
+  }, [flow, refreshReplayList, replayBackendKey, toggleReplayDismissedAction]);
 
   const loadReplayFrame = useCallback((replayId: string, target?: ReplayFrameTarget): Promise<ReplayFrame> => {
-    return multi.getReplayFrame(replayBackendKey, replayId, target);
-  }, [multi, replayBackendKey]);
+    return loadReplayFrameAction(replayBackendKey, replayId, target);
+  }, [loadReplayFrameAction, replayBackendKey]);
 
   const loadReplayTimeline = useCallback((replayId: string): Promise<ReplayTimeline> => {
-    return multi.getReplayTimeline(replayBackendKey, replayId);
-  }, [multi, replayBackendKey]);
+    return loadReplayTimelineAction(replayBackendKey, replayId);
+  }, [loadReplayTimelineAction, replayBackendKey]);
 
   const handleOpenReplayHistory = useCallback((args: {
     workspaceId: string;
@@ -1035,95 +981,64 @@ export default function App() {
   }, [filteredWorkspaces]);
 
   // ─── Command palette ───────────────────────────────────────────────────────
-
-  const commandPaletteCommands = useMemo(
-    () => COMMAND_PALETTE_COMMAND_DEFS.map((d) => ({ id: d.id, label: d.label, shortcut: d.shortcut })),
-    [],
-  );
-
-  const selectedWorkspaceForCommands = resolveSelectedWorkspace({
+  const { commandPalette } = useCommandPaletteOrchestration({
     selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
     selectedDetailWorkspaceId: selectedRef?.workspaceId ?? selectedWorkspaceForDetail?.id ?? null,
-    workspaces: filteredWorkspaces,
-  });
-  const selectedProjectForCommands = resolveSelectedProjectName({ selectedProjectName: selectedWorkspaceProjectName });
-
-  const handleCommandPaletteSelect = useCallback(
-    (id: string) => {
-      executeCommandPaletteAction({
-        commandId: id as (typeof COMMAND_PALETTE_COMMAND_DEFS)[number]['id'],
-        workspace: selectedWorkspaceForCommands,
-        projectName: selectedProjectForCommands,
-        showSelect: (config) => flow.showSelect<string>(config),
-        showMessage: ({ message, variant }) => {
-          if (variant === 'error') {
-            toast.error(message);
-          } else if (variant === 'warning') {
-            toast.warning(message);
-          } else if (variant === 'success') {
-            toast.success(message);
-          } else {
-            toast.info(message);
-          }
-        },
-        onOpenUrl: async (url) => {
-          window.open(url, '_blank', 'noopener,noreferrer');
-        },
-        onAddRepo: () => lifecycleController.openCreateProjectFlow(),
-        onAddWorkspace: () => lifecycleController.openCreateMenu(null),
-        onSetStatus: (workspace) => {
-          showWorkspaceStatusSelect({
-            showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
-            onSelectPhase: (phase) => {
-              workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
-              flow.close();
-            },
-          });
-        },
-        onDeleteWorkspace: handleDeleteWorkspace,
-        onEditBundleConfig: async (workspace) => {
-          await handleManageBundleConfig({ workspaceId: workspace.id });
-        },
-        onEditProcessConfig: async (workspace) => {
-          await handleEditProcesses({ workspaceId: workspace.id });
-        },
-        onDeleteRepo: handleDeleteProject,
-        onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
-        onOpenReview: (workspace) => handleOpenReview(workspace.id),
-      });
+    workspaces: filteredWorkspaces as any,
+    selectedProjectName: selectedWorkspaceProjectName,
+    showSelect: (config) => flow.showSelect<string>(config),
+    showMessage: ({ message, variant }) => {
+      if (variant === 'error') toast.error(message);
+      else if (variant === 'warning') toast.warning(message);
+      else if (variant === 'success') toast.success(message);
+      else toast.info(message);
     },
-    [
-      lifecycleController,
-      handleDeleteProject,
-      handleDeleteWorkspace,
-      handleManageBundleConfig,
-      handleEditProcesses,
-      handleOpenGitHubPullRequest,
-      handleOpenReview,
-      workspaceBoardState,
-      flow,
-      selectedProjectForCommands,
-      selectedWorkspaceForCommands,
-    ],
-  );
-
-  const commandPalette = useCommandPaletteState({
-    commands: commandPaletteCommands,
-    onSelect: handleCommandPaletteSelect,
+    onOpenUrl: async (url) => {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    },
+    onAddRepo: () => lifecycleController.openCreateProjectFlow(),
+    onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+    onSetWorkspacePhase: (workspace, phase) => {
+      workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
+      flow.close();
+    },
+    onDeleteWorkspace: handleDeleteWorkspace,
+    onEditBundleConfig: async (workspace) => {
+      await handleManageBundleConfig({ workspaceId: workspace.id });
+    },
+    onEditProcessConfig: async (workspace) => {
+      await handleEditProcesses({ workspaceId: workspace.id });
+    },
+    onDeleteRepo: handleDeleteProject,
+    onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
+    onOpenReview: (workspace) => handleOpenReview(workspace.id),
   });
+
+  const inboxActions = useInboxActions({
+    client: agentSessionClientContext,
+    flow,
+    onError: (message) => {
+      toast.error(message);
+    },
+  });
+
 
   // ─── Inbox ─────────────────────────────────────────────────────────────────
 
-  const inboxProps = useInboxPageModel({
+  const { inboxProps, handleInboxCommand } = useInboxPage({
     items: backendInbox,
     unreadCount: backendInboxUnreadCount,
-    onClearItem: async (id) => { await multi.clearInbox(id); },
-    onClearAll: async () => { await multi.clearInbox(); },
-    onMarkRead: async (id) => { await multi.markInboxRead(id); },
+    onClearItem: async (id) => { await inboxActions.clearInbox(id); },
+    onClearAll: async () => { await inboxActions.clearInbox(); },
+    onMarkRead: async (id) => { await inboxActions.markInboxRead(id); },
     onAttachSession: async (sessionId) => {
       setShowInbox(false);
       const sessionRef = getSessionRef(sessionId);
-      await attachController.attachFromSelection({ sessionId, backendKey: sessionRef?.backendKey });
+      if (!sessionRef) {
+        toast.error(`Could not resolve session backend for ${sessionId}.`);
+        return;
+      }
+      await attachController.attachFromSelection({ sessionId, backendKey: sessionRef.backendKey });
     },
     onClose: () => setShowInbox(false),
   });
@@ -1207,7 +1122,11 @@ export default function App() {
         label: "Attach",
         onClick: () => {
           const sessionRef = getSessionRef(notification.sessionId);
-          void attachController.attachFromSelection({ sessionId: notification.sessionId, backendKey: sessionRef?.backendKey });
+          if (!sessionRef) {
+            toast.error(`Could not resolve session backend for ${notification.title ?? notification.sessionId}.`);
+            return;
+          }
+          void attachController.attachFromSelection({ sessionId: notification.sessionId, backendKey: sessionRef.backendKey });
         },
       },
     });
@@ -1219,15 +1138,19 @@ export default function App() {
     onShowToast: handleShowToast,
     onAttachSession: (sessionId) => {
       const sessionRef = getSessionRef(sessionId);
-      void attachController.attachFromSelection({ sessionId, backendKey: sessionRef?.backendKey });
+      if (!sessionRef) {
+        toast.error(`Could not resolve session backend for ${sessionId}.`);
+        return;
+      }
+      void attachController.attachFromSelection({ sessionId, backendKey: sessionRef.backendKey });
     },
     onMarkRead: async (itemId) => {
-      await multi.markInboxRead(itemId);
+      await inboxActions.markInboxRead(itemId);
     },
     pollIntervalMs: 5000,
     onRefreshInbox: async () => {
       if (terminalStatus === "connected") {
-        multi.requestInbox();
+        await inboxActions.requestInbox();
       }
     },
     isUserActive,
@@ -1269,31 +1192,15 @@ export default function App() {
   // Inbox keyboard
   useEffect(() => {
     if (!showInbox) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const command = resolveInboxCommand({ key: e.key, shift: e.shiftKey });
-      if (!command) return;
+      const handled = await handleInboxCommand({ key: e.key, shift: e.shiftKey });
+      if (!handled) return;
       e.preventDefault();
-      if (command === 'move-up') inboxProps.moveUp();
-      else if (command === 'move-down') inboxProps.moveDown();
-      else if (command === 'activate') {
-        if (inboxProps.isViewingThread) inboxProps.attachToSession();
-        else inboxProps.openThread();
-      } else if (command === 'back') {
-        if (inboxProps.isViewingThread) inboxProps.closeThread();
-        else setShowInbox(false);
-      } else if (command === 'delete') {
-        if (inboxProps.isViewingThread) inboxProps.deleteThread();
-        else inboxProps.deleteSelected();
-      } else if (command === 'clear') {
-        inboxProps.clearAll();
-      } else if (command === 'attach') {
-        inboxProps.attachToSession();
-      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showInbox, inboxProps.moveUp, inboxProps.moveDown, inboxProps.openThread, inboxProps.closeThread, inboxProps.deleteSelected, inboxProps.deleteThread, inboxProps.clearAll, inboxProps.attachToSession, inboxProps.isViewingThread]);
+  }, [showInbox, handleInboxCommand]);
 
   // Events keyboard
   useEffect(() => {
@@ -1339,16 +1246,18 @@ export default function App() {
       if ((e.key === 'Escape' || e.key === 'q') && !scriptState?.isRunning) {
         e.preventDefault();
         setShowScriptTerminal(false);
+        lastScriptWorkspaceIdRef.current = null;
+        lastScriptWorkspaceRef.current = null;
       } else if ((e.key === 'c' || e.key === 'C') && scriptState?.isRunning) {
         e.preventDefault();
-        const workspaceId = lastScriptWorkspaceIdRef.current;
-        if (!workspaceId) return;
-        void multi.cancelPendingScripts(getWorkspaceRef(workspaceId));
+        const workspaceRef = lastScriptWorkspaceRef.current;
+        if (!workspaceRef) return;
+        void multi.cancelPendingScripts(workspaceRef);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [getWorkspaceRef, scriptState?.isRunning, showScriptTerminal, terminalMode, terminalStatus, view, multi]);
+  }, [scriptState?.isRunning, showScriptTerminal, terminalMode, terminalStatus, view, multi]);
 
   // Global Shift+Tab for toast attach
   useEffect(() => {
@@ -1401,7 +1310,7 @@ export default function App() {
             projectName={reviewWorkspace.projectName}
             workspaceName={reviewWorkspace.workspaceId}
             workspaceLabel={reviewWorkspace.workspaceLabel}
-            sendReviewRequest={(operation) => multi.sendReviewRequest(reviewRef, operation)}
+            sendReviewRequest={(operation) => sendReviewRequestAction(reviewRef.backendKey, reviewRef.workspaceId, operation)}
             onBack={() => { setView('terminal'); setReviewWorkspace(null); }}
           />
           <Toaster theme="dark" position="top-right" richColors />
@@ -1471,7 +1380,7 @@ export default function App() {
               const replay = backendReplays.find((item) => item.replayId === replayId) ?? activeReplay;
               return toggleReplayDismissed(replay);
             }}
-          onCleanup={() => multi.cancelPendingReplayRequests(replayBackendKey)}
+          onCleanup={() => cancelReplayRequests(replayBackendKey)}
         />
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
@@ -1497,17 +1406,27 @@ export default function App() {
           error={scriptState?.error}
           exitCode={scriptState?.exitCode}
           setWriteCallback={setWriteCallback}
-          canAttachAnyway={Boolean(!isRunning && scriptState?.error && lastScriptWorkspaceIdRef.current)}
+          canAttachAnyway={Boolean(!isRunning && scriptState?.error && lastScriptWorkspaceRef.current)}
           onAttachAnyway={async () => {
-            const workspaceId = lastScriptWorkspaceIdRef.current;
-            if (!workspaceId) return;
-            await attachController.attach({ workspaceId, scriptPolicy: 'skip' });
+            const workspaceRef = lastScriptWorkspaceRef.current;
+            if (!workspaceRef) return;
+            await attachController.attach(
+              {
+                workspaceId: workspaceRef.workspaceId,
+                scriptPolicy: 'skip',
+              },
+              workspaceRef.backendKey,
+            );
           }}
-          onBack={() => { lastScriptWorkspaceIdRef.current = null; setShowScriptTerminal(false); }}
+          onBack={() => {
+            lastScriptWorkspaceIdRef.current = null;
+            lastScriptWorkspaceRef.current = null;
+            setShowScriptTerminal(false);
+          }}
           onCancel={() => {
-            const workspaceId = lastScriptWorkspaceIdRef.current;
-            if (!workspaceId) return;
-            void multi.cancelPendingScripts(getWorkspaceRef(workspaceId));
+            const workspaceRef = lastScriptWorkspaceRef.current;
+            if (!workspaceRef) return;
+            void cancelPendingScripts(workspaceRef);
           }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
@@ -1750,7 +1669,7 @@ export default function App() {
           workspaceStatusById={workspaceRuntime.workspaceStatusById}
           worktreeCount={worktreeCount}
           inboxUnreadCount={backendInboxUnreadCount}
-          onOpenInbox={() => { multi.requestInbox(); setShowInbox(true); }}
+          onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
           onOpenHelp={handleOpenHelp}
           onOpenCreateMenu={handleOpenCreateMenu}
           onOpenCommandPalette={() => commandPalette.toggle()}
@@ -1894,5 +1813,22 @@ export default function App() {
       </div>
       <Toaster theme="dark" position="top-right" richColors />
     </>
+  );
+}
+
+// ─── Outer shell ────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
+  const relayDescriptor = useMemo<RelayDescriptor | null>(() => {
+    if (!resolvedIdentity) return null;
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return { url: `${wsProtocol}//${location.host}/ws`, source: 'local' };
+  }, [resolvedIdentity]);
+
+  return (
+    <GitSpaceProvider platform={browserPlatform()} relay={relayDescriptor} identity={resolvedIdentity}>
+      <AppInner resolvedIdentity={resolvedIdentity} setResolvedIdentity={setResolvedIdentity} />
+    </GitSpaceProvider>
   );
 }

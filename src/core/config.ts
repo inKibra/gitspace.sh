@@ -12,8 +12,8 @@ import {
 	chmodSync,
 } from 'fs'
 import { join, dirname } from 'path'
-import { homedir } from 'os'
 import type { GlobalConfig, ProjectConfig, NotificationConfig, EventsConfig } from '../types/config.js'
+import { getWorkspaceRoot, getConfigRoot, getWorkspaceProjectDir } from './paths.js'
 import {
 	DEFAULT_GLOBAL_CONFIG,
 	DEFAULT_NOTIFICATION_CONFIG,
@@ -24,32 +24,33 @@ import { SpacesError } from '../types/errors.js'
 import { notifyOwnerSyncCategoryDirty } from './owner-sync-events.js'
 
 /**
- * Get the global gitspace directory path
+ * Get the global GitSpace workspace root.
+ *
+ * @deprecated Callers should prefer getWorkspaceRoot() from core/paths.
  */
 export function getGitspaceDir(): string {
-	const home = process.env.HOME?.trim() || homedir()
-	return join(home, 'gitspace')
+	return getWorkspaceRoot()
 }
 
 /**
- * @deprecated Use getGitspaceDir() instead
+ * @deprecated Use getWorkspaceRoot() instead.
  */
 export function getSpacesDir(): string {
-	return getGitspaceDir()
+	return getWorkspaceRoot()
 }
 
 /**
  * Get the global config file path
  */
 export function getGlobalConfigPath(): string {
-	return join(getSpacesDir(), '.config.json')
+	return join(getConfigRoot(), '.config.json')
 }
 
 /**
  * Get a project directory path
  */
 export function getProjectDir(projectName: string): string {
-	return join(getSpacesDir(), projectName)
+	return getWorkspaceProjectDir(projectName)
 }
 
 /**

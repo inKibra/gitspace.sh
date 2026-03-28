@@ -53,13 +53,7 @@ export function getPiRuntimeSecret(): string {
 }
 
 export function configurePiRuntimeEnvironment(socketPath: string): Record<string, string> {
-  const secret = getPiRuntimeSecret();
-  process.env[PI_RUNTIME_SOCKET_ENV] = socketPath;
-  process.env[PI_RUNTIME_SECRET_ENV] = secret;
-  return {
-    [PI_RUNTIME_SOCKET_ENV]: socketPath,
-    [PI_RUNTIME_SECRET_ENV]: secret,
-  };
+  return buildPiRuntimeChildEnvironment(socketPath);
 }
 
 export function buildPiRuntimeChildEnvironment(socketPath: string): Record<string, string> {

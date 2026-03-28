@@ -21,265 +21,45 @@
  * Legacy migration:
  *   If old-format mnemonic storage is detected, the user is prompted to
  *   re-enter their PIN to migrate to the new device keypair format.
+ *
+ * All state machine logic lives in useIdentityGate (src/app/react).
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useAuth } from '../hooks/useAuth.web';
-import {
-  fetchCloudBackup,
-  decryptBackupEnvelope,
-  type CloudBackup,
-} from '../lib/identity-backup.web';
-import {
-  hasStoredDeviceIdentity,
-  unlockDeviceIdentity,
-  generateAndStoreDeviceIdentity,
-  clearStoredDeviceIdentity,
-  hasLegacyMnemonicStorage,
-  decryptLegacyMnemonic,
-  clearLegacyMnemonicStorage,
-  deriveRootIdentityFromMnemonic,
-} from '../lib/storage/identity-store.web';
-import {
-  isValidMnemonic,
-  normalizeMnemonic,
-} from '../session/crypto/identity.web';
 import type { Identity } from '../types/identity';
-
-type GateStep =
-  | 'checking'
-  | 'unlock-pin'
-  | 'legacy-migrate-pin'
-  | 'login'
-  | 'fetching-backup'
-  | 'backup-password'
-  | 'no-backup'
-  | 'mnemonic-entry'
-  | 'create-pin'
-  | 'error';
+import { useIdentityGate } from '../app/react';
 
 interface IdentityGateProps {
   onIdentityReady: (identity: Identity) => void;
 }
 
 export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
-  const auth = useAuth();
-  const [step, setStep] = useState<GateStep>('checking');
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  // Form values
-  const [pinValue, setPinValue] = useState('');
-  const [passwordValue, setPasswordValue] = useState('');
-  const [mnemonicValue, setMnemonicValue] = useState('');
-  const [newPinValue, setNewPinValue] = useState('');
-  const [confirmPinValue, setConfirmPinValue] = useState('');
-
-  // Backup data from cloud
-  const backupRef = useRef<CloudBackup | null>(null);
-  // Mnemonic ready to be used for device identity creation
-  const pendingMnemonicRef = useRef<string | null>(null);
-
-  // ================================================================
-  // Initial check
-  // ================================================================
-  useEffect(() => {
-    if (step !== 'checking') return;
-
-    if (hasStoredDeviceIdentity()) {
-      setStep('unlock-pin');
-      return;
-    }
-
-    // Legacy: old-format mnemonic storage needs migration
-    if (hasLegacyMnemonicStorage()) {
-      setStep('legacy-migrate-pin');
-      return;
-    }
-
-    if (auth.isLoggedIn) {
-      setStep('fetching-backup');
-      return;
-    }
-
-    setStep('login');
-  }, [auth.isLoggedIn, step]);
-
-  // ================================================================
-  // Auto-fetch cloud backup
-  // ================================================================
-  useEffect(() => {
-    if (step !== 'fetching-backup' || !auth.token) return;
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const backup = await fetchCloudBackup(auth.token!);
-        if (cancelled) return;
-
-        if (backup) {
-          backupRef.current = backup;
-          setStep('backup-password');
-        } else {
-          setStep('no-backup');
-        }
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to fetch backup');
-        setStep('error');
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [step, auth.token]);
-
-  // ================================================================
-  // Handlers
-  // ================================================================
-
-  /**
-   * Given a confirmed mnemonic, generate a device identity and call
-   * onIdentityReady. Must be called after the PIN has been confirmed.
-   */
-  const createDeviceIdentityFromMnemonic = useCallback(async (mnemonic: string, pin: string) => {
-    const rootIdentity = deriveRootIdentityFromMnemonic(mnemonic);
-    const deviceIdentity = await generateAndStoreDeviceIdentity(rootIdentity, pin);
-    onIdentityReady(deviceIdentity);
-  }, [onIdentityReady]);
-
-  /** Unlock with PIN (new device format). */
-  const handleUnlockPin = useCallback(async () => {
-    if (!pinValue.trim()) return;
-    setLoading(true);
-    setError(null);
-
-    try {
-      const identity = await unlockDeviceIdentity(pinValue);
-      onIdentityReady(identity);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unlock failed');
-      setPinValue('');
-    } finally {
-      setLoading(false);
-    }
-  }, [pinValue, onIdentityReady]);
-
-  /**
-   * Legacy migration: user has old mnemonic storage.
-   * Decrypt with their PIN, re-derive root identity, create new device identity.
-   */
-  const handleLegacyMigratePin = useCallback(async () => {
-    if (!pinValue.trim()) return;
-    setLoading(true);
-    setError(null);
-
-    try {
-      const mnemonic = await decryptLegacyMnemonic(pinValue);
-      // Migrate only after the new device identity is durably stored.
-      await createDeviceIdentityFromMnemonic(mnemonic, pinValue);
-      clearLegacyMnemonicStorage();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Migration failed');
-      setPinValue('');
-    } finally {
-      setLoading(false);
-    }
-  }, [pinValue, createDeviceIdentityFromMnemonic]);
-
-  const handleBackupPassword = useCallback(async () => {
-    if (!passwordValue.trim() || !backupRef.current) return;
-    setLoading(true);
-    setError(null);
-
-    try {
-      const mnemonic = await decryptBackupEnvelope(backupRef.current.envelope, passwordValue);
-      const normalized = normalizeMnemonic(mnemonic);
-      if (!isValidMnemonic(normalized)) {
-        throw new Error('Decrypted data is not a valid mnemonic.');
-      }
-      pendingMnemonicRef.current = normalized;
-      setPasswordValue('');
-      setMnemonicValue('');
-      setStep('create-pin');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Decryption failed');
-      setPasswordValue('');
-    } finally {
-      setLoading(false);
-    }
-  }, [passwordValue]);
-
-  const handleMnemonicEntry = useCallback(() => {
-    if (!mnemonicValue.trim()) return;
-    setError(null);
-
-    const normalized = normalizeMnemonic(mnemonicValue);
-    if (!isValidMnemonic(normalized)) {
-      setError('Invalid 24-word recovery phrase.');
-      return;
-    }
-
-    pendingMnemonicRef.current = normalized;
-    setMnemonicValue('');
-    setPasswordValue('');
-    setStep('create-pin');
-  }, [mnemonicValue]);
-
-  const handleMnemonicBack = useCallback(() => {
-    setError(null);
-    setMnemonicValue('');
-
-    if (!auth.isLoggedIn) {
-      setStep('login');
-      return;
-    }
-
-    setStep(backupRef.current ? 'backup-password' : 'no-backup');
-  }, [auth.isLoggedIn]);
-
-  const handleCreatePin = useCallback(async () => {
-    if (!newPinValue.trim()) {
-      setError('PIN is required.');
-      return;
-    }
-    if (newPinValue.length < 4) {
-      setError('PIN must be at least 4 characters.');
-      return;
-    }
-    if (newPinValue !== confirmPinValue) {
-      setError('PINs do not match.');
-      return;
-    }
-    if (!pendingMnemonicRef.current) {
-      setError('No mnemonic available.');
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      await createDeviceIdentityFromMnemonic(pendingMnemonicRef.current, newPinValue);
-      // Clear sensitive data from memory
-      pendingMnemonicRef.current = null;
-      setPasswordValue('');
-      setMnemonicValue('');
-      setNewPinValue('');
-      setConfirmPinValue('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create device identity');
-    } finally {
-      setLoading(false);
-    }
-  }, [newPinValue, confirmPinValue, createDeviceIdentityFromMnemonic]);
-
-  const handleKeyDown = useCallback((handler: () => void) => {
-    return (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter' && !loading) {
-        handler();
-      }
-    };
-  }, [loading]);
+  const {
+    step,
+    error,
+    loading,
+    pinValue,
+    setPinValue,
+    passwordValue,
+    setPasswordValue,
+    mnemonicValue,
+    setMnemonicValue,
+    newPinValue,
+    setNewPinValue,
+    confirmPinValue,
+    setConfirmPinValue,
+    startLogin,
+    handleUnlockPin,
+    handleResetBrowserIdentity,
+    handleLegacyMigratePin,
+    handleLegacyReset,
+    handleBackupPassword,
+    handleGoToMnemonicEntry,
+    handleMnemonicEntry,
+    handleMnemonicBack,
+    handleCreatePin,
+    handleRetry,
+    handleKeyDown,
+  } = useIdentityGate(onIdentityReady);
 
   // ================================================================
   // Render
@@ -329,13 +109,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 {loading ? 'Unlocking...' : 'Unlock'}
               </button>
               <button
-                onClick={() => {
-                  clearStoredDeviceIdentity();
-                  auth.logout();
-                  setStep('login');
-                  setError(null);
-                  setPinValue('');
-                }}
+                onClick={handleResetBrowserIdentity}
                 className="w-full mt-2 px-5 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] transition-all"
               >
                 Reset browser identity
@@ -371,13 +145,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 {loading ? 'Migrating...' : 'Continue'}
               </button>
               <button
-                onClick={() => {
-                  clearLegacyMnemonicStorage();
-                  auth.logout();
-                  setStep('login');
-                  setError(null);
-                  setPinValue('');
-                }}
+                onClick={handleLegacyReset}
                 className="w-full mt-2 px-5 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] transition-all"
               >
                 Reset and start over
@@ -392,7 +160,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 Sign in with GitHub to recover your identity from the cloud, or enter your recovery phrase manually.
               </p>
               <button
-                onClick={auth.startLogin}
+                onClick={startLogin}
                 className="w-full px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow transition-all"
               >
                 Sign in with GitHub
@@ -403,7 +171,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 <div className="flex-1 border-t border-[#30363d]" />
               </div>
               <button
-                onClick={() => { setStep('mnemonic-entry'); setError(null); }}
+                onClick={handleGoToMnemonicEntry}
                 className="w-full px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px] transition-all"
               >
                 Enter recovery phrase
@@ -445,7 +213,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 {loading ? 'Decrypting...' : 'Decrypt'}
               </button>
               <button
-                onClick={() => { setStep('mnemonic-entry'); setError(null); setPasswordValue(''); }}
+                onClick={handleGoToMnemonicEntry}
                 className="w-full mt-2 px-5 py-2 text-sm text-[#8b949e] hover:text-[#e6edf3] transition-all"
               >
                 Enter recovery phrase instead
@@ -463,7 +231,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 To enable cloud backup, run <code className="text-[#3fb950] bg-[#0d1117] px-1 rounded">gssh user identity backup enable</code> from the CLI.
               </p>
               <button
-                onClick={() => { setStep('mnemonic-entry'); setError(null); }}
+                onClick={handleGoToMnemonicEntry}
                 className="w-full px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow transition-all"
               >
                 Enter recovery phrase
@@ -546,7 +314,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
               <h2 className="text-lg font-medium text-[#f85149] mb-2">Error</h2>
               <p className="text-sm text-[#8b949e] mb-4">{error}</p>
               <button
-                onClick={() => { setStep('login'); setError(null); }}
+                onClick={handleRetry}
                 className="w-full px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px] transition-all"
               >
                 Try again

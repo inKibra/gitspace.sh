@@ -5,8 +5,8 @@
  * - Encrypted keypair storage (password-protected)
  * - Machine identity configuration
  *
- * Directory structure:
- *   ~/gitspace/.identity/
+ * Default directory structure (under the configured identity root):
+ *   .identity/
  *   ├── keypair.json      # Encrypted identity keypair
  *   └── machine.json      # Machine registration info
  *
@@ -33,7 +33,7 @@ import {
 } from '../lib/tmux-lite/crypto/identity.js';
 import { seal, open } from '../lib/tmux-lite/crypto/secretbox.js';
 import { deriveKey, generateSalt } from '../lib/tmux-lite/crypto/keys.js';
-import { getSpacesDir } from './config.js';
+import { getIdentityRoot } from './paths.js';
 import {
 	SpacesError,
 	NoIdentityError,
@@ -74,12 +74,12 @@ interface DecryptedSecrets {
 // ============================================================================
 
 /**
- * Get the identity directory path
+ * Get the identity directory path.
  *
- * @returns Path to ~/gitspace/.identity/
+ * Defaults under the workspace root, but may be sandboxed independently.
  */
 export function getIdentityDir(): string {
-	return join(getSpacesDir(), '.identity');
+	return getIdentityRoot()
 }
 
 /**

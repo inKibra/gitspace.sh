@@ -55,6 +55,7 @@ describe('useAttachController', () => {
       },
       {
         sessionName: 'custom-name',
+        backendKey: 'local',
         workspaceId: 'my-project:my-workspace',
       }
     )
@@ -186,6 +187,7 @@ describe('useAttachController', () => {
       },
       {
         sessionName: 'remote-shell',
+        backendKey: 'remote:machine-1',
         workspaceId: 'my-project:my-workspace',
       }
     )
@@ -341,6 +343,7 @@ describe('useAttachController', () => {
         sessionName: 'debug-shell',
         cols: 120,
         rows: 40,
+        backendKey: 'local',
         scriptPolicy: 'skip',
       }
     )

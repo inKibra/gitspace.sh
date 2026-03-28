@@ -49,6 +49,7 @@ import { listProjectSummaries } from '../../core/project-catalog.js';
 import { scanWorkspaces } from '../../lib/remote-session/workspace-scanner.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
+import { getWorkspaceRoot } from '../../core/paths.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
 import {
@@ -1481,8 +1482,7 @@ export class LocalSessionBackend implements SessionBackend {
   // ============================================================================
 
   private get agentPrefsPath(): string {
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-    return join(home, 'gitspace', '.agent-sessions.json');
+    return join(getWorkspaceRoot(), '.agent-sessions.json');
   }
 
   private agentPrefsCache: Record<string, string> | null = null;

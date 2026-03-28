@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { readHostConfig, syncServeRouteHostnames } from '../../../commands/host.js';
 import { isCloudflaredInstalled } from '../../../utils/cloudflared.js';
 import { buildProcessHostname } from '../../../utils/hostnames.js';
-import { getGitspaceDir } from '../../../core/config.js';
+import { getWorkspaceRoot } from '../../../core/paths.js';
 import { listSessionsFromRunningServer, isProcessRunning, isServerRunning } from '../cli.js';
 import { parseProcessSessionName } from '../../processes/names.js';
 import { resolveWorkspaceRef } from '../../events/paths.js';
@@ -31,7 +31,7 @@ const READY_TIMEOUT_MS = 5000;
 const MAX_WORKSPACE_PATH_CACHE_SIZE = 256;
 
 function getHostingRuntimeDir(): string {
-  const base = join(getGitspaceDir(), '.tmux-hosting');
+  const base = join(getWorkspaceRoot(), '.tmux-hosting');
   mkdirSync(base, { recursive: true });
   return base;
 }
@@ -97,14 +97,14 @@ function describeHostedServiceDiscoveryFailure(error: unknown): string {
 }
 
 function findWorkspacePathById(workspaceId: string): string | null {
-  const spacesDir = getGitspaceDir();
-  if (!existsSync(spacesDir)) {
+  const workspaceRoot = getWorkspaceRoot();
+  if (!existsSync(workspaceRoot)) {
     return null;
   }
-  const entries = readdirSync(spacesDir, { withFileTypes: true });
+  const entries = readdirSync(workspaceRoot, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === 'app') continue;
-    const candidate = join(spacesDir, entry.name, 'workspaces', workspaceId);
+    const candidate = join(workspaceRoot, entry.name, 'workspaces', workspaceId);
     if (existsSync(candidate)) {
       return candidate;
     }

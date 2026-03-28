@@ -1,18 +1,16 @@
 /**
- * Workspace scanner - finds and lists workspaces on the local machine
+ * Workspace scanner - finds and lists workspaces on the local machine.
  *
- * Scans ~/gitspace/<project>/workspaces/* for workspace directories.
+ * Scans the configured workspace root for <project>/workspaces/* directories.
  */
 
-import { readdir, stat, readFile } from "fs/promises";
-import { join } from "path";
-import { homedir } from "os";
-import type { WorkspaceInfo } from "./protocol";
-import type { WorkspacePhase } from "../../types/config.js";
-import { getWorkspaceStatus } from "../../core/workspace-metadata.js";
-import { listWorkspaceNotes, summarizeWorkspaceNotes } from "../../core/workspace-metadata.js";
+import { readdir, stat, readFile } from 'fs/promises';
+import { join } from 'path';
+import type { WorkspaceInfo } from './protocol';
+import type { WorkspacePhase } from '../../types/config.js';
+import { getWorkspaceStatus, listWorkspaceNotes, summarizeWorkspaceNotes } from '../../core/workspace-metadata.js';
+import { getWorkspaceDir, getWorkspaceProjectDir, getWorkspaceRoot } from '../../core/paths.js';
 
-const SPACES_DIR = join(homedir(), "gitspace");
 const STALE_DAYS = 30;
 
 /**
@@ -22,22 +20,22 @@ export async function scanWorkspaces(): Promise<WorkspaceInfo[]> {
   const workspaces: WorkspaceInfo[] = [];
 
   try {
-    // List all projects in ~/gitspace/
-    const entries = await readdir(SPACES_DIR, { withFileTypes: true });
+    const workspaceRoot = getWorkspaceRoot();
+    const entries = await readdir(workspaceRoot, { withFileTypes: true });
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
 
       // Skip the 'app' directory (the CLI itself)
-      if (entry.name === "app") continue;
+      if (entry.name === 'app') continue;
 
-      const projectPath = join(SPACES_DIR, entry.name);
+      const projectPath = getWorkspaceProjectDir(entry.name);
       const projectWorkspaces = await scanProjectWorkspaces(entry.name, projectPath);
       workspaces.push(...projectWorkspaces);
     }
   } catch (e) {
-    // If ~/gitspace/ doesn't exist, return empty list
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+    // If the workspace root doesn't exist, return empty list
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];
     }
     throw e;
@@ -62,7 +60,7 @@ async function scanProjectWorkspaces(
   projectPath: string
 ): Promise<WorkspaceInfo[]> {
   const workspaces: WorkspaceInfo[] = [];
-  const workspacesDir = join(projectPath, "workspaces");
+  const workspacesDir = join(projectPath, 'workspaces');
 
   try {
     const entries = await readdir(workspacesDir, { withFileTypes: true });
@@ -84,7 +82,7 @@ async function scanProjectWorkspaces(
     }
   } catch (e) {
     // Workspaces directory doesn't exist - no workspaces for this project
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];
     }
     throw e;
@@ -143,8 +141,8 @@ async function getWorkspaceInfo(
  */
 async function getGitBranch(workspacePath: string): Promise<string | undefined> {
   try {
-    const headPath = join(workspacePath, ".git", "HEAD");
-    const content = await readFile(headPath, "utf-8");
+    const headPath = join(workspacePath, '.git', 'HEAD');
+    const content = await readFile(headPath, 'utf-8');
 
     // Parse "ref: refs/heads/branch-name"
     const match = content.match(/^ref: refs\/heads\/(.+)$/m);
@@ -163,7 +161,7 @@ async function getGitBranch(workspacePath: string): Promise<string | undefined> 
  * Get workspaces for a specific project
  */
 export async function getProjectWorkspaces(projectName: string): Promise<WorkspaceInfo[]> {
-  const projectPath = join(SPACES_DIR, projectName);
+  const projectPath = getWorkspaceProjectDir(projectName);
   return scanProjectWorkspaces(projectName, projectPath);
 }
 
@@ -174,7 +172,7 @@ export async function getWorkspace(
   projectName: string,
   workspaceName: string
 ): Promise<WorkspaceInfo | null> {
-  const workspacePath = join(SPACES_DIR, projectName, "workspaces", workspaceName);
+  const workspacePath = getWorkspaceDir(projectName, workspaceName);
   const status = getWorkspaceStatus(projectName, workspaceName);
   return getWorkspaceInfo(projectName, workspaceName, workspacePath, status);
 }

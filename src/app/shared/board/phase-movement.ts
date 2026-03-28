@@ -1,5 +1,4 @@
-import { PHASES } from '../../../machine/controllers/useKanbanViewController.js';
-import type { WorkspaceBoardGroup } from '../../../machine/controllers/useKanbanViewController.js';
+import { PHASES, type WorkspaceBoardGroup } from './types.js';
 import type { WorkspacePhase } from '../../../types/config.js';
 
 export function getShiftArrowPhaseChange(args: {

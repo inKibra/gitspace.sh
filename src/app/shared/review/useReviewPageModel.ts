@@ -1,4 +1,4 @@
-import { useReview } from '../../../hooks/useReview.web.js';
+import { useReview } from '../../react/useReview.js';
 import { computeWorkspaceStatus } from '../../../types/review.js';
 import type { ReviewOperation, ReviewResult } from '../../../types/review.js';
 

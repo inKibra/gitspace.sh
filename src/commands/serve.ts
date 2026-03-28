@@ -387,7 +387,7 @@ async function verifyRelayTrust(
     logger.error(`Received:  ${computedFingerprint}`);
     logger.log('');
     logger.error('The relay identity has changed. This could indicate a man-in-the-middle attack.');
-    logger.error('If this is expected, remove the old relay entry from ~/gitspace/.identity/trusted-relays.json and retry.');
+    logger.error('If this is expected, remove the old relay entry from your configured identity directory (trusted-relays.json) and retry.');
     return { trusted: false, reason: 'Relay identity mismatch - possible security threat' };
   }
 

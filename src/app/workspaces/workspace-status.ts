@@ -4,6 +4,7 @@ import type { AgentSessionInfo, SessionInfo } from '../../machine/api/list-types
 /** Minimal workspace shape needed to compute status summaries. */
 export interface WorkspaceStatusInput {
   id: string;
+  selectionKey?: string;
   processes?: { name: string; instances?: number }[];
   processConfigError?: string;
 }
@@ -158,10 +159,11 @@ export function buildWorkspaceStatusSummaryMap(
 
   const result: Record<string, WorkspaceStatusSummary> = {};
   for (const workspace of workspaces) {
+    const workspaceKey = workspace.selectionKey ?? workspace.id;
     result[workspace.id] = deriveWorkspaceStatusSummary(
       workspace,
       byWorkspaceId[workspace.id] ?? [],
-      agentSessionsByWorkspace[workspace.id] ?? [],
+      agentSessionsByWorkspace[workspaceKey] ?? [],
     );
   }
   return result;

@@ -1567,8 +1567,9 @@ Secondary machines connect to primary machine's embedded relay:
 import { getSecret } from '../utils/secrets.js';
 
 /**
- * Host config stored in ~/gitspace/host.json (non-sensitive data only)
- * Sensitive tunnel tokens are stored in keychain via Bun.secrets
+ * Host config stored at the default workspace root in ~/gitspace/host.json
+ * (non-sensitive data only).
+ * Sensitive tunnel tokens are stored in keychain via Bun.secrets.
  */
 interface HostConfig {
   subdomain: string;          // Primary subdomain
@@ -1577,7 +1578,7 @@ interface HostConfig {
 }
 
 export async function serve(options: ServeOptions): Promise<void> {
-  const hostConfig = await getHostConfig();  // Reads non-sensitive config from ~/gitspace/
+  const hostConfig = await getHostConfig();  // Reads non-sensitive config from the workspace root
 
   if (hostConfig?.subdomain) {
     // PRIMARY MODE: Has subdomain, runs cloudflared + relay
@@ -1644,8 +1645,8 @@ async function startSecondaryMode(relayUrl: string): Promise<void> {
 |-----------|----------|-----------|
 | gitspace.sh API token (`gst_xxx`) | System keychain via `Bun.secrets` | Sensitive, needs secure storage |
 | Tunnel tokens | System keychain via `Bun.secrets` | Sensitive, grants tunnel access |
-| Machine identity private keys | `~/gitspace/.identity/keypair.json` (encrypted) | Already password-protected |
-| Relay config (URL, machine ID) | `~/gitspace/.identity/relay.json` | Non-sensitive metadata |
+| Machine identity private keys | `<identity-root>/keypair.json` (encrypted) | Already password-protected |
+| Relay config (URL, machine ID) | `<identity-root>/relay.json` | Non-sensitive metadata |
 | API tokens in D1 | SHA-256 hash only | Never store plaintext |
 
 **Device Registration Security:**

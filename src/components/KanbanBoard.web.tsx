@@ -2,8 +2,8 @@
  * KanbanBoard Web - columns and workspace cards for browser.
  */
 
-import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../machine/controllers/useKanbanViewController.js';
-import { PHASES, PHASE_LABELS } from '../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
+import { PHASES, PHASE_LABELS } from '../app/shared/board/types.js';
 import type { WorkspacePhase } from '../types/config.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';

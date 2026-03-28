@@ -32,6 +32,11 @@ export type WorkspaceProcessPort = ResolvedProcessPort;
 /** Workspace info from machine */
 export interface WorkspaceInfo {
   id: string;
+  /**
+   * Backend-scoped workspace key (`[backendKey, workspaceId]`) when rendered from multi-backend
+   * runtime views. Optional to keep compatibility with single-backend callers.
+   */
+  selectionKey?: string;
   name: string;
   path: string;
   projectName: string;
@@ -278,6 +283,7 @@ function buildTree(
 
     // Workspaces under this project
     for (const ws of group.workspaces) {
+      const workspaceLookupKey = ws.selectionKey ?? ws.id;
       const isExpanded = expandedWorkspaces.has(ws.id);
       items.push({
         type: 'workspace',
@@ -287,7 +293,7 @@ function buildTree(
 
       // If expanded, show processes, sessions, events, and new session action
       if (isExpanded) {
-        const runtime = runtimeByWorkspace[ws.id];
+        const runtime = runtimeByWorkspace[workspaceLookupKey];
         const workspaceSessions = runtime?.sessions ?? sortWorkspaceSessions(sessions.filter((session) => session.workspaceId === ws.id));
         const processSessions = runtime?.processSessions ?? workspaceSessions.filter((session) => session.processName);
         const adHocSessions = runtime?.shellSessions ?? workspaceSessions.filter((session) => !session.processName);
@@ -444,8 +450,8 @@ function buildTree(
         items.push({
           type: 'agents',
           workspaceId: ws.id,
-          count: agentSessionCounts[ws.id] ?? 0,
-          pendingPermissions: pendingPermissionsByWorkspace[ws.id] ?? 0,
+          count: agentSessionCounts[workspaceLookupKey] ?? 0,
+          pendingPermissions: pendingPermissionsByWorkspace[workspaceLookupKey] ?? 0,
           expanded: agentExpanded,
         });
 
@@ -454,7 +460,7 @@ function buildTree(
             type: 'new-agent-session',
             workspaceId: ws.id,
           });
-          const agentSessions = [...(agentSessionsByWorkspace[ws.id] ?? [])].sort((a, b) =>
+          const agentSessions = [...(agentSessionsByWorkspace[workspaceLookupKey] ?? [])].sort((a, b) =>
             (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
           );
           for (const session of agentSessions) {

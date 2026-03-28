@@ -292,7 +292,14 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             )}
             {agentRows.filter((row) => row.bucket === 'closed').map((row) => (
               <div key={`closed:${row.id}`} className="flex items-center gap-1">
-                <SidebarItem dotColor="text-[#484f58]" label={row.title} rightLabel="closed" />
+                <SidebarItem
+                  dotColor="text-[#484f58]"
+                  label={row.title}
+                  rightLabel="closed"
+                  onClick={() => {
+                    void detailActions.openAgentSession(row.id);
+                  }}
+                />
                 {onArchiveAgentSession && (
                   <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[#484f58] hover:text-[#8b949e] flex-shrink-0 px-1">arc</button>
                 )}

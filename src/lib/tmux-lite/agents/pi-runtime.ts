@@ -1,19 +1,21 @@
 import { join } from 'node:path';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { getGitspaceDir } from '../../../core/config.js';
+import rootPackageJson from '../../../../package.json';
+import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
 import type { OmpAgentSession, OmpModule, PiAiModule } from './omp-types.js';
 
 const OMP_PACKAGE = '@oh-my-pi/pi-coding-agent';
 const PI_AI_PACKAGE = '@oh-my-pi/pi-ai';
 const OMP_BIN_NAME = 'omp';
+const MANAGED_OMP_PACKAGE_SPEC = readManagedOmpPackageSpec();
 
 /**
- * Pi agent directory, scoped under gitspace.
+ * Pi agent directory, scoped under the configured workspace root.
  *
- * Structure:
- *   ~/gitspace/.pi/
+ * Default structure:
+ *   <workspace-root>/.pi/
  *     bin/                 ← managed binaries (omp, fd, ast-grep, etc.)
  *     extensions/          ← gitspace-managed extensions
  *     sessions/            ← Pi session storage (by workspace path)
@@ -30,8 +32,18 @@ export async function importPiAiModule(): Promise<PiAiModule> {
 }
 
 
+function readManagedOmpPackageSpec(): string {
+  const spec = (rootPackageJson as {
+    dependencies?: Record<string, string>;
+  }).dependencies?.[OMP_PACKAGE]?.trim();
+  if (!spec) {
+    throw new Error(`Managed Pi package spec for ${OMP_PACKAGE} is missing from the root package manifest`);
+  }
+  return spec;
+}
+
 export function getPiAgentDir(): string {
-  return join(getGitspaceDir(), '.pi');
+  return join(getWorkspaceRoot(), '.pi');
 }
 
 /**
@@ -81,7 +93,7 @@ export function getGitspacePiExtensionPaths(): string[] {
 
 /**
  * Ensure oh-my-pi is installed and up to date.
- * Installs to ~/gitspace/.pi/ with its own package.json so it's
+ * Installs to <workspace-root>/.pi/ with its own package.json so it's
  * independent of gitspace's node_modules.
  *
  * Returns the path to the omp binary.
@@ -97,7 +109,7 @@ export async function ensureOmpInstalled(): Promise<string> {
       name: 'gitspace-pi-agent',
       private: true,
       dependencies: {
-        [OMP_PACKAGE]: 'latest',
+        [OMP_PACKAGE]: MANAGED_OMP_PACKAGE_SPEC,
       },
     }, null, 2));
   }
@@ -123,7 +135,7 @@ export async function ensureOmpInstalled(): Promise<string> {
 }
 
 /**
- * Update oh-my-pi to the latest version.
+ * Update oh-my-pi to the managed repo-pinned version.
  * Called periodically (e.g., on tmux-lite server startup).
  */
 export async function updateOmp(): Promise<{ version: string; updated: boolean }> {
@@ -135,7 +147,7 @@ export async function updateOmp(): Promise<{ version: string; updated: boolean }
   const pkg = existsSync(pkgJsonPath)
     ? JSON.parse(readFileSync(pkgJsonPath, 'utf-8'))
     : { name: 'gitspace-pi-agent', private: true, dependencies: {} };
-  pkg.dependencies[OMP_PACKAGE] = 'latest';
+  pkg.dependencies[OMP_PACKAGE] = MANAGED_OMP_PACKAGE_SPEC;
   writeFileSync(pkgJsonPath, JSON.stringify(pkg, null, 2));
 
   execSync('bun install', {
@@ -155,7 +167,8 @@ export async function updateOmp(): Promise<{ version: string; updated: boolean }
  * Build environment variables for a Pi agent session scoped to a workspace.
  *
  * Sets PI_CODING_AGENT_DIR so oh-my-pi reads config/extensions/sessions
- * from the gitspace-managed directory (~/.pi/) instead of the default (~/.omp/agent/).
+ * from the GitSpace-managed directory (<workspace-root>/.pi/, default: ~/gitspace/.pi/)
+ * instead of the upstream default (~/.omp/agent/).
  */
 export function setupPiEnvironment(
   _target: AgentWorkspaceTarget,

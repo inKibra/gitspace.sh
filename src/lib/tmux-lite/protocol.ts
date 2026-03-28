@@ -316,6 +316,14 @@ export type Command =
       metadata?: Record<string, string>;
     }
   | {
+      type: 'new-virtual';
+      name?: string;
+      cwd: string;
+      kind?: SessionKind;
+      hidden?: boolean;
+      metadata?: Record<string, string>;
+    }
+  | {
       type: 'attach-prepare';
       requestId: string;
       sessionId?: string;

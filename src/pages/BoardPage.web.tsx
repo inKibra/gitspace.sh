@@ -8,7 +8,7 @@
 
 import { useEffect } from 'react';
 import { KanbanBoardWeb } from '../components/KanbanBoard.web.js';
-import type { WorkspaceBoardGroup } from '../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup } from '../app/shared/board/types.js';
 import { getShiftArrowPhaseChange } from '../app/shared/board/phase-movement.js';
 import type { WorkspacePhase } from '../types/config.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';

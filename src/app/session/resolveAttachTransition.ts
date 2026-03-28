@@ -52,7 +52,10 @@ export function resolveAttachErrorTransition(params: AttachOutcomeTransitionPara
 } {
   const isWorkspaceScriptFailure = params.message.startsWith('Workspace scripts failed during')
 
-  if (params.target === 'workspace' && isWorkspaceScriptFailure) {
+  if (
+    params.target === 'workspace'
+    && (isWorkspaceScriptFailure || params.view === 'workspace-detail')
+  ) {
     return {
       nextView: null,
       resetSessionSwitching: true,

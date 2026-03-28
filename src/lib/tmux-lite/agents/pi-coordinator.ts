@@ -3,6 +3,7 @@ import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
   createSession as createTmuxSession,
+  createVirtualSession as createTmuxVirtualSession,
 } from '../cli.js';
 import { getRouterSocket, type Session as TmuxSession } from '../protocol.js';
 import {
@@ -22,6 +23,8 @@ import {
   shouldDisplayAgentSession,
 } from '../../../agents/session-display.js';
 import type { AgentEvent } from '../../../agents/backend.js';
+import { getVirtualTerminal } from '../virtual-session-registry.js';
+import { startVirtualInteractiveMode, type VirtualInteractiveModeHandle } from './virtual-interactive-mode.js';
 
 export const PI_AGENT_TMUX_SESSION_KIND = 'agent';
 
@@ -63,11 +66,13 @@ interface TerminalSessionBinding {
 
 export class PiCoordinator {
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
+  private readonly inflightActiveSessions = new Map<string, Promise<OmpAgentSession>>();
   private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
   private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
   private readonly activeSessions = new Map<string, OmpAgentSession>();
   private readonly sessionUnsubscribers = new Map<string, () => void>();
   private readonly sessionsRoot: string | undefined;
+  private readonly virtualModeHandles = new Map<string, VirtualInteractiveModeHandle>();
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
 
   constructor(sessionsRoot?: string) {
@@ -262,12 +267,6 @@ export class PiCoordinator {
       this.releaseTerminalSession(existing.id);
     }
 
-    const ompBin = await ensureOmpInstalled();
-    const env = {
-      ...setupPiEnvironment(target),
-      ...buildPiRuntimeChildEnvironment(getRouterSocket()),
-    };
-
     const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
@@ -276,9 +275,78 @@ export class PiCoordinator {
       );
     }
 
-    void this.ensureActiveSession(target, agentSessionId, match).catch(() => {
+    // Try the in-process VirtualTerminal path first.
+    // This gives us structured SDK access and avoids a child process.
+    try {
+      return await this.createVirtualAgentSession(target, agentSessionId, match);
+    } catch (err) {
+      console.warn(
+        `[PiCoordinator] VirtualTerminal path failed for ${agentSessionId}, falling back to PTY:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    // Fallback: spawn omp CLI in a PTY (the original path).
+    return this.createPtyAgentSession(target, agentSessionId, match);
+  }
+
+  /**
+   * Create an agent terminal session using VirtualTerminal + in-process InteractiveMode.
+   * The SDK session runs in-process, and pi-tui renders through xterm-headless.
+   */
+  private async createVirtualAgentSession(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    sessionFile: PiSessionFileInfo,
+  ): Promise<TmuxSession> {
+    // Ensure we have the SDK session in-process
+    const sdkSession = await this.ensureActiveSession(target, agentSessionId, sessionFile);
+
+    // Create a virtual tmux session (no PTY, no child process)
+    const tmuxSession = await createTmuxVirtualSession(
+      buildAgentTerminalSessionName(target, agentSessionId),
+      target.workspacePath,
+      {
+        kind: PI_AGENT_TMUX_SESSION_KIND,
+        hidden: true,
+        metadata: {
+          workspaceId: target.workspaceId,
+          agentSessionId,
+        },
+      },
+    );
+
+    // Retrieve the VirtualTerminal created by the server
+    const virtualTerminal = getVirtualTerminal(tmuxSession.id);
+    if (!virtualTerminal) {
+      throw new Error('VirtualTerminal not found in registry after session creation');
+    }
+
+    // Start InteractiveMode on the VirtualTerminal
+    const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal);
+    this.virtualModeHandles.set(agentSessionId, handle);
+
+    this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
+    return tmuxSession;
+  }
+
+  /**
+   * Fallback: create an agent terminal session by spawning omp CLI in a PTY.
+   * This is the original path, kept as a safety net.
+   */
+  private async createPtyAgentSession(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    sessionFile: PiSessionFileInfo,
+  ): Promise<TmuxSession> {
+    const ompBin = await ensureOmpInstalled();
+    const env = {
+      ...setupPiEnvironment(target),
+      ...buildPiRuntimeChildEnvironment(getRouterSocket()),
+    };
+
+    void this.ensureActiveSession(target, agentSessionId, sessionFile).catch(() => {
       // Non-fatal for attach: the terminal should still open even if SDK rehydration fails.
-      // promptAgentSession() performs the same rehydration synchronously and will surface errors there.
     });
 
     const extensionArgs = getGitspacePiExtensionPaths().flatMap((extensionPath) => [
@@ -291,7 +359,7 @@ export class PiCoordinator {
       target.workspacePath,
       {
         command: ompBin,
-        args: ['--session', match.path, ...extensionArgs],
+        args: ['--session', sessionFile.path, ...extensionArgs],
         env,
         kind: PI_AGENT_TMUX_SESSION_KIND,
         hidden: true,
@@ -320,6 +388,29 @@ export class PiCoordinator {
       return existing;
     }
 
+    const inFlightSessionId = agentSessionId;
+    const existingInFlight = this.inflightActiveSessions.get(inFlightSessionId);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
+
+    const ensurePromise = (async () => {
+      try {
+        return await this.ensureActiveSessionInternal(target, agentSessionId, sessionFile);
+      } finally {
+        this.inflightActiveSessions.delete(inFlightSessionId);
+      }
+    })();
+
+    this.inflightActiveSessions.set(inFlightSessionId, ensurePromise);
+    return ensurePromise;
+  }
+
+  private async ensureActiveSessionInternal(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    sessionFile: PiSessionFileInfo | null,
+  ): Promise<OmpAgentSession> {
     const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
@@ -396,6 +487,13 @@ export class PiCoordinator {
     const unsubscribe = this.sessionUnsubscribers.get(sessionId);
     unsubscribe?.();
     this.sessionUnsubscribers.delete(sessionId);
+
+    // Stop the virtual interactive mode if running
+    const modeHandle = this.virtualModeHandles.get(sessionId);
+    if (modeHandle) {
+      this.virtualModeHandles.delete(sessionId);
+      void modeHandle.stop().catch(() => {});
+    }
 
     const session = this.activeSessions.get(sessionId);
     if (session) {

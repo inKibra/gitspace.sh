@@ -4,7 +4,7 @@
  * Uses scrypt for password-based key derivation.
  */
 
-import { scrypt, randomBytes, type ScryptOptions } from "node:crypto";
+import { scrypt, randomBytes } from "node:crypto";
 
 /** Salt length in bytes */
 export const SALT_LENGTH = 16;

@@ -2,9 +2,8 @@ import { describe, it, expect } from 'bun:test';
 import { PiCoordinator } from '../pi-coordinator.js';
 import { listPiSessions, findPiSessionFile } from '../pi-session-files.js';
 import { encodeSessionDirName } from '../pi-session-files.js';
-import { getPiAgentDir } from '../pi-runtime.js';
-import { join, resolve } from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -24,16 +23,29 @@ function createFakeSession(sessionsRoot: string, cwd: string, id: string, firstM
 }
 
 describe('pi-session-files', () => {
-  it('getPiAgentDir points to managed dir under gitspace', () => {
-    const dir = getPiAgentDir();
-    expect(dir).toContain('gitspace');
-    expect(dir).toEndWith('.pi');
-  });
-
   it('listPiSessions returns empty for workspace with no sessions', () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'pi-test-'));
     const sessions = listPiSessions(tmpDir);
     expect(sessions).toEqual([]);
+  });
+
+  it('finds symlinked working dirs with canonical session encoding', () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+
+    const tmpDir = mkdtempSync(join(tmpdir(), 'pi-test-'));
+    const cwd = join(tmpDir, 'real-workspace');
+    const symlinkedCwd = join(tmpDir, 'symlink-workspace');
+    mkdirSync(cwd, { recursive: true });
+    symlinkSync(cwd, symlinkedCwd, 'dir');
+
+    const sessionsRoot = join(tmpDir, 'sessions');
+    createFakeSession(sessionsRoot, symlinkedCwd, 'symlink-session', 'hello from symlink');
+
+    const sessions = listPiSessions(cwd, sessionsRoot);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].id).toBe('symlink-session');
   });
 
   it('listPiSessions finds sessions from JSONL files', () => {

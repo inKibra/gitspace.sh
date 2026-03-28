@@ -5,8 +5,8 @@
 
 import type { ScrollBoxRenderable } from '@opentui/core';
 import { useRef, useEffect } from 'react';
-import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../machine/controllers/useKanbanViewController.js';
-import { PHASE_LABELS } from '../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
+import { PHASE_LABELS } from '../app/shared/board/types.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 

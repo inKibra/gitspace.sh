@@ -31,7 +31,8 @@ const COLORS = {
   detachHint: '#FFAA00',
 };
 
-const TAIL_WINDOW_LIMIT = 250;
+
+const TAIL_WINDOW_LIMIT = 1_000;
 const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
 const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
 

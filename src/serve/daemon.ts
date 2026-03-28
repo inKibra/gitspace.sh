@@ -6,7 +6,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { getSpacesDir } from '../core/config.js';
 import { assertControlOwner, listCloudWorkspaces, readControlMeta } from '../relay/control/store.js';
 import type { CloudWorkspaceRecord } from '../relay/control/types.js';
@@ -284,7 +284,7 @@ export function startStatusServer(): void {
         }
         socket.end();
       },
-      error(socket, error) {
+      error(_socket, _error) {
         // Ignore socket errors
       },
     },
@@ -314,10 +314,10 @@ export async function queryServeStatus(): Promise<StatusResponse | null> {
   if (!existsSync(socketPath)) return null;
 
   return new Promise((resolve) => {
-    const socket = Bun.connect({
+    Bun.connect({
       unix: socketPath,
       socket: {
-        data(socket, data) {
+        data(_socket, data) {
           try {
             const response = JSON.parse(data.toString());
             if (response.type === 'status') {
@@ -362,7 +362,7 @@ export async function sendShutdownCommand(): Promise<boolean> {
     Bun.connect({
       unix: socketPath,
       socket: {
-        data(socket, data) {
+        data(_socket, data) {
           try {
             const response = JSON.parse(data.toString());
             resolve(response.type === 'ok');
@@ -407,7 +407,7 @@ export async function queryControlMeta(): Promise<{
     Bun.connect({
       unix: socketPath,
       socket: {
-        data(socket, data) {
+        data(_socket, data) {
           try {
             const response = JSON.parse(data.toString()) as ControlResponse;
             if (response.type === 'control_meta') {
@@ -455,7 +455,7 @@ export async function sendAssertOwnerCommand(identityId: string): Promise<{ succ
     Bun.connect({
       unix: socketPath,
       socket: {
-        data(socket, data) {
+        data(_socket, data) {
           try {
             const response = JSON.parse(data.toString()) as ControlResponse;
             if (response.type === 'ok') {
@@ -502,7 +502,7 @@ export async function sendListCloudWorkspacesCommand(identityId: string): Promis
     Bun.connect({
       unix: socketPath,
       socket: {
-        data(socket, data) {
+        data(_socket, data) {
           try {
             const response = JSON.parse(data.toString()) as ControlResponse;
             if (response.type === 'cloud_workspaces') {

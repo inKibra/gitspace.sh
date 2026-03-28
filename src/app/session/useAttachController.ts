@@ -20,6 +20,11 @@ export interface AttachContext {
   target: AttachTarget
   params: BundleRefreshAttachParams
   projectName: string | null
+  workspaceRef?: BackendScopedWorkspaceRef
+}
+
+interface WorkspaceScopedBundleRefreshAttachParams extends BundleRefreshAttachParams {
+  backendKey?: BackendKey
 }
 
 export interface AttachErrorContext extends AttachContext {
@@ -62,7 +67,7 @@ export interface UseAttachControllerOptions {
 }
 
 export interface UseAttachControllerResult {
-  attach: (params: BundleRefreshAttachParams) => Promise<boolean>
+  attach: (params: BundleRefreshAttachParams, backendKeyOverride?: BackendKey) => Promise<boolean>
   attachFromSelection: (selection: AttachSelectionParams) => Promise<void>
   /** True when the last workspace attach failed in a recoverable way. */
   canAttachAnyway: boolean
@@ -147,25 +152,38 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         null
       : defaultProjectName ?? null
 
+    const defaultBackend = backendKeyOverride ?? defaultBackendKey
+    const resolvedWorkspaceRef = attachParams.workspaceId
+      ? resolveWorkspaceRef?.(attachParams.workspaceId)
+      : null
+    const ref: BackendScopedWorkspaceRef = attachParams.workspaceId
+      ? resolvedWorkspaceRef ?? {
+          backendKey: defaultBackend,
+          workspaceId: attachParams.workspaceId,
+        }
+      : {
+          backendKey: defaultBackend,
+          workspaceId: '',
+        }
+    const attachParamsWithBackend: WorkspaceScopedBundleRefreshAttachParams =
+      attachParams.workspaceId
+        ? {
+            ...attachParams,
+            backendKey: ref.backendKey,
+          }
+        : attachParams
+
     const context: AttachContext = {
       target,
       params: attachParams,
       projectName,
+      workspaceRef: attachParams.workspaceId ? ref : undefined,
     }
 
     await onBeforeAttach?.(context)
 
     try {
-      const ref = attachParams.workspaceId
-        ? resolveWorkspaceRef?.(attachParams.workspaceId) ?? {
-            backendKey: backendKeyOverride ?? defaultBackendKey,
-            workspaceId: attachParams.workspaceId,
-          }
-        : {
-            backendKey: backendKeyOverride ?? defaultBackendKey,
-            workspaceId: '',
-          }
-      const attached = await attachSessionWithBundleRefresh(ref, attachParams)
+      const attached = await attachSessionWithBundleRefresh(ref, attachParamsWithBackend)
 
       if (!attached) {
         await onAttachCancelled?.(context)
@@ -211,10 +229,15 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       return false
     }
 
-    return attach({
-      ...recoverableAttachParams,
-      scriptPolicy: 'skip',
-    })
+    const params = recoverableAttachParams as WorkspaceScopedBundleRefreshAttachParams
+
+    return attach(
+      {
+        ...params,
+        scriptPolicy: 'skip',
+      },
+      params.backendKey,
+    )
   }, [attach, recoverableAttachParams])
 
   const attachFromSelection = useCallback(async (selection: AttachSelectionParams): Promise<void> => {

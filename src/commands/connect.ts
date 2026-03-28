@@ -133,7 +133,7 @@ export async function verifyClientRelayTrust(
     logger.error(`Received:  ${relayIdentity.fingerprint}`);
     logger.log('');
     throw new SpacesError(
-      'Relay identity mismatch - possible security threat. Remove the old entry from ~/gitspace/.identity/trusted-relays.json and retry only if expected.',
+      'Relay identity mismatch - possible security threat. Remove the old entry from your configured identity directory (trusted-relays.json) and retry only if expected.',
       'USER_ERROR',
       1,
     );
