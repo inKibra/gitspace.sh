@@ -5,7 +5,7 @@
  * Relays are identified by their URL and Ed25519 public key.
  *
  * Storage: <identity-root>/trusted-relays.json
-
+ */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { join } from "node:path";

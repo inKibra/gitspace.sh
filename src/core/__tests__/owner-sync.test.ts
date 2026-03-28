@@ -101,6 +101,14 @@ mock.module('../../core/config.js', () => ({
   },
 }));
 
+mock.module('../paths.js', () => ({
+  getWorkspaceRoot: (): string => mockGitspaceDir,
+  getIdentityRoot: (): string => join(mockGitspaceDir, '.identity'),
+  getConfigRoot: (): string => mockGitspaceDir,
+  getWorkspaceProjectDir: (projectName: string): string => join(mockGitspaceDir, projectName),
+  getWorkspaceDir: (projectName: string, workspaceName: string): string => join(mockGitspaceDir, projectName, 'workspaces', workspaceName),
+}));
+
 const { initializeOwnerSync, resetOwnerSyncForTests } = await import('../owner-sync.js');
 const { generateNewMnemonic, initFromMnemonic } = await import('../user-identity.js');
 const {
