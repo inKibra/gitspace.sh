@@ -80,11 +80,15 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(attachSession).toHaveBeenCalledTimes(1)
 
     const confirm = confirmCalls[0]
-    confirm.onCancel?.()
+    await act(async () => {
+      confirm.onCancel?.()
+      await promise
+    })
 
-    const attached = await promise
-    expect(attached).toBe(false)
-    expect(showMessage).toHaveBeenCalled()
+    expect(showMessage).not.toHaveBeenCalled()
+    expect(result.current.recoverableParams).toMatchObject({
+      workspaceId: TEST_REF.workspaceId,
+    })
   })
 
   it('applies refresh plan and retries attach after confirmation', async () => {
@@ -340,6 +344,44 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(attachCalls).toBe(2)
     expect(applySubmissionCalls.length).toBe(1)
     expect(applySubmissionCalls[0]?.secretValues).toEqual({ PULUMI_ACCESS_TOKEN: 'token-value' })
+  })
+
+  it('bypasses bundle refresh handling when retrying with scriptPolicy skip', async () => {
+    const showMessage = mock(() => {})
+    const showConfirm = mock(() => {})
+    const attachSession = mock(async () => undefined)
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage,
+          showConfirm,
+          showWizard: () => {},
+          close: () => {},
+        },
+        commandError: { code: 'BUNDLE_REFRESH_REQUIRED', message: 'stale' },
+        attachSession,
+        getBundleRefreshPlan: async () => makePlan({ hasChanged: true }),
+        applyBundleRefresh: async () => {},
+      })
+    )
+
+    await act(async () => {
+      await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+        workspaceId: TEST_REF.workspaceId,
+        scriptPolicy: 'skip',
+      })
+    })
+
+    expect(showConfirm).not.toHaveBeenCalled()
+    expect(showMessage).not.toHaveBeenCalled()
+    expect(attachSession).toHaveBeenCalledTimes(1)
+    expect(attachSession).toHaveBeenCalledWith({
+      workspaceId: TEST_REF.workspaceId,
+      scriptPolicy: 'skip',
+    })
+    expect(result.current.recoverableParams).toBeNull()
   })
 
   it('shows script failure message and sets recoverableParams', async () => {

@@ -357,11 +357,6 @@ export function useBundleRefreshAttachFlow(
         if (!plan.hasChanged && plan.steps.length === 0) {
           const retryAttach = await showNoChangeRetryPrompt(currentOptions.flow, plan.details);
           if (!retryAttach) {
-            currentOptions.flow.showMessage({
-              title: 'Session Attach Cancelled',
-              message: 'Bundle refresh was required by backend, and retry was cancelled.',
-              variant: 'warning',
-            });
             setRecoverableParams(pending.params);
             return false;
           }
@@ -375,11 +370,6 @@ export function useBundleRefreshAttachFlow(
 
         const confirmed = await showRefreshPrompt(currentOptions.flow, plan.details);
         if (!confirmed) {
-          currentOptions.flow.showMessage({
-            title: 'Session Attach Cancelled',
-            message: 'Bundle refresh is required before creating this session.',
-            variant: 'warning',
-          });
           setRecoverableParams(pending.params);
           return false;
         }
@@ -389,11 +379,6 @@ export function useBundleRefreshAttachFlow(
         if (plan.steps.length > 0) {
           const values = await runRefreshWizard(currentOptions.flow, plan);
           if (!values) {
-            currentOptions.flow.showMessage({
-              title: 'Session Attach Cancelled',
-              message: 'Bundle refresh was cancelled.',
-              variant: 'warning',
-            });
             setRecoverableParams(pending.params);
             return false;
           }
@@ -454,6 +439,16 @@ export function useBundleRefreshAttachFlow(
       ref: BackendScopedWorkspaceRef,
       params: BundleRefreshAttachParams
     ): Promise<boolean> => {
+      // "Attach anyway" retries intentionally skip scripts and bundle refresh
+      // handling. Run them directly so stale commandError state cannot reopen
+      // the bundle-refresh prompt loop for this attempt.
+      if (params.scriptPolicy === 'skip') {
+        console.debug('[bundle-refresh-attach] attach anyway retry', JSON.stringify(params));
+        setRecoverableParams(null);
+        await Promise.resolve(optionsRef.current.attachSession(params));
+        return true;
+      }
+
       // Clear any previous recovery state for this new attempt.
       setRecoverableParams(null);
       const currentOptions = optionsRef.current;

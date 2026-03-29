@@ -750,7 +750,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
     const isScriptFailure = commandError.code ? SCRIPT_ERROR_CODES.has(commandError.code) : false;
     if (isScriptFailure) {
-      if (!scriptState) {
+      if (!showScriptTerminal && !scriptState) {
         flow.showMessage({ title: 'Workspace Script Failed', message: commandError.message, variant: 'error' });
         setShowScriptTerminal(false);
       }
@@ -1406,17 +1406,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           error={scriptState?.error}
           exitCode={scriptState?.exitCode}
           setWriteCallback={setWriteCallback}
-          canAttachAnyway={Boolean(!isRunning && scriptState?.error && lastScriptWorkspaceRef.current)}
+          canAttachAnyway={attachController.canAttachAnyway}
           onAttachAnyway={async () => {
-            const workspaceRef = lastScriptWorkspaceRef.current;
-            if (!workspaceRef) return;
-            await attachController.attach(
-              {
-                workspaceId: workspaceRef.workspaceId,
-                scriptPolicy: 'skip',
-              },
-              workspaceRef.backendKey,
-            );
+            await attachController.attachAnyway();
           }}
           onBack={() => {
             lastScriptWorkspaceIdRef.current = null;

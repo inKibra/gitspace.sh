@@ -48,7 +48,7 @@ interface AttachWorkspaceSessionDeps {
     workspacePath: string;
     workspaceName: string;
     interactiveScripts: false;
-    bundleMode: 'error-if-changed';
+    bundleMode: 'error-if-changed' | 'skip';
     scriptPolicy: 'auto' | 'skip';
     signal: AbortSignal;
     onOutput: (data: Uint8Array) => void;
@@ -133,7 +133,7 @@ export async function attachWorkspaceSession(
     workspacePath: workspace.path,
     workspaceName: workspace.id,
     interactiveScripts: false,
-    bundleMode: 'error-if-changed',
+    bundleMode: args.scriptPolicy === 'skip' ? 'skip' : 'error-if-changed',
     scriptPolicy: args.scriptPolicy ?? 'auto',
     signal: attachAbortController.signal,
     onOutput: (data) => {

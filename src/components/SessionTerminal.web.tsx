@@ -5,7 +5,6 @@ import {
   type PageDirection,
 } from './session-terminal-page-navigation.js';
 import { isIOSDevice } from '../utils/device.web.js';
-import { isReplayDebugEnabled } from './replay-debug.web.js';
 
 interface Props {
   onData: (data: Uint8Array) => void;
@@ -77,6 +76,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   const onActivityRef = useRef(onActivity);
   const onResizeRef = useRef(onResize);
   const allowTapFocusRef = useRef(allowTapFocus);
+  const setWriteCallbackRef = useRef(setWriteCallback);
   const readOnlyRef = useRef(readOnly);
 
   // Touch state with accumulated delta pattern
@@ -112,6 +112,10 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   useEffect(() => {
     allowTouchScrollRef.current = allowTouchScroll;
   }, [allowTouchScroll]);
+
+  useEffect(() => {
+    setWriteCallbackRef.current = setWriteCallback;
+  }, [setWriteCallback]);
 
   // Keep readOnly ref in sync
   useEffect(() => {
@@ -391,7 +395,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         container.addEventListener('touchmove', handleTouchMove, { passive: false });
         container.addEventListener('touchend', handleTouchEnd, { passive: true });
 
-        setWriteCallback((data: Uint8Array) => {
+        setWriteCallbackRef.current((data: Uint8Array) => {
           const wasScrolledUp = term.viewportY > 0;
           const viewportBefore = term.viewportY;
           const chunk = new Uint8Array(data);
@@ -401,16 +405,6 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           }
 
           try {
-            if (isReplayDebugEnabled()) {
-              console.debug('[session-terminal:web] write chunk', {
-                byteLength: chunk.byteLength,
-                preview: Array.from(chunk.slice(0, 16)),
-                viewportY: term.viewportY,
-                cols: term.cols,
-                rows: term.rows,
-              });
-            }
-
             term.write(new TextDecoder().decode(chunk));
           } catch (error) {
             console.error('[session-terminal:web] term.write failed', {
@@ -469,23 +463,24 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           observer.disconnect();
           term.dispose();
           terminalRef.current = null;
-          setWriteCallback(null);
+          setWriteCallbackRef.current(null);
         };
       })
       .catch(() => {
-        setWriteCallback(null);
+        setWriteCallbackRef.current(null);
       });
 
     return () => {
       disposed = true;
+      initializedRef.current = false;
       touchStateRef.current = null;
       if (teardown) {
         teardown();
       } else {
-        setWriteCallback(null);
+        setWriteCallbackRef.current(null);
       }
     };
-  }, [setWriteCallback, tryConsumePageNavigation]);
+  }, [tryConsumePageNavigation]);
 
   return (
     <div

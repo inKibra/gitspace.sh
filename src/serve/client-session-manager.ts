@@ -211,8 +211,11 @@ export class ClientSessionManager {
     session.tmuxSocketWriter = undefined;
     session.state = 'browsing';
     session.attachedSessionId = undefined;
+    session.attachedSessionName = undefined;
     session.viewOnly = undefined;
     session.sessionSocketPath = undefined;
+    session.initialCols = undefined;
+    session.initialRows = undefined;
     session.waitingForResize = undefined;
     session.frameBuffer = undefined;
 
@@ -282,15 +285,17 @@ export class ClientSessionManager {
           return frame;
         }
 
-        if (msg.type === "resize" && session.waitingForResize) {
-          // First resize - send attach-init with actual dimensions
+        // First-resize gate: defer attach-init until client sends actual dimensions
+        if (msg.type === 'resize' && session.waitingForResize) {
+          // First resize — send attach-init with actual dimensions
           console.log(`[session-manager] First resize: ${msg.cols}x${msg.rows} - sending attach-init`);
           session.waitingForResize = false;
-          this.writeToTmuxSocket(session, encodeControl({ type: "attach-init", cols: msg.cols, rows: msg.rows, clientType: "web" }));
+          this.writeToTmuxSocket(session, encodeControl({ type: 'attach-init', cols: msg.cols, rows: msg.rows, clientType: 'web' }));
           return null; // attach-init handles the resize
         }
 
-        // Other control messages (resize after init) - encode for tmux-lite and send
+        // Forward control messages directly to tmux-lite after attach-init.
+
         this.writeToTmuxSocket(session, encodeControl(msg));
       } else {
         // Raw PTY input (STREAM_ID.DATA) - send directly to socket
@@ -301,12 +306,13 @@ export class ClientSessionManager {
         }
 
         // Only forward if we've sent attach-init (waitingForResize is false)
-        if (!session.waitingForResize) {
-          // Wrap PTY data in a frame for the framed protocol
-          this.writeToTmuxSocket(session, encodePTY(result.data));
-        } else {
-          console.warn("[session-manager] Ignoring PTY data before attach-init");
+        if (session.waitingForResize) {
+          console.warn('[session-manager] Ignoring PTY data before attach-init');
+          return null;
         }
+
+        // Wrap PTY data in a frame for the framed protocol
+        this.writeToTmuxSocket(session, encodePTY(result.data));
       }
 
       return null;
@@ -358,8 +364,11 @@ export class ClientSessionManager {
       this.remoteSessionHandler.onClientLeavesBrowsing(connectionId);
       session.state = "attached";
       session.attachedSessionId = remoteSession.attachedSessionId;
+      session.attachedSessionName = remoteSession.attachedSessionName;
       session.viewOnly = remoteSession.viewOnly ?? false;
       session.sessionSocketPath = remoteSession.sessionSocketPath;
+      session.initialCols = remoteSession.initialCols;
+      session.initialRows = remoteSession.initialRows;
 
       // Connect to tmux-lite session socket for PTY I/O
       await this.attachToTmuxLiteSession(connectionId, session);
@@ -539,8 +548,16 @@ export class ClientSessionManager {
                   const metaData = new TextEncoder().encode(metaMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, metaData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
+                } else if (event.type === 'attached' && session.attachedSessionId) {
+                  const attachedMsg = JSON.stringify({
+                    type: 'attached',
+                    sessionId: session.attachedSessionId,
+                    sessionName: session.attachedSessionName,
+                  });
+                  const attachedData = new TextEncoder().encode(attachedMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, attachedData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                 }
-                // Ignore attach-ready and attached - handled by client
               } else if (frame.type === FrameType.PTY) {
                 // Forward PTY data to web client
                 const encFrame = createFrame(STREAM_ID.DATA, frame.payload, session.sessionKeys.sendKey);
@@ -571,10 +588,9 @@ export class ClientSessionManager {
       session.tmuxSocket = socket;
       session.tmuxSocketWriter = createBufferedSocketWriter(socket);
 
-      // Don't send attach-init yet - wait for the first resize from client
+      // Don't send attach-init yet — wait for the first resize from client
       // This ensures tmux-lite receives the actual terminal dimensions
       session.waitingForResize = true;
-
       console.log(`[session-manager] Connected to tmux-lite session: ${session.sessionSocketPath} (waiting for resize)`);
     } catch (e) {
       console.error("[session-manager] Failed to connect to tmux-lite session:", e);

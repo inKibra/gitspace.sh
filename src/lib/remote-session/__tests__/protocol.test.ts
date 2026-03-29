@@ -121,7 +121,6 @@ describe('message union coverage', () => {
 
   it('accepts current machine messages', () => {
     const machineMessages: MachineToClientMessage[] = [
-      { type: 'attached', sessionId: 's1', sessionName: 'test', cols: 80, rows: 24 },
       { type: 'detached' },
       { type: 'session_exited', sessionId: 's1', exitCode: 0 },
       { type: 'error', code: 'TEST', message: 'test error' },
@@ -150,6 +149,6 @@ describe('message union coverage', () => {
       { type: 'agent_state_update', delta: { type: 'agent_state_snapshot', workspaces: {} } },
       { type: 'replay_frame', requestId: 'req-3', replayId: 'r1', frame: { replayId: 'r1', checkpoint: null, events: [] }, chunkIndex: 0, totalChunks: 1 },
     ];
-    expect(machineMessages).toHaveLength(28);
+    expect(machineMessages).toHaveLength(27);
   });
 });

@@ -25,7 +25,7 @@ import type { BundleConfigState, BundleConfigSubmission } from '../../types/bund
 import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
-import { findUtf8Boundary } from '../../utils/utf8.js';
+import { AttachLifecycle } from './attach-lifecycle.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
   ReviewRequestError,
@@ -87,6 +87,7 @@ type AuthorizationPayload = { type: 'access_list' };
 
 interface SessionEventMessage {
   type: 'attach-ready' | 'attached' | 'exited' | 'kicked' | 'session-meta';
+  sessionId?: string;
   sessionName?: string;
   processTitle?: string;
   terminalTitle?: string;
@@ -181,7 +182,6 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'replay_timeline',
   'replay_dismissed',
   'replay_undismissed',
-  'attached',
   'detached',
   'session_exited',
   'error',
@@ -243,16 +243,6 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
-function concatUint8Array(parts: Uint8Array[]): Uint8Array {
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const combined = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    combined.set(part, offset);
-    offset += part.length;
-  }
-  return combined;
-}
 
 function workspaceIdsMatch(expected: string, actual: string | undefined): boolean {
   if (!actual) {
@@ -308,10 +298,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private readonly handshake: RemoteSessionHandshakeAdapter<THandshakeState, TServerHello, TServerAuth>;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
 
-  private mode: 'browsing' | 'attached' = 'browsing';
-  private attachedSessionId: string | null = null;
-  private attachedWorkspaceId: string | null = null;
-  private viewOnly = false;
+  private readonly attachLifecycle = new AttachLifecycle((event) => this.emit(event));
   private handshakeState: THandshakeState | null = null;
   private sessionKeys: SessionKeys | null = null;
   private isConnected = false;
@@ -365,15 +352,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         timeout: ReturnType<typeof setTimeout>;
       }
     | null = null;
-  private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
-  private pendingPtyChunks: Uint8Array[] = [];
-  private pendingUtf8Bytes = new Uint8Array(0);
   private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
   private pendingTmuxCommands = new Map<string, {
     resolve: (response: TmuxResponse) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
+  private pendingDetachTransition: {
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  } | null = null;
   private readonly machineStateClient = new MachineStateClient();
 
   constructor(options: RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHello, TServerAuth>) {
@@ -396,16 +385,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
-    this.ptyOutputHandler = handler;
-    if (!handler || this.pendingPtyChunks.length === 0) {
-      return;
-    }
-
-    const pending = [...this.pendingPtyChunks];
-    this.pendingPtyChunks = [];
-    for (const chunk of pending) {
-      this.emitPtyData(chunk);
-    }
+    this.attachLifecycle.setOutputHandler(handler);
   }
 
   async connect(): Promise<void> {
@@ -703,8 +683,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async attachSession(params: AttachSessionParams): Promise<void> {
-    this.viewOnly = params.viewOnly ?? false;
-    this.attachedWorkspaceId = params.workspaceId ?? null;
+    if (this.attachLifecycle.isAttached) {
+      await this.detachSession();
+    }
+
+    this.attachLifecycle.beginAttach({
+      workspaceId: params.workspaceId ?? null,
+      viewOnly: params.viewOnly ?? false,
+    });
     const command: AttachSessionRequest = {
       type: 'attach_session',
       sessionId: params.sessionId,
@@ -776,18 +762,70 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
     await this.waitForInitialSnapshot();
-    this.viewOnly = options.viewOnly ?? false;
+    if (this.attachLifecycle.isAttached) {
+      await this.detachSession();
+    }
     const response = await this.sendTmuxCommand({ type: 'agent-attach', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    await this.attachSession({ sessionId: response.session.id, viewOnly: options.viewOnly });
+    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly });
   }
 
   async detachSession(): Promise<void> {
-    const ctrl: SessionCtrl = { type: 'detach' };
-    await this.sendCommand(ctrl);
+    if (!this.attachLifecycle.isTransportActive) {
+      return;
+    }
+
+    // If we're still in the attaching phase (scripts running, no PTY socket yet),
+    // just clear local state — there's nothing to detach on the machine side.
+    if (this.attachLifecycle.isAttaching) {
+      this.attachLifecycle.clearAttachment({ emitDetached: true });
+      return;
+    }
+    if (this.pendingDetachTransition) {
+      return new Promise<void>((resolve, reject) => {
+        const pending = this.pendingDetachTransition;
+        if (!pending) {
+          resolve();
+          return;
+        }
+        const currentResolve = pending.resolve;
+        const currentReject = pending.reject;
+        pending.resolve = () => { currentResolve(); resolve(); };
+        pending.reject = (error: Error) => { currentReject(error); reject(error); };
+      });
+    }
+
+    const waitForDetach = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingDetachTransition = null;
+        reject(new Error('Timed out waiting for remote detach'));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingDetachTransition = {
+        resolve: () => {
+          clearTimeout(timeout);
+          this.pendingDetachTransition = null;
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(timeout);
+          this.pendingDetachTransition = null;
+          reject(error);
+        },
+        timeout,
+      };
+    });
+
+    try {
+      const ctrl: SessionCtrl = { type: 'detach' };
+      await this.sendCommand(ctrl);
+      await waitForDetach;
+    } catch (error) {
+      this.rejectPendingDetachTransition(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
   async cancelPendingScripts(): Promise<void> {
@@ -1026,7 +1064,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
-    if (this.viewOnly) {
+    if (this.attachLifecycle.currentViewOnly) {
       return;
     }
     this.assertConnected();
@@ -1186,7 +1224,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
-    if (this.mode === 'attached') {
+    if (this.attachLifecycle.isTransportActive) {
       this.emitPtyData(opened.data);
     }
   }
@@ -1257,7 +1295,6 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
 
       this.isConnected = true;
-      this.mode = 'browsing';
       this.handshakeState = null;
       this.emit({ type: 'status', status: 'connected' });
       this.resolveConnect();
@@ -1281,45 +1318,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'replay_undismissed':
         this.resolveUndismissReplay(message);
         return;
-      case 'attached':
-        this.mode = 'attached';
-        this.attachedSessionId = message.sessionId;
-        this.emit({
-          type: 'attached',
-          sessionId: message.sessionId,
-          sessionName: message.sessionName,
-          viewOnly: this.viewOnly,
-          workspaceId: this.attachedWorkspaceId ?? undefined,
-        });
-        this.emit({
-          type: 'session_meta',
-          meta: {
-            sessionName: message.sessionName,
-            processTitle: message.processTitle ?? null,
-            terminalTitle: message.terminalTitle ?? null,
-            lastAlertKind: message.lastAlertKind ?? null,
-            lastAlertPreview: message.lastAlertPreview ?? null,
-            lastAlertAt: message.lastAlertAt ?? null,
-            unreadAlertCount: message.unreadAlertCount ?? null,
-          },
-        });
-        return;
       case 'detached':
-        this.mode = 'browsing';
-        this.attachedSessionId = null;
-        this.attachedWorkspaceId = null;
-        this.viewOnly = false;
-        this.emit({ type: 'detached' });
+        this.attachLifecycle.clearAttachment({ emitDetached: true });
+        this.resolvePendingDetachTransition();
         return;
       case 'session_exited':
-        this.mode = 'browsing';
-        this.attachedSessionId = null;
-        this.attachedWorkspaceId = null;
-        this.emit({
-          type: 'session_exited',
-          sessionId: message.sessionId,
-          exitCode: message.exitCode,
-        });
+        this.attachLifecycle.emitExited(message.exitCode, message.sessionId);
+        this.resolvePendingDetachTransition();
         return;
       case 'workspace_deleted':
         this.resolveWorkspaceDelete(message.workspaceId);
@@ -1537,41 +1542,36 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private handleSessionEvent(message: SessionEventMessage): void {
     if (message.type === 'kicked') {
-      this.mode = 'browsing';
-      this.attachedSessionId = null;
-      this.attachedWorkspaceId = null;
-      this.emit({ type: 'detached' });
+      this.attachLifecycle.clearAttachment({ emitDetached: true });
+      this.resolvePendingDetachTransition();
       return;
     }
 
     if (message.type === 'exited') {
-      const sessionId = this.attachedSessionId;
-      this.mode = 'browsing';
-      this.attachedSessionId = null;
-      this.attachedWorkspaceId = null;
-      if (sessionId) {
-        this.emit({ type: 'session_exited', sessionId, exitCode: message.code });
-      }
+      this.attachLifecycle.emitExited(message.code, message.sessionId);
+      this.resolvePendingDetachTransition();
       return;
     }
 
-    if (message.type === 'attached' && this.attachedSessionId) {
-      this.emit({ type: 'attached', sessionId: this.attachedSessionId, workspaceId: this.attachedWorkspaceId ?? undefined });
+    if (message.type === 'attached' && message.sessionId) {
+      this.attachLifecycle.confirmAttached({
+        sessionId: message.sessionId,
+        sessionName: message.sessionName,
+        workspaceId: this.attachLifecycle.workspaceId,
+        viewOnly: this.attachLifecycle.currentViewOnly,
+      });
       return;
     }
 
     if (message.type === 'session-meta') {
-      this.emit({
-        type: 'session_meta',
-        meta: {
-          sessionName: message.sessionName ?? null,
-          processTitle: message.processTitle ?? null,
-          terminalTitle: message.terminalTitle ?? null,
-          lastAlertKind: message.lastAlertKind ?? null,
-          lastAlertPreview: message.lastAlertPreview ?? null,
-          lastAlertAt: message.lastAlertAt ?? null,
-          unreadAlertCount: message.unreadAlertCount ?? null,
-        },
+      this.attachLifecycle.emitSessionMeta({
+        sessionName: message.sessionName ?? null,
+        processTitle: message.processTitle ?? null,
+        terminalTitle: message.terminalTitle ?? null,
+        lastAlertKind: message.lastAlertKind ?? null,
+        lastAlertPreview: message.lastAlertPreview ?? null,
+        lastAlertAt: message.lastAlertAt ?? null,
+        unreadAlertCount: message.unreadAlertCount ?? null,
       });
     }
   }
@@ -1612,26 +1612,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private emitPtyData(data: Uint8Array): void {
-    if (!this.ptyOutputHandler) {
-      this.pendingPtyChunks.push(data);
-      return;
-    }
-
-    const combined = this.pendingUtf8Bytes.length
-      ? concatUint8Array([this.pendingUtf8Bytes, data])
-      : data;
-
-    const boundary = findUtf8Boundary(combined);
-    if (boundary < combined.length) {
-      this.pendingUtf8Bytes = combined.slice(boundary);
-    } else {
-      this.pendingUtf8Bytes = new Uint8Array(0);
-    }
-
-    const chunk = combined.slice(0, boundary);
-    if (chunk.length > 0) {
-      this.ptyOutputHandler(chunk);
-    }
+    this.attachLifecycle.pushPtyData(data);
   }
 
   private async sendCommand(message: ClientToMachineMessage | SessionCtrl): Promise<void> {
@@ -1757,13 +1738,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private resetState(): void {
     this.isConnected = false;
-    this.mode = 'browsing';
-    this.attachedSessionId = null;
-    this.attachedWorkspaceId = null;
+    this.attachLifecycle.reset();
+    this.rejectPendingDetachTransition(new Error('Remote session disconnected'));
     this.handshakeState = null;
     this.sessionKeys = null;
-    this.pendingPtyChunks = [];
-    this.pendingUtf8Bytes = new Uint8Array(0);
     this.pendingReplayFrameChunks.clear();
     this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
@@ -1785,6 +1763,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.initialSnapshotReject = null;
     this.initialSnapshotReceived = false;
   }
+
+  private resolvePendingDetachTransition(): void {
+    const pending = this.pendingDetachTransition;
+    if (!pending) {
+      return;
+    }
+    pending.resolve();
+  }
+
+  private rejectPendingDetachTransition(error: Error): void {
+    const pending = this.pendingDetachTransition;
+    if (!pending) {
+      return;
+    }
+    pending.reject(error);
+  }
+
 
   private resolveInitialSnapshot(): void {
     if (this.initialSnapshotReceived) {

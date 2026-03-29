@@ -192,20 +192,6 @@ export interface ReplayUndismissedResponse {
   replayId: string;
 }
 
-/** Session attached successfully - transitions to attached mode */
-export interface AttachedResponse {
-  type: "attached";
-  sessionId: string;
-  sessionName: string;
-   processTitle?: string;
-   terminalTitle?: string;
-   lastAlertKind?: import('../tmux-lite/protocol.js').InboxItem['type'];
-   lastAlertPreview?: string;
-   lastAlertAt?: number;
-   unreadAlertCount?: number;
-  cols: number;
-  rows: number;
-}
 
 /** Detached from session - back to browsing mode */
 export interface DetachedResponse {
@@ -310,7 +296,6 @@ export type MachineToClientMessage =
   | ReplayTimelineResponse
   | ReplayDismissedResponse
   | ReplayUndismissedResponse
-  | AttachedResponse
   | DetachedResponse
   | SessionExitedResponse
   | ErrorResponse

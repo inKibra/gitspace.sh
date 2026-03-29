@@ -51,7 +51,7 @@ import { deleteWorkspaceCore } from '../../core/workspace.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
 import { getWorkspaceRoot } from '../../core/paths.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
-import { findUtf8Boundary } from '../../utils/utf8.js';
+import { AttachLifecycle } from './attach-lifecycle.js';
 import {
   matchesWorkspaceId,
   resolveWorkspaceName,
@@ -227,16 +227,6 @@ function getDefaultTerminalSize(): { cols: number; rows: number } {
   return { cols, rows };
 }
 
-function concatUint8Array(parts: Uint8Array[]): Uint8Array {
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const combined = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    combined.set(part, offset);
-    offset += part.length;
-  }
-  return combined;
-}
 
 function isAttachRetryableError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -394,16 +384,11 @@ export class LocalSessionBackend implements SessionBackend {
   private readonly deps: LocalSessionBackendDependencies;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
   private connected = false;
-  private attachedSessionId: string | null = null;
-  private attachedWorkspaceId: string | null = null;
+  private readonly attachLifecycle = new AttachLifecycle((event) => this.emit(event));
   private sessionSocket: LocalSessionSocketConnection | null = null;
   private sessionSocketSessionId: string | null = null;
   private sessionSocketGeneration = 0;
   private closingSessionSocket = false;
-  private ptyOutputHandler: ((data: Uint8Array) => void) | null = null;
-  private pendingPtyChunks: Uint8Array[] = [];
-  private pendingUtf8Bytes = new Uint8Array(0);
-  private viewOnly = false;
   private pendingAttachAbortController: AbortController | null = null;
   private pendingAttachRequestId: string | null = null;
   private agentStateCache: Record<string, WorkspaceAgentState> = {};
@@ -424,14 +409,7 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
-    this.ptyOutputHandler = handler;
-    if (!handler || this.pendingPtyChunks.length === 0) {
-      return;
-    }
-
-    const pending = concatUint8Array(this.pendingPtyChunks);
-    this.pendingPtyChunks = [];
-    this.emitPtyData(pending);
+    this.attachLifecycle.setOutputHandler(handler);
   }
 
   async connect(): Promise<void> {
@@ -478,11 +456,10 @@ export class LocalSessionBackend implements SessionBackend {
     this.stopAgentWatch?.();
     this.stopAgentWatch = null;
 
+    const wasAttached = this.attachLifecycle.isAttached;
     await this.closeSessionSocket(false);
+    this.attachLifecycle.reset();
     this.connected = false;
-    const wasAttached = this.attachedSessionId !== null;
-    this.attachedSessionId = null;
-    this.attachedWorkspaceId = null;
     this.emit({ type: 'status', status: 'disconnected' });
     if (wasAttached) {
       this.emit({ type: 'detached' });
@@ -704,7 +681,7 @@ export class LocalSessionBackend implements SessionBackend {
     if (!this.connected) {
       await this.connect();
     }
-    this.viewOnly = params.viewOnly ?? false;
+    this.attachLifecycle.beginAttach({ viewOnly: params.viewOnly ?? false });
 
     let targetSession: TmuxSession | null = null;
     let targetWorkspaceId: string | null = null;
@@ -723,10 +700,10 @@ export class LocalSessionBackend implements SessionBackend {
       // resolved workspace separate and re-apply it for each attach attempt.
       const snapshotSession = this.machineStateClient.getSnapshot().terminalSessionsById[params.sessionId];
       targetWorkspaceId = snapshotSession?.workspaceId ?? null;
-      this.attachedWorkspaceId = targetWorkspaceId;
+      this.attachLifecycle.beginAttach({ workspaceId: targetWorkspaceId, viewOnly: params.viewOnly ?? false });
     } else if (params.workspaceId) {
       targetWorkspaceId = params.workspaceId;
-      this.attachedWorkspaceId = targetWorkspaceId;
+      this.attachLifecycle.beginAttach({ workspaceId: targetWorkspaceId, viewOnly: params.viewOnly ?? false });
       let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
       try {
         const prepared = await this.deps.prepareAttachSession({
@@ -748,7 +725,7 @@ export class LocalSessionBackend implements SessionBackend {
         });
         targetSession = prepared.session;
         targetWorkspaceId = prepared.workspaceId ?? targetWorkspaceId;
-        this.attachedWorkspaceId = targetWorkspaceId;
+        this.attachLifecycle.updateAttachContext({ workspaceId: targetWorkspaceId, viewOnly: params.viewOnly ?? false });
         this.pendingAttachRequestId = null;
       } catch (error) {
         this.pendingAttachRequestId = null;
@@ -783,14 +760,7 @@ export class LocalSessionBackend implements SessionBackend {
       this.sessionSocket.sendControl({ type: 'detach' });
     }
 
-    const hadAttached = this.attachedSessionId !== null;
-    await this.closeSessionSocket(false);
-    this.attachedSessionId = null;
-    this.attachedWorkspaceId = null;
-    this.viewOnly = false;
-    if (hadAttached) {
-      this.emit({ type: 'detached' });
-    }
+    await this.closeSessionSocket(true);
   }
 
   async cancelPendingScripts(): Promise<void> {
@@ -802,11 +772,11 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
-    if (this.viewOnly) {
+    if (this.attachLifecycle.currentViewOnly) {
       return;
     }
     const socket = this.sessionSocket;
-    if (!socket || !this.attachedSessionId) {
+    if (!socket || !this.attachLifecycle.sessionId) {
       throw new SpacesError('No attached local session', 'SYSTEM_ERROR', 2);
     }
     socket.sendPty(data);
@@ -814,7 +784,7 @@ export class LocalSessionBackend implements SessionBackend {
 
   async resizePty(cols: number, rows: number): Promise<void> {
     const socket = this.sessionSocket;
-    if (!socket || !this.attachedSessionId) {
+    if (!socket || !this.attachLifecycle.sessionId) {
       throw new SpacesError('No attached local session', 'SYSTEM_ERROR', 2);
     }
     socket.sendControl({ type: 'resize', cols, rows });
@@ -1074,7 +1044,7 @@ export class LocalSessionBackend implements SessionBackend {
     workspaceId: string | null,
   ): Promise<void> {
     await this.closeSessionSocket(true, { preserveWorkspaceId: true });
-    this.attachedWorkspaceId = workspaceId;
+    this.attachLifecycle.beginAttach({ workspaceId, viewOnly: params.viewOnly ?? false });
 
     const size = getDefaultTerminalSize();
     const cols = params.cols ?? size.cols;
@@ -1115,7 +1085,7 @@ export class LocalSessionBackend implements SessionBackend {
               ) {
                 return;
               }
-              this.emitPtyData(data);
+              this.attachLifecycle.pushPtyData(data);
             },
             onControl: (event) => {
               if (
@@ -1125,16 +1095,11 @@ export class LocalSessionBackend implements SessionBackend {
                 return;
               }
               if (event.type === 'attached') {
-                this.attachedSessionId = session.id;
-                this.emit({
-                  type: 'attached',
+                this.attachLifecycle.confirmAttached({
                   sessionId: session.id,
                   sessionName: session.name,
-                  viewOnly: this.viewOnly,
-                  workspaceId: this.attachedWorkspaceId ?? undefined,
-                });
-                this.emit({
-                  type: 'session_meta',
+                  workspaceId: this.attachLifecycle.workspaceId,
+                  viewOnly: this.attachLifecycle.currentViewOnly,
                   meta: {
                     sessionName: session.name,
                     processTitle: session.processTitle ?? null,
@@ -1162,20 +1127,16 @@ export class LocalSessionBackend implements SessionBackend {
                 return;
               }
 
-              const hadAttached = this.attachedSessionId !== null;
               this.sessionSocket = null;
               this.sessionSocketSessionId = null;
-              this.attachedSessionId = null;
-              this.attachedWorkspaceId = null;
 
               if (!settled) {
+                this.attachLifecycle.clearAttachment({ preserveWorkspaceId: true, preserveViewOnly: true });
                 settleReject(new SpacesError(`Local session socket closed: ${session.name}`, 'SYSTEM_ERROR', 2));
                 return;
               }
 
-              if (hadAttached) {
-                this.emit({ type: 'detached' });
-              }
+              this.attachLifecycle.clearAttachment({ emitDetached: true });
             },
             onError: (error) => {
               this.emit({ type: 'error', message: error.message });
@@ -1219,7 +1180,6 @@ export class LocalSessionBackend implements SessionBackend {
 
   private async closeSessionSocket(emitDetached: boolean, options: { preserveWorkspaceId?: boolean } = {}): Promise<void> {
     const socket = this.sessionSocket;
-    const hadAttached = this.attachedSessionId !== null;
 
     // Invalidate any stale socket callbacks from earlier connections.
     this.sessionSocketGeneration += 1;
@@ -1231,16 +1191,11 @@ export class LocalSessionBackend implements SessionBackend {
       this.sessionSocketSessionId = null;
     }
 
-    this.attachedSessionId = null;
-    if (!options.preserveWorkspaceId) {
-      this.attachedWorkspaceId = null;
-    }
-    this.pendingUtf8Bytes = new Uint8Array(0);
-    this.pendingPtyChunks = [];
-
-    if (emitDetached && hadAttached) {
-      this.emit({ type: 'detached' });
-    }
+    this.attachLifecycle.clearAttachment({
+      emitDetached,
+      preserveWorkspaceId: options.preserveWorkspaceId ?? false,
+      preserveViewOnly: options.preserveWorkspaceId ?? false,
+    });
   }
 
   private handleSessionControl(event: SessionEvent, sessionId: string): void {
@@ -1251,23 +1206,20 @@ export class LocalSessionBackend implements SessionBackend {
 
     if (event.type === 'exited') {
       const exitCode = typeof event.code === 'number' ? event.code : undefined;
-      this.emit({ type: 'session_exited', sessionId, exitCode });
+      this.attachLifecycle.emitExited(exitCode, sessionId);
       void this.closeSessionSocket(false);
       return;
     }
 
     if (event.type === 'session-meta') {
-      this.emit({
-        type: 'session_meta',
-        meta: {
-          sessionName: event.sessionName ?? null,
-          processTitle: event.processTitle ?? null,
-          terminalTitle: event.terminalTitle ?? null,
-          lastAlertKind: event.lastAlertKind ?? null,
-          lastAlertPreview: event.lastAlertPreview ?? null,
-          lastAlertAt: event.lastAlertAt ?? null,
-          unreadAlertCount: event.unreadAlertCount ?? null,
-        },
+      this.attachLifecycle.emitSessionMeta({
+        sessionName: event.sessionName ?? null,
+        processTitle: event.processTitle ?? null,
+        terminalTitle: event.terminalTitle ?? null,
+        lastAlertKind: event.lastAlertKind ?? null,
+        lastAlertPreview: event.lastAlertPreview ?? null,
+        lastAlertAt: event.lastAlertAt ?? null,
+        unreadAlertCount: event.unreadAlertCount ?? null,
       });
     }
   }
@@ -1309,26 +1261,7 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   private emitPtyData(data: Uint8Array): void {
-    if (!this.ptyOutputHandler) {
-      this.pendingPtyChunks.push(data);
-      return;
-    }
-
-    const combined = this.pendingUtf8Bytes.length
-      ? concatUint8Array([this.pendingUtf8Bytes, data])
-      : data;
-
-    const boundary = findUtf8Boundary(combined);
-    if (boundary < combined.length) {
-      this.pendingUtf8Bytes = combined.slice(boundary);
-    } else {
-      this.pendingUtf8Bytes = new Uint8Array(0);
-    }
-
-    const chunk = combined.slice(0, boundary);
-    if (chunk.length > 0) {
-      this.ptyOutputHandler(chunk);
-    }
+    this.attachLifecycle.pushPtyData(data);
   }
 
   private emit(event: BackendEvent): void {
@@ -1474,7 +1407,7 @@ export class LocalSessionBackend implements SessionBackend {
       throw new Error('Unexpected agent attach response');
     }
     await this.refreshMachineSnapshotState();
-    await this.attachSession({ sessionId: response.session.id, viewOnly: options.viewOnly });
+    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly });
   }
 
   // ============================================================================

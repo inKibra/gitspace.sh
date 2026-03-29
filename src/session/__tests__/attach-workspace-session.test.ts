@@ -53,3 +53,41 @@ describe('attachWorkspaceSession command sessions', () => {
     expect(prepareWorkspaceForSession).not.toHaveBeenCalled();
   });
 });
+
+describe('attachWorkspaceSession skip policy', () => {
+  it('uses skip bundle mode when scriptPolicy is skip', async () => {
+    const prepareWorkspaceForSession = mock(async () => ({ success: true as const }));
+    const createSession = mock(async () => ({
+      id: 'session-2',
+      name: 'acme:feature-1:1',
+      socketPath: '/tmp/session-2.sock',
+      pid: 456,
+      attached: false,
+      cwd: '/tmp/acme/feature-1',
+      createdAt: Date.now(),
+    }));
+
+    await attachWorkspaceSession({
+      scanWorkspaces: async () => [{
+        id: 'feature-1',
+        path: '/tmp/acme/feature-1',
+        projectName: 'acme',
+      }],
+      listSessions: async () => [],
+      createSession,
+      prepareWorkspaceForSession,
+    }, {
+      workspaceId: 'acme:feature-1',
+      scriptPolicy: 'skip',
+    });
+
+    expect(prepareWorkspaceForSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectName: 'acme',
+        workspaceName: 'feature-1',
+        bundleMode: 'skip',
+        scriptPolicy: 'skip',
+      })
+    );
+  });
+});

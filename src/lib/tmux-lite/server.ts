@@ -2408,6 +2408,7 @@ routerListener = Bun.listen({
                 }
                 targetSession = getSessionInfo(s);
               } else if (cmd.workspaceId) {
+                console.log('[tmux-lite] attach-prepare workspace', { workspaceId: cmd.workspaceId, sessionName: cmd.sessionName, scriptPolicy: cmd.scriptPolicy });
                 let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
                 const prepared = await attachWorkspaceSession({
                   scanWorkspaces,
@@ -2441,6 +2442,7 @@ routerListener = Bun.listen({
                 if (!cmd.command) {
                   writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
                 }
+                console.log('[tmux-lite] attach-prepare created session', { name: prepared.session.name, id: prepared.session.id, scriptPolicy: cmd.scriptPolicy });
                 targetSession = prepared.session;
                 workspaceId = prepared.workspace.id;
               } else {
@@ -2454,6 +2456,13 @@ routerListener = Bun.listen({
               pendingAttachControllers.delete(cmd.requestId);
               const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
               const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
+              console.error('[tmux-lite] attach-prepare failed', {
+                workspaceId: cmd.workspaceId,
+                sessionName: cmd.sessionName,
+                scriptPolicy: cmd.scriptPolicy,
+                code: typedError?.code,
+                message,
+              });
               res = typedError?.code
                 ? { type: 'error', message, code: typedError.code }
                 : { type: 'error', message };
