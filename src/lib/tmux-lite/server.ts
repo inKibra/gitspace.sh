@@ -11,9 +11,10 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
+import { VirtualTerminal } from './agents/virtual-terminal.js';
+import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-session-registry.js';
 import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
-import { resolveWorkspaceRef } from "../events/paths.js";
 import {
   applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
@@ -48,6 +49,7 @@ import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/typ
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
   attachAgentSession as ensureAgentTerminalSession,
+  applyPiRuntimeUpdate,
   archiveAgentSession,
   abortAgentSession,
   closeAgentSession,
@@ -56,20 +58,30 @@ import {
   getAgentControlSnapshot,
   getKnownAgentSessions,
   listLiveAgentSessions,
+  promptAgentSession,
+  rebindPiTerminalSessionOwnership,
+  releasePiTerminalSessionOwnership,
   respondToAgentPermission,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
 } from './agent-control.js';
-import { defaultOpenCodeRuntimeManager } from '../../agents/opencode-runtime.js';
+import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
+import {
+  configurePiRuntimeEnvironment,
+  PI_RUNTIME_TERMINAL_SESSION_ENV,
+  verifyPiRuntimeUpdateCommand,
+} from './agents/pi-runtime-status.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
 import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
-import { matchesWorkspaceId } from '../../utils/workspace-id.js';
+import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
+import { signalSubprocessTree } from './process-tree.js';
+import { PortConflictError } from '../processes/ports.js';
 import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
@@ -100,9 +112,11 @@ import {
 // Using 512KB to be well under the 1MB limit
 const PTY_CHUNK_SIZE = 512 * 1024;
 
-// Max scrollback lines to include in serialized state during attach
-// This is a limit - if less scrollback exists, we'll send what's available
-const SERIALIZE_SCROLLBACK_LINES = 10_000;
+// Max scrollback lines to include when serializing live state for an attach.
+const ATTACH_SERIALIZE_SCROLLBACK_LINES = 2_000;
+
+// Keep replay checkpoints smaller than full attach serialization to cap disk churn.
+const REPLAY_CHECKPOINT_SCROLLBACK_LINES = 250;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
@@ -111,6 +125,7 @@ if (rawArgs.includes("--test")) {
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
+const PI_RUNTIME_ENV = configurePiRuntimeEnvironment(ROUTER_SOCKET);
 const SERVER_START_TIME = Date.now();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
@@ -179,17 +194,18 @@ interface ReplayRuntime {
 interface SessionData {
   info: Session;
   listener: any;
-  ptyTerminal: Bun.Terminal;
+  ptyTerminal: Bun.Terminal | null;
   xterm: XTerminal;
   serialize: SerializeAddon;
   idleState: IdleDetectionState;
-  proc: Bun.Subprocess;
+  proc: Bun.Subprocess | null;
+  virtualTerminal: VirtualTerminal | null;
   client: any;
   clientWriter: any;
   ctrlBuffer: Buffer;
   pendingWrites: number;  // Track pending xterm writes
   attaching: boolean;
-  attachBuffer: Buffer[];
+  attachDirty: boolean;
   attachPending: boolean;
   attachTimer: any;
   processTitle: string;   // Title set by running process (via OSC 0)
@@ -361,6 +377,13 @@ function ensureWorkspacePmSubscribed(): void {
   workspacePmSubscribed = true;
 }
 
+async function resolveWorkspaceIdForRuntimePath(workspacePath: string): Promise<string | null> {
+  const normalizedPath = normalizeWorkspacePath(workspacePath);
+  const workspaces = await scanWorkspaces();
+  const match = workspaces.find((workspace) => normalizeWorkspacePath(workspace.path) === normalizedPath);
+  return match ? toCanonicalWorkspaceId(match) : null;
+}
+
 void getAgentControlReady().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[server] failed to initialize agent control: ${message}`);
@@ -456,7 +479,7 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   clearAttachTimer(session);
   session.attachPending = false;
   session.attaching = false;
-  session.attachBuffer = [];
+  session.attachDirty = false;
   session.info.attached = false;
   session.clientWriter = null;
   if (session.client) {
@@ -467,6 +490,17 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   safeUnlink(session.info.socketPath);
   if (options.removeFromMap !== false) {
     sessions.delete(session.info.id);
+  }
+
+  const workspaceId = session.info.metadata?.workspaceId;
+  const agentSessionId = session.info.metadata?.agentSessionId;
+  releasePiTerminalSessionOwnership(session.info.id);
+  if (workspaceId && agentSessionId) {
+    applyPiRuntimeUpdate(workspaceId, agentSessionId, {
+      status: { type: 'idle' },
+      pendingPermissions: [],
+      pendingQuestions: [],
+    });
   }
 }
 
@@ -482,16 +516,14 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
     }
     try { session.xterm.dispose(); } catch {}
     cleanupSessionResources(session, { removeFromMap: false });
-    try { session.proc.kill(9); } catch {}
+    if (session.proc) try { signalSubprocessTree(session.proc, 'SIGKILL'); } catch {}
+    if (session.virtualTerminal) removeVirtualTerminal(session.info.id);
   }
   sessions.clear();
 
   stopListener(routerListener);
   safeUnlink(PID_FILE);
   safeUnlink(ROUTER_SOCKET);
-  void defaultOpenCodeRuntimeManager.shutdown().catch(() => {
-    // non-fatal during shutdown
-  });
 }
 
 // How long after last interaction before we consider the user "inactive"
@@ -556,17 +588,7 @@ function terminalSignalsEnabled(ptyTerminal: Bun.Terminal): boolean {
 }
 
 function sendInterruptSignal(proc: Bun.Subprocess): boolean {
-  try {
-    process.kill(-proc.pid, 'SIGINT');
-    return true;
-  } catch {}
-
-  try {
-    process.kill(proc.pid, 'SIGINT');
-    return true;
-  } catch {}
-
-  return false;
+  return signalSubprocessTree(proc, 'SIGINT');
 }
 
 // ============================================================================
@@ -902,7 +924,7 @@ function createReplayCheckpoint(replay: ReplayRuntime, session: SessionData): Re
     },
     serializer: {
       kind: "xterm-serialize",
-      scrollbackLines: SERIALIZE_SCROLLBACK_LINES,
+      scrollbackLines: REPLAY_CHECKPOINT_SCROLLBACK_LINES,
     },
     ansiPath: `checkpoints/${checkpointId}.ansi`,
   };
@@ -917,7 +939,7 @@ function writeReplayCheckpointNow(session: SessionData): void {
   try {
     const checkpoint = createReplayCheckpoint(replay, session);
     const serialized = session.serialize.serialize({
-      scrollback: SERIALIZE_SCROLLBACK_LINES,
+      scrollback: REPLAY_CHECKPOINT_SCROLLBACK_LINES,
     });
     writeReplayCheckpoint(replay.replayId, checkpoint, serialized);
     replay.checkpointCount++;
@@ -1336,16 +1358,17 @@ function createPtyDataHandler(
     // Our custom OSC 777 exit sequences are harmless - terminals ignore unknown OSC
     // Converting to string and back was corrupting cursor movement/screen control sequences
 
-    if (session.attaching) {
-      session.attachBuffer.push(Buffer.from(data));
-      return;
-    }
-
-    // Feed data to xterm-headless for state tracking
+    // Keep xterm state current during attach so the client can be seeded
+    // from the latest terminal snapshot instead of replaying queued output.
     session.pendingWrites++;
     xterm.write(data, () => {
       session.pendingWrites--;
     });
+
+    if (session.attaching) {
+      session.attachDirty = true;
+      return;
+    }
 
     // Send to client (buffered - avoid framed protocol desync on backpressure)
     writeToClient(session, encodePTY(data));
@@ -1463,10 +1486,9 @@ function sendSerializedState(session: SessionData, sessionName: string): void {
     writeToClient(session, encodePTY(Buffer.from("\x1b[2J\x1b[H"))); // clear + home
 
     if (!skipSerialize) {
-      // Get serialized terminal state (including modes) for consistent redraws
-      // Limit scrollback to prevent oversized payloads
+      // Get serialized terminal state (including modes) for consistent redraws.
       const serialized = session.serialize.serialize({
-        scrollback: SERIALIZE_SCROLLBACK_LINES,
+        scrollback: ATTACH_SERIALIZE_SCROLLBACK_LINES,
       });
       const serializedBytes = Buffer.from(serialized);
 
@@ -1514,39 +1536,27 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
     session.attachPending = false;
     clearAttachTimer(session);
 
-    // Wait for any pending xterm writes to complete
-    const sendState = () => {
+    const settleAndSendState = () => {
       if (session.pendingWrites > 0) {
-        setTimeout(sendState, 10);
+        setTimeout(settleAndSendState, 10);
         return;
       }
 
+      session.attachDirty = false;
       sendSerializedState(session, sessionName);
       sendCursorState(session);
 
       writeToClient(session, encodeControl({ type: "attach-ready", cols: session.xterm.cols, rows: session.xterm.rows }));
 
-      const drainAttachBuffer = () => {
-        const buffered = session.attachBuffer;
-        session.attachBuffer = [];
-        for (const chunk of buffered) {
-          session.pendingWrites++;
-          session.xterm.write(chunk, () => {
-            session.pendingWrites--;
-          });
-          writeToClient(session, encodePTY(chunk));
-        }
-      };
-
       const attachStart = Date.now();
       const finalizeAttach = () => {
-        if (session.attachBuffer.length > 0) {
-          drainAttachBuffer();
+        if (session.pendingWrites > 0 && Date.now() - attachStart < 500) {
+          setTimeout(finalizeAttach, 10);
+          return;
         }
 
-        if ((session.pendingWrites > 0 || session.attachBuffer.length > 0) &&
-            Date.now() - attachStart < 200) {
-          setTimeout(finalizeAttach, 10);
+        if (session.attachDirty && Date.now() - attachStart < 500) {
+          setTimeout(settleAndSendState, 10);
           return;
         }
 
@@ -1562,7 +1572,7 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
       finalizeAttach();
     };
 
-    sendState();
+    settleAndSendState();
   };
 }
 
@@ -1593,7 +1603,7 @@ function createSessionSocketHandlers(
 
       session.attaching = true;
       session.attachPending = true;
-      session.attachBuffer = [];
+      session.attachDirty = false;
       session.client = socket;
       session.clientWriter = createBufferedSocketWriter(socket);
       session.info.attached = true;
@@ -1672,7 +1682,7 @@ function createSessionSocketHandlers(
             session.attaching = false;
             session.attachPending = false;
             clearAttachTimer(session);
-            session.attachBuffer = [];
+            session.attachDirty = false;
             session.lastDetached = Date.now(); // Record detach time for grace period
             socket.end();
             console.log(`[${sessionName}] detached`);
@@ -1724,7 +1734,7 @@ function createSessionSocketHandlers(
         session.attaching = false;
         session.attachPending = false;
         clearAttachTimer(session);
-        session.attachBuffer = [];
+        session.attachDirty = false;
         console.log(`[${sessionName}] disconnected`);
       }
     }
@@ -1798,7 +1808,7 @@ function cleanupFailedSessionCreation(
   socketPath: string
 ): void {
   try { disposeDsr(); } catch {}
-  try { proc.kill(9); } catch {}
+  try { signalSubprocessTree(proc, 'SIGKILL'); } catch {}
   try { xterm.dispose(); } catch {}
   safeUnlink(socketPath);
   console.warn(`[${sessionName}] cleaned up failed session startup`);
@@ -1839,9 +1849,8 @@ function createSession(
   const xterm = new XTerminal({
     cols,
     rows,
-    // Keep stored scrollback bounded; match ghostty-web default (10k).
-    // Note: attach serialization is additionally capped by SERIALIZE_SCROLLBACK_LINES.
-    scrollback: 10_000,
+    // Keep stored scrollback bounded.
+    scrollback: 2_000,
     allowProposedApi: true,
   });
 
@@ -1897,9 +1906,14 @@ function createSession(
   const spawnCmd = options?.command
     ? [options.command, ...(options.args ?? [])]
     : [shell];
-  const spawnEnv = options?.env
-    ? { ...shellEnv, ...options.env }
-    : shellEnv;
+  const spawnEnv = {
+    ...shellEnv,
+    ...(options?.env ?? {}),
+    ...(options?.kind === 'agent' ? {
+      ...PI_RUNTIME_ENV,
+      [PI_RUNTIME_TERMINAL_SESSION_ENV]: id,
+    } : {}),
+  };
 
   const proc = Bun.spawn(spawnCmd, {
     terminal: ptyTerminal,
@@ -1961,12 +1975,13 @@ function createSession(
     serialize,
     idleState,
     proc,
+    virtualTerminal: null,
     client: null,
     clientWriter: null,
     ctrlBuffer: Buffer.alloc(0),
     pendingWrites: 0,
     attaching: false,
-    attachBuffer: [],
+    attachDirty: false,
     attachPending: false,
     attachTimer: null,
     processTitle: '',
@@ -1985,6 +2000,246 @@ function createSession(
   }
 
   console.log(`[${sessionName}] created (pid ${proc.pid})`);
+  return info;
+}
+
+/**
+ * Create a virtual session backed by VirtualTerminal instead of a PTY process.
+ * The VirtualTerminal is registered in the shared registry so the coordinator
+ * (running in the same process) can retrieve it to start InteractiveMode.
+ */
+function createVirtualSession(
+  name: string | undefined,
+  cwd: string,
+  options?: {
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    metadata?: Record<string, string>;
+  }
+): Session {
+  const id = genId();
+  const sessionName = name || `virtual-${id}`;
+  const socketPath = getSessionSocketPath(id);
+  const socketDir = dirname(socketPath);
+  if (!existsSync(socketDir)) {
+    mkdirSync(socketDir, { recursive: true });
+  }
+  safeUnlink(socketPath);
+
+  const cols = 80;
+  const rows = 24;
+
+  // xterm-headless for terminal state tracking (same as PTY sessions)
+  const xterm = new XTerminal({
+    cols,
+    rows,
+    // Agent sessions are full-screen TUI; minimal scrollback needed.
+    scrollback: 100,
+    allowProposedApi: true,
+  });
+
+  const serialize = new SerializeAddon();
+  xterm.loadAddon(serialize);
+
+  const { getProcessTitle } = setupXtermEventHandlers(id, sessionName, xterm);
+
+  const idleState: IdleDetectionState = {
+    lastOutputTime: 0,
+    outputSinceIdle: 0,
+    idleTimer: null,
+  };
+
+  // VirtualTerminal writer: feeds pi-tui output into xterm-headless and clients.
+  // This mirrors what createPtyDataHandler does for PTY sessions.
+  const virtualTerminal = new VirtualTerminal(cols, rows, (data: string) => {
+    idleState.lastOutputTime = Date.now();
+    idleState.outputSinceIdle += data.length;
+
+    const session = sessions.get(id);
+    if (!session) return;
+
+    // Track pending writes for attach synchronization
+    session.pendingWrites++;
+    xterm.write(data, () => {
+      session.pendingWrites--;
+      if (session.attaching) {
+        session.attachDirty = true;
+      }
+      // Fan out to attached client
+      const encoded = encodePTY(data);
+      writeToClient(session, encoded);
+    });
+  });
+
+  registerVirtualTerminal(id, virtualTerminal);
+
+  // Session info
+  const info: Session = {
+    id,
+    name: sessionName,
+    socketPath,
+    pid: process.pid, // No child process; use server PID for identification
+    attached: false,
+    cwd,
+    createdAt: Date.now(),
+    kind: options?.kind ?? 'agent',
+    hidden: options?.hidden ?? true,
+    metadata: options?.metadata,
+  };
+
+  const startAttach = createStartAttach(sessionName);
+
+  // Socket handlers for virtual sessions — route input to VirtualTerminal
+  const socketHandlers = {
+    open(socket: any) {
+      const session = sessions.get(id);
+      if (!session) return socket.end();
+
+      if (session.client) {
+        writeToClient(session, encodeControl({ type: 'kicked' }));
+        session.client.end();
+      }
+
+      session.attaching = true;
+      session.attachPending = true;
+      session.attachDirty = false;
+      session.client = socket;
+      session.clientWriter = createBufferedSocketWriter(socket);
+      session.info.attached = true;
+      session.lastAttached = Date.now();
+      session.ctrlBuffer = Buffer.alloc(0);
+      clearAttachTimer(session);
+      session.attachTimer = setTimeout(() => {
+        if (session.attachPending) {
+          console.log(`[${sessionName}] WARN: attach-init not received after 5s, starting attach anyway`);
+          startAttach(session);
+        }
+      }, 5000);
+    },
+
+    data(socket: any, data: Buffer) {
+      const session = sessions.get(id);
+      if (!session) return;
+
+      const applyResize = (cols: number, rows: number) => {
+        try {
+          virtualTerminal.resize(cols, rows);
+          session.xterm.resize(cols, rows);
+        } catch {}
+      };
+
+      let buf = Buffer.from(data);
+      if (session.ctrlBuffer.length > 0) {
+        buf = Buffer.concat([session.ctrlBuffer, buf]);
+      }
+
+      let frames;
+      let remaining;
+      try {
+        const result = parseFrames(buf);
+        frames = result.frames;
+        remaining = result.remaining;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Frame parse error';
+        console.error(`[${sessionName}] Frame parse error: ${msg}`);
+        socket.end();
+        return;
+      }
+      session.ctrlBuffer = Buffer.from(remaining);
+
+      for (const frame of frames) {
+        if (frame.type === FrameType.CONTROL) {
+          const ctrl = decodeControl(frame.payload) as SessionCtrl;
+          if (ctrl.type === 'resize' || ctrl.type === 'attach-init') {
+            applyResize(ctrl.cols, ctrl.rows);
+            if (session.attaching && session.attachPending) {
+              startAttach(session);
+            }
+          } else if (ctrl.type === 'detach') {
+            writeToClient(session, encodePTY(TERM_RESET));
+            session.client = null;
+            session.clientWriter = null;
+            session.info.attached = false;
+            session.attaching = false;
+            session.attachPending = false;
+            clearAttachTimer(session);
+            session.attachDirty = false;
+            session.lastDetached = Date.now();
+            socket.end();
+            console.log(`[${sessionName}] detached`);
+          }
+        } else if (frame.type === FrameType.PTY) {
+          // Route client keystrokes to VirtualTerminal → pi-tui
+          const text = Buffer.from(frame.payload).toString('utf-8');
+          virtualTerminal.injectInput(text);
+          session.lastInteraction = Date.now();
+        }
+      }
+    },
+
+    drain(socket: any) {
+      const session = sessions.get(id);
+      if (session && session.client === socket) {
+        flushClient(session);
+      }
+    },
+
+    close(socket: any) {
+      const session = sessions.get(id);
+      if (session && session.client === socket) {
+        session.client = null;
+        session.clientWriter = null;
+        session.info.attached = false;
+        session.attaching = false;
+        session.attachPending = false;
+        clearAttachTimer(session);
+        session.attachDirty = false;
+        console.log(`[${sessionName}] disconnected`);
+      }
+    },
+  };
+
+  let listener;
+  try {
+    listener = Bun.listen({
+      unix: socketPath,
+      socket: socketHandlers,
+    });
+  } catch (error) {
+    removeVirtualTerminal(id);
+    try { xterm.dispose(); } catch {}
+    safeUnlink(socketPath);
+    throw error;
+  }
+
+  sessions.set(id, {
+    info,
+    listener,
+    ptyTerminal: null,
+    xterm,
+    serialize,
+    idleState,
+    proc: null,
+    virtualTerminal,
+    client: null,
+    clientWriter: null,
+    ctrlBuffer: Buffer.alloc(0),
+    pendingWrites: 0,
+    attaching: false,
+    attachDirty: false,
+    attachPending: false,
+    attachTimer: null,
+    processTitle: '',
+    terminalTitle: '',
+    unreadAlertCount: 0,
+    lastInteraction: 0,
+    lastDetached: 0,
+    lastAttached: 0,
+    replay: null,
+    replayCheckpointPending: false,
+  });
+
+  console.log(`[${sessionName}] virtual session created`);
   return info;
 }
 
@@ -2125,6 +2380,22 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'new-virtual':
+            try {
+              const session = createVirtualSession(cmd.name, cmd.cwd, {
+                kind: cmd.kind,
+                hidden: cmd.hidden,
+                metadata: cmd.metadata,
+              });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'session', session };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              console.error(`[server] createVirtualSession failed: ${errMsg}`);
+              res = { type: 'error', message: `Failed to create virtual session: ${errMsg}` };
+            }
+            break;
+
           case 'attach-prepare':
             try {
               let targetSession: Session;
@@ -2137,10 +2408,11 @@ routerListener = Bun.listen({
                 }
                 targetSession = getSessionInfo(s);
               } else if (cmd.workspaceId) {
+                console.log('[tmux-lite] attach-prepare workspace', { workspaceId: cmd.workspaceId, sessionName: cmd.sessionName, scriptPolicy: cmd.scriptPolicy });
                 let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
                 const prepared = await attachWorkspaceSession({
                   scanWorkspaces,
-                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.name })),
+                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.info.name })),
                   createSession: async (name, cwd, options) => createSession(name, cwd, options),
                   prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
                 }, {
@@ -2170,6 +2442,7 @@ routerListener = Bun.listen({
                 if (!cmd.command) {
                   writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
                 }
+                console.log('[tmux-lite] attach-prepare created session', { name: prepared.session.name, id: prepared.session.id, scriptPolicy: cmd.scriptPolicy });
                 targetSession = prepared.session;
                 workspaceId = prepared.workspace.id;
               } else {
@@ -2181,8 +2454,18 @@ routerListener = Bun.listen({
               continue;
             } catch (e) {
               pendingAttachControllers.delete(cmd.requestId);
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to prepare attach: ${errMsg}` };
+              const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+              const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
+              console.error('[tmux-lite] attach-prepare failed', {
+                workspaceId: cmd.workspaceId,
+                sessionName: cmd.sessionName,
+                scriptPolicy: cmd.scriptPolicy,
+                code: typedError?.code,
+                message,
+              });
+              res = typedError?.code
+                ? { type: 'error', message, code: typedError.code }
+                : { type: 'error', message };
             }
             break;
 
@@ -2213,8 +2496,15 @@ routerListener = Bun.listen({
             if (!s) {
               res = { type: "error", message: `Session ${cmd.id} not found` };
             } else {
-              // Use SIGKILL to forcefully terminate - SIGTERM is often ignored by shells
-              s.proc.kill(9);
+              if (s.proc) {
+                signalSubprocessTree(s.proc, 'SIGKILL');
+              }
+              if (s.virtualTerminal) {
+                s.virtualTerminal.stop();
+                removeVirtualTerminal(s.info.id);
+              }
+              cleanupSessionResources(s);
+              try { s.xterm.dispose(); } catch {}
               void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: "ok" };
             }
@@ -2267,6 +2557,75 @@ routerListener = Bun.listen({
             break;
 
 
+          case 'agent-prompt':
+            try {
+              await getAgentControlReady();
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'pi-runtime-update':
+            try {
+              await getAgentControlReady();
+              if (!verifyPiRuntimeUpdateCommand(cmd)) {
+                res = { type: 'error', code: 'UNAUTHORIZED', message: 'Unauthorized Pi runtime update.' };
+                break;
+              }
+              const workspaceId = await resolveWorkspaceIdForRuntimePath(cmd.workspacePath);
+              if (!workspaceId) {
+                res = { type: 'error', message: `Workspace not found for Pi runtime update: ${cmd.workspacePath}` };
+                break;
+              }
+              const reportingSession = sessions.get(cmd.terminalSessionId);
+              if (!reportingSession) {
+                res = { type: 'error', message: `Terminal session not found for Pi runtime update: ${cmd.terminalSessionId}` };
+                break;
+              }
+              if (reportingSession.info.kind !== 'agent') {
+                res = { type: 'error', message: `Pi runtime update can only target agent PTYs: ${cmd.terminalSessionId}` };
+                break;
+              }
+              if (reportingSession.info.metadata?.workspaceId !== workspaceId) {
+                res = {
+                  type: 'error',
+                  message: `Terminal session workspace mismatch for Pi runtime update: ${cmd.terminalSessionId}`,
+                };
+                break;
+              }
+              const previousAgentSessionId = reportingSession.info.metadata?.agentSessionId;
+              const reassignment = rebindPiTerminalSessionOwnership(workspaceId, cmd.terminalSessionId, cmd.sessionId);
+              reportingSession.info.metadata = {
+                ...reportingSession.info.metadata,
+                workspaceId,
+                agentSessionId: cmd.sessionId,
+              };
+              applyPiRuntimeUpdate(
+                workspaceId,
+                cmd.sessionId,
+                {
+                  status: cmd.status,
+                  pendingPermissions: cmd.pendingPermissions,
+                  pendingQuestions: cmd.pendingQuestions,
+                  errorMessage: cmd.errorMessage,
+                  lastMessage: cmd.lastMessage,
+                },
+                {
+                  previousSessionId: previousAgentSessionId ?? reassignment.previousAgentSessionId,
+                  suppressPreviousSession: (previousAgentSessionId ?? reassignment.previousAgentSessionId) !== cmd.sessionId
+                    && reassignment.previousOwnerCount === 0,
+                },
+              );
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to apply Pi runtime update: ${errMsg}` };
+            }
+            break;
+
           case 'workspace-set-phase':
             try {
               setWorkspaceStatus(cmd.projectName, cmd.workspaceName, cmd.phase);
@@ -2307,6 +2666,16 @@ routerListener = Bun.listen({
                 sessionIds,
               };
             } catch (e) {
+              if (e instanceof PortConflictError) {
+                res = {
+                  type: 'error',
+                  code: e.code,
+                  message: `Failed to start service: ${e.message}`,
+                  processName: cmd.processName,
+                  portConflicts: e.conflicts,
+                };
+                break;
+              }
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to start service: ${errMsg}` };
             }
@@ -2771,12 +3140,9 @@ function cleanupAndExit(signal: string) {
     try {
       markReplayCrashed(s);
       s.xterm.dispose();
-      s.proc.kill(9);
+      signalSubprocessTree(s.proc, 'SIGKILL');
     } catch {}
   }
-  void defaultOpenCodeRuntimeManager.shutdown().catch(() => {
-    // non-fatal during shutdown
-  });
   // Clean up PID file
   try { unlinkSync(PID_FILE); } catch {}
   process.exit(0);

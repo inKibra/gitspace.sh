@@ -55,6 +55,7 @@ describe('useAttachController', () => {
       },
       {
         sessionName: 'custom-name',
+        backendKey: 'local',
         workspaceId: 'my-project:my-workspace',
       }
     )
@@ -149,6 +150,76 @@ describe('useAttachController', () => {
       },
       {
         sessionId: 'session-view',
+        viewOnly: true,
+      }
+    )
+  })
+
+  it('resolves workspace attaches against the owning backend', async () => {
+    const close = mock(() => {})
+    const showInputCalls: Array<{
+      onSubmit: (value: string) => Promise<void> | void
+    }> = []
+
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: (opts) => {
+            showInputCalls.push({ onSubmit: opts.onSubmit })
+          },
+          showMessage: () => {},
+          close,
+        },
+        attachSessionWithBundleRefresh,
+        resolveWorkspaceRef: (workspaceId) => ({ backendKey: 'remote:machine-1', workspaceId }),
+      })
+    )
+
+    await result.current.attachFromSelection({ workspaceId: 'my-project:my-workspace' })
+    await showInputCalls[0]?.onSubmit('remote-shell')
+
+    expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
+      {
+        backendKey: 'remote:machine-1',
+        workspaceId: 'my-project:my-workspace',
+      },
+      {
+        sessionName: 'remote-shell',
+        backendKey: 'remote:machine-1',
+        workspaceId: 'my-project:my-workspace',
+      }
+    )
+  })
+
+  it('uses the selected session backend when provided', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+      })
+    )
+
+    await result.current.attachFromSelection({
+      sessionId: 'session-remote',
+      backendKey: 'remote:machine-1',
+      viewOnly: true,
+    })
+
+    expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
+      {
+        backendKey: 'remote:machine-1',
+        workspaceId: '',
+      },
+      {
+        sessionId: 'session-remote',
         viewOnly: true,
       }
     )
@@ -272,6 +343,7 @@ describe('useAttachController', () => {
         sessionName: 'debug-shell',
         cols: 120,
         rows: 40,
+        backendKey: 'local',
         scriptPolicy: 'skip',
       }
     )

@@ -26,6 +26,7 @@ export interface WorkspaceRuntimeWorkspaceInfo extends WorkspaceInfo {
   backendKey: string;
   machineLabel: string;
   phase?: string;
+  selectionKey: string;
 }
 
 export interface WorkspaceRuntimeEntry {

@@ -78,6 +78,7 @@ export class RelayClient {
   private state: ConnectionState = "disconnected";
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private allowReconnect = true;
   private readKey: Buffer | null = null;
   private writeKey: Buffer | null = null;
 
@@ -139,6 +140,7 @@ export class RelayClient {
       return;
     }
 
+    this.allowReconnect = true;
     this.setState("connecting");
     this.doConnect();
   }
@@ -147,12 +149,13 @@ export class RelayClient {
    * Disconnect from the relay server
    */
   disconnect(): void {
+    this.allowReconnect = false;
     this.cancelReconnect();
+    this.setState("disconnected");
     if (this.ws) {
       this.ws.close(1000, "Client disconnect");
       this.ws = null;
     }
-    this.setState("disconnected");
   }
 
   /**
@@ -220,8 +223,8 @@ export class RelayClient {
         this.handshakeState = null;
         this.events.onDisconnect?.(event.code, event.reason);
 
-        // Auto-reconnect unless explicitly disconnected
-        if (this.state !== "disconnected") {
+        // Auto-reconnect only for unexpected disconnects.
+        if (this.allowReconnect && this.state !== "disconnected" && event.code !== 1000) {
           this.scheduleReconnect();
         }
       };
@@ -237,7 +240,9 @@ export class RelayClient {
     } catch (e) {
       console.error("[relay-client] Connection error:", e);
       this.events.onError?.(e as Error);
-      this.scheduleReconnect();
+      if (this.allowReconnect) {
+        this.scheduleReconnect();
+      }
     }
   }
 

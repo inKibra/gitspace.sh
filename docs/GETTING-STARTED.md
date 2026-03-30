@@ -1,6 +1,6 @@
 # GitSpace Remote Access - Getting Started
 
-> **Note:** The CLI command is `gssh` and data is stored in `~/gitspace/`.
+> **Note:** The CLI command is `gssh`. By default GitSpace stores projects/workspaces in `~/gitspace/`, while identity/runtime state may be redirected in sandboxed environments.
 
 This guide covers setting up secure remote terminal access to your machine. The system is designed around a simple philosophy: **your machine owns its identity, grants access through invites, and maintains full control over who can connect.**
 
@@ -355,8 +355,10 @@ gssh client machines list --relay wss://relay.example.com/ws
 
 | Variable | Description |
 |----------|-------------|
-| `SPACES_RELAY_URL` | Default relay URL |
-| `SPACES_IDENTITY_PATH` | Custom identity file location |
+| `GITSPACE_WORKSPACE_ROOT` | Override the default workspace/project root (`~/gitspace`) |
+| `GITSPACE_HOME` | Legacy alias for workspace root override |
+| `GITSPACE_IDENTITY_DIR` | Override the identity storage directory |
+| `GITSPACE_CONFIG_ROOT` | Override the config storage directory |
 
 ---
 

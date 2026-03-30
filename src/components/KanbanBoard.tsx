@@ -4,7 +4,7 @@
  * Selection is driven by workspaceBoardState and workspaceDetailState.
  */
 
-import type { KanbanWorkspaceItem } from '../machine/controllers/useKanbanViewController.js';
+import type { KanbanWorkspaceItem } from '../app/shared/board/types.js';
 
 export function getWorkspaceDisplayName(entry: KanbanWorkspaceItem): string {
   return entry.name || entry.id.split(':').pop() || entry.id;

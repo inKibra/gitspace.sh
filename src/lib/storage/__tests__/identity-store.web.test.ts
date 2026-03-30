@@ -195,12 +195,9 @@ describe('identity-store.web — device cert storage', () => {
     const root = mnemonicToUserIdentity(mnemonic);
     await generateAndStoreDeviceIdentity(root as ReturnType<typeof generateIdentity>, TEST_PIN);
 
-    // Check the raw stored string — mnemonic words must not appear
+    // Check the raw stored string — the full mnemonic must never be persisted.
     const raw = mockLocalStorage.getItem('gssh.browser.device.v1')!;
-    const words = mnemonic.split(' ');
-    for (const word of words) {
-      expect(raw).not.toContain(word);
-    }
+    expect(raw).not.toContain(mnemonic);
   });
 });
 

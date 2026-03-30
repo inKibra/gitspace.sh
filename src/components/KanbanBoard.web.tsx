@@ -2,8 +2,8 @@
  * KanbanBoard Web - columns and workspace cards for browser.
  */
 
-import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../machine/controllers/useKanbanViewController.js';
-import { PHASES, PHASE_LABELS } from '../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
+import { PHASES, PHASE_LABELS } from '../app/shared/board/types.js';
 import type { WorkspacePhase } from '../types/config.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
@@ -57,8 +57,8 @@ function getPullRequestChip(entry: KanbanWorkspaceItem): { label: string; tone: 
 export interface KanbanBoardWebProps {
   groups: WorkspaceBoardGroup[];
   selectedWorkspaceId: string | null;
-  onSelectWorkspace: (workspaceId: string | null) => void;
-  onPhaseChange?: (workspaceId: string, phase: WorkspacePhase) => void;
+  onSelectWorkspace: (workspaceKey: string | null) => void;
+  onPhaseChange?: (workspaceKey: string, phase: WorkspacePhase) => void;
   workspaceStatusById?: Record<string, WorkspaceStatusSummary>;
   /** When true, lanes stretch vertically to fill the container. */
   fullHeight?: boolean;
@@ -79,7 +79,7 @@ function WorkspaceCard({
   entry: KanbanWorkspaceItem;
   isSelected: boolean;
   onSelect: () => void;
-  onPhaseChange?: (workspaceId: string, phase: WorkspacePhase) => void;
+  onPhaseChange?: (workspaceKey: string, phase: WorkspacePhase) => void;
   status?: WorkspaceStatusSummary;
 }) {
   const name = getWorkspaceDisplayName(entry);
@@ -195,7 +195,7 @@ function WorkspaceCard({
               key={phase}
               type="button"
               title={`Move to ${PHASE_LABELS[phase]}`}
-              onClick={() => entry.phase !== phase && onPhaseChange(entry.id, phase)}
+              onClick={() => entry.phase !== phase && onPhaseChange(entry.selectionKey, phase)}
               className={
                 'text-xs px-1.5 py-0.5 rounded ' +
                 (entry.phase === phase
@@ -236,12 +236,12 @@ export function KanbanBoardWeb({
           <div className="mt-2 flex flex-col gap-0.5">
             {group.workspaces.map((w) => (
               <WorkspaceCard
-                key={w.id}
+                key={w.selectionKey}
                 entry={w}
-                isSelected={w.id === selectedWorkspaceId}
-                onSelect={() => onSelectWorkspace(w.id === selectedWorkspaceId ? null : w.id)}
+                isSelected={w.selectionKey === selectedWorkspaceId}
+                onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
                 onPhaseChange={onPhaseChange}
-                status={workspaceStatusById[w.id]}
+                status={workspaceStatusById[w.selectionKey]}
               />
             ))}
           </div>

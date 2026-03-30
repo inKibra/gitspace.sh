@@ -15,11 +15,11 @@ import {
 } from '../relay-client/index.js';
 import {
   exportConfigForOwnerSyncSnapshot,
-  getGitspaceDir,
   readGlobalConfig,
   writeGlobalConfig,
   writeProjectConfig,
 } from './config.js';
+import { getConfigRoot } from './paths.js';
 import {
   exportSecretsForOwnerSyncSnapshot,
   importSecretsFromOwnerSyncSnapshot,
@@ -36,7 +36,7 @@ const OWNER_SYNC_CATEGORIES: SyncCategory[] = [
   'preferences',
 ];
 
-const OWNER_SYNC_STATE_PATH = join(getGitspaceDir(), '.owner-sync-state.json');
+const OWNER_SYNC_STATE_PATH = join(getConfigRoot(), '.owner-sync-state.json');
 const OWNER_SYNC_STATE_VERSION = 1;
 const OWNER_SYNC_MIGRATION_VERSION = 1;
 const OWNER_SYNC_KEY_INFO = new TextEncoder().encode('gssh-owner-sync-envelope-v1');

@@ -25,7 +25,7 @@
       "args": ["sample-server/index.ts"],
       "autostart": false,
       "ports": [
-        { "port": 7777, "name": "web", "protocol": "http" }
+        { "name": "web", "protocol": "http" }
       ],
       "restart": {
         "policy": "on-failure",

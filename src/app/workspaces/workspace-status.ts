@@ -4,6 +4,7 @@ import type { AgentSessionInfo, SessionInfo } from '../../machine/api/list-types
 /** Minimal workspace shape needed to compute status summaries. */
 export interface WorkspaceStatusInput {
   id: string;
+  selectionKey?: string;
   processes?: { name: string; instances?: number }[];
   processConfigError?: string;
 }
@@ -77,7 +78,7 @@ export function deriveWorkspaceStatusSummary(
     if (agent.archivedAt || agent.closedAt) {
       continue;
     }
-    if ((agent.pendingPermissionCount ?? 0) > 0) {
+    if ((agent.pendingPermissionCount ?? 0) > 0 || (agent.pendingQuestionCount ?? 0) > 0) {
       agents.orange += 1;
       continue;
     }
@@ -93,6 +94,9 @@ export function deriveWorkspaceStatusSummary(
   }
 
   for (const session of sessions) {
+    if (session.processName) {
+      continue;
+    }
     if (session.exitCode === undefined) {
       terminals.green += 1;
     } else if (session.exitCode !== 0) {
@@ -125,12 +129,12 @@ export function deriveWorkspaceStatusSummary(
   let primaryColor: WorkspaceStatusColor = 'dim';
   if (agents.orange > 0) {
     primaryColor = 'orange';
+  } else if (agents.green > 0 || services.green > 0) {
+    primaryColor = 'green';
   } else if (agents.blue > 0) {
     primaryColor = 'blue';
   } else if (agents.red > 0 || services.red > 0 || terminals.red > 0) {
     primaryColor = 'red';
-  } else if (agents.green > 0 || services.green > 0) {
-    primaryColor = 'green';
   }
 
   return {
@@ -155,10 +159,11 @@ export function buildWorkspaceStatusSummaryMap(
 
   const result: Record<string, WorkspaceStatusSummary> = {};
   for (const workspace of workspaces) {
+    const workspaceKey = workspace.selectionKey ?? workspace.id;
     result[workspace.id] = deriveWorkspaceStatusSummary(
       workspace,
       byWorkspaceId[workspace.id] ?? [],
-      agentSessionsByWorkspace[workspace.id] ?? [],
+      agentSessionsByWorkspace[workspaceKey] ?? [],
     );
   }
   return result;
@@ -170,14 +175,14 @@ export function deriveWorkspacePrimaryColorFromMachineSummary(
   if (summary.permissionAgentCount > 0) {
     return 'orange';
   }
+  if (summary.runningAgentCount > 0 || summary.runningProcessCount > 0) {
+    return 'green';
+  }
   if (summary.waitingAgentCount > 0) {
     return 'blue';
   }
   if (summary.retryingAgentCount > 0 || summary.failedProcessCount > 0 || summary.failedTerminalCount > 0) {
     return 'red';
-  }
-  if (summary.runningAgentCount > 0 || summary.runningProcessCount > 0) {
-    return 'green';
   }
   return 'dim';
 }

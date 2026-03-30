@@ -181,8 +181,8 @@ export function useRemoteSessionClient<ConnectParams>(
     if (!backendKey) {
       return null;
     }
-    return engine.getBackendState(backendKey);
-  }, [engine, engine.state]);
+    return engine.state?.backends[backendKey] ?? null;
+  }, [engine.state]);
 
   const status = useMemo<RemoteSessionConnectionStatus>(() => {
     if (!activeBackendState) {

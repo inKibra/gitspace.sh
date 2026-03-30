@@ -479,17 +479,9 @@ describe("Issue 5: Self-Signed Device Certificate Rejection", () => {
       properCert,
     );
 
-    // processClientAuth returns null only on cert rejection — non-null means cert passed the guard
-    // (it may still fail ACL, but that's separate from the cert check)
     const result = processClientAuth(stateAfterServerHello, clientAuth, machine);
-    // The cert format check passes; result being null here would mean ACL rejection (expected
-    // since we didn't add the device to the access list), but the cert itself was accepted.
-    // To distinguish cert rejection from ACL rejection we verify the cert fields directly.
-    const certParsed = JSON.parse(properCert);
-    expect(certParsed.deviceSigningPublicKey).not.toBe(certParsed.userRootSigningPublicKey);
-    // The cert passed the self-signed guard (if it were rejected for cert reasons, result === null
-    // AND the reason would be the guard, not ACL). This test mainly confirms the guard does NOT
-    // fire for a legitimate cert.
-    void result; // May be null due to ACL — that is fine
+    expect(result).not.toBeNull();
+    expect(result?.clientIdentityKey).toEqual(deviceIdentity.signing.publicKey);
+    expect(result?.authorization).toEqual({ type: "access_list" });
   });
 });

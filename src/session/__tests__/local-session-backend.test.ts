@@ -1,8 +1,14 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock, beforeEach, afterEach } from 'bun:test';
 import { LocalSessionBackend, type LocalSessionBackendDependencies } from '../backends/local-session-backend';
+import type { BackendDescriptor } from '../backend';
 import type { BackendEvent } from '../events';
 import type { NotificationConfig } from '../../notifications/types';
-
+import { applyTmuxLiteSandboxEnvironment, getTmuxLitePathsForSandbox } from '../../lib/tmux-lite/protocol.js';
+import { killServer } from '../../lib/tmux-lite/cli.js';
+import { rmSync } from 'node:fs';
+import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
+import type { Session as TmuxSession, WorkspaceRuntimeRecord } from '../../lib/tmux-lite/protocol.js';
+import { PortConflictError } from '../../lib/processes/ports.js';
 const notificationConfig: NotificationConfig = {
   enabled: true,
   minCommandDurationMs: 1000,
@@ -18,6 +24,358 @@ const notificationConfig: NotificationConfig = {
     holdWhenIdleMs: 5000,
   },
 };
+
+let sandboxCounter = 0;
+let currentSandboxName: string | null = null;
+let previousTmuxEnv: Record<string, string | undefined> | null = null;
+
+function captureTmuxEnv(): Record<string, string | undefined> {
+  return {
+    TMUX_LITE_SANDBOX: process.env.TMUX_LITE_SANDBOX,
+    TMUX_LITE_SOCKET: process.env.TMUX_LITE_SOCKET,
+    TMUX_LITE_SESSION_DIR: process.env.TMUX_LITE_SESSION_DIR,
+    TMUX_LITE_PID_FILE: process.env.TMUX_LITE_PID_FILE,
+    TMUX_LITE_REPLAY_DIR: process.env.TMUX_LITE_REPLAY_DIR,
+  };
+}
+
+function restoreTmuxEnv(env: Record<string, string | undefined>): void {
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+function cleanupSandbox(name: string): void {
+  const paths = getTmuxLitePathsForSandbox(name);
+  rmSync(paths.sessionDir, { recursive: true, force: true });
+  rmSync(paths.replayDir, { recursive: true, force: true });
+  try { rmSync(paths.routerSocket, { force: true }); } catch {}
+  try { rmSync(paths.pidFile, { force: true }); } catch {}
+}
+
+beforeEach(() => {
+  previousTmuxEnv = captureTmuxEnv();
+  currentSandboxName = `local-backend-${process.pid}-${sandboxCounter++}`;
+  cleanupSandbox(currentSandboxName);
+  applyTmuxLiteSandboxEnvironment(currentSandboxName);
+});
+
+afterEach(async () => {
+  try { await killServer(); } catch {}
+  if (currentSandboxName) {
+    cleanupSandbox(currentSandboxName);
+  }
+  if (previousTmuxEnv) {
+    restoreTmuxEnv(previousTmuxEnv);
+  }
+  currentSandboxName = null;
+  previousTmuxEnv = null;
+});
+
+function toCanonicalWorkspaceId(projectName: string, workspaceId: string): string {
+  return workspaceId.includes(':') ? workspaceId : `${projectName}:${workspaceId}`;
+}
+
+function toRuntimeWorkspace(workspace: {
+  id: string;
+  name: string;
+  path: string;
+  projectName: string;
+  branch?: string;
+  sessionCount?: number;
+  isStale?: boolean;
+  processes?: WorkspaceRuntimeRecord['processes'];
+}): WorkspaceRuntimeRecord {
+  const sessionCount = workspace.sessionCount ?? 0;
+  const canonicalId = toCanonicalWorkspaceId(workspace.projectName, workspace.id);
+  const configuredProcessCount = workspace.processes?.length ?? 0;
+  return {
+    id: canonicalId,
+    name: workspace.name,
+    path: workspace.path,
+    projectName: workspace.projectName,
+    branch: workspace.branch,
+    sessionCount,
+    isStale: workspace.isStale,
+    processes: workspace.processes,
+    status: 'code',
+    terminals: {
+      sessionCount,
+      attachedCount: 0,
+      runningCount: sessionCount,
+      failedCount: 0,
+    },
+    agents: {
+      sessionCount: 0,
+      busyCount: 0,
+      waitingCount: 0,
+      needsPermissionCount: 0,
+      errorCount: 0,
+      closedCount: 0,
+      archivedCount: 0,
+    },
+    processSummary: {
+      configuredCount: configuredProcessCount,
+      runningCount: 0,
+      failedCount: 0,
+    },
+  };
+}
+
+function toTerminalSession(session: {
+  id: string;
+  name: string;
+  socketPath: string;
+  pid: number;
+  attached: boolean;
+  cwd: string;
+  createdAt: number;
+  kind?: TmuxSession['kind'];
+  hidden?: boolean;
+  metadata?: Record<string, string>;
+  exitCode?: number;
+  processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: TmuxSession['lastAlertKind'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
+}): TmuxSession {
+  return {
+    ...session,
+    kind: session.kind ?? 'shell',
+    hidden: session.hidden ?? false,
+  };
+}
+
+async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencies>): Promise<MachineSnapshot> {
+  const workspaces = await (deps.scanWorkspaces?.() ?? Promise.resolve([]));
+  const sessions = await (deps.listSessions?.() ?? Promise.resolve([]));
+  const terminalSessions = sessions.map((session) => toTerminalSession(session as Parameters<typeof toTerminalSession>[0]));
+  const runtimeWorkspaces = workspaces.map((workspace) => {
+    const visibleSessionCount = terminalSessions.filter((session) => {
+      const sameWorkspace = session.cwd === workspace.path || session.cwd.startsWith(`${workspace.path}/`);
+      return sameWorkspace && session.kind !== 'agent' && session.hidden !== true;
+    }).length;
+    return toRuntimeWorkspace({
+      ...(workspace as Parameters<typeof toRuntimeWorkspace>[0]),
+      sessionCount: visibleSessionCount,
+    });
+  });
+  const projectSummaries = deps.listProjectSummaries?.() ?? [];
+  const projectsById = Object.fromEntries(
+    projectSummaries.map((project) => [project.name, {
+      id: project.name,
+      name: project.name,
+      repository: project.repository,
+      isCurrent: project.isCurrent,
+      workspaceIds: runtimeWorkspaces.filter((workspace) => workspace.projectName === project.name).map((workspace) => workspace.id),
+      workspaceCount: runtimeWorkspaces.filter((workspace) => workspace.projectName === project.name).length,
+    }]),
+  );
+  const workspaceIdsByProjectId = Object.fromEntries(
+    Object.keys(projectsById).map((projectId) => [projectId, runtimeWorkspaces.filter((workspace) => workspace.projectName === projectId).map((workspace) => workspace.id)]),
+  );
+  const workspacesById = Object.fromEntries(runtimeWorkspaces.map((workspace) => [workspace.id, {
+    id: workspace.id,
+    name: workspace.name,
+    projectId: workspace.projectName,
+    projectName: workspace.projectName,
+    path: workspace.path,
+    branch: workspace.branch,
+    phase: workspace.status,
+    isStale: workspace.isStale,
+    serveDomain: workspace.serveDomain,
+    processes: workspace.processes,
+    processConfigError: workspace.processConfigError,
+    notesSummary: workspace.notesSummary,
+    terminalSessionIds: terminalSessions.filter((session) => (session.cwd === workspace.path || session.cwd.startsWith(`${workspace.path}/`)) && session.kind !== 'agent' && session.hidden !== true).map((session) => session.id),
+    agentSessionIds: [],
+    processIds: [],
+    replayIds: [],
+    summary: {
+      terminalCount: workspace.terminals.sessionCount,
+      attachedTerminalCount: workspace.terminals.attachedCount,
+      runningTerminalCount: workspace.terminals.runningCount,
+      failedTerminalCount: workspace.terminals.failedCount,
+      agentCount: 0,
+      runningAgentCount: 0,
+      waitingAgentCount: 0,
+      permissionAgentCount: 0,
+      retryingAgentCount: 0,
+      closedAgentCount: 0,
+      archivedAgentCount: 0,
+      configuredProcessCount: workspace.processSummary.configuredCount,
+      runningProcessCount: workspace.processSummary.runningCount,
+      failedProcessCount: workspace.processSummary.failedCount,
+    },
+  }]));
+  const terminalSessionsById = Object.fromEntries(terminalSessions.map((session) => {
+    const workspace = runtimeWorkspaces.find((item) => session.cwd === item.path || session.cwd.startsWith(`${item.path}/`));
+    const isAgentPty = session.kind === 'agent';
+    return [session.id, {
+      id: session.id,
+      name: session.name,
+      workspaceId: workspace?.id,
+      projectId: workspace?.projectName,
+      cwd: session.cwd,
+      kind: (isAgentPty ? 'agent-pty' : 'shell') as 'agent-pty' | 'shell',
+      hidden: session.hidden ?? false,
+      state: (session.attached ? 'attached' : 'running') as 'attached' | 'running',
+      attached: session.attached,
+      createdAt: session.createdAt,
+      exitCode: session.exitCode,
+      processTitle: session.processTitle,
+      terminalTitle: session.terminalTitle,
+      lastAlertKind: session.lastAlertKind,
+      lastAlertPreview: session.lastAlertPreview,
+      lastAlertAt: session.lastAlertAt,
+      unreadAlertCount: session.unreadAlertCount,
+      processName: undefined,
+      processInstance: undefined,
+      linkedAgentSessionId: session.metadata?.agentSessionId,
+      metadata: session.metadata,
+    }];
+  }));
+  const terminalSessionIdsByWorkspaceId = Object.fromEntries(runtimeWorkspaces.map((workspace) => [workspace.id, terminalSessions.filter((session) => (session.cwd === workspace.path || session.cwd.startsWith(`${workspace.path}/`)) && session.kind !== 'agent' && session.hidden !== true).map((session) => session.id)]));
+  return {
+    snapshotNonce: 1,
+    generatedAt: new Date().toISOString(),
+    projectsById,
+    projectOrder: Object.keys(projectsById),
+    workspacesById,
+    workspaceOrder: runtimeWorkspaces.map((workspace) => workspace.id),
+    workspaceIdsByProjectId,
+    terminalSessionsById,
+    terminalSessionIdsByWorkspaceId,
+    agentSessionsById: {},
+    agentSessionIdsByWorkspaceId: {},
+    processesById: {},
+    processIdsByWorkspaceId: {},
+    replaysById: {},
+    replayIdsByWorkspaceId: {},
+    notificationsById: {},
+    notificationOrder: [],
+  };
+}
+
+function createBackend(
+  deps: Partial<LocalSessionBackendDependencies>,
+  options: {
+    descriptor?: BackendDescriptor;
+  } = {},
+) {
+  const effectiveDeps: Partial<LocalSessionBackendDependencies> = {
+    ...deps,
+    getMachineSnapshot: deps.getMachineSnapshot ?? (() => buildSnapshotForDeps(deps)),
+    watchMachineEvents: deps.watchMachineEvents ?? (async () => () => {}),
+    sendTmuxCommand: deps.sendTmuxCommand ?? (async (command) => {
+      switch (command.type) {
+        case 'inbox': {
+          const items = await ((deps as { getInbox?: () => Promise<unknown> }).getInbox?.() ?? Promise.resolve([]));
+          return {
+            type: 'inbox' as const,
+            items: Array.isArray(items) ? items : ((items as { items?: unknown[] }).items ?? []),
+          };
+        }
+        case 'inbox-clear':
+          await (deps as { clearInbox?: (id?: string) => Promise<void> }).clearInbox?.(command.id);
+          return { type: 'ok' as const };
+        case 'inbox-read':
+          await (deps as { markInboxRead?: (id: string) => Promise<void> }).markInboxRead?.(command.id);
+          return { type: 'ok' as const };
+        case 'notification-config-get': {
+          const result = await ((deps as { getNotificationConfig?: () => Promise<unknown> }).getNotificationConfig?.() ?? Promise.resolve({ config: notificationConfig }));
+          return {
+            type: 'notification-config' as const,
+            config: (result && typeof result === 'object' && 'config' in result ? result.config : result) as NotificationConfig,
+          };
+        }
+        case 'notification-config-update': {
+          const result = await ((deps as { updateNotificationConfig?: (config: NotificationConfig) => Promise<unknown> }).updateNotificationConfig?.(command.config) ?? Promise.resolve({ config: command.config }));
+          return {
+            type: 'notification-config' as const,
+            config: (result && typeof result === 'object' && 'config' in result ? result.config : result) as NotificationConfig,
+          };
+        }
+        default:
+          throw new Error(`Unhandled tmux command in test helper: ${command.type}`);
+      }
+    }),
+    prepareAttachSession: deps.prepareAttachSession ?? (async (params) => {
+      const workspaceList = await (deps.scanWorkspaces?.() ?? Promise.resolve([]));
+      const workspace = workspaceList.find((item) => item.id === params.workspaceId || toCanonicalWorkspaceId(item.projectName, item.id) === params.workspaceId);
+      if (!workspace) {
+        throw new Error(`Workspace not found: ${params.workspaceId}`);
+      }
+      const requestId = 'test-request';
+      params.onRequestId?.(requestId);
+      let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+      const prep = await ((deps.prepareWorkspaceForSession as ((options: any) => Promise<any>) | undefined)?.({
+        projectName: workspace.projectName,
+        workspacePath: workspace.path,
+        workspaceName: workspace.name,
+        scriptPolicy: params.scriptPolicy,
+        onPhaseStart: (phase: 'pre' | 'setup' | 'select') => {
+          currentPhase = phase;
+          params.onScriptOutput?.({
+            type: 'attach-script-output',
+            requestId,
+            phase,
+            data: Buffer.from(`\r\n==> ${phase} scripts...\r\n`).toString('base64'),
+            done: false,
+          });
+        },
+        onOutput: (data: Uint8Array) => {
+          params.onScriptOutput?.({
+            type: 'attach-script-output',
+            requestId,
+            phase: currentPhase,
+            data: Buffer.from(data).toString('base64'),
+            done: false,
+          });
+        },
+      }) ?? Promise.resolve({ success: true }));
+      if (!prep.success) {
+        const phase = prep.phase ?? 'setup';
+        const code = phase === 'pre' ? 'PRE_SCRIPT_FAILED' : phase === 'select' ? 'SELECT_SCRIPT_FAILED' : 'SETUP_SCRIPT_FAILED';
+        throw Object.assign(new Error(prep.error ?? `${phase} failed`), { code });
+      }
+      params.onScriptOutput?.({ type: 'attach-script-output', requestId, phase: 'select', data: '', done: true });
+      const sessions = await (deps.listSessions?.() ?? Promise.resolve([]));
+      const existingCount = sessions.filter((session) => session.cwd === workspace.path && !session.hidden).length;
+      const nextIndex = existingCount + 1;
+      const sessionName = params.sessionName ?? `${workspace.projectName}:${workspace.id}:${nextIndex}`;
+      const createSessionDep = deps.createSession as typeof deps.createSession | undefined;
+      const session = await (createSessionDep
+        ? createSessionDep(sessionName, workspace.path, { command: params.command, args: params.args, env: params.env })
+        : Promise.resolve({ id: 'sess-new', name: sessionName, socketPath: '/tmp/socket-new', pid: 1, attached: false, cwd: workspace.path, createdAt: Date.now() }));
+      return { type: 'attach-prepared' as const, requestId, session, workspaceId: toCanonicalWorkspaceId(workspace.projectName, workspace.id), viewOnly: params.viewOnly };
+    }),
+    cancelPrepareAttachSession: deps.cancelPrepareAttachSession ?? (async () => undefined),
+    deleteTmuxWorkspace: deps.deleteTmuxWorkspace ?? (async ({ projectName, workspaceId, scriptPolicy, onScriptOutput }) => {
+      const result = await (deps.deleteWorkspaceCore?.(projectName, workspaceId, {
+        removeScriptPolicy: scriptPolicy === 'skip' ? 'skip' : 'enforce',
+        onScriptOutput: (data) => onScriptOutput?.({
+          type: 'workspace-delete-output',
+          requestId: 'test-request',
+          data: Buffer.from(data).toString('base64'),
+          done: false,
+        }),
+      }) ?? Promise.resolve({ success: true, workspaceName: workspaceId, branchDeleted: false, sessionsKilled: 0 }));
+      if (!result.success) {
+        onScriptOutput?.({ type: 'workspace-delete-output', requestId: 'test-request', data: '', done: true, error: result.error });
+        throw Object.assign(new Error(result.error ?? 'Delete failed'), { code: result.errorCode });
+      }
+      onScriptOutput?.({ type: 'workspace-delete-output', requestId: 'test-request', data: '', done: true });
+    }),
+  };
+  return new LocalSessionBackend({ descriptor: options.descriptor, deps: effectiveDeps });
+}
 
 describe('LocalSessionBackend', () => {
   it('emits local project/workspace/session/inbox and attach events', async () => {
@@ -98,7 +456,7 @@ describe('LocalSessionBackend', () => {
         sessionsKilled: 0,
       }),
       getNotificationConfig: () => notificationConfig,
-      updateNotificationConfig: (updates) => ({
+      updateNotificationConfig: async (updates: NotificationConfig) => ({
         ...notificationConfig,
         ...updates,
       }),
@@ -117,13 +475,12 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({
+    const backend = createBackend(deps, {
       descriptor: {
         key: 'local',
         kind: 'local',
         label: 'Local',
       },
-      deps,
     });
 
     backend.onEvent((event) => events.push(event));
@@ -184,12 +541,13 @@ describe('LocalSessionBackend', () => {
       config: notificationConfig,
     });
 
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'attached',
       sessionId: 'sess-new',
       sessionName: 'alpha:ws-1:2',
       viewOnly: false,
-    });
+      workspaceId: 'alpha:ws-1',
+    }));
 
     const scriptStreamChunks = events
       .filter((event): event is Extract<BackendEvent, { type: 'script_output' }> =>
@@ -238,7 +596,7 @@ describe('LocalSessionBackend', () => {
       listSessions: async () => [],
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -319,7 +677,7 @@ describe('LocalSessionBackend', () => {
       }),
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -332,7 +690,7 @@ describe('LocalSessionBackend', () => {
     expect(sentControls).toContainEqual({ type: 'resize', cols: 100, rows: 30 });
     expect(sentControls).toContainEqual({ type: 'detach' });
     expect(sentPty).toEqual([new Uint8Array([0x41])]);
-    expect(events).toContainEqual({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1', viewOnly: false });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'attached', sessionId: 'sess-1', sessionName: 'alpha:ws-1:1', viewOnly: false, workspaceId: 'alpha:ws-1' }));
     expect(events).toContainEqual({ type: 'detached' });
   });
 
@@ -403,7 +761,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
     await backend.attachSession({ sessionId: 'sess-1' });
 
@@ -483,7 +841,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
 
     backend.setPtyOutputHandler((data) => {
@@ -583,7 +941,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
 
     backend.setPtyOutputHandler((data) => {
@@ -675,7 +1033,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
@@ -689,12 +1047,13 @@ describe('LocalSessionBackend', () => {
     const detachedEvents = events.filter((event) => event.type === 'detached');
 
     expect(attachedEvents).toEqual([
-      {
+      expect.objectContaining({
         type: 'attached',
         sessionId: 'sess-1',
         sessionName: 'alpha:ws-1:1',
         viewOnly: false,
-      },
+        workspaceId: 'alpha:ws-1',
+      }),
     ]);
     expect(detachedEvents).toEqual([{ type: 'detached' }]);
   });
@@ -765,19 +1124,20 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
     await backend.attachSession({ sessionId: 'sess-1' });
 
     expect(connectAttempts).toBe(2);
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'attached',
       sessionId: 'sess-1',
       sessionName: 'alpha:ws-1:1',
       viewOnly: false,
-    });
+      workspaceId: 'alpha:ws-1',
+    }));
   });
 
   it('fails fast when attaching to an exited session', async () => {
@@ -818,7 +1178,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
 
     await backend.connect();
     await expect(backend.attachSession({ sessionId: 'sess-exited' })).rejects.toThrow(
@@ -899,7 +1259,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
     await backend.attachSession({ sessionId: 'sess-1' });
 
@@ -951,11 +1311,11 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.connect();
-    await expect(backend.attachSession({ workspaceId: 'ws-1' })).rejects.toThrow('setup');
+    await expect(backend.attachSession({ workspaceId: 'ws-1' })).rejects.toThrow('install failed');
 
     expect(events).toContainEqual({
       type: 'command_error',
@@ -1018,7 +1378,7 @@ describe('LocalSessionBackend', () => {
       }),
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     await backend.connect();
     await backend.attachSession({ workspaceId: 'ws-1', scriptPolicy: 'skip' });
 
@@ -1040,16 +1400,16 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.deleteWorkspace('alpha', 'alpha:ws-1');
 
-    expect(events).toContainEqual({
+    expect(events).toContainEqual(expect.objectContaining({
       type: 'script_output',
       phase: 'remove',
       data: new TextEncoder().encode('remove:ws-1'),
-    });
+    }));
     expect(events).toContainEqual({
       type: 'script_output',
       phase: 'remove',
@@ -1087,7 +1447,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await expect(backend.deleteWorkspace('alpha', 'ws-1')).rejects.toMatchObject({
@@ -1128,7 +1488,7 @@ describe('LocalSessionBackend', () => {
       }),
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await expect(backend.deleteWorkspace('alpha', 'ws-missing')).rejects.toMatchObject({
@@ -1224,7 +1584,7 @@ describe('LocalSessionBackend', () => {
       },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
     await backend.listReplays('ws-1');
@@ -1265,7 +1625,7 @@ describe('LocalSessionBackend', () => {
       undismissReplay: (replayId) => { undismissCalls.push(replayId); },
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     const frame = await backend.getReplayFrame('replay-1');
     expect(frame.replayId).toBe('replay-1');
     expect(frame.events).toHaveLength(1);
@@ -1318,9 +1678,10 @@ describe('LocalSessionBackend', () => {
       ],
     };
 
-    const backend = new LocalSessionBackend({ deps });
+    const backend = createBackend(deps);
     backend.onEvent((event) => events.push(event));
 
+    await backend.connect();
     await backend.listWorkspaces();
     await backend.listSessions();
 
@@ -1334,8 +1695,9 @@ describe('LocalSessionBackend', () => {
     });
   });
 
-  it('attaches agent sessions through the shared tmux session from the coordinator', async () => {
-    const ensureAgentTerminalSession = mock(async () => ({
+  it('refreshes machine state before attaching a newly created agent session terminal', async () => {
+    const events: BackendEvent[] = [];
+    const agentTerminalSession = {
       id: 'tmux-agent-1',
       name: 'agent:ws-1:abcd1234',
       socketPath: '/tmp/socket-agent',
@@ -1346,34 +1708,46 @@ describe('LocalSessionBackend', () => {
       kind: 'agent' as const,
       hidden: true,
       metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
-    }));
+    };
+    const ensureAgentTerminalSession = mock(async (_target: unknown, _agentSessionId: string) => agentTerminalSession);
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      branch: 'main',
+      sessionCount: 0,
+      isStale: false,
+    };
+    const staleSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [],
+    });
+    const refreshedSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [agentTerminalSession],
+    });
+    const snapshots = [staleSnapshot, refreshedSnapshot];
+    const getMachineSnapshot = mock(async () => snapshots.shift() ?? refreshedSnapshot);
+
     const deps: Partial<LocalSessionBackendDependencies> = {
       ensureServer: async () => {},
-      scanWorkspaces: async () => [
-        {
-          id: 'ws-1',
-          name: 'ws-1',
-          path: '/tmp/ws-1',
-          projectName: 'alpha',
-          branch: 'main',
-          sessionCount: 0,
-          isStale: false,
-        },
-      ],
-      listSessions: async () => [
-        {
-          id: 'tmux-agent-1',
-          name: 'agent:ws-1:abcd1234',
-          socketPath: '/tmp/socket-agent',
-          pid: 999,
-          attached: false,
-          cwd: '/tmp/ws-1',
-          createdAt: 10,
-          kind: 'agent',
-          hidden: true,
-          metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
-        },
-      ],
+      getMachineSnapshot,
+      watchMachineEvents: async () => () => {},
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [agentTerminalSession],
+      sendTmuxCommand: mock(async (command): Promise<any> => {
+        if (command.type === 'agent-attach') {
+          return { type: 'session' as const, session: await ensureAgentTerminalSession(command.target, command.agentSessionId) };
+        }
+        if (command.type === 'inbox') {
+          return { type: 'inbox' as const, items: [] };
+        }
+        if (command.type === 'notification-config-get') {
+          return { type: 'notification-config' as const, config: notificationConfig };
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      }),
       connectSessionSocket: async (_socketPath, handlers) => ({
         sendControl: (control) => {
           if (control.type === 'attach-init') {
@@ -1384,23 +1758,56 @@ describe('LocalSessionBackend', () => {
         close: () => handlers.onClose(),
       }),
     };
-    const backend = new LocalSessionBackend({
-      deps,
-      agentControl: {
-        getState: mock(async () => []),
-        watchState: mock(async () => () => {}),
-        listSessions: mock(async () => []),
-        createSession: mock(async () => []),
-        abortSession: mock(async () => true),
-        attachSession: ensureAgentTerminalSession,
-        respondToPermission: mock(async () => true),
-      },
-    });
+    const backend = createBackend(deps);
+    backend.onEvent((event) => events.push(event));
+
+    await backend.connect();
     await backend.attachAgentSession('alpha:ws-1', 'agent-ses-1');
 
+    expect(getMachineSnapshot).toHaveBeenCalledTimes(2);
     expect(ensureAgentTerminalSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: 'alpha:ws-1', workspacePath: '/tmp/ws-1' }),
       'agent-ses-1',
     );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'attached',
+        sessionId: 'tmux-agent-1',
+        workspaceId: 'alpha:ws-1',
+      }),
+    );
   });
+  it('rethrows structured service-start conflicts as PortConflictError', async () => {
+    const conflict = { port: 3000, protocol: 'http' as const, pid: 1234, command: 'node' };
+    const backend = createBackend({
+      sendTmuxCommand: async (command) => {
+        if (command.type === 'service-start') {
+          return {
+            type: 'error' as const,
+            code: 'PORT_CONFLICT',
+            message: 'Failed to start service: Cannot start web; port already in use: :3000 -> node (pid 1234)',
+            processName: 'web',
+            portConflicts: [conflict],
+          };
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      },
+    });
+
+    let thrown: unknown;
+    try {
+      await backend.startProcess('alpha:ws-1', 'web', 1);
+      expect.unreachable('Expected startProcess to throw');
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(PortConflictError);
+    expect(thrown).toMatchObject({
+      name: 'PortConflictError',
+      code: 'PORT_CONFLICT',
+      conflicts: [conflict],
+    });
+  });
+
 });

@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { getStatus as getTmuxStatus, isServerRunning as isTmuxRunning } from '../lib/tmux-lite/cli.js';
-import { queryServeStatus, isServeRunning, type StatusResponse } from '../serve/daemon.js';
+import { queryServeStatus, isServeRunning } from '../serve/daemon.js';
 
 /** Package version for comparison */
 const PACKAGE_VERSION = '1.0.0';
@@ -30,10 +30,6 @@ export interface ServeStatus {
   relayStatus?: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
   clients?: number;
   uptime?: number;
-  hosting?: {
-    subdomain: string;
-    tunnelActive: boolean;
-  };
 }
 
 /** Combined daemon status */
@@ -105,7 +101,6 @@ export function useDaemonStatus(options: UseDaemonStatusOptions = {}): UseDaemon
               relayStatus: serve.relay.status,
               clients: serve.clients,
               uptime: serve.uptime,
-              hosting: serve.hosting,
             };
           } else {
             serveStatus = { running: true }; // Running but couldn't get details

@@ -185,6 +185,11 @@ export async function isServerRunning(): Promise<boolean> {
 // Start server if not running
 let ensureServerPromise: Promise<void> | null = null;
 
+async function refreshHostingAfterEnsure(): Promise<void> {
+  const { refreshTmuxHosting } = await import('./hosting/supervisor.js');
+  await refreshTmuxHosting().catch(() => undefined);
+}
+
 export async function ensureServer(): Promise<void> {
   if (ensureServerPromise) {
     return ensureServerPromise;
@@ -193,6 +198,7 @@ export async function ensureServer(): Promise<void> {
   ensureServerPromise = (async () => {
     if (await isServerRunning()) {
       await send({ type: 'agent-state' });
+      await refreshHostingAfterEnsure();
       return;
     }
 
@@ -203,10 +209,11 @@ export async function ensureServer(): Promise<void> {
       env: process.env as Record<string, string>,
     });
 
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {
       await Bun.sleep(100);
       if (await isServerRunning()) {
         await send({ type: 'agent-state' });
+        await refreshHostingAfterEnsure();
         return;
       }
     }
@@ -407,7 +414,8 @@ export async function prepareAttachSession(options: AttachPrepareOptions): Promi
               if (response.type === 'error') {
                 settled = true;
                 cleanup();
-                reject(new Error(response.message));
+                const error = Object.assign(new Error(response.message), response.code ? { code: response.code } : {});
+                reject(error);
                 return;
               }
             }
@@ -693,11 +701,15 @@ export async function deleteTmuxWorkspace(options: {
 
 // === API convenience functions ===
 
-export async function listSessions(): Promise<Session[]> {
-  await ensureServer();
+export async function listSessionsFromRunningServer(): Promise<Session[]> {
   const res = await send({ type: "list" });
   if (res.type === "sessions") return res.sessions;
   throw new Error("Unexpected response");
+}
+
+export async function listSessions(): Promise<Session[]> {
+  await ensureServer();
+  return listSessionsFromRunningServer();
 }
 
 export async function listReplays(options: {
@@ -795,6 +807,29 @@ export async function createSession(
   if (res.type === "session") return res.session;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");
+}
+
+export async function createVirtualSession(
+  name: string,
+  cwd: string,
+  options?: {
+    kind?: import('./protocol.js').SessionKind;
+    hidden?: boolean;
+    metadata?: Record<string, string>;
+  }
+): Promise<Session> {
+  await ensureServer();
+  const res = await send({
+    type: 'new-virtual',
+    name,
+    cwd,
+    kind: options?.kind,
+    hidden: options?.hidden,
+    metadata: options?.metadata,
+  });
+  if (res.type === 'session') return res.session;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
 }
 
 export async function killSession(id: string): Promise<void> {
@@ -905,6 +940,18 @@ export async function attachAgentSession(
   await ensureServer();
   const res = await send({ type: 'agent-attach', target, agentSessionId });
   if (res.type === 'session') return res.session;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+export async function promptAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+  text: string,
+): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: 'agent-prompt', target, agentSessionId, text });
+  if (res.type === 'ok') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }

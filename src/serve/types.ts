@@ -5,7 +5,6 @@
  */
 
 import type { Identity, SessionKeys, AccessType } from "../types/identity.js";
-import type { RemoteSessionHandlerOptions } from "../lib/remote-session/index.js";
 import { FrameType } from "../lib/tmux-lite/protocol.js";
 
 // ============================================================================
@@ -60,8 +59,6 @@ export interface ServeOptions {
   relay: string;
   /** Machine identity for authentication */
   identity: Identity;
-  /** Remote session handler configuration */
-  remoteSessionOptions?: RemoteSessionHandlerOptions;
   /** Shell to spawn (default: $SHELL or /bin/bash) */
   shell?: string;
   /** Extra environment variables for PTY sessions */
@@ -107,9 +104,14 @@ export interface ClientSession {
   peerIdentityId?: string;
   /** Attached tmux-lite session ID (when state === "attached") */
   attachedSessionId?: string;
+  /** Human-readable session name for attach lifecycle events */
+  attachedSessionName?: string;
   /** When true, this attached session is server-enforced read-only */
   viewOnly?: boolean;
-  /** True if waiting for initial resize before sending attach-init */
+  /** Initial terminal size requested by the client before attach-init is sent */
+  initialCols?: number;
+  initialRows?: number;
+  /** When true, we haven't sent attach-init yet — waiting for the first resize with real dimensions */
   waitingForResize?: boolean;
   /** Buffer for incomplete frames from tmux-lite socket */
   frameBuffer?: Buffer;

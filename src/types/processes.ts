@@ -9,9 +9,19 @@ export type ProcessRestartPolicy = 'never' | 'on-failure' | 'always';
 export type ProcessPortProtocol = 'http' | 'tcp';
 
 export interface ProcessPortConfig {
-  port: number;
-  name?: string;
+  name: string;
   protocol?: ProcessPortProtocol;
+}
+
+export interface ResolvedProcessPort extends ProcessPortConfig {
+  instance: number;
+  port: number;
+}
+
+export interface RuntimeProcessDefinition {
+  name: string;
+  instances?: number;
+  ports?: ResolvedProcessPort[];
 }
 
 export interface ProcessRestartConfig {

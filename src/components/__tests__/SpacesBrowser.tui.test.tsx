@@ -208,7 +208,7 @@ describe('SpacesBrowserTUI renderer', () => {
         instance: 1,
         workspaceId: 'ws-1',
         status: 'running',
-        ports: [{ port: 3000, name: 'http', protocol: 'http' as const }],
+        ports: [{ instance: 1, port: 3000, name: 'http', protocol: 'http' as const }],
         isSelected: false,
         index: 1,
       },

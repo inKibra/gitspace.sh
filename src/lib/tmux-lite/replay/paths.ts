@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { getGitspaceDir } from '../../../core/config.js';
+import { getWorkspaceRoot } from '../../../core/paths.js';
 import { SpacesError } from '../../../types/errors.js';
 import { logger } from '../../../utils/logger.js';
 import { getReplayDir as getTmuxLiteReplayDir } from '../protocol.js';
@@ -15,7 +15,7 @@ function getConfiguredReplayRootDir(): string {
   if (process.env.TMUX_LITE_SANDBOX?.trim()) {
     return getTmuxLiteReplayDir();
   }
-  return join(getGitspaceDir(), '.tmux-lite', 'replays');
+  return join(getWorkspaceRoot(), '.tmux-lite', 'replays');
 }
 
 export function assertValidReplayId(replayId: string): void {

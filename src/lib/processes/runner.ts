@@ -10,7 +10,12 @@ import { WideEventCollector } from "../events/collector.js";
 import { buildProcessEventsConfig } from "./events-config.js";
 import { loadProcessesConfig, getProcessDefinition } from "./config.js";
 import { recordProcessExit } from "./state.js";
-import { buildProcessHostname } from "../../utils/hostnames.js";
+import { resolveProcessRuntimePorts, reconcileProcessPortAllocations } from './allocations.js';
+import { buildProcessHostname } from '../../utils/hostnames.js';
+import { normalizeEnvKey } from '../../utils/normalize-env-key.js';
+import { readHostConfig } from '../../commands/host.js';
+import { parseTmuxHostingBaseHost } from '../tmux-lite/hosting/base-host.js';
+import { readTmuxHostingState } from '../tmux-lite/hosting/state.js';
 import type { WideEvent } from "../../types/events.js";
 
 interface RunnerOptions {
@@ -73,17 +78,42 @@ async function run(): Promise<void> {
   const cwd = definition.cwd ? join(opts.workspacePath, definition.cwd) : opts.workspacePath;
   const commandArgs = [definition.command, ...(definition.args ?? [])];
   const workspaceId = opts.workspacePath.split("/").pop() ?? opts.workspacePath;
-  // Inject PORT from the first declared port (gitspace owns port allocation)
-  const firstPort = definition.ports?.[0];
-  const serveDomain = process.env.GITSPACE_SERVE_DOMAIN;
+  reconcileProcessPortAllocations(opts.workspacePath, config);
+  const resolvedPorts = await resolveProcessRuntimePorts(opts.workspacePath, {
+    name: opts.processName,
+    instance: opts.instance,
+    definition,
+  });
+  const firstPort = resolvedPorts[0];
+  const hosting = readTmuxHostingState();
+  const baseHost = hosting?.enabled ? hosting.baseHost : undefined;
+  const machineName = hosting?.machineName;
   const portEnv: Record<string, string> = {};
-  if (firstPort?.port) {
+  const portMap = Object.fromEntries(resolvedPorts.map((port) => [port.name, port.port]));
+  if (firstPort) {
     portEnv.PORT = String(firstPort.port);
   }
-  if (serveDomain && firstPort) {
-    const portLabel = firstPort.name?.trim() || String(firstPort.port);
-    const hostname = buildProcessHostname(serveDomain, workspaceId, opts.processName, opts.instance, portLabel);
-    portEnv.GITSPACE_SERVE_URL = `https://${hostname}`;
+  for (const [name, port] of Object.entries(portMap)) {
+    portEnv[`GITSPACE_PORT_${normalizeEnvKey(name)}`] = String(port);
+  }
+  if (resolvedPorts.length > 0) {
+    portEnv.GITSPACE_PORTS_JSON = JSON.stringify(portMap);
+  }
+  if (baseHost && firstPort) {
+    const parsedBaseHost = parseTmuxHostingBaseHost(baseHost);
+    const serveDomain = readHostConfig()?.serveNamespaces?.[parsedBaseHost.rootSubdomain]?.domain;
+    if (serveDomain) {
+      const hostname = buildProcessHostname(
+        serveDomain,
+        parsedBaseHost.rootSubdomain,
+        workspaceId,
+        opts.processName,
+        opts.instance,
+        firstPort.name,
+        machineName,
+      );
+      portEnv.GITSPACE_SERVE_URL = `http://${hostname}`;
+    }
   }
 
   const env = {

@@ -1,12 +1,12 @@
 import type { SessionCreateHooks } from '../lib/tmux-lite/protocol.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 
-function resolveWorkspaceSessionLauncherArgs(): string[] {
+export function resolveWorkspaceSessionLauncherArgs(): string[] {
   const execPath = process.execPath;
-  const scriptPath = process.argv[1];
 
-  if (execPath.endsWith('bun') && scriptPath) {
-    return [execPath, scriptPath];
+  if (execPath.endsWith('bun')) {
+    const indexPath = new URL('../index.ts', import.meta.url).pathname;
+    return [execPath, indexPath];
   }
 
   if (execPath && !execPath.endsWith('/node') && !execPath.endsWith('node')) {
@@ -20,6 +20,18 @@ function buildShellCommand(args: string[]): string {
   return args
     .map((arg) => (/^[A-Za-z0-9_./:-]+$/.test(arg) ? arg : escapeShellArg(arg)))
     .join(' ');
+}
+
+export function buildWorkspaceSessionCommand(spaceArgs: string[], launcherArgs: string[] = resolveWorkspaceSessionLauncherArgs()): {
+  command: string;
+  args: string[];
+} {
+  const [command, ...args] = [...launcherArgs, 'space', ...spaceArgs];
+  if (!command) {
+    throw new Error('Workspace session launcher command is missing.');
+  }
+
+  return { command, args };
 }
 
 /**

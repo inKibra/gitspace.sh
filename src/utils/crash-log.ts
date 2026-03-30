@@ -1,8 +1,8 @@
 import { appendFileSync, mkdirSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
+import { getWorkspaceRoot } from '../core/paths.js';
 
-const CRASH_LOG_DIR = join(homedir(), 'gitspace', '.logs');
+const CRASH_LOG_DIR = join(getWorkspaceRoot(), '.logs');
 const CRASH_LOG_PATH = join(CRASH_LOG_DIR, 'gssh-crash.log');
 const REDACTED = '[REDACTED]';
 const SENSITIVE_FLAGS = new Set([

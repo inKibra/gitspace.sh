@@ -9,6 +9,7 @@ import {
   type RemoteSessionSocketHandlers,
 } from '../backends/remote-session-backend';
 import { buildRemoteBackendKey } from '../backend-key';
+import { PortConflictError } from '../../lib/processes/ports.js';
 
 interface FakeSocket {
   readyState: number;
@@ -316,6 +317,90 @@ describe('RemoteSessionBackend', () => {
     expect(ptyChunks).toEqual(['setup output']);
   });
 
+  it('forwards workspace context when attaching an agent session terminal', async () => {
+    const socket = createFakeSocket();
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const machineSnapshot = createEmptyMachineSnapshot();
+    machineSnapshot.workspacesById['alpha:ws-1'] = {
+      id: 'alpha:ws-1',
+      name: 'ws-1',
+      path: '/tmp/alpha/workspaces/ws-1',
+      projectName: 'alpha',
+      branch: 'main',
+      summary: { terminalCount: 0, managedProcessCount: 0, runningProcessCount: 0, idleAgentCount: 0, activeAgentCount: 1 },
+      updatedAt: new Date().toISOString(),
+    };
+    machineSnapshot.workspaceOrder = ['alpha:ws-1'];
+    machineSnapshot.workspaceIdsByProjectId = { alpha: ['alpha:ws-1'] };
+    machineSnapshot.projectsById.alpha = {
+      id: 'alpha',
+      name: 'alpha',
+      path: '/tmp/alpha',
+      repository: 'org/alpha',
+      workspaceIds: ['alpha:ws-1'],
+      workspaceCount: 1,
+    };
+    machineSnapshot.projectOrder = ['alpha'];
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'machine_snapshot', snapshot: machineSnapshot }));
+    await Bun.sleep(0);
+
+    const attachPromise = backend.attachAgentSession('alpha:ws-1', 'agent-1');
+    await Bun.sleep(0);
+
+    const tmuxCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { type: string; requestId: string; command: { type: string } };
+    expect(tmuxCommand.type).toBe('tmux_command');
+    expect(tmuxCommand.command).toMatchObject({ type: 'agent-attach', agentSessionId: 'agent-1' });
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'tmux_command_response',
+        requestId: tmuxCommand.requestId,
+        response: {
+          type: 'session',
+          session: { id: 'tmux-agent-1', name: 'agent:ws-1:agent-1', workspaceId: 'alpha:ws-1', attached: false, createdAt: 1 },
+        },
+      })
+    );
+    await Bun.sleep(0);
+
+    const attachCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as Record<string, unknown>;
+    expect(attachCommand).toEqual({
+      type: 'attach_session',
+      sessionId: 'tmux-agent-1',
+      workspaceId: 'alpha:ws-1',
+      viewOnly: undefined,
+      sessionName: undefined,
+      cols: undefined,
+      rows: undefined,
+      scriptPolicy: undefined,
+      command: undefined,
+      args: undefined,
+      env: undefined,
+    });
+
+    await attachPromise;
+  });
+
   it('resolves agent session list responses from machine messages', async () => {
     const socket = createFakeSocket();
     const backend = new RemoteSessionBackend({
@@ -428,7 +513,7 @@ describe('RemoteSessionBackend', () => {
     );
     await connectPromise;
 
-    ((backend as unknown) as { mode: 'attached' | 'browsing' }).mode = 'attached';
+    await backend.attachSession({ sessionId: 'sess-1', workspaceId: 'alpha:ws-1' });
 
     socket.handlers?.onMessage(
       makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('snapshot-before-handler'))
@@ -446,6 +531,63 @@ describe('RemoteSessionBackend', () => {
 
     expect(output).toEqual(['snapshot-before-handler', 'live-after-handler']);
   });
+
+it('does not emit attached until the real attach event arrives and preserves pre-attached PTY output', async () => {
+  const socket = createFakeSocket();
+  const events: BackendEvent[] = [];
+  const output: string[] = [];
+
+  const backend = new RemoteSessionBackend({
+    descriptor: {
+      key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+      kind: 'remote',
+      label: 'Machine 1',
+      relayUrl: 'wss://relay.test/ws',
+      machineId: 'machine-1',
+    },
+    socket,
+    socketAdapter,
+    identity,
+    machineId: 'machine-1',
+    deviceCertificate: 'test-device-cert',
+    signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+    crypto: cryptoAdapter,
+    handshake: handshakeAdapter,
+  });
+
+  backend.onEvent((event) => events.push(event));
+  backend.setPtyOutputHandler((data) => {
+    output.push(new TextDecoder().decode(data));
+  });
+
+  await connectAndHandshake(backend, socket);
+  await backend.attachSession({ sessionId: 'sess-1', workspaceId: 'alpha:ws-1' });
+
+  socket.handlers?.onMessage(
+    makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('snapshot-before-attached'))
+  );
+  await Bun.sleep(0);
+
+  expect(output).toEqual(['snapshot-before-attached']);
+  expect(events.some((event) => event.type === 'attached')).toBe(false);
+
+  socket.handlers?.onMessage(
+    makeRelayDataPayload(cryptoAdapter, {
+      type: 'attached',
+      sessionId: 'sess-1',
+      sessionName: 'alpha:ws-1:1',
+    })
+  );
+  await Bun.sleep(0);
+
+  expect(events).toContainEqual(expect.objectContaining({
+    type: 'attached',
+    sessionId: 'sess-1',
+    sessionName: 'alpha:ws-1:1',
+    workspaceId: 'alpha:ws-1',
+  }));
+});
+
 
   it('lists replays and emits replay events', async () => {
     const socket = createFakeSocket();
@@ -742,7 +884,7 @@ describe('RemoteSessionBackend', () => {
       callbackOneOutput.push(new TextDecoder().decode(data));
     });
 
-    ((backend as unknown) as { mode: 'attached' | 'browsing' }).mode = 'attached';
+    await backend.attachSession({ sessionId: 'sess-1', workspaceId: 'alpha:ws-1' });
 
     socket.handlers?.onMessage(
       makeRelayBinaryPayload(cryptoAdapter, new TextEncoder().encode('before-clear'))
@@ -1345,4 +1487,63 @@ describe('RemoteSessionBackend', () => {
       code: 'DELETE_FAILED',
     });
   });
+  it('rethrows structured service-start conflicts as PortConflictError', async () => {
+    const socket = createFakeSocket();
+    const conflict = { port: 3000, protocol: 'http' as const, pid: 1234, command: 'node' };
+
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    const pending = backend.startProcess('project:workspace', 'web', 1);
+    await Bun.sleep(0);
+    const sent = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { requestId: string; type: string };
+    expect(sent.type).toBe('tmux_command');
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'tmux_command_response',
+        requestId: sent.requestId,
+        response: {
+          type: 'error',
+          code: 'PORT_CONFLICT',
+          message: 'Failed to start service: Cannot start web; port already in use: :3000 -> node (pid 1234)',
+          processName: 'web',
+          portConflicts: [conflict],
+        },
+      }),
+    );
+
+    let thrown: unknown;
+    try {
+      await pending;
+      expect.unreachable('Expected startProcess to throw');
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(PortConflictError);
+    expect(thrown).toMatchObject({
+      name: 'PortConflictError',
+      code: 'PORT_CONFLICT',
+      conflicts: [conflict],
+    });
+  });
+
 });

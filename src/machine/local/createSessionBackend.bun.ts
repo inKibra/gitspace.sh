@@ -1,3 +1,4 @@
+import { readMachineIdentity, readRelayConfig } from '../../core/identity.js'
 import WebSocket from 'ws'
 import type { X3DHClientState } from '../../lib/tmux-lite/crypto/handshake.js'
 import type { Identity, X3DHResponseMessage, X3DHResultMessage } from '../../types/identity.js'
@@ -64,11 +65,13 @@ export function createBunLocalSessionBackend(
   backendKey: BackendKey,
   label = 'Local'
 ): LocalSessionBackend {
+  const machineId = readMachineIdentity()?.machineId ?? readRelayConfig()?.machineId
   return new LocalSessionBackend({
     descriptor: {
       key: backendKey,
       kind: 'local',
       label,
+      machineId,
     },
   })
 }

@@ -1,9 +1,9 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { getGitspaceDir } from '../core/config.js';
+import { getWorkspaceRoot } from '../core/paths.js';
 
 function getAgentLogPath(): string {
-  const dir = join(getGitspaceDir(), '.agent');
+  const dir = join(getWorkspaceRoot(), '.agent');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }

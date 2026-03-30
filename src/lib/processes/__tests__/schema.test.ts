@@ -130,31 +130,36 @@ describe('validateProcessesConfig', () => {
     expect(result.errors[0]).toContain('ports must be an array');
   });
 
-  it('should fail for port out of range', () => {
+  it('should fail when port name is missing', () => {
     const config: ProcessesConfig = {
       processes: [
-        { name: 'web', command: 'npm start', ports: [{ port: 0 }] },
+        { name: 'web', command: 'npm start', ports: [{ name: '' }] },
       ],
     };
     const result = validateProcessesConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.errors[0]).toContain('port must be a number between 1 and 65535');
+    expect(result.errors[0]).toContain('port name must be a non-empty string');
   });
 
-  it('should fail for port over 65535', () => {
+  it('should fail for duplicate port names', () => {
     const config: ProcessesConfig = {
       processes: [
-        { name: 'web', command: 'npm start', ports: [{ port: 70000 }] },
+        {
+          name: 'web',
+          command: 'npm start',
+          ports: [{ name: 'http' }, { name: 'http', protocol: 'tcp' }],
+        },
       ],
     };
     const result = validateProcessesConfig(config);
     expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('port names must be unique');
   });
 
   it('should pass for valid port config', () => {
     const config: ProcessesConfig = {
       processes: [
-        { name: 'web', command: 'npm start', ports: [{ port: 3000, name: 'http', protocol: 'http' }] },
+        { name: 'web', command: 'npm start', ports: [{ name: 'http', protocol: 'http' }] },
       ],
     };
     const result = validateProcessesConfig(config);
@@ -164,7 +169,7 @@ describe('validateProcessesConfig', () => {
   it('should fail for invalid port protocol', () => {
     const config = {
       processes: [
-        { name: 'web', command: 'npm start', ports: [{ port: 3000, protocol: 'udp' }] },
+        { name: 'web', command: 'npm start', ports: [{ name: 'http', protocol: 'udp' }] },
       ],
     } as unknown as ProcessesConfig;
     const result = validateProcessesConfig(config);

@@ -57,24 +57,13 @@ import {
 } from '../lib/tmux-lite/hosting/supervisor.js';
 import { resolveHostingSubdomains } from './host.js';
 import { selectOne } from '../utils/prompts.js';
+import { buildServeHostnamePattern } from '../utils/hostnames.js';
+import { normalizeTmuxHostingBaseHost, parseTmuxHostingBaseHost } from '../lib/tmux-lite/hosting/base-host.js';
 
 interface TmuxCommandOptions {
   sandbox?: string;
 }
 
-function normalizeHostingBaseHost(input: string): string {
-  const trimmed = input.trim().toLowerCase();
-  if (!trimmed) {
-    throw new Error('Hosting route cannot be empty');
-  }
-  if (trimmed.endsWith('.gitspace.sh')) {
-    return trimmed;
-  }
-  if (trimmed.endsWith('.serve')) {
-    return `${trimmed}.gitspace.sh`;
-  }
-  return `${trimmed}.serve.gitspace.sh`;
-}
 
 function applyTmuxSandbox(options?: TmuxCommandOptions): void {
   if (options?.sandbox) {
@@ -176,7 +165,12 @@ export async function stopTmux(options: { force?: boolean; sandbox?: string } = 
   await stopTmuxHosting();
   await killServer();
   logger.success("tmux-lite server stopped");
+  const hostingState = readTmuxHostingState();
+  if (hostingState?.enabled) {
+    logger.dim(`Hosting config remains enabled for ${hostingState.baseHost ?? 'the selected route'} and will be reconciled when tmux-lite starts again.`);
+  }
 }
+
 
 /**
  * Show tmux-lite server status
@@ -296,6 +290,7 @@ export async function statusTmuxHosting(options: TmuxCommandOptions = {}): Promi
   if (runtime.reason) {
     logger.log(`  status: ${runtime.reason}`);
   }
+  logger.log('  ownership: hosted service URLs are published from tmux-lite');
 }
 
 export async function selectTmuxHosting(baseHost: string | undefined, options: TmuxCommandOptions = {}): Promise<void> {
@@ -303,19 +298,20 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
 
   let selectedBaseHost = baseHost?.trim();
   if (!selectedBaseHost) {
-    const subdomains = await resolveHostingSubdomains();
-    if (subdomains.length === 0) {
+    const baseHosts = [...new Set((await resolveHostingSubdomains()).map((subdomain) => normalizeTmuxHostingBaseHost(subdomain)))];
+    if (baseHosts.length === 0) {
       logger.warning('No reserved hosting routes found.');
       logger.dim('Reserve one with: gssh user host reserve <name>');
       return;
     }
     if (!process.stdout.isTTY || !process.stdin.isTTY) {
-      selectedBaseHost = `${subdomains[0]}.gitspace.sh`;
+      selectedBaseHost = baseHosts[0];
     } else {
       const selected = await selectOne(
-        subdomains.map((subdomain) => ({
-          label: `${subdomain}.gitspace.sh`,
-          value: `${subdomain}.gitspace.sh`,
+        baseHosts.map((candidateBaseHost) => ({
+          label: candidateBaseHost,
+          value: candidateBaseHost,
+          description: `${parseTmuxHostingBaseHost(candidateBaseHost).rootSubdomain}.gitspace.sh stays the relay host; tmux hosting publishes flattened service hosts under ${buildServeHostnamePattern('gitspace.sh', parseTmuxHostingBaseHost(candidateBaseHost).rootSubdomain)}.`,
         })),
         'Select a tmux-lite hosting route'
       );
@@ -327,11 +323,12 @@ export async function selectTmuxHosting(baseHost: string | undefined, options: T
     }
   }
 
-  const state = writeTmuxHostingState({ baseHost: normalizeHostingBaseHost(selectedBaseHost), enabled: true });
+  const normalizedBaseHost = normalizeTmuxHostingBaseHost(selectedBaseHost);
+  const state = writeTmuxHostingState({ baseHost: normalizedBaseHost, enabled: true });
   const refreshed = await refreshTmuxHosting();
   logger.success(`tmux-lite hosting route selected: ${state.baseHost}`);
   logger.log(`  Machine name: ${state.machineName}`);
-  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+  logger.log(`  Hosted services: ${refreshed.active ? 'publishing now' : refreshed.reason ?? 'not publishing'}`);
 }
 
 export async function setTmuxHostingMachineName(machineName: string, options: TmuxCommandOptions = {}): Promise<void> {
@@ -353,7 +350,7 @@ export async function enableTmuxHosting(options: TmuxCommandOptions = {}): Promi
   const state = writeTmuxHostingState({ enabled: true });
   const refreshed = await refreshTmuxHosting();
   logger.success(`tmux-lite hosting enabled for ${state.baseHost}`);
-  logger.log(`  Cloudflared: ${refreshed.active ? 'running' : refreshed.reason ?? 'stopped'}`);
+  logger.log(`  Hosted services: ${refreshed.active ? 'publishing now' : refreshed.reason ?? 'not publishing'}`);
 }
 
 export async function disableTmuxHosting(options: TmuxCommandOptions = {}): Promise<void> {

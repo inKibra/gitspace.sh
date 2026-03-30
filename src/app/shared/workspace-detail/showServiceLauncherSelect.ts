@@ -1,5 +1,6 @@
 import type { WorkspaceInfo } from '../../../components/SpacesBrowser.js';
 import { buildServiceLauncherOptions } from '../../../lib/services/endpoints.js';
+import { readTmuxHostingState } from '../../../lib/tmux-lite/hosting/state.js';
 
 interface ServiceLauncherSelectConfig {
   workspace: WorkspaceInfo;
@@ -15,11 +16,17 @@ interface ServiceLauncherSelectConfig {
 
 export function showServiceLauncherSelect(args: ServiceLauncherSelectConfig): boolean {
   const process = (args.workspace.processes ?? []).find((candidate) => candidate.name === args.processName);
+  const hostingState = readTmuxHostingState();
   const options = buildServiceLauncherOptions({
     workspaceId: args.workspace.id,
     processName: args.processName,
     instance: args.instance,
     ports: process?.ports,
+    hosting: {
+      baseHost: args.workspace.serveDomain ?? hostingState?.baseHost,
+      machineName: hostingState?.machineName,
+      enabled: hostingState?.enabled === true,
+    },
   });
 
   if (options.length === 0) {

@@ -99,6 +99,17 @@ interface FileApprovalState {
   isApproved: boolean;
 }
 
+function filterVisibleFiles(
+  files: ReviewChangedFile[],
+  hideApprovedFiles: boolean,
+  reviewStateByFileKey: Record<string, FileApprovalState>,
+): ReviewChangedFile[] {
+  if (!hideApprovedFiles) {
+    return files;
+  }
+  return files.filter((file) => !reviewStateByFileKey[fileKey(file.filePath, file.prevFilePath)]?.isApproved);
+}
+
 interface FileTreeNode {
   type: 'folder' | 'file';
   name: string;
@@ -185,14 +196,15 @@ export function DiffViewer({
   }, [files]);
 
   const selectedFile = useMemo(() => {
+    const availableFiles = filterVisibleFiles(files, hideApprovedFiles, reviewStateByFileKey);
     if (selectedFileKey) {
       const match = fileByKey.get(selectedFileKey);
-      if (match) {
+      if (match && availableFiles.some((file) => fileKey(file.filePath, file.prevFilePath) === selectedFileKey)) {
         return match;
       }
     }
-    return files[0] ?? null;
-  }, [selectedFileKey, fileByKey, files]);
+    return availableFiles[0] ?? null;
+  }, [selectedFileKey, fileByKey, files, hideApprovedFiles, reviewStateByFileKey]);
 
   useEffect(() => {
     if (!commentForm) {
@@ -243,39 +255,43 @@ export function DiffViewer({
 
     const loadReviewState = async () => {
       const entries = await Promise.all(files.map(async (file) => {
-        try {
-          const diff = await onRequestFileDiff(file.filePath, file.prevFilePath);
-          const parsed = parseSingleFileDiff(diff, file);
-          const totalHunks = parsed.hunks.length;
-          const key = fileKey(file.filePath, file.prevFilePath);
-          const fileThreads = threads.filter((thread) => thread.target.kind === 'hunk' && thread.target.file === file.filePath);
-          const decisions = new Map<string, HunkDecision>();
-          for (const hunk of parsed.hunks) {
-            const matching = fileThreads.filter((thread) => (
-              thread.target.kind === 'hunk' &&
-              normalizeHunkHeader(thread.target.hunkHeader) === normalizeHunkHeader(hunk.header)
-            ));
-            decisions.set(normalizeHunkHeader(hunk.header), aggregateHunkDecision(matching));
+        const key = fileKey(file.filePath, file.prevFilePath);
+        let parsed = fileDiffStateByKeyRef.current[key]?.status === 'ready'
+          ? fileDiffStateByKeyRef.current[key].data
+          : null;
+
+        if (!parsed) {
+          try {
+            const diff = await onRequestFileDiff(file.filePath, file.prevFilePath);
+            parsed = parseSingleFileDiff(diff, file);
+            setFileDiffStateByKey((prev) => prev[key]?.status === 'ready'
+              ? prev
+              : { ...prev, [key]: { status: 'ready', data: parsed! } });
+          } catch {
+            parsed = null;
           }
-          const approvedHunks = [...decisions.values()].filter((decision) => decision === 'approved').length;
-          const rejectedHunks = [...decisions.values()].filter((decision) => decision === 'rejected').length;
-          const pendingHunks = Math.max(0, totalHunks - approvedHunks - rejectedHunks);
-          return [key, {
-            totalHunks,
-            approvedHunks,
-            rejectedHunks,
-            pendingHunks,
-            isApproved: totalHunks > 0 && approvedHunks === totalHunks,
-          } satisfies FileApprovalState] as const;
-        } catch {
-          return [fileKey(file.filePath, file.prevFilePath), {
-            totalHunks: 0,
-            approvedHunks: 0,
-            rejectedHunks: 0,
-            pendingHunks: 0,
-            isApproved: false,
-          } satisfies FileApprovalState] as const;
         }
+
+        const totalHunks = parsed?.hunks.length ?? 0;
+        const fileThreads = threads.filter((thread) => thread.target.kind === 'hunk' && thread.target.file === file.filePath);
+        const decisions = new Map<string, HunkDecision>();
+        for (const hunk of parsed?.hunks ?? []) {
+          const matching = fileThreads.filter((thread) => (
+            thread.target.kind === 'hunk' &&
+            normalizeHunkHeader(thread.target.hunkHeader) === normalizeHunkHeader(hunk.header)
+          ));
+          decisions.set(normalizeHunkHeader(hunk.header), aggregateHunkDecision(matching));
+        }
+        const approvedHunks = [...decisions.values()].filter((decision) => decision === 'approved').length;
+        const rejectedHunks = [...decisions.values()].filter((decision) => decision === 'rejected').length;
+        const pendingHunks = Math.max(0, totalHunks - approvedHunks - rejectedHunks);
+        return [key, {
+          totalHunks,
+          approvedHunks,
+          rejectedHunks,
+          pendingHunks,
+          isApproved: totalHunks > 0 && approvedHunks === totalHunks,
+        } satisfies FileApprovalState] as const;
       }));
 
       if (!cancelled) {
@@ -921,12 +937,10 @@ export function DiffViewer({
   const contextLoading = selectedContextState?.status === 'loading';
   const contextError = selectedContextState?.status === 'error' ? selectedContextState.error.message : null;
   const contextReady = selectedContextState?.status === 'ready';
-  const visibleFiles = useMemo(() => {
-    if (!hideApprovedFiles) {
-      return files;
-    }
-    return files.filter((file) => !reviewStateByFileKey[fileKey(file.filePath, file.prevFilePath)]?.isApproved);
-  }, [files, hideApprovedFiles, reviewStateByFileKey]);
+  const visibleFiles = useMemo(
+    () => filterVisibleFiles(files, hideApprovedFiles, reviewStateByFileKey),
+    [files, hideApprovedFiles, reviewStateByFileKey],
+  );
   const visibleFileTree = useMemo(() => buildFileTree(visibleFiles), [visibleFiles]);
 
   useEffect(() => {

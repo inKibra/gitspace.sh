@@ -4,7 +4,7 @@
 
 import { existsSync, readdirSync } from 'fs';
 import { join, relative, sep } from 'path';
-import { getGitspaceDir } from '../../core/config.js';
+import { getWorkspaceDir, getWorkspaceRoot } from '../../core/paths.js';
 import { encodeProcessNameForPath } from '../processes/names.js';
 
 const DEFAULT_INSTANCE = 1;
@@ -19,8 +19,8 @@ export interface WorkspaceRef {
  * Resolve workspace/project info from a cwd path
  */
 export function resolveWorkspaceRef(cwd: string): WorkspaceRef | null {
-  const spacesDir = getGitspaceDir();
-  const rel = relative(spacesDir, cwd);
+  const workspaceRoot = getWorkspaceRoot();
+  const rel = relative(workspaceRoot, cwd);
   if (!rel || rel.startsWith('..')) {
     return null;
   }
@@ -33,7 +33,7 @@ export function resolveWorkspaceRef(cwd: string): WorkspaceRef | null {
   }
   const projectName = parts[0];
   const workspaceId = parts[2];
-  const workspacePath = join(spacesDir, projectName, 'workspaces', workspaceId);
+  const workspacePath = getWorkspaceDir(projectName, workspaceId);
   return { projectName, workspaceId, workspacePath };
 }
 

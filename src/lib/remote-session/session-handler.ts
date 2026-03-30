@@ -66,10 +66,15 @@ export interface RemoteClientSession {
   accessType?: AccessType;
   /** For view: the specific session ID access was granted to */
   grantedSessionId?: string;
-  /** Attached tmux-lite session ID (set after attach_session) */
+  /** Attached tmux-lite session ID (set after attach_session target resolution) */
   attachedSessionId?: string;
+  /** Human-readable session name for attach lifecycle events */
+  attachedSessionName?: string;
   /** Path to tmux-lite session socket (set after attach_session) */
   sessionSocketPath?: string;
+  /** Initial terminal size requested by the client before attach-init is sent */
+  initialCols?: number;
+  initialRows?: number;
   /** When true, PTY writes from this client are blocked server-side */
   viewOnly?: boolean;
 }
@@ -141,11 +146,6 @@ function matchesWorkspaceIdToken(parsedWorkspaceId: string, workspaceId: string)
   return normalizeWorkspaceIdToken(parsedWorkspaceId) === normalizeWorkspaceIdToken(workspaceId);
 }
 
-export interface RemoteSessionHandlerOptions {
-  processHostDomain?: string;
-  onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
-}
-
 /**
  * Remote session handler
  */
@@ -153,8 +153,6 @@ export class RemoteSessionHandler {
   private tmuxLiteAvailable = false;
   private processSchedulers = new Map<string, NodeJS.Timer>();
   private pendingAttachRuns = new Map<string, string>();
-  private processHostDomain?: string;
-  private onProcessesChanged?: (workspacePath: string) => void | Promise<void>;
 
   // Machine snapshot push state
   private latestMachineSnapshot: MachineSnapshot | null = null;
@@ -162,10 +160,6 @@ export class RemoteSessionHandler {
   /** connectionId → async send function for unsolicited machine snapshot pushes */
   private machineSnapshotWatchers = new Map<string, (msg: MachineToClientMessage) => Promise<void>>();
 
-  constructor(options: RemoteSessionHandlerOptions = {}) {
-    this.processHostDomain = options.processHostDomain;
-    this.onProcessesChanged = options.onProcessesChanged;
-  }
 
   /**
    * Initialize - check if tmux-lite is available and start machine event watch
@@ -639,6 +633,7 @@ export class RemoteSessionHandler {
         }
         let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
         try {
+          console.log('[remote-session] prepareAttachSession starting', { workspaceId: msg.workspaceId, sessionName: msg.sessionName, scriptPolicy: msg.scriptPolicy });
           const prepared = await prepareAttachSession({
             workspaceId: msg.workspaceId,
             sessionName: msg.sessionName,
@@ -664,8 +659,10 @@ export class RemoteSessionHandler {
             },
           });
           this.pendingAttachRuns.delete(session.connectionId);
+          console.log('[remote-session] prepareAttachSession completed', { sessionId: prepared.session.id, sessionName: prepared.session.name, workspaceId: prepared.workspaceId, scriptPolicy: msg.scriptPolicy });
           targetSession = prepared.session;
         } catch (error) {
+          console.error('[remote-session] prepareAttachSession failed', { workspaceId: msg.workspaceId, sessionName: msg.sessionName, scriptPolicy: msg.scriptPolicy, error: error instanceof Error ? error.message : String(error) });
           this.pendingAttachRuns.delete(session.connectionId);
           const typedError = error instanceof Error ? error as Error & { code?: string } : undefined;
           if (!msg.command) {
@@ -704,27 +701,24 @@ export class RemoteSessionHandler {
 
       session.state = "attached";
       session.attachedSessionId = targetSession.id;
+      session.attachedSessionName = targetSession.name;
       session.sessionSocketPath = targetSession.socketPath;
+      session.initialCols = msg.cols;
+      session.initialRows = msg.rows;
       session.viewOnly = msg.viewOnly ?? false;
 
-      // Send confirmation - ClientSessionManager will connect to the socket
-      await this.sendMessage(session, sendResponse, {
-        type: "attached",
-        sessionId: targetSession.id,
-        sessionName: targetSession.name,
-        processTitle: targetSession.processTitle,
-        terminalTitle: (targetSession as any).terminalTitle,
-        lastAlertKind: (targetSession as any).lastAlertKind,
-        lastAlertPreview: (targetSession as any).lastAlertPreview,
-        lastAlertAt: (targetSession as any).lastAlertAt,
-        unreadAlertCount: (targetSession as any).unreadAlertCount,
-        cols: msg.cols ?? 80,
-        rows: msg.rows ?? 24,
-      });
+      // ClientSessionManager now owns the real PTY attach handshake.
+      // This step only resolves which tmux session to connect to.
     } catch (e) {
       console.error("[remote-session] Failed to attach session:", e);
-      const detail = e instanceof Error ? e.message : String(e);
-      await this.sendError(session, sendResponse, "ATTACH_FAILED", `Failed to attach to session: ${detail}`);
+      const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+      const detail = typedError?.message ?? String(e);
+      await this.sendError(
+        session,
+        sendResponse,
+        typedError?.code ?? "ATTACH_FAILED",
+        `Failed to attach to session: ${detail}`
+      );
     }
   }
 
@@ -766,8 +760,9 @@ export class RemoteSessionHandler {
       });
     } catch (e) {
       console.error("[remote-session] Failed to delete workspace:", e);
-      const message = e instanceof Error ? e.message : String(e);
-      await this.sendError(session, sendResponse, "DELETE_FAILED", message, {
+      const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+      const message = typedError?.message ?? String(e);
+      await this.sendError(session, sendResponse, typedError?.code ?? "DELETE_FAILED", message, {
         workspaceId: canonicalWorkspaceId,
       });
     }

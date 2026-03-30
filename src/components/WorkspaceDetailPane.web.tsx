@@ -13,7 +13,6 @@ import type { ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
-import { buildProcessHostname } from '../utils/hostnames.js';
 
 /* ─── Sidebar helpers ─────────────────────────────────────────────────────── */
 
@@ -195,7 +194,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             }
             const w = di.workspace;
             const isCurrent = w.id === workspace.id;
-            const primaryColor = getWorkspaceStripColor(w.id, workspaceStatusById);
+            const primaryColor = getWorkspaceStripColor(w, workspaceStatusById);
             const dotColorClass =
               primaryColor === 'orange' ? 'text-[#f59e0b]' :
               primaryColor === 'red'    ? 'text-[#ff7b72]' :
@@ -217,7 +216,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               >
                 <span className={dotColorClass}>●</span>
                 <span>{w.name}</span>
-                {workspaceStatusById[w.id]?.primaryColor === 'orange' && (
+                {getWorkspaceStripColor(w, workspaceStatusById) === 'orange' && (
                   <span className="text-[#f59e0b]">⚡</span>
                 )}
               </button>
@@ -293,7 +292,14 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             )}
             {agentRows.filter((row) => row.bucket === 'closed').map((row) => (
               <div key={`closed:${row.id}`} className="flex items-center gap-1">
-                <SidebarItem dotColor="text-[#484f58]" label={row.title} rightLabel="closed" />
+                <SidebarItem
+                  dotColor="text-[#484f58]"
+                  label={row.title}
+                  rightLabel="closed"
+                  onClick={() => {
+                    void detailActions.openAgentSession(row.id);
+                  }}
+                />
                 {onArchiveAgentSession && (
                   <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[#484f58] hover:text-[#8b949e] flex-shrink-0 px-1">arc</button>
                 )}
@@ -366,7 +372,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           {serviceRows.length > 0 && (
             <SidebarSection title="Services">
               {serviceRows.map((service) => {
-                  const localUrl = service.portLabel;
+                  const localUrl = service.localUrl;
                   const isOpen = attachedServiceIdentity?.processName === service.processName
                     && attachedServiceIdentity.instance === service.instance;
                   return (
@@ -395,32 +401,35 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                             att
                           </button>
                         )}
-                        {service.state === 'running' && localUrl && (
+                        {service.state === 'running' && localUrl && (() => {
+                          const targetUrl = service.hostedUrl ?? `http://${localUrl}`;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => window.open(targetUrl, '_blank', 'noopener,noreferrer')}
+                              className="text-[10px] text-[#484f58] hover:text-[#58a6ff] flex-shrink-0 px-1"
+                              title={`Open ${targetUrl}` }
+                            >
+                              ↗
+                            </button>
+                          );
+                        })()}
+                        {service.state === 'running' && onStopProcess && (
                           <button
                             type="button"
-                            onClick={() => window.open(`http://${localUrl}`, '_blank', 'noopener,noreferrer')}
-                            className="text-[10px] text-[#484f58] hover:text-[#58a6ff] flex-shrink-0 px-1"
-                            title={`Open http://${localUrl}`}
+                            onClick={() => onStopProcess({ workspaceId: workspace.id, processName: service.processName })}
+                            className="text-[10px] text-[#484f58] hover:text-[#ff7b72] flex-shrink-0 px-1"
+                            title="Stop service"
                           >
-                            ↗
+                            stop
                           </button>
                         )}
                       </div>
                       {service.state === 'running' && localUrl && (
                         <div className="pl-5 text-[10px] text-[#484f58] truncate">
-                          {workspace.serveDomain
-                            ? (() => {
-                                const portLabel = service.portLabel?.split(':')[1] ?? String(service.instance);
-                                const hostname = buildProcessHostname(
-                                  workspace.serveDomain,
-                                  workspace.id,
-                                  service.processName,
-                                  service.instance,
-                                  portLabel
-                                );
-                                return <a href={`https://${hostname}`} target="_blank" rel="noopener noreferrer" className="hover:text-[#58a6ff] transition-colors">{hostname}</a>;
-                              })()
-                            : <span>{localUrl}</span>
+                          {service.hostedUrl
+                            ? <a href={service.hostedUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[#58a6ff] transition-colors">{service.hostedUrl.replace(/^http:\/\//, '')}</a>
+                            : localUrl ? <span>{localUrl}</span> : null
                           }
                         </div>
                       )}

@@ -23,7 +23,7 @@ import { formatTime, getAgentSessionDisplayState } from './SpacesBrowser.js';
 import { SessionTerminal } from './SessionTerminal.tui.js';
 import { ScriptTerminal } from './ScriptTerminal.tui.js';
 import type { WorkspaceStatusInput } from '../app/workspaces/workspace-status.js';
-import { PHASES, PHASE_LABELS } from '../machine/controllers/useKanbanViewController.js';
+import { PHASES, PHASE_LABELS } from '../app/shared/board/types.js';
 import type { WorkspacePhase } from '../types/config.js';
 import type { UseFlowReturn } from './Flow.js';
 import type { WorkspaceDetailStripStatus } from './WorkspaceDetailPane.js';
@@ -88,10 +88,11 @@ export interface WorkspaceDetailScreenProps extends WorkspaceDetailPaneProps {
   /** Shared workspace status summary for sibling pills. */
   workspaceStatusById?: Record<string, WorkspaceDetailStripStatus>;
   /** Select another workspace from top pills */
-  onSelectWorkspace?: (workspaceId: string) => void;
+  onSelectWorkspace?: (workspaceSelectionKey: string) => void;
   /** Inline terminal bindings for active attached session */
   terminalBindings?: {
     attachedSessionId: string | null;
+    attachedWorkspaceId?: string | null;
     attachedAgentSessionId?: string | null;
     attachedSessionName?: string | null;
     attachedSessionMeta?: {
@@ -136,6 +137,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     onOpenReplay,
     onOpenReplayHistory,
     onStartProcess,
+    onStartProcessAttach,
     onStopProcess,
     onManageBundleConfig,
     onEditProcesses,
@@ -148,6 +150,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     machineLabel = 'local',
     onBack,
     onChangeStatus,
+    onLaunchCommit,
     allWorkspaces = [],
     workspaceStatusById = {},
     onSelectWorkspace,
@@ -178,12 +181,13 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
       onAttachSession,
       onOpenReplay,
       onOpenReplayHistory,
-      onStartProcessAttach: onStartProcess,
+      onStartProcessAttach: onStartProcessAttach ?? onStartProcess,
       onStopProcess,
       onManageBundleConfig,
       onEditProcesses,
       onOpenReview,
       onOpenGitHubPullRequest,
+      onLaunchCommit,
       onRequestStatusChange: onChangeStatus ? (workspaceId) => onChangeStatus(workspaceId, PHASES[statusPickerCursor] ?? 'code') : undefined,
       onOpenAgentSession,
       onCreateAgentSession,
@@ -249,12 +253,37 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     () => agentSessions.find((session) => session.id === terminalBindings?.attachedAgentSessionId) ?? null,
     [agentSessions, terminalBindings?.attachedAgentSessionId],
   );
+  const attachedWorkspaceMatchesCurrent = Boolean(
+    terminalBindings?.attachedWorkspaceId === workspace.id
+      && (terminalBindings.attachedSessionId || terminalBindings.attachedSessionName),
+  );
   const showInlineScriptTerminal = Boolean(
     scriptBindings?.scriptState && scriptBindings.workspaceId === workspace.id
   );
   const showInlineSessionTerminal = Boolean(
-    terminalBindings && !showInlineScriptTerminal && (attachedWorkspaceSession || attachedAgentSession)
+    terminalBindings && !showInlineScriptTerminal && (attachedWorkspaceSession || attachedAgentSession || attachedWorkspaceMatchesCurrent)
   );
+
+  const activeInlineTerminalKey = useMemo(
+    () => attachedWorkspaceSession?.id
+      ?? attachedAgentSession?.id
+      ?? (showInlineScriptTerminal ? `${workspace.id}:${scriptBindings?.scriptState?.phase ?? 'script'}` : null),
+    [attachedAgentSession?.id, attachedWorkspaceSession?.id, scriptBindings?.scriptState?.phase, showInlineScriptTerminal, workspace.id],
+  );
+
+  const previousInlineTerminalKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!activeInlineTerminalKey) {
+      previousInlineTerminalKeyRef.current = null;
+      return;
+    }
+    if (previousInlineTerminalKeyRef.current === activeInlineTerminalKey) {
+      return;
+    }
+    previousInlineTerminalKeyRef.current = activeInlineTerminalKey;
+    setFocus('terminal');
+  }, [activeInlineTerminalKey]);
   const attachedServiceIdentity = useMemo(
     () => attachedWorkspaceSession?.processName
       ? {
@@ -278,6 +307,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
      | { kind: 'history-see-all'; label: string }
      | { kind: 'open-github-pr' }
      | { kind: 'open-review' }
+     | { kind: 'launch-commit' }
      | { kind: 'event-logs' }
      | { kind: 'bundle-config' }
      | { kind: 'process-config' }
@@ -319,12 +349,13 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     for (const action of footerActions) {
       if (action.id === 'open-github-pr') items.push({ kind: 'open-github-pr' });
       else if (action.id === 'open-review' && onOpenReview) items.push({ kind: 'open-review' });
+      else if (action.id === 'launch-commit' && onLaunchCommit) items.push({ kind: 'launch-commit' });
       else if (action.id === 'edit-bundle-config') items.push({ kind: 'bundle-config' });
       else if (action.id === 'edit-process-config') items.push({ kind: 'process-config' });
       else if (action.id === 'change-status') items.push({ kind: 'change-status' });
     }
     return items;
-  }, [agentRows, archivedAgentSessions.length, footerActions, hasMoreReplayRows, onOpenReview, seeAllReplayLabel, showArchivedAgents, visibleReplayRows, workspace.processes, workspaceSessions, sessionRows]);
+  }, [agentRows, archivedAgentSessions.length, footerActions, hasMoreReplayRows, onLaunchCommit, onOpenReview, seeAllReplayLabel, showArchivedAgents, visibleReplayRows, workspace.processes, workspaceSessions, sessionRows]);
 
   const clampSidebar = useCallback(
     (idx: number) => Math.max(0, Math.min(sidebarItems.length - 1, idx)),
@@ -395,6 +426,10 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
       case 'open-review':
         void detailActions.footerAction('open-review');
         break;
+      case 'launch-commit':
+        void detailActions.footerAction('launch-commit');
+        setFocus('terminal');
+        break;
       case 'event-logs':
         onOpenEvents(workspace.id);
         break;
@@ -429,12 +464,22 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     setFocus('sidebar');
   }, [statusPickerCursor, onChangeStatus, workspace.id]);
 
+  const moveWorkspacePhase = useCallback((delta: -1 | 1) => {
+    if (!onChangeStatus) return;
+    const currentIndex = PHASES.indexOf(phaseStr as WorkspacePhase);
+    if (currentIndex < 0) return;
+    const nextPhase = PHASES[currentIndex + delta];
+    if (!nextPhase) return;
+    onChangeStatus(workspace.id, nextPhase);
+  }, [onChangeStatus, phaseStr, workspace.id]);
+
   const activateWorkspacePill = useCallback(() => {
     const selected = siblingWorkspaces[workspacePillCursor];
-    if (!selected) {
+    const selectionKey = selected?.selectionKey;
+    if (!selectionKey) {
       return;
     }
-    detailActions.selectWorkspace(selected.id);
+    detailActions.selectWorkspace(selectionKey);
   }, [siblingWorkspaces, workspacePillCursor, detailActions]);
 
   const openSelectedServiceLauncher = useCallback(() => {
@@ -492,7 +537,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         if (focus === 'status-picker') {
           if (key.name === 'escape') {
             setFocus('sidebar');
-          } else if (key.name === 'up' || key.raw === 'k') {
+          } else if (key.name === 'up' || (key.raw === 'k' && !key.shift)) {
             setStatusPickerCursor((i) => Math.max(0, i - 1));
           } else if (key.name === 'down' || key.raw === 'j') {
             setStatusPickerCursor((i) => Math.min(PHASES.length - 1, i + 1));
@@ -516,6 +561,10 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         if (focus === 'sidebar' || focus === 'workspace-pills') {
           if (key.name === 'escape') {
             onBack();
+            return;
+          }
+          if (key.shift && (key.name === 'left' || key.name === 'right')) {
+            moveWorkspacePhase(key.name === 'left' ? -1 : 1);
             return;
           }
         }
@@ -565,6 +614,13 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             }
             return;
           }
+          if (key.raw === 'K') {
+            const item = sidebarItems[sidebarCursor];
+            if (item?.kind === 'agent' && !item.closedAt && onAbortAgentSession) {
+              void onAbortAgentSession(workspace.id, item.id);
+              return;
+            }
+          }
           if (key.shift && key.name?.toLowerCase() === 'x') {
             const item = sidebarItems[sidebarCursor];
             if (item?.kind === 'agent' && onArchiveAgentSession && flow) {
@@ -578,7 +634,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             }
             return;
           }
-          if (key.name === 'up' || key.raw === 'k') {
+          if (key.name === 'up' || (key.raw === 'k' && !key.shift)) {
             setSidebarCursor((i) => clampSidebar(i - 1));
           } else if (key.name === 'down' || key.raw === 'j') {
             setSidebarCursor((i) => clampSidebar(i + 1));
@@ -611,6 +667,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         clampSidebar,
         activateCurrentSidebarItem,
         applyStatusPicker,
+        moveWorkspacePhase,
         onAbortAgentSession,
         onCloseAgentSession,
         onArchiveAgentSession,
@@ -649,8 +706,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         : focus === 'terminal'
           ? `[Shift+Esc] UI${attachAnywayHint}`
           : focus === 'workspace-pills'
-            ? `[←→] Switch workspace  [Enter] Open  [Tab] Sidebar  [Esc] Back${attachAnywayHint}`
-            : `${sidebarHint}  [x] Close/Stop  [X] Archive  [k] Abort${attachAnywayHint}`;
+            ? `[←→] Switch workspace  [Shift+←/→] Move phase  [Enter] Open  [Tab] Sidebar  [Esc] Back${attachAnywayHint}`
+            : `${sidebarHint}  [Shift+←/→] Move phase  [x] Close/Stop  [X] Archive  [K] Abort${attachAnywayHint}`;
 
   return (
     <box flexDirection="column" flexGrow={1} width="100%" backgroundColor={COLORS.bg}>
@@ -690,7 +747,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
               const w = di.workspace;
               const isCurrent = w.id === workspace.id;
               const isFocused = focus === 'workspace-pills' && siblingWorkspaces[workspacePillCursor]?.id === w.id;
-              const status = workspaceStatusById[w.id];
+              const status = workspaceStatusById[w.selectionKey ?? w.id];
               const dotColor = getStatusColor(status);
               const labelColor = isFocused
                 ? COLORS.selected
@@ -924,7 +981,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
                       <text fg={isSelected ? COLORS.selected : COLORS.textMid}>{service.label}</text>
                       {service.subtitle && <text fg={COLORS.textDim}> {service.subtitle}</text>}
                       {service.portLabel ? (
-                        <text fg={COLORS.textDim}>{service.portLabel}</text>
+                        <text fg={service.hostedUrl ? COLORS.blue : COLORS.textDim}>{service.portLabel}</text>
                       ) : null}
                       {service.alertLabel && (
                         <text fg={COLORS.amber}> {service.alertLabel}</text>
@@ -1029,43 +1086,40 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
             {pendingPermissions > 0 && (
               <text fg={COLORS.amber}>⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}</text>
             )}
-            {(() => {
-              const githubSelected = isSidebarItemSelected((item) => item.kind === 'open-github-pr');
-              const reviewSelected = isSidebarItemSelected((item) => item.kind === 'open-review');
-              const bundleSelected = isSidebarItemSelected((item) => item.kind === 'bundle-config');
-              const processSelected = isSidebarItemSelected((item) => item.kind === 'process-config');
-              const statusSelected = isSidebarItemSelected((item) => item.kind === 'change-status');
+            {footerActions.map((action) => {
+              const selected = isSidebarItemSelected((item) => {
+                if (action.id === 'open-github-pr') return item.kind === 'open-github-pr';
+                if (action.id === 'open-review') return item.kind === 'open-review';
+                if (action.id === 'launch-commit') return item.kind === 'launch-commit';
+                if (action.id === 'edit-bundle-config') return item.kind === 'bundle-config';
+                if (action.id === 'edit-process-config') return item.kind === 'process-config';
+                return item.kind === 'change-status';
+              });
+
+              if (action.id === 'open-github-pr') {
+                if (!pullRequest?.url) return null;
+                return (
+                  <box key={action.id} backgroundColor={selected ? COLORS.bgSelected : undefined}>
+                    <text fg={selected ? COLORS.selected : COLORS.textMid}>{action.label}</text>
+                  </box>
+                );
+              }
+
+              if (action.id === 'change-status') {
+                return (
+                  <box key={action.id} flexDirection="row" gap={1} backgroundColor={selected ? COLORS.bgSelected : undefined}>
+                    <text fg={selected ? COLORS.selected : COLORS.textMid}>{action.label}</text>
+                    <text fg={COLORS.blue}>{action.rightLabel?.replace(/^[\[]|[\]]$/g, '') ?? phaseStr}</text>
+                  </box>
+                );
+              }
+
               return (
-                <>
-                  {footerActions.some((action) => action.id === 'open-github-pr') && pullRequest?.url && (
-                    <box backgroundColor={githubSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={githubSelected ? COLORS.selected : COLORS.textMid}>Open GitHub PR</text>
-                    </box>
-                  )}
-                  {footerActions.some((action) => action.id === 'open-review') && onOpenReview && (
-                    <box backgroundColor={reviewSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={reviewSelected ? COLORS.selected : COLORS.textMid}>Open Review</text>
-                    </box>
-                  )}
-                  {footerActions.some((action) => action.id === 'edit-bundle-config') && (
-                    <box backgroundColor={bundleSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={bundleSelected ? COLORS.selected : COLORS.textMid}>Edit bundle config</text>
-                    </box>
-                  )}
-                  {footerActions.some((action) => action.id === 'edit-process-config') && (
-                    <box backgroundColor={processSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={processSelected ? COLORS.selected : COLORS.textMid}>Edit process config</text>
-                    </box>
-                  )}
-                  {footerActions.find((action) => action.id === 'change-status') && (
-                    <box flexDirection="row" gap={1} backgroundColor={statusSelected ? COLORS.bgSelected : undefined}>
-                      <text fg={statusSelected ? COLORS.selected : COLORS.textMid}>Change Status</text>
-                      <text fg={COLORS.blue}>{footerActions.find((action) => action.id === 'change-status')?.rightLabel?.replace(/^[\[]|[\]]$/g, '') ?? phaseStr}</text>
-                    </box>
-                  )}
-                </>
+                <box key={action.id} backgroundColor={selected ? COLORS.bgSelected : undefined}>
+                  <text fg={selected ? COLORS.selected : COLORS.textMid}>{action.label}</text>
+                </box>
               );
-            })()}
+            })}
           </box>
         </box>
 

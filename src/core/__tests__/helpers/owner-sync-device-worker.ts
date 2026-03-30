@@ -11,7 +11,8 @@ import {
   exportSecretsForOwnerSyncSnapshot,
   setProjectSecret,
 } from '../../../utils/secrets.js';
-import { getGitspaceDir, readGlobalConfig, readProjectConfig, writeGlobalConfig, writeProjectConfig } from '../../config.js';
+import { readGlobalConfig, readProjectConfig, writeGlobalConfig, writeProjectConfig } from '../../config.js';
+import { getConfigRoot } from '../../paths.js';
 import { writeRelayConfig } from '../../identity.js';
 import { initializeOwnerSync, resetOwnerSyncForTests } from '../../owner-sync.js';
 import { initFromMnemonic, loadUserRootIdentity } from '../../user-identity.js';
@@ -122,7 +123,7 @@ function isSyncCategory(value: unknown): value is SyncCategory {
 }
 
 function loadOwnerSyncStateMutable(): MutableOwnerSyncState {
-  const statePath = join(getGitspaceDir(), '.owner-sync-state.json');
+  const statePath = join(getConfigRoot(), '.owner-sync-state.json');
   if (!existsSync(statePath)) {
     return {
       version: 1,
@@ -191,7 +192,7 @@ function loadOwnerSyncStateMutable(): MutableOwnerSyncState {
 }
 
 function writeOwnerSyncStateMutable(state: MutableOwnerSyncState): void {
-  const statePath = join(getGitspaceDir(), '.owner-sync-state.json');
+  const statePath = join(getConfigRoot(), '.owner-sync-state.json');
   writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf-8');
 }
 

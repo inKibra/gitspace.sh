@@ -9,7 +9,8 @@ import { formatTime, getAgentSessionDisplayState } from '../../../components/Spa
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
 import { parseProcessSessionName } from '../../../lib/processes/names.js';
 import { getSessionAlertLabel, getSessionSubtitle } from '../workspace-runtime/derive.js';
-
+import { getPrimaryProcessPort } from '../../../lib/processes/runtime-ports.js';
+import { resolveHostedServiceUrl } from '../../../lib/tmux-lite/hosting/routes.js';
 const REPLAY_HISTORY_PREVIEW_LIMIT = 3;
 const NOTE_TODO_PREVIEW_LIMIT = 2;
 const NOTE_RECENT_PREVIEW_LIMIT = 1;
@@ -248,7 +249,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
         continue;
       }
       for (let instance = 1; instance <= count; instance += 1) {
-        const port = (process.ports ?? [])[instance - 1] ?? (process.ports ?? [])[0] ?? null;
+        const port = getPrimaryProcessPort(process.ports, instance);
         const matchingSessions = workspaceSessions.filter(
           (session) =>
             session.processName === process.name &&
@@ -258,12 +259,23 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
           .filter((session) => session.exitCode === undefined)
           .sort((a, b) => b.createdAt - a.createdAt)[0];
         const latestSession = [...matchingSessions].sort((a, b) => b.createdAt - a.createdAt)[0];
+        const localUrl = port ? `localhost:${port.port}` : undefined;
+        const hostedUrl = runningSession && port ? resolveHostedServiceUrl({
+          baseHost: workspace.serveDomain,
+          workspaceId: workspace.id,
+          processName: process.name,
+          instance,
+          portLabel: port.name,
+          protocol: port.protocol === 'tcp' ? 'tcp' : 'http',
+        }) : undefined;
         rows.push({
           key: `${process.name}:${instance}`,
           processName: process.name,
           instance,
           label: `${process.name}#${instance}`,
-          portLabel: port ? `localhost:${port.port}` : undefined,
+          portLabel: hostedUrl ? hostedUrl.replace(/^http:\/\//, '') : localUrl,
+          localUrl,
+          hostedUrl,
           state: runningSession ? 'running' : latestSession?.exitCode !== undefined ? (latestSession.exitCode === 0 ? 'stopped' : 'failed') : 'stopped',
           subtitle: latestSession ? getSessionSubtitle(runningSession ?? latestSession) : undefined,
           alertLabel: latestSession ? getSessionAlertLabel(runningSession ?? latestSession) : undefined,
@@ -329,6 +341,8 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
 
   const footerActions = useMemo(() => {
     const actions: WorkspaceDetailModel['footerActions'] = [
+      { id: 'open-review', label: 'Open Review' },
+      { id: 'launch-commit', label: 'Auto Commit Changes (Alpha)' },
       { id: 'edit-bundle-config', label: 'Edit Bundle Config' },
       { id: 'edit-process-config', label: 'Edit Process Config' },
       { id: 'change-status', label: 'Change Status', rightLabel: `[${phase}]` },
@@ -336,7 +350,6 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     if (workspace.pullRequest?.url) {
       actions.unshift({ id: 'open-github-pr', label: 'Open GitHub PR' });
     }
-    actions.splice(actions.findIndex((item) => item.id === 'change-status'), 0, { id: 'open-review', label: 'Open Review' });
     return actions;
   }, [phase, workspace.pullRequest?.url]);
 
@@ -378,6 +391,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     footerAction: (id) => {
       if (id === 'open-github-pr') return actions.onOpenGitHubPullRequest?.(workspace.id);
       if (id === 'open-review') return actions.onOpenReview?.(workspace.id);
+      if (id === 'launch-commit') return actions.onLaunchCommit?.(workspace.id);
       if (id === 'edit-bundle-config') return actions.onManageBundleConfig?.({ workspaceId: workspace.id });
       if (id === 'edit-process-config') return actions.onEditProcesses?.({ workspaceId: workspace.id });
       return actions.onRequestStatusChange?.(workspace.id, workspace.projectName);

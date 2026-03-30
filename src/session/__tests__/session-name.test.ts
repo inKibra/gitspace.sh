@@ -33,3 +33,16 @@ describe('buildSessionName', () => {
     }
   });
 });
+
+it('ignores malformed existing session names during auto naming', () => {
+  const name = buildSessionName({
+    projectName: 'alpha',
+    workspaceName: 'ws-1',
+    sessions: [
+      { name: 'alpha:ws-1:1' },
+      { name: undefined as unknown as string },
+    ],
+  });
+
+  expect(name).toBe('alpha:ws-1:2');
+});

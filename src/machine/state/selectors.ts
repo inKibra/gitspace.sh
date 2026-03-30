@@ -1,5 +1,5 @@
 import type { WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
-import type { SessionStatus } from '../../agents/opencode-event-types.js';
+import type { SessionStatus } from '../../agents/agent-runtime-types.js';
 import type { ProjectInfo, SessionInfo, WorkspaceInfo } from '../../lib/remote-session/protocol.js';
 import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import { selectProjects, selectWorkspaces } from './client.js';
@@ -69,6 +69,7 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
     const statuses: WorkspaceAgentState['statuses'] = {};
     const pendingPermissions: WorkspaceAgentState['pendingPermissions'] = {};
     const lastMessages: WorkspaceAgentState['lastMessages'] = {};
+    const errorMessages: WorkspaceAgentState['errorMessages'] = {};
 
     for (const sessionId of snapshot.agentSessionIdsByWorkspaceId[workspace.id] ?? []) {
       const session = snapshot.agentSessionsById[sessionId];
@@ -103,6 +104,9 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       if (session.lastMessagePreview) {
         lastMessages[session.id] = session.lastMessagePreview;
       }
+      if (session.errorMessage) {
+        errorMessages[session.id] = session.errorMessage;
+      }
     }
 
     result[workspace.id] = {
@@ -112,6 +116,7 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       pendingPermissions,
       pendingQuestions: {},
       lastMessages,
+      errorMessages,
     };
   }
   return result;

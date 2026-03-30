@@ -12,7 +12,9 @@ class MockPortConflictError extends Error {
   }
 }
 
+const realPorts = await import('../../lib/processes/ports.js');
 mock.module('../../lib/processes/ports.js', () => ({
+  ...realPorts,
   PortConflictError: MockPortConflictError,
   resolvePortConflict: mockResolvePortConflict,
 }));

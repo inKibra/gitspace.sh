@@ -145,6 +145,8 @@ gssh client connect <machine-id>
 
 ## Directory Structure
 
+Default workspace root:
+
 ```
 ~/gitspace/
 ├── .config.json           # Global config

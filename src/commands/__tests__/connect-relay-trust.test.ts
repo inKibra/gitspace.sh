@@ -7,14 +7,14 @@ import {
   getTrustedRelay,
   addTrustedRelay,
 } from '../../core/trusted-relays.js';
-import {
-  fetchRelayIdentity,
-  verifyClientRelayTrust,
-  type RelayIdentityProbe,
-} from '../connect.js';
+import type { RelayIdentityProbe } from '../connect.js';
 
 let originalHome: string | undefined;
 let testDir: string;
+
+async function loadConnectModule() {
+  return import(`../connect.js?test=${Date.now()}`);
+}
 
 function setupEnv() {
   originalHome = process.env.HOME;
@@ -66,6 +66,7 @@ describe('fetchRelayIdentity', () => {
     });
 
     try {
+      const { fetchRelayIdentity } = await loadConnectModule();
       const relay = await fetchRelayIdentity(`ws://127.0.0.1:${server.port}/ws`);
       expect(relay).toEqual({
         publicKey: relayPublicKey,
@@ -92,6 +93,7 @@ describe('fetchRelayIdentity', () => {
     });
 
     try {
+      const { fetchRelayIdentity } = await loadConnectModule();
       const relay = await fetchRelayIdentity(`ws://127.0.0.1:${server.port}/ws`);
       expect(relay.publicKey).toBe(relayPublicKey);
       expect(relay.fingerprint).toBe(computeRelayFingerprint(relayPublicKey));
@@ -112,6 +114,7 @@ describe('fetchRelayIdentity', () => {
     });
 
     try {
+      const { fetchRelayIdentity } = await loadConnectModule();
       await expect(
         fetchRelayIdentity(`ws://127.0.0.1:${server.port}/ws`),
       ).rejects.toThrow(/did not provide relayPublicKey/i);
@@ -129,6 +132,7 @@ describe('verifyClientRelayTrust', () => {
     const relayUrl = 'wss://relay-explicit.example.test/ws';
     const relayPublicKey = Buffer.from('relay-pub-match').toString('base64');
 
+    const { verifyClientRelayTrust } = await loadConnectModule();
     await verifyClientRelayTrust(relayUrl, makeProbe(relayPublicKey, 'example'), {
       relayPubkey: relayPublicKey,
     });
@@ -143,6 +147,7 @@ describe('verifyClientRelayTrust', () => {
     const expectedPublicKey = Buffer.from('expected-key').toString('base64');
     const actualPublicKey = Buffer.from('actual-key').toString('base64');
 
+    const { verifyClientRelayTrust } = await loadConnectModule();
     await expect(
       verifyClientRelayTrust(relayUrl, makeProbe(actualPublicKey), {
         relayPubkey: expectedPublicKey,
@@ -156,6 +161,7 @@ describe('verifyClientRelayTrust', () => {
     const relayUrl = 'ws://127.0.0.1:4480/ws';
     const relayPublicKey = Buffer.from('localhost-key').toString('base64');
 
+    const { verifyClientRelayTrust } = await loadConnectModule();
     await verifyClientRelayTrust(relayUrl, makeProbe(relayPublicKey));
 
     const trusted = getTrustedRelay(relayUrl);
@@ -170,6 +176,7 @@ describe('verifyClientRelayTrust', () => {
 
     addTrustedRelay(relayUrl, originalKey, 'relay-one');
 
+    const { verifyClientRelayTrust } = await loadConnectModule();
     await expect(
       verifyClientRelayTrust(relayUrl, makeProbe(unexpectedKey), { yes: true }),
     ).rejects.toThrow(/relay identity mismatch/i);
@@ -193,6 +200,7 @@ describe('verifyClientRelayTrust', () => {
     });
 
     try {
+      const { fetchRelayIdentity } = await loadConnectModule();
       await expect(fetchRelayIdentity(`ws://127.0.0.1:${server.port}/ws`)).rejects.toThrow(/inconsistent identity metadata/i);
     } finally {
       server.stop(true);
@@ -203,6 +211,7 @@ describe('verifyClientRelayTrust', () => {
     const relayUrl = 'wss://relay-yes.example.test/ws';
     const relayPublicKey = Buffer.from('new-key').toString('base64');
 
+    const { verifyClientRelayTrust } = await loadConnectModule();
     await expect(
       verifyClientRelayTrust(relayUrl, makeProbe(relayPublicKey), { yes: true })
     ).rejects.toThrow(/interactive approval or --relay-pubkey/i);

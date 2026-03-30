@@ -29,6 +29,8 @@ export interface MachineRegistration {
   registeredAt: number;
   /** When machine last connected */
   lastConnectedAt: number;
+  /** Last observed message or keepalive from this machine */
+  lastSeenAt: number;
 }
 
 // ============================================================================
@@ -90,6 +92,7 @@ export function registerMachine(
     ws,
     registeredAt: now,
     lastConnectedAt: now,
+    lastSeenAt: now,
   };
 
   machines.set(machineId, registration);
@@ -121,8 +124,18 @@ export function setMachineConnection(
   if (machine) {
     machine.ws = ws;
     if (ws) {
-      machine.lastConnectedAt = Date.now();
+      const now = Date.now();
+      machine.lastConnectedAt = now;
+      machine.lastSeenAt = now;
     }
+  }
+}
+
+/** Update machine liveness without changing the socket reference */
+export function markMachineSeen(machineId: string): void {
+  const machine = machines.get(machineId);
+  if (machine) {
+    machine.lastSeenAt = Date.now();
   }
 }
 

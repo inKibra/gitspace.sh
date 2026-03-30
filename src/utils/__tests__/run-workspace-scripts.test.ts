@@ -157,6 +157,34 @@ describe('runWorkspaceScripts', () => {
     }
   });
 
+  it('returns success without running pre/setup/select when scriptPolicy is skip', async () => {
+    const outputFile = join(testDir, 'skip-output.txt');
+
+    const preScript = join(preScriptsDir, '01-pre.sh');
+    writeFileSync(preScript, `#!/bin/bash\necho "pre" >> "${outputFile}"`);
+    chmodSync(preScript, 0o755);
+
+    const setupScript = join(setupScriptsDir, '01-setup.sh');
+    writeFileSync(setupScript, `#!/bin/bash\necho "setup" >> "${outputFile}"`);
+    chmodSync(setupScript, 0o755);
+
+    const selectScript = join(selectScriptsDir, '01-select.sh');
+    writeFileSync(selectScript, `#!/bin/bash\necho "select" >> "${outputFile}"`);
+    chmodSync(selectScript, 0o755);
+
+    const result = await runWorkspaceScripts({
+      projectName: 'test-project',
+      workspacePath,
+      workspaceName: 'test-workspace',
+      repository: 'owner/repo',
+      scriptPolicy: 'skip',
+    });
+
+    expect(result.success).toBe(true);
+    expect(existsSync(outputFile)).toBe(false);
+  });
+
+
   describe('first-time workspace (pre + setup + select)', () => {
     it('should run pre, setup, and select scripts successfully', async () => {
       const outputFile = join(testDir, 'output.txt');

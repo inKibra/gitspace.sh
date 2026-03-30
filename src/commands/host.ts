@@ -4,16 +4,23 @@
  * Handles subdomain management: reserve, release, list, set-primary, status
  */
 
-import { existsSync, writeFileSync, readFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getSecret, setSecret, deleteSecret } from '../utils/secrets.js';
 import { getSpacesDir } from '../core/config.js';
-import { getPublicKeyWithoutPassword } from '../core/identity.js';
+import { getIdentityDir, getPublicKeyWithoutPassword } from '../core/identity.js';
+import {
+  GITSPACE_API_BASE as API_BASE,
+  fetchWorkerPublicConfig,
+  getWorkerCompatibilityWarnings,
+  parseServeTunnelDetails,
+  supportsServeCompanionMetadata,
+  type ServeTunnelConfigSource,
+  type ServeTunnelDetails,
+} from '../core/gitspace-api.js';
 import { logger } from '../utils/logger.js';
 import { SpacesError } from '../types/errors.js';
-
-// API Configuration
-const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
+import { buildServeHostnamePattern } from '../utils/hostnames.js';
 
 // ============================================================================
 // Types
@@ -21,11 +28,23 @@ const API_BASE = process.env.GITSPACE_API_URL || 'https://api.gitspace.sh';
 
 /**
  * Host configuration stored in ~/.gitspace/host.json
- * Non-sensitive data only - tunnel tokens are in keychain
+ * Non-sensitive data only - relay tunnel tokens remain in keychain.
  */
+export interface LocalManagedServeTunnelConfig {
+  id: string;
+  name: string;
+  configSource: ServeTunnelConfigSource;
+  credentialsPath: string;
+}
+
+export interface ServeNamespaceConfig {
+  domain: string;
+  tunnel?: LocalManagedServeTunnelConfig;
+}
+
 export interface HostConfig {
   subdomain: string;
-  serveSubdomain?: string;
+  serveNamespaces?: Record<string, ServeNamespaceConfig>;
   subdomains?: string[];
   createdAt: number;
 }
@@ -36,6 +55,8 @@ interface SubdomainInfo {
   status: string;
   is_primary: number;
   relay?: boolean | number | null;
+  serveDomain?: string | null;
+  serveStatus?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -50,8 +71,11 @@ interface SubdomainCreateResponse {
   id: string;
   subdomain: string;
   tunnelToken?: string;
-  serveSubdomain?: string;
-  serveTunnelToken?: string;
+  serveDomain?: string;
+  serveTunnelId?: string;
+  serveTunnelName?: string;
+  serveTunnelConfigSource?: ServeTunnelConfigSource;
+  serveTunnelCredentialsFile?: ServeTunnelDetails['serveTunnelCredentialsFile'];
   hosts: string[];
   isPrimary: boolean;
 }
@@ -67,15 +91,43 @@ export interface HostReadinessCheck {
 export interface HostSyncReport {
   ready: boolean;
   primarySubdomain: string | null;
-  serveSubdomain: string | null;
+  serveDomain: string | null;
   subdomain: HostReadinessCheck;
   tunnelToken: HostReadinessCheck;
-  serveTunnelToken: HostReadinessCheck;
+  serveTunnel: HostReadinessCheck;
   warnings: string[];
 }
 
 function normalizeSubdomain(subdomain: string): string {
   return subdomain.toLowerCase().trim();
+}
+
+function trimString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeStoredSubdomain(value: unknown): string | undefined {
+  const trimmed = trimString(value);
+  return trimmed ? normalizeSubdomain(trimmed) : undefined;
+}
+
+function normalizeStoredDomain(value: unknown): string | undefined {
+  const trimmed = trimString(value)?.toLowerCase();
+  if (!trimmed) return undefined;
+  return trimmed === 'serve.gitspace.sh' ? 'gitspace.sh' : trimmed;
+}
+
+function validateReservableSubdomain(subdomain: string): void {
+  if (subdomain.includes('--')) {
+    throw new SpacesError('Subdomain names containing -- are reserved for hosted service routes.', 'USER_ERROR');
+  }
+  if (subdomain.endsWith('-srv')) {
+    throw new SpacesError('Subdomain names ending in -srv are reserved for hosted service routes.', 'USER_ERROR');
+  }
 }
 
 function configuredCheck(detail: string): HostReadinessCheck {
@@ -94,16 +146,80 @@ function createInitialHostSyncReport(): HostSyncReport {
   return {
     ready: false,
     primarySubdomain: null,
-    serveSubdomain: null,
+    serveDomain: null,
     subdomain: missingCheck('Not checked yet.'),
     tunnelToken: missingCheck('Not checked yet.'),
-    serveTunnelToken: missingCheck('Not checked yet.'),
+    serveTunnel: missingCheck('Not checked yet.'),
     warnings: [],
   };
 }
 
 function isConfigured(check: HostReadinessCheck): boolean {
   return check.status === 'configured';
+}
+
+interface SubdomainListingSnapshot {
+  subdomains: SubdomainInfo[];
+  warnings: string[];
+  serveMetadataSupported: boolean;
+}
+
+interface ServeNamespaceSyncResult {
+  rootSubdomain: string;
+  config?: ServeNamespaceConfig;
+  warning?: string;
+  readiness?: HostReadinessCheck;
+}
+
+function describeCompatibilityFetchError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function resolveServeDomain(args: {
+  entry: SubdomainInfo;
+  serveMetadataSupported: boolean;
+}): { serveDomain: string | null; missingMetadataWarning?: string } {
+  const { entry, serveMetadataSupported } = args;
+  if (!serveMetadataSupported) {
+    return { serveDomain: null };
+  }
+
+  if (!Object.hasOwn(entry, 'serveDomain') || !Object.hasOwn(entry, 'serveStatus')) {
+    return {
+      serveDomain: null,
+      missingMetadataWarning: `gitspace.sh listed ${entry.subdomain}.gitspace.sh without flattened serve metadata. Hosted serve readiness cannot be verified safely.`,
+    };
+  }
+
+  if (entry.serveDomain && entry.serveStatus === 'active') {
+    return { serveDomain: entry.serveDomain.toLowerCase() };
+  }
+
+  return { serveDomain: null };
+}
+
+async function fetchSubdomainListing(headers: Record<string, string>): Promise<SubdomainListingSnapshot> {
+  let warnings: string[] = [];
+  let serveMetadataSupported = false;
+
+  try {
+    const config = await fetchWorkerPublicConfig();
+    warnings = getWorkerCompatibilityWarnings(config);
+    serveMetadataSupported = supportsServeCompanionMetadata(config);
+  } catch (error) {
+    warnings = [
+      `Could not verify gitspace.sh API compatibility (${describeCompatibilityFetchError(error)}). Hosted serve readiness may be incomplete.`,
+    ];
+  }
+
+  const res = await fetch(`${API_BASE}/subdomains`, { headers });
+  if (!res.ok) {
+    await throwIfInvalidDeviceFingerprint(res);
+    throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
+  }
+
+  const subdomains: SubdomainInfo[] = await res.json();
+  return { subdomains, warnings, serveMetadataSupported };
 }
 
 async function setPrimarySubdomainViaSync(headers: Record<string, string>, subdomain: string): Promise<boolean> {
@@ -171,7 +287,7 @@ function checkStatusLabel(check: HostReadinessCheck): string {
 }
 
 function collectRecommendedCommands(report: HostSyncReport): string[] {
-  const commands = [report.subdomain.fix, report.tunnelToken.fix, report.serveTunnelToken.fix]
+  const commands = [report.subdomain.fix, report.tunnelToken.fix, report.serveTunnel.fix]
     .filter((value): value is string => Boolean(value));
   return [...new Set(commands)];
 }
@@ -186,14 +302,17 @@ export function printHostSyncReport(report: HostSyncReport, title: string = 'Hos
   logger.log(`  Tunnel token:      ${checkStatusLabel(report.tunnelToken)}`);
   logger.dim(`    ${report.tunnelToken.detail}`);
 
-  logger.log(`  Serve token:       ${checkStatusLabel(report.serveTunnelToken)}`);
-  logger.dim(`    ${report.serveTunnelToken.detail}`);
+  logger.log(`  Serve tunnel:      ${checkStatusLabel(report.serveTunnel)}`);
+  logger.dim(`    ${report.serveTunnel.detail}`);
 
   if (report.primarySubdomain) {
     logger.log(`  Primary host:      ${report.primarySubdomain}.gitspace.sh`);
   }
-  if (report.serveSubdomain) {
-    logger.log(`  Serve host:        ${report.serveSubdomain}.gitspace.sh`);
+  if (report.serveDomain) {
+    logger.log(`  Serve domain:      ${report.serveDomain}`);
+    if (report.primarySubdomain) {
+      logger.log(`  Serve route:       ${buildServeHostnamePattern(report.serveDomain, report.primarySubdomain)}`);
+    }
   }
 
   for (const warning of report.warnings) {
@@ -263,6 +382,102 @@ function getHostConfigPath(): string {
   return join(getSpacesDir(), 'host.json');
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizeStoredSubdomains(value: unknown): { values: string[]; repaired: boolean } {
+  if (!Array.isArray(value)) {
+    return { values: [], repaired: value != null };
+  }
+
+  const values: string[] = [];
+  let repaired = false;
+  for (const candidate of value) {
+    const normalized = normalizeStoredSubdomain(candidate);
+    if (!normalized) {
+      repaired = true;
+      continue;
+    }
+    if (values.includes(normalized)) {
+      repaired = true;
+      continue;
+    }
+    if (candidate !== normalized) {
+      repaired = true;
+    }
+    values.push(normalized);
+  }
+
+  return { values, repaired };
+}
+
+function normalizeStoredServeTunnel(value: unknown): LocalManagedServeTunnelConfig | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const id = trimString(value.id);
+  const name = trimString(value.name);
+  const configSource = value.configSource;
+  const credentialsPath = trimString(value.credentialsPath);
+  if (!id || !name || configSource !== 'local' || !credentialsPath) {
+    return undefined;
+  }
+
+  return {
+    id,
+    name,
+    configSource,
+    credentialsPath,
+  };
+}
+
+function normalizeStoredServeNamespace(value: unknown): ServeNamespaceConfig | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const legacySubdomain = normalizeStoredSubdomain(value.subdomain);
+  const domain = normalizeStoredDomain(value.domain)
+    ?? (legacySubdomain ? 'gitspace.sh' : undefined);
+  if (!domain) {
+    return undefined;
+  }
+
+  const tunnel = normalizeStoredServeTunnel(value.tunnel);
+  return tunnel ? { domain, tunnel } : { domain };
+}
+
+function normalizeStoredServeNamespaces(value: unknown): { values: Record<string, ServeNamespaceConfig>; repaired: boolean } {
+  if (!isRecord(value)) {
+    return { values: {}, repaired: value != null };
+  }
+
+  const values: Record<string, ServeNamespaceConfig> = {};
+  let repaired = false;
+  for (const [rootSubdomain, config] of Object.entries(value)) {
+    const normalizedRoot = normalizeSubdomain(rootSubdomain);
+    const normalizedConfig = normalizeStoredServeNamespace(config);
+    if (!normalizedConfig) {
+      repaired = true;
+      continue;
+    }
+    const rawDomain = isRecord(config) ? normalizeStoredDomain(config.domain) : undefined;
+    const rawLegacySubdomain = isRecord(config) ? normalizeStoredSubdomain(config.subdomain) : undefined;
+    if (
+      normalizedRoot !== rootSubdomain ||
+      rawDomain !== normalizedConfig.domain ||
+      rawLegacySubdomain != null
+    ) {
+      repaired = true;
+    }
+    values[normalizedRoot] = normalizedConfig;
+  }
+
+  return { values, repaired };
+}
+
 /**
  * Read host config from disk
  */
@@ -272,12 +487,62 @@ export function readHostConfig(): HostConfig | null {
     return null;
   }
 
+  let parsed: unknown;
   try {
-    const content = readFileSync(configPath, 'utf-8');
-    return JSON.parse(content) as HostConfig;
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8')) as unknown;
   } catch {
     return null;
   }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const subdomain = normalizeStoredSubdomain(parsed.subdomain);
+  if (!subdomain) {
+    return null;
+  }
+
+  const { values: subdomains, repaired: repairedSubdomains } = normalizeStoredSubdomains(parsed.subdomains);
+  const { values: serveNamespaces, repaired: repairedServeNamespaces } = normalizeStoredServeNamespaces(parsed.serveNamespaces);
+  let repaired = repairedSubdomains || repairedServeNamespaces;
+
+  if (!subdomains.includes(subdomain)) {
+    subdomains.unshift(subdomain);
+    repaired = true;
+  }
+
+  const legacyServeSubdomain = normalizeStoredSubdomain(parsed.serveSubdomain);
+  if (legacyServeSubdomain) {
+    const current = serveNamespaces[subdomain];
+    if (!current || current.domain !== 'gitspace.sh') {
+      serveNamespaces[subdomain] = current?.tunnel
+        ? { domain: 'gitspace.sh', tunnel: current.tunnel }
+        : { domain: 'gitspace.sh' };
+      repaired = true;
+    }
+  }
+
+  const createdAt = typeof parsed.createdAt === 'number' ? parsed.createdAt : Date.now();
+  if (typeof parsed.createdAt !== 'number') {
+    repaired = true;
+  }
+
+  const config: HostConfig = {
+    subdomain,
+    subdomains,
+    createdAt,
+    ...(Object.keys(serveNamespaces).length > 0 ? { serveNamespaces } : {}),
+  };
+
+  if (repaired) {
+    try {
+      writeHostConfig(config);
+    } catch {
+      // Keep the repaired in-memory config even if best-effort write-back fails.
+    }
+  }
+
+  return config;
 }
 
 /**
@@ -291,6 +556,153 @@ function writeHostConfig(config: HostConfig): void {
   });
 }
 
+function getServeTunnelCredentialsDir(): string {
+  return join(getIdentityDir(), 'serve-tunnels');
+}
+
+function getServeTunnelCredentialsPath(tunnelId: string): string {
+  return join(getServeTunnelCredentialsDir(), `${tunnelId}.json`);
+}
+
+function persistServeTunnelConfig(details: ServeTunnelDetails): LocalManagedServeTunnelConfig {
+  const credentialsDir = getServeTunnelCredentialsDir();
+  mkdirSync(credentialsDir, { recursive: true, mode: 0o700 });
+
+  const credentialsPath = getServeTunnelCredentialsPath(details.serveTunnelId);
+  writeFileSync(credentialsPath, `${JSON.stringify(details.serveTunnelCredentialsFile, null, 2)}\n`, {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  try {
+    chmodSync(credentialsPath, 0o600);
+  } catch {
+    // Best effort. The write itself already used a restricted mode for new files.
+  }
+
+  return {
+    id: details.serveTunnelId,
+    name: details.serveTunnelName,
+    configSource: details.serveTunnelConfigSource,
+    credentialsPath,
+  };
+}
+
+function getStoredServeNamespace(hostConfig: HostConfig | null, rootSubdomain: string): ServeNamespaceConfig | undefined {
+  return hostConfig?.serveNamespaces?.[normalizeSubdomain(rootSubdomain)];
+}
+
+export function getPrimaryServeDomain(hostConfig: HostConfig | null = readHostConfig()): string | null {
+  const primarySubdomain = hostConfig?.subdomain;
+  if (!primarySubdomain) {
+    return null;
+  }
+  return hostConfig?.serveNamespaces?.[primarySubdomain]?.domain ?? null;
+}
+
+async function fetchServeTunnelDetailsFromApi(
+  headers: Record<string, string>,
+  rootSubdomain: string,
+): Promise<ServeTunnelDetails> {
+  const normalizedRoot = normalizeSubdomain(rootSubdomain);
+  const response = await fetch(`${API_BASE}/subdomains/${normalizedRoot}`, { headers });
+  if (!response.ok) {
+    await throwIfInvalidDeviceFingerprint(response);
+    await logApiFailure(`Failed to fetch serve tunnel details for ${normalizedRoot}.gitspace.sh`, response);
+    throw new SpacesError(
+      `Failed to fetch serve tunnel details for ${normalizedRoot}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  const payload = await response.json();
+  const details = parseServeTunnelDetails(payload);
+  if (!details) {
+    logger.error(
+      `Invalid serve tunnel details returned for ${normalizedRoot}.gitspace.sh payload=${JSON.stringify(payload).slice(0, 500)}`
+    );
+    throw new SpacesError(
+      `Invalid serve tunnel details returned for ${normalizedRoot}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  return details;
+}
+
+async function syncServeNamespaceFromApi(args: {
+  headers: Record<string, string>;
+  entry: SubdomainInfo;
+  serveMetadataSupported: boolean;
+  currentConfig?: ServeNamespaceConfig;
+}): Promise<ServeNamespaceSyncResult> {
+  const rootSubdomain = normalizeSubdomain(args.entry.subdomain);
+  const { serveDomain, missingMetadataWarning } = resolveServeDomain({
+    entry: args.entry,
+    serveMetadataSupported: args.serveMetadataSupported,
+  });
+
+  if (missingMetadataWarning) {
+    return {
+      rootSubdomain,
+      config: args.currentConfig,
+      warning: missingMetadataWarning,
+      readiness: errorCheck(
+        missingMetadataWarning,
+        'Deploy a worker version that exposes flattened serve metadata, then re-run `gssh user host status`.',
+      ),
+    };
+  }
+
+  if (!serveDomain) {
+    return { rootSubdomain };
+  }
+
+  try {
+    const details = await fetchServeTunnelDetailsFromApi(args.headers, rootSubdomain);
+    const normalizedServeDomain = normalizeStoredDomain(details.serveDomain);
+    if (!normalizedServeDomain) {
+      throw new SpacesError(
+        `Serve tunnel response missing serve domain for ${rootSubdomain}.gitspace.sh`,
+        'SYSTEM_ERROR',
+        2,
+      );
+    }
+    if (normalizedServeDomain !== serveDomain) {
+      throw new SpacesError(
+        `Serve tunnel response targeted ${normalizedServeDomain} instead of ${serveDomain}`,
+        'SYSTEM_ERROR',
+        2,
+      );
+    }
+
+    const tunnel = persistServeTunnelConfig(details);
+    await deleteSecret(getServeTokenKey(rootSubdomain));
+
+    return {
+      rootSubdomain,
+      config: { domain: normalizedServeDomain, tunnel },
+      readiness: configuredCheck(
+        `Locally managed serve tunnel ${details.serveTunnelName} for ${normalizedServeDomain} stored at ${tunnel.credentialsPath}.`,
+      ),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      rootSubdomain,
+      config: args.currentConfig?.domain === serveDomain
+        ? args.currentConfig
+        : { domain: serveDomain },
+      warning: `Could not sync locally managed serve tunnel for ${rootSubdomain} on ${serveDomain} (${detail}).`,
+      readiness: errorCheck(
+        `Could not sync locally managed serve tunnel for ${rootSubdomain} on ${serveDomain} (${detail}).`,
+        'gssh user host status',
+      ),
+    };
+  }
+}
+
 /**
  * Sync host config from gitspace.sh API
  * Called after login and subdomain changes to keep local config in sync
@@ -298,12 +710,13 @@ function writeHostConfig(config: HostConfig): void {
  */
 export async function syncHostConfig(interactive: boolean = false): Promise<HostSyncReport> {
   const report = createInitialHostSyncReport();
+  const currentHostConfig = readHostConfig();
 
   const token = await getSecret('GITSPACE_TOKEN');
   if (!token) {
     report.subdomain = missingCheck('Not logged in to gitspace.sh.', 'gssh user auth login');
     report.tunnelToken = missingCheck('Unavailable until login is complete.', 'gssh user auth login');
-    report.serveTunnelToken = missingCheck('Unavailable until login is complete.', 'gssh user auth login');
+    report.serveTunnel = missingCheck('Unavailable until login is complete.', 'gssh user auth login');
     return report;
   }
 
@@ -314,33 +727,26 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
     const detail = error instanceof Error ? error.message : String(error);
     report.subdomain = errorCheck(detail, 'gssh user identity init');
     report.tunnelToken = missingCheck('Unavailable until identity is configured.', 'gssh user identity init');
-    report.serveTunnelToken = missingCheck('Unavailable until identity is configured.', 'gssh user identity init');
+    report.serveTunnel = missingCheck('Unavailable until identity is configured.', 'gssh user identity init');
     return report;
   }
 
   let activeSubdomains: SubdomainInfo[] = [];
+  let serveMetadataSupported = false;
   try {
-    const res = await fetch(`${API_BASE}/subdomains`, { headers });
-    if (!res.ok) {
-      await throwIfInvalidDeviceFingerprint(res);
-      report.subdomain = errorCheck(
-        `Could not list subdomains (${res.status} ${res.statusText}).`,
-        'gssh user host status',
-      );
-      report.tunnelToken = missingCheck('Unavailable until subdomains are reachable.', 'gssh user host status');
-      report.serveTunnelToken = missingCheck('Unavailable until subdomains are reachable.', 'gssh user host status');
-      return report;
-    }
-
-    const subdomains: SubdomainInfo[] = await res.json();
-    activeSubdomains = subdomains.filter((entry) => entry.status === 'active');
+    const listing = await fetchSubdomainListing(headers);
+    activeSubdomains = listing.subdomains.filter((entry) => entry.status === 'active');
+    serveMetadataSupported = listing.serveMetadataSupported;
+    report.warnings.push(...listing.warnings);
   } catch (error) {
-    report.subdomain = errorCheck(
-      `Could not reach gitspace.sh API (${error instanceof Error ? error.message : String(error)}).`,
-      'gssh user host status',
-    );
+    const detail = error instanceof Error ? error.message : String(error);
+    if (error instanceof SpacesError && detail.startsWith('Failed to list subdomains:')) {
+      report.subdomain = errorCheck(`Could not list subdomains (${detail.replace('Failed to list subdomains: ', '')}).`, 'gssh user host status');
+    } else {
+      report.subdomain = errorCheck(`Could not reach gitspace.sh API (${detail}).`, 'gssh user host status');
+    }
     report.tunnelToken = missingCheck('Unavailable while API is unreachable.', 'gssh user host status');
-    report.serveTunnelToken = missingCheck('Unavailable while API is unreachable.', 'gssh user host status');
+    report.serveTunnel = missingCheck('Unavailable while API is unreachable.', 'gssh user host status');
     return report;
   }
 
@@ -350,7 +756,7 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
       'gssh user host reserve <name>',
     );
     report.tunnelToken = missingCheck('No relay host selected yet.', 'gssh user host reserve <name>');
-    report.serveTunnelToken = missingCheck('No relay host selected yet.', 'gssh user host reserve <name>');
+    report.serveTunnel = missingCheck('No relay host selected yet.', 'gssh user host reserve <name>');
 
     if (interactive) {
       logger.log('');
@@ -390,25 +796,50 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
   if (!primary) {
     report.subdomain = missingCheck('Active subdomains exist, but no primary subdomain is set.', 'gssh user host set-primary <name>');
     report.tunnelToken = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
-    report.serveTunnelToken = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
+    report.serveTunnel = missingCheck('Choose a primary subdomain before syncing host config.', 'gssh user host set-primary <name>');
     report.warnings.push('Host config was not updated because no primary subdomain is set.');
     return report;
   }
 
   const selected = primary;
-  const serveSubdomain = activeSubdomains.find((entry) => entry.subdomain === `${selected.subdomain}.serve`);
-  const resolvedServeSubdomain = serveSubdomain?.subdomain;
+  const existingServeNamespaces = currentHostConfig?.serveNamespaces ?? {};
+  const nextServeNamespaces: Record<string, ServeNamespaceConfig> = {};
+  let serveResults: ServeNamespaceSyncResult[] = [];
+
+  if (serveMetadataSupported) {
+    serveResults = await Promise.all(activeSubdomains.map((entry) => syncServeNamespaceFromApi({
+      headers,
+      entry,
+      serveMetadataSupported,
+      currentConfig: getStoredServeNamespace(currentHostConfig, entry.subdomain),
+    })));
+
+    for (const result of serveResults) {
+      if (result.warning) {
+        report.warnings.push(result.warning);
+      }
+      if (result.config) {
+        nextServeNamespaces[result.rootSubdomain] = result.config;
+      }
+    }
+  } else {
+    for (const entry of activeSubdomains) {
+      const existing = existingServeNamespaces[normalizeSubdomain(entry.subdomain)];
+      if (existing) {
+        nextServeNamespaces[normalizeSubdomain(entry.subdomain)] = existing;
+      }
+    }
+  }
 
   writeHostConfig({
     subdomain: selected.subdomain,
-    ...(resolvedServeSubdomain ? { serveSubdomain: resolvedServeSubdomain } : {}),
-    subdomains: activeSubdomains.map((entry) => entry.subdomain),
+    subdomains: activeSubdomains.map((entry) => normalizeSubdomain(entry.subdomain)),
     createdAt: selected.created_at,
+    ...(Object.keys(nextServeNamespaces).length > 0 ? { serveNamespaces: nextServeNamespaces } : {}),
   });
 
   report.primarySubdomain = selected.subdomain;
-  report.serveSubdomain = resolvedServeSubdomain ?? null;
-
+  report.serveDomain = nextServeNamespaces[selected.subdomain]?.domain ?? null;
   report.subdomain = configuredCheck(`Primary subdomain ${selected.subdomain}.gitspace.sh is active.`);
 
   report.tunnelToken = await ensureTokenFromApi({
@@ -418,24 +849,30 @@ export async function syncHostConfig(interactive: boolean = false): Promise<Host
     description: `tunnel credentials for ${selected.subdomain}.gitspace.sh`,
   });
 
-  report.serveTunnelToken = resolvedServeSubdomain
-    ? await ensureTokenFromApi({
-        headers,
-        apiSubdomain: resolvedServeSubdomain,
-        secretKey: getServeTokenKey(selected.subdomain),
-        description: `serve tunnel credentials for ${resolvedServeSubdomain}.gitspace.sh`,
-      })
-    : missingCheck(
-        `No companion serve subdomain exists for ${selected.subdomain}.gitspace.sh.`,
+  if (serveMetadataSupported) {
+    const primaryServeResult = serveResults.find((result) => result.rootSubdomain === selected.subdomain);
+    if (primaryServeResult?.readiness) {
+      report.serveTunnel = primaryServeResult.readiness;
+    } else {
+      report.serveTunnel = missingCheck(
+        `No serve domain exists for ${selected.subdomain}.gitspace.sh.`,
         `gssh user host reserve ${selected.subdomain}`
       );
+    }
+  } else {
+    report.serveTunnel = errorCheck(
+      `gitspace.sh API compatibility could not be verified for ${selected.subdomain}.gitspace.sh. Serve readiness cannot be confirmed safely.`,
+      'Update the gitspace.sh worker, then re-run `gssh user host status`.',
+    );
+  }
 
   report.ready = isConfigured(report.subdomain)
     && isConfigured(report.tunnelToken)
-    && isConfigured(report.serveTunnelToken);
+    && isConfigured(report.serveTunnel);
 
   return report;
 }
+
 
 // ============================================================================
 // Helper: Get Auth Token
@@ -454,7 +891,7 @@ async function getAuthToken(): Promise<string> {
 
 async function getAuthHeaders(
   extra: Record<string, string> = {}
-): Promise<Record<string, string>> {
+ ): Promise<Record<string, string>> {
   const token = await getAuthToken();
   const identity = getPublicKeyWithoutPassword();
   if (!identity) {
@@ -473,15 +910,7 @@ async function getAuthHeaders(
 
 export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
   const headers = await getAuthHeaders();
-  const res = await fetch(`${API_BASE}/subdomains`, { headers });
-
-  if (!res.ok) {
-    await throwIfInvalidDeviceFingerprint(res);
-    await logApiFailure('Failed to list subdomains', res);
-    throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
-  }
-
-  const subdomains: SubdomainInfo[] = await res.json();
+  const { subdomains } = await fetchSubdomainListing(headers);
   return subdomains
     .filter((subdomain) => {
       if (subdomain.status !== 'active') {
@@ -498,6 +927,7 @@ export async function listAccountSubdomains(): Promise<AccountSubdomain[]> {
       status: subdomain.status,
     }));
 }
+
 
 /**
  * Resolve relay-capable subdomains in stable priority order.
@@ -545,25 +975,46 @@ export async function resolveHostingSubdomains(hostConfig: HostConfig | null = r
 
   try {
     const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE}/subdomains`, { headers });
-    if (!res.ok) {
-      await throwIfInvalidDeviceFingerprint(res);
-      throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
-    }
-    const accountSubdomains = await res.json() as SubdomainInfo[];
-    subdomains = accountSubdomains
-      .filter((entry) => entry.status === 'active' && entry.subdomain.endsWith('.serve'))
-      .map((entry) => entry.subdomain);
+    const listing = await fetchSubdomainListing(headers);
+    subdomains = listing.subdomains
+      .filter((entry) => entry.status === 'active' && entry.serveStatus === 'active' && Boolean(entry.serveDomain))
+      .map((entry) => normalizeSubdomain(entry.subdomain))
+      .filter((entry, index, values) => values.indexOf(entry) === index);
   } catch {
-    if (hostConfig?.serveSubdomain) {
-      subdomains.push(hostConfig.serveSubdomain);
-    }
-    if (hostConfig?.subdomains?.length) {
-      subdomains.push(...hostConfig.subdomains.filter((subdomain) => subdomain.endsWith('.serve')));
-    }
+    subdomains = Object.keys(hostConfig?.serveNamespaces ?? {})
+      .map((entry) => normalizeSubdomain(entry))
+      .filter((entry, index, values) => values.indexOf(entry) === index);
   }
 
   return [...new Set(subdomains)].sort((a, b) => a.localeCompare(b));
+}
+
+export async function syncServeRouteHostnames(args: {
+  rootSubdomain: string;
+  hostnames: string[];
+}): Promise<{ serveDomain: string; syncedHostnames: string[]; deletedHostnames: string[] }> {
+  const normalizedRoot = normalizeSubdomain(args.rootSubdomain);
+  const headers = await getAuthHeaders({ 'Content-Type': 'application/json' });
+  const response = await fetch(`${API_BASE}/subdomains/${normalizedRoot}/serve-routes`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ hostnames: args.hostnames }),
+  });
+  if (!response.ok) {
+    await throwIfInvalidDeviceFingerprint(response);
+    await logApiFailure(`Failed to sync serve routes for ${normalizedRoot}.gitspace.sh`, response);
+    throw new SpacesError(
+      `Failed to sync serve routes for ${normalizedRoot}.gitspace.sh`,
+      'SYSTEM_ERROR',
+      2,
+    );
+  }
+
+  return await response.json() as {
+    serveDomain: string;
+    syncedHostnames: string[];
+    deletedHostnames: string[];
+  };
 }
 
 export async function ensureSubdomainTunnelToken(subdomain: string): Promise<string> {
@@ -624,6 +1075,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
 
   // Normalize subdomain
   subdomain = normalizeSubdomain(subdomain);
+  validateReservableSubdomain(subdomain);
 
   // Check availability
   logger.info('Checking availability...');
@@ -666,17 +1118,14 @@ export async function hostReserve(subdomain: string): Promise<void> {
 
   logger.info('Configuring DNS...');
 
-  // Fetch and store tunnel token in keychain
+  const reserveServeTunnel = parseServeTunnelDetails(data);
+  const serveDomain = normalizeStoredDomain(reserveServeTunnel?.serveDomain ?? data.serveDomain)
+    ?? 'gitspace.sh';
+
   logger.info('Saving credentials...');
   let tunnelToken = data.tunnelToken;
   if (!tunnelToken) {
-    const tokenRes = await fetch(
-      `${API_BASE}/subdomains/${subdomain}/token`,
-      {
-        headers,
-      }
-    );
-
+    const tokenRes = await fetch(`${API_BASE}/subdomains/${subdomain}/token`, { headers });
     if (!tokenRes.ok) {
       throw new SpacesError('Failed to get tunnel token', 'SYSTEM_ERROR');
     }
@@ -689,45 +1138,30 @@ export async function hostReserve(subdomain: string): Promise<void> {
     throw new SpacesError('Failed to get tunnel token', 'SYSTEM_ERROR');
   }
 
-  const serveSubdomain = data.serveSubdomain ?? `${subdomain}.serve`;
-  let serveTunnelToken = data.serveTunnelToken;
-  if (!serveTunnelToken) {
-    const serveTokenRes = await fetch(
-      `${API_BASE}/subdomains/${serveSubdomain}/token`,
-      {
-        headers,
-      }
-    );
-
-    if (!serveTokenRes.ok) {
-      throw new SpacesError('Failed to get serve tunnel token', 'SYSTEM_ERROR');
-    }
-
-    const serveTokenData = await serveTokenRes.json();
-    serveTunnelToken = serveTokenData.tunnelToken;
-  }
-
-  if (!serveTunnelToken) {
-    throw new SpacesError('Failed to get serve tunnel token', 'SYSTEM_ERROR');
-  }
-
   await setSecret(getTunnelTokenKey(subdomain), tunnelToken);
-  await setSecret(getServeTokenKey(subdomain), serveTunnelToken);
 
-  // Update local host config
-  await syncHostConfig();
+  logger.info('Syncing local host configuration...');
+  const syncReport = await syncHostConfig();
 
   logger.log('');
   logger.success(`Reserved: ${data.subdomain}.gitspace.sh`);
   logger.log(`  Wildcard: *.${data.subdomain}.gitspace.sh`);
-  logger.log(`Serve: ${serveSubdomain}.gitspace.sh`);
-  logger.log(`  Wildcard: *.${serveSubdomain}.gitspace.sh`);
+  logger.log(`Serve domain: ${serveDomain}`);
+  logger.log(`Serve route:  ${buildServeHostnamePattern(serveDomain, data.subdomain)}`);
   if (data.isPrimary) {
     logger.dim('  (set as primary)');
+  } else if (!syncReport.primarySubdomain) {
+    logger.warning('Reserved the subdomain, but no primary subdomain is set for this account.');
+    logger.dim('Run `gssh user host set-primary <name>` to choose the default hosted relay and tmux hosting route.');
+  }
+
+  for (const warning of syncReport.warnings) {
+    logger.warning(warning);
   }
 
   logger.log('');
-  logger.log("Run 'gssh machine serve start' to start hosting.");
+  logger.log("Run 'gssh machine tmux hosting select' to publish hosted service URLs.");
+  logger.log("Run 'gssh machine serve start' when you also want remote terminal access.");
 }
 
 // ============================================================================
@@ -762,10 +1196,16 @@ export async function hostRelease(subdomain?: string): Promise<void> {
     throw new SpacesError(`Failed to release: ${error.error}`, 'USER_ERROR');
   }
 
-  // Clear local tunnel token
-  await deleteSecret(getTunnelTokenKey(subdomain));
-  if (!subdomain.endsWith('.serve')) {
-    await deleteSecret(getServeTokenKey(subdomain));
+  const rootSubdomain = subdomain.endsWith('.serve')
+    ? subdomain.slice(0, -'.serve'.length)
+    : subdomain;
+  const storedServeTunnel = readHostConfig()?.serveNamespaces?.[rootSubdomain]?.tunnel;
+
+  // Clear local tunnel credentials
+  await deleteSecret(getTunnelTokenKey(rootSubdomain));
+  await deleteSecret(getServeTokenKey(rootSubdomain));
+  if (storedServeTunnel?.credentialsPath && existsSync(storedServeTunnel.credentialsPath)) {
+    rmSync(storedServeTunnel.credentialsPath, { force: true });
   }
 
   // Update local host config
@@ -820,7 +1260,7 @@ export async function hostList(): Promise<void> {
 // ============================================================================
 
 /**
- * Set a subdomain as primary for `gssh machine serve start`
+ * Set a subdomain as the default hosted relay and tmux hosting route.
  */
 export async function hostSetPrimary(subdomain: string): Promise<void> {
   const headers = await getAuthHeaders();
@@ -859,100 +1299,61 @@ export async function hostDoctor(): Promise<void> {
  * Show hosting status
  */
 export async function hostStatus(): Promise<void> {
-  let headers: Record<string, string>;
+  let report: HostSyncReport;
   try {
-    headers = await getAuthHeaders();
-  } catch {
-    logger.log('Not logged in or identity not found');
-    logger.dim('Run: gssh user auth login');
-    return;
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/subdomains`, { headers });
-
-    if (!res.ok) {
-      await throwIfInvalidDeviceFingerprint(res);
-      logger.log('Could not fetch subdomains');
-      return;
-    }
-
-    const subdomains: SubdomainInfo[] = await res.json();
-    const primary = subdomains.find((s) => s.is_primary && s.status === 'active');
-    if (!primary) {
-      logger.log('No primary subdomain set.');
-      logger.dim('Run: gssh user host reserve <name>');
-      return;
-    }
-
-    const primarySubdomain = primary.subdomain;
-    const serveSubdomain = subdomains.find(
-      (s) => s.subdomain === `${primarySubdomain}.serve` && s.status === 'active'
-    )?.subdomain;
-
-    logger.log(`Primary: ${primary.subdomain}.gitspace.sh`);
-    logger.log(`Status: ${primary.status}`);
-    logger.log(`Serve: ${serveSubdomain ? `${serveSubdomain}.gitspace.sh` : 'not provisioned'}`);
-
-    // Check if tunnel token exists locally
-    let tunnelToken = await getSecret(getTunnelTokenKey(primary.subdomain));
-    let serveTunnelToken = await getSecret(getServeTokenKey(primary.subdomain));
-
-    // Auto-fetch token if missing
-    if (!tunnelToken) {
-      logger.dim('Tunnel credentials missing, fetching...');
-      try {
-        const tokenRes = await fetch(`${API_BASE}/subdomains/${primary.subdomain}/token`, { headers });
-        if (tokenRes.ok) {
-          const { tunnelToken: newToken } = await tokenRes.json();
-          await setSecret(getTunnelTokenKey(primary.subdomain), newToken);
-          tunnelToken = newToken;
-          logger.success('Tunnel credentials synced');
-        }
-      } catch {
-        // Ignore
-      }
-    }
-
-    if (serveSubdomain && !serveTunnelToken) {
-      logger.dim('Serve tunnel credentials missing, fetching...');
-      try {
-        const tokenRes = await fetch(`${API_BASE}/subdomains/${serveSubdomain}/token`, { headers });
-        if (tokenRes.ok) {
-          const { tunnelToken: newToken } = await tokenRes.json();
-          await setSecret(getServeTokenKey(primary.subdomain), newToken);
-          serveTunnelToken = newToken;
-          logger.success('Serve tunnel credentials synced');
-        }
-      } catch {
-        // Ignore
-      }
-    }
-
-    logger.log(`Tunnel token: ${tunnelToken ? 'configured' : 'missing'}`);
-    logger.log(`Serve tunnel token: ${serveSubdomain ? (serveTunnelToken ? 'configured' : 'missing') : 'not provisioned'}`);
-
-    if (!tunnelToken) {
-      logger.warning('Could not fetch tunnel credentials');
-    }
-    if (serveSubdomain && !serveTunnelToken) {
-      logger.warning('Could not fetch serve tunnel credentials');
-    }
-    if (!serveSubdomain) {
-      logger.warning(`No companion serve subdomain exists for ${primary.subdomain}.gitspace.sh`);
-      logger.dim(`Run: gssh user host reserve ${primary.subdomain}`);
-    }
+    report = await syncHostConfig(false);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.log(`Could not verify status: ${message}`);
 
-    // Show local config
     const hostConfig = readHostConfig();
     if (hostConfig) {
       logger.log(`Local config: ${hostConfig.subdomain}.gitspace.sh`);
-      if (hostConfig.serveSubdomain) {
-        logger.log(`Local serve: ${hostConfig.serveSubdomain}.gitspace.sh`);
+      const primaryServeDomain = getPrimaryServeDomain(hostConfig);
+      if (primaryServeDomain) {
+        logger.log(`Local serve domain: ${primaryServeDomain}`);
+        logger.log(`Local serve route:  ${buildServeHostnamePattern(primaryServeDomain, hostConfig.subdomain)}`);
       }
     }
+    return;
+  }
+
+  if (!report.primarySubdomain) {
+    if (report.subdomain.fix === 'gssh user auth login' || report.subdomain.fix === 'gssh user identity init') {
+      logger.log(report.subdomain.detail);
+      logger.dim(`Run: ${report.subdomain.fix}`);
+    } else {
+      logger.log('No primary subdomain set.');
+      logger.dim('Run: gssh user host set-primary <name>');
+    }
+    for (const warning of report.warnings) {
+      logger.warning(warning);
+    }
+    return;
+  }
+
+  logger.log(`Primary: ${report.primarySubdomain}.gitspace.sh`);
+  logger.log(`Status: ${report.subdomain.status}`);
+  logger.log(`Serve domain: ${report.serveDomain ?? 'not provisioned'}`);
+  if (report.primarySubdomain && report.serveDomain) {
+    logger.log(`Serve route: ${buildServeHostnamePattern(report.serveDomain, report.primarySubdomain)}`);
+  }
+  logger.log(`Tunnel token: ${checkStatusLabel(report.tunnelToken)}`);
+  logger.log(`Serve tunnel: ${checkStatusLabel(report.serveTunnel)}`);
+
+  if (report.serveTunnel.status === 'missing' && report.serveTunnel.detail.startsWith('No serve domain exists')) {
+    logger.warning(report.serveTunnel.detail);
+    if (report.serveTunnel.fix) {
+      logger.dim(`Run: ${report.serveTunnel.fix}`);
+    }
+  } else if (report.serveTunnel.status === 'error') {
+    logger.warning(report.serveTunnel.detail);
+    if (report.serveTunnel.fix) {
+      logger.dim(report.serveTunnel.fix);
+    }
+  }
+
+  for (const warning of report.warnings) {
+    logger.warning(warning);
   }
 }

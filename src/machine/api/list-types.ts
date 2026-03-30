@@ -10,7 +10,7 @@
  * Keep these here as a transitional layer; do not add new fields.
  */
 
-import type { SessionStatus } from '../../agents/opencode-event-types.js';
+import type { SessionStatus } from '../../agents/agent-runtime-types.js';
 
 /** Workspace as returned by list_workspaces / workspace_list */
 export type { WorkspaceInfo } from '../../lib/remote-session/protocol.js';
@@ -18,7 +18,7 @@ export type { WorkspaceInfo } from '../../lib/remote-session/protocol.js';
 /** Terminal session as returned by list_sessions / session_list */
 export type { SessionInfo } from '../../lib/remote-session/protocol.js';
 
-/** Agent session summary — client-side view of a running OpenCode session */
+/** Agent session summary — client-side view of a running agent session */
 export interface AgentSessionInfo {
   id: string;
   workspaceId: string;
@@ -28,6 +28,7 @@ export interface AgentSessionInfo {
   archivedAt?: string;
   status?: SessionStatus;
   pendingPermissionCount?: number;
+  pendingQuestionCount?: number;
   errorMessage?: string;
   /** Timestamp (ms) of the last observed activity from the live event stream. */
   lastActivityAt?: number;

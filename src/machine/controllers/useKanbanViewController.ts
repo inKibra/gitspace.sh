@@ -1,54 +1,13 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import type { WorkspacePhase } from '../../types/config.js';
-import type { MultiMachineState, BackendScopedWorkspaceRef } from '../multi/types.js';
-import type {
-  MachineWorkspaceLinearRecord,
-  MachineWorkspacePullRequestRecord,
-} from '../../lib/tmux-lite/machine/types.js';
-
-export const PHASES: WorkspacePhase[] = ['plan', 'code', 'review', 'ship'];
-export const PHASE_LABELS: Record<WorkspacePhase, string> = {
-  plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship',
-};
-
-/** A workspace item as projected by useKanbanViewController for rendering. */
-export interface KanbanWorkspaceItem {
-  id: string;
-  name: string;
-  path: string;
-  projectName: string;
-  branch?: string;
-  sessionCount: number;
-  /** Number of running or idle (non-archived, non-closed) agent sessions */
-  agentCount: number;
-  /** Number of agent sessions waiting for user permission (drives orange indicator) */
-  pendingPermissionCount: number;
-  isStale?: boolean;
-  serveDomain?: string;
-  processes?: { name: string; instances?: number; ports?: import('../../types/processes.js').ProcessPortConfig[] }[];
-  processConfigError?: string;
-  phase: WorkspacePhase;
-  pullRequest?: MachineWorkspacePullRequestRecord;
-  linear?: MachineWorkspaceLinearRecord;
-  backendKey: string;
-  /** Human-readable label for the machine this workspace lives on (e.g. 'Local', 'My MacBook') */
-  machineLabel: string;
-  /** True when this workspace is on a remote machine (not the local one) */
-  isRemote: boolean;
-}
-
-export interface WorkspaceBoardGroup {
-  phase: WorkspacePhase;
-  workspaces: KanbanWorkspaceItem[];
-}
-
-/** Moving-mode state: the user is repositioning a workspace between lanes. */
-export interface MovingState {
-  workspaceId: string;
-  originPhase: WorkspacePhase;
-  targetPhase: WorkspacePhase;
-}
+import {
+  type MultiMachineState,
+  type BackendScopedWorkspaceRef,
+  toBackendScopedWorkspaceKey,
+} from '../multi/types.js';
 import { selectAllWorkspaces } from '../multi/selectors.js';
+import { PHASES } from '../../app/shared/board/types.js';
+
 
 export interface UseKanbanViewControllerArgs {
   state: MultiMachineState;
@@ -58,12 +17,12 @@ export interface UseKanbanViewControllerArgs {
 }
 
 export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
-  const [moving, setMoving] = useState<MovingState | null>(null);
   const workspaces = useMemo(() => {
     return selectAllWorkspaces(args.state).map(({ backendKey, workspace }) => {
       const backendState = args.state.byBackend[backendKey];
       return {
         id: workspace.id,
+        selectionKey: toBackendScopedWorkspaceKey({ backendKey, workspaceId: workspace.id }),
         name: workspace.name,
         path: workspace.path,
         projectName: workspace.projectName,
@@ -85,35 +44,11 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
     });
   }, [args.state]);
 
-  const setPhase = useCallback((workspaceId: string, phase: WorkspacePhase) => {
-    const workspace = workspaces.find((item) => item.id === workspaceId);
+  const setPhase = useCallback((workspaceKey: string, phase: WorkspacePhase) => {
+    const workspace = workspaces.find((item) => item.selectionKey === workspaceKey);
     if (!workspace) return;
-    return args.onSetWorkspacePhase?.({ backendKey: workspace.backendKey, workspaceId }, phase);
+    return args.onSetWorkspacePhase?.({ backendKey: workspace.backendKey, workspaceId: workspace.id }, phase);
   }, [args, workspaces]);
-
-  const startMoving = useCallback((workspaceId: string, currentPhase: WorkspacePhase) => {
-    setMoving({ workspaceId, originPhase: currentPhase, targetPhase: currentPhase });
-  }, []);
-
-  const shiftMovingTarget = useCallback((delta: -1 | 1) => {
-    setMoving((prev) => {
-      if (!prev) return prev;
-      const currentIndex = PHASES.indexOf(prev.targetPhase);
-      const nextIndex = currentIndex + delta;
-      if (nextIndex < 0 || nextIndex >= PHASES.length) return prev;
-      return { ...prev, targetPhase: PHASES[nextIndex]! };
-    });
-  }, []);
-
-  const confirmMoving = useCallback(() => {
-    if (!moving) return;
-    if (moving.targetPhase !== moving.originPhase) {
-      void setPhase(moving.workspaceId, moving.targetPhase);
-    }
-    setMoving(null);
-  }, [moving, setPhase]);
-
-  const cancelMoving = useCallback(() => setMoving(null), []);
 
   const groups = useMemo(() => PHASES.map((phase) => ({
     phase,
@@ -123,20 +58,15 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
   return {
     groups,
     selectedRef: args.selectedRef,
-    selectedWorkspaceId: args.selectedRef?.workspaceId ?? null,
-    setSelectedWorkspaceId: (workspaceId: string | null) => {
-      if (!workspaceId) {
+    selectedWorkspaceId: args.selectedRef ? toBackendScopedWorkspaceKey(args.selectedRef) : null,
+    setSelectedWorkspaceId: (workspaceKey: string | null) => {
+      if (!workspaceKey) {
         args.onSelectRef(null);
         return;
       }
-      const workspace = workspaces.find((item) => item.id === workspaceId);
+      const workspace = workspaces.find((item) => item.selectionKey === workspaceKey);
       args.onSelectRef(workspace ? { backendKey: workspace.backendKey, workspaceId: workspace.id } : null);
     },
-    moving,
-    startMoving,
-    shiftMovingTarget,
-    confirmMoving,
-    cancelMoving,
     setPhase,
   };
 }

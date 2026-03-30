@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildWorkspaceSessionHooks } from '../workspace-shell-hooks.js';
+import { buildWorkspaceSessionCommand, buildWorkspaceSessionHooks, resolveWorkspaceSessionLauncherArgs } from '../workspace-shell-hooks.js';
 
 describe('buildWorkspaceSessionHooks', () => {
   it('injects workspace environment context', () => {
@@ -30,5 +30,24 @@ describe('buildWorkspaceSessionHooks', () => {
 
     expect(hooks.shellInit?.bash).toBe(expected);
     expect(hooks.shellInit?.zsh).toBe(expected);
+  });
+});
+
+describe('buildWorkspaceSessionCommand', () => {
+  it('reuses the current launcher strategy for workspace commands', () => {
+    expect(buildWorkspaceSessionCommand(['commit'], ['bun', '/tmp/dev repo/src/index.ts'])).toEqual({
+      command: 'bun',
+      args: ['/tmp/dev repo/src/index.ts', 'space', 'commit'],
+    });
+  });
+});
+
+describe('resolveWorkspaceSessionLauncherArgs', () => {
+  it('targets the main gssh entrypoint when running under bun', () => {
+    const launcher = resolveWorkspaceSessionLauncherArgs();
+
+    expect(launcher[0]).toBe(process.execPath);
+    expect(launcher[1]).toContain('/src/index.ts');
+    expect(launcher[1]).not.toContain('/lib/tmux-lite/server.ts');
   });
 });

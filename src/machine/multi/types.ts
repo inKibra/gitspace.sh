@@ -30,3 +30,7 @@ export interface BackendScopedAgentSessionRef {
   workspaceId: string;
   agentSessionId: string;
 }
+
+export function toBackendScopedWorkspaceKey(ref: BackendScopedWorkspaceRef): string {
+  return JSON.stringify([ref.backendKey, ref.workspaceId]);
+}

@@ -20,16 +20,22 @@ function determineTerminalState(session: Session): MachineTerminalSessionRecord[
   return 'failed';
 }
 
-function determineAgentState(workspace: WorkspaceAgentState, sessionId: string, closedAt?: string): MachineAgentSessionRecord['state'] {
+function determineAgentState(
+  workspace: WorkspaceAgentState,
+  sessionId: string,
+  closedAt: string | undefined,
+  errorMessage: string | undefined,
+  pendingQuestionCount: number,
+  pendingPermissionCount: number,
+): MachineAgentSessionRecord['state'] {
   if (closedAt) return 'closed';
-  const pendingPermissionCount = workspace.pendingPermissions[sessionId]?.length ?? 0;
-  const pendingQuestionCount = workspace.pendingQuestions[sessionId]?.length ?? 0;
   if (pendingPermissionCount > 0 || pendingQuestionCount > 0) return 'permission-needed';
   const status = workspace.statuses[sessionId];
-  if (status?.type === 'retry') return 'retrying';
+  if (status?.type === 'retry' || errorMessage) return 'retrying';
   if (status?.type === 'busy') return 'running';
   return 'waiting';
 }
+
 
 function resolveWorkspaceIdForTerminal(
   session: Session,
@@ -231,25 +237,33 @@ export function buildMachineSnapshot(params: {
     for (const session of workspace.sessions) {
       const pendingPermissionIds = (workspace.pendingPermissions[session.id] ?? []).map((permission) => permission.id);
       const pendingQuestionIds = (workspace.pendingQuestions[session.id] ?? []).map((q) => q.id);
+      const linkedTerminal = Object.values(terminalSessionsById).find(
+        (terminal) => terminal.workspaceId === workspaceId && terminal.linkedAgentSessionId === session.id,
+      );
+      const errorMessage = workspace.errorMessages[session.id]
+        ?? (workspace.statuses[session.id]?.type === 'retry' ? 'retrying' : undefined);
       const record: MachineAgentSessionRecord = {
         id: session.id,
         workspaceId,
         projectId: workspaceRecord.projectId,
         title: session.title,
-        state: determineAgentState(workspace, session.id, session.closedAt),
+        state: determineAgentState(
+          workspace,
+          session.id,
+          session.closedAt,
+          errorMessage,
+          pendingQuestionIds.length,
+          pendingPermissionIds.length,
+        ),
         updatedAt: session.updatedAt,
         closedAt: session.closedAt,
         pendingPermissionIds,
         pendingPermissionCount: pendingPermissionIds.length,
         pendingQuestionIds,
         pendingQuestionCount: pendingQuestionIds.length,
-        errorMessage: workspace.statuses[session.id]?.type === 'retry'
-          ? 'retrying'
-          : undefined,
+        errorMessage,
         lastMessagePreview: workspace.lastMessages[session.id],
-        linkedTerminalSessionId: Object.values(terminalSessionsById).find(
-          (terminal) => terminal.workspaceId === workspaceId && terminal.linkedAgentSessionId === session.id,
-        )?.id,
+        linkedTerminalSessionId: linkedTerminal?.id,
       };
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];
@@ -280,6 +294,55 @@ export function buildMachineSnapshot(params: {
         agentSessionIds: [...workspacesById[workspaceId].agentSessionIds, record.id],
       };
     }
+  }
+
+  for (const [workspaceId, workspaceRecord] of Object.entries(workspacesById)) {
+    const agentIds = agentSessionIdsByWorkspaceId[workspaceId] ?? [];
+    let runningAgentCount = 0;
+    let waitingAgentCount = 0;
+    let permissionAgentCount = 0;
+    let retryingAgentCount = 0;
+    let closedAgentCount = 0;
+    let archivedAgentCount = 0;
+
+    for (const agentId of agentIds) {
+      const agent = agentSessionsById[agentId];
+      if (!agent) continue;
+      switch (agent.state) {
+        case 'running':
+          runningAgentCount += 1;
+          break;
+        case 'waiting':
+          waitingAgentCount += 1;
+          break;
+        case 'permission-needed':
+          permissionAgentCount += 1;
+          break;
+        case 'retrying':
+          retryingAgentCount += 1;
+          break;
+        case 'closed':
+          closedAgentCount += 1;
+          break;
+        case 'archived':
+          archivedAgentCount += 1;
+          break;
+      }
+    }
+
+    workspacesById[workspaceId] = {
+      ...workspaceRecord,
+      summary: {
+        ...workspaceRecord.summary,
+        agentCount: agentIds.length,
+        runningAgentCount,
+        waitingAgentCount,
+        permissionAgentCount,
+        retryingAgentCount,
+        closedAgentCount,
+        archivedAgentCount,
+      },
+    };
   }
 
   return {

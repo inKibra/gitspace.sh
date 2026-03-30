@@ -5,7 +5,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import type {
@@ -31,6 +31,44 @@ export interface ReviewWriteOptions {
 // Path Helpers
 // ============================================================================
 
+function getLegacyNotesPath(workspacePath: string, workspaceName: string): string {
+  return join(workspacePath, '.gitspace', 'review', workspaceName, 'notes.json');
+}
+
+function readSessionFile(filePath: string): ReviewSession | null {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    return JSON.parse(raw) as ReviewSession;
+  } catch (error) {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : undefined;
+
+    if (code === 'ENOENT') {
+      return null;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (error instanceof SyntaxError) {
+      logger.error(`Failed to parse review notes at ${filePath}: ${message}`);
+      throw new SpacesError(`Corrupted review notes at ${filePath}: ${message}`, 'USER_ERROR', 1);
+    }
+
+    logger.error(`Failed to read review notes at ${filePath}: ${message}`);
+    if (error instanceof Error) {
+      throw error;
+    }
+
+    throw new SpacesError(`Failed to read review notes at ${filePath}: ${message}`, 'SYSTEM_ERROR', 2);
+  }
+}
+
 /**
  * Returns the path to the review.json file for this workspace.
  */
@@ -51,39 +89,18 @@ export function readReviewSession(
   baseBranch: string
 ): ReviewSession {
   const notesPath = getNotesPath(workspacePath, workspaceName);
-
-  if (!existsSync(notesPath)) {
-    return createEmptySession(workspaceName, baseBranch);
+  const session = readSessionFile(notesPath);
+  if (session) {
+    return session;
   }
 
-  try {
-    const raw = readFileSync(notesPath, 'utf-8');
-    const parsed = JSON.parse(raw) as ReviewSession;
-    return parsed;
-  } catch (error) {
-    const code =
-      typeof error === 'object' && error !== null && 'code' in error
-        ? String((error as { code?: unknown }).code)
-        : undefined;
-
-    if (code === 'ENOENT') {
-      return createEmptySession(workspaceName, baseBranch);
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-
-    if (error instanceof SyntaxError) {
-      logger.error(`Failed to parse review notes at ${notesPath}: ${message}`);
-      throw new SpacesError(`Corrupted review notes at ${notesPath}: ${message}`, 'USER_ERROR', 1);
-    }
-
-    logger.error(`Failed to read review notes at ${notesPath}: ${message}`);
-    if (error instanceof Error) {
-      throw error;
-    }
-
-    throw new SpacesError(`Failed to read review notes at ${notesPath}: ${message}`, 'SYSTEM_ERROR', 2);
+  const legacyNotesPath = getLegacyNotesPath(workspacePath, workspaceName);
+  const legacySession = readSessionFile(legacyNotesPath);
+  if (legacySession) {
+    return legacySession;
   }
+
+  return createEmptySession(workspaceName, baseBranch);
 }
 
 /**

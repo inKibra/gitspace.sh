@@ -60,7 +60,7 @@ export class ClientSessionManager {
       handshakeTimeoutMs: options.handshakeTimeoutMs,
       ownerUserRootId: options.ownerUserRootId,
     });
-    this.remoteSessionHandler = new RemoteSessionHandler(options.remoteSessionOptions);
+    this.remoteSessionHandler = new RemoteSessionHandler();
   }
 
   private writeToTmuxSocket(session: ClientSession, frame: Buffer): void {
@@ -196,6 +196,48 @@ export class ClientSessionManager {
     return null;
   }
 
+  private returnAttachedSessionToBrowsing(
+    connectionId: string,
+    session: ClientSession,
+    options: {
+      socket?: ClientSession['tmuxSocket'];
+      writer?: ClientSession['tmuxSocketWriter'];
+      sendDetachControl?: boolean;
+    } = {},
+  ): void {
+    const socket = options.socket ?? session.tmuxSocket;
+    const writer = options.writer ?? session.tmuxSocketWriter;
+    session.tmuxSocket = undefined;
+    session.tmuxSocketWriter = undefined;
+    session.state = 'browsing';
+    session.attachedSessionId = undefined;
+    session.attachedSessionName = undefined;
+    session.viewOnly = undefined;
+    session.sessionSocketPath = undefined;
+    session.initialCols = undefined;
+    session.initialRows = undefined;
+    session.waitingForResize = undefined;
+    session.frameBuffer = undefined;
+
+    if (socket) {
+      try {
+        if (options.sendDetachControl) {
+          const frame = encodeControl({ type: 'detach' });
+          if (writer) writer.write(frame);
+          else socket.write(frame);
+        }
+        socket.end();
+      } catch {
+        // Socket may already be closed
+      }
+    }
+
+    if (session.sessionKeys) {
+      this.registerBrowsingPushes(connectionId, session.sessionKeys);
+    }
+  }
+
+
   /**
    * Handle message in attached state - route to tmux-lite session based on stream ID
    */
@@ -226,27 +268,14 @@ export class ClientSessionManager {
 
         if (msg.type === "detach") {
           // Handle detach specially - close tmux socket and send response to client
-          // Store socket reference and clear it BEFORE ending to prevent close callback
-          // from triggering handleDisconnect
+          // while keeping the authenticated connection in browsing mode.
           const socket = session.tmuxSocket;
           const writer = session.tmuxSocketWriter;
-          session.tmuxSocket = undefined;
-          session.tmuxSocketWriter = undefined;
-          session.state = "browsing";
-          session.attachedSessionId = undefined;
-          session.viewOnly = undefined;
-          session.sessionSocketPath = undefined;
-          session.waitingForResize = undefined;
-          session.frameBuffer = undefined;
-
-          // Now send detach and close the socket (using framed protocol)
-          {
-            const frame = encodeControl(msg);
-            if (writer) writer.write(frame);
-            else socket.write(frame);
-          }
-          socket.end();
-          this.registerBrowsingPushes(connectionId, session.sessionKeys);
+          this.returnAttachedSessionToBrowsing(connectionId, session, {
+            socket,
+            writer,
+            sendDetachControl: true,
+          });
 
           // Send detached response to client
           const detachedMsg = JSON.stringify({ type: "detached" });
@@ -256,15 +285,17 @@ export class ClientSessionManager {
           return frame;
         }
 
-        if (msg.type === "resize" && session.waitingForResize) {
-          // First resize - send attach-init with actual dimensions
+        // First-resize gate: defer attach-init until client sends actual dimensions
+        if (msg.type === 'resize' && session.waitingForResize) {
+          // First resize — send attach-init with actual dimensions
           console.log(`[session-manager] First resize: ${msg.cols}x${msg.rows} - sending attach-init`);
           session.waitingForResize = false;
-          this.writeToTmuxSocket(session, encodeControl({ type: "attach-init", cols: msg.cols, rows: msg.rows, clientType: "web" }));
+          this.writeToTmuxSocket(session, encodeControl({ type: 'attach-init', cols: msg.cols, rows: msg.rows, clientType: 'web' }));
           return null; // attach-init handles the resize
         }
 
-        // Other control messages (resize after init) - encode for tmux-lite and send
+        // Forward control messages directly to tmux-lite after attach-init.
+
         this.writeToTmuxSocket(session, encodeControl(msg));
       } else {
         // Raw PTY input (STREAM_ID.DATA) - send directly to socket
@@ -275,12 +306,13 @@ export class ClientSessionManager {
         }
 
         // Only forward if we've sent attach-init (waitingForResize is false)
-        if (!session.waitingForResize) {
-          // Wrap PTY data in a frame for the framed protocol
-          this.writeToTmuxSocket(session, encodePTY(result.data));
-        } else {
-          console.warn("[session-manager] Ignoring PTY data before attach-init");
+        if (session.waitingForResize) {
+          console.warn('[session-manager] Ignoring PTY data before attach-init');
+          return null;
         }
+
+        // Wrap PTY data in a frame for the framed protocol
+        this.writeToTmuxSocket(session, encodePTY(result.data));
       }
 
       return null;
@@ -332,8 +364,11 @@ export class ClientSessionManager {
       this.remoteSessionHandler.onClientLeavesBrowsing(connectionId);
       session.state = "attached";
       session.attachedSessionId = remoteSession.attachedSessionId;
+      session.attachedSessionName = remoteSession.attachedSessionName;
       session.viewOnly = remoteSession.viewOnly ?? false;
       session.sessionSocketPath = remoteSession.sessionSocketPath;
+      session.initialCols = remoteSession.initialCols;
+      session.initialRows = remoteSession.initialRows;
 
       // Connect to tmux-lite session socket for PTY I/O
       await this.attachToTmuxLiteSession(connectionId, session);
@@ -485,16 +520,23 @@ export class ClientSessionManager {
 
                 if (event.type === "exited") {
                   console.log(`[session-manager] Session exited: ${event.code}`);
-                  // Send exit notification to client
-                  const exitMsg = JSON.stringify({ type: "session_exited", sessionId: session.attachedSessionId, exitCode: event.code });
-                  const exitData = new TextEncoder().encode(exitMsg);
-                  const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
-                  sendToClient(Buffer.from(encFrame));
-                  this.handleDisconnect(connectionId, `Session exited with code ${event.code}`);
+                  const exitedSessionId = session.attachedSessionId;
+                  this.returnAttachedSessionToBrowsing(connectionId, session);
+
+                  if (exitedSessionId) {
+                    const exitMsg = JSON.stringify({ type: "session_exited", sessionId: exitedSessionId, exitCode: event.code });
+                    const exitData = new TextEncoder().encode(exitMsg);
+                    const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
+                    sendToClient(Buffer.from(encFrame));
+                  }
                   return;
                 } else if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
-                  this.handleDisconnect(connectionId, "Session kicked");
+                  this.returnAttachedSessionToBrowsing(connectionId, session);
+                  const detachedMsg = JSON.stringify({ type: "detached" });
+                  const detachedData = new TextEncoder().encode(detachedMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                   return;
                 } else if (event.type === "wide_event") {
                   const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });
@@ -506,8 +548,16 @@ export class ClientSessionManager {
                   const metaData = new TextEncoder().encode(metaMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, metaData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
+                } else if (event.type === 'attached' && session.attachedSessionId) {
+                  const attachedMsg = JSON.stringify({
+                    type: 'attached',
+                    sessionId: session.attachedSessionId,
+                    sessionName: session.attachedSessionName,
+                  });
+                  const attachedData = new TextEncoder().encode(attachedMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, attachedData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                 }
-                // Ignore attach-ready and attached - handled by client
               } else if (frame.type === FrameType.PTY) {
                 // Forward PTY data to web client
                 const encFrame = createFrame(STREAM_ID.DATA, frame.payload, session.sessionKeys.sendKey);
@@ -538,10 +588,9 @@ export class ClientSessionManager {
       session.tmuxSocket = socket;
       session.tmuxSocketWriter = createBufferedSocketWriter(socket);
 
-      // Don't send attach-init yet - wait for the first resize from client
+      // Don't send attach-init yet — wait for the first resize from client
       // This ensures tmux-lite receives the actual terminal dimensions
       session.waitingForResize = true;
-
       console.log(`[session-manager] Connected to tmux-lite session: ${session.sessionSocketPath} (waiting for resize)`);
     } catch (e) {
       console.error("[session-manager] Failed to connect to tmux-lite session:", e);

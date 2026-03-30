@@ -80,4 +80,14 @@ describe('loadProcessesConfigWithDiagnostics', () => {
       expect(config.processes[0]?.name).toBe('api');
     });
   });
+
+  it('drops legacy numeric port values from loaded config', () => {
+    withWorkspace((workspace) => {
+      const path = getProcessesConfigPath(workspace);
+      writeFileSync(path, '{"processes":[{"name":"api","command":"bun","ports":[{"name":"web","port":7777,"protocol":"http"}]}]}');
+
+      const config = loadProcessesConfig(workspace);
+      expect(config.processes[0]?.ports).toEqual([{ name: 'web', protocol: 'http' }]);
+    });
+  });
 });

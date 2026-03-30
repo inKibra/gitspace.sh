@@ -15,6 +15,8 @@ import type {
 import type { AgentSessionInfo } from '../machine/api/list-types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import type { WorkspaceNotesSummary } from '../types/workspace.js';
+import type { RuntimeProcessDefinition, ResolvedProcessPort } from '../types/processes.js';
+import { getProcessPortsForInstance } from '../lib/processes/runtime-ports.js';
 export type { AgentSessionInfo } from '../machine/api/list-types.js';
 
 export type { ReplayInfo };
@@ -24,21 +26,17 @@ export type { ReplayInfo };
 // ============================================================================
 
 /** Process summary for workspace */
-export interface WorkspaceProcessInfo {
-  name: string;
-  instances?: number;
-  ports?: WorkspaceProcessPort[];
-}
-
-export interface WorkspaceProcessPort {
-  port: number;
-  name?: string;
-  protocol?: 'http' | 'tcp';
-}
+export type WorkspaceProcessInfo = RuntimeProcessDefinition;
+export type WorkspaceProcessPort = ResolvedProcessPort;
 
 /** Workspace info from machine */
 export interface WorkspaceInfo {
   id: string;
+  /**
+   * Backend-scoped workspace key (`[backendKey, workspaceId]`) when rendered from multi-backend
+   * runtime views. Optional to keep compatibility with single-backend callers.
+   */
+  selectionKey?: string;
   name: string;
   path: string;
   projectName: string;
@@ -84,7 +82,7 @@ export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSes
   if (session.closedAt) {
     return 'closed';
   }
-  if ((session.pendingPermissionCount ?? 0) > 0) {
+  if ((session.pendingPermissionCount ?? 0) > 0 || (session.pendingQuestionCount ?? 0) > 0) {
     return 'needs-permission';
   }
   if (session.errorMessage) {
@@ -285,6 +283,7 @@ function buildTree(
 
     // Workspaces under this project
     for (const ws of group.workspaces) {
+      const workspaceLookupKey = ws.selectionKey ?? ws.id;
       const isExpanded = expandedWorkspaces.has(ws.id);
       items.push({
         type: 'workspace',
@@ -294,7 +293,7 @@ function buildTree(
 
       // If expanded, show processes, sessions, events, and new session action
       if (isExpanded) {
-        const runtime = runtimeByWorkspace[ws.id];
+        const runtime = runtimeByWorkspace[workspaceLookupKey];
         const workspaceSessions = runtime?.sessions ?? sortWorkspaceSessions(sessions.filter((session) => session.workspaceId === ws.id));
         const processSessions = runtime?.processSessions ?? workspaceSessions.filter((session) => session.processName);
         const adHocSessions = runtime?.shellSessions ?? workspaceSessions.filter((session) => !session.processName);
@@ -317,7 +316,10 @@ function buildTree(
               instance: row.instance,
               workspaceId: ws.id,
               status: row.state,
-              ports: ws.processes?.find((process) => process.name === row.processName)?.ports,
+              ports: getProcessPortsForInstance(
+                ws.processes?.find((process) => process.name === row.processName)?.ports,
+                row.instance,
+              ),
               serveDomain: ws.serveDomain,
               subtitle: row.subtitle,
               alertLabel: row.alertLabel,
@@ -366,7 +368,7 @@ function buildTree(
                 instance,
                 workspaceId: ws.id,
                 status,
-                ports: process.ports,
+                ports: getProcessPortsForInstance(process.ports, instance),
                 serveDomain: ws.serveDomain,
               });
               renderedProcessKeys.add(`${process.name}:${instance}`);
@@ -448,8 +450,8 @@ function buildTree(
         items.push({
           type: 'agents',
           workspaceId: ws.id,
-          count: agentSessionCounts[ws.id] ?? 0,
-          pendingPermissions: pendingPermissionsByWorkspace[ws.id] ?? 0,
+          count: agentSessionCounts[workspaceLookupKey] ?? 0,
+          pendingPermissions: pendingPermissionsByWorkspace[workspaceLookupKey] ?? 0,
           expanded: agentExpanded,
         });
 
@@ -458,7 +460,7 @@ function buildTree(
             type: 'new-agent-session',
             workspaceId: ws.id,
           });
-          const agentSessions = [...(agentSessionsByWorkspace[ws.id] ?? [])].sort((a, b) =>
+          const agentSessions = [...(agentSessionsByWorkspace[workspaceLookupKey] ?? [])].sort((a, b) =>
             (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
           );
           for (const session of agentSessions) {

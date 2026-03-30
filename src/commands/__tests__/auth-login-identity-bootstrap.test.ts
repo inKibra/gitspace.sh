@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { generateIdentity } from '../../lib/tmux-lite/crypto/identity.js';
+import { mnemonicToUserIdentity } from '../../lib/tmux-lite/crypto/user-identity.js';
 
 describe('authLogin identity recovery', () => {
   const originalStdoutIsTTY = process.stdout.isTTY;
@@ -26,19 +28,16 @@ describe('authLogin identity recovery', () => {
 
   test('recovers a missing user root identity from cloud backup after login', async () => {
     const ensureDeviceIdentityPasswordMock = mock(async () => 'device-password');
-    const loadKeypairMock = mock(async () => ({ signing: { secretKey: new Uint8Array(64) } }));
-    const signMock = mock(() => new Uint8Array([1, 2, 3]));
-    const serializeIdentityMock = mock(() => ({ signingPublicKey: 'device-pubkey' }));
+    const deviceIdentity = generateIdentity('device-test');
+    const loadKeypairMock = mock(async () => deviceIdentity);
     const setSecretMock = mock(async () => undefined);
     const syncHostConfigMock = mock(async () => ({ ok: true }));
     const printHostSyncReportMock = mock(() => undefined);
     const loadUserRootIdentityMock = mock(async () => null);
-    const recoverUserRootFromCloudBackupMock = mock(async () => ({
-      id: 'user-root-1',
-      signing: { publicKey: new Uint8Array(32) },
-      keyExchange: { publicKey: new Uint8Array(32) },
-      createdAt: Date.now(),
-    }));
+    const recoveredIdentity = mnemonicToUserIdentity(
+      'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art',
+    );
+    const recoverUserRootFromCloudBackupMock = mock(async () => recoveredIdentity);
     const getCloudIdentityBackupStatusMock = mock(async () => ({ enabled: true }));
     const promptConfirmMock = mock(async () => true);
     const promptPasswordMock = mock(async () => 'backup-password');
@@ -54,10 +53,6 @@ describe('authLogin identity recovery', () => {
       getPublicKeyWithoutPassword: mock(() => null),
     }));
 
-    mock.module('../../lib/tmux-lite/crypto/identity.js', () => ({
-      sign: signMock,
-      serializeIdentity: serializeIdentityMock,
-    }));
 
     mock.module('../host.js', () => ({
       syncHostConfig: syncHostConfigMock,
@@ -83,11 +78,10 @@ describe('authLogin identity recovery', () => {
       recoverUserRootFromCloudBackup: recoverUserRootFromCloudBackupMock,
     }));
 
-    mock.module('../../lib/tmux-lite/crypto/user-identity.js', () => ({
-      formatUserRootPublicKey: mock(() => 'gssh-user:PUBLICKEY'),
-    }));
 
+    const realPrompts = await import('../../utils/prompts.js');
     mock.module('../../utils/prompts.js', () => ({
+      ...realPrompts,
       promptConfirm: promptConfirmMock,
       promptPassword: promptPasswordMock,
     }));
@@ -100,7 +94,12 @@ describe('authLogin identity recovery', () => {
           : input.url;
 
       if (url.endsWith('/config')) {
-        return Response.json({ github_client_id: 'client-id' });
+        return Response.json({
+          github_client_id: 'client-id',
+          version: '1.0.0',
+          apiVersion: 3,
+          subdomainsSchemaVersion: 4,
+        });
       }
 
       if (url === 'https://github.com/login/device/code') {

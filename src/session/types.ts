@@ -102,6 +102,7 @@ export type SessionEngineAction =
       sessionName?: string | null;
       meta?: AttachedSessionMeta | null;
       workspaceId?: string | null;
+      preserveContextOnExit?: boolean;
     }
   | {
       type: 'SET_ATTACHED_SESSION_META';

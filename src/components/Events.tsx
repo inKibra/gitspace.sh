@@ -51,10 +51,10 @@ function getEventTimestamp(event: WideEventItem): number {
 }
 
 function getEventKey(event: WideEventItem): string {
-  const processName = event.processName ?? 'unknown';
-  const instance = event.processInstance ?? 1;
-  const correlation = event.correlationId ?? event.eventId;
-  return `${processName}:${instance}:${correlation}`;
+  // Selection must track the concrete event, not a correlation group. Multiple
+  // related events can share a correlationId, so using eventId avoids jumping
+  // back to a hidden sibling when the filtered list changes.
+  return event.eventId;
 }
 
 export interface UseEventsProps {

@@ -5,7 +5,7 @@
  */
 
 import { Hono } from 'hono';
-import { ed25519 } from '@noble/curves/ed25519';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import type { Env, User, GitHubUser } from '../types';
 import { hashToken } from '../middleware/auth';
 

@@ -161,12 +161,12 @@ export interface LinearTeamInfo {
 }
 
 /**
- * Global configuration stored in ~/gitspace/.config.json
+ * Global configuration stored in the configured config root as `.config.json`.
  */
 export interface GlobalConfig {
   /** Name of the currently active project */
   currentProject: string | null;
-  /** Path to the projects directory (default: ~/gitspace) */
+  /** Path to the projects/workspace root (default: ~/gitspace) */
   projectsDir: string;
   /** Default base branch for new projects (default: "main") */
   defaultBaseBranch: string;
@@ -220,12 +220,12 @@ export interface BundleConfirmHistoryEntry {
 
 /**
  * GitSpace-internal kanban phase for a workspace.
- * Stored per workspace in project config; synced via owner-sync.
+ * Stored per workspace in workspace-local metadata and synced via owner-sync.
  */
 export type WorkspacePhase = 'plan' | 'code' | 'review' | 'ship';
 
 /**
- * Project-specific configuration stored in ~/gitspace/{PROJECT_NAME}/.config.json
+ * Project-specific configuration stored at <workspace-root>/{PROJECT_NAME}/.config.json
  */
 export interface ProjectConfig {
   /** Project name */
@@ -257,7 +257,7 @@ export interface ProjectConfig {
  */
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
   currentProject: null,
-  projectsDir: '', // Will be set to ~/gitspace at runtime
+  projectsDir: '', // Set to the resolved workspace root at runtime
   defaultBaseBranch: 'main',
   staleDays: 30,
   notifications: { ...DEFAULT_NOTIFICATION_CONFIG },

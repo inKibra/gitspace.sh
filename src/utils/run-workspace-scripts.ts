@@ -118,10 +118,14 @@ export async function runWorkspaceScripts(
     signal,
   };
 
+  if (scriptPolicy === 'skip') {
+    return { success: true };
+  }
+
   const existingLock = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
   const stepFingerprints = currentBundle ? buildBundleStepFingerprints(currentBundle) : {};
 
-  const setupNeeded = scriptPolicy !== 'skip' && !noSetup && shouldRunSetup({
+  const setupNeeded = !noSetup && shouldRunSetup({
     lock: existingLock,
     bundle: currentBundle,
     bundleHash,
@@ -200,9 +204,6 @@ export async function runWorkspaceScripts(
     }
   }
 
-  if (scriptPolicy === 'skip') {
-    return { success: true };
-  }
 
   // Always run select scripts on terminal attach (new session path).
   const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select');

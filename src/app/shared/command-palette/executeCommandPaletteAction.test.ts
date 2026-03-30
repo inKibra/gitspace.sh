@@ -8,7 +8,7 @@ function createWorkspace() {
     path: '/tmp/demo',
     projectName: 'proj',
     sessionCount: 0,
-    processes: [{ name: 'web', ports: [{ name: 'app', port: 3000, protocol: 'http' as const }] }],
+    processes: [{ name: 'web', ports: [{ instance: 1, name: 'app', port: 3000, protocol: 'http' as const }] }],
   };
 }
 

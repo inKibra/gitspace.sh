@@ -5,11 +5,13 @@ import type {
   UseBundleRefreshAttachFlowResult,
 } from '../../session/useBundleRefreshAttachFlow.js'
 import type { BackendKey } from '../../session/backend.js'
+import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js'
 
 export interface AttachSelectionParams {
   sessionId?: string
   workspaceId?: string
   viewOnly?: boolean
+  backendKey?: BackendKey
 }
 
 export type AttachTarget = 'session' | 'workspace'
@@ -18,6 +20,11 @@ export interface AttachContext {
   target: AttachTarget
   params: BundleRefreshAttachParams
   projectName: string | null
+  workspaceRef?: BackendScopedWorkspaceRef
+}
+
+interface WorkspaceScopedBundleRefreshAttachParams extends BundleRefreshAttachParams {
+  backendKey?: BackendKey
 }
 
 export interface AttachErrorContext extends AttachContext {
@@ -47,6 +54,7 @@ export interface UseAttachControllerOptions {
   recoverableAttachParams?: BundleRefreshAttachParams | null
   defaultProjectName?: string | null
   defaultBackendKey?: BackendKey
+  resolveWorkspaceRef?: (workspaceId: string) => BackendScopedWorkspaceRef | null
   resolveProjectName?: (workspaceId: string) => string | null
   getAttachSize?: () => AttachTerminalSize | null
   sessionNamePrompt?: SessionNamePromptConfig
@@ -59,7 +67,7 @@ export interface UseAttachControllerOptions {
 }
 
 export interface UseAttachControllerResult {
-  attach: (params: BundleRefreshAttachParams) => Promise<boolean>
+  attach: (params: BundleRefreshAttachParams, backendKeyOverride?: BackendKey) => Promise<boolean>
   attachFromSelection: (selection: AttachSelectionParams) => Promise<void>
   /** True when the last workspace attach failed in a recoverable way. */
   canAttachAnyway: boolean
@@ -100,6 +108,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     recoverableAttachParams,
     defaultProjectName,
     defaultBackendKey = 'local',
+    resolveWorkspaceRef,
     resolveProjectName,
     getAttachSize,
     sessionNamePrompt,
@@ -130,7 +139,10 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     }
   }, [getAttachSize])
 
-  const attach = useCallback(async (params: BundleRefreshAttachParams): Promise<boolean> => {
+  const attach = useCallback(async (
+    params: BundleRefreshAttachParams,
+    backendKeyOverride?: BackendKey,
+  ): Promise<boolean> => {
     const attachParams = withAttachSize(params)
     const target: AttachTarget = attachParams.workspaceId ? 'workspace' : 'session'
     const projectName = attachParams.workspaceId
@@ -140,17 +152,38 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         null
       : defaultProjectName ?? null
 
+    const defaultBackend = backendKeyOverride ?? defaultBackendKey
+    const resolvedWorkspaceRef = attachParams.workspaceId
+      ? resolveWorkspaceRef?.(attachParams.workspaceId)
+      : null
+    const ref: BackendScopedWorkspaceRef = attachParams.workspaceId
+      ? resolvedWorkspaceRef ?? {
+          backendKey: defaultBackend,
+          workspaceId: attachParams.workspaceId,
+        }
+      : {
+          backendKey: defaultBackend,
+          workspaceId: '',
+        }
+    const attachParamsWithBackend: WorkspaceScopedBundleRefreshAttachParams =
+      attachParams.workspaceId
+        ? {
+            ...attachParams,
+            backendKey: ref.backendKey,
+          }
+        : attachParams
+
     const context: AttachContext = {
       target,
       params: attachParams,
       projectName,
+      workspaceRef: attachParams.workspaceId ? ref : undefined,
     }
 
     await onBeforeAttach?.(context)
 
     try {
-      const ref = { backendKey: defaultBackendKey, workspaceId: attachParams.workspaceId ?? '' }
-      const attached = await attachSessionWithBundleRefresh(ref, attachParams)
+      const attached = await attachSessionWithBundleRefresh(ref, attachParamsWithBackend)
 
       if (!attached) {
         await onAttachCancelled?.(context)
@@ -187,6 +220,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     onAttachSuccess,
     onBeforeAttach,
     resolveProjectName,
+    resolveWorkspaceRef,
     withAttachSize,
   ])
 
@@ -195,10 +229,15 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       return false
     }
 
-    return attach({
-      ...recoverableAttachParams,
-      scriptPolicy: 'skip',
-    })
+    const params = recoverableAttachParams as WorkspaceScopedBundleRefreshAttachParams
+
+    return attach(
+      {
+        ...params,
+        scriptPolicy: 'skip',
+      },
+      params.backendKey,
+    )
   }, [attach, recoverableAttachParams])
 
   const attachFromSelection = useCallback(async (selection: AttachSelectionParams): Promise<void> => {
@@ -215,7 +254,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         attachParams.viewOnly = selection.viewOnly
       }
 
-      await attach(attachParams)
+      await attach(attachParams, selection.backendKey)
       return
     }
 
@@ -234,7 +273,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         await attach({
           workspaceId: selection.workspaceId,
           sessionName: sessionName.trim() || undefined,
-        })
+        }, selection.backendKey)
       },
     })
   }, [attach, closePromptOnSubmit, flow, preflightSessionAttach, sessionNamePrompt])

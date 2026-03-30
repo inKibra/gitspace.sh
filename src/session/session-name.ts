@@ -31,7 +31,7 @@ export function buildSessionName(options: BuildSessionNameOptions): string {
 
   const usedNumericSuffixes = new Set<number>();
   for (const session of sessions) {
-    if (!session.name.startsWith(prefix)) {
+    if (typeof session.name !== 'string' || !session.name.startsWith(prefix)) {
       continue;
     }
     const suffix = session.name.slice(prefix.length);

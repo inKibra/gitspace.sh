@@ -232,7 +232,9 @@ export async function connectMachineRelay(
     const maxReconnectAttempts = 10;
     const baseReconnectDelay = 1000;
     const maxReconnectDelay = 30000;
+    const pingIntervalMs = 15_000;
     let resolved = false;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
 
     const signingPublicKey = signingPrivateKey
       ? new Uint8Array(Buffer.from(publicIdentity.signingPublicKey, 'base64'))
@@ -247,6 +249,23 @@ export async function connectMachineRelay(
       }
     };
 
+    const stopPing = () => {
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+    };
+
+    const startPing = (ws: WebSocket) => {
+      stopPing();
+      pingTimer = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+      }, pingIntervalMs);
+    };
+
     const connect = () => {
       console.log(`[serve] Connecting to relay: ${url.toString()}`);
       const ws = new WebSocket(url.toString());
@@ -254,10 +273,10 @@ export async function connectMachineRelay(
 
       ws.onopen = () => {
         console.log('[serve] WebSocket connected, waiting for relay identity...');
-        reconnectAttempts = 0;
       };
 
       ws.onclose = (event) => {
+        stopPing();
         console.log(`[serve] WebSocket closed: code=${event.code} reason=${event.reason || 'none'}`);
         eventHandler({
           type: 'relay_disconnected',
@@ -266,17 +285,14 @@ export async function connectMachineRelay(
         });
 
         if (reconnectAttempts < maxReconnectAttempts) {
-          reconnectAttempts++;
+          reconnectAttempts += 1;
           const delay = Math.min(
             baseReconnectDelay * Math.pow(2, reconnectAttempts - 1) + Math.random() * 1000,
             maxReconnectDelay
           );
           eventHandler({ type: 'relay_reconnecting', attempt: reconnectAttempts });
           setTimeout(connect, delay);
-        } else {
-          // All reconnect attempts exhausted — reject the outer promise so the
-          // caller does not hang indefinitely waiting for a connection that will
-          // never succeed.
+        } else if (!resolved) {
           reject(new Error(`WebSocket reconnect failed after ${maxReconnectAttempts} attempts`));
         }
       };
@@ -355,6 +371,8 @@ export async function connectMachineRelay(
             }
 
             case 'registered':
+              reconnectAttempts = 0;
+              startPing(ws);
               eventHandler({ type: 'relay_connected' });
 
               if (!resolved) {
@@ -396,6 +414,9 @@ export async function connectMachineRelay(
               if (!resolved) {
                 reject(new Error(msg.message));
               }
+              break;
+
+            case 'pong':
               break;
 
             default:

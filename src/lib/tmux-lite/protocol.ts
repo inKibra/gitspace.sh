@@ -261,7 +261,7 @@ export interface WorkspaceRuntimeRecord {
   sessionCount: number;
   isStale?: boolean;
   serveDomain?: string;
-  processes?: { name: string; instances?: number; ports?: import('../../types/processes.js').ProcessPortConfig[] }[];
+  processes?: import('../../types/processes.js').RuntimeProcessDefinition[];
   processConfigError?: string;
   status?: import('../../types/config.js').WorkspacePhase;
   notesSummary?: import('../../types/workspace.js').WorkspaceNotesSummary;
@@ -316,6 +316,14 @@ export type Command =
       metadata?: Record<string, string>;
     }
   | {
+      type: 'new-virtual';
+      name?: string;
+      cwd: string;
+      kind?: SessionKind;
+      hidden?: boolean;
+      metadata?: Record<string, string>;
+    }
+  | {
       type: 'attach-prepare';
       requestId: string;
       sessionId?: string;
@@ -347,6 +355,20 @@ export type Command =
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string }
+  | {
+      type: 'pi-runtime-update';
+      timestamp: number;
+      signature: string;
+      sessionId: string;
+      terminalSessionId: string;
+      workspacePath: string;
+      status: import('../../agents/agent-runtime-types.js').SessionStatus;
+      pendingPermissions: import('../../agents/agent-runtime-types.js').Permission[];
+      pendingQuestions: import('../../agents/agent-runtime-types.js').PendingQuestion[];
+      errorMessage?: string;
+      lastMessage?: string;
+    }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
   | { type: 'github-repos'; org?: string }
@@ -436,7 +458,7 @@ export type Response =
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/ports.js').PortConflictInfo[] }
   | { type: "inbox"; items: InboxItem[] }
   | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
   | { type: "version"; version: string; protocol: number }
@@ -477,7 +499,7 @@ export interface InboxItem {
   /** Present only for agent_* item types — carries routing metadata for the app layer */
   agentAction?: {
     workspaceId: string;
-    agentSessionId: string;    // OpenCode session ID
+    agentSessionId: string;    // agent runtime session ID
     permissionId?: string;     // only for agent_permission
     permissionTitle?: string;
     messagePreview?: string;   // for agent_idle

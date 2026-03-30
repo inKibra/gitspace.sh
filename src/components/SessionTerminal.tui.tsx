@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
 import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core';
-import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';
+import { TailGhosttyTerminalRenderable } from './TailGhosttyTerminal.tui.js';
+import { getTailWindowOffset } from './session-terminal-tail-window.js';
 import { findUtf8Boundary } from '../utils/utf8.js';
 import { BracketedPasteModeTracker, wrapPaste } from './terminal-bracketed-paste.tui.js';
 import { toast } from '@opentui-ui/toast';
@@ -21,7 +22,7 @@ import {
   restoreKittyKeyboard,
 } from '../tui/kitty-keyboard.js';
 
-extend({ 'ghostty-terminal': GhosttyTerminalRenderable });
+extend({ 'tail-ghostty-terminal': TailGhosttyTerminalRenderable });
 
 const COLORS = {
   statusBar: '#333333',
@@ -30,9 +31,15 @@ const COLORS = {
   detachHint: '#FFAA00',
 };
 
-const SCROLLBACK_LIMIT = 2_000;
+
+const TAIL_WINDOW_LIMIT = 1_000;
 const SHIFT_ESCAPE_SEQUENCES = new Set(['\x1b[27;2u', '\x1b[27;2;27~']);
 const SHIFT_TAB_SEQUENCES = new Set(['\x1b[Z', '\x1b[9;2u', '\x1b[27;2;9~']);
+
+const RENDER_BATCH_DELAY_MS = 24;
+const RENDER_BURST_GAP_MS = 12;
+const RENDER_BURST_CHUNK_BYTES = 512;
+const RENDER_BATCH_FORCE_FLUSH_BYTES = 8 * 1024;
 
 function isUiModeToggleSequence(sequence: string): boolean {
   return SHIFT_ESCAPE_SEQUENCES.has(sequence);
@@ -113,12 +120,14 @@ export function SessionTerminal({
   const [termSize, setTermSize] = useState(() =>
     getTerminalSize(reservedRows, reservedCols, reservedRowsExtra)
   );
-  const [initialData] = useState<Buffer>(() => Buffer.alloc(0));
+  const [initialData, setInitialData] = useState<Buffer>(() => Buffer.alloc(0));
 
-  const terminalRef = useRef<GhosttyTerminalRenderable | null>(null);
+  const terminalRef = useRef<TailGhosttyTerminalRenderable | null>(null);
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null);
-  const pendingPtyDataRef = useRef<Buffer[]>([]);
   const ptyUtf8BufferRef = useRef<Buffer>(Buffer.alloc(0));
+  const renderBatchBufferRef = useRef<Buffer>(Buffer.alloc(0));
+  const renderBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRenderFlushAtRef = useRef(0);
   const followScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bracketedPasteRef = useRef(new BracketedPasteModeTracker());
   const textEncoderRef = useRef(new TextEncoder());
@@ -165,6 +174,18 @@ export function SessionTerminal({
       return;
     }
 
+    const desiredOffset = getTailWindowOffset(terminal.totalLines, TAIL_WINDOW_LIMIT);
+    if (terminal.offset !== desiredOffset) {
+      terminal.offset = desiredOffset;
+      if (!followScrollTimeoutRef.current) {
+        followScrollTimeoutRef.current = setTimeout(() => {
+          followScrollTimeoutRef.current = null;
+          scrollToCursorIfFollowing();
+        }, 0);
+      }
+      return;
+    }
+
     let cursor: [number, number];
     try {
       cursor = terminal.getCursor();
@@ -175,10 +196,6 @@ export function SessionTerminal({
     const lineCount = terminal.lineCount ?? 0;
     if (lineCount <= 0) {
       return;
-    }
-
-    if (lineCount > SCROLLBACK_LIMIT) {
-      terminal.feed(Buffer.from('\x1b[3J'));
     }
 
     const cursorLine = Math.max(0, lineCount - terminal.rows + cursor[1]);
@@ -221,6 +238,57 @@ export function SessionTerminal({
     renderer.clearSelection();
   }, [renderer]);
 
+  const flushRenderBatch = useCallback(() => {
+    const terminal = terminalRef.current;
+    const buffered = renderBatchBufferRef.current;
+    renderBatchBufferRef.current = Buffer.alloc(0);
+    if (renderBatchTimerRef.current) {
+      clearTimeout(renderBatchTimerRef.current);
+      renderBatchTimerRef.current = null;
+    }
+    if (!terminal || buffered.length === 0) {
+      return;
+    }
+    terminal.feed(buffered);
+    lastRenderFlushAtRef.current = Date.now();
+    scheduleScrollFollow();
+  }, [scheduleScrollFollow]);
+
+  const enqueueRenderChunk = useCallback((chunk: Buffer) => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      setInitialData((previous) => (previous.length > 0 ? Buffer.concat([previous, chunk]) : chunk));
+      return;
+    }
+
+    const now = Date.now();
+    const shouldBatch = chunk.length >= RENDER_BURST_CHUNK_BYTES
+      || (now - lastRenderFlushAtRef.current) <= RENDER_BURST_GAP_MS
+      || renderBatchBufferRef.current.length > 0;
+
+    if (!shouldBatch) {
+      terminal.feed(chunk);
+      lastRenderFlushAtRef.current = now;
+      scheduleScrollFollow();
+      return;
+    }
+
+    renderBatchBufferRef.current = renderBatchBufferRef.current.length > 0
+      ? Buffer.concat([renderBatchBufferRef.current, chunk])
+      : chunk;
+
+    if (renderBatchBufferRef.current.length >= RENDER_BATCH_FORCE_FLUSH_BYTES) {
+      flushRenderBatch();
+      return;
+    }
+
+    if (!renderBatchTimerRef.current) {
+      renderBatchTimerRef.current = setTimeout(() => {
+        flushRenderBatch();
+      }, RENDER_BATCH_DELAY_MS);
+    }
+  }, [flushRenderBatch, scheduleScrollFollow]);
+
   const feedChunk = useCallback((chunk: Uint8Array) => {
     const incoming = Buffer.from(chunk);
 
@@ -245,34 +313,28 @@ export function SessionTerminal({
     bracketedPasteRef.current.update(combined);
 
     if (!terminalRef.current) {
-      pendingPtyDataRef.current.push(combined);
+      setInitialData((previous) => (previous.length > 0 ? Buffer.concat([previous, combined]) : combined));
       return;
     }
 
-    terminalRef.current.feed(combined);
-    scheduleScrollFollow();
-  }, [scheduleScrollFollow]);
+    enqueueRenderChunk(combined);
+  }, [enqueueRenderChunk]);
 
   useEffect(() => {
     setWriteCallback(feedChunk);
     return () => {
       setWriteCallback(null);
-      pendingPtyDataRef.current = [];
       ptyUtf8BufferRef.current = Buffer.alloc(0);
+      renderBatchBufferRef.current = Buffer.alloc(0);
+      if (renderBatchTimerRef.current) {
+        clearTimeout(renderBatchTimerRef.current);
+        renderBatchTimerRef.current = null;
+      }
       setTerminalMounted(false);
+      setInitialData(Buffer.alloc(0));
     };
   }, [feedChunk, setWriteCallback]);
 
-  useEffect(() => {
-    if (!terminalMounted || !terminalRef.current || pendingPtyDataRef.current.length === 0) {
-      return;
-    }
-
-    const pending = Buffer.concat(pendingPtyDataRef.current);
-    pendingPtyDataRef.current = [];
-    terminalRef.current.feed(pending);
-    scheduleScrollFollow();
-  }, [scheduleScrollFollow, terminalMounted]);
 
   useEffect(() => {
     if (!terminalMounted) {
@@ -280,6 +342,13 @@ export function SessionTerminal({
     }
     scheduleScrollFollow();
   }, [initialData, scheduleScrollFollow, terminalMounted]);
+
+  useEffect(() => {
+    if (!terminalMounted) {
+      return;
+    }
+    flushRenderBatch();
+  }, [flushRenderBatch, terminalMounted]);
 
   useEffect(() => {
     const { cols, rows } = getTerminalSize(reservedRows, reservedCols, reservedRowsExtra);
@@ -312,11 +381,11 @@ export function SessionTerminal({
       }
 
       if (isUiModeToggleSequence(sequence)) {
-        if (onShiftEsc) {
-          onShiftEsc();
-          return true;
-        }
         if (uiModeEnabledRef.current) {
+          if (onShiftEsc) {
+            onShiftEsc();
+            return true;
+          }
           forceDisableKeyboard();
         }
         setUiModeEnabled((prev) => !prev);
@@ -383,8 +452,12 @@ export function SessionTerminal({
     }
 
     if (key.shift && key.name === 'escape') {
-      forceDisableKeyboard();
-      setUiModeEnabled(false);
+      if (onShiftEsc) {
+        onShiftEsc();
+      } else {
+        forceDisableKeyboard();
+        setUiModeEnabled(false);
+      }
       return;
     }
 
@@ -467,8 +540,8 @@ export function SessionTerminal({
         stickyStart="bottom"
         onMouseUp={handleMouseUp}
       >
-        <ghostty-terminal
-          ref={(el: GhosttyTerminalRenderable | null) => {
+        <tail-ghostty-terminal
+          ref={(el: TailGhosttyTerminalRenderable | null) => {
             const wasNull = terminalRef.current === null;
             terminalRef.current = el;
             if (el && wasNull) {
@@ -480,6 +553,8 @@ export function SessionTerminal({
           cursorStyle="block"
           cols={termSize.cols}
           rows={termSize.rows}
+          limit={TAIL_WINDOW_LIMIT}
+          offset={0}
           ansi={initialData}
         />
       </scrollbox>

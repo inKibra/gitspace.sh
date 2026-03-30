@@ -6,16 +6,18 @@
  * header bar + full-height kanban board with all phases visible.
  */
 
+import { useEffect } from 'react';
 import { KanbanBoardWeb } from '../components/KanbanBoard.web.js';
-import type { WorkspaceBoardGroup } from '../machine/controllers/useKanbanViewController.js';
+import type { WorkspaceBoardGroup } from '../app/shared/board/types.js';
+import { getShiftArrowPhaseChange } from '../app/shared/board/phase-movement.js';
 import type { WorkspacePhase } from '../types/config.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 
 export interface BoardPageProps {
   groups: WorkspaceBoardGroup[];
   selectedWorkspaceId: string | null;
-  onSelectWorkspace: (workspaceId: string | null) => void;
-  onPhaseChange?: (workspaceId: string, phase: WorkspacePhase) => void;
+  onSelectWorkspace: (workspaceKey: string | null) => void;
+  onPhaseChange?: (workspaceKey: string, phase: WorkspacePhase) => void;
   worktreeCount: number;
   inboxUnreadCount: number;
   onOpenInbox: () => void;
@@ -29,6 +31,14 @@ export interface BoardPageProps {
   loading?: boolean;
   loadingLabel?: string;
 }
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement
+    || (target instanceof HTMLElement && target.isContentEditable);
+}
+
 
 export function BoardPage({
   groups,
@@ -47,6 +57,39 @@ export function BoardPage({
   loading = false,
   loadingLabel = 'Loading worktrees...',
 }: BoardPageProps) {
+  useEffect(() => {
+    if (!onPhaseChange) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !event.shiftKey) {
+        return;
+      }
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+        return;
+      }
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+
+      const change = getShiftArrowPhaseChange({
+        groups,
+        selectedWorkspaceId,
+        direction: event.key === 'ArrowLeft' ? -1 : 1,
+      });
+      if (!change) {
+        return;
+      }
+
+      event.preventDefault();
+      onPhaseChange(change.workspaceKey, change.phase);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [groups, onPhaseChange, selectedWorkspaceId]);
+
   return (
     <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
       {/* Header bar */}
