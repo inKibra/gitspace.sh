@@ -308,7 +308,7 @@ export class AgentEventManager {
     delete state.pendingQuestions[sessionId];
     delete state.errorMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
-    this.emit({ type: 'agent_session_status', workspaceId, sessionId, status: { type: 'idle' } });
+    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
   markSessionArchived(workspaceId: string, sessionId: string): void {
