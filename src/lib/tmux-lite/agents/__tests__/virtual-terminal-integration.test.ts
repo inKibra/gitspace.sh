@@ -1,5 +1,5 @@
-import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { existsSync, copyFileSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -139,7 +139,7 @@ describe('VirtualTerminal integration', () => {
     expect(statSync(pngPath).size).toBeGreaterThan(500);
 
     const stablePath = '/tmp/virtual-terminal-integration-test.png';
-    Bun.write(stablePath, Bun.file(pngPath));
+    copyFileSync(pngPath, stablePath);
     console.log(`\n  Screenshot written to: ${stablePath}`);
 
     tui.stop();

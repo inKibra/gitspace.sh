@@ -2,20 +2,16 @@ import type { OmpAgentSession } from './omp-types.js';
 import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
-  createSession as createTmuxSession,
   createVirtualSession as createTmuxVirtualSession,
 } from '../cli.js';
-import { getRouterSocket, type Session as TmuxSession } from '../protocol.js';
+import type { Session as TmuxSession } from '../protocol.js';
 import {
-  setupPiEnvironment,
-  ensureOmpInstalled,
   createPiSessionManager,
   getGitspacePiExtensionPaths,
   importOmpModule,
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
-import { buildPiRuntimeChildEnvironment } from './pi-runtime-status.js';
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
@@ -275,14 +271,7 @@ export class PiCoordinator {
       );
     }
 
-    try {
-      return await this.createVirtualAgentSession(target, agentSessionId, match);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[PiCoordinator] VirtualTerminal path failed for ${agentSessionId}; falling back to PTY: ${message}`);
-    }
-
-    return this.createPtyAgentSession(target, agentSessionId, match);
+    return this.createVirtualAgentSession(target, agentSessionId, match);
   }
 
   private async createVirtualAgentSession(
@@ -306,58 +295,24 @@ export class PiCoordinator {
 
     const virtualTerminal = getVirtualTerminal(tmuxSession.id);
     if (!virtualTerminal) {
+      await killTmuxSession(tmuxSession.id).catch(() => {});
       throw new Error('VirtualTerminal not found in registry after session creation');
     }
 
-    const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal, {
-      cwd: target.workspacePath,
-      agentDir: process.env.PI_CODING_AGENT_DIR,
-    });
-    this.virtualModeHandles.set(agentSessionId, handle);
-
-    this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
-    return tmuxSession;
+    try {
+      const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal, {
+        cwd: target.workspacePath,
+        agentDir: process.env.PI_CODING_AGENT_DIR,
+      });
+      this.virtualModeHandles.set(agentSessionId, handle);
+      this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
+      return tmuxSession;
+    } catch (error) {
+      await killTmuxSession(tmuxSession.id).catch(() => {});
+      throw error;
+    }
   }
 
-  private async createPtyAgentSession(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile: PiSessionFileInfo,
-  ): Promise<TmuxSession> {
-    const ompBin = await ensureOmpInstalled();
-    const env = {
-      ...setupPiEnvironment(target),
-      ...buildPiRuntimeChildEnvironment(getRouterSocket()),
-    };
-
-    void this.ensureActiveSession(target, agentSessionId, sessionFile).catch(() => {
-      // Non-fatal for attach: the terminal should still open even if SDK rehydration fails.
-    });
-
-    const extensionArgs = getGitspacePiExtensionPaths().flatMap((extensionPath) => [
-      '--extension',
-      extensionPath,
-    ]);
-
-    const tmuxSession = await createTmuxSession(
-      buildAgentTerminalSessionName(target, agentSessionId),
-      target.workspacePath,
-      {
-        command: ompBin,
-        args: ['--session', sessionFile.path, ...extensionArgs],
-        env,
-        kind: PI_AGENT_TMUX_SESSION_KIND,
-        hidden: true,
-        recordReplay: false,
-        metadata: {
-          workspaceId: target.workspaceId,
-          agentSessionId,
-        },
-      },
-    );
-    this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
-    return tmuxSession;
-  }
 
   // -------------------------------------------------------------------------
   // Private helpers
