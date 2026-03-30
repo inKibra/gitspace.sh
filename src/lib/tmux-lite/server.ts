@@ -49,7 +49,6 @@ import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/typ
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
   attachAgentSession as ensureAgentTerminalSession,
-  applyPiRuntimeUpdate,
   archiveAgentSession,
   abortAgentSession,
   closeAgentSession,
@@ -65,13 +64,9 @@ import {
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
+  markAgentSessionIdle,
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
-import {
-  configurePiRuntimeEnvironment,
-  PI_RUNTIME_TERMINAL_SESSION_ENV,
-  verifyPiRuntimeUpdateCommand,
-} from './agents/pi-runtime-status.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
@@ -112,11 +107,9 @@ import {
 // Using 512KB to be well under the 1MB limit
 const PTY_CHUNK_SIZE = 512 * 1024;
 
-// Max scrollback lines to include when serializing live state for an attach.
-const ATTACH_SERIALIZE_SCROLLBACK_LINES = 2_000;
-
-// Keep replay checkpoints smaller than full attach serialization to cap disk churn.
-const REPLAY_CHECKPOINT_SCROLLBACK_LINES = 250;
+// Max scrollback lines to include in serialized state during attach
+// This is a limit - if less scrollback exists, we'll send what's available
+const SERIALIZE_SCROLLBACK_LINES = 250;
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
@@ -125,7 +118,6 @@ if (rawArgs.includes("--test")) {
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
-const PI_RUNTIME_ENV = configurePiRuntimeEnvironment(ROUTER_SOCKET);
 const SERVER_START_TIME = Date.now();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
@@ -496,11 +488,7 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   const agentSessionId = session.info.metadata?.agentSessionId;
   releasePiTerminalSessionOwnership(session.info.id);
   if (workspaceId && agentSessionId) {
-    applyPiRuntimeUpdate(workspaceId, agentSessionId, {
-      status: { type: 'idle' },
-      pendingPermissions: [],
-      pendingQuestions: [],
-    });
+    markAgentSessionIdle(workspaceId, agentSessionId);
   }
 }
 
@@ -924,7 +912,7 @@ function createReplayCheckpoint(replay: ReplayRuntime, session: SessionData): Re
     },
     serializer: {
       kind: "xterm-serialize",
-      scrollbackLines: REPLAY_CHECKPOINT_SCROLLBACK_LINES,
+      scrollbackLines: SERIALIZE_SCROLLBACK_LINES,
     },
     ansiPath: `checkpoints/${checkpointId}.ansi`,
   };
@@ -939,7 +927,7 @@ function writeReplayCheckpointNow(session: SessionData): void {
   try {
     const checkpoint = createReplayCheckpoint(replay, session);
     const serialized = session.serialize.serialize({
-      scrollback: REPLAY_CHECKPOINT_SCROLLBACK_LINES,
+      scrollback: SERIALIZE_SCROLLBACK_LINES,
     });
     writeReplayCheckpoint(replay.replayId, checkpoint, serialized);
     replay.checkpointCount++;
@@ -1486,9 +1474,10 @@ function sendSerializedState(session: SessionData, sessionName: string): void {
     writeToClient(session, encodePTY(Buffer.from("\x1b[2J\x1b[H"))); // clear + home
 
     if (!skipSerialize) {
-      // Get serialized terminal state (including modes) for consistent redraws.
+      // Get serialized terminal state (including modes) for consistent redraws
+      // Limit scrollback to prevent oversized payloads
       const serialized = session.serialize.serialize({
-        scrollback: ATTACH_SERIALIZE_SCROLLBACK_LINES,
+        scrollback: SERIALIZE_SCROLLBACK_LINES,
       });
       const serializedBytes = Buffer.from(serialized);
 
@@ -1909,10 +1898,6 @@ function createSession(
   const spawnEnv = {
     ...shellEnv,
     ...(options?.env ?? {}),
-    ...(options?.kind === 'agent' ? {
-      ...PI_RUNTIME_ENV,
-      [PI_RUNTIME_TERMINAL_SESSION_ENV]: id,
-    } : {}),
   };
 
   const proc = Bun.spawn(spawnCmd, {
@@ -2004,9 +1989,9 @@ function createSession(
 }
 
 /**
- * Create a virtual session backed by VirtualTerminal instead of a PTY process.
- * The VirtualTerminal is registered in the shared registry so the coordinator
- * (running in the same process) can retrieve it to start InteractiveMode.
+ * Create a virtual session backed by VirtualTerminal instead of a PTY child process.
+ * The coordinator retrieves the registered VirtualTerminal and boots
+ * InteractiveMode in-process against the same xterm-headless state.
  */
 function createVirtualSession(
   name: string | undefined,
@@ -2028,12 +2013,9 @@ function createVirtualSession(
 
   const cols = 80;
   const rows = 24;
-
-  // xterm-headless for terminal state tracking (same as PTY sessions)
   const xterm = new XTerminal({
     cols,
     rows,
-    // Agent sessions are full-screen TUI; minimal scrollback needed.
     scrollback: 100,
     allowProposedApi: true,
   });
@@ -2041,7 +2023,7 @@ function createVirtualSession(
   const serialize = new SerializeAddon();
   xterm.loadAddon(serialize);
 
-  const { getProcessTitle } = setupXtermEventHandlers(id, sessionName, xterm);
+  setupXtermEventHandlers(id, sessionName, xterm);
 
   const idleState: IdleDetectionState = {
     lastOutputTime: 0,
@@ -2049,8 +2031,6 @@ function createVirtualSession(
     idleTimer: null,
   };
 
-  // VirtualTerminal writer: feeds pi-tui output into xterm-headless and clients.
-  // This mirrors what createPtyDataHandler does for PTY sessions.
   const virtualTerminal = new VirtualTerminal(cols, rows, (data: string) => {
     idleState.lastOutputTime = Date.now();
     idleState.outputSinceIdle += data.length;
@@ -2058,27 +2038,24 @@ function createVirtualSession(
     const session = sessions.get(id);
     if (!session) return;
 
-    // Track pending writes for attach synchronization
     session.pendingWrites++;
     xterm.write(data, () => {
       session.pendingWrites--;
       if (session.attaching) {
         session.attachDirty = true;
+        return;
       }
-      // Fan out to attached client
-      const encoded = encodePTY(data);
-      writeToClient(session, encoded);
+      writeToClient(session, encodePTY(data));
     });
   });
 
   registerVirtualTerminal(id, virtualTerminal);
 
-  // Session info
   const info: Session = {
     id,
     name: sessionName,
     socketPath,
-    pid: process.pid, // No child process; use server PID for identification
+    pid: process.pid,
     attached: false,
     cwd,
     createdAt: Date.now(),
@@ -2088,8 +2065,6 @@ function createVirtualSession(
   };
 
   const startAttach = createStartAttach(sessionName);
-
-  // Socket handlers for virtual sessions — route input to VirtualTerminal
   const socketHandlers = {
     open(socket: any) {
       const session = sessions.get(id);
@@ -2169,9 +2144,7 @@ function createVirtualSession(
             console.log(`[${sessionName}] detached`);
           }
         } else if (frame.type === FrameType.PTY) {
-          // Route client keystrokes to VirtualTerminal → pi-tui
-          const text = Buffer.from(frame.payload).toString('utf-8');
-          virtualTerminal.injectInput(text);
+          virtualTerminal.injectInput(Buffer.from(frame.payload).toString('utf-8'));
           session.lastInteraction = Date.now();
         }
       }
@@ -2179,9 +2152,7 @@ function createVirtualSession(
 
     drain(socket: any) {
       const session = sessions.get(id);
-      if (session && session.client === socket) {
-        flushClient(session);
-      }
+      if (session && session.client === socket) flushClient(session);
     },
 
     close(socket: any) {
@@ -2408,7 +2379,6 @@ routerListener = Bun.listen({
                 }
                 targetSession = getSessionInfo(s);
               } else if (cmd.workspaceId) {
-                console.log('[tmux-lite] attach-prepare workspace', { workspaceId: cmd.workspaceId, sessionName: cmd.sessionName, scriptPolicy: cmd.scriptPolicy });
                 let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
                 const prepared = await attachWorkspaceSession({
                   scanWorkspaces,
@@ -2442,7 +2412,6 @@ routerListener = Bun.listen({
                 if (!cmd.command) {
                   writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
                 }
-                console.log('[tmux-lite] attach-prepare created session', { name: prepared.session.name, id: prepared.session.id, scriptPolicy: cmd.scriptPolicy });
                 targetSession = prepared.session;
                 workspaceId = prepared.workspace.id;
               } else {
@@ -2456,13 +2425,6 @@ routerListener = Bun.listen({
               pendingAttachControllers.delete(cmd.requestId);
               const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
               const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
-              console.error('[tmux-lite] attach-prepare failed', {
-                workspaceId: cmd.workspaceId,
-                sessionName: cmd.sessionName,
-                scriptPolicy: cmd.scriptPolicy,
-                code: typedError?.code,
-                message,
-              });
               res = typedError?.code
                 ? { type: 'error', message, code: typedError.code }
                 : { type: 'error', message };
@@ -2568,63 +2530,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'pi-runtime-update':
-            try {
-              await getAgentControlReady();
-              if (!verifyPiRuntimeUpdateCommand(cmd)) {
-                res = { type: 'error', code: 'UNAUTHORIZED', message: 'Unauthorized Pi runtime update.' };
-                break;
-              }
-              const workspaceId = await resolveWorkspaceIdForRuntimePath(cmd.workspacePath);
-              if (!workspaceId) {
-                res = { type: 'error', message: `Workspace not found for Pi runtime update: ${cmd.workspacePath}` };
-                break;
-              }
-              const reportingSession = sessions.get(cmd.terminalSessionId);
-              if (!reportingSession) {
-                res = { type: 'error', message: `Terminal session not found for Pi runtime update: ${cmd.terminalSessionId}` };
-                break;
-              }
-              if (reportingSession.info.kind !== 'agent') {
-                res = { type: 'error', message: `Pi runtime update can only target agent PTYs: ${cmd.terminalSessionId}` };
-                break;
-              }
-              if (reportingSession.info.metadata?.workspaceId !== workspaceId) {
-                res = {
-                  type: 'error',
-                  message: `Terminal session workspace mismatch for Pi runtime update: ${cmd.terminalSessionId}`,
-                };
-                break;
-              }
-              const previousAgentSessionId = reportingSession.info.metadata?.agentSessionId;
-              const reassignment = rebindPiTerminalSessionOwnership(workspaceId, cmd.terminalSessionId, cmd.sessionId);
-              reportingSession.info.metadata = {
-                ...reportingSession.info.metadata,
-                workspaceId,
-                agentSessionId: cmd.sessionId,
-              };
-              applyPiRuntimeUpdate(
-                workspaceId,
-                cmd.sessionId,
-                {
-                  status: cmd.status,
-                  pendingPermissions: cmd.pendingPermissions,
-                  pendingQuestions: cmd.pendingQuestions,
-                  errorMessage: cmd.errorMessage,
-                  lastMessage: cmd.lastMessage,
-                },
-                {
-                  previousSessionId: previousAgentSessionId ?? reassignment.previousAgentSessionId,
-                  suppressPreviousSession: (previousAgentSessionId ?? reassignment.previousAgentSessionId) !== cmd.sessionId
-                    && reassignment.previousOwnerCount === 0,
-                },
-              );
-              res = { type: 'ok' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to apply Pi runtime update: ${errMsg}` };
-            }
-            break;
 
           case 'workspace-set-phase':
             try {

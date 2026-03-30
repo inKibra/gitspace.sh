@@ -127,7 +127,7 @@ export interface MachineTerminalSessionRecord {
   workspaceId?: string;
   projectId?: string;
   cwd: string;
-  kind: 'shell' | 'process' | 'agent-pty';
+  kind: 'shell' | 'process' | 'agent';
   hidden: boolean;
   state: MachineTerminalSessionState;
   attached: boolean;
@@ -161,6 +161,8 @@ export interface MachineAgentSessionRecord {
   errorMessage?: string;
   lastMessagePreview?: string;
   linkedTerminalSessionId?: string;
+  modelInfo?: import('../../../agents/agent-runtime-types.js').AgentModelInfo;
+  todoPhases?: import('../../../agents/agent-runtime-types.js').TodoPhase[];
 }
 
 export interface MachineProcessRecord {

@@ -168,7 +168,7 @@ export function buildMachineSnapshot(params: {
       projectId,
       cwd: session.cwd,
       kind: session.kind === 'agent'
-        ? 'agent-pty'
+        ? 'agent'
         : processIdentity.processName
           ? 'process'
           : 'shell',
@@ -189,7 +189,7 @@ export function buildMachineSnapshot(params: {
       metadata: session.metadata,
     };
     terminalSessionsById[session.id] = terminalRecord;
-    if (workspaceId && terminalRecord.kind !== 'agent-pty') {
+    if (workspaceId && terminalRecord.kind !== 'agent') {
       terminalSessionIdsByWorkspaceId[workspaceId] = [
         ...(terminalSessionIdsByWorkspaceId[workspaceId] ?? []),
         session.id,
@@ -264,6 +264,8 @@ export function buildMachineSnapshot(params: {
         errorMessage,
         lastMessagePreview: workspace.lastMessages[session.id],
         linkedTerminalSessionId: linkedTerminal?.id,
+        modelInfo: workspace.modelInfo?.[session.id],
+        todoPhases: workspace.todoPhases?.[session.id],
       };
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];

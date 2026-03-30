@@ -45,9 +45,10 @@ function SidebarItem({
   active?: boolean;
   highlight?: boolean;
 }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <button
-      type="button"
+    <Tag
+      type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={
         'w-full flex items-center gap-1.5 px-1.5 py-1 rounded text-xs text-left truncate transition-colors ' +
@@ -64,7 +65,7 @@ function SidebarItem({
         {subtitle && <span className="block truncate text-[10px] text-[#6e7681]">{subtitle}</span>}
       </span>
       {rightLabel && <span className="text-[10px] text-[#484f58] flex-shrink-0">{rightLabel}</span>}
-    </button>
+    </Tag>
   );
 }
 
@@ -151,6 +152,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     showArchivedAgents,
     toggleArchivedAgents,
     agentRows,
+    agentTodoPhases,
     sessionRows,
     visibleReplayRows,
     hasMoreReplayRows,
@@ -275,6 +277,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                     <SidebarItem
                       dotColor={dotColor}
                       label={row.title}
+                      subtitle={row.modelLabel}
                       rightLabel={row.lastActiveLabel ?? undefined}
                       onClick={() => {
                         void detailActions.openAgentSession(row.id);
@@ -329,6 +332,40 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               />
             )}
           </SidebarSection>
+
+          {/* AGENT TASKS — from in-process SDK todo state */}
+          {agentTodoPhases && agentTodoPhases.length > 0 && (
+            <SidebarSection
+              title="Agent Tasks"
+              extra={
+                <span className="text-[10px] text-[#484f58]">
+                  {agentTodoPhases.reduce((n, p) => n + p.tasks.filter(t => t.status === 'completed').length, 0)}/
+                  {agentTodoPhases.reduce((n, p) => n + p.tasks.length, 0)} done
+                </span>
+              }
+            >
+              {agentTodoPhases.map((phase) => (
+                <div key={phase.name} className="mb-1">
+                  <div className="text-[10px] text-[#8b949e] uppercase tracking-wide px-1.5 mb-0.5">{phase.name}</div>
+                  {phase.tasks.map((task, i) => {
+                    const dotColor =
+                      task.status === 'completed' ? 'text-[#3fb950]'
+                      : task.status === 'in_progress' ? 'text-[#58a6ff]'
+                      : task.status === 'abandoned' ? 'text-[#484f58]'
+                      : 'text-[#8b949e]';
+                    return (
+                      <SidebarItem
+                        key={`${phase.name}-${i}`}
+                        dotColor={dotColor}
+                        label={task.content}
+                        rightLabel={task.status === 'in_progress' ? '...' : undefined}
+                      />
+                    );
+                  })}
+                </div>
+              ))}
+            </SidebarSection>
+          )}
 
           {/* TERMINALS */}
           <SidebarSection title="Terminals">

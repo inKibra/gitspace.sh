@@ -10,7 +10,7 @@
  * Keep these here as a transitional layer; do not add new fields.
  */
 
-import type { SessionStatus } from '../../agents/agent-runtime-types.js';
+import type { AgentModelInfo, SessionStatus, TodoPhase } from '../../agents/agent-runtime-types.js';
 
 /** Workspace as returned by list_workspaces / workspace_list */
 export type { WorkspaceInfo } from '../../lib/remote-session/protocol.js';
@@ -32,4 +32,8 @@ export interface AgentSessionInfo {
   errorMessage?: string;
   /** Timestamp (ms) of the last observed activity from the live event stream. */
   lastActivityAt?: number;
+  /** Model currently in use (populated when session runs in-process). */
+  modelInfo?: AgentModelInfo;
+  /** Todo phases (populated when session runs in-process). */
+  todoPhases?: TodoPhase[];
 }

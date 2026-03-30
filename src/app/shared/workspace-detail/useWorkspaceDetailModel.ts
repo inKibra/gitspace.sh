@@ -128,6 +128,17 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     [runtime, agentSessions],
   );
 
+  // Extract todo phases from the first active agent session that has them.
+  // This surfaces the SDK's task tracker in the workspace detail sidebar.
+  const agentTodoPhases = useMemo(() => {
+    for (const session of activeAgentSessions) {
+      if (session.todoPhases && session.todoPhases.length > 0) {
+        return session.todoPhases;
+      }
+    }
+    return undefined;
+  }, [activeAgentSessions]);
+
   const agentRows = useMemo(
     () => [
       ...activeAgentSessions.map((session) => ({
@@ -140,6 +151,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
           : session.updatedAt
             ? formatTime(new Date(session.updatedAt).getTime())
             : undefined,
+        modelLabel: session.modelInfo?.name,
       })),
       ...closedAgentSessions.map((session) => ({
         id: session.id,
@@ -417,6 +429,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     showArchivedAgents,
     toggleArchivedAgents,
     agentRows,
+    agentTodoPhases,
     sessionRows,
     replayRows,
     visibleReplayRows,

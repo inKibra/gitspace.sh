@@ -41,3 +41,28 @@ export interface PendingQuestion {
   questions: QuestionInfo[];
   tool?: { messageID: string; callID: string };
 }
+
+// -- SDK-derived structured state (available when session runs in-process) --
+
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'abandoned';
+
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+  details?: string;
+  notes?: string;
+}
+
+export interface TodoPhase {
+  name: string;
+  tasks: TodoItem[];
+}
+
+export interface AgentModelInfo {
+  /** Display name of the current model (e.g., "Claude 4 Sonnet") */
+  name: string;
+  /** Provider identifier (e.g., "anthropic") */
+  provider: string;
+  /** Current role identifier (e.g., "default", "code", "plan") */
+  role?: string;
+}

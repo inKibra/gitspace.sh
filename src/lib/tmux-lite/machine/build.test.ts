@@ -19,7 +19,7 @@ function makeWorkspace(): WorkspaceRuntimeRecord {
   };
 }
 
-function makeAgentPty(id = 'pty-1', agentSessionId = 'agent-1'): Session {
+function makeAgentTerminalSession(id = 'pty-1', agentSessionId = 'agent-1'): Session {
   return {
     id,
     name: `agent:ws-1:${agentSessionId.slice(-8)}`,
@@ -41,7 +41,7 @@ describe('buildMachineSnapshot', () => {
   it('does not mark an agent running only because its linked PTY is attached', () => {
     const snapshot = buildMachineSnapshot({
       snapshotNonce: 1,
-      terminalSessions: [makeAgentPty()],
+      terminalSessions: [makeAgentTerminalSession()],
       workspaces: [makeWorkspace()],
       agentStateByWorkspaceId: {
         'demo:ws-1': {
@@ -106,8 +106,8 @@ describe('buildMachineSnapshot', () => {
     const snapshot = buildMachineSnapshot({
       snapshotNonce: 1,
       terminalSessions: [
-        makeAgentPty('pty-a', 'agent-old'),
-        makeAgentPty('pty-b', 'agent-new'),
+        makeAgentTerminalSession('pty-a', 'agent-old'),
+        makeAgentTerminalSession('pty-b', 'agent-new'),
       ],
       workspaces: [makeWorkspace()],
       agentStateByWorkspaceId: {

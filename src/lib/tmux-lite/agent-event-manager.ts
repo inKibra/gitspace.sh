@@ -1,9 +1,9 @@
 /**
  * AgentEventManager
  *
- * Tracks agent sessions for each workspace from two sources only:
+ * Tracks agent sessions for each workspace from two sources:
  * - known sessions discovered from on-disk Pi session files
- * - live in-process runtime updates forwarded from the Pi extension
+ * - live in-process SDK events forwarded by PiCoordinator
  *
  * Archived sessions are excluded from the active list and can only re-enter
  * through an explicit restore path.
@@ -17,9 +17,11 @@ import { getArchivedSessions } from '../../agents/agent-db.js';
 import { writeAgentLog } from '../../agents/agent-log.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import type {
+  AgentModelInfo,
   PendingQuestion,
   Permission,
   SessionStatus,
+  TodoPhase,
 } from '../../agents/agent-runtime-types.js';
 
 export interface AgentSessionSummary {
@@ -38,6 +40,10 @@ export interface WorkspaceAgentState {
   pendingQuestions: Record<string, PendingQuestion[]>;
   lastMessages: Record<string, string>;
   errorMessages: Record<string, string>;
+  /** Todo phases per session (populated when session runs in-process via SDK). */
+  todoPhases: Record<string, TodoPhase[]>;
+  /** Model info per session (populated when session runs in-process via SDK). */
+  modelInfo: Record<string, AgentModelInfo>;
 }
 
 export type AgentStateUpdateDelta =
@@ -51,15 +57,10 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_last_message'; workspaceId: string; sessionId: string; preview: string }
   | { type: 'agent_session_created'; workspaceId: string; sessionId: string; title: string }
   | { type: 'agent_session_updated'; workspaceId: string; sessionId: string; title: string }
-  | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string };
+  | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string }
+  | { type: 'agent_todo_update'; workspaceId: string; sessionId: string; phases: TodoPhase[] }
+  | { type: 'agent_model_update'; workspaceId: string; sessionId: string; modelInfo: AgentModelInfo };
 
-export interface ExternalSessionRuntimeState {
-  status: SessionStatus;
-  pendingPermissions: Permission[];
-  pendingQuestions: PendingQuestion[];
-  errorMessage?: string;
-  lastMessage?: string;
-}
 
 const LAST_MESSAGE_MAX_CHARS = 120;
 
@@ -73,7 +74,7 @@ export class AgentEventManager {
 
   async initialize(): Promise<void> {
     // No external runtime bootstrap remains. Pi session discovery and in-process
-    // updates seed state through syncKnownSessions/syncExternalRuntimeState.
+    // updates seed state through syncKnownSessions and explicit runtime update methods.
   }
 
   registerWorkspace(workspaceId: string, workspacePath: string): void {
@@ -154,52 +155,6 @@ export class AgentEventManager {
     return snapshot;
   }
 
-  suppressSession(workspaceId: string, sessionId: string): void {
-    let suppressed = this.suppressedSessionIds.get(workspaceId);
-    if (!suppressed) {
-      suppressed = new Set();
-      this.suppressedSessionIds.set(workspaceId, suppressed);
-    }
-    const wasSuppressed = suppressed.has(sessionId);
-    suppressed.add(sessionId);
-
-    const state = this.workspaceStates.get(workspaceId);
-    let deleted = false;
-    if (state) {
-      const nextSessions = state.sessions.filter((session) => session.id !== sessionId);
-      if (nextSessions.length !== state.sessions.length) {
-        state.sessions = nextSessions;
-        deleted = true;
-      }
-      if (state.statuses[sessionId] !== undefined) {
-        delete state.statuses[sessionId];
-        deleted = true;
-      }
-      if (state.pendingPermissions[sessionId] !== undefined) {
-        delete state.pendingPermissions[sessionId];
-        deleted = true;
-      }
-      if (state.pendingQuestions[sessionId] !== undefined) {
-        delete state.pendingQuestions[sessionId];
-        deleted = true;
-      }
-      if (state.lastMessages[sessionId] !== undefined) {
-        delete state.lastMessages[sessionId];
-        deleted = true;
-      }
-      if (state.errorMessages[sessionId] !== undefined) {
-        delete state.errorMessages[sessionId];
-        deleted = true;
-      }
-    }
-    this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
-    if (deleted) {
-      this.emit({ type: 'agent_session_deleted', workspaceId, sessionId });
-    }
-    if (deleted || !wasSuppressed) {
-      this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
-    }
-  }
 
   markSessionClosed(workspaceId: string, sessionId: string): void {
     const state = this.workspaceStates.get(workspaceId);
@@ -214,6 +169,8 @@ export class AgentEventManager {
     delete state.pendingQuestions[sessionId];
     delete state.lastMessages[sessionId];
     delete state.errorMessages[sessionId];
+    delete state.todoPhases[sessionId];
+    delete state.modelInfo[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
@@ -242,7 +199,11 @@ export class AgentEventManager {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     state.statuses[sessionId] = status;
-    delete state.errorMessages[sessionId];
+    // Only clear error messages when transitioning to a non-error status.
+    // Retry status carries an error message that must survive.
+    if (status.type !== 'retry') {
+      delete state.errorMessages[sessionId];
+    }
     this.previousStatuses.set(`${workspaceId}:${sessionId}`, status);
     this.emit({ type: 'agent_session_status', workspaceId, sessionId, status });
   }
@@ -265,51 +226,88 @@ export class AgentEventManager {
     this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage });
   }
 
-  syncExternalRuntimeState(
-    workspaceId: string,
-    sessionId: string,
-    update: ExternalSessionRuntimeState,
-  ): void {
-    this.unsuppressSession(workspaceId, sessionId);
+  setExternalTodoPhases(workspaceId: string, sessionId: string, phases: TodoPhase[]): void {
+    this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
-    if (state.sessions.findIndex((session) => session.id === sessionId) === -1) {
-      this.ensureSessionEntry(workspaceId, sessionId, sessionId);
-    }
+    state.todoPhases[sessionId] = phases;
+    this.emit({ type: 'agent_todo_update', workspaceId, sessionId, phases });
+  }
 
-    const sessionIndex = state.sessions.findIndex((session) => session.id === sessionId);
-    if (sessionIndex !== -1 && state.sessions[sessionIndex]?.closedAt) {
-      state.sessions[sessionIndex] = { ...state.sessions[sessionIndex]!, closedAt: undefined };
-    }
+  setExternalModelInfo(workspaceId: string, sessionId: string, modelInfo: AgentModelInfo): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    state.modelInfo[sessionId] = modelInfo;
+    this.emit({ type: 'agent_model_update', workspaceId, sessionId, modelInfo });
+  }
 
-    state.statuses[sessionId] = update.status;
-    this.previousStatuses.set(`${workspaceId}:${sessionId}`, update.status);
+  addPendingQuestion(workspaceId: string, sessionId: string, question: PendingQuestion): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    const existing = state.pendingQuestions[sessionId] ?? [];
+    state.pendingQuestions[sessionId] = [
+      ...existing.filter((q) => q.id !== question.id),
+      question,
+    ];
+    this.emit({ type: 'agent_question_added', workspaceId, sessionId, question });
+  }
 
-    if (update.pendingPermissions.length > 0) {
-      state.pendingPermissions[sessionId] = update.pendingPermissions;
-    } else {
-      delete state.pendingPermissions[sessionId];
-    }
-
-    if (update.pendingQuestions.length > 0) {
-      state.pendingQuestions[sessionId] = update.pendingQuestions;
+  removePendingQuestion(workspaceId: string, sessionId: string, requestId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state) return;
+    const existing = state.pendingQuestions[sessionId];
+    if (!existing) return;
+    const next = existing.filter((q) => q.id !== requestId);
+    if (next.length > 0) {
+      state.pendingQuestions[sessionId] = next;
     } else {
       delete state.pendingQuestions[sessionId];
     }
+    this.emit({ type: 'agent_question_removed', workspaceId, sessionId, requestId });
+  }
 
-    const normalizedMessage = update.lastMessage?.trim();
-    if (normalizedMessage) {
-      state.lastMessages[sessionId] = normalizedMessage.slice(-LAST_MESSAGE_MAX_CHARS);
-    } else if (update.lastMessage !== undefined) {
-      delete state.lastMessages[sessionId];
-    }
+  addPendingPermission(workspaceId: string, sessionId: string, permission: Permission): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    const existing = state.pendingPermissions[sessionId] ?? [];
+    state.pendingPermissions[sessionId] = [
+      ...existing.filter((p) => p.id !== permission.id),
+      permission,
+    ];
+    this.emit({ type: 'agent_permission_added', workspaceId, sessionId, permission });
+  }
 
-    const normalizedError = update.errorMessage?.trim();
-    if (normalizedError) {
-      state.errorMessages[sessionId] = normalizedError;
+  removePendingPermission(workspaceId: string, sessionId: string, permissionId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state) return;
+    const existing = state.pendingPermissions[sessionId];
+    if (!existing) return;
+    const next = existing.filter((p) => p.id !== permissionId);
+    if (next.length > 0) {
+      state.pendingPermissions[sessionId] = next;
     } else {
-      delete state.errorMessages[sessionId];
+      delete state.pendingPermissions[sessionId];
     }
+    this.emit({ type: 'agent_permission_removed', workspaceId, sessionId, permissionId });
+  }
 
+  clearPendingPermissions(workspaceId: string, sessionId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state || !state.pendingPermissions[sessionId]) return;
+    const removed = state.pendingPermissions[sessionId]!;
+    delete state.pendingPermissions[sessionId];
+    for (const p of removed) {
+      this.emit({ type: 'agent_permission_removed', workspaceId, sessionId, permissionId: p.id });
+    }
+  }
+
+  markSessionIdle(workspaceId: string, sessionId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state) return;
+    state.statuses[sessionId] = { type: 'idle' };
+    delete state.pendingPermissions[sessionId];
+    delete state.pendingQuestions[sessionId];
+    delete state.errorMessages[sessionId];
+    this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
@@ -322,6 +320,8 @@ export class AgentEventManager {
     delete state.pendingQuestions[sessionId];
     delete state.lastMessages[sessionId];
     delete state.errorMessages[sessionId];
+    delete state.todoPhases[sessionId];
+    delete state.modelInfo[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.suppressedSessionIds.get(workspaceId)?.delete(sessionId);
     let archived = this.archivedSessionIds.get(workspaceId);
@@ -386,6 +386,8 @@ export class AgentEventManager {
         pendingQuestions: {},
         lastMessages: {},
         errorMessages: {},
+        todoPhases: {},
+        modelInfo: {},
       };
       this.workspaceStates.set(workspaceId, state);
     }

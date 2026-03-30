@@ -33,7 +33,7 @@ export function machineSnapshotToWorkspaces(snapshot: MachineSnapshot): Workspac
 export function machineSnapshotToSessions(snapshot: MachineSnapshot, workspaceId?: string): SessionInfo[] {
   return Object.values(snapshot.terminalSessionsById)
     .filter((session) => !workspaceId || session.workspaceId === workspaceId)
-    .filter((session) => session.kind !== 'agent-pty')
+    .filter((session) => session.kind !== 'agent')
     .map((session) => ({
       id: session.id,
       name: session.name,
@@ -70,6 +70,8 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
     const pendingPermissions: WorkspaceAgentState['pendingPermissions'] = {};
     const lastMessages: WorkspaceAgentState['lastMessages'] = {};
     const errorMessages: WorkspaceAgentState['errorMessages'] = {};
+    const todoPhases: WorkspaceAgentState['todoPhases'] = {};
+    const modelInfo: WorkspaceAgentState['modelInfo'] = {};
 
     for (const sessionId of snapshot.agentSessionIdsByWorkspaceId[workspace.id] ?? []) {
       const session = snapshot.agentSessionsById[sessionId];
@@ -107,6 +109,12 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       if (session.errorMessage) {
         errorMessages[session.id] = session.errorMessage;
       }
+      if (session.todoPhases && session.todoPhases.length > 0) {
+        todoPhases[session.id] = session.todoPhases;
+      }
+      if (session.modelInfo) {
+        modelInfo[session.id] = session.modelInfo;
+      }
     }
 
     result[workspace.id] = {
@@ -117,6 +125,8 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       pendingQuestions: {},
       lastMessages,
       errorMessages,
+      todoPhases,
+      modelInfo,
     };
   }
   return result;

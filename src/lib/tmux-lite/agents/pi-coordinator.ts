@@ -2,20 +2,15 @@ import type { OmpAgentSession } from './omp-types.js';
 import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
-  createSession as createTmuxSession,
   createVirtualSession as createTmuxVirtualSession,
 } from '../cli.js';
-import { getRouterSocket, type Session as TmuxSession } from '../protocol.js';
+import type { Session as TmuxSession } from '../protocol.js';
 import {
-  setupPiEnvironment,
-  ensureOmpInstalled,
   createPiSessionManager,
-  getGitspacePiExtensionPaths,
   importOmpModule,
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
-import { buildPiRuntimeChildEnvironment } from './pi-runtime-status.js';
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
@@ -25,6 +20,11 @@ import {
 import type { AgentEvent } from '../../../agents/backend.js';
 import { getVirtualTerminal } from '../virtual-session-registry.js';
 import { startVirtualInteractiveMode, type VirtualInteractiveModeHandle } from './virtual-interactive-mode.js';
+import type {
+  PendingQuestion,
+  Permission,
+  QuestionInfo,
+} from '../../../agents/agent-runtime-types.js';
 
 export const PI_AGENT_TMUX_SESSION_KIND = 'agent';
 
@@ -58,11 +58,110 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
     && session.metadata?.agentSessionId === agentSessionId;
 }
 
+// ---------------------------------------------------------------------------
+// Ask-question parsing (moved from the removed gitspace-status extension)
+// ---------------------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function parseQuestionOptions(input: unknown): Array<{ label: string; description?: string }> {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((option) => {
+    if (typeof option === 'string') return [{ label: option }];
+    if (isRecord(option) && typeof option.label === 'string') {
+      return [{ label: option.label, description: typeof option.description === 'string' ? option.description : undefined }];
+    }
+    return [];
+  });
+}
+
+function parseAskQuestions(input: Record<string, unknown>): QuestionInfo[] {
+  if (Array.isArray(input.questions)) {
+    const parsed = input.questions.flatMap((q: unknown) => {
+      if (!isRecord(q) || typeof q.question !== 'string') return [];
+      return [{
+        question: q.question as string,
+        header: typeof q.header === 'string' ? q.header : 'Question',
+        options: parseQuestionOptions(q.options),
+        multiple: q.multiple === true,
+        custom: q.custom === true,
+      } satisfies QuestionInfo];
+    });
+    if (parsed.length > 0) return parsed;
+  }
+  if (typeof input.question === 'string') {
+    return [{
+      question: input.question,
+      header: typeof input.header === 'string' ? input.header : 'Question',
+      options: parseQuestionOptions(input.options),
+      multiple: input.multiple === true,
+      custom: input.custom === true,
+    }];
+  }
+  if (typeof input.prompt === 'string') {
+    return [{
+      question: input.prompt,
+      header: 'Question',
+      options: parseQuestionOptions(input.options),
+      multiple: input.multiple === true,
+      custom: true,
+    }];
+  }
+  return [{ question: 'Agent requested additional input.', header: 'Question', options: [], custom: true }];
+}
+
+function buildPendingQuestion(toolCallId: string, sessionId: string, input: Record<string, unknown>): PendingQuestion {
+  return {
+    id: toolCallId,
+    sessionID: sessionId,
+    questions: parseAskQuestions(input),
+    tool: { messageID: toolCallId, callID: toolCallId },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Permission parsing (moved from the removed gitspace-status extension)
+// ---------------------------------------------------------------------------
+
+function buildPermission(sessionId: string, payload: unknown): Permission {
+  const record = isRecord(payload) ? payload : {};
+  const id = typeof record.id === 'string'
+    ? record.id
+    : typeof record.permissionId === 'string'
+      ? record.permissionId
+      : typeof record.callID === 'string'
+        ? record.callID
+        : typeof record.messageID === 'string'
+          ? record.messageID
+          : `perm-${sessionId}-${Date.now()}`;
+  return {
+    id,
+    type: typeof record.type === 'string' ? record.type : 'permission',
+    pattern: Array.isArray(record.pattern) || typeof record.pattern === 'string' ? record.pattern : undefined,
+    sessionID: sessionId,
+    messageID: typeof record.messageID === 'string' ? record.messageID : id,
+    callID: typeof record.callID === 'string' ? record.callID : undefined,
+    title: typeof record.title === 'string' ? record.title : 'Permission requested',
+    metadata: isRecord(record.metadata) ? record.metadata : record,
+    time: { created: typeof record.createdAt === 'number' ? record.createdAt : Date.now() },
+  };
+}
+
+function permissionIdFromPayload(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.id === 'string') return payload.id;
+  if (typeof payload.permissionId === 'string') return payload.permissionId;
+  if (typeof payload.callID === 'string') return payload.callID;
+  if (typeof payload.messageID === 'string') return payload.messageID;
+  return null;
+}
+
 interface TerminalSessionBinding {
   workspaceId: string;
   agentSessionId: string;
 }
-
 
 export class PiCoordinator {
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
@@ -115,7 +214,7 @@ export class PiCoordinator {
       agentDir,
       sessionManager,
       cwd: target.workspacePath,
-      additionalExtensionPaths: getGitspacePiExtensionPaths(),
+      // No extension needed — event handling is done in-process by bindSessionEvents.
     });
     if (title) {
       await sessionManager.setSessionName(title);
@@ -236,7 +335,7 @@ export class PiCoordinator {
   }
 
   /**
-   * Ensure a tmux-lite PTY session exists for a Pi agent session.
+   * Ensure a tmux-lite virtual terminal session exists for a Pi agent session.
    * Uses Pi's session ID to find and resume the right JSONL file.
    * Throws if the session file is not found (prevents silent mismatch).
    */
@@ -275,34 +374,15 @@ export class PiCoordinator {
       );
     }
 
-    // Try the in-process VirtualTerminal path first.
-    // This gives us structured SDK access and avoids a child process.
-    try {
-      return await this.createVirtualAgentSession(target, agentSessionId, match);
-    } catch (err) {
-      console.warn(
-        `[PiCoordinator] VirtualTerminal path failed for ${agentSessionId}, falling back to PTY:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-
-    // Fallback: spawn omp CLI in a PTY (the original path).
-    return this.createPtyAgentSession(target, agentSessionId, match);
+    return this.createVirtualAgentSession(target, agentSessionId, match);
   }
 
-  /**
-   * Create an agent terminal session using VirtualTerminal + in-process InteractiveMode.
-   * The SDK session runs in-process, and pi-tui renders through xterm-headless.
-   */
   private async createVirtualAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
     sessionFile: PiSessionFileInfo,
   ): Promise<TmuxSession> {
-    // Ensure we have the SDK session in-process
     const sdkSession = await this.ensureActiveSession(target, agentSessionId, sessionFile);
-
-    // Create a virtual tmux session (no PTY, no child process)
     const tmuxSession = await createTmuxVirtualSession(
       buildAgentTerminalSessionName(target, agentSessionId),
       target.workspacePath,
@@ -316,63 +396,26 @@ export class PiCoordinator {
       },
     );
 
-    // Retrieve the VirtualTerminal created by the server
     const virtualTerminal = getVirtualTerminal(tmuxSession.id);
     if (!virtualTerminal) {
+      await killTmuxSession(tmuxSession.id).catch(() => {});
       throw new Error('VirtualTerminal not found in registry after session creation');
     }
 
-    // Start InteractiveMode on the VirtualTerminal
-    const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal);
-    this.virtualModeHandles.set(agentSessionId, handle);
-
-    this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
-    return tmuxSession;
+    try {
+      const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal, {
+        cwd: target.workspacePath,
+        agentDir: process.env.PI_CODING_AGENT_DIR,
+      });
+      this.virtualModeHandles.set(agentSessionId, handle);
+      this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
+      return tmuxSession;
+    } catch (error) {
+      await killTmuxSession(tmuxSession.id).catch(() => {});
+      throw error;
+    }
   }
 
-  /**
-   * Fallback: create an agent terminal session by spawning omp CLI in a PTY.
-   * This is the original path, kept as a safety net.
-   */
-  private async createPtyAgentSession(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile: PiSessionFileInfo,
-  ): Promise<TmuxSession> {
-    const ompBin = await ensureOmpInstalled();
-    const env = {
-      ...setupPiEnvironment(target),
-      ...buildPiRuntimeChildEnvironment(getRouterSocket()),
-    };
-
-    void this.ensureActiveSession(target, agentSessionId, sessionFile).catch(() => {
-      // Non-fatal for attach: the terminal should still open even if SDK rehydration fails.
-    });
-
-    const extensionArgs = getGitspacePiExtensionPaths().flatMap((extensionPath) => [
-      '--extension',
-      extensionPath,
-    ]);
-
-    const tmuxSession = await createTmuxSession(
-      buildAgentTerminalSessionName(target, agentSessionId),
-      target.workspacePath,
-      {
-        command: ompBin,
-        args: ['--session', sessionFile.path, ...extensionArgs],
-        env,
-        kind: PI_AGENT_TMUX_SESSION_KIND,
-        hidden: true,
-        recordReplay: false,
-        metadata: {
-          workspaceId: target.workspaceId,
-          agentSessionId,
-        },
-      },
-    );
-    this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
-    return tmuxSession;
-  }
 
   // -------------------------------------------------------------------------
   // Private helpers
@@ -388,53 +431,44 @@ export class PiCoordinator {
       return existing;
     }
 
-    const inFlightSessionId = agentSessionId;
-    const existingInFlight = this.inflightActiveSessions.get(inFlightSessionId);
+    const existingInFlight = this.inflightActiveSessions.get(agentSessionId);
     if (existingInFlight) {
       return existingInFlight;
     }
 
     const ensurePromise = (async () => {
       try {
-        return await this.ensureActiveSessionInternal(target, agentSessionId, sessionFile);
+        const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+        if (!match) {
+          throw new Error(
+            `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
+            `The session file may have been deleted or the ID is stale.`,
+          );
+        }
+
+        const { session } = await openPiSession(target.workspacePath, match.path);
+        if (session.sessionId !== agentSessionId) {
+          session.dispose();
+          throw new Error(
+            `Pi session file '${match.path}' reopened as '${session.sessionId}', expected '${agentSessionId}'.`,
+          );
+        }
+
+        this.activeSessions.set(agentSessionId, session);
+        this.bindSessionEvents(
+          target,
+          agentSessionId,
+          match.title ?? match.firstMessage ?? undefined,
+          session,
+        );
+        return session;
       } finally {
-        this.inflightActiveSessions.delete(inFlightSessionId);
+        this.inflightActiveSessions.delete(agentSessionId);
       }
     })();
 
-    this.inflightActiveSessions.set(inFlightSessionId, ensurePromise);
+    this.inflightActiveSessions.set(agentSessionId, ensurePromise);
     return ensurePromise;
-  }
-
-  private async ensureActiveSessionInternal(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile: PiSessionFileInfo | null,
-  ): Promise<OmpAgentSession> {
-    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
-    if (!match) {
-      throw new Error(
-        `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
-        `The session file may have been deleted or the ID is stale.`,
-      );
-    }
-
-    const { session } = await openPiSession(target.workspacePath, match.path);
-    if (session.sessionId !== agentSessionId) {
-      session.dispose();
-      throw new Error(
-        `Pi session file '${match.path}' reopened as '${session.sessionId}', expected '${agentSessionId}'.`,
-      );
-    }
-
-    this.activeSessions.set(agentSessionId, session);
-    this.bindSessionEvents(
-      target,
-      agentSessionId,
-      match.title ?? match.firstMessage ?? undefined,
-      session,
-    );
-    return session;
   }
 
 
@@ -448,39 +482,181 @@ export class PiCoordinator {
     existing?.();
 
     const summaryTitle = title ?? sessionId;
-    const unsubscribe = session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
-      if (!this.eventHandler || typeof piEvent.type !== 'string') {
-        return;
-      }
+    const unsubscribers: Array<() => void> = [];
 
-      if (piEvent.type === 'message_update') {
-        this.eventHandler(target, {
-          type: 'message',
-          sessionId,
-          payload: { ...piEvent, title: summaryTitle },
-        });
-        return;
-      }
+    // --- SDK session events (subscribe delivers all lifecycle + tool events) ---
+    unsubscribers.push(
+      session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
+        if (!this.eventHandler || typeof piEvent.type !== 'string') return;
 
-      if (piEvent.type === 'agent_start') {
-        this.eventHandler(target, {
-          type: 'status',
-          sessionId,
-          payload: { type: 'busy', event: piEvent },
-        });
-        return;
-      }
+        switch (piEvent.type) {
+          case 'message_update':
+            this.eventHandler(target, {
+              type: 'message',
+              sessionId,
+              payload: { ...piEvent, title: summaryTitle },
+            });
+            return;
 
-      if (piEvent.type === 'agent_end') {
+          case 'agent_start':
+            this.eventHandler(target, {
+              type: 'status',
+              sessionId,
+              payload: { type: 'busy', event: piEvent },
+            });
+            return;
+
+          case 'agent_end':
+            this.eventHandler(target, {
+              type: 'status',
+              sessionId,
+              payload: { type: 'idle', event: piEvent },
+            });
+            return;
+
+          case 'auto_retry_start': {
+            const errorMessage = typeof piEvent.errorMessage === 'string' ? piEvent.errorMessage : 'Retrying...';
+            this.eventHandler(target, {
+              type: 'error',
+              sessionId,
+              error: errorMessage,
+            });
+            this.eventHandler(target, {
+              type: 'status',
+              sessionId,
+              payload: {
+                type: 'retry',
+                attempt: typeof piEvent.attempt === 'number' ? piEvent.attempt : 1,
+                message: errorMessage,
+                next: Date.now() + (typeof piEvent.delayMs === 'number' ? piEvent.delayMs : 0),
+              },
+            });
+            return;
+          }
+
+          case 'auto_retry_end': {
+            const success = piEvent.success === true;
+            // Restore busy/idle first — then set error so it isn't wiped by status clear.
+            this.eventHandler(target, {
+              type: 'status',
+              sessionId,
+              payload: { type: success ? 'busy' : 'idle', event: piEvent },
+            });
+            if (!success && typeof piEvent.finalError === 'string') {
+              this.eventHandler(target, { type: 'error', sessionId, error: piEvent.finalError });
+            }
+            return;
+          }
+
+          // Ask tool: track pending questions
+          case 'tool_execution_start':
+          case 'tool_call': {
+            const toolName = piEvent.toolName ?? piEvent.tool_name;
+            if (toolName !== 'ask') break;
+            const toolCallId = String(piEvent.toolCallId ?? piEvent.tool_call_id ?? '');
+            if (!toolCallId) break;
+            const input = isRecord(piEvent.input) ? piEvent.input : {};
+            this.eventHandler(target, {
+              type: 'question_added',
+              sessionId,
+              question: buildPendingQuestion(toolCallId, sessionId, input),
+            });
+            return;
+          }
+
+          case 'tool_execution_end':
+          case 'tool_result': {
+            const toolName = piEvent.toolName ?? piEvent.tool_name;
+            // Always extract todo phases from tool_execution_end regardless of tool
+            const phases = (session as any).getTodoPhases?.();
+            if (Array.isArray(phases)) {
+              this.eventHandler(target, {
+                type: 'status',
+                sessionId,
+                payload: { type: 'todo_update', phases },
+              });
+            }
+            if (toolName !== 'ask') break;
+            const toolCallId = String(piEvent.toolCallId ?? piEvent.tool_call_id ?? '');
+            if (!toolCallId) break;
+            this.eventHandler(target, {
+              type: 'question_removed',
+              sessionId,
+              questionId: toolCallId,
+            });
+            return;
+          }
+
+          case 'todo_reminder': {
+            const phases = (session as any).getTodoPhases?.();
+            if (Array.isArray(phases)) {
+              this.eventHandler(target, {
+                type: 'status',
+                sessionId,
+                payload: { type: 'todo_update', phases },
+              });
+            }
+            break;
+          }
+
+          case 'model_change': {
+            const model = (session as any).model;
+            if (model) {
+              this.eventHandler(target, {
+                type: 'status',
+                sessionId,
+                payload: { type: 'model_update', name: model.name, provider: model.provider },
+              });
+            }
+            break;
+          }
+        }
+      }),
+    );
+
+    // --- Permission events via SDK internal event bus ---
+    // The SDK emits permission-gate events on its event bus. Since the agent
+    // runs in-process, we can subscribe directly instead of loading an extension.
+    const eventBus = (session as any).events ?? (session as any)._eventBus ?? (session as any).extensionEvents;
+    if (eventBus && typeof eventBus.on === 'function') {
+      const waitingHandler = (payload: unknown) => {
+        if (!this.eventHandler) return;
         this.eventHandler(target, {
-          type: 'status',
+          type: 'permission_added',
           sessionId,
-          payload: { type: 'idle', event: piEvent },
+          permission: buildPermission(sessionId, payload),
+        });
+      };
+      const resolvedHandler = (payload: unknown) => {
+        if (!this.eventHandler) return;
+        this.eventHandler(target, {
+          type: 'permission_removed',
+          sessionId,
+          permissionId: permissionIdFromPayload(payload),
+        });
+      };
+      for (const channel of ['gitspace:permission.waiting', 'permission-gate:waiting']) {
+        eventBus.on(channel, waitingHandler);
+      }
+      for (const channel of ['gitspace:permission.resolved', 'permission-gate:resolved']) {
+        eventBus.on(channel, resolvedHandler);
+      }
+      // Cleanup for event bus listeners if the bus supports off/removeListener
+      if (typeof eventBus.off === 'function') {
+        unsubscribers.push(() => {
+          for (const channel of ['gitspace:permission.waiting', 'permission-gate:waiting']) {
+            eventBus.off(channel, waitingHandler);
+          }
+          for (const channel of ['gitspace:permission.resolved', 'permission-gate:resolved']) {
+            eventBus.off(channel, resolvedHandler);
+          }
         });
       }
+    }
+
+    this.sessionUnsubscribers.set(sessionId, () => {
+      for (const unsub of unsubscribers) unsub();
     });
-
-    this.sessionUnsubscribers.set(sessionId, unsubscribe);
   }
 
   private disposeActiveSession(sessionId: string): void {
@@ -488,7 +664,6 @@ export class PiCoordinator {
     unsubscribe?.();
     this.sessionUnsubscribers.delete(sessionId);
 
-    // Stop the virtual interactive mode if running
     const modeHandle = this.virtualModeHandles.get(sessionId);
     if (modeHandle) {
       this.virtualModeHandles.delete(sessionId);
