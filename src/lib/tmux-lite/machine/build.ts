@@ -264,6 +264,8 @@ export function buildMachineSnapshot(params: {
         errorMessage,
         lastMessagePreview: workspace.lastMessages[session.id],
         linkedTerminalSessionId: linkedTerminal?.id,
+        modelInfo: workspace.modelInfo?.[session.id],
+        todoPhases: workspace.todoPhases?.[session.id],
       };
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];

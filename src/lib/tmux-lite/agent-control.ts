@@ -65,13 +65,22 @@ export function ensureAgentControlInitialized(): Promise<void> {
       // events into the shared snapshot model.
       defaultPiCoordinator.setEventHandler((target, event) => {
         switch (event.type) {
-          case 'status':
-            if (event.payload && typeof event.payload === 'object' && (event.payload as { type?: unknown }).type === 'busy') {
+          case 'status': {
+            const payload = event.payload as { type?: string; [key: string]: unknown } | undefined;
+            if (payload?.type === 'busy') {
               defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'busy' });
+            } else if (payload?.type === 'todo_update' && Array.isArray((payload as any).phases)) {
+              defaultAgentEventManager.setExternalTodoPhases(target.workspaceId, event.sessionId, (payload as any).phases);
+            } else if (payload?.type === 'model_update') {
+              defaultAgentEventManager.setExternalModelInfo(target.workspaceId, event.sessionId, {
+                name: String((payload as any).name ?? 'Unknown'),
+                provider: String((payload as any).provider ?? 'Unknown'),
+              });
             } else {
               defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'idle' });
             }
             break;
+          }
           case 'message': {
             const preview = extractPiMessagePreview(event.payload);
             if (preview) {

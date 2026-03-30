@@ -210,6 +210,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     showArchivedAgents,
     toggleArchivedAgents,
     agentRows,
+    agentTodoPhases,
     sessionRows,
     replayRows,
     visibleReplayRows,
@@ -837,6 +838,7 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
                   >
                     <text fg={dotColor}>●</text>
                     <text fg={isSelected ? COLORS.selected : agentState === 'closed' ? COLORS.textDim : COLORS.textMid}>{a.title}</text>
+                    {a.modelInfo && <text fg={COLORS.textDim}> [{a.modelInfo.name}]</text>}
                     {lastActive && <text fg={COLORS.textDim}> {lastActive}</text>}
                   </box>
                 );
@@ -914,6 +916,42 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
               );
             })()}
           </box>
+
+          {/* AGENT TASKS — from in-process SDK todo state */}
+          {agentTodoPhases && agentTodoPhases.length > 0 && (
+            <box flexDirection="column" marginBottom={1}>
+              <box flexDirection="row" gap={1}>
+                <text fg={COLORS.sectionHeader}>AGENT TASKS</text>
+                <text fg={COLORS.textDim}>
+                  {agentTodoPhases.reduce((n, p) => n + p.tasks.filter(t => t.status === 'completed').length, 0)}/
+                  {agentTodoPhases.reduce((n, p) => n + p.tasks.length, 0)}
+                </text>
+              </box>
+              {agentTodoPhases.map((phase) => (
+                <box key={phase.name} flexDirection="column">
+                  <text fg={COLORS.textDim}> {phase.name}</text>
+                  {phase.tasks.map((task, i) => {
+                    const dot =
+                      task.status === 'completed' ? '\u2713'
+                      : task.status === 'in_progress' ? '\u25B6'
+                      : task.status === 'abandoned' ? '\u00D7'
+                      : '\u25CB';
+                    const fg =
+                      task.status === 'completed' ? COLORS.green
+                      : task.status === 'in_progress' ? COLORS.blue
+                      : task.status === 'abandoned' ? COLORS.textDim
+                      : COLORS.textMid;
+                    return (
+                      <box key={`${phase.name}-${i}`} flexDirection="row" gap={1}>
+                        <text fg={fg}>{dot}</text>
+                        <text fg={fg}>{task.content}</text>
+                      </box>
+                    );
+                  })}
+                </box>
+              ))}
+            </box>
+          )}
 
           {/* TERMINALS section */}
           <box flexDirection="column" marginBottom={1}>

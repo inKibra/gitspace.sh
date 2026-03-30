@@ -161,6 +161,8 @@ export interface MachineAgentSessionRecord {
   errorMessage?: string;
   lastMessagePreview?: string;
   linkedTerminalSessionId?: string;
+  modelInfo?: import('../../../agents/agent-runtime-types.js').AgentModelInfo;
+  todoPhases?: import('../../../agents/agent-runtime-types.js').TodoPhase[];
 }
 
 export interface MachineProcessRecord {

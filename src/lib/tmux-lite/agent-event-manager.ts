@@ -17,9 +17,11 @@ import { getArchivedSessions } from '../../agents/agent-db.js';
 import { writeAgentLog } from '../../agents/agent-log.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import type {
+  AgentModelInfo,
   PendingQuestion,
   Permission,
   SessionStatus,
+  TodoPhase,
 } from '../../agents/agent-runtime-types.js';
 
 export interface AgentSessionSummary {
@@ -38,6 +40,10 @@ export interface WorkspaceAgentState {
   pendingQuestions: Record<string, PendingQuestion[]>;
   lastMessages: Record<string, string>;
   errorMessages: Record<string, string>;
+  /** Todo phases per session (populated when session runs in-process via SDK). */
+  todoPhases: Record<string, TodoPhase[]>;
+  /** Model info per session (populated when session runs in-process via SDK). */
+  modelInfo: Record<string, AgentModelInfo>;
 }
 
 export type AgentStateUpdateDelta =
@@ -51,7 +57,9 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_last_message'; workspaceId: string; sessionId: string; preview: string }
   | { type: 'agent_session_created'; workspaceId: string; sessionId: string; title: string }
   | { type: 'agent_session_updated'; workspaceId: string; sessionId: string; title: string }
-  | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string };
+  | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string }
+  | { type: 'agent_todo_update'; workspaceId: string; sessionId: string; phases: TodoPhase[] }
+  | { type: 'agent_model_update'; workspaceId: string; sessionId: string; modelInfo: AgentModelInfo };
 
 export interface ExternalSessionRuntimeState {
   status: SessionStatus;
@@ -59,6 +67,8 @@ export interface ExternalSessionRuntimeState {
   pendingQuestions: PendingQuestion[];
   errorMessage?: string;
   lastMessage?: string;
+  todoPhases?: TodoPhase[];
+  modelInfo?: AgentModelInfo;
 }
 
 const LAST_MESSAGE_MAX_CHARS = 120;
@@ -265,6 +275,18 @@ export class AgentEventManager {
     this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage });
   }
 
+  setExternalTodoPhases(workspaceId: string, sessionId: string, phases: TodoPhase[]): void {
+    const state = this.getOrCreateState(workspaceId);
+    state.todoPhases[sessionId] = phases;
+    this.emit({ type: 'agent_todo_update', workspaceId, sessionId, phases });
+  }
+
+  setExternalModelInfo(workspaceId: string, sessionId: string, modelInfo: AgentModelInfo): void {
+    const state = this.getOrCreateState(workspaceId);
+    state.modelInfo[sessionId] = modelInfo;
+    this.emit({ type: 'agent_model_update', workspaceId, sessionId, modelInfo });
+  }
+
   syncExternalRuntimeState(
     workspaceId: string,
     sessionId: string,
@@ -310,6 +332,14 @@ export class AgentEventManager {
       delete state.errorMessages[sessionId];
     }
 
+    if (update.todoPhases) {
+      state.todoPhases[sessionId] = update.todoPhases;
+    }
+
+    if (update.modelInfo) {
+      state.modelInfo[sessionId] = update.modelInfo;
+    }
+
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
@@ -322,6 +352,8 @@ export class AgentEventManager {
     delete state.pendingQuestions[sessionId];
     delete state.lastMessages[sessionId];
     delete state.errorMessages[sessionId];
+    delete state.todoPhases[sessionId];
+    delete state.modelInfo[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.suppressedSessionIds.get(workspaceId)?.delete(sessionId);
     let archived = this.archivedSessionIds.get(workspaceId);
@@ -386,6 +418,8 @@ export class AgentEventManager {
         pendingQuestions: {},
         lastMessages: {},
         errorMessages: {},
+        todoPhases: {},
+        modelInfo: {},
       };
       this.workspaceStates.set(workspaceId, state);
     }

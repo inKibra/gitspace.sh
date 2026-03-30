@@ -47,6 +47,8 @@ function toAgentSessionInfo(agent: MachineAgentSessionRecord): AgentSessionInfo 
     pendingPermissionCount: agent.pendingPermissionCount,
     pendingQuestionCount: agent.pendingQuestionCount,
     errorMessage: agent.errorMessage,
+    modelInfo: agent.modelInfo,
+    todoPhases: agent.todoPhases,
   };
 }
 

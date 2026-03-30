@@ -5,6 +5,7 @@ import type {
 } from '../../../components/WorkspaceDetailPane.js';
 import type { WorkspaceRuntimeEntry } from '../workspace-runtime/types.js';
 import type { WorkspaceNote, WorkspaceNotesSummary } from '../../../types/workspace.js';
+import type { TodoPhase } from '../../../agents/agent-runtime-types.js';
 
 export interface WorkspaceDetailModelInput {
   workspace: WorkspaceInfo;
@@ -76,7 +77,10 @@ export interface WorkspaceDetailModel {
     bucket: 'active' | 'closed' | 'archived';
     state: 'needs-permission' | 'running' | 'waiting' | 'retrying' | 'error' | 'closed' | 'archived';
     lastActiveLabel?: string;
+    modelLabel?: string;
   }>;
+  /** Todo phases from the active agent session (if running in-process). */
+  agentTodoPhases?: TodoPhase[];
   sessionRows: Array<{
     id: string;
     label: string;

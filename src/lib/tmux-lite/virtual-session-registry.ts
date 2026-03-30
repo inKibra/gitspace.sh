@@ -5,9 +5,8 @@
  * and server run in the same process. This registry provides the bridge:
  * the server stores VirtualTerminals here when creating virtual sessions,
  * and the coordinator retrieves them to wire up InteractiveMode.
- *
- * Keyed by tmux-lite session ID.
  */
+
 import type { VirtualTerminal } from './agents/virtual-terminal.js';
 
 const registry = new Map<string, VirtualTerminal>();

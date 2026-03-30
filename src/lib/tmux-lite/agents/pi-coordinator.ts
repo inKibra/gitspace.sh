@@ -275,34 +275,22 @@ export class PiCoordinator {
       );
     }
 
-    // Try the in-process VirtualTerminal path first.
-    // This gives us structured SDK access and avoids a child process.
     try {
       return await this.createVirtualAgentSession(target, agentSessionId, match);
-    } catch (err) {
-      console.warn(
-        `[PiCoordinator] VirtualTerminal path failed for ${agentSessionId}, falling back to PTY:`,
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[PiCoordinator] VirtualTerminal path failed for ${agentSessionId}; falling back to PTY: ${message}`);
     }
 
-    // Fallback: spawn omp CLI in a PTY (the original path).
     return this.createPtyAgentSession(target, agentSessionId, match);
   }
 
-  /**
-   * Create an agent terminal session using VirtualTerminal + in-process InteractiveMode.
-   * The SDK session runs in-process, and pi-tui renders through xterm-headless.
-   */
   private async createVirtualAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
     sessionFile: PiSessionFileInfo,
   ): Promise<TmuxSession> {
-    // Ensure we have the SDK session in-process
     const sdkSession = await this.ensureActiveSession(target, agentSessionId, sessionFile);
-
-    // Create a virtual tmux session (no PTY, no child process)
     const tmuxSession = await createTmuxVirtualSession(
       buildAgentTerminalSessionName(target, agentSessionId),
       target.workspacePath,
@@ -316,24 +304,21 @@ export class PiCoordinator {
       },
     );
 
-    // Retrieve the VirtualTerminal created by the server
     const virtualTerminal = getVirtualTerminal(tmuxSession.id);
     if (!virtualTerminal) {
       throw new Error('VirtualTerminal not found in registry after session creation');
     }
 
-    // Start InteractiveMode on the VirtualTerminal
-    const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal);
+    const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal, {
+      cwd: target.workspacePath,
+      agentDir: process.env.PI_CODING_AGENT_DIR,
+    });
     this.virtualModeHandles.set(agentSessionId, handle);
 
     this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
     return tmuxSession;
   }
 
-  /**
-   * Fallback: create an agent terminal session by spawning omp CLI in a PTY.
-   * This is the original path, kept as a safety net.
-   */
   private async createPtyAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
@@ -388,53 +373,44 @@ export class PiCoordinator {
       return existing;
     }
 
-    const inFlightSessionId = agentSessionId;
-    const existingInFlight = this.inflightActiveSessions.get(inFlightSessionId);
+    const existingInFlight = this.inflightActiveSessions.get(agentSessionId);
     if (existingInFlight) {
       return existingInFlight;
     }
 
     const ensurePromise = (async () => {
       try {
-        return await this.ensureActiveSessionInternal(target, agentSessionId, sessionFile);
+        const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+        if (!match) {
+          throw new Error(
+            `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
+            `The session file may have been deleted or the ID is stale.`,
+          );
+        }
+
+        const { session } = await openPiSession(target.workspacePath, match.path);
+        if (session.sessionId !== agentSessionId) {
+          session.dispose();
+          throw new Error(
+            `Pi session file '${match.path}' reopened as '${session.sessionId}', expected '${agentSessionId}'.`,
+          );
+        }
+
+        this.activeSessions.set(agentSessionId, session);
+        this.bindSessionEvents(
+          target,
+          agentSessionId,
+          match.title ?? match.firstMessage ?? undefined,
+          session,
+        );
+        return session;
       } finally {
-        this.inflightActiveSessions.delete(inFlightSessionId);
+        this.inflightActiveSessions.delete(agentSessionId);
       }
     })();
 
-    this.inflightActiveSessions.set(inFlightSessionId, ensurePromise);
+    this.inflightActiveSessions.set(agentSessionId, ensurePromise);
     return ensurePromise;
-  }
-
-  private async ensureActiveSessionInternal(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile: PiSessionFileInfo | null,
-  ): Promise<OmpAgentSession> {
-    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
-    if (!match) {
-      throw new Error(
-        `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
-        `The session file may have been deleted or the ID is stale.`,
-      );
-    }
-
-    const { session } = await openPiSession(target.workspacePath, match.path);
-    if (session.sessionId !== agentSessionId) {
-      session.dispose();
-      throw new Error(
-        `Pi session file '${match.path}' reopened as '${session.sessionId}', expected '${agentSessionId}'.`,
-      );
-    }
-
-    this.activeSessions.set(agentSessionId, session);
-    this.bindSessionEvents(
-      target,
-      agentSessionId,
-      match.title ?? match.firstMessage ?? undefined,
-      session,
-    );
-    return session;
   }
 
 
@@ -477,6 +453,33 @@ export class PiCoordinator {
           sessionId,
           payload: { type: 'idle', event: piEvent },
         });
+        return;
+      }
+
+      // Forward todo state changes (emitted by the todo-write tool)
+      if (piEvent.type === 'todo_reminder' || piEvent.type === 'tool_execution_end') {
+        // Extract todo phases from the in-process session if available
+        const phases = (session as any).getTodoPhases?.();
+        if (Array.isArray(phases) && phases.length > 0) {
+          this.eventHandler(target, {
+            type: 'status',
+            sessionId,
+            payload: { type: 'todo_update', phases },
+          });
+        }
+        // Don't return — let other handlers process too
+      }
+
+      // Forward model change events
+      if (piEvent.type === 'model_change') {
+        const model = (session as any).model;
+        if (model) {
+          this.eventHandler(target, {
+            type: 'status',
+            sessionId,
+            payload: { type: 'model_update', name: model.name, provider: model.provider },
+          });
+        }
       }
     });
 
@@ -488,7 +491,6 @@ export class PiCoordinator {
     unsubscribe?.();
     this.sessionUnsubscribers.delete(sessionId);
 
-    // Stop the virtual interactive mode if running
     const modeHandle = this.virtualModeHandles.get(sessionId);
     if (modeHandle) {
       this.virtualModeHandles.delete(sessionId);
