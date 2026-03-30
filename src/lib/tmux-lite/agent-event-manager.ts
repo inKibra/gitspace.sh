@@ -169,6 +169,8 @@ export class AgentEventManager {
     delete state.pendingQuestions[sessionId];
     delete state.lastMessages[sessionId];
     delete state.errorMessages[sessionId];
+    delete state.todoPhases[sessionId];
+    delete state.modelInfo[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
@@ -197,7 +199,11 @@ export class AgentEventManager {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     state.statuses[sessionId] = status;
-    delete state.errorMessages[sessionId];
+    // Only clear error messages when transitioning to a non-error status.
+    // Retry status carries an error message that must survive.
+    if (status.type !== 'retry') {
+      delete state.errorMessages[sessionId];
+    }
     this.previousStatuses.set(`${workspaceId}:${sessionId}`, status);
     this.emit({ type: 'agent_session_status', workspaceId, sessionId, status });
   }

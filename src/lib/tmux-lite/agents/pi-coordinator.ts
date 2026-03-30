@@ -536,15 +536,15 @@ export class PiCoordinator {
 
           case 'auto_retry_end': {
             const success = piEvent.success === true;
-            if (!success && typeof piEvent.finalError === 'string') {
-              this.eventHandler(target, { type: 'error', sessionId, error: piEvent.finalError });
-            }
-            // Restore busy/idle — agent loop continues or ends
+            // Restore busy/idle first — then set error so it isn't wiped by status clear.
             this.eventHandler(target, {
               type: 'status',
               sessionId,
               payload: { type: success ? 'busy' : 'idle', event: piEvent },
             });
+            if (!success && typeof piEvent.finalError === 'string') {
+              this.eventHandler(target, { type: 'error', sessionId, error: piEvent.finalError });
+            }
             return;
           }
 
