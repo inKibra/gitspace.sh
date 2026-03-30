@@ -356,19 +356,6 @@ export type Command =
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string }
-  | {
-      type: 'pi-runtime-update';
-      timestamp: number;
-      signature: string;
-      sessionId: string;
-      terminalSessionId: string;
-      workspacePath: string;
-      status: import('../../agents/agent-runtime-types.js').SessionStatus;
-      pendingPermissions: import('../../agents/agent-runtime-types.js').Permission[];
-      pendingQuestions: import('../../agents/agent-runtime-types.js').PendingQuestion[];
-      errorMessage?: string;
-      lastMessage?: string;
-    }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
   | { type: 'github-repos'; org?: string }

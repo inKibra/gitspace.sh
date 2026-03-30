@@ -2,7 +2,6 @@ import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummar
 import {
   defaultAgentEventManager,
   type AgentStateUpdateDelta,
-  type ExternalSessionRuntimeState,
   type WorkspaceAgentState,
 } from './agent-event-manager.js';
 import { getArchivedSessions } from '../../agents/agent-db.js';
@@ -10,10 +9,6 @@ import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 
-export interface ApplyPiRuntimeUpdateOptions {
-  previousSessionId?: string;
-  suppressPreviousSession?: boolean;
-}
 
 export type AgentWorkspaceTarget = PiWorkspaceTarget;
 export type AgentSessionSummary = PiAgentSessionSummary;
@@ -69,6 +64,13 @@ export function ensureAgentControlInitialized(): Promise<void> {
             const payload = event.payload as { type?: string; [key: string]: unknown } | undefined;
             if (payload?.type === 'busy') {
               defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'busy' });
+            } else if (payload?.type === 'retry') {
+              defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, {
+                type: 'retry',
+                attempt: Number((payload as any).attempt ?? 1),
+                message: String((payload as any).message ?? 'Retrying...'),
+                next: Number((payload as any).next ?? Date.now()),
+              });
             } else if (payload?.type === 'todo_update' && Array.isArray((payload as any).phases)) {
               defaultAgentEventManager.setExternalTodoPhases(target.workspaceId, event.sessionId, (payload as any).phases);
             } else if (payload?.type === 'model_update') {
@@ -91,6 +93,24 @@ export function ensureAgentControlInitialized(): Promise<void> {
           case 'error':
             defaultAgentEventManager.setExternalError(target.workspaceId, event.sessionId, event.error);
             break;
+          case 'question_added':
+            defaultAgentEventManager.addPendingQuestion(target.workspaceId, event.sessionId, event.question);
+            break;
+          case 'question_removed':
+            defaultAgentEventManager.removePendingQuestion(target.workspaceId, event.sessionId, event.questionId);
+            break;
+          case 'permission_added':
+            defaultAgentEventManager.addPendingPermission(target.workspaceId, event.sessionId, event.permission);
+            break;
+          case 'permission_removed': {
+            const permId = event.permissionId;
+            if (permId) {
+              defaultAgentEventManager.removePendingPermission(target.workspaceId, event.sessionId, permId);
+            } else {
+              defaultAgentEventManager.clearPendingPermissions(target.workspaceId, event.sessionId);
+            }
+            break;
+          }
         }
       });
       await syncKnownWorkspaces();
@@ -140,18 +160,6 @@ export function subscribeAgentControl(handler: (delta: AgentStateUpdateDelta) =>
 
 export function getAgentControlSnapshot(): Record<string, WorkspaceAgentState> {
   return defaultAgentEventManager.getSnapshot();
-}
-
-export function applyPiRuntimeUpdate(
-  workspaceId: string,
-  sessionId: string,
-  runtime: ExternalSessionRuntimeState,
-  options: ApplyPiRuntimeUpdateOptions = {},
-): void {
-  if (options.previousSessionId && options.previousSessionId !== sessionId && options.suppressPreviousSession) {
-    defaultAgentEventManager.suppressSession(workspaceId, options.previousSessionId);
-  }
-  defaultAgentEventManager.syncExternalRuntimeState(workspaceId, sessionId, runtime);
 }
 
 export function rebindPiTerminalSessionOwnership(
@@ -250,7 +258,7 @@ export async function promptAgentSession(target: AgentWorkspaceTarget, agentSess
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  // Pi doesn't have a separate abort API — closing the PTY stops the agent.
+  // Pi doesn't have a separate abort API — closing the session stops the agent.
   return defaultPiCoordinator.closeAgentSession(target, agentSessionId);
 }
 

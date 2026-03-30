@@ -49,7 +49,6 @@ import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/typ
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
   attachAgentSession as ensureAgentTerminalSession,
-  applyPiRuntimeUpdate,
   archiveAgentSession,
   abortAgentSession,
   closeAgentSession,
@@ -67,11 +66,6 @@ import {
   syncKnownWorkspaces,
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
-import {
-  configurePiRuntimeEnvironment,
-  PI_RUNTIME_TERMINAL_SESSION_ENV,
-  verifyPiRuntimeUpdateCommand,
-} from './agents/pi-runtime-status.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
@@ -123,7 +117,6 @@ if (rawArgs.includes("--test")) {
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
-configurePiRuntimeEnvironment(ROUTER_SOCKET);
 const SERVER_START_TIME = Date.now();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
@@ -493,13 +486,9 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   const workspaceId = session.info.metadata?.workspaceId;
   const agentSessionId = session.info.metadata?.agentSessionId;
   releasePiTerminalSessionOwnership(session.info.id);
-  if (workspaceId && agentSessionId) {
-    applyPiRuntimeUpdate(workspaceId, agentSessionId, {
-      status: { type: 'idle' },
-      pendingPermissions: [],
-      pendingQuestions: [],
-    });
-  }
+  // Agent session lifecycle is managed in-process by PiCoordinator.
+  // When the terminal session is cleaned up, the coordinator handles
+  // dispose via releaseTerminalSession above.
 }
 
 function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}): void {
@@ -1908,7 +1897,6 @@ function createSession(
   const spawnEnv = {
     ...shellEnv,
     ...(options?.env ?? {}),
-    ...(options?.kind === 'agent' ? { [PI_RUNTIME_TERMINAL_SESSION_ENV]: id } : {}),
   };
 
   const proc = Bun.spawn(spawnCmd, {
@@ -2538,63 +2526,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'pi-runtime-update':
-            try {
-              await getAgentControlReady();
-              if (!verifyPiRuntimeUpdateCommand(cmd)) {
-                res = { type: 'error', code: 'UNAUTHORIZED', message: 'Unauthorized Pi runtime update.' };
-                break;
-              }
-              const workspaceId = await resolveWorkspaceIdForRuntimePath(cmd.workspacePath);
-              if (!workspaceId) {
-                res = { type: 'error', message: `Workspace not found for Pi runtime update: ${cmd.workspacePath}` };
-                break;
-              }
-              const reportingSession = sessions.get(cmd.terminalSessionId);
-              if (!reportingSession) {
-                res = { type: 'error', message: `Terminal session not found for Pi runtime update: ${cmd.terminalSessionId}` };
-                break;
-              }
-              if (reportingSession.info.kind !== 'agent') {
-                res = { type: 'error', message: `Pi runtime update can only target agent PTYs: ${cmd.terminalSessionId}` };
-                break;
-              }
-              if (reportingSession.info.metadata?.workspaceId !== workspaceId) {
-                res = {
-                  type: 'error',
-                  message: `Terminal session workspace mismatch for Pi runtime update: ${cmd.terminalSessionId}`,
-                };
-                break;
-              }
-              const previousAgentSessionId = reportingSession.info.metadata?.agentSessionId;
-              const reassignment = rebindPiTerminalSessionOwnership(workspaceId, cmd.terminalSessionId, cmd.sessionId);
-              reportingSession.info.metadata = {
-                ...reportingSession.info.metadata,
-                workspaceId,
-                agentSessionId: cmd.sessionId,
-              };
-              applyPiRuntimeUpdate(
-                workspaceId,
-                cmd.sessionId,
-                {
-                  status: cmd.status,
-                  pendingPermissions: cmd.pendingPermissions,
-                  pendingQuestions: cmd.pendingQuestions,
-                  errorMessage: cmd.errorMessage,
-                  lastMessage: cmd.lastMessage,
-                },
-                {
-                  previousSessionId: previousAgentSessionId ?? reassignment.previousAgentSessionId,
-                  suppressPreviousSession: (previousAgentSessionId ?? reassignment.previousAgentSessionId) !== cmd.sessionId
-                    && reassignment.previousOwnerCount === 0,
-                },
-              );
-              res = { type: 'ok' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to apply Pi runtime update: ${errMsg}` };
-            }
-            break;
 
           case 'workspace-set-phase':
             try {

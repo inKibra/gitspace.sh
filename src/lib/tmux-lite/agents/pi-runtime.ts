@@ -54,7 +54,6 @@ export function ensurePiAgentDir(): string {
   const dirs = [
     agentDir,
     join(agentDir, 'bin'),
-    join(agentDir, 'extensions'),
     join(agentDir, 'sessions'),
   ];
   for (const dir of dirs) {
@@ -87,9 +86,6 @@ export function getOmpBinPath(): string {
   return join(agentDir, 'node_modules', '.bin', OMP_BIN_NAME);
 }
 
-export function getGitspacePiExtensionPaths(): string[] {
-  return [join(import.meta.dir, 'extensions', 'gitspace-status.ts')];
-}
 
 /**
  * Ensure oh-my-pi is installed and up to date.
@@ -240,7 +236,6 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     authStorage,
     modelRegistry,
     model: restoredModel,
-    additionalExtensionPaths: getGitspacePiExtensionPaths(),
   });
   if (restoredModel && !session.model) {
     await session.setModel(restoredModel);

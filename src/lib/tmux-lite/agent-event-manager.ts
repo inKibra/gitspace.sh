@@ -1,9 +1,9 @@
 /**
  * AgentEventManager
  *
- * Tracks agent sessions for each workspace from two sources only:
+ * Tracks agent sessions for each workspace from two sources:
  * - known sessions discovered from on-disk Pi session files
- * - live in-process runtime updates forwarded from the Pi extension
+ * - live in-process SDK events forwarded by PiCoordinator
  *
  * Archived sessions are excluded from the active list and can only re-enter
  * through an explicit restore path.
@@ -285,6 +285,66 @@ export class AgentEventManager {
     const state = this.getOrCreateState(workspaceId);
     state.modelInfo[sessionId] = modelInfo;
     this.emit({ type: 'agent_model_update', workspaceId, sessionId, modelInfo });
+  }
+
+  addPendingQuestion(workspaceId: string, sessionId: string, question: PendingQuestion): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    const existing = state.pendingQuestions[sessionId] ?? [];
+    state.pendingQuestions[sessionId] = [
+      ...existing.filter((q) => q.id !== question.id),
+      question,
+    ];
+    this.emit({ type: 'agent_question_added', workspaceId, sessionId, question });
+  }
+
+  removePendingQuestion(workspaceId: string, sessionId: string, requestId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state) return;
+    const existing = state.pendingQuestions[sessionId];
+    if (!existing) return;
+    const next = existing.filter((q) => q.id !== requestId);
+    if (next.length > 0) {
+      state.pendingQuestions[sessionId] = next;
+    } else {
+      delete state.pendingQuestions[sessionId];
+    }
+    this.emit({ type: 'agent_question_removed', workspaceId, sessionId, requestId });
+  }
+
+  addPendingPermission(workspaceId: string, sessionId: string, permission: Permission): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    const existing = state.pendingPermissions[sessionId] ?? [];
+    state.pendingPermissions[sessionId] = [
+      ...existing.filter((p) => p.id !== permission.id),
+      permission,
+    ];
+    this.emit({ type: 'agent_permission_added', workspaceId, sessionId, permission });
+  }
+
+  removePendingPermission(workspaceId: string, sessionId: string, permissionId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state) return;
+    const existing = state.pendingPermissions[sessionId];
+    if (!existing) return;
+    const next = existing.filter((p) => p.id !== permissionId);
+    if (next.length > 0) {
+      state.pendingPermissions[sessionId] = next;
+    } else {
+      delete state.pendingPermissions[sessionId];
+    }
+    this.emit({ type: 'agent_permission_removed', workspaceId, sessionId, permissionId });
+  }
+
+  clearPendingPermissions(workspaceId: string, sessionId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state || !state.pendingPermissions[sessionId]) return;
+    const removed = state.pendingPermissions[sessionId]!;
+    delete state.pendingPermissions[sessionId];
+    for (const p of removed) {
+      this.emit({ type: 'agent_permission_removed', workspaceId, sessionId, permissionId: p.id });
+    }
   }
 
   syncExternalRuntimeState(

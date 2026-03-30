@@ -11,7 +11,6 @@ import type {
 } from '../../../agents/backend.js';
 import {
   createPiSessionManager,
-  getGitspacePiExtensionPaths,
   importOmpModule,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
@@ -123,7 +122,6 @@ export class PiBackend implements AgentBackend {
       agentDir,
       sessionManager,
       cwd,
-      additionalExtensionPaths: getGitspacePiExtensionPaths(),
     });
     if (input.title) {
       await sessionManager.setSessionName(input.title);

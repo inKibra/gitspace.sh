@@ -33,7 +33,7 @@ export function machineSnapshotToWorkspaces(snapshot: MachineSnapshot): Workspac
 export function machineSnapshotToSessions(snapshot: MachineSnapshot, workspaceId?: string): SessionInfo[] {
   return Object.values(snapshot.terminalSessionsById)
     .filter((session) => !workspaceId || session.workspaceId === workspaceId)
-    .filter((session) => session.kind !== 'agent-pty')
+    .filter((session) => session.kind !== 'agent')
     .map((session) => ({
       id: session.id,
       name: session.name,

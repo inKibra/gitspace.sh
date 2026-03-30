@@ -216,14 +216,14 @@ async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencie
   }]));
   const terminalSessionsById = Object.fromEntries(terminalSessions.map((session) => {
     const workspace = runtimeWorkspaces.find((item) => session.cwd === item.path || session.cwd.startsWith(`${item.path}/`));
-    const isAgentPty = session.kind === 'agent';
+    const isAgentSession = session.kind === 'agent';
     return [session.id, {
       id: session.id,
       name: session.name,
       workspaceId: workspace?.id,
       projectId: workspace?.projectName,
       cwd: session.cwd,
-      kind: (isAgentPty ? 'agent-pty' : 'shell') as 'agent-pty' | 'shell',
+      kind: (isAgentSession ? 'agent' : 'shell') as 'agent' | 'shell',
       hidden: session.hidden ?? false,
       state: (session.attached ? 'attached' : 'running') as 'attached' | 'running',
       attached: session.attached,

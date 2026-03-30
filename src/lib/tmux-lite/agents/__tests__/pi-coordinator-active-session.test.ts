@@ -33,7 +33,6 @@ mock.module('../pi-runtime.js', () => ({
     agentDir: '/tmp/pi-agent',
     sessionManager: {},
   })),
-  getGitspacePiExtensionPaths: mock(() => []),
   importOmpModule: mock(async () => ({
     createAgentSession: mock(async () => ({
       session: createSession(),

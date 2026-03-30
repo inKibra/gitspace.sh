@@ -127,7 +127,7 @@ export interface MachineTerminalSessionRecord {
   workspaceId?: string;
   projectId?: string;
   cwd: string;
-  kind: 'shell' | 'process' | 'agent-pty';
+  kind: 'shell' | 'process' | 'agent';
   hidden: boolean;
   state: MachineTerminalSessionState;
   attached: boolean;

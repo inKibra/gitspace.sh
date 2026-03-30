@@ -56,14 +56,24 @@ export type AgentEvent =
       payload: unknown;
     }
   | {
-      type: 'permission_request';
+      type: 'permission_added';
       sessionId: string;
-      payload: unknown;
+      permission: import('./agent-runtime-types.js').Permission;
     }
   | {
-      type: 'question';
+      type: 'permission_removed';
       sessionId: string;
-      payload: unknown;
+      permissionId: string | null;
+    }
+  | {
+      type: 'question_added';
+      sessionId: string;
+      question: import('./agent-runtime-types.js').PendingQuestion;
+    }
+  | {
+      type: 'question_removed';
+      sessionId: string;
+      questionId: string;
     }
   | {
       type: 'status';
