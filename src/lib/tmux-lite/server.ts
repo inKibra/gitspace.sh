@@ -64,6 +64,7 @@ import {
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
+  markAgentSessionIdle,
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
@@ -486,9 +487,9 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   const workspaceId = session.info.metadata?.workspaceId;
   const agentSessionId = session.info.metadata?.agentSessionId;
   releasePiTerminalSessionOwnership(session.info.id);
-  // Agent session lifecycle is managed in-process by PiCoordinator.
-  // When the terminal session is cleaned up, the coordinator handles
-  // dispose via releaseTerminalSession above.
+  if (workspaceId && agentSessionId) {
+    markAgentSessionIdle(workspaceId, agentSessionId);
+  }
 }
 
 function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}): void {
@@ -2040,7 +2041,10 @@ function createVirtualSession(
     session.pendingWrites++;
     xterm.write(data, () => {
       session.pendingWrites--;
-      if (session.attaching) session.attachDirty = true;
+      if (session.attaching) {
+        session.attachDirty = true;
+        return;
+      }
       writeToClient(session, encodePTY(data));
     });
   });

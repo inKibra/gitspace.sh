@@ -45,9 +45,10 @@ function SidebarItem({
   active?: boolean;
   highlight?: boolean;
 }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <button
-      type="button"
+    <Tag
+      type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={
         'w-full flex items-center gap-1.5 px-1.5 py-1 rounded text-xs text-left truncate transition-colors ' +
@@ -64,7 +65,7 @@ function SidebarItem({
         {subtitle && <span className="block truncate text-[10px] text-[#6e7681]">{subtitle}</span>}
       </span>
       {rightLabel && <span className="text-[10px] text-[#484f58] flex-shrink-0">{rightLabel}</span>}
-    </button>
+    </Tag>
   );
 }
 

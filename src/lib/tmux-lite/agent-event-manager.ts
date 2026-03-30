@@ -61,15 +61,6 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_todo_update'; workspaceId: string; sessionId: string; phases: TodoPhase[] }
   | { type: 'agent_model_update'; workspaceId: string; sessionId: string; modelInfo: AgentModelInfo };
 
-export interface ExternalSessionRuntimeState {
-  status: SessionStatus;
-  pendingPermissions: Permission[];
-  pendingQuestions: PendingQuestion[];
-  errorMessage?: string;
-  lastMessage?: string;
-  todoPhases?: TodoPhase[];
-  modelInfo?: AgentModelInfo;
-}
 
 const LAST_MESSAGE_MAX_CHARS = 120;
 
@@ -83,7 +74,7 @@ export class AgentEventManager {
 
   async initialize(): Promise<void> {
     // No external runtime bootstrap remains. Pi session discovery and in-process
-    // updates seed state through syncKnownSessions/syncExternalRuntimeState.
+    // updates seed state through syncKnownSessions and explicit runtime update methods.
   }
 
   registerWorkspace(workspaceId: string, workspacePath: string): void {
@@ -164,52 +155,6 @@ export class AgentEventManager {
     return snapshot;
   }
 
-  suppressSession(workspaceId: string, sessionId: string): void {
-    let suppressed = this.suppressedSessionIds.get(workspaceId);
-    if (!suppressed) {
-      suppressed = new Set();
-      this.suppressedSessionIds.set(workspaceId, suppressed);
-    }
-    const wasSuppressed = suppressed.has(sessionId);
-    suppressed.add(sessionId);
-
-    const state = this.workspaceStates.get(workspaceId);
-    let deleted = false;
-    if (state) {
-      const nextSessions = state.sessions.filter((session) => session.id !== sessionId);
-      if (nextSessions.length !== state.sessions.length) {
-        state.sessions = nextSessions;
-        deleted = true;
-      }
-      if (state.statuses[sessionId] !== undefined) {
-        delete state.statuses[sessionId];
-        deleted = true;
-      }
-      if (state.pendingPermissions[sessionId] !== undefined) {
-        delete state.pendingPermissions[sessionId];
-        deleted = true;
-      }
-      if (state.pendingQuestions[sessionId] !== undefined) {
-        delete state.pendingQuestions[sessionId];
-        deleted = true;
-      }
-      if (state.lastMessages[sessionId] !== undefined) {
-        delete state.lastMessages[sessionId];
-        deleted = true;
-      }
-      if (state.errorMessages[sessionId] !== undefined) {
-        delete state.errorMessages[sessionId];
-        deleted = true;
-      }
-    }
-    this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
-    if (deleted) {
-      this.emit({ type: 'agent_session_deleted', workspaceId, sessionId });
-    }
-    if (deleted || !wasSuppressed) {
-      this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
-    }
-  }
 
   markSessionClosed(workspaceId: string, sessionId: string): void {
     const state = this.workspaceStates.get(workspaceId);
@@ -276,12 +221,14 @@ export class AgentEventManager {
   }
 
   setExternalTodoPhases(workspaceId: string, sessionId: string, phases: TodoPhase[]): void {
+    this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     state.todoPhases[sessionId] = phases;
     this.emit({ type: 'agent_todo_update', workspaceId, sessionId, phases });
   }
 
   setExternalModelInfo(workspaceId: string, sessionId: string, modelInfo: AgentModelInfo): void {
+    this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     state.modelInfo[sessionId] = modelInfo;
     this.emit({ type: 'agent_model_update', workspaceId, sessionId, modelInfo });
@@ -347,60 +294,15 @@ export class AgentEventManager {
     }
   }
 
-  syncExternalRuntimeState(
-    workspaceId: string,
-    sessionId: string,
-    update: ExternalSessionRuntimeState,
-  ): void {
-    this.unsuppressSession(workspaceId, sessionId);
-    const state = this.getOrCreateState(workspaceId);
-    if (state.sessions.findIndex((session) => session.id === sessionId) === -1) {
-      this.ensureSessionEntry(workspaceId, sessionId, sessionId);
-    }
-
-    const sessionIndex = state.sessions.findIndex((session) => session.id === sessionId);
-    if (sessionIndex !== -1 && state.sessions[sessionIndex]?.closedAt) {
-      state.sessions[sessionIndex] = { ...state.sessions[sessionIndex]!, closedAt: undefined };
-    }
-
-    state.statuses[sessionId] = update.status;
-    this.previousStatuses.set(`${workspaceId}:${sessionId}`, update.status);
-
-    if (update.pendingPermissions.length > 0) {
-      state.pendingPermissions[sessionId] = update.pendingPermissions;
-    } else {
-      delete state.pendingPermissions[sessionId];
-    }
-
-    if (update.pendingQuestions.length > 0) {
-      state.pendingQuestions[sessionId] = update.pendingQuestions;
-    } else {
-      delete state.pendingQuestions[sessionId];
-    }
-
-    const normalizedMessage = update.lastMessage?.trim();
-    if (normalizedMessage) {
-      state.lastMessages[sessionId] = normalizedMessage.slice(-LAST_MESSAGE_MAX_CHARS);
-    } else if (update.lastMessage !== undefined) {
-      delete state.lastMessages[sessionId];
-    }
-
-    const normalizedError = update.errorMessage?.trim();
-    if (normalizedError) {
-      state.errorMessages[sessionId] = normalizedError;
-    } else {
-      delete state.errorMessages[sessionId];
-    }
-
-    if (update.todoPhases) {
-      state.todoPhases[sessionId] = update.todoPhases;
-    }
-
-    if (update.modelInfo) {
-      state.modelInfo[sessionId] = update.modelInfo;
-    }
-
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+  markSessionIdle(workspaceId: string, sessionId: string): void {
+    const state = this.workspaceStates.get(workspaceId);
+    if (!state) return;
+    state.statuses[sessionId] = { type: 'idle' };
+    delete state.pendingPermissions[sessionId];
+    delete state.pendingQuestions[sessionId];
+    delete state.errorMessages[sessionId];
+    this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
+    this.emit({ type: 'agent_session_status', workspaceId, sessionId, status: { type: 'idle' } });
   }
 
   markSessionArchived(workspaceId: string, sessionId: string): void {

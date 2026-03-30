@@ -315,3 +315,7 @@ export async function respondToAgentPermission(
   // TODO: implement Pi permission handling via RPC or extension when needed.
   return false;
 }
+
+export function markAgentSessionIdle(workspaceId: string, sessionId: string): void {
+  defaultAgentEventManager.markSessionIdle(workspaceId, sessionId);
+}

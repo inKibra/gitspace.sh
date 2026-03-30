@@ -131,7 +131,11 @@ function buildPermission(sessionId: string, payload: unknown): Permission {
     ? record.id
     : typeof record.permissionId === 'string'
       ? record.permissionId
-      : 'pi-permission';
+      : typeof record.callID === 'string'
+        ? record.callID
+        : typeof record.messageID === 'string'
+          ? record.messageID
+          : `perm-${sessionId}-${Date.now()}`;
   return {
     id,
     type: typeof record.type === 'string' ? record.type : 'permission',
@@ -149,6 +153,8 @@ function permissionIdFromPayload(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.id === 'string') return payload.id;
   if (typeof payload.permissionId === 'string') return payload.permissionId;
+  if (typeof payload.callID === 'string') return payload.callID;
+  if (typeof payload.messageID === 'string') return payload.messageID;
   return null;
 }
 
@@ -563,7 +569,7 @@ export class PiCoordinator {
             const toolName = piEvent.toolName ?? piEvent.tool_name;
             // Always extract todo phases from tool_execution_end regardless of tool
             const phases = (session as any).getTodoPhases?.();
-            if (Array.isArray(phases) && phases.length > 0) {
+            if (Array.isArray(phases)) {
               this.eventHandler(target, {
                 type: 'status',
                 sessionId,
@@ -583,7 +589,7 @@ export class PiCoordinator {
 
           case 'todo_reminder': {
             const phases = (session as any).getTodoPhases?.();
-            if (Array.isArray(phases) && phases.length > 0) {
+            if (Array.isArray(phases)) {
               this.eventHandler(target, {
                 type: 'status',
                 sessionId,
