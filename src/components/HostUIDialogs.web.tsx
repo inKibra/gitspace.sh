@@ -87,20 +87,20 @@ function DialogShell({ title, onBackdropClick, children, width = 'md' }: DialogS
     <>
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-[#0d1117]/80 backdrop-blur-sm"
+        className="absolute inset-0 bg-[var(--gs-bg)]/80 backdrop-blur-sm"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
         onClick={onBackdropClick}
       />
       {/* Card */}
       <div
-        className={`relative bg-[#161b22] shadow-xl w-full mx-0 sm:mx-4 p-5 sm:p-6 border-0 sm:border border-[#30363d]
+        className={`relative bg-[var(--gs-bg-elevated)] shadow-xl w-full mx-0 sm:mx-4 p-5 sm:p-6 border-0 sm:border border-[var(--gs-border)]
           fixed sm:relative inset-0 sm:inset-auto sm:rounded-lg
           flex flex-col sm:block max-h-screen sm:max-h-[90vh] overflow-y-auto
           ${maxW}`}
         style={{ zIndex: 10000, position: 'relative' }}
       >
-        <h2 className="text-xl font-semibold text-[#22c55e] mb-4 flex-shrink-0">{title}</h2>
-        <div className="flex-1 min-h-0 text-[#e6edf3]">{children}</div>
+        <h2 className="text-xl font-semibold text-[var(--gs-accent)] mb-4 flex-shrink-0">{title}</h2>
+        <div className="flex-1 min-h-0 text-[var(--gs-text)]">{children}</div>
       </div>
     </>
   );
@@ -111,9 +111,9 @@ function DialogShell({ title, onBackdropClick, children, width = 'md' }: DialogS
 // ============================================================================
 
 const BTN_CANCEL =
-  'px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]';
+  'px-5 py-3 bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] border border-[var(--gs-border)] rounded-lg min-h-[48px]';
 const BTN_PRIMARY =
-  'px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow';
+  'px-5 py-3 bg-[var(--gs-accent)] hover:bg-[var(--gs-accent-hover)] active:bg-[var(--gs-accent-hover)] text-[var(--gs-text-on-accent)] font-medium rounded-lg min-h-[48px] shadow-glow';
 
 // ============================================================================
 // SelectDialog
@@ -144,7 +144,7 @@ function SelectDialog({ request, onResponse }: SelectDialogProps) {
       {/* Scrollable option list */}
       <div className="space-y-2 max-h-64 sm:max-h-80 overflow-y-auto -mx-2 px-2 mb-4">
         {request.options.length === 0 && (
-          <div className="p-4 rounded-lg border border-[#30363d] bg-[#0d1117] text-sm text-[#8b949e]">
+          <div className="p-4 rounded-lg border border-[var(--gs-border)] bg-[var(--gs-bg)] text-sm text-[var(--gs-text-muted)]">
             No options available.
           </div>
         )}
@@ -153,7 +153,7 @@ function SelectDialog({ request, onResponse }: SelectDialogProps) {
             key={idx}
             type="button"
             onClick={() => pick(option)}
-            className="w-full text-left p-4 bg-[#161b22] border border-[#30363d] rounded-lg hover:bg-[#21262d] active:bg-[#0d1117] cursor-pointer min-h-[48px] text-[#e6edf3] transition-colors"
+            className="w-full text-left p-4 bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] rounded-lg hover:bg-[var(--gs-bg-active)] active:bg-[var(--gs-bg)] cursor-pointer min-h-[48px] text-[var(--gs-text)] transition-colors"
           >
             {option}
           </button>
@@ -202,7 +202,7 @@ function ConfirmDialog({ request, onResponse }: ConfirmDialogProps) {
 
   return (
     <DialogShell title={request.title} onBackdropClick={() => respond(false)}>
-      <p className="mb-6 text-[#e6edf3] whitespace-pre-wrap">{request.message}</p>
+      <p className="mb-6 text-[var(--gs-text)] whitespace-pre-wrap">{request.message}</p>
       <div className="flex flex-col-reverse sm:flex-row justify-end gap-3">
         <button type="button" onClick={() => respond(false)} className={BTN_CANCEL}>
           No
@@ -261,7 +261,7 @@ function InputDialog({ request, onResponse }: InputDialogProps) {
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={request.placeholder}
-        className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all mb-6"
+        className="w-full p-3 text-base bg-[var(--gs-bg)] border border-[var(--gs-border)] rounded-lg text-[var(--gs-text)] focus:border-[var(--gs-input-focus-border)] focus:outline-none focus:shadow-glow transition-all mb-6"
         autoFocus
       />
       <div className="flex flex-col-reverse sm:flex-row justify-end gap-3">
@@ -323,10 +323,10 @@ function EditorDialog({ request, onResponse }: EditorDialogProps) {
         value={value}
         onChange={(e) => setValue(e.target.value)}
         rows={8}
-        className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all resize-y mb-2 font-mono"
+        className="w-full p-3 text-base bg-[var(--gs-bg)] border border-[var(--gs-border)] rounded-lg text-[var(--gs-text)] focus:border-[var(--gs-input-focus-border)] focus:outline-none focus:shadow-glow transition-all resize-y mb-2 font-mono"
         autoFocus
       />
-      <p className="text-xs text-[#6e7681] mb-4">Ctrl+Enter to submit</p>
+      <p className="text-xs text-[var(--gs-text-dim)] mb-4">Ctrl+Enter to submit</p>
       <div className="flex flex-col-reverse sm:flex-row justify-end gap-3">
         <button type="button" onClick={cancel} className={BTN_CANCEL}>
           Cancel

@@ -90,8 +90,8 @@ function FloatingButton({
       title={title}
       className="
         px-3 py-2 rounded-lg text-xs font-medium
-        bg-[#161b22]/90 text-[#e6edf3] border border-[#30363d]
-        active:bg-[#22c55e] active:text-[#0d1117] active:border-[#22c55e]
+        bg-[var(--gs-bg-elevated)]/90 text-[var(--gs-text)] border border-[var(--gs-border)]
+        active:bg-[var(--gs-accent)] active:text-[var(--gs-text-on-accent)] active:border-[var(--gs-accent)]
         transition-all duration-75 active:scale-95
       "
       style={{

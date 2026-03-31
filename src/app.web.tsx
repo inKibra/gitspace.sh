@@ -1342,17 +1342,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
     return (
       <>
-        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--gs-bg)] px-4">
           <div className="text-center">
-            <div className="text-lg text-[#e6edf3] mb-2">
-              Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
+            <div className="text-lg text-[var(--gs-text)] mb-2">
+              Loading review for <span className="text-[var(--gs-info)]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
             </div>
-            <div className="text-sm text-[#8b949e]">
+            <div className="text-sm text-[var(--gs-text-muted)]">
               {terminalStatus !== 'connected' ? 'Connecting...' : 'Resolving workspace backend...'}
             </div>
             <button
               onClick={() => { setView('terminal'); setReviewWorkspace(null); }}
-              className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+              className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"
             >
               Back to Workspaces
             </button>
@@ -1369,15 +1369,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     if (terminalStatus !== 'connected' || terminalMode !== 'browsing') {
       return (
         <>
-          <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+          <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--gs-bg)] px-4">
             <div className="text-center">
-              <div className="text-lg text-[#e6edf3] mb-2">
-                Loading replay for <span className="text-[#58a6ff]">{activeReplay.sessionName}</span>
+              <div className="text-lg text-[var(--gs-text)] mb-2">
+                Loading replay for <span className="text-[var(--gs-info)]">{activeReplay.sessionName}</span>
               </div>
-              <div className="text-sm text-[#8b949e]">Connecting...</div>
+              <div className="text-sm text-[var(--gs-text-muted)]">Connecting...</div>
               <button
                 onClick={() => { setView('terminal'); setActiveReplay(null); }}
-                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+                className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"
               >
                 Back to Workspaces
               </button>
@@ -1489,10 +1489,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             onClick={() => commandPalette.close()}
           >
             <div
-              className="w-full max-w-md rounded-lg border border-[#30363d] bg-[#21262d] shadow-xl"
+              className="w-full max-w-md rounded-lg border border-[var(--gs-border)] bg-[var(--gs-btn-secondary-bg)] shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="border-b border-[#30363d] px-3 py-2">
+              <div className="border-b border-[var(--gs-border)] px-3 py-2">
                 <input
                   type="text"
                   placeholder="Filter commands..."
@@ -1504,7 +1504,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     else if (e.key === 'ArrowUp') { e.preventDefault(); commandPalette.moveSelection(-1); }
                     else if (e.key === 'Enter') { e.preventDefault(); commandPalette.selectCurrent(); }
                   }}
-                  className="w-full bg-transparent text-white placeholder-[#6e7681] outline-none"
+                  className="w-full bg-transparent text-white placeholder-[var(--gs-text-dim)] outline-none"
                   autoFocus
                 />
               </div>
@@ -1512,15 +1512,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 {commandPalette.filteredCommands.map((cmd, i) => (
                   <li
                     key={cmd.id}
-                    className={`cursor-pointer px-3 py-2 text-sm ${i === commandPalette.selectedIndex ? 'bg-[#388bfd] text-white' : 'text-[#c9d1d9] hover:bg-[#30363d]'}`}
+                    className={`cursor-pointer px-3 py-2 text-sm ${i === commandPalette.selectedIndex ? 'bg-[var(--gs-info)] text-white' : 'text-[var(--gs-text-secondary)] hover:bg-[var(--gs-border)]'}`}
                     onClick={() => { commandPalette.setSelectedIndex(i); commandPalette.selectCurrent(); }}
                   >
                     {cmd.label}
-                    {cmd.shortcut ? <span className="ml-2 text-[#6e7681]">{cmd.shortcut}</span> : null}
+                    {cmd.shortcut ? <span className="ml-2 text-[var(--gs-text-dim)]">{cmd.shortcut}</span> : null}
                   </li>
                 ))}
               </ul>
-              <div className="border-t border-[#30363d] px-3 py-1.5 text-xs text-[#6e7681]">
+              <div className="border-t border-[var(--gs-border)] px-3 py-1.5 text-xs text-[var(--gs-text-dim)]">
                 ↑↓ select · Enter run · Esc close
               </div>
             </div>
@@ -1579,14 +1579,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       && (attachedAgentSessionId !== pendingAgentAttachTarget.agentSessionId
         || backendAttachedWorkspaceId !== pendingAgentAttachTarget.workspaceId);
     const inlineTerminalOutlet = switchingAgentSession ? (
-      <div className="flex-1 flex items-center justify-center bg-[#0d1117]">
-        <div className="text-sm text-[#8b949e]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
+        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
       </div>
     ) : (terminalMode === 'attached' && attachedMatchesSelected) ? (
       <div className="flex-1 min-h-0 flex flex-col">
         <AttachedTerminalPaneWeb
-          rootClassName="flex-1 min-h-0 flex flex-col bg-[#0d1117] overflow-hidden"
-          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[#21262d] bg-[#161b22] flex items-center justify-between gap-2"
+          rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
+          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
           sessionName={attachedSessionName}
           processTitle={attachedSessionMeta?.processTitle ?? null}
           terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
@@ -1600,11 +1600,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onToggleInputMode={toggleInlineInputMode}
           inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
             inputMode
-              ? 'bg-[#22c55e] text-[#0d1117] font-medium'
-              : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+              ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] font-medium'
+              : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
           }`}
           onDetach={() => multi.detachSession(inlineAttachedRef)}
-          detachButtonClassName="px-2 py-1 text-xs rounded border border-[#30363d] text-[#e6edf3] hover:bg-[#30363d]"
+          detachButtonClassName="px-2 py-1 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
           terminalContainerClassName={inlineTerminalContainerClass}
           terminalRef={terminalRef}
           onData={handleInlineKeyboardData}
@@ -1623,8 +1623,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <NativeAgentSurfaceConnected />
       </div>
     ) : agentAttachPending ? (
-      <div className="flex-1 flex items-center justify-center bg-[#0d1117]">
-        <div className="text-sm text-[#8b949e]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
+        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
       </div>
     ) : null;
 
@@ -1760,17 +1760,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return (
       <>
         <AttachedTerminalPaneWeb
-          rootClassName="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden"
-          headerClassName="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0"
+          rootClassName="w-screen h-screen flex flex-col bg-[var(--gs-bg)] overflow-hidden"
+          headerClassName="bg-[var(--gs-bg-elevated)] px-4 py-2 flex items-center justify-between border-b border-[var(--gs-border)] min-h-[52px] gap-2 flex-shrink-0"
           leadingContent={(
             <button
               onClick={() => void multi.detachSession(attachedRef)}
-              className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+              className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] active:text-[var(--gs-accent)] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
             >
               ← <span className="hidden sm:inline ml-1">Workspaces</span>
             </button>
           )}
-          trailingContent={<span className="text-xs text-[#6e7681] hidden sm:inline">Shift+Esc</span>}
+          trailingContent={<span className="text-xs text-[var(--gs-text-dim)] hidden sm:inline">Shift+Esc</span>}
           sessionName={attachedSessionName}
           processTitle={attachedSessionMeta?.processTitle ?? null}
           terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
@@ -1784,11 +1784,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onToggleInputMode={toggleInputMode}
           inputButtonClassName={`px-3 py-2 text-sm rounded min-h-[44px] transition-all ${
             inputMode
-              ? 'bg-[#22c55e] text-[#0d1117] shadow-glow font-medium'
-              : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+              ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] shadow-glow font-medium'
+              : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
           }`}
           onDetach={() => multi.detachSession(attachedRef)}
-          detachButtonClassName="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+          detachButtonClassName="px-3 py-2 text-sm bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded text-[var(--gs-text)] min-h-[44px] border border-[var(--gs-border)]"
           terminalContainerClassName={getTerminalContainerClass()}
           terminalRef={terminalRef}
           onData={handleKeyboardData}
@@ -1822,21 +1822,21 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   return (
     <>
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--gs-bg)] px-4">
         <div className="text-center">
-          <h1 className="text-xl font-bold text-[#e6edf3] mb-4">GitSpace</h1>
-          <div className="text-sm text-[#8b949e] mb-4">{statusMessage}</div>
+          <h1 className="text-xl font-bold text-[var(--gs-text)] mb-4">GitSpace</h1>
+          <div className="text-sm text-[var(--gs-text-muted)] mb-4">{statusMessage}</div>
           {!isError && (
             <div className="flex gap-1 justify-center">
               {[0, 1, 2].map((i) => (
-                <div key={i} className="w-1.5 h-1.5 rounded-full bg-[#3fb950] animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
+                <div key={i} className="w-1.5 h-1.5 rounded-full bg-[var(--gs-success)] animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
               ))}
             </div>
           )}
           {isError && (
             <button
               onClick={() => window.location.reload()}
-              className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+              className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"   
             >
               Retry
             </button>

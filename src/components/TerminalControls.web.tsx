@@ -249,7 +249,7 @@ export function TerminalControls({
     <>
       {/* Main controls bar - two rows for more space */}
       <div
-        className={`terminal-controls flex flex-col gap-2 p-3 bg-[#161b22] border-t border-[#30363d] ${className}`}
+        className={`terminal-controls flex flex-col gap-2 p-3 bg-[var(--gs-bg-elevated)] border-t border-[var(--gs-border)] ${className}`}
         style={{
           paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
           // When keyboard is hidden, position above floating controls (jog wheel area)
@@ -277,7 +277,7 @@ export function TerminalControls({
           />
 
           {/* Separator */}
-          <div className="w-px h-8 bg-[#30363d] mx-1" />
+          <div className="w-px h-8 bg-[var(--gs-border)] mx-1" />
 
           {/* NumPad trigger - D-Pad removed since jog wheel handles arrows */}
           <TerminalKey
@@ -354,8 +354,8 @@ function ModifierButton({
         transition-colors duration-75
         ${
           active
-            ? 'bg-[#22c55e] text-[#0d1117] shadow-glow'
-            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+            ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] shadow-glow'
+            : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
         }
       `}
       style={{
@@ -444,8 +444,8 @@ function TerminalKey({
         transition-all duration-75 active:scale-95
         ${
           highlight
-            ? 'bg-[#d29922] text-[#0d1117] shadow-glow'
-            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+            ? 'bg-[var(--gs-warning)] text-[var(--gs-text-on-accent)] shadow-glow'
+            : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
         }
       `}
       style={{

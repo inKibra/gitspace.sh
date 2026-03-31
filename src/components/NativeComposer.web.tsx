@@ -181,8 +181,8 @@ function ToolButton({ onClick, title, disabled = false, children }: ToolButtonPr
         height: 38,
         borderRadius: 8,
         background: 'none',
-        border: '1px solid #30363d',
-        color: disabled ? '#30363d' : '#6e7681',
+        border: '1px solid var(--gs-border)',
+        color: disabled ? 'var(--gs-border)' : 'var(--gs-text-dim)',
         cursor: disabled ? 'default' : 'pointer',
         display: 'flex',
         alignItems: 'center',
@@ -553,8 +553,8 @@ export function NativeComposer({
     <div
       style={{
         width: '100%',
-        background: '#0d1117',
-        borderTop: '1px solid #30363d',
+        background: 'var(--gs-bg)',
+        borderTop: '1px solid var(--gs-border)',
         padding: '8px 12px',
         // Respect iOS safe area
         paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
@@ -584,16 +584,16 @@ export function NativeComposer({
                 height: 48,
                 borderRadius: 6,
                 overflow: 'hidden',
-                border: '1px solid #30363d',
+                border: '1px solid var(--gs-border)',
                 flexShrink: 0,
-                background: '#161b22',
+                background: 'var(--gs-bg-elevated)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
               }}
             >
               {img.loading ? (
-                <span style={{ color: '#6e7681' }}>
+                <span style={{ color: 'var(--gs-text-dim)' }}>
                   <Spinner />
                 </span>
               ) : (
@@ -620,7 +620,7 @@ export function NativeComposer({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: '#e6edf3',
+                  color: 'var(--gs-text)',
                   padding: 0,
                   WebkitTapHighlightColor: 'transparent',
                 }}
@@ -637,8 +637,8 @@ export function NativeComposer({
                 display: 'flex',
                 alignItems: 'center',
                 gap: 4,
-                background: '#161b22',
-                border: '1px solid #30363d',
+                background: 'var(--gs-bg-elevated)',
+                border: '1px solid var(--gs-border)',
                 borderRadius: 6,
                 padding: '4px 8px',
                 maxWidth: 160,
@@ -649,7 +649,7 @@ export function NativeComposer({
               <span
                 style={{
                   fontSize: 11,
-                  color: '#8b949e',
+                  color: 'var(--gs-text-muted)',
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
@@ -666,7 +666,7 @@ export function NativeComposer({
                   background: 'none',
                   border: 'none',
                   cursor: 'pointer',
-                  color: '#6e7681',
+                  color: 'var(--gs-text-dim)',
                   padding: 0,
                   display: 'flex',
                   alignItems: 'center',
@@ -713,8 +713,8 @@ export function NativeComposer({
                 right: 0,
                 maxHeight: 200,
                 overflowY: 'auto',
-                background: '#161b22',
-                border: '1px solid #30363d',
+                background: 'var(--gs-bg-elevated)',
+                border: '1px solid var(--gs-border)',
                 borderRadius: 8,
                 marginBottom: 4,
                 zIndex: 100,
@@ -730,8 +730,8 @@ export function NativeComposer({
                   style={{
                     padding: '6px 12px',
                     cursor: 'pointer',
-                    background: i === autocomplete.selectedIndex ? '#21262d' : 'transparent',
-                    color: '#e6edf3',
+                    background: i === autocomplete.selectedIndex ? 'var(--gs-bg-active)' : 'transparent',
+                    color: 'var(--gs-text)',
                     fontSize: 13,
                     display: 'flex',
                     justifyContent: 'space-between',
@@ -742,7 +742,7 @@ export function NativeComposer({
                     {autocomplete.mode === 'slash' ? '/' : '@'}{item.label}
                   </span>
                   {item.description && (
-                    <span style={{ color: '#6e7681', fontSize: 12, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ color: 'var(--gs-text-dim)', fontSize: 12, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {item.description}
                     </span>
                   )}
@@ -763,10 +763,10 @@ export function NativeComposer({
             rows={1}
             style={{
               width: '100%',
-              background: '#161b22',
-              border: '1px solid #30363d',
+              background: 'var(--gs-bg-elevated)',
+              border: '1px solid var(--gs-border)',
               borderRadius: 10,
-              color: isDisabled ? '#6e7681' : '#e6edf3',
+              color: isDisabled ? 'var(--gs-text-dim)' : 'var(--gs-text)',
               fontSize: 15,
               lineHeight: 1.5,
               padding: '8px 12px',
@@ -778,7 +778,7 @@ export function NativeComposer({
               boxSizing: 'border-box',
               fontFamily: 'inherit',
               WebkitAppearance: 'none',
-              caretColor: '#22c55e',
+              caretColor: 'var(--gs-accent)',
             }}
           />
         </div>
@@ -792,8 +792,8 @@ export function NativeComposer({
             title="Abort"
             style={{
               ...ACTION_BUTTON_BASE,
-              background: '#f85149',
-              color: '#ffffff',
+              background: 'var(--gs-danger)',
+              color: 'white',
               opacity: onAbort ? 1 : 0.4,
               cursor: onAbort ? 'pointer' : 'default',
             }}
@@ -808,8 +808,8 @@ export function NativeComposer({
             title="Send"
             style={{
               ...ACTION_BUTTON_BASE,
-              background: canSend ? '#22c55e' : '#21262d',
-              color: canSend ? '#0d1117' : '#6e7681',
+              background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
+              color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
               cursor: canSend ? 'pointer' : 'default',
             }}
           >

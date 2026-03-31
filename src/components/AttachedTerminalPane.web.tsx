@@ -77,22 +77,22 @@ export function AttachedTerminalPaneWeb(props: AttachedTerminalPaneWebProps) {
       <div className={headerClassName}>
         <div className="flex items-center gap-2 min-w-0 flex-1">
           {leadingContent}
-          <div className="min-w-0 text-sm text-[#8b949e] truncate">
-            <span className="text-[#3fb950]">●</span>{' '}
+          <div className="min-w-0 text-sm text-[var(--gs-text-muted)] truncate">
+            <span className="text-[var(--gs-success)]">●</span>{' '}
             {showConnectedLabel && <span className="hidden sm:inline">Connected</span>}
             {sessionName && (
-              <span className="text-[#e6edf3]">
-                <span className="hidden sm:inline text-[#6e7681] mx-1">/</span>
+              <span className="text-[var(--gs-text)]">
+                <span className="hidden sm:inline text-[var(--gs-text-dim)] mx-1">/</span>
                 {sessionName.split(':').pop()}
               </span>
             )}
             {(processTitle || terminalTitle) && (
-              <span className="hidden md:inline text-[#8b949e] ml-2">
+              <span className="hidden md:inline text-[var(--gs-text-muted)] ml-2">
                 {processTitle || terminalTitle}
               </span>
             )}
             {lastAlertLabel && (
-              <span className="hidden lg:inline text-[#f59e0b] ml-2">{lastAlertLabel}</span>
+              <span className="hidden lg:inline text-[var(--gs-warning-bright)] ml-2">{lastAlertLabel}</span>
             )}
           </div>
         </div>

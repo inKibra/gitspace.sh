@@ -66,9 +66,9 @@ export function NativeAgentSurface({
           style={{
             padding: '4px 12px',
             fontSize: '12px',
-            color: '#8b949e',
-            backgroundColor: '#161b22',
-            borderTop: '1px solid #21262d',
+            color: 'var(--gs-text-muted)',
+            backgroundColor: 'var(--gs-bg-elevated)',
+            borderTop: '1px solid var(--gs-border-muted)',
             textAlign: 'center',
           }}
         >

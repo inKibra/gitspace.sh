@@ -528,23 +528,23 @@ export function ReplayTerminalWeb({
     : '[Space] Play  [←/→] Event  [Shift+←/→] Checkpoint';
 
   return (
-    <div className="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden">
-      <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0">
+    <div className="w-screen h-screen flex flex-col bg-[var(--gs-bg)] overflow-hidden">
+      <div className="bg-[var(--gs-bg-elevated)] px-4 py-2 flex items-center justify-between border-b border-[var(--gs-border)] min-h-[52px] gap-2 flex-shrink-0">
         <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1 overflow-hidden">
           <button
             onClick={onBack}
-            className="text-sm text-[#8b949e] hover:text-[#e6edf3] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+            className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
           >
             ← <span className="hidden sm:inline ml-1">Workspaces</span>
           </button>
           <div className="min-w-0 flex-1 overflow-hidden">
-            <div className="text-sm text-[#8b949e] truncate">
-              <span className={replay.status === 'crashed' ? 'text-[#ff7b72]' : 'text-[#79c0ff]'}>↺</span>{' '}
+            <div className="text-sm text-[var(--gs-text-muted)] truncate">
+              <span className={replay.status === 'crashed' ? 'text-[var(--gs-danger-hover)]' : 'text-[var(--gs-info-light)]'}>↺</span>{' '}
               {machineLabel && <span className="hidden sm:inline">{machineLabel}</span>}
-              {machineLabel && <span className="hidden sm:inline text-[#6e7681] mx-1">/</span>}
-              <span className="text-[#e6edf3]">{replay.sessionName}</span>
+              {machineLabel && <span className="hidden sm:inline text-[var(--gs-text-dim)] mx-1">/</span>}
+              <span className="text-[var(--gs-text)]">{replay.sessionName}</span>
             </div>
-            <div className="text-xs text-[#8b949e] font-mono tabular-nums flex items-center gap-3 overflow-x-auto whitespace-nowrap">
+            <div className="text-xs text-[var(--gs-text-muted)] font-mono tabular-nums flex items-center gap-3 overflow-x-auto whitespace-nowrap">
               <span className="inline-flex min-w-[14ch] justify-end">
                 <span className="inline-block min-w-[6ch] text-right">{activeTimeLabel}</span>
                 <span>/</span>
@@ -552,12 +552,12 @@ export function ReplayTerminalWeb({
               </span>
               <span className="inline-flex min-w-[7ch] justify-end">{stepLabel}</span>
               {checkpointPosition && <span className="inline-flex min-w-[10ch] justify-end">ckpt {checkpointPosition.current}/{checkpointPosition.total}</span>}
-              <span className={`inline-flex min-w-[9ch] justify-end ${isPlaying ? 'text-[#3fb950]' : 'text-[#8b949e]'}`}>
+              <span className={`inline-flex min-w-[9ch] justify-end ${isPlaying ? 'text-[var(--gs-success)]' : 'text-[var(--gs-text-muted)]'}`}>
                 {isPlaying ? '[playing]' : '[paused]'}
               </span>
-              <span className="inline-flex min-w-[6ch] justify-end text-[#d29922]">{speedLabel}</span>
-              {(timelineLoading || frameLoading) && <span className="text-[#d29922]">[loading]</span>}
-              {error && <span className="text-[#ff7b72] truncate">[error] {error}</span>}
+              <span className="inline-flex min-w-[6ch] justify-end text-[var(--gs-warning)]">{speedLabel}</span>
+              {(timelineLoading || frameLoading) && <span className="text-[var(--gs-warning)]">[loading]</span>}
+              {error && <span className="text-[var(--gs-danger-hover)] truncate">[error] {error}</span>}
             </div>
           </div>
         </div>
@@ -565,44 +565,44 @@ export function ReplayTerminalWeb({
           <div className="hidden md:flex items-center gap-1">
             <button
               onClick={() => stepReplay(-1)}
-              className="px-2 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[40px] border border-[#30363d]"
+              className="px-2 py-2 text-xs bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] min-h-[40px] border border-[var(--gs-border)]"
               aria-label="Previous replay step"
             >
               ←
             </button>
             <button
               onClick={togglePlayback}
-              className="px-3 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[40px] border border-[#30363d]"
+              className="px-3 py-2 text-xs bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] min-h-[40px] border border-[var(--gs-border)]"
             >
               {isPlaying ? 'Pause' : 'Play'}
             </button>
             <button
               onClick={() => stepReplay(1)}
-              className="px-2 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[40px] border border-[#30363d]"
+              className="px-2 py-2 text-xs bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] min-h-[40px] border border-[var(--gs-border)]"
               aria-label="Next replay step"
             >
               →
             </button>
             <button
               onClick={() => adjustPlaybackSpeed(-1)}
-              className="px-2 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[40px] border border-[#30363d]"
+              className="px-2 py-2 text-xs bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] min-h-[40px] border border-[var(--gs-border)]"
               aria-label="Slower playback"
             >
               -
             </button>
             <button
               onClick={() => adjustPlaybackSpeed(1)}
-              className="px-2 py-2 text-xs bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[40px] border border-[#30363d]"
+              className="px-2 py-2 text-xs bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] min-h-[40px] border border-[var(--gs-border)]"
               aria-label="Faster playback"
             >
               +
             </button>
           </div>
-          <div className="hidden lg:block text-xs text-[#6e7681] font-mono whitespace-nowrap">{transportHint}</div>
+          <div className="hidden lg:block text-xs text-[var(--gs-text-dim)] font-mono whitespace-nowrap">{transportHint}</div>
           {onDismiss && (
             <button
               onClick={() => void handleDismiss()}
-              className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+              className="px-3 py-2 text-sm bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] min-h-[44px] border border-[var(--gs-border)]"
             >
               {replay.dismissedAt ? 'Restore' : 'Dismiss'}
             </button>

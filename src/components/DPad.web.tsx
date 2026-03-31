@@ -224,7 +224,7 @@ export function DPad({
       >
         {/* Outer ring */}
         <div
-          className="absolute rounded-full border-2 border-[#30363d]"
+          className="absolute rounded-full border-2 border-[var(--gs-border)]"
           style={{
             width: JOYSTICK_RADIUS * 2,
             height: JOYSTICK_RADIUS * 2,
@@ -257,7 +257,7 @@ export function DPad({
 
         {/* Center knob (40px wide, centered in the ring) */}
         <div
-          className="absolute rounded-full bg-[#22c55e] shadow-glow transition-transform duration-75"
+          className="absolute rounded-full bg-[var(--gs-accent)] shadow-glow transition-transform duration-75"
           style={{
             width: 40,
             height: 40,
@@ -268,7 +268,7 @@ export function DPad({
 
         {/* Dead zone indicator */}
         <div
-          className="absolute rounded-full border border-[#21262d]"
+          className="absolute rounded-full border border-[var(--gs-border-muted)]"
           style={{
             width: DEAD_ZONE * 2,
             height: DEAD_ZONE * 2,
@@ -280,13 +280,13 @@ export function DPad({
 
       {/* Modifier indicator */}
       {modifierText && (
-        <div className="absolute top-8 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-[#161b22] text-[#e6edf3] text-sm border border-[#30363d]">
+        <div className="absolute top-8 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] text-sm border border-[var(--gs-border)]">
           {modifierText}+Arrow
         </div>
       )}
 
       {/* Instructions */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[#6e7681] text-sm">
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[var(--gs-text-dim)] text-sm">
         Drag to move • Release to close
       </div>
     </div>
@@ -325,7 +325,7 @@ const DirectionIndicator = React.memo(function DirectionIndicator({
   return (
     <div
       className={`absolute text-xl font-bold transition-colors duration-75 ${
-        active ? 'text-[#22c55e]' : 'text-[#30363d]'
+        active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-border)]'
       }`}
       style={{
         left: pos.x,

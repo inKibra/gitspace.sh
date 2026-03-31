@@ -7,6 +7,7 @@
  */
 
 import { useEffect } from 'react';
+import { useTheme, THEMES } from '../lib/theme.web.js';
 import { KanbanBoardWeb } from '../components/KanbanBoard.web.js';
 import type { WorkspaceBoardGroup } from '../app/shared/board/types.js';
 import { getShiftArrowPhaseChange } from '../app/shared/board/phase-movement.js';
@@ -39,6 +40,35 @@ function isTypingTarget(target: EventTarget | null): boolean {
     || (target instanceof HTMLElement && target.isContentEditable);
 }
 
+/** Compact theme switcher — cycles through themes on click, dropdown on hover. */
+function ThemePicker() {
+  const { theme, setTheme } = useTheme();
+  const current = THEMES.find(t => t.id === theme);
+  return (
+    <div className="relative group">
+      <button
+        type="button"
+        className="px-2 py-1 text-xs rounded text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
+        title={`Theme: ${current?.label ?? theme}`}
+      >
+        ◐ {current?.label ?? theme}
+      </button>
+      <div className="hidden group-hover:block absolute right-0 top-full mt-1 py-1 min-w-[160px] bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] z-50">
+        {THEMES.map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTheme(t.id)}
+            className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--gs-bg-active)] ${t.id === theme ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}
+          >
+            {t.label}
+            {t.group === 'light' ? ' ☀' : ''}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function BoardPage({
   groups,
@@ -91,50 +121,51 @@ export function BoardPage({
   }, [groups, onPhaseChange, selectedWorkspaceId]);
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
+    <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
       {/* Header bar */}
-      <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[#30363d] bg-[#161b22]">
-        <span className="text-sm font-medium text-[#e6edf3]">Project Board</span>
-        <span className="text-xs text-[#484f58]">·</span>
-        <span className="text-xs text-[#484f58]">
+      <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
+        <span className="text-sm font-medium text-[var(--gs-text)]">Project Board</span>
+        <span className="text-xs text-[var(--gs-text-ghost)]">·</span>
+        <span className="text-xs text-[var(--gs-text-ghost)]">
           {worktreeCount} worktree{worktreeCount !== 1 ? 's' : ''}
         </span>
+        <ThemePicker />
         <div className="flex-1" />
         <button
           onClick={onOpenInbox}
-          className="px-2 py-1 text-xs rounded text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#21262d]"
+          className="px-2 py-1 text-xs rounded text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
         >
           Inbox{inboxUnreadCount > 0 ? ` (${inboxUnreadCount})` : ''}
         </button>
         <button
           onClick={onOpenHelp}
-          className="px-2 py-1 text-xs rounded text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#21262d]"
+          className="px-2 py-1 text-xs rounded text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
         >
           ?
         </button>
         <button
           onClick={onOpenCreateMenu}
-          className="px-2 py-1 text-xs rounded bg-[#238636] text-white hover:bg-[#2ea043]"
+          className="px-2 py-1 text-xs rounded bg-[var(--gs-success-muted)] text-white hover:bg-[var(--gs-success-muted)]"
         >
           + New
         </button>
         {onOpenCommandPalette && (
           <button
             onClick={onOpenCommandPalette}
-            className="px-2 py-1 text-xs rounded text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#21262d]"
+            className="px-2 py-1 text-xs rounded text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
           >
             Cmd+K
           </button>
         )}
         <button
           onClick={onRefresh}
-          className="px-2 py-1 text-xs rounded text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#21262d]"
+          className="px-2 py-1 text-xs rounded text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
         >
           Refresh
         </button>
         <button
           onClick={onDisconnect}
-          className="px-2 py-1 text-xs rounded text-[#f85149] hover:bg-[#2d1617]"
+          className="px-2 py-1 text-xs rounded text-[var(--gs-danger)] hover:bg-[var(--gs-chip-red-bg)]"
         >
           Disconnect
         </button>
@@ -144,7 +175,7 @@ export function BoardPage({
       <div className="flex-1 min-h-0 p-3 overflow-auto">
         {loading ? (
           <div className="flex items-center justify-center h-full">
-            <div className="text-sm text-[#8b949e]">{loadingLabel}</div>
+            <div className="text-sm text-[var(--gs-text-muted)]">{loadingLabel}</div>
           </div>
         ) : (
           <KanbanBoardWeb

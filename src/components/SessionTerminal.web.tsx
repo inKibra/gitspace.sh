@@ -198,12 +198,12 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           fontSize: 14,
           fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
           theme: {
-            background: "#0d1117",
-            foreground: "#e6edf3",
-            cursor: "#22c55e",
-            cursorAccent: "#0d1117",
-            selectionBackground: "#22c55e33",
-            selectionForeground: "#e6edf3",
+          background: "var(--gs-terminal-bg)",
+          foreground: "var(--gs-terminal-fg)",
+          cursor: "var(--gs-terminal-cursor)",
+          cursorAccent: "var(--gs-terminal-cursor-accent)",
+          selectionBackground: "var(--gs-terminal-selection)",
+          selectionForeground: "var(--gs-terminal-fg)",
             black: "#484f58",
             red: "#ff7b72",
             green: "#3fb950",
@@ -485,7 +485,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   return (
     <div
       ref={containerRef}
-      className="w-full h-full bg-[#0d1117]"
+      className="w-full h-full bg-[var(--gs-bg)]"
     />
   );
 });

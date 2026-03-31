@@ -13,6 +13,7 @@ import type { ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
+import { useTheme, THEMES } from '../lib/theme.web.js';
 
 /* ─── Sidebar helpers ─────────────────────────────────────────────────────── */
 
@@ -20,7 +21,7 @@ function SidebarSection({ title, extra, children }: { title: string; extra?: Rea
   return (
     <div className="mb-3">
       <div className="flex items-center gap-2 mb-1">
-        <span className="text-[10px] uppercase tracking-wider text-[#484f58] font-medium">{title}</span>
+        <span className="text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)] font-medium">{title}</span>
         {extra}
       </div>
       <div className="space-y-0.5">{children}</div>
@@ -53,23 +54,51 @@ function SidebarItem({
       className={
         'w-full flex items-center gap-1.5 px-1.5 py-1 rounded text-xs text-left truncate transition-colors ' +
         (highlight
-          ? 'bg-[#1c2333] text-[#e6edf3] ring-1 ring-[#58a6ff]/30'
+          ? 'bg-[var(--gs-highlight-bg)] text-[var(--gs-text)] ring-1 ring-[var(--gs-info)]/30'
           : active
-            ? 'bg-[#1c1c1e] text-[#e6edf3]'
-            : 'text-[#a1a1aa] hover:bg-[#1c1c1e] hover:text-[#e6edf3]')
+            ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]'
+            : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]')
       }
     >
       {dotColor && <span className={dotColor} style={{ fontSize: '8px' }}>●</span>}
       <span className="truncate flex-1 min-w-0">
         <span className="block truncate">{label}</span>
-        {subtitle && <span className="block truncate text-[10px] text-[#6e7681]">{subtitle}</span>}
+        {subtitle && <span className="block truncate text-[10px] text-[var(--gs-text-dim)]">{subtitle}</span>}
       </span>
-      {rightLabel && <span className="text-[10px] text-[#484f58] flex-shrink-0">{rightLabel}</span>}
+      {rightLabel && <span className="text-[10px] text-[var(--gs-text-ghost)] flex-shrink-0">{rightLabel}</span>}
     </Tag>
   );
 }
 
-/* DetailActionButton removed — sidebar uses SidebarItem + inline micro-buttons instead */
+
+function ThemeSwitcher() {
+  const { theme, setTheme } = useTheme();
+  const current = THEMES.find(t => t.id === theme);
+  return (
+    <div className="relative group ml-auto flex-shrink-0">
+      <button
+        type="button"
+        className="px-2 py-0.5 text-[10px] rounded text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
+        title={`Theme: ${current?.label ?? theme}`}
+      >
+        ◐
+      </button>
+      <div className="hidden group-hover:block absolute right-0 top-full mt-1 py-1 min-w-[160px] bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] z-50">
+        {THEMES.map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTheme(t.id)}
+            className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--gs-bg-active)] ${t.id === theme ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}
+          >
+            {t.label}
+            {t.group === 'light' ? ' ☀' : ''}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /* ─── Main component ──────────────────────────────────────────────────────── */
 
@@ -179,17 +208,17 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     : null;
 
   return (
-    <div className="h-full flex flex-col bg-[#0d1117] overflow-hidden">
+    <div className="h-full flex flex-col bg-[var(--gs-bg)] overflow-hidden">
       {/* ── Workspace pill strip ── */}
       {visibleStripWorkspaces.length > 0 && (
-        <div className="flex-shrink-0 flex items-center gap-0 overflow-x-auto border-b border-[#21262d] bg-[#0d1117] px-1 py-0.5 scrollbar-none">
+        <div className="flex-shrink-0 flex items-center gap-0 overflow-x-auto border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg)] px-1 py-0.5 scrollbar-none">
           {stripDisplayItems.map((di, idx) => {
             if (di.type === 'project-label') {
               return (
                 <span
                   key={`label-${di.tier}-${di.projectName}`}
                   className={
-                    'px-2 text-xs text-[#484f58] flex-shrink-0 select-none whitespace-nowrap' +
+                    'px-2 text-xs text-[var(--gs-text-ghost)] flex-shrink-0 select-none whitespace-nowrap' +
                     (idx === 0 ? '' : ' ml-1')
                   }
                 >
@@ -201,11 +230,11 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             const isCurrent = w.id === workspace.id;
             const primaryColor = getWorkspaceStripColor(w, workspaceStatusById);
             const dotColorClass =
-              primaryColor === 'orange' ? 'text-[#f59e0b]' :
-              primaryColor === 'red'    ? 'text-[#ff7b72]' :
-              primaryColor === 'green'  ? 'text-[#22c55e]' :
-              primaryColor === 'blue'   ? 'text-[#58a6ff]' :
-              'text-[#374151]';
+              primaryColor === 'orange' ? 'text-[var(--gs-warning-bright)]' :
+              primaryColor === 'red'    ? 'text-[var(--gs-danger-hover)]' :
+              primaryColor === 'green'  ? 'text-[var(--gs-accent)]' :
+              primaryColor === 'blue'   ? 'text-[var(--gs-info)]' :
+              'text-[var(--gs-text-ghost)]';
             return (
               <button
                 key={w.id}
@@ -214,15 +243,15 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 className={
                   'flex items-center gap-1 px-2 py-1 rounded text-xs flex-shrink-0 transition-colors ' +
                   (isCurrent
-                    ? 'bg-[#21262d] text-[#e6edf3]'
-                    : 'text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22]')
+                    ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]'
+                    : 'text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-elevated)]')
                 }
                 title={`${w.name} (${w.projectName})`}
               >
                 <span className={dotColorClass}>●</span>
                 <span>{w.name}</span>
                 {getWorkspaceStripColor(w, workspaceStatusById) === 'orange' && (
-                  <span className="text-[#f59e0b]">⚡</span>
+                  <span className="text-[var(--gs-warning-bright)]">⚡</span>
                 )}
               </button>
             );
@@ -231,50 +260,51 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
       )}
 
       {/* ── Header ── */}
-      <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[#30363d] bg-[#161b22]">
+      <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
         <button
           type="button"
           onClick={onClose}
-          className="text-sm text-[#8b949e] hover:text-[#e6edf3] flex-shrink-0"
+          className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] flex-shrink-0"
         >
           ← Board
         </button>
-        <span className="text-[#30363d]">|</span>
+        <span className="text-[var(--gs-border)]">|</span>
         <div className="min-w-0 flex-1">
-          <span className="font-medium text-[#e6edf3] truncate">{workspace.name}</span>
-          <span className="ml-2 text-xs text-[#8b949e]">
-            {phase && <span className="px-1.5 py-0.5 rounded bg-[#21262d] text-[#79c0ff] mr-2">{phaseLabel}</span>}
+          <span className="font-medium text-[var(--gs-text)] truncate">{workspace.name}</span>
+          <span className="ml-2 text-xs text-[var(--gs-text-muted)]">
+            {phase && <span className="px-1.5 py-0.5 rounded bg-[var(--gs-bg-active)] text-[var(--gs-info-light)] mr-2">{phaseLabel}</span>}
             {workspaceSessions.length} session(s) · {workspaceReplays.length} replay(s)
           </span>
+          <ThemeSwitcher />
         </div>
       </div>
 
       {/* ── Sidebar + Main ── */}
       <div className="flex-1 flex min-h-0">
         {/* Sidebar */}
-        <div className="w-[240px] flex-shrink-0 border-r border-[#21262d] bg-[#161618] overflow-y-auto px-2 py-3 flex flex-col">
+        <div className="w-[240px] flex-shrink-0 border-r border-[var(--gs-border-muted)] bg-[var(--gs-sidebar-bg)] overflow-y-auto px-2 py-3 flex flex-col">
           <div>
           {/* AI AGENTS */}
           <SidebarSection
             title="AI Agents"
             extra={
               <>
-                {agentSessionCount > 0 && <span className="text-[10px] text-[#484f58]">{agentSessionCount}</span>}
-                {pendingPermissions > 0 && <span className="text-[10px] text-[#f59e0b]">⚡{pendingPermissions}</span>}
+                {agentSessionCount > 0 && <span className="text-[10px] text-[var(--gs-text-ghost)]">{agentSessionCount}</span>}
+                {pendingPermissions > 0 && <span className="text-[10px] text-[var(--gs-warning-bright)]">⚡{pendingPermissions}</span>}
               </>
             }
           >
             {activeAgentSessions.length === 0 ? (
-              <div className="text-xs text-[#484f58] px-1.5">No agents</div>
+              <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No agents</div>
             ) : (
               agentRows.filter((row) => row.bucket === 'active').map((row) => {
                 const agentState = row.state;
                 const dotColor =
-                  agentState === 'needs-permission' ? 'text-[#f59e0b]'
-                  : agentState === 'running' ? 'text-[#10b981]'
-                  : agentState === 'waiting' ? 'text-[#3b82f6]'
-                  : agentState === 'retrying' || agentState === 'error' ? 'text-[#ef4444]'
-                  : 'text-[#484f58]';
+                  agentState === 'needs-permission' ? 'text-[var(--gs-warning-bright)]'
+                  : agentState === 'running' ? 'text-[var(--gs-running)]'
+                  : agentState === 'waiting' ? 'text-[var(--gs-info)]'
+                  : agentState === 'retrying' || agentState === 'error' ? 'text-[var(--gs-danger)]'
+                  : 'text-[var(--gs-text-ghost)]';
                 return (
                   <div key={row.id} className="flex items-center gap-1">
                     <SidebarItem
@@ -288,10 +318,10 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                       }}
                     />
                     {onAbortAgentSession && agentState === 'running' && (
-                      <button type="button" onClick={() => void detailActions.abortAgentSession(row.id)} className="text-[10px] text-[#ff7b72] hover:text-[#ff9e9e] flex-shrink-0 px-1">✕</button>
+                      <button type="button" onClick={() => void detailActions.abortAgentSession(row.id)} className="text-[10px] text-[var(--gs-danger-hover)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">✕</button>
                     )}
                     {onCloseAgentSession && agentState !== 'running' && (
-                      <button type="button" onClick={() => void detailActions.closeAgentSession(row.id)} className="text-[10px] text-[#484f58] hover:text-[#8b949e] flex-shrink-0 px-1">×</button>
+                      <button type="button" onClick={() => void detailActions.closeAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">×</button>
                     )}
                   </div>
                 );
@@ -300,7 +330,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             {agentRows.filter((row) => row.bucket === 'closed').map((row) => (
               <div key={`closed:${row.id}`} className="flex items-center gap-1">
                 <SidebarItem
-                  dotColor="text-[#484f58]"
+                  dotColor="text-[var(--gs-text-ghost)]"
                   label={row.title}
                   rightLabel="closed"
                   onClick={() => {
@@ -308,7 +338,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   }}
                 />
                 {onArchiveAgentSession && (
-                  <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[#484f58] hover:text-[#8b949e] flex-shrink-0 px-1">arc</button>
+                  <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">arc</button>
                 )}
               </div>
             ))}
@@ -321,9 +351,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 />
                 {showArchivedAgents && agentRows.filter((row) => row.bucket === 'archived').map((row) => (
                   <div key={`archived:${row.id}`} className="flex items-center gap-1">
-                    <SidebarItem dotColor="text-[#484f58]" label={row.title} rightLabel="archived" />
+                    <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="archived" />
                     {onRestoreAgentSession && (
-                      <button type="button" onClick={() => void detailActions.restoreAgentSession(row.id)} className="text-[10px] text-[#3fb950] hover:text-[#22c55e] flex-shrink-0 px-1">res</button>
+                      <button type="button" onClick={() => void detailActions.restoreAgentSession(row.id)} className="text-[10px] text-[var(--gs-success)] hover:text-[var(--gs-accent)] flex-shrink-0 px-1">res</button>
                     )}
                   </div>
                 ))}
@@ -342,7 +372,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             <SidebarSection
               title="Agent Tasks"
               extra={
-                <span className="text-[10px] text-[#484f58]">
+                <span className="text-[10px] text-[var(--gs-text-ghost)]">
                   {agentTodoPhases.reduce((n, p) => n + p.tasks.filter(t => t.status === 'completed').length, 0)}/
                   {agentTodoPhases.reduce((n, p) => n + p.tasks.length, 0)} done
                 </span>
@@ -350,13 +380,13 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             >
               {agentTodoPhases.map((phase) => (
                 <div key={phase.name} className="mb-1">
-                  <div className="text-[10px] text-[#8b949e] uppercase tracking-wide px-1.5 mb-0.5">{phase.name}</div>
+                  <div className="text-[10px] text-[var(--gs-text-muted)] uppercase tracking-wide px-1.5 mb-0.5">{phase.name}</div>
                   {phase.tasks.map((task, i) => {
                     const dotColor =
-                      task.status === 'completed' ? 'text-[#3fb950]'
-                      : task.status === 'in_progress' ? 'text-[#58a6ff]'
-                      : task.status === 'abandoned' ? 'text-[#484f58]'
-                      : 'text-[#8b949e]';
+                      task.status === 'completed' ? 'text-[var(--gs-success)]'
+                      : task.status === 'in_progress' ? 'text-[var(--gs-info)]'
+                      : task.status === 'abandoned' ? 'text-[var(--gs-text-ghost)]'
+                      : 'text-[var(--gs-text-muted)]';
                     return (
                       <SidebarItem
                         key={`${phase.name}-${i}`}
@@ -374,7 +404,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           {/* TERMINALS */}
           <SidebarSection title="Terminals">
             {shellSessions.length === 0 ? (
-              <div className="text-xs text-[#484f58] px-1.5">No sessions</div>
+              <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No sessions</div>
             ) : (
               sessionRows.map((row) => {
                 const s = workspaceSessions.find((session) => session.id === row.id)!;
@@ -385,7 +415,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 return (
                   <div key={row.id} className="flex items-center gap-1">
                     <SidebarItem
-                      dotColor={isOpen ? 'text-[#3fb950]' : row.attached ? 'text-[#f59e0b]' : 'text-[#10b981]'}
+                      dotColor={isOpen ? 'text-[var(--gs-success)]' : row.attached ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-running)]'}
                       label={row.label}
                       subtitle={row.subtitle}
                       rightLabel={row.alertLabel ?? row.statusLabel}
@@ -396,7 +426,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                       }}
                     />
                     {onDeleteSession && (
-                      <button type="button" onClick={() => detailActions.deleteSession(s.id, s.name)} className="text-[10px] text-[#484f58] hover:text-[#ff7b72] flex-shrink-0 px-1">×</button>
+                      <button type="button" onClick={() => detailActions.deleteSession(s.id, s.name)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">×</button>
                     )}
                   </div>
                 );
@@ -420,7 +450,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                     <div key={service.key}>
                       <div className="flex items-center gap-1">
                         <SidebarItem
-                          dotColor={isOpen ? 'text-[#3fb950]' : service.state === 'running' ? 'text-[#10b981]' : 'text-[#484f58]'}
+                          dotColor={isOpen ? 'text-[var(--gs-success)]' : service.state === 'running' ? 'text-[var(--gs-running)]' : 'text-[var(--gs-text-ghost)]'}
                           label={service.label}
                           subtitle={service.subtitle ?? localUrl}
                           rightLabel={service.state === 'disabled' ? undefined : (service.alertLabel ?? service.state)}
@@ -436,7 +466,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                           <button
                             type="button"
                             onClick={() => onAttachSession({ sessionId: service.attachableSessionId, viewOnly: true })}
-                            className="text-[10px] text-[#58a6ff] hover:text-[#79c0ff] flex-shrink-0 px-1"
+                            className="text-[10px] text-[var(--gs-info)] hover:text-[var(--gs-info-light)] flex-shrink-0 px-1"
                             title="Attach service terminal"
                           >
                             att
@@ -448,7 +478,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                             <button
                               type="button"
                               onClick={() => window.open(targetUrl, '_blank', 'noopener,noreferrer')}
-                              className="text-[10px] text-[#484f58] hover:text-[#58a6ff] flex-shrink-0 px-1"
+                              className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-info)] flex-shrink-0 px-1"
                               title={`Open ${targetUrl}` }
                             >
                               ↗
@@ -459,7 +489,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                           <button
                             type="button"
                             onClick={() => onStopProcess({ workspaceId: workspace.id, processName: service.processName })}
-                            className="text-[10px] text-[#484f58] hover:text-[#ff7b72] flex-shrink-0 px-1"
+                            className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1"
                             title="Stop service"
                           >
                             stop
@@ -467,9 +497,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                         )}
                       </div>
                       {service.state === 'running' && localUrl && (
-                        <div className="pl-5 text-[10px] text-[#484f58] truncate">
+                        <div className="pl-5 text-[10px] text-[var(--gs-text-ghost)] truncate">
                           {service.hostedUrl
-                            ? <a href={service.hostedUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[#58a6ff] transition-colors">{service.hostedUrl.replace(/^http:\/\//, '')}</a>
+                            ? <a href={service.hostedUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[var(--gs-info)] transition-colors">{service.hostedUrl.replace(/^http:\/\//, '')}</a>
                             : localUrl ? <span>{localUrl}</span> : null
                           }
                         </div>
@@ -484,7 +514,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           {workspaceReplays.length > 0 && (
             <SidebarSection title="Replays">
               {visibleReplayRows.map((replay) => {
-                const tone = replay.tone === 'red' ? 'text-[#ff7b72]' : 'text-[#3fb950]';
+                const tone = replay.tone === 'red' ? 'text-[var(--gs-danger-hover)]' : 'text-[var(--gs-success)]';
                 return (
                   <SidebarItem
                     key={replay.replayId}
@@ -511,12 +541,12 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           {(notesSummary?.total ?? 0) > 0 && (
             <SidebarSection
               title="Notes"
-              extra={<span className="text-[10px] text-[#484f58]">{notesSummary?.openTodoCount ?? 0} todo</span>}
+              extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{notesSummary?.openTodoCount ?? 0} todo</span>}
             >
               {visibleTodoRows.map((note) => (
                 <SidebarItem
                   key={note.id}
-                  dotColor={note.priority === 'high' ? 'text-[#ff7b72]' : note.priority === 'medium' ? 'text-[#f59e0b]' : 'text-[#3b82f6]'}
+                  dotColor={note.priority === 'high' ? 'text-[var(--gs-danger-hover)]' : note.priority === 'medium' ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-info)]'}
                   label={note.label}
                   rightLabel={note.priority}
                 />
@@ -524,7 +554,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               {visibleRecentNoteRows.map((note) => (
                 <SidebarItem
                   key={note.id}
-                  dotColor="text-[#484f58]"
+                  dotColor="text-[var(--gs-text-ghost)]"
                   label={note.label}
                   rightLabel="note"
                 />
@@ -537,7 +567,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               {pmRows.map((row) => (
                 <SidebarItem
                   key={row.id}
-                  dotColor={row.tone === 'red' ? 'text-[#ff7b72]' : row.tone === 'green' ? 'text-[#3fb950]' : row.tone === 'blue' ? 'text-[#58a6ff]' : 'text-[#484f58]'}
+                  dotColor={row.tone === 'red' ? 'text-[var(--gs-danger-hover)]' : row.tone === 'green' ? 'text-[var(--gs-success)]' : row.tone === 'blue' ? 'text-[var(--gs-info)]' : 'text-[var(--gs-text-ghost)]'}
                   label={row.label}
                   rightLabel={row.detail}
                   onClick={row.actionable && row.section === 'pull-request' && onOpenGitHubPullRequest ? () => void detailActions.footerAction('open-github-pr') : undefined}
@@ -548,13 +578,13 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
 
           {/* SYSTEM */}
           <SidebarSection title="System">
-            <SidebarItem label="Event Logs" dotColor="text-[#10b981]" rightLabel="live" onClick={() => onOpenEvents(workspace.id)} />
+            <SidebarItem label="Event Logs" dotColor="text-[var(--gs-running)]" rightLabel="live" onClick={() => onOpenEvents(workspace.id)} />
           </SidebarSection>
           </div>
 
-          <div className="mt-auto pt-3 border-t border-[#21262d] space-y-0.5">
+          <div className="mt-auto pt-3 border-t border-[var(--gs-border-muted)] space-y-0.5">
             {pendingPermissions > 0 && (
-              <div className="px-1.5 text-[11px] text-[#f59e0b]">
+              <div className="px-1.5 text-[11px] text-[var(--gs-warning-bright)]">
                 ⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}
               </div>
             )}
@@ -578,12 +608,12 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               <div className="flex-1 flex items-center justify-center">
                 {pendingAgentAttach ? (
                   <div className="text-center">
-                    <div className="text-sm text-[#8b949e] animate-pulse">Attaching agent session…</div>
+                    <div className="text-sm text-[var(--gs-text-muted)] animate-pulse">Attaching agent session…</div>
                   </div>
                 ) : (
                   <div className="text-center">
-                    <div className="text-sm text-[#484f58]">No active session</div>
-                    <div className="text-xs text-[#30363d] mt-1">Attach a session or agent from the sidebar.</div>
+                    <div className="text-sm text-[var(--gs-text-ghost)]">No active session</div>
+                    <div className="text-xs text-[var(--gs-border)] mt-1">Attach a session or agent from the sidebar.</div>
                   </div>
                 )}
               </div>

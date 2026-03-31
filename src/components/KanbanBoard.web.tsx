@@ -10,11 +10,11 @@ import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.
 
 function PmChip({ label, tone = 'dim' }: { label: string; tone?: 'green' | 'blue' | 'amber' | 'red' | 'dim' }) {
   const toneClass =
-    tone === 'green' ? 'border-[#1f6f43] bg-[#0d2d1a] text-[#3fb950]'
-    : tone === 'blue' ? 'border-[#1f6feb] bg-[#0d1f33] text-[#58a6ff]'
-    : tone === 'amber' ? 'border-[#9a6700] bg-[#2d2100] text-[#d29922]'
-    : tone === 'red' ? 'border-[#a40e26] bg-[#2d1117] text-[#ff7b72]'
-    : 'border-[#30363d] bg-[#161b22] text-[#8b949e]';
+    tone === 'green' ? 'border-[var(--gs-chip-green-border)] bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]'
+    : tone === 'blue' ? 'border-[var(--gs-chip-blue-border)] bg-[var(--gs-chip-blue-bg)] text-[var(--gs-chip-blue-text)]'
+    : tone === 'amber' ? 'border-[var(--gs-chip-amber-border)] bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]'
+    : tone === 'red' ? 'border-[var(--gs-chip-red-border)] bg-[var(--gs-chip-red-bg)] text-[var(--gs-chip-red-text)]'
+    : 'border-[var(--gs-chip-dim-border)] bg-[var(--gs-chip-dim-bg)] text-[var(--gs-chip-dim-text)]';
   return <span className={`rounded border px-1.5 py-0.5 text-[10px] ${toneClass}`}>{label}</span>;
 }
 
@@ -93,17 +93,17 @@ function WorkspaceCard({
 
   // Primary status dot: orange = needs attention, green = active, dim = idle
   const dotColor = status?.primaryColor === 'orange'
-    ? 'text-[#f59e0b]'   // orange — agent waiting for permission
+    ? 'text-[var(--gs-warning-bright)]'   // orange — agent waiting for permission
     : status?.primaryColor === 'red'
-      ? 'text-[#ff7b72]'
+      ? 'text-[var(--gs-danger-hover)]'
       : status?.primaryColor === 'blue'
-        ? 'text-[#58a6ff]'
+        ? 'text-[var(--gs-info)]'
         : (sessionCount > 0 || agentCount > 0 || processCount > 0)
-      ? 'text-[#22c55e]' // green — something is running
-      : 'text-[#374151]'; // dim — nothing active
+      ? 'text-[var(--gs-accent)]' // green — something is running
+      : 'text-[var(--gs-text-ghost)]'; // dim — nothing active
 
   return (
-    <div className="rounded border border-transparent hover:border-[#30363d]">
+    <div className="rounded border border-transparent hover:border-[var(--gs-border)]">
       <div
         role="button"
         tabIndex={0}
@@ -111,7 +111,7 @@ function WorkspaceCard({
         onKeyDown={(e) => e.key === 'Enter' && onSelect()}
         className={
           'cursor-pointer rounded-t px-2 py-1.5 text-sm ' +
-          (isSelected ? 'bg-[#388bfd] text-white' : 'text-[#c9d1d9] hover:bg-[#30363d]')
+          (isSelected ? 'bg-[var(--gs-info)] text-white' : 'text-[var(--gs-text-secondary)] hover:bg-[var(--gs-border)]')
         }
       >
         <div className="flex items-center gap-1.5">
@@ -126,12 +126,12 @@ function WorkspaceCard({
         <div className="flex items-center gap-1.5 text-xs opacity-90 mt-0.5 pl-3.5">
           {entry.branch && <span className="truncate">({entry.branch})</span>}
           {pendingPermissionCount > 0 && (
-            <span title={`${pendingPermissionCount} agent(s) need attention`} className="flex-shrink-0 text-[#f59e0b]">
+            <span title={`${pendingPermissionCount} agent(s) need attention`} className="flex-shrink-0 text-[var(--gs-warning-bright)]">
               ⚡{pendingPermissionCount}
             </span>
           )}
           {agentCount > 0 && (
-            <span title={`${agentCount} agent(s)`} className="flex-shrink-0 text-[#10b981]">
+            <span title={`${agentCount} agent(s)`} className="flex-shrink-0 text-[var(--gs-running)]">
               ✦{agentCount}
             </span>
           )}
@@ -141,7 +141,7 @@ function WorkspaceCard({
             </span>
           )}
           {processCount > 0 && (
-            <span title={`${processCount} process(es)`} className="flex-shrink-0 text-[#8b949e]">
+            <span title={`${processCount} process(es)`} className="flex-shrink-0 text-[var(--gs-text-muted)]">
               ⚙{processCount}
             </span>
           )}
@@ -189,7 +189,7 @@ function WorkspaceCard({
         )}
       </div>
       {onPhaseChange && (
-        <div className="flex gap-0.5 px-2 pb-1.5 pt-0.5 rounded-b bg-[#161b22]" onClick={(e) => e.stopPropagation()}>
+        <div className="flex gap-0.5 px-2 pb-1.5 pt-0.5 rounded-b bg-[var(--gs-bg-elevated)]" onClick={(e) => e.stopPropagation()}>
           {PHASES.map((phase) => (
             <button
               key={phase}
@@ -199,8 +199,8 @@ function WorkspaceCard({
               className={
                 'text-xs px-1.5 py-0.5 rounded ' +
                 (entry.phase === phase
-                  ? 'bg-[#388bfd] text-white'
-                  : 'text-[#6e7681] hover:bg-[#30363d] hover:text-[#e6edf3]')
+                  ? 'bg-[var(--gs-info)] text-white'
+                  : 'text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)] hover:text-[var(--gs-text)]')
               }
             >
               {PHASE_LABELS[phase].slice(0, 1)}
@@ -225,12 +225,12 @@ export function KanbanBoardWeb({
       {groups.map((group) => (
         <div
           key={group.phase}
-          className={`flex min-w-[180px] flex-1 flex-col rounded border border-[#30363d] bg-[#21262d] p-2 ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
+          className={`flex min-w-[180px] flex-1 flex-col rounded border border-[var(--gs-border)] bg-[var(--gs-bg-active)] p-2 ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
         >
-          <div className="font-semibold text-[#58a6ff]">
+          <div className="font-semibold text-[var(--gs-info)]">
             {PHASE_LABELS[group.phase] ?? group.phase}
           </div>
-          <div className="text-xs text-[#6e7681]">
+          <div className="text-xs text-[var(--gs-text-dim)]">
             {group.workspaces.length} workspace(s)
           </div>
           <div className="mt-2 flex flex-col gap-0.5">

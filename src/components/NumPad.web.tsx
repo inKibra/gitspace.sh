@@ -173,7 +173,7 @@ export function NumPad({
       {/* NumPad container */}
       <div
         ref={padRef}
-        className="bg-[#161b22] rounded-xl shadow-2xl border border-[#30363d]"
+        className="bg-[var(--gs-bg-elevated)] rounded-xl shadow-2xl border border-[var(--gs-border)]"
         style={{
           width: PAD_WIDTH,
           padding: PADDING,
@@ -184,18 +184,18 @@ export function NumPad({
       >
         {/* Active number indicator */}
         <div
-          className="text-center text-lg font-mono text-[#e6edf3] mb-2"
+          className="text-center text-lg font-mono text-[var(--gs-text)] mb-2"
           style={{ height: 24 }}
         >
           {activeNum !== null ? (
             <span>
               {modifierText && (
-                <span className="text-[#22c55e]">{modifierText}+</span>
+                <span className="text-[var(--gs-accent)]">{modifierText}+</span>
               )}
               {activeNum}
             </span>
           ) : (
-            <span className="text-[#6e7681]">
+            <span className="text-[var(--gs-text-dim)]">
               {modifierText ? `${modifierText}+` : 'Tap a number'}
             </span>
           )}
@@ -221,7 +221,7 @@ export function NumPad({
       </div>
 
       {/* Instructions */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[#6e7681] text-sm">
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[var(--gs-text-dim)] text-sm">
         Tap number • Tap outside to close
       </div>
     </div>
@@ -250,8 +250,8 @@ function NumKey({ num, active, onClick }: NumKeyProps): React.ReactElement {
         transition-all duration-75 active:scale-95
         ${
           active
-            ? 'bg-[#22c55e] text-[#0d1117] shadow-glow'
-            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+            ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] shadow-glow'
+            : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
         }
       `}
       style={{

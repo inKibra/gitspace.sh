@@ -238,14 +238,14 @@ export function ReviewPage({
       width: '100vw',
       display: 'flex',
       flexDirection: 'column',
-      background: '#0d1117',
-      color: '#e6edf3',
+      background: 'var(--gs-bg)',
+      color: 'var(--gs-text)',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       overflow: 'hidden',
     }}>
       <div style={{
-        background: '#161b22',
-        borderBottom: '1px solid #30363d',
+        background: 'var(--gs-bg-elevated)',
+        borderBottom: '1px solid var(--gs-border)',
         padding: '10px 16px',
         display: 'flex',
         alignItems: 'center',
@@ -258,7 +258,7 @@ export function ReviewPage({
           style={{
             background: 'none',
             border: 'none',
-            color: '#8b949e',
+            color: 'var(--gs-text-muted)',
             cursor: 'pointer',
             fontSize: '13px',
             padding: '4px',
@@ -270,27 +270,27 @@ export function ReviewPage({
           ← Workspaces
         </button>
 
-        <div style={{ height: '16px', width: '1px', background: '#30363d' }} />
+        <div style={{ height: '16px', width: '1px', background: 'var(--gs-border)' }} />
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
           {machineName && (
             <>
-              <span style={{ fontSize: '13px', color: '#8b949e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ fontSize: '13px', color: 'var(--gs-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {machineName}
               </span>
-              <span style={{ color: '#30363d' }}>/</span>
+              <span style={{ color: 'var(--gs-border)' }}>/</span>
             </>
           )}
-          <span style={{ fontSize: '13px', color: '#8b949e' }}>{projectName}</span>
-          <span style={{ color: '#30363d' }}>/</span>
-          <span style={{ fontSize: '13px', color: '#e6edf3', fontWeight: 600 }}>{workspaceLabel ?? workspaceName}</span>
+          <span style={{ fontSize: '13px', color: 'var(--gs-text-muted)' }}>{projectName}</span>
+          <span style={{ color: 'var(--gs-border)' }}>/</span>
+          <span style={{ fontSize: '13px', color: 'var(--gs-text)', fontWeight: 600 }}>{workspaceLabel ?? workspaceName}</span>
           {headBranch && (
-            <span style={{ fontSize: '11px', color: '#6e7681', background: '#21262d', padding: '1px 6px', borderRadius: '4px', border: '1px solid #30363d' }}>
+            <span style={{ fontSize: '11px', color: 'var(--gs-text-dim)', background: 'var(--gs-btn-secondary-bg)', padding: '1px 6px', borderRadius: '4px', border: '1px solid var(--gs-border)' }}>
               {headBranch}
             </span>
           )}
           {baseBranch && (
-            <span style={{ fontSize: '11px', color: '#6e7681' }}>← {baseBranch}</span>
+            <span style={{ fontSize: '11px', color: 'var(--gs-text-dim)' }}>← {baseBranch}</span>
           )}
         </div>
 
@@ -312,7 +312,7 @@ export function ReviewPage({
         {(actionError || actionSuccess) && (
           <span style={{
             fontSize: '12px',
-            color: actionError ? '#f85149' : '#22c55e',
+            color: actionError ? 'var(--gs-danger)' : 'var(--gs-accent)',
             maxWidth: '320px',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
@@ -328,9 +328,9 @@ export function ReviewPage({
           style={{
             fontSize: '12px',
             padding: '5px 10px',
-            background: '#21262d',
-            color: '#8b949e',
-            border: '1px solid #30363d',
+            background: 'var(--gs-btn-secondary-bg)',
+            color: 'var(--gs-text-muted)',
+            border: '1px solid var(--gs-border)',
             borderRadius: '6px',
             cursor: 'pointer',
           }}
@@ -344,9 +344,9 @@ export function ReviewPage({
           style={{
             fontSize: '12px',
             padding: '5px 10px',
-            background: '#21262d',
-            color: '#58a6ff',
-            border: '1px solid #30363d',
+            background: 'var(--gs-btn-secondary-bg)',
+            color: 'var(--gs-info)',
+            border: '1px solid var(--gs-border)',
             borderRadius: '6px',
             cursor: 'pointer',
           }}
@@ -360,9 +360,9 @@ export function ReviewPage({
           style={{
             fontSize: '12px',
             padding: '5px 10px',
-            background: pushing ? '#21262d' : '#22c55e',
-            color: pushing ? '#8b949e' : '#0d1117',
-            border: '1px solid #30363d',
+            background: pushing ? 'var(--gs-btn-secondary-bg)' : 'var(--gs-accent)',
+            color: pushing ? 'var(--gs-text-muted)' : 'var(--gs-text-on-accent)',
+            border: '1px solid var(--gs-border)',
             borderRadius: '6px',
             cursor: threads.length === 0 ? 'not-allowed' : 'pointer',
             fontWeight: 600,
@@ -376,9 +376,9 @@ export function ReviewPage({
           style={{
             fontSize: '12px',
             padding: '5px 10px',
-            background: '#21262d',
-            color: '#8b949e',
-            border: '1px solid #30363d',
+            background: 'var(--gs-btn-secondary-bg)',
+            color: 'var(--gs-text-muted)',
+            border: '1px solid var(--gs-border)',
             borderRadius: '6px',
             cursor: 'pointer',
           }}
@@ -389,8 +389,8 @@ export function ReviewPage({
               marginLeft: '6px',
               fontSize: '10px',
               padding: '0 5px',
-              background: '#58a6ff',
-              color: '#0d1117',
+              background: 'var(--gs-info)',
+              color: 'var(--gs-text-on-accent)',
               borderRadius: '8px',
               fontWeight: 700,
             }}>
@@ -403,9 +403,9 @@ export function ReviewPage({
       {(reviewError || filesError) && (
         <div style={{
           padding: '8px 16px',
-          background: '#f8514922',
-          borderBottom: '1px solid #f8514944',
-          color: '#f85149',
+          background: 'var(--gs-chip-red-bg)',
+          borderBottom: '1px solid var(--gs-danger)',
+          color: 'var(--gs-danger)',
           fontSize: '12px',
         }}>
           Error: {filesError?.message ?? reviewError}
@@ -418,7 +418,7 @@ export function ReviewPage({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: '#8b949e',
+          color: 'var(--gs-text-muted)',
           fontSize: '13px',
         }}>
           Loading changed files...
@@ -429,13 +429,13 @@ export function ReviewPage({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: '#8b949e',
+          color: 'var(--gs-text-muted)',
           fontSize: '13px',
           flexDirection: 'column',
           gap: '8px',
         }}>
           <div>No changes vs {baseBranch ?? 'base branch'}.</div>
-          <div style={{ fontSize: '12px', color: '#6e7681' }}>
+          <div style={{ fontSize: '12px', color: 'var(--gs-text-dim)' }}>
             This workspace is up to date with its base branch.
           </div>
         </div>
@@ -478,11 +478,11 @@ export function ReviewPage({
                   width: '6px',
                   cursor: 'col-resize',
                   background: 'transparent',
-                  borderLeft: '1px solid #30363d',
+                  borderLeft: '1px solid var(--gs-border)',
                 }}
               />
 
-              <div style={{ flex: 1, overflow: 'hidden', borderLeft: '1px solid #30363d' }}>
+              <div style={{ flex: 1, overflow: 'hidden', borderLeft: '1px solid var(--gs-border)' }}>
               <ThreadPanel
                 threads={threads}
                 currentFilePath={currentFilePath}
