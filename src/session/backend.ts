@@ -214,11 +214,17 @@ export interface SessionBackend {
   archiveAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   restoreAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean }): Promise<void>;
+  promptAgentSession?(workspaceId: string, agentSessionId: string, text: string, images?: import('../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void>;
+  stageUpload?(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }>;
+  /** Send a dialog response back to the server for a pending host UI dialog. */
+  sendDialogResponse?(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void>;
 
   /** Retrieve the persisted last-selected agent session ID for a workspace. */
   getAgentSessionPreference(workspaceId: string): Promise<string | null>;
   /** Persist the selected agent session ID for a workspace. */
   setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void>;
+  listAgentCommands?(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>>;
+  getFileSuggestions?(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>>;
 }
 
 export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline, TerminalSnapshot };

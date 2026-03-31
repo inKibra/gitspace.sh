@@ -69,13 +69,12 @@ async function openResolvedAgentSession(
   context: AppClientContext,
   args: OpenAgentSessionArgs & { workspaceRef: AppClientAgentSessionOpenValue['workspaceRef'] },
 ): Promise<AgentSessionCommandResult<AppClientAgentSessionOpenValue>> {
+  // Verify the backend supports agent attach (surface the error early)
   const backendResult = getBackend(context, args.workspaceId, args.workspaceRef.backendKey);
   if (!backendResult.ok) {
     return backendResult;
   }
-
-  const backend = backendResult.value;
-  if (!backend.attachAgentSession) {
+  if (!backendResult.value.attachAgentSession) {
     return agentSessionFailure({
       code: 'operation-unavailable',
       message: 'Agent attach unavailable',
@@ -88,7 +87,11 @@ async function openResolvedAgentSession(
   void context.multi.setAgentSessionPreference(args.workspaceRef, args.agentSessionId).catch(() => undefined);
 
   try {
-    await backend.attachAgentSession(args.workspaceRef.workspaceId, args.agentSessionId, args.attachOptions);
+    // Go through multi (engine) so SET_PENDING_AGENT_ATTACH is dispatched
+    await context.multi.attachAgentSession(
+      { ...args.workspaceRef, agentSessionId: args.agentSessionId },
+      args.attachOptions,
+    );
     return agentSessionSuccess({
       workspaceRef: args.workspaceRef,
       agentSessionRef: {

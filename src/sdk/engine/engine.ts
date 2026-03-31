@@ -96,6 +96,8 @@ function dispatchBackendEvent(
         sessionId: evt.sessionId,
         sessionName: evt.sessionName ?? null,
         meta: { sessionName: evt.sessionName ?? null },
+        workspaceId: evt.workspaceId ?? null,
+        agentSessionId: evt.agentSessionId ?? null,
       };
     case 'session_meta':
       return { type: 'SET_ATTACHED_SESSION_META', backendKey, meta: evt.meta };
@@ -129,6 +131,17 @@ function dispatchBackendEvent(
       return null;
     case 'machine_snapshot':
       return { type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: evt.snapshot };
+    case 'host_ui_dialog_request':
+      return { type: 'SET_HOST_UI_DIALOG', backendKey, request: evt.request };
+    case 'host_ui_event':
+      if (evt.event.type === 'working-message') {
+        return {
+          type: 'SET_HOST_UI_WORKING_MESSAGE',
+          backendKey,
+          message: evt.event.payload.message,
+        };
+      }
+      return null;
     default:
       return null;
   }
@@ -459,10 +472,44 @@ export class GitSpaceEngine {
     );
   }
 
-  attachAgentSession(ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean }): Promise<void> {
+  async attachAgentSession(ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean }): Promise<void> {
+    this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: true });
+    try {
+      return await this.withRefBackend(ref, (b) =>
+        b.attachAgentSession?.(ref.workspaceId, ref.agentSessionId, attachOptions) ?? Promise.resolve()
+      );
+    } catch (error) {
+      this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: false });
+      throw error;
+    }
+  }
+
+  promptAgentSession(ref: BackendScopedAgentSessionRef, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
     return this.withRefBackend(ref, (b) =>
-      b.attachAgentSession?.(ref.workspaceId, ref.agentSessionId, attachOptions) ?? Promise.resolve()
+      b.promptAgentSession?.(ref.workspaceId, ref.agentSessionId, text, images) ?? Promise.resolve()
     );
+  }
+
+  stageUpload(ref: BackendScopedWorkspaceRef, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.stageUpload) return Promise.reject(new Error('File staging unavailable'));
+      return b.stageUpload(ref.workspaceId, fileName, data, mimeType);
+    });
+  }
+
+  sendDialogResponse(
+    backendKey: BackendKey,
+    dialogId: string,
+    dialogType: 'select' | 'confirm' | 'input' | 'editor',
+    value: string | boolean | undefined,
+  ): Promise<void> {
+    return this.withBackend(backendKey, (b) =>
+      b.sendDialogResponse?.(dialogId, dialogType, value) ?? Promise.resolve()
+    );
+  }
+
+  clearPendingDialog(backendKey: BackendKey): void {
+    this.dispatch({ type: 'CLEAR_HOST_UI_DIALOG', backendKey });
   }
 
   getAgentSessionPreference(ref: BackendScopedWorkspaceRef): Promise<string | null> {
@@ -471,6 +518,20 @@ export class GitSpaceEngine {
 
   setAgentSessionPreference(ref: BackendScopedWorkspaceRef, sessionId: string): Promise<void> {
     return this.withRefBackend(ref, (b) => b.setAgentSessionPreference(ref.workspaceId, sessionId));
+  }
+
+  listAgentCommands(ref: BackendScopedWorkspaceRef): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.listAgentCommands) return Promise.reject(new Error('Command listing unavailable'));
+      return b.listAgentCommands(ref.workspaceId);
+    });
+  }
+
+  getFileSuggestions(ref: BackendScopedWorkspaceRef, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.getFileSuggestions) return Promise.reject(new Error('File suggestions unavailable'));
+      return b.getFileSuggestions(ref.workspaceId, prefix, limit);
+    });
   }
 
   // ─── Backend-targeted creation/discovery ────────────────────────────────────

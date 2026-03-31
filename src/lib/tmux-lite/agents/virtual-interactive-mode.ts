@@ -21,6 +21,7 @@ interface InteractiveModeInstance {
   getUserInput(): Promise<{ text: string; images?: unknown[]; cancelled: boolean; started: boolean }>;
   shutdown(): Promise<void>;
   isInitialized: boolean;
+  renderInitialMessages?(): void;
 }
 
 interface SubmitInteractiveInputFn {
@@ -85,6 +86,12 @@ export async function startVirtualInteractiveMode(
   }
 
   await mode.init();
+
+  // Render historical conversation messages from the session file so resumed
+  // sessions show prior messages, matching the Pi CLI behavior.
+  if (typeof mode.renderInitialMessages === 'function') {
+    mode.renderInitialMessages();
+  }
 
   let running = true;
   const loopPromise = (async () => {

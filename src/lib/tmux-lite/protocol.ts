@@ -220,6 +220,13 @@ export interface AgentWorkspaceTargetPayload {
   projectName: string;
 }
 
+export interface AgentPromptImage {
+  /** Raw base64 image data (not a data URL) */
+  data: string;
+  /** MIME type, e.g. "image/png", "image/jpeg" */
+  mimeType: string;
+}
+
 export interface AgentSessionSummaryPayload {
   id: string;
   workspaceId: string;
@@ -355,7 +362,10 @@ export type Command =
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string }
+  | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[] }
+  | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
+  | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }
+  | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
   | { type: 'github-repos'; org?: string }
@@ -386,6 +396,12 @@ export type Command =
       agentSessionId: string;
       permissionId: string;
       response: 'allow' | 'deny';
+    }
+  | {
+      type: 'agent-dialog-response';
+      dialogId: string;
+      dialogType: 'select' | 'confirm' | 'input' | 'editor';
+      value: string | boolean | undefined;
     }
   | { type: "kill-server" }
   | { type: "inbox" }
@@ -418,6 +434,17 @@ export type Response =
   | { type: 'machine-watch-started' }
   | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
   | { type: 'agent-bool'; ok: boolean }
+  | { type: 'agent-staged'; stagedPath: string }
+  | { type: 'agent-commands'; commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> }
+  | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }
+  | {
+      type: 'agent-dialog-request';
+      request: import('./agents/host-ui-bridge.js').HostUIDialogRequest;
+    }
+  | {
+      type: 'agent-ui-event';
+      event: import('./agents/host-ui-bridge.js').HostUIEvent;
+    }
   | { type: 'attach-script-output'; requestId: string; phase: 'pre' | 'setup' | 'select'; data: string; done?: boolean; error?: string }
   | { type: 'attach-prepared'; requestId: string; session: Session; workspaceId?: string; viewOnly?: boolean }
   | { type: 'service-started'; workspaceId: string; processName: string; sessionId: string; sessionIds: string[] }

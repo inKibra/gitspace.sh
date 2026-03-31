@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { flushSync } from "react-dom";
 import type { SessionTerminalHandle } from "./components/SessionTerminal.web";
 import { ReplayTerminalWeb } from './components/ReplayTerminal.web';
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
@@ -58,6 +59,7 @@ import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.j
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
 
 import { browserPlatform } from './sdk/platforms/browser.js';
+import { NativeAgentSurfaceConnected } from './components/NativeAgentSurfaceConnected.web.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 
 // Replay helper
@@ -152,7 +154,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       if (st?.mode === 'attached') return key;
     }
     return null;
-  }, [multi]);
+  }, [multi, multiMachineState]);
 
   const attachedBackendState = attachedBackendKey ? multi.getBackendState(attachedBackendKey) : null;
   const terminalStatus = activeBackendState?.status ?? 'disconnected';
@@ -201,6 +203,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const flow = useFlow({
     onError: (error) => console.error('Flow error:', error),
   });
+
 
   const workspaceLifecycleClient = useMemo(() => ({
     multi,
@@ -459,8 +462,27 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       toast.error(message);
     },
   });
-  const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await openAgentSessionAction(workspaceId, agentSessionId);
+  const [agentAttachPending, setAgentAttachPending] = useState(false);
+  const [pendingAgentAttachTarget, setPendingAgentAttachTarget] = useState<{ workspaceId: string; agentSessionId: string } | null>(null);
+  // Clear pending only when the requested target session actually becomes attached, or on error.
+  useEffect(() => {
+    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
+    const attachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
+    const targetReached = !!pendingAgentAttachTarget
+      && terminalMode === 'attached'
+      && attachedAgentSessionId === pendingAgentAttachTarget.agentSessionId
+      && attachedWorkspaceId === pendingAgentAttachTarget.workspaceId;
+    if (agentAttachPending && (targetReached || commandError)) {
+      setAgentAttachPending(false);
+      setPendingAgentAttachTarget(null);
+    }
+  }, [agentAttachPending, pendingAgentAttachTarget, terminalMode, attachedBackendState, commandError]);
+  const handleOpenAgentSession = useCallback((workspaceId: string, agentSessionId: string) => {
+    flushSync(() => {
+      setAgentAttachPending(true);
+      setPendingAgentAttachTarget({ workspaceId, agentSessionId });
+    });
+    void openAgentSessionAction(workspaceId, agentSessionId);
   }, [openAgentSessionAction]);
 
   const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
@@ -1551,43 +1573,59 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const attachedMatchesSelected = !backendAttachedWorkspaceId
       || !selectedRef
       || selectedRef.workspaceId === backendAttachedWorkspaceId;
-    const inlineTerminalOutlet = (terminalMode === 'attached' && attachedMatchesSelected) ? (
-      <AttachedTerminalPaneWeb
-        rootClassName="flex-1 min-h-0 flex flex-col bg-[#0d1117] overflow-hidden"
-        headerClassName="flex-shrink-0 px-3 py-2 border-b border-[#21262d] bg-[#161b22] flex items-center justify-between gap-2"
-        sessionName={attachedSessionName}
-        processTitle={attachedSessionMeta?.processTitle ?? null}
-        terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
-        lastAlertLabel={attachedSessionMeta?.lastAlertKind
-          ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
-          : null}
-        showConnectedLabel={true}
-        showMobileControls={showMobileControls}
-        inputMode={inputMode}
-        keyboardVisible={keyboardVisible}
-        onToggleInputMode={toggleInlineInputMode}
-        inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
-          inputMode
-            ? 'bg-[#22c55e] text-[#0d1117] font-medium'
-            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
-        }`}
-        onDetach={() => multi.detachSession(inlineAttachedRef)}
-        detachButtonClassName="px-2 py-1 text-xs rounded border border-[#30363d] text-[#e6edf3] hover:bg-[#30363d]"
-        terminalContainerClassName={inlineTerminalContainerClass}
-        terminalRef={terminalRef}
-        onData={handleInlineKeyboardData}
-        setWriteCallback={setWriteCallback}
-        onResize={resizePty}
-        onActivity={handleTerminalActivity}
-        readOnly={isViewOnlySession}
-        allowTapFocus={inputMode || !showMobileControls}
-        allowTouchScroll={!inputMode}
-        onSendData={handleInlineSendData}
-        onFocusTerminal={handleInlineFocusTerminal}
-        modifiers={modifiers}
-        onModifiersChange={setModifiers}
-        showFloatingControls={showInlineFloatingControls}
-      />
+    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
+    const switchingAgentSession = !!pendingAgentAttachTarget
+      && agentAttachPending
+      && (attachedAgentSessionId !== pendingAgentAttachTarget.agentSessionId
+        || backendAttachedWorkspaceId !== pendingAgentAttachTarget.workspaceId);
+    const inlineTerminalOutlet = switchingAgentSession ? (
+      <div className="flex-1 flex items-center justify-center bg-[#0d1117]">
+        <div className="text-sm text-[#8b949e]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+      </div>
+    ) : (terminalMode === 'attached' && attachedMatchesSelected) ? (
+      <div className="flex-1 min-h-0 flex flex-col">
+        <AttachedTerminalPaneWeb
+          rootClassName="flex-1 min-h-0 flex flex-col bg-[#0d1117] overflow-hidden"
+          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[#21262d] bg-[#161b22] flex items-center justify-between gap-2"
+          sessionName={attachedSessionName}
+          processTitle={attachedSessionMeta?.processTitle ?? null}
+          terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
+          lastAlertLabel={attachedSessionMeta?.lastAlertKind
+            ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
+            : null}
+          showConnectedLabel={true}
+          showMobileControls={showMobileControls}
+          inputMode={inputMode}
+          keyboardVisible={keyboardVisible}
+          onToggleInputMode={toggleInlineInputMode}
+          inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
+            inputMode
+              ? 'bg-[#22c55e] text-[#0d1117] font-medium'
+              : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+          }`}
+          onDetach={() => multi.detachSession(inlineAttachedRef)}
+          detachButtonClassName="px-2 py-1 text-xs rounded border border-[#30363d] text-[#e6edf3] hover:bg-[#30363d]"
+          terminalContainerClassName={inlineTerminalContainerClass}
+          terminalRef={terminalRef}
+          onData={handleInlineKeyboardData}
+          setWriteCallback={setWriteCallback}
+          onResize={resizePty}
+          onActivity={handleTerminalActivity}
+          readOnly={isViewOnlySession}
+          allowTapFocus={inputMode || !showMobileControls}
+          allowTouchScroll={!inputMode}
+          onSendData={handleInlineSendData}
+          onFocusTerminal={handleInlineFocusTerminal}
+          modifiers={modifiers}
+          onModifiersChange={setModifiers}
+          showFloatingControls={showInlineFloatingControls}
+        />
+        <NativeAgentSurfaceConnected />
+      </div>
+    ) : agentAttachPending ? (
+      <div className="flex-1 flex items-center justify-center bg-[#0d1117]">
+        <div className="text-sm text-[#8b949e]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+      </div>
     ) : null;
 
     // ── Workspace detail page (full-screen, replaces board) ────────────────
@@ -1602,6 +1640,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             agentSessionCount={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0) : 0}
             pendingPermissions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0) : 0}
             attachedSessionId={backendAttachedSessionId}
+            attachedAgentSessionId={attachedBackendState?.attachedAgentSessionId ?? null}
+            pendingAgentAttach={agentAttachPending}
             allWorkspaces={allWorkspaceEntries}
             workspaceStatusById={workspaceStatusById}
             runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}

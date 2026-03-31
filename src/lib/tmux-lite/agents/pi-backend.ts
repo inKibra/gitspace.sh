@@ -118,11 +118,13 @@ export class PiBackend implements AgentBackend {
 
     const { createAgentSession } = await importOmpModule();
     const { agentDir, sessionManager } = await createPiSessionManager(cwd);
-    const { session } = await createAgentSession({
+    const result = await createAgentSession({
       agentDir,
       sessionManager,
       cwd,
+      hasUI: true,
     });
+    const { session } = result;
     if (input.title) {
       await sessionManager.setSessionName(input.title);
     }

@@ -58,6 +58,7 @@ import {
   getKnownAgentSessions,
   listLiveAgentSessions,
   promptAgentSession,
+  stageUploadFile,
   rebindPiTerminalSessionOwnership,
   releasePiTerminalSessionOwnership,
   respondToAgentPermission,
@@ -65,6 +66,10 @@ import {
   subscribeAgentControl,
   syncKnownWorkspaces,
   markAgentSessionIdle,
+  setAgentHostUIEmitter,
+  resolveAgentDialogResponse,
+  listAgentCommands,
+  getFileSuggestions,
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
@@ -354,6 +359,29 @@ async function getAgentControlReady(): Promise<void> {
       });
     });
     agentControlSubscribed = true;
+
+    // Install the host UI bridge emitter so extension dialog requests
+    // and UI events are broadcast to all watching clients.
+    setAgentHostUIEmitter({
+      emitDialogRequest(request) {
+        for (const socket of agentStateWatchers) {
+          try {
+            sendRouterResponse(socket, { type: 'agent-dialog-request', request });
+          } catch {
+            agentStateWatchers.delete(socket);
+          }
+        }
+      },
+      emitEvent(event) {
+        for (const socket of agentStateWatchers) {
+          try {
+            sendRouterResponse(socket, { type: 'agent-ui-event', event });
+          } catch {
+            agentStateWatchers.delete(socket);
+          }
+        }
+      },
+    });
   }
 }
 
@@ -2522,11 +2550,23 @@ routerListener = Bun.listen({
           case 'agent-prompt':
             try {
               await getAgentControlReady();
-              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text);
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images);
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+            }
+            break;
+
+
+          case 'agent-stage-upload':
+            try {
+              await getAgentControlReady();
+              const stageResult = await stageUploadFile(cmd.target, cmd.fileName, cmd.data, cmd.mimeType);
+              res = { type: 'agent-staged', stagedPath: stageResult.stagedPath };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to stage upload: ${errMsg}` };
             }
             break;
 
@@ -2919,6 +2959,7 @@ routerListener = Bun.listen({
               await getAgentControlReady();
               const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
               res = { type: 'session', session };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
@@ -2938,6 +2979,42 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to respond to agent permission: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-dialog-response':
+            try {
+              const resolved = resolveAgentDialogResponse({
+                type: cmd.dialogType,
+                id: cmd.dialogId,
+                value: cmd.value as any,
+              });
+              res = { type: 'agent-bool', ok: resolved };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resolve dialog: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-list-commands':
+            try {
+              await getAgentControlReady();
+              const commands = await listAgentCommands(cmd.target);
+              res = { type: 'agent-commands', commands };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list commands: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-file-suggestions':
+            try {
+              await getAgentControlReady();
+              const suggestions = await getFileSuggestions(cmd.target, cmd.prefix, cmd.limit);
+              res = { type: 'agent-file-suggestions', suggestions };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to get file suggestions: ${errMsg}` };
             }
             break;
 

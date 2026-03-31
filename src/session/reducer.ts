@@ -24,10 +24,14 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
     attachedSessionName: null,
     attachedSessionMeta: null,
     attachedWorkspaceId: null,
+    attachedAgentSessionId: null,
+    pendingAgentAttach: false,
     scriptState: null,
     events: [],
     liveEventIds: [],
     savedEventFilters: [],
+    pendingDialogRequest: null,
+    agentWorkingMessage: undefined,
   };
 }
 
@@ -124,6 +128,22 @@ export function sessionEngineReducer(
           [action.backendKey]: {
             ...backend,
             commandError: action.commandError,
+            pendingAgentAttach: false,
+          },
+        },
+      };
+    }
+
+    case 'SET_PENDING_AGENT_ATTACH': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            pendingAgentAttach: action.pending,
           },
         },
       };
@@ -285,6 +305,10 @@ export function sessionEngineReducer(
             attachedSessionName: nextSessionName,
             attachedSessionMeta: nextMeta,
             attachedWorkspaceId: nextWorkspaceId,
+            attachedAgentSessionId: attached ? (action.agentSessionId ?? null) : null,
+            pendingDialogRequest: attached ? backend.pendingDialogRequest : null,
+            agentWorkingMessage: attached ? backend.agentWorkingMessage : undefined,
+            pendingAgentAttach: false,
           },
         },
       };
@@ -332,6 +356,51 @@ export function sessionEngineReducer(
           [action.backendKey]: {
             ...backend,
             savedEventFilters: action.filters,
+          },
+        },
+      };
+    }
+
+    case 'SET_HOST_UI_DIALOG': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            pendingDialogRequest: action.request,
+          },
+        },
+      };
+    }
+
+    case 'SET_HOST_UI_WORKING_MESSAGE': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            agentWorkingMessage: action.message,
+          },
+        },
+      };
+    }
+
+    case 'CLEAR_HOST_UI_DIALOG': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            pendingDialogRequest: null,
           },
         },
       };

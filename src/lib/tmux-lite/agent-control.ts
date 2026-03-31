@@ -1,4 +1,5 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
+import type { HostUIBridgeEmitter, HostUIDialogResponse } from './agents/host-ui-bridge.js';
 import {
   defaultAgentEventManager,
   type AgentStateUpdateDelta,
@@ -7,6 +8,7 @@ import {
 import { getArchivedSessions } from '../../agents/agent-db.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
+import type { AgentPromptImage } from './protocol.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 
 
@@ -249,10 +251,50 @@ export async function createAgentSession(target: AgentWorkspaceTarget, title?: s
   return getKnownAgentSessions(target);
 }
 
-export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string): Promise<void> {
+export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string, images?: AgentPromptImage[]): Promise<void> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text);
+  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text, images);
+}
+
+export async function stageUploadFile(
+  target: AgentWorkspaceTarget,
+  fileName: string,
+  data: string,
+  mimeType: string,
+): Promise<{ stagedPath: string }> {
+  await ensureAgentControlInitialized();
+  const { join, basename } = await import('path');
+  const { mkdirSync, writeFileSync, existsSync } = await import('fs');
+
+  // Sanitize filename: strip path components, limit length
+  let safeName = basename(fileName).replace(/[\/\\:*?"<>|]/g, '_');
+  if (safeName.length > 200) safeName = safeName.slice(0, 200);
+  if (!safeName) safeName = 'upload';
+
+  const stagingDir = join(target.workspacePath, '.gitspace', 'uploads');
+  mkdirSync(stagingDir, { recursive: true });
+
+  // Deduplicate: if file exists, append _N before extension
+  let finalName = safeName;
+  let finalPath = join(stagingDir, finalName);
+  if (existsSync(finalPath)) {
+    const dotIdx = safeName.lastIndexOf('.');
+    const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
+    const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
+    let counter = 1;
+    while (existsSync(finalPath)) {
+      finalName = `${base}_${counter}${ext}`;
+      finalPath = join(stagingDir, finalName);
+      counter++;
+    }
+  }
+
+  // Decode base64 and write
+  const bytes = Buffer.from(data, 'base64');
+  writeFileSync(finalPath, bytes);
+
+  return { stagedPath: finalPath };
 }
 
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
@@ -318,4 +360,83 @@ export async function respondToAgentPermission(
 
 export function markAgentSessionIdle(workspaceId: string, sessionId: string): void {
   defaultAgentEventManager.markSessionIdle(workspaceId, sessionId);
+}
+
+// ---------------------------------------------------------------------------
+// Host UI bridge wiring
+// ---------------------------------------------------------------------------
+
+/**
+ * Install the bridge emitter so extension dialog requests and UI events
+ * are broadcast to watching clients. Call once during tmux-lite server setup.
+ */
+export function setAgentHostUIEmitter(emitter: HostUIBridgeEmitter | null): void {
+  defaultPiCoordinator.setHostUIEmitter(emitter);
+}
+
+/**
+ * Route a dialog response from a client to the pending SDK Promise.
+ */
+export function resolveAgentDialogResponse(response: HostUIDialogResponse): boolean {
+  return defaultPiCoordinator.resolveDialogResponse(response);
+}
+
+export async function listAgentCommands(
+    target: AgentWorkspaceTarget,
+): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
+    await ensureAgentControlInitialized();
+    return defaultPiCoordinator.listAvailableCommands(target);
+}
+
+export async function getFileSuggestions(
+    target: AgentWorkspaceTarget,
+    prefix: string,
+    limit: number = 50,
+): Promise<Array<{ path: string; isDirectory: boolean }>> {
+    await ensureAgentControlInitialized();
+    const { join } = await import('path');
+    const { readdirSync } = await import('fs');
+
+    const results: Array<{ path: string; isDirectory: boolean }> = [];
+    const workspacePath = target.workspacePath;
+
+    // Normalize prefix: strip leading @ if present
+    const cleanPrefix = prefix.startsWith('@') ? prefix.slice(1) : prefix;
+
+    // Determine search directory and name prefix from the cleaned input
+    const lastSlash = cleanPrefix.lastIndexOf('/');
+    const searchDir = lastSlash >= 0
+        ? join(workspacePath, cleanPrefix.slice(0, lastSlash))
+        : workspacePath;
+    const filePrefix = lastSlash >= 0
+        ? cleanPrefix.slice(lastSlash + 1).toLowerCase()
+        : cleanPrefix.toLowerCase();
+    const relativeBase = lastSlash >= 0 ? cleanPrefix.slice(0, lastSlash + 1) : '';
+
+    try {
+        const entries = readdirSync(searchDir, { withFileTypes: true });
+        for (const entry of entries) {
+            if (results.length >= limit) break;
+            // Skip hidden files and noisy directories
+            if (entry.name.startsWith('.')) continue;
+            if (entry.isDirectory() && ['node_modules', '__pycache__', '.git'].includes(entry.name)) continue;
+
+            if (entry.name.toLowerCase().startsWith(filePrefix)) {
+                results.push({
+                    path: relativeBase + entry.name,
+                    isDirectory: entry.isDirectory(),
+                });
+            }
+        }
+    } catch {
+        // Directory doesn't exist or isn't readable — return empty
+    }
+
+    // Directories first, then alphabetical within each group
+    results.sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+        return a.path.localeCompare(b.path);
+    });
+
+    return results;
 }

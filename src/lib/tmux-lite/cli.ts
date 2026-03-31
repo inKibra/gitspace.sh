@@ -972,6 +972,8 @@ export async function respondToAgentPermission(
 export async function watchAgentState(handlers: {
   onSnapshot?: (workspaces: import('./agent-event-manager.js').WorkspaceAgentState[]) => void;
   onUpdate?: (delta: import('./agent-event-manager.js').AgentStateUpdateDelta) => void;
+  onDialogRequest?: (request: import('./agents/host-ui-bridge.js').HostUIDialogRequest) => void;
+  onUIEvent?: (event: import('./agents/host-ui-bridge.js').HostUIEvent) => void;
   onError?: (error: Error) => void;
 }): Promise<() => void> {
   await ensureServer();
@@ -1025,6 +1027,14 @@ export async function watchAgentState(handlers: {
               }
               if (message.type === 'agent-state-update') {
                 handlers.onUpdate?.(message.delta);
+                continue;
+              }
+              if (message.type === 'agent-dialog-request') {
+                handlers.onDialogRequest?.(message.request);
+                continue;
+              }
+              if (message.type === 'agent-ui-event') {
+                handlers.onUIEvent?.(message.event);
                 continue;
               }
               if (message.type === 'error') {

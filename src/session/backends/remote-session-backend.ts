@@ -193,6 +193,8 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'agent_state_snapshot',
   'agent_state_update',
   'machine_snapshot',
+  'agent_dialog_request',
+  'agent_ui_event',
 ]);
 
 function isHandshakeEnvelope(value: unknown): value is HandshakeEnvelope {
@@ -298,10 +300,25 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private readonly handshake: RemoteSessionHandshakeAdapter<THandshakeState, TServerHello, TServerAuth>;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
 
-  private readonly attachLifecycle = new AttachLifecycle((event) => this.emit(event));
+  private readonly attachLifecycle = new AttachLifecycle((event) => {
+    // Inject agentSessionId into attached events so the session engine knows
+    // when an agent session is active.
+    if (event.type === 'attached') {
+      console.debug('[RemoteBackend] attached event, agentSessionId:', this.attachedAgentSessionId);
+      if (this.attachedAgentSessionId) {
+        this.emit({ ...event, agentSessionId: this.attachedAgentSessionId });
+        return;
+      }
+    }
+    if (event.type === 'detached' || event.type === 'session_exited') {
+      this.attachedAgentSessionId = null;
+    }
+    this.emit(event);
+  });
   private handshakeState: THandshakeState | null = null;
   private sessionKeys: SessionKeys | null = null;
   private isConnected = false;
+  private attachedAgentSessionId: string | null = null;
   private listenersAttached = false;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -770,7 +787,43 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
+    this.attachedAgentSessionId = agentSessionId;
     await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly });
+  }
+
+  async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-prompt', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, text, images });
+    if (response.type === 'error') throw new Error(response.message);
+  }
+
+  async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-stage-upload', target: this.getAgentWorkspaceTarget(workspaceId), fileName, data, mimeType });
+    if (response.type === 'agent-staged') return { stagedPath: response.stagedPath };
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected stage upload response');
+  }
+
+  async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
+    if (response.type === 'error') throw new Error(response.message);
+  }
+
+  async listAgentCommands(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-list-commands', target: this.getAgentWorkspaceTarget(workspaceId) });
+    if (response.type === 'agent-commands') return response.commands;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected list commands response');
+  }
+
+  async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTmuxCommand({ type: 'agent-file-suggestions', target: this.getAgentWorkspaceTarget(workspaceId), prefix, limit });
+    if (response.type === 'agent-file-suggestions') return response.suggestions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected file suggestions response');
   }
 
   async detachSession(): Promise<void> {
@@ -1363,6 +1416,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           code: message.code,
           message: message.message,
         });
+        return;
+      case 'agent_dialog_request':
+        this.emit({ type: 'host_ui_dialog_request', request: message.request });
+        return;
+      case 'agent_ui_event':
+        this.emit({ type: 'host_ui_event', event: message.event });
         return;
       default:
         return;

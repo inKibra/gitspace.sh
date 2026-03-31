@@ -17,6 +17,11 @@ export function toMultiMachineState(state: SessionEngineState | null): MultiMach
       snapshot: backend.machineSnapshot,
       lastError: backend.error,
       label: backend.descriptor.label,
+      attachedAgentSessionId: backend.attachedAgentSessionId,
+      attachedWorkspaceId: backend.attachedWorkspaceId,
+      pendingDialogRequest: backend.pendingDialogRequest,
+      agentWorkingMessage: backend.agentWorkingMessage,
+      pendingAgentAttach: backend.pendingAgentAttach,
     };
   }
   return {

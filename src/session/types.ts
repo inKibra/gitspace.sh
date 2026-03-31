@@ -50,12 +50,19 @@ export interface BackendSessionState {
   attachedSessionName: string | null;
   attachedSessionMeta: AttachedSessionMeta | null;
   attachedWorkspaceId: string | null;
+  /** Set when the attached terminal is an agent session (from attachAgentSession). */
+  attachedAgentSessionId: string | null;
+  /** Set when an agent session open/attach is in progress. Cleared on attach or error. */
+  pendingAgentAttach: boolean;
 
   scriptState: ScriptRuntimeState | null;
 
   events: WideEvent[];
   liveEventIds: string[];
   savedEventFilters: SavedEventFilter[];
+
+  pendingDialogRequest: import('../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest | null;
+  agentWorkingMessage: string | undefined;
 }
 
 export interface SessionEngineState {
@@ -102,6 +109,7 @@ export type SessionEngineAction =
       sessionName?: string | null;
       meta?: AttachedSessionMeta | null;
       workspaceId?: string | null;
+      agentSessionId?: string | null;
       preserveContextOnExit?: boolean;
     }
   | {
@@ -124,4 +132,16 @@ export type SessionEngineAction =
       type: 'SET_SAVED_EVENT_FILTERS';
       backendKey: BackendKey;
       filters: SavedEventFilter[];
-    };
+    }
+  | {
+      type: 'SET_HOST_UI_DIALOG';
+      backendKey: BackendKey;
+      request: import('../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest;
+    }
+  | {
+      type: 'SET_HOST_UI_WORKING_MESSAGE';
+      backendKey: BackendKey;
+      message: string | undefined;
+    }
+  | { type: 'CLEAR_HOST_UI_DIALOG'; backendKey: BackendKey }
+  | { type: 'SET_PENDING_AGENT_ATTACH'; backendKey: BackendKey; pending: boolean };

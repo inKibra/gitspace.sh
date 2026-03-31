@@ -50,6 +50,8 @@ export interface WorkspaceDetailPaneProps {
   workspaceStatusById?: Record<string, WorkspaceDetailStripStatus>;
   runtime?: WorkspaceRuntimeEntry | null;
   attachedSessionId?: string | null;
+  attachedAgentSessionId?: string | null;
+  pendingAgentAttach?: boolean;
   /** Called when user clicks a workspace in the header strip to switch to it. */
   onSelectWorkspace?: (workspaceId: string) => void;
   onClose: () => void;

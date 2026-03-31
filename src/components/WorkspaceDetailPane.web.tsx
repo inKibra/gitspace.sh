@@ -107,10 +107,13 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     allWorkspaces = [],
     workspaceStatusById = {},
     attachedSessionId = null,
+    attachedAgentSessionId = null,
     onSelectWorkspace,
     onClose,
     children,
+    pendingAgentAttach = false,
   } = props;
+
 
   const detailModel = useWorkspaceDetailModel({
     workspace,
@@ -279,6 +282,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                       label={row.title}
                       subtitle={row.modelLabel}
                       rightLabel={row.lastActiveLabel ?? undefined}
+                      active={row.id === attachedAgentSessionId}
                       onClick={() => {
                         void detailActions.openAgentSession(row.id);
                       }}
@@ -571,9 +575,17 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             {children ? (
               children
             ) : (
-              <div className="flex-1 flex flex-col items-center justify-center text-[#484f58]">
-                <div className="text-sm">No active session</div>
-                <div className="text-xs mt-1">Attach a session or agent from the sidebar.</div>
+              <div className="flex-1 flex items-center justify-center">
+                {pendingAgentAttach ? (
+                  <div className="text-center">
+                    <div className="text-sm text-[#8b949e] animate-pulse">Attaching agent session…</div>
+                  </div>
+                ) : (
+                  <div className="text-center">
+                    <div className="text-sm text-[#484f58]">No active session</div>
+                    <div className="text-xs text-[#30363d] mt-1">Attach a session or agent from the sidebar.</div>
+                  </div>
+                )}
               </div>
             )}
           </div>
