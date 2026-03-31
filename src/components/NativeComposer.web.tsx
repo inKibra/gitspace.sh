@@ -177,11 +177,11 @@ function ToolButton({ onClick, title, disabled = false, children }: ToolButtonPr
       disabled={disabled}
       title={title}
       style={{
-        width: 38,
-        height: 38,
-        borderRadius: 8,
+        width: 34,
+        height: 34,
+        borderRadius: 0,
         background: 'none',
-        border: '1px solid var(--gs-border)',
+        border: 'none',
         color: disabled ? 'var(--gs-border)' : 'var(--gs-text-dim)',
         cursor: disabled ? 'default' : 'pointer',
         display: 'flex',
@@ -681,10 +681,18 @@ export function NativeComposer({
         </div>
       )}
 
-      {/* ── Input row ────────────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
-        {/* Attach buttons */}
-        <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+      {/* ── Input row — single visual bar with buttons inline ─────────────── */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'flex-end',
+        gap: 0,
+        background: 'var(--gs-bg-elevated)',
+        border: '1px solid var(--gs-border)',
+        borderRadius: 'var(--gs-input-radius, 0px)',
+        overflow: 'hidden',
+      }}>
+        {/* Attach buttons — left side */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 0, flexShrink: 0, paddingLeft: 4 }}>
           <ToolButton
             onClick={() => imageInputRef.current?.click()}
             title="Attach image"
@@ -702,7 +710,7 @@ export function NativeComposer({
         </div>
 
         {/* Textarea wrapper with autocomplete dropdown */}
-        <div style={{ flex: 1, position: 'relative' }}>
+        <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
           {/* Autocomplete dropdown */}
           {autocomplete.mode && autocomplete.items.length > 0 && (
             <div
@@ -715,7 +723,6 @@ export function NativeComposer({
                 overflowY: 'auto',
                 background: 'var(--gs-bg-elevated)',
                 border: '1px solid var(--gs-border)',
-                borderRadius: 8,
                 marginBottom: 4,
                 zIndex: 100,
               }}
@@ -763,9 +770,8 @@ export function NativeComposer({
             rows={1}
             style={{
               width: '100%',
-              background: 'var(--gs-bg-elevated)',
-              border: '1px solid var(--gs-border)',
-              borderRadius: 10,
+              background: 'transparent',
+              border: 'none',
               color: isDisabled ? 'var(--gs-text-dim)' : 'var(--gs-text)',
               fontSize: 15,
               lineHeight: 1.5,
@@ -783,39 +789,41 @@ export function NativeComposer({
           />
         </div>
 
-        {/* Send button (normal) or Abort button (when busy) */}
-        {isBusy ? (
-          <button
-            type="button"
-            onClick={onAbort}
-            disabled={!onAbort}
-            title="Abort"
-            style={{
-              ...ACTION_BUTTON_BASE,
-              background: 'var(--gs-danger)',
-              color: 'white',
-              opacity: onAbort ? 1 : 0.4,
-              cursor: onAbort ? 'pointer' : 'default',
-            }}
-          >
-            <IconStop />
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!canSend}
-            title="Send"
-            style={{
-              ...ACTION_BUTTON_BASE,
-              background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
-              color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
-              cursor: canSend ? 'pointer' : 'default',
-            }}
-          >
-            {isSubmitting ? <Spinner /> : <IconPaperPlane />}
-          </button>
-        )}
+        {/* Send / Abort button — right side */}
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, paddingRight: 4 }}>
+          {isBusy ? (
+            <button
+              type="button"
+              onClick={onAbort}
+              disabled={!onAbort}
+              title="Abort"
+              style={{
+                ...ACTION_BUTTON_BASE,
+                background: 'var(--gs-danger)',
+                color: 'white',
+                opacity: onAbort ? 1 : 0.4,
+                cursor: onAbort ? 'pointer' : 'default',
+              }}
+            >
+              <IconStop />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!canSend}
+              title="Send"
+              style={{
+                ...ACTION_BUTTON_BASE,
+                background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
+                color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
+                cursor: canSend ? 'pointer' : 'default',
+              }}
+            >
+              {isSubmitting ? <Spinner /> : <IconPaperPlane />}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Hidden file inputs */}
