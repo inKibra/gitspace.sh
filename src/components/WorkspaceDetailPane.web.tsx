@@ -491,12 +491,12 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           onClick={onClose}
           className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] flex-shrink-0"
         >
-          ← Board
+          ←
         </button>
-        <span className="text-[var(--gs-border)]">|</span>
-        <div className="min-w-0 flex-1">
+        <span className="hidden sm:inline text-[var(--gs-border)]">|</span>
+        <div className="min-w-0 flex-1 truncate">
           <span className="font-medium text-[var(--gs-text)] truncate">{workspace.name}</span>
-          <span className="ml-2 text-xs text-[var(--gs-text-muted)]">
+          <span className="hidden sm:inline ml-2 text-xs text-[var(--gs-text-muted)]">
             {phase && <span className="px-1.5 py-0.5 bg-[var(--gs-bg-active)] text-[var(--gs-info-light)] mr-2">{phaseLabel}</span>}
             {workspaceSessions.length} session(s) · {workspaceReplays.length} replay(s)
           </span>
