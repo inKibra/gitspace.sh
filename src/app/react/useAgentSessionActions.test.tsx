@@ -95,8 +95,10 @@ describe('useAppClient', () => {
 });
 
 describe('useAgentSessionActions', () => {
-  it('wires create flow submission through the client and open callbacks', async () => {
+  it('shows creating state before closing into attach flow', async () => {
     const showInputCalls: Array<{ onSubmit: (value: string) => Promise<void> | void }> = [];
+    const showLoading = mock(() => undefined);
+    const close = mock(() => undefined);
     const beforeOpen = mock(() => undefined);
     const onOpenSuccess = mock(() => undefined);
     const client = makeClient();
@@ -107,6 +109,8 @@ describe('useAgentSessionActions', () => {
         showInput: (options) => {
           showInputCalls.push({ onSubmit: options.onSubmit });
         },
+        showLoading,
+        close,
       },
       beforeOpen,
       onOpenSuccess,
@@ -118,10 +122,15 @@ describe('useAgentSessionActions', () => {
     await showInputCalls[0]?.onSubmit('  investigate auth bug  ');
 
     expect(beforeOpen).toHaveBeenCalledTimes(1);
+    expect(showLoading).toHaveBeenCalledWith({
+      title: 'Creating Agent Session',
+      message: 'Creating investigate auth bug...',
+    });
     expect(client.agentSessions.createAndOpen).toHaveBeenCalledWith({
       workspaceId: 'proj:ws-1',
       title: 'investigate auth bug',
     });
+    expect(close).toHaveBeenCalledTimes(1);
     expect(onOpenSuccess).toHaveBeenCalledTimes(1);
   });
 

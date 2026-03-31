@@ -1,123 +1,96 @@
 /** @jsxImportSource react */
 /**
  * HostUIDialogs — renders Pi SDK extension dialog requests as native web modals.
- *
- * Receives a HostUIDialogRequest from the server-side host UI bridge and renders
- * the appropriate dialog type. Only one dialog is shown at a time; the latest
- * request wins.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   HostUIDialogRequest,
   HostUIDialogResponse,
 } from '../lib/tmux-lite/agents/host-ui-bridge.js';
 
-// ============================================================================
-// Public overlay component
-// ============================================================================
-
 export interface HostUIDialogOverlayProps {
   request: HostUIDialogRequest | null;
   onResponse: (response: HostUIDialogResponse) => void;
 }
 
+const BTN_CANCEL = 'gs-button-secondary';
+const BTN_PRIMARY = 'gs-button-primary';
+const FIELD = 'gs-field';
+
 export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlayProps) {
   if (!request) return null;
+
+  const dismiss = () => {
+    switch (request.type) {
+      case 'select':
+        onResponse({ type: 'select', id: request.id, value: undefined });
+        return;
+      case 'confirm':
+        onResponse({ type: 'confirm', id: request.id, value: false });
+        return;
+      case 'input':
+        onResponse({ type: 'input', id: request.id, value: undefined });
+        return;
+      case 'editor':
+        onResponse({ type: 'editor', id: request.id, value: undefined });
+        return;
+    }
+  };
 
   const content = (() => {
     switch (request.type) {
       case 'select':
-        return (
-          <SelectDialog
-            request={request}
-            onResponse={onResponse}
-          />
-        );
+        return <SelectDialog request={request} onResponse={onResponse} />;
       case 'confirm':
-        return (
-          <ConfirmDialog
-            request={request}
-            onResponse={onResponse}
-          />
-        );
+        return <ConfirmDialog request={request} onResponse={onResponse} />;
       case 'input':
-        return (
-          <InputDialog
-            request={request}
-            onResponse={onResponse}
-          />
-        );
+        return <InputDialog request={request} onResponse={onResponse} />;
       case 'editor':
-        return (
-          <EditorDialog
-            request={request}
-            onResponse={onResponse}
-          />
-        );
+        return <EditorDialog request={request} onResponse={onResponse} />;
     }
   })();
 
   return createPortal(
-    <div
-      className="fixed inset-0 flex items-center justify-center"
-      style={{ zIndex: 9999, position: 'fixed', top: 0, left: 0, right: 0, bottom: 0 }}
-    >
-      {content}
+    <div className="gs-overlay-root" onClick={dismiss}>
+      <div className="absolute inset-0 gs-overlay-backdrop" />
+      <div className="relative" onClick={(e) => e.stopPropagation()}>{content}</div>
     </div>,
     document.body,
   );
 }
 
-// ============================================================================
-// Shared backdrop + card shell
-// ============================================================================
-
 interface DialogShellProps {
   title: string;
   onBackdropClick: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
   width?: 'md' | 'lg';
+  kicker?: string;
 }
 
-function DialogShell({ title, onBackdropClick, children, width = 'md' }: DialogShellProps) {
-  const maxW = width === 'lg' ? 'sm:max-w-lg' : 'sm:max-w-md';
+function DialogShell({ title, onBackdropClick, children, width = 'md', kicker = 'Agent UI' }: DialogShellProps) {
+  const widthClass = width === 'lg' ? 'gs-shell-card--wide' : 'gs-shell-card--compact';
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-[var(--gs-bg)]/80 backdrop-blur-sm"
-        style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+    <div className={`gs-shell-card ${widthClass}`}>
+      <button
+        type="button"
+        aria-label="Close dialog"
         onClick={onBackdropClick}
-      />
-      {/* Card */}
-      <div
-        className={`relative bg-[var(--gs-bg-elevated)] shadow-xl w-full mx-0 sm:mx-4 p-5 sm:p-6 border-0 sm:border border-[var(--gs-border)]
-          fixed sm:relative inset-0 sm:inset-auto sm:rounded-lg
-          flex flex-col sm:block max-h-screen sm:max-h-[90vh] overflow-y-auto
-          ${maxW}`}
-        style={{ zIndex: 10000, position: 'relative' }}
+        className="absolute right-3 top-3 z-10 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
       >
-        <h2 className="text-xl font-semibold text-[var(--gs-accent)] mb-4 flex-shrink-0">{title}</h2>
-        <div className="flex-1 min-h-0 text-[var(--gs-text)]">{children}</div>
+        ×
+      </button>
+      <div className="gs-shell-header">
+        <div className="gs-shell-title-stack">
+          <div className="gs-shell-kicker">{kicker}</div>
+          <h2 className="gs-shell-title">{title}</h2>
+        </div>
       </div>
-    </>
+      <div className="gs-shell-body">{children}</div>
+    </div>
   );
 }
-
-// ============================================================================
-// Button helpers
-// ============================================================================
-
-const BTN_CANCEL =
-  'px-5 py-3 bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] border border-[var(--gs-border)] rounded-lg min-h-[48px]';
-const BTN_PRIMARY =
-  'px-5 py-3 bg-[var(--gs-accent)] hover:bg-[var(--gs-accent-hover)] active:bg-[var(--gs-accent-hover)] text-[var(--gs-text-on-accent)] font-medium rounded-lg min-h-[48px] shadow-glow';
-
-// ============================================================================
-// SelectDialog
-// ============================================================================
 
 interface SelectDialogProps {
   request: Extract<HostUIDialogRequest, { type: 'select' }>;
@@ -140,37 +113,31 @@ function SelectDialog({ request, onResponse }: SelectDialogProps) {
   }, []);
 
   return (
-    <DialogShell title={request.title} onBackdropClick={cancel} width="lg">
-      {/* Scrollable option list */}
-      <div className="space-y-2 max-h-64 sm:max-h-80 overflow-y-auto -mx-2 px-2 mb-4">
-        {request.options.length === 0 && (
-          <div className="p-4 rounded-lg border border-[var(--gs-border)] bg-[var(--gs-bg)] text-sm text-[var(--gs-text-muted)]">
-            No options available.
+    <DialogShell title={request.title} onBackdropClick={cancel} width="lg" kicker="Agent choice">
+      <div className="gs-panel-block">
+        {request.options.length === 0 ? (
+          <div className="gs-empty-panel">No options available.</div>
+        ) : (
+          <div className="gs-select-list max-h-72 overflow-y-auto">
+            {request.options.map((option, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => pick(option)}
+                className="gs-select-item"
+              >
+                {option}
+              </button>
+            ))}
           </div>
         )}
-        {request.options.map((option, idx) => (
-          <button
-            key={idx}
-            type="button"
-            onClick={() => pick(option)}
-            className="w-full text-left p-4 bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] rounded-lg hover:bg-[var(--gs-bg-active)] active:bg-[var(--gs-bg)] cursor-pointer min-h-[48px] text-[var(--gs-text)] transition-colors"
-          >
-            {option}
-          </button>
-        ))}
-      </div>
-      <div className="flex justify-end">
-        <button type="button" onClick={cancel} className={BTN_CANCEL}>
-          Cancel
-        </button>
+        <div className="flex justify-end">
+          <button type="button" onClick={cancel} className={BTN_CANCEL}>Cancel</button>
+        </div>
       </div>
     </DialogShell>
   );
 }
-
-// ============================================================================
-// ConfirmDialog
-// ============================================================================
 
 interface ConfirmDialogProps {
   request: Extract<HostUIDialogRequest, { type: 'confirm' }>;
@@ -182,18 +149,12 @@ function ConfirmDialog({ request, onResponse }: ConfirmDialogProps) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' || e.key === 'n' || e.key === 'N') {
         e.preventDefault();
         respond(false);
-      } else if (e.key === 'Enter') {
+      } else if (e.key === 'Enter' || e.key === 'y' || e.key === 'Y') {
         e.preventDefault();
         respond(true);
-      } else if (e.key === 'y' || e.key === 'Y') {
-        e.preventDefault();
-        respond(true);
-      } else if (e.key === 'n' || e.key === 'N') {
-        e.preventDefault();
-        respond(false);
       }
     };
     window.addEventListener('keydown', handler);
@@ -201,23 +162,17 @@ function ConfirmDialog({ request, onResponse }: ConfirmDialogProps) {
   }, []);
 
   return (
-    <DialogShell title={request.title} onBackdropClick={() => respond(false)}>
-      <p className="mb-6 text-[var(--gs-text)] whitespace-pre-wrap">{request.message}</p>
-      <div className="flex flex-col-reverse sm:flex-row justify-end gap-3">
-        <button type="button" onClick={() => respond(false)} className={BTN_CANCEL}>
-          No
-        </button>
-        <button type="button" onClick={() => respond(true)} className={BTN_PRIMARY}>
-          Yes
-        </button>
+    <DialogShell title={request.title} onBackdropClick={() => respond(false)} kicker="Agent confirmation">
+      <div className="gs-panel-block">
+        <p className="text-[var(--gs-text)] whitespace-pre-wrap">{request.message}</p>
+        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <button type="button" onClick={() => respond(false)} className={BTN_CANCEL}>No</button>
+          <button type="button" onClick={() => respond(true)} className={BTN_PRIMARY}>Yes</button>
+        </div>
       </div>
     </DialogShell>
   );
 }
-
-// ============================================================================
-// InputDialog
-// ============================================================================
 
 interface InputDialogProps {
   request: Extract<HostUIDialogRequest, { type: 'input' }>;
@@ -242,7 +197,6 @@ function InputDialog({ request, onResponse }: InputDialogProps) {
         cancel();
       } else if (e.key === 'Enter') {
         const target = e.target as HTMLElement | null;
-        // Enter submits only from the input itself, not from other elements
         if (target instanceof HTMLInputElement) {
           e.preventDefault();
           submit();
@@ -254,31 +208,25 @@ function InputDialog({ request, onResponse }: InputDialogProps) {
   }, [value]);
 
   return (
-    <DialogShell title={request.title} onBackdropClick={cancel}>
-      <input
-        ref={inputRef}
-        type="text"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder={request.placeholder}
-        className="w-full p-3 text-base bg-[var(--gs-bg)] border border-[var(--gs-border)] rounded-lg text-[var(--gs-text)] focus:border-[var(--gs-input-focus-border)] focus:outline-none focus:shadow-glow transition-all mb-6"
-        autoFocus
-      />
-      <div className="flex flex-col-reverse sm:flex-row justify-end gap-3">
-        <button type="button" onClick={cancel} className={BTN_CANCEL}>
-          Cancel
-        </button>
-        <button type="button" onClick={submit} className={BTN_PRIMARY}>
-          Submit
-        </button>
+    <DialogShell title={request.title} onBackdropClick={cancel} kicker="Agent input">
+      <div className="gs-panel-block">
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={request.placeholder}
+          className={FIELD}
+          autoFocus
+        />
+        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <button type="button" onClick={cancel} className={BTN_CANCEL}>Cancel</button>
+          <button type="button" onClick={submit} className={BTN_PRIMARY}>Submit</button>
+        </div>
       </div>
     </DialogShell>
   );
 }
-
-// ============================================================================
-// EditorDialog
-// ============================================================================
 
 interface EditorDialogProps {
   request: Extract<HostUIDialogRequest, { type: 'editor' }>;
@@ -293,7 +241,6 @@ function EditorDialog({ request, onResponse }: EditorDialogProps) {
     const el = textareaRef.current;
     if (!el) return;
     el.focus();
-    // Place cursor at end of prefill
     el.setSelectionRange(el.value.length, el.value.length);
   }, []);
 
@@ -306,7 +253,6 @@ function EditorDialog({ request, onResponse }: EditorDialogProps) {
         e.preventDefault();
         cancel();
       }
-      // Ctrl+Enter or Cmd+Enter submits from the textarea
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         submit();
@@ -317,23 +263,23 @@ function EditorDialog({ request, onResponse }: EditorDialogProps) {
   }, [value]);
 
   return (
-    <DialogShell title={request.title} onBackdropClick={cancel} width="lg">
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        rows={8}
-        className="w-full p-3 text-base bg-[var(--gs-bg)] border border-[var(--gs-border)] rounded-lg text-[var(--gs-text)] focus:border-[var(--gs-input-focus-border)] focus:outline-none focus:shadow-glow transition-all resize-y mb-2 font-mono"
-        autoFocus
-      />
-      <p className="text-xs text-[var(--gs-text-dim)] mb-4">Ctrl+Enter to submit</p>
-      <div className="flex flex-col-reverse sm:flex-row justify-end gap-3">
-        <button type="button" onClick={cancel} className={BTN_CANCEL}>
-          Cancel
-        </button>
-        <button type="button" onClick={submit} className={BTN_PRIMARY}>
-          Submit
-        </button>
+    <DialogShell title={request.title} onBackdropClick={cancel} width="lg" kicker="Agent editor">
+      <div className="gs-panel-block">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          rows={8}
+          className={`${FIELD} min-h-[220px] resize-y font-mono`}
+          autoFocus
+        />
+        <div className="gs-shell-meta-row">
+          <span>Ctrl/Cmd + Enter submits</span>
+        </div>
+        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <button type="button" onClick={cancel} className={BTN_CANCEL}>Cancel</button>
+          <button type="button" onClick={submit} className={BTN_PRIMARY}>Submit</button>
+        </div>
       </div>
     </DialogShell>
   );

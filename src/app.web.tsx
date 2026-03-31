@@ -1492,45 +1492,49 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <Toaster theme="dark" position="top-right" richColors />
         {commandPalette.isOpen && (
           <div
-            className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-[10vh]"
+            className="gs-overlay-root"
             role="dialog"
             aria-label="Command palette"
             onClick={() => commandPalette.close()}
           >
+            <div className="absolute inset-0 gs-overlay-backdrop" />
             <div
-              className="w-full max-w-md rounded-lg border border-[var(--gs-border)] bg-[var(--gs-btn-secondary-bg)] shadow-xl"
+              className="gs-shell-card gs-shell-card--compact gs-shell-card--headerless"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="border-b border-[var(--gs-border)] px-3 py-2">
-                <input
-                  type="text"
-                  placeholder="Filter commands..."
-                  value={commandPalette.filter}
-                  onChange={(e) => commandPalette.setFilter(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') commandPalette.close();
-                    else if (e.key === 'ArrowDown') { e.preventDefault(); commandPalette.moveSelection(1); }
-                    else if (e.key === 'ArrowUp') { e.preventDefault(); commandPalette.moveSelection(-1); }
-                    else if (e.key === 'Enter') { e.preventDefault(); commandPalette.selectCurrent(); }
-                  }}
-                  className="w-full bg-transparent text-white placeholder-[var(--gs-text-dim)] outline-none"
-                  autoFocus
-                />
-              </div>
-              <ul className="max-h-[50vh] overflow-y-auto py-1">
-                {commandPalette.filteredCommands.map((cmd, i) => (
-                  <li
-                    key={cmd.id}
-                    className={`cursor-pointer px-3 py-2 text-sm ${i === commandPalette.selectedIndex ? 'bg-[var(--gs-info)] text-white' : 'text-[var(--gs-text-secondary)] hover:bg-[var(--gs-border)]'}`}
-                    onClick={() => { commandPalette.setSelectedIndex(i); commandPalette.selectCurrent(); }}
-                  >
-                    {cmd.label}
-                    {cmd.shortcut ? <span className="ml-2 text-[var(--gs-text-dim)]">{cmd.shortcut}</span> : null}
-                  </li>
-                ))}
-              </ul>
-              <div className="border-t border-[var(--gs-border)] px-3 py-1.5 text-xs text-[var(--gs-text-dim)]">
-                ↑↓ select · Enter run · Esc close
+              <div className="gs-shell-body gs-shell-body--flush">
+                <div className="border-b border-[var(--gs-border)] px-4 py-3">
+                  <div className="gs-shell-kicker">Command palette</div>
+                  <input
+                    type="text"
+                    placeholder="Filter commands..."
+                    value={commandPalette.filter}
+                    onChange={(e) => commandPalette.setFilter(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') commandPalette.close();
+                      else if (e.key === 'ArrowDown') { e.preventDefault(); commandPalette.moveSelection(1); }
+                      else if (e.key === 'ArrowUp') { e.preventDefault(); commandPalette.moveSelection(-1); }
+                      else if (e.key === 'Enter') { e.preventDefault(); commandPalette.selectCurrent(); }
+                    }}
+                    className="gs-field mt-2 min-h-[44px]"
+                    autoFocus
+                  />
+                </div>
+                <ul className="max-h-[50vh] overflow-y-auto">
+                  {commandPalette.filteredCommands.map((cmd, i) => (
+                    <li
+                      key={cmd.id}
+                      className={`gs-command-item cursor-pointer ${i === commandPalette.selectedIndex ? 'gs-command-item--active' : ''}` }
+                      onClick={() => { commandPalette.setSelectedIndex(i); commandPalette.selectCurrent(); }}
+                    >
+                      <span>{cmd.label}</span>
+                      {cmd.shortcut ? <span className="text-[var(--gs-text-dim)]">{cmd.shortcut}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                <div className="border-t border-[var(--gs-border)] px-4 py-2 text-[11px] uppercase tracking-[0.16em] text-[var(--gs-text-dim)]">
+                  ↑↓ select · enter run · esc close
+                </div>
               </div>
             </div>
           </div>

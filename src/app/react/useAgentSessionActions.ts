@@ -17,7 +17,7 @@ export interface AgentSessionOpenCallbacks {
 
 export interface UseAgentSessionActionsOptions extends AgentSessionOpenCallbacks {
   client?: AppClient | AppClientContext | null;
-  flow: Pick<UseFlowReturn, 'showInput'>;
+  flow: Pick<UseFlowReturn, 'showInput'> & Partial<Pick<UseFlowReturn, 'showLoading' | 'close'>>;
   onError?: (message: string, error: AgentSessionCommandError) => void;
 }
 
@@ -95,12 +95,18 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
       onSubmit: async (value) => {
         await resolvedCallbacks.beforeOpen?.();
         const title = value.trim() || undefined;
+        options.flow.showLoading?.({
+          title: 'Creating Agent Session',
+          message: title ? `Creating ${title}...` : 'Creating agent session...',
+        });
         const result = await client.agentSessions.createAndOpen({ workspaceId, title, attachOptions: resolvedCallbacks.attachOptions });
         if (!result.ok) {
+          options.flow.close?.();
           reportError('create', result.error);
           return;
         }
 
+        options.flow.close?.();
         await resolvedCallbacks.onOpenSuccess?.(result.value);
       },
     });

@@ -184,7 +184,7 @@ export function BoardPage({
         {/* Always visible: + New */}
         <button
           onClick={onOpenCreateMenu}
-          className="px-2 py-1 text-xs rounded bg-[var(--gs-success-muted)] text-white hover:bg-[var(--gs-success-muted)]"
+          className="px-2 py-1 text-xs rounded bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] hover:bg-[var(--gs-accent-hover)]"
         >
           + New
         </button>
