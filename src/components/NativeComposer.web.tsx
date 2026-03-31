@@ -684,7 +684,7 @@ export function NativeComposer({
       {/* ── Input row — single visual bar with buttons inline ─────────────── */}
       <div style={{
         display: 'flex',
-        alignItems: 'flex-end',
+        alignItems: 'center',
         gap: 0,
         background: 'var(--gs-bg-elevated)',
         border: '1px solid var(--gs-border)',
