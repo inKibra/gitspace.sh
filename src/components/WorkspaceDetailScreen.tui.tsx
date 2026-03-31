@@ -52,9 +52,9 @@ const COLORS = {
 };
 
 /** Layout chrome reserved when embedding terminals inline (sidebar + borders + main padding + terminal border + terminal padding). */
-const LAYOUT_RESERVED_COLS = 46;
+export const WORKSPACE_DETAIL_TERMINAL_RESERVED_COLS = 46;
 /** Layout chrome reserved when embedding terminals inline (header + main padding + terminal border + terminal padding + status bar). */
-const LAYOUT_RESERVED_ROWS = 8;
+export const WORKSPACE_DETAIL_TERMINAL_RESERVED_ROWS = 8;
 
 
 
@@ -1193,8 +1193,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
                   modalOpen={sessionTerminalModalOpen}
                   readOnly={terminalBindings.readOnly ?? false}
                   showTopBanner={false}
-                  reservedCols={LAYOUT_RESERVED_COLS}
-                  reservedRowsExtra={LAYOUT_RESERVED_ROWS}
+                  reservedCols={WORKSPACE_DETAIL_TERMINAL_RESERVED_COLS}
+                  reservedRowsExtra={WORKSPACE_DETAIL_TERMINAL_RESERVED_ROWS}
                   onShiftEsc={() => setFocus('sidebar')}
                 />
               </box>
@@ -1219,8 +1219,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
                   setWriteCallback={scriptBindings.setWriteCallback}
                   showTopBanner={false}
                   showHintBar={!scriptBindings.scriptState.isRunning}
-                  reservedCols={LAYOUT_RESERVED_COLS}
-                  reservedRowsExtra={LAYOUT_RESERVED_ROWS}
+                  reservedCols={WORKSPACE_DETAIL_TERMINAL_RESERVED_COLS}
+                  reservedRowsExtra={WORKSPACE_DETAIL_TERMINAL_RESERVED_ROWS}
                 />
               </box>
             ) : attachedWorkspaceSession ? (() => {

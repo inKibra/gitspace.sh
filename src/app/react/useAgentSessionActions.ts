@@ -12,6 +12,7 @@ import { useAppClient } from './useAppClient.js';
 export interface AgentSessionOpenCallbacks {
   beforeOpen?: () => void | Promise<void>;
   onOpenSuccess?: (value: AppClientAgentSessionOpenValue) => void | Promise<void>;
+  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number };
 }
 
 export interface UseAgentSessionActionsOptions extends AgentSessionOpenCallbacks {
@@ -60,7 +61,8 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
   const resolveOpenCallbacks = useCallback((overrides?: AgentSessionOpenCallbacks): AgentSessionOpenCallbacks => ({
     beforeOpen: overrides?.beforeOpen ?? options.beforeOpen,
     onOpenSuccess: overrides?.onOpenSuccess ?? options.onOpenSuccess,
-  }), [options.beforeOpen, options.onOpenSuccess]);
+    attachOptions: overrides?.attachOptions ?? options.attachOptions,
+  }), [options.beforeOpen, options.onOpenSuccess, options.attachOptions]);
 
   const reportError = useCallback((action: AgentSessionActionName, error: AgentSessionCommandError): void => {
     options.onError?.(formatAgentSessionError(action, error), error);
@@ -74,7 +76,7 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
     const resolvedCallbacks = resolveOpenCallbacks(callbacks);
     await resolvedCallbacks.beforeOpen?.();
 
-    const result = await client.agentSessions.open({ workspaceId, agentSessionId });
+    const result = await client.agentSessions.open({ workspaceId, agentSessionId, attachOptions: resolvedCallbacks.attachOptions });
     if (!result.ok) {
       reportError('open', result.error);
       return null;
@@ -93,7 +95,7 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
       onSubmit: async (value) => {
         await resolvedCallbacks.beforeOpen?.();
         const title = value.trim() || undefined;
-        const result = await client.agentSessions.createAndOpen({ workspaceId, title });
+        const result = await client.agentSessions.createAndOpen({ workspaceId, title, attachOptions: resolvedCallbacks.attachOptions });
         if (!result.ok) {
           reportError('create', result.error);
           return;

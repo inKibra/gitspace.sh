@@ -2025,6 +2025,8 @@ function createVirtualSession(
   name: string | undefined,
   cwd: string,
   options?: {
+    cols?: number;
+    rows?: number;
     kind?: import('./protocol.js').SessionKind;
     hidden?: boolean;
     metadata?: Record<string, string>;
@@ -2039,8 +2041,8 @@ function createVirtualSession(
   }
   safeUnlink(socketPath);
 
-  const cols = 80;
-  const rows = 24;
+  const cols = options?.cols && options.cols > 0 ? options.cols : 80;
+  const rows = options?.rows && options.rows > 0 ? options.rows : 24;
   const xterm = new XTerminal({
     cols,
     rows,
@@ -2382,6 +2384,8 @@ routerListener = Bun.listen({
           case 'new-virtual':
             try {
               const session = createVirtualSession(cmd.name, cmd.cwd, {
+                cols: cmd.cols,
+                rows: cmd.rows,
                 kind: cmd.kind,
                 hidden: cmd.hidden,
                 metadata: cmd.metadata,
@@ -2957,7 +2961,7 @@ routerListener = Bun.listen({
           case 'agent-attach':
             try {
               await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
+              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
               res = { type: 'session', session };
               void broadcastMachineSnapshotReplacement().catch(() => {});
             } catch (e) {

@@ -384,12 +384,17 @@ export class PiCoordinator {
    * Uses Pi's session ID to find and resume the right JSONL file.
    * Throws if the session file is not found (prevents silent mismatch).
    */
-  async ensureAgentTerminalSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
+  async ensureAgentTerminalSession(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    sessionFile?: PiSessionFileInfo,
+    options?: { cols?: number; rows?: number },
+  ): Promise<TmuxSession> {
     const key = `${target.workspaceId}:${agentSessionId}`;
     const inFlight = this.inflightTerminalSessions.get(key);
     if (inFlight) return inFlight;
 
-    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId).finally(() => {
+    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId, sessionFile, options).finally(() => {
       this.inflightTerminalSessions.delete(key);
     });
     this.inflightTerminalSessions.set(key, ensurePromise);
@@ -399,6 +404,8 @@ export class PiCoordinator {
   private async ensureAgentTerminalSessionInternal(
     target: PiWorkspaceTarget,
     agentSessionId: string,
+    sessionFile?: PiSessionFileInfo,
+    options?: { cols?: number; rows?: number },
   ): Promise<TmuxSession> {
     const tmuxSessions = await listTmuxSessions();
     const existing = tmuxSessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
@@ -411,7 +418,7 @@ export class PiCoordinator {
       this.releaseTerminalSession(existing.id);
     }
 
-    const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
         `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
@@ -419,19 +426,22 @@ export class PiCoordinator {
       );
     }
 
-    return this.createVirtualAgentSession(target, agentSessionId, match);
+    return this.createVirtualAgentSession(target, agentSessionId, match, options);
   }
 
   private async createVirtualAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
     sessionFile: PiSessionFileInfo,
+    options?: { cols?: number; rows?: number },
   ): Promise<TmuxSession> {
     const sdkSession = await this.ensureActiveSession(target, agentSessionId, sessionFile);
     const tmuxSession = await createTmuxVirtualSession(
       buildAgentTerminalSessionName(target, agentSessionId),
       target.workspacePath,
       {
+        cols: options?.cols,
+        rows: options?.rows,
         kind: PI_AGENT_TMUX_SESSION_KIND,
         hidden: true,
         metadata: {

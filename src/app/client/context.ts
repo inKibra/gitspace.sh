@@ -11,7 +11,7 @@ export interface AppClientMulti {
   closeAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
   archiveAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
   restoreAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
-  attachAgentSession: (ref: BackendScopedAgentSessionRef, options?: { viewOnly?: boolean }) => Promise<void>;
+  attachAgentSession: (ref: BackendScopedAgentSessionRef, options?: { viewOnly?: boolean; cols?: number; rows?: number }) => Promise<void>;
   getAgentSessionPreference: (ref: BackendScopedWorkspaceRef) => Promise<string | null>;
   setAgentSessionPreference: (ref: BackendScopedWorkspaceRef, sessionId: string) => Promise<void>;
   respondToAgentPermission?: (ref: BackendScopedAgentSessionRef, permissionId: string, response: 'allow' | 'deny') => Promise<boolean>;

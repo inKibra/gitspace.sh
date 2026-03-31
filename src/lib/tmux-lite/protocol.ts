@@ -326,6 +326,8 @@ export type Command =
       type: 'new-virtual';
       name?: string;
       cwd: string;
+      cols?: number;
+      rows?: number;
       kind?: SessionKind;
       hidden?: boolean;
       metadata?: Record<string, string>;
@@ -361,7 +363,7 @@ export type Command =
   | { type: 'agent-close'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; cols?: number; rows?: number }
   | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[] }
   | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
   | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }

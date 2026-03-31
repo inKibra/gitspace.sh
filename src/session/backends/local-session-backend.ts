@@ -1411,16 +1411,16 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent restore response');
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const response = await this.sendTmuxCommand({ type: 'agent-attach', target, agentSessionId });
+    const response = await this.sendTmuxCommand({ type: 'agent-attach', target, agentSessionId, cols: options.cols, rows: options.rows });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
     this.attachedAgentSessionId = agentSessionId;
     await this.refreshMachineSnapshotState();
-    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly });
+    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {

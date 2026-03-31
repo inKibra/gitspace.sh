@@ -777,18 +777,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected agent restore response');
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
     await this.waitForInitialSnapshot();
     if (this.attachLifecycle.isAttached) {
       await this.detachSession();
     }
-    const response = await this.sendTmuxCommand({ type: 'agent-attach', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendTmuxCommand({ type: 'agent-attach', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
     this.attachedAgentSessionId = agentSessionId;
-    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly });
+    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {

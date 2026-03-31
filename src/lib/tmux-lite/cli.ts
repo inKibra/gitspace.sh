@@ -813,6 +813,8 @@ export async function createVirtualSession(
   name: string,
   cwd: string,
   options?: {
+    cols?: number;
+    rows?: number;
     kind?: import('./protocol.js').SessionKind;
     hidden?: boolean;
     metadata?: Record<string, string>;
@@ -823,6 +825,8 @@ export async function createVirtualSession(
     type: 'new-virtual',
     name,
     cwd,
+    cols: options?.cols,
+    rows: options?.rows,
     kind: options?.kind,
     hidden: options?.hidden,
     metadata: options?.metadata,
@@ -936,9 +940,10 @@ export async function restoreAgentSession(
 export async function attachAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
+  options?: { cols?: number; rows?: number },
 ): Promise<Session> {
   await ensureServer();
-  const res = await send({ type: 'agent-attach', target, agentSessionId });
+  const res = await send({ type: 'agent-attach', target, agentSessionId, cols: options?.cols, rows: options?.rows });
   if (res.type === 'session') return res.session;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');

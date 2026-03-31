@@ -333,14 +333,18 @@ export async function restoreAgentSession(target: AgentWorkspaceTarget, agentSes
   return getKnownAgentSessions(target);
 }
 
-export async function attachAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<import('./protocol.js').Session> {
+export async function attachAgentSession(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  options?: { cols?: number; rows?: number },
+): Promise<import('./protocol.js').Session> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
   defaultAgentEventManager.syncKnownSessions(
     target.workspaceId,
     await defaultPiCoordinator.refreshAgentSessions(target),
   );
-  const session = await defaultPiCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+  const session = await defaultPiCoordinator.ensureAgentTerminalSession(target, agentSessionId, undefined, options);
   defaultAgentEventManager.markSessionOpen(target.workspaceId, agentSessionId);
   void defaultAgentEventManager.reconcileWorkspace(target.workspaceId);
   return session;
