@@ -1357,10 +1357,6 @@ html {
 .terminal-with-floating-controls { padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
 .terminal-input-mode-container { height: 45dvh; min-height: 180px; overflow: hidden; }
 
-.xterm { width: 100% !important; height: 100% !important; }
-.xterm .xterm-screen { width: 100% !important; }
-.xterm .xterm-screen canvas { display: block; }
-
 .xterm .xterm-viewport { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .ios-native-term-selection .xterm .xterm-accessibility-tree { -webkit-user-select: text; user-select: text; }
 .terminal-controls button { touch-action: manipulation; }
