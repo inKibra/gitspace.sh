@@ -787,8 +787,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    this.attachedAgentSessionId = agentSessionId;
     await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+    // Set only after a successful attach so a failed attach leaves state clean.
+    this.attachedAgentSessionId = agentSessionId;
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {

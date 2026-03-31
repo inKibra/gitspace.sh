@@ -170,6 +170,8 @@ export class PiCoordinator {
   private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
   private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
   private readonly activeSessions = new Map<string, OmpAgentSession>();
+  // Reverse index: agentSessionId → workspaceId, kept in sync with activeSessions.
+  private readonly sessionWorkspaceIds = new Map<string, string>();
   private readonly sessionUnsubscribers = new Map<string, () => void>();
   private readonly sessionsRoot: string | undefined;
   private readonly virtualModeHandles = new Map<string, VirtualInteractiveModeHandle>();
@@ -254,6 +256,7 @@ export class PiCoordinator {
 
     const sessionId = session.sessionId;
     this.activeSessions.set(sessionId, session);
+    this.sessionWorkspaceIds.set(sessionId, target.workspaceId);
     this.bindSessionEvents(target, sessionId, title, session);
     this.bindHostUI(sessionId, setToolUIContext);
 
@@ -510,6 +513,7 @@ export class PiCoordinator {
         }
 
         this.activeSessions.set(agentSessionId, session);
+        this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);
         this.bindSessionEvents(
           target,
           agentSessionId,
@@ -731,6 +735,7 @@ export class PiCoordinator {
     if (session) {
       session.dispose();
       this.activeSessions.delete(sessionId);
+      this.sessionWorkspaceIds.delete(sessionId);
     }
   }
 
@@ -823,8 +828,10 @@ export class PiCoordinator {
     // 0. Built-in commands supported through the web surface
     commands.push({ name: 'compact', description: 'Compact the session context', kind: 'extension' });
 
-    // 1. Collect custom commands from the first active session (commands are workspace-scoped)
-    for (const [, session] of this.activeSessions) {
+    // 1. Collect custom commands from the active session for the requested workspace
+    //    (commands are workspace-scoped; skip any session belonging to a different workspace).
+    for (const [sessionId, session] of this.activeSessions) {
+      if (this.sessionWorkspaceIds.get(sessionId) !== target.workspaceId) continue;
       try {
         const customCmds = (session as any).customCommands;
         if (Array.isArray(customCmds)) {

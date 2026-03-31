@@ -162,6 +162,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const attachedSessionName = attachedBackendState?.attachedSessionName ?? null;
   const attachedSessionMeta = attachedBackendState?.attachedSessionMeta ?? null;
   const commandError = attachedBackendState?.commandError ?? activeBackendState?.commandError ?? null;
+  // Always-current ref so callbacks can read commandError without it in their dep array.
+  const commandErrorRef = useRef(commandError);
+  commandErrorRef.current = commandError;
   const scriptState = attachedBackendState?.scriptState ?? activeBackendState?.scriptState ?? null;
   const notificationConfig = activeBackendState?.notificationConfig ?? null;
 
@@ -464,7 +467,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   });
   const [agentAttachPending, setAgentAttachPending] = useState(false);
   const [pendingAgentAttachTarget, setPendingAgentAttachTarget] = useState<{ workspaceId: string; agentSessionId: string } | null>(null);
-  // Clear pending only when the requested target session actually becomes attached, or on error.
+  // Refs that prevent two failure modes:
+  //   1. Stale commandError from a prior operation immediately clearing a fresh pending attach.
+  //   2. Stuck pending when open() returns null before any backend attach begins.
+  const attachPendingCommandErrorSnapshotRef = useRef<typeof commandError>(null);
+  const pendingAgentAttachTargetRef = useRef<{ workspaceId: string; agentSessionId: string } | null>(null);
+  // Clear pending only when the requested target actually attaches, or a *fresh* error arrives.
   useEffect(() => {
     const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
     const attachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
@@ -472,9 +480,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       && terminalMode === 'attached'
       && attachedAgentSessionId === pendingAgentAttachTarget.agentSessionId
       && attachedWorkspaceId === pendingAgentAttachTarget.workspaceId;
-    if (agentAttachPending && (targetReached || commandError)) {
+    // Ignore commandError that already existed when this attach was requested.
+    const isFreshError = commandError != null && commandError !== attachPendingCommandErrorSnapshotRef.current;
+    if (agentAttachPending && (targetReached || isFreshError)) {
       setAgentAttachPending(false);
       setPendingAgentAttachTarget(null);
+      pendingAgentAttachTargetRef.current = null;
     }
   }, [agentAttachPending, pendingAgentAttachTarget, terminalMode, attachedBackendState, commandError]);
   /** Estimate terminal cols/rows from viewport for initial agent session size. */
@@ -490,11 +501,36 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, []);
 
   const handleOpenAgentSession = useCallback((workspaceId: string, agentSessionId: string) => {
+    const target = { workspaceId, agentSessionId };
+    // Snapshot current commandError so a stale error from a prior operation cannot
+    // immediately clear this pending attach before the backend has a chance to respond.
+    attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
+    pendingAgentAttachTargetRef.current = target;
     flushSync(() => {
       setAgentAttachPending(true);
-      setPendingAgentAttachTarget({ workspaceId, agentSessionId });
+      setPendingAgentAttachTarget(target);
     });
-    void openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: getWebAgentAttachSize() });
+    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: getWebAgentAttachSize() })
+      .then((result) => {
+        // open() returning null means the call failed before any backend attach was initiated.
+        // Clear pending only if no rapid session switch has since overtaken this request.
+        if (result === null) {
+          const cur = pendingAgentAttachTargetRef.current;
+          if (cur?.workspaceId === workspaceId && cur?.agentSessionId === agentSessionId) {
+            pendingAgentAttachTargetRef.current = null;
+            setAgentAttachPending(false);
+            setPendingAgentAttachTarget(null);
+          }
+        }
+      })
+      .catch(() => {
+        const cur = pendingAgentAttachTargetRef.current;
+        if (cur?.workspaceId === workspaceId && cur?.agentSessionId === agentSessionId) {
+          pendingAgentAttachTargetRef.current = null;
+          setAgentAttachPending(false);
+          setPendingAgentAttachTarget(null);
+        }
+      });
   }, [openAgentSessionAction, getWebAgentAttachSize]);
 
   const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {

@@ -267,6 +267,14 @@ export async function stageUploadFile(
   const { join, basename } = await import('path');
   const { mkdirSync, writeFileSync, existsSync } = await import('fs');
 
+  // Conservative upload size limit: 20 MB decoded.
+  // Base64 encodes 3 bytes as 4 chars, so a 20 MB payload is at most ~27 MB of base64.
+  // Reject oversized strings before allocating the decode buffer.
+  const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+  if (data.length > MAX_UPLOAD_BYTES * 2) {
+    throw new Error(`Upload rejected: base64 input length ${data.length} exceeds maximum`);
+  }
+
   // Sanitize filename: strip path components, limit length
   let safeName = basename(fileName).replace(/[\/\\:*?"<>|]/g, '_');
   if (safeName.length > 200) safeName = safeName.slice(0, 200);
@@ -290,8 +298,11 @@ export async function stageUploadFile(
     }
   }
 
-  // Decode base64 and write
+  // Decode and validate byte size before writing — do not partially commit an oversized file.
   const bytes = Buffer.from(data, 'base64');
+  if (bytes.length > MAX_UPLOAD_BYTES) {
+    throw new Error(`Upload rejected: decoded file size ${bytes.length} bytes exceeds limit of ${MAX_UPLOAD_BYTES} bytes`);
+  }
   writeFileSync(finalPath, bytes);
 
   return { stagedPath: finalPath };
@@ -398,7 +409,7 @@ export async function getFileSuggestions(
     limit: number = 50,
 ): Promise<Array<{ path: string; isDirectory: boolean }>> {
     await ensureAgentControlInitialized();
-    const { join } = await import('path');
+    const { join, resolve } = await import('path');
     const { readdirSync } = await import('fs');
 
     const results: Array<{ path: string; isDirectory: boolean }> = [];
@@ -406,6 +417,11 @@ export async function getFileSuggestions(
 
     // Normalize prefix: strip leading @ if present
     const cleanPrefix = prefix.startsWith('@') ? prefix.slice(1) : prefix;
+
+    // Reject absolute paths and any segment that is `..`; either can escape the workspace.
+    if (cleanPrefix.startsWith('/') || cleanPrefix.split('/').some((seg) => seg === '..')) {
+        return [];
+    }
 
     // Determine search directory and name prefix from the cleaned input
     const lastSlash = cleanPrefix.lastIndexOf('/');
@@ -416,6 +432,13 @@ export async function getFileSuggestions(
         ? cleanPrefix.slice(lastSlash + 1).toLowerCase()
         : cleanPrefix.toLowerCase();
     const relativeBase = lastSlash >= 0 ? cleanPrefix.slice(0, lastSlash + 1) : '';
+
+    // Resolved guard: ensure searchDir is still inside the workspace (defense in depth).
+    const resolvedSearch = resolve(searchDir);
+    const resolvedWorkspace = resolve(workspacePath);
+    if (resolvedSearch !== resolvedWorkspace && !resolvedSearch.startsWith(resolvedWorkspace + '/')) {
+        return [];
+    }
 
     try {
         const entries = readdirSync(searchDir, { withFileTypes: true });

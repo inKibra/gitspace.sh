@@ -801,8 +801,8 @@ export function DiffViewer({
               width: '16px',
               height: '16px',
               borderRadius: '999px',
-              border: `1px solid ${color}66`,
-              background: `${color}33`,
+              border: `1px solid color-mix(in srgb, ${color} 40%, transparent)`,
+              background: `color-mix(in srgb, ${color} 20%, transparent)`,
               color,
               cursor: 'pointer',
               fontSize: '10px',
@@ -835,7 +835,7 @@ export function DiffViewer({
             pointerEvents: 'auto',
             boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)',
             borderRadius: '4px',
-            border: `1px solid ${tint}33`,
+            border: `1px solid color-mix(in srgb, ${tint} 20%, transparent)`,
             background: 'var(--gs-bg-elevated)',
             padding: '1px',
           }}
@@ -1517,14 +1517,14 @@ function expandToAbsoluteLines(lines: string[], start: number, total: number): s
 function actionButtonStyle(active: boolean, color: string, success = false): CSSProperties {
   return {
     border: success
-      ? `1px solid ${active ? `${color}88` : `${color}66`}`
-      : `1px solid ${active ? `${color}66` : 'var(--gs-border)'}`,
+      ? `1px solid ${active ? `color-mix(in srgb, ${color} 53%, transparent)` : `color-mix(in srgb, ${color} 40%, transparent)`}`
+      : `1px solid ${active ? `color-mix(in srgb, ${color} 40%, transparent)` : 'var(--gs-border)'}`,
     background: success
       ? active
         ? color
-        : `${color}cc`
+        : `color-mix(in srgb, ${color} 80%, transparent)`
       : active
-        ? `${color}33`
+        ? `color-mix(in srgb, ${color} 20%, transparent)`
         : 'var(--gs-btn-secondary-bg)',
     color: success ? 'var(--gs-text-on-accent)' : active ? color : 'var(--gs-text-secondary)',
     borderRadius: '4px',

@@ -128,6 +128,7 @@ export interface HostUIBridgeEmitter {
 // ---------------------------------------------------------------------------
 
 interface PendingDialog<T> {
+  sessionId: string;
   resolve: (value: T) => void;
   reject: (error: Error) => void;
 }
@@ -268,9 +269,8 @@ export class HostUIBridgeState {
    * Reject all pending dialogs (e.g., on session dispose).
    */
   rejectAllForSession(sessionId: string, reason: string): void {
-    // Dialog IDs don't encode the session, so we reject all.
-    // In practice this is only called during session teardown.
     for (const [id, pending] of this.pendingDialogs) {
+      if (pending.sessionId !== sessionId) continue;
       pending.reject(new Error(reason));
       this.pendingDialogs.delete(id);
     }
@@ -287,6 +287,7 @@ export class HostUIBridgeState {
   private requestDialog<T>(emitter: HostUIBridgeEmitter, request: HostUIDialogRequest): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.pendingDialogs.set(request.id, {
+        sessionId: request.sessionId,
         resolve: resolve as (value: unknown) => void,
         reject,
       });

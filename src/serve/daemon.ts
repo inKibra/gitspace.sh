@@ -5,6 +5,7 @@
  * for the `gssh machine serve` command group.
  */
 
+import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getSpacesDir } from '../core/config.js';
@@ -42,7 +43,7 @@ export function getServeSocketPath(): string {
     return full;
   }
   // Fall back to /tmp with a hash of the daemon dir to avoid collisions.
-  const { createHash } = require('crypto') as typeof import('crypto');
+  // createHash imported at module level — safe for ESM (no require)
   const hash = createHash('sha256').update(getServeDaemonDir()).digest('hex').slice(0, 12);
   return `/tmp/gssh-serve-${hash}.sock`;
 }

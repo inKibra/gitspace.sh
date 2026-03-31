@@ -42,13 +42,13 @@ export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlay
   const content = (() => {
     switch (request.type) {
       case 'select':
-        return <SelectDialog request={request} onResponse={onResponse} />;
+        return <SelectDialog key={request.id} request={request} onResponse={onResponse} />;
       case 'confirm':
-        return <ConfirmDialog request={request} onResponse={onResponse} />;
+        return <ConfirmDialog key={request.id} request={request} onResponse={onResponse} />;
       case 'input':
-        return <InputDialog request={request} onResponse={onResponse} />;
+        return <InputDialog key={request.id} request={request} onResponse={onResponse} />;
       case 'editor':
-        return <EditorDialog request={request} onResponse={onResponse} />;
+        return <EditorDialog key={request.id} request={request} onResponse={onResponse} />;
     }
   })();
 
