@@ -477,13 +477,25 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       setPendingAgentAttachTarget(null);
     }
   }, [agentAttachPending, pendingAgentAttachTarget, terminalMode, attachedBackendState, commandError]);
+  /** Estimate terminal cols/rows from viewport for initial agent session size. */
+  const getWebAgentAttachSize = useCallback(() => {
+    // Approximate: 8px per char, 18px per row (monospace at 14px font).
+    // Subtract ~260px for sidebar (hidden on mobile, but the resize will fix it).
+    const sidebarWidth = window.innerWidth >= 640 ? 260 : 0;
+    const availableWidth = Math.max(window.innerWidth - sidebarWidth - 32, 200);
+    const availableHeight = Math.max(window.innerHeight - 120, 200);
+    const cols = Math.max(Math.floor(availableWidth / 8), 40);
+    const rows = Math.max(Math.floor(availableHeight / 18), 10);
+    return { cols, rows };
+  }, []);
+
   const handleOpenAgentSession = useCallback((workspaceId: string, agentSessionId: string) => {
     flushSync(() => {
       setAgentAttachPending(true);
       setPendingAgentAttachTarget({ workspaceId, agentSessionId });
     });
-    void openAgentSessionAction(workspaceId, agentSessionId);
-  }, [openAgentSessionAction]);
+    void openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: getWebAgentAttachSize() });
+  }, [openAgentSessionAction, getWebAgentAttachSize]);
 
   const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await abortAgentSessionAction(workspaceId, agentSessionId);
@@ -493,6 +505,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     await closeAgentSessionAction(workspaceId, agentSessionId);
   }, [closeAgentSessionAction]);
 
+  const handleCreateAgentSession = useCallback((workspaceId: string) => {
+    createAgentSessionAction(workspaceId, { attachOptions: getWebAgentAttachSize() });
+  }, [createAgentSessionAction, getWebAgentAttachSize]);
+
   const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await archiveAgentSessionAction(workspaceId, agentSessionId);
   }, [archiveAgentSessionAction]);
@@ -500,13 +516,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await restoreAgentSessionAction(workspaceId, agentSessionId);
   }, [restoreAgentSessionAction]);
-
-  const handleCreateAgentSession = useCallback((workspaceId: string) => {
-    createAgentSessionAction(workspaceId);
-  }, [createAgentSessionAction]);
-
-
-
 
   // ─── Resolve project name from workspaceId ────────────────────────────────
 
