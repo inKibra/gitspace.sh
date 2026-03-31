@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitSpace — Mood Board v4 (Focused)</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Azeret+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@400;500&display=swap');
+  @font-face{font-family:'Geist Mono';src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
+  @font-face{font-family:'Geist Mono';src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Medium.woff2') format('woff2');font-weight:500;font-display:swap}
+
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{background:#050505;color:#ccc;font-family:'DM Sans',system-ui,sans-serif;font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  ::selection{background:#00ff66;color:#000}
+
+  .mh{padding:60px 48px 40px;max-width:1600px;margin:0 auto}
+  .mh h1{font-family:'Instrument Serif',Georgia,serif;font-size:42px;font-weight:400;color:#f0ede8;margin-bottom:8px}
+  .mh p{color:#555;font-size:14px;max-width:640px}
+
+  nav{position:sticky;top:0;z-index:100;background:rgba(5,5,5,0.92);backdrop-filter:blur(12px);border-bottom:1px solid #151515;padding:0 48px;display:flex;gap:0;max-width:1600px;margin:0 auto;overflow-x:auto}
+  nav a{padding:14px 14px;font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:#444;text-decoration:none;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap}
+  nav a:hover{color:#aaa}
+  nav a.on{color:#fff;border-bottom-color:#fff}
+
+  .sep{max-width:1600px;margin:0 auto;padding:48px 48px 12px;font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#333;border-top:1px solid #151515}
+
+  .tk{max-width:1600px;margin:0 auto;padding:40px 48px 60px;border-bottom:1px solid #0e0e0e}
+  .tk-l{font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:3px;text-transform:uppercase;margin-bottom:6px}
+  .tk h2{font-family:'Instrument Serif',Georgia,serif;font-size:30px;font-weight:400;margin-bottom:4px;color:#eee}
+  .tk-d{color:#555;font-size:13px;margin-bottom:28px;max-width:600px;line-height:1.7}
+  .tk-f{font-family:'Geist Mono',monospace;font-size:10px;color:#2a2a2a;margin-bottom:28px;letter-spacing:.3px}.tk-f span{color:#555}
+
+  .pr{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .pb{border-radius:10px;overflow:hidden;min-height:420px}
+  .pl{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;padding:10px 14px;opacity:.35}
+
+  @media(max-width:960px){.pr{grid-template-columns:1fr}.mh,.tk,.sep{padding-left:20px;padding-right:20px}nav{padding:0 16px}}
+
+  /* ═══════════════════════════════════════════════════════════════
+     SHARED STRUCTURE — every take uses same HTML, different paint
+     ═══════════════════════════════════════════════════════════════ */
+
+  /* ── B · Brutalist Terminal ──────────────────────────────────── */
+  .b .pb{background:#000;border:1px solid #111}
+  .b .kan{padding:12px;display:flex;gap:1px;height:100%;background:#1a1a1a}
+  .b .kcol{flex:1;display:flex;flex-direction:column;gap:1px;background:#1a1a1a}
+  .b .kh{font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#444;padding:10px 12px;background:#000;display:flex;justify-content:space-between}
+  .b .kh .ct{color:#282828}
+  .b .kc{background:#000;padding:10px 12px;border-left:2px solid transparent;cursor:pointer;transition:background .1s}
+  .b .kc:hover{background:#080808}
+  .b .kc.sel{border-left-color:#00ff66;background:#080808}
+  .b .cn{font-family:'Geist Mono',monospace;font-size:12px;font-weight:500;color:#d4d4d4;display:flex;align-items:center;gap:8px}
+  .b .cn .d{width:5px;height:5px;border-radius:1px;flex-shrink:0}
+  .b .cbr{font-family:'Geist Mono',monospace;font-size:10px;color:#444;margin-top:2px;padding-left:13px}
+  .b .cch{display:flex;gap:6px;margin-top:5px;padding-left:13px}
+  .b .ch{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:1px 5px;border:none;border-radius:0}
+  .b .cg{color:#00ff66;background:rgba(0,255,102,.08)}.b .cb{color:#4488ff;background:rgba(68,136,255,.08)}.b .ca{color:#ffcc00;background:rgba(255,204,0,.06)}.b .cr{color:#ff3333;background:rgba(255,51,51,.08)}.b .cd{color:#444;background:#0a0a0a}
+
+  .b .det{display:flex;height:100%}
+  .b .sb{width:200px;flex-shrink:0;background:#000;border-right:1px solid #1a1a1a;padding:8px 0;overflow-y:auto}
+  .b .mn{flex:1;display:flex;flex-direction:column}
+  .b .hd{padding:8px 16px;border-bottom:1px solid #1a1a1a;display:flex;align-items:center;gap:12px;font-family:'Geist Mono',monospace}
+  .b .hd .bk{font-size:12px;color:#444;cursor:pointer}.b .hd .bk:hover{color:#00ff66}
+  .b .hd .nm{font-size:12px;font-weight:500;color:#00ff66}
+  .b .hd .ph{font-size:10px;color:#444;letter-spacing:1px;text-transform:uppercase}
+  .b .tm{flex:1;background:#000;display:flex;align-items:center;justify-content:center;font-family:'Geist Mono',monospace;font-size:12px;color:#282828}
+  .b .st{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#282828;padding:6px 12px 4px;border-bottom:1px solid #1a1a1a}
+  .b .sc{margin-bottom:8px}
+  .b .si{font-family:'Geist Mono',monospace;font-size:11px;color:#777;padding:4px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .08s}
+  .b .si:hover{background:#080808;color:#d4d4d4}
+  .b .si.act{color:#00ff66;background:rgba(0,255,102,.04)}
+  .b .si .d{width:4px;height:4px;border-radius:1px;flex-shrink:0}
+  .b .si .rt{margin-left:auto;font-size:9px;color:#282828}
+
+  /* ── R1 · Brutalist × Phosphor ──────────────────────────────── */
+  .r1 .pb{background:#000;border:1px solid #111;position:relative;overflow:hidden}
+  .r1 .pb::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.07) 3px,rgba(0,0,0,.07) 4px);z-index:2}
+  .r1 .kan{padding:12px;display:flex;gap:1px;height:100%;background:#181408;position:relative;z-index:1}
+  .r1 .kcol{flex:1;display:flex;flex-direction:column;gap:1px;background:#181408}
+  .r1 .kh{font-family:'Space Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#504018;padding:10px 12px;background:#000;display:flex;justify-content:space-between}
+  .r1 .kh .ct{color:#302810}
+  .r1 .kc{background:#000;padding:10px 12px;border-left:2px solid transparent;cursor:pointer;transition:background .1s}
+  .r1 .kc:hover{background:#0a0800}
+  .r1 .kc.sel{border-left-color:#e8c840;background:#0a0800}
+  .r1 .cn{font-family:'Space Mono',monospace;font-size:12px;font-weight:500;color:#c8b870;display:flex;align-items:center;gap:8px;text-shadow:0 0 6px rgba(232,200,64,.15)}
+  .r1 .cn .d{width:5px;height:5px;border-radius:1px;flex-shrink:0;box-shadow:0 0 4px currentColor}
+  .r1 .cbr{font-family:'Space Mono',monospace;font-size:10px;color:#504018;margin-top:2px;padding-left:13px}
+  .r1 .cch{display:flex;gap:6px;margin-top:5px;padding-left:13px}
+  .r1 .ch{font-family:'Space Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:1px 5px;border:none;border-radius:0}
+  .r1 .cg{color:#80e850;background:rgba(128,232,80,.06)}.r1 .cb{color:#a0c8e8;background:rgba(160,200,232,.06)}.r1 .ca{color:#e8a030;background:rgba(232,160,48,.06)}.r1 .cr{color:#e84040;background:rgba(232,64,64,.06)}.r1 .cd{color:#504018;background:rgba(255,255,255,.02)}
+
+  .r1 .det{display:flex;height:100%;position:relative;z-index:1}
+  .r1 .sb{width:200px;flex-shrink:0;background:#000;border-right:1px solid #181408;padding:8px 0;overflow-y:auto}
+  .r1 .mn{flex:1;display:flex;flex-direction:column}
+  .r1 .hd{padding:8px 16px;border-bottom:1px solid #181408;display:flex;align-items:center;gap:12px;font-family:'Space Mono',monospace}
+  .r1 .hd .bk{font-size:12px;color:#504018;cursor:pointer}.r1 .hd .bk:hover{color:#e8c840}
+  .r1 .hd .nm{font-size:12px;font-weight:500;color:#e8c840;text-shadow:0 0 8px rgba(232,200,64,.2)}
+  .r1 .hd .ph{font-size:10px;color:#504018;letter-spacing:1px;text-transform:uppercase}
+  .r1 .tm{flex:1;background:#000;display:flex;align-items:center;justify-content:center;font-family:'Space Mono',monospace;font-size:12px;color:#302810;text-shadow:0 0 3px rgba(232,200,64,.1)}
+  .r1 .st{font-family:'Space Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#302810;padding:6px 12px 4px;border-bottom:1px solid #181408}
+  .r1 .sc{margin-bottom:8px}
+  .r1 .si{font-family:'Space Mono',monospace;font-size:11px;color:#a08848;padding:4px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .1s}
+  .r1 .si:hover{background:#0a0800;color:#c8b870}
+  .r1 .si.act{color:#e8c840;background:rgba(232,200,64,.03)}
+  .r1 .si .d{width:4px;height:4px;border-radius:1px;flex-shrink:0;box-shadow:0 0 3px currentColor}
+  .r1 .si .rt{margin-left:auto;font-size:9px;color:#302810}
+
+  /* ── H · Noir Contrast ──────────────────────────────────────── */
+  .h .pb{background:#000;border:1px solid #0e0e0e}
+  .h .kan{padding:24px 20px;display:flex;gap:1px;height:100%;background:#111}
+  .h .kcol{flex:1;display:flex;flex-direction:column;background:#000}
+  .h .kh{font-family:'Azeret Mono',monospace;font-size:9px;letter-spacing:3px;text-transform:uppercase;color:#444;padding:12px 16px 14px;display:flex;justify-content:space-between}
+  .h .kh .ct{color:#222}
+  .h .kc{padding:14px 16px;border-bottom:1px solid #111;cursor:pointer;transition:background .1s}
+  .h .kc:hover{background:#080808}
+  .h .kc.sel{background:#080808}
+  .h .kc.sel .cn{color:#fff}
+  .h .cn{font-family:'Azeret Mono',monospace;font-size:13px;font-weight:500;color:#888;display:flex;align-items:center;gap:10px;transition:color .1s}
+  .h .cn .d{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .h .cbr{font-family:'Azeret Mono',monospace;font-size:10px;color:#222;margin-top:4px;padding-left:18px}
+  .h .cch{display:flex;gap:8px;margin-top:6px;padding-left:18px}
+  .h .ch{font-family:'Azeret Mono',monospace;font-size:9px;padding:0;border:none;background:none;letter-spacing:.5px}
+  .h .cg{color:#44cc88}.h .cb{color:#5588ff}.h .ca{color:#ffaa00}.h .cr{color:#ff4040}.h .cd{color:#222}
+
+  .h .det{display:flex;height:100%}
+  .h .sb{width:200px;flex-shrink:0;border-right:1px solid #111;padding:16px 0;overflow-y:auto}
+  .h .mn{flex:1;display:flex;flex-direction:column}
+  .h .hd{padding:14px 20px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #111}
+  .h .hd .bk{font-family:'Azeret Mono',monospace;font-size:11px;color:#444;cursor:pointer}.h .hd .bk:hover{color:#fff}
+  .h .hd .nm{font-family:'Azeret Mono',monospace;font-size:13px;font-weight:500;color:#fff}
+  .h .hd .ph{font-family:'Azeret Mono',monospace;font-size:9px;color:#444;letter-spacing:2px;text-transform:uppercase}
+  .h .tm{flex:1;background:#000;display:flex;align-items:center;justify-content:center;font-family:'Azeret Mono',monospace;font-size:12px;color:#181818}
+  .h .st{font-family:'Azeret Mono',monospace;font-size:8px;letter-spacing:3px;text-transform:uppercase;color:#222;padding:4px 16px 8px}
+  .h .sc{margin-bottom:14px}
+  .h .si{font-family:'Azeret Mono',monospace;font-size:11px;color:#444;padding:5px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:color .1s}
+  .h .si:hover{color:#888}
+  .h .si.act{color:#fff}
+  .h .si .d{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+  .h .si .rt{margin-left:auto;font-size:8px;color:#222}
+
+  /* ── R2 · Noir × Brutalist ──────────────────────────────────── */
+  .r2 .pb{background:#000;border:1px solid #0a0a0a}
+  .r2 .kan{padding:0;display:flex;gap:1px;height:100%;background:#111}
+  .r2 .kcol{flex:1;display:flex;flex-direction:column;background:#000}
+  .r2 .kh{font-family:'Azeret Mono',monospace;font-size:9px;letter-spacing:3px;text-transform:uppercase;color:#333;padding:14px 16px;background:#050505;display:flex;justify-content:space-between}
+  .r2 .kh .ct{color:#1a1a1a}
+  .r2 .kc{padding:12px 16px;border-left:3px solid transparent;border-bottom:1px solid #0a0a0a;cursor:pointer;transition:all .1s}
+  .r2 .kc:hover{background:#050505}
+  .r2 .kc:hover .cn{color:#999}
+  .r2 .kc.sel{background:#050505;border-left-color:#fff}
+  .r2 .kc.sel .cn{color:#fff}
+  .r2 .kc.sel .cbr{color:#333}
+  .r2 .cn{font-family:'Azeret Mono',monospace;font-size:12px;color:#666;display:flex;align-items:center;gap:10px;transition:color .15s}
+  .r2 .cn .d{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+  .r2 .cbr{font-family:'Azeret Mono',monospace;font-size:10px;color:#1a1a1a;margin-top:3px;padding-left:16px}
+  .r2 .cch{display:flex;gap:10px;margin-top:6px;padding-left:16px}
+  .r2 .ch{font-family:'Azeret Mono',monospace;font-size:9px;padding:0;border:none;background:none;letter-spacing:.5px}
+  .r2 .cg{color:#44cc88}.r2 .cb{color:#5588ff}.r2 .ca{color:#ffaa00}.r2 .cr{color:#ff4040}.r2 .cd{color:#1a1a1a}
+
+  .r2 .det{display:flex;height:100%}
+  .r2 .sb{width:1px;flex-shrink:0;background:#111}
+  .r2 .sb2{width:180px;flex-shrink:0;padding:20px 0;overflow-y:auto}
+  .r2 .mn{flex:1;display:flex;flex-direction:column}
+  .r2 .hd{padding:16px 20px;display:flex;align-items:center;gap:20px;border-bottom:1px solid #0a0a0a}
+  .r2 .hd .bk{font-family:'Azeret Mono',monospace;font-size:10px;color:#333;letter-spacing:1px;cursor:pointer}.r2 .hd .bk:hover{color:#fff}
+  .r2 .hd .nm{font-family:'Azeret Mono',monospace;font-size:14px;font-weight:500;color:#fff;letter-spacing:-.5px}
+  .r2 .hd .ph{font-family:'Azeret Mono',monospace;font-size:9px;color:#333;letter-spacing:2px;text-transform:uppercase}
+  .r2 .tm{flex:1;background:#000;display:flex;align-items:center;justify-content:center;font-family:'Azeret Mono',monospace;font-size:11px;color:#111}
+  .r2 .st{font-family:'Azeret Mono',monospace;font-size:8px;letter-spacing:3px;text-transform:uppercase;color:#1a1a1a;padding:0 16px 8px}
+  .r2 .sc{margin-bottom:12px}
+  .r2 .si{font-family:'Azeret Mono',monospace;font-size:11px;color:#333;padding:4px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:color .1s}
+  .r2 .si:hover{color:#888}
+  .r2 .si.act{color:#fff}
+  .r2 .si .d{width:4px;height:4px;border-radius:50%;flex-shrink:0}
+  .r2 .si .rt{margin-left:auto;font-size:8px;color:#1a1a1a}
+
+  /* ── R4 · Brutalist × Hot Wire ──────────────────────────────── */
+  .r4 .pb{background:#000;border:1px solid #111}
+  .r4 .kan{padding:12px;display:flex;gap:1px;height:100%;background:#151520}
+  .r4 .kcol{flex:1;display:flex;flex-direction:column;gap:1px;background:#151520}
+  .r4 .kh{font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#504c68;padding:10px 12px;background:#000;display:flex;justify-content:space-between}
+  .r4 .kh .ct{color:#302c40}
+  .r4 .kc{background:#000;padding:10px 12px;border-left:2px solid transparent;cursor:pointer;transition:background .1s}
+  .r4 .kc:hover{background:#06060a}
+  .r4 .kc.sel{border-left-color:#f050a0;background:#06060a}
+  .r4 .cn{font-family:'Geist Mono',monospace;font-size:12px;font-weight:500;color:#c0bcd0;display:flex;align-items:center;gap:8px}
+  .r4 .cn .d{width:5px;height:5px;border-radius:1px;flex-shrink:0}
+  .r4 .cbr{font-family:'Geist Mono',monospace;font-size:10px;color:#504c68;margin-top:2px;padding-left:13px}
+  .r4 .cch{display:flex;gap:6px;margin-top:5px;padding-left:13px}
+  .r4 .ch{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:1px 5px;border:none;border-radius:0}
+  .r4 .cg{color:#00ff66;background:rgba(0,255,102,.06)}.r4 .cb{color:#5080f0;background:rgba(80,128,240,.06)}.r4 .ca{color:#f0b030;background:rgba(240,176,48,.05)}.r4 .cr{color:#f04848;background:rgba(240,72,72,.06)}.r4 .cd{color:#504c68;background:rgba(255,255,255,.02)}
+
+  .r4 .det{display:flex;height:100%}
+  .r4 .sb{width:200px;flex-shrink:0;background:#000;border-right:1px solid #151520;padding:8px 0;overflow-y:auto}
+  .r4 .mn{flex:1;display:flex;flex-direction:column}
+  .r4 .hd{padding:8px 16px;border-bottom:1px solid #151520;display:flex;align-items:center;gap:12px;font-family:'Geist Mono',monospace}
+  .r4 .hd .bk{font-size:12px;color:#504c68;cursor:pointer}.r4 .hd .bk:hover{color:#f050a0}
+  .r4 .hd .nm{font-size:12px;font-weight:500;color:#f050a0}
+  .r4 .hd .ph{font-size:10px;color:#504c68;letter-spacing:1px;text-transform:uppercase}
+  .r4 .tm{flex:1;background:#000;display:flex;align-items:center;justify-content:center;font-family:'Geist Mono',monospace;font-size:12px;color:#302c40}
+  .r4 .st{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#302c40;padding:6px 12px 4px;border-bottom:1px solid #151520}
+  .r4 .sc{margin-bottom:8px}
+  .r4 .si{font-family:'Geist Mono',monospace;font-size:11px;color:#8884a0;padding:4px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .08s}
+  .r4 .si:hover{background:#06060a;color:#c0bcd0}
+  .r4 .si.act{color:#f050a0;background:rgba(240,80,160,.04)}
+  .r4 .si .d{width:4px;height:4px;border-radius:1px;flex-shrink:0}
+  .r4 .si .rt{margin-left:auto;font-size:9px;color:#302c40}
+
+  /* ── R5 · Brut×Noir×Phosphor — Three-way: B gaps + H monochrome + E warmth
+     Amber-tinted monochrome. No green/blue/pink. Warm grays. Azeret.
+     ──────────────────────────────────────────────────────────── */
+  .r5 .pb{background:#000;border:1px solid #0e0e0a}
+  .r5 .kan{padding:0;display:flex;gap:1px;height:100%;background:#18160e}
+  .r5 .kcol{flex:1;display:flex;flex-direction:column;background:#000}
+  .r5 .kh{font-family:'Azeret Mono',monospace;font-size:9px;letter-spacing:3px;text-transform:uppercase;color:#3a3428;padding:14px 16px;background:#050400;display:flex;justify-content:space-between}
+  .r5 .kh .ct{color:#201c10}
+  .r5 .kc{padding:13px 16px;border-left:3px solid transparent;border-bottom:1px solid #0e0e0a;cursor:pointer;transition:all .1s}
+  .r5 .kc:hover{background:#060400}
+  .r5 .kc:hover .cn{color:#a89870}
+  .r5 .kc.sel{background:#060400;border-left-color:#d8c060}
+  .r5 .kc.sel .cn{color:#e8d890}
+  .r5 .kc.sel .cbr{color:#504820}
+  .r5 .cn{font-family:'Azeret Mono',monospace;font-size:12px;color:#706850;display:flex;align-items:center;gap:10px;transition:color .15s}
+  .r5 .cn .d{width:6px;height:6px;border-radius:50%;flex-shrink:0;box-shadow:0 0 3px currentColor}
+  .r5 .cbr{font-family:'Azeret Mono',monospace;font-size:10px;color:#201c10;margin-top:3px;padding-left:16px}
+  .r5 .cch{display:flex;gap:10px;margin-top:6px;padding-left:16px}
+  .r5 .ch{font-family:'Azeret Mono',monospace;font-size:9px;padding:0;border:none;background:none;letter-spacing:.5px}
+  .r5 .cg{color:#80c850}.r5 .cb{color:#90a8c0}.r5 .ca{color:#d8a030}.r5 .cr{color:#c85040}.r5 .cd{color:#302810}
+
+  .r5 .det{display:flex;height:100%}
+  .r5 .sb{width:1px;flex-shrink:0;background:#18160e}
+  .r5 .sb2{width:180px;flex-shrink:0;padding:20px 0;overflow-y:auto}
+  .r5 .mn{flex:1;display:flex;flex-direction:column}
+  .r5 .hd{padding:14px 20px;display:flex;align-items:center;gap:20px;border-bottom:1px solid #0e0e0a}
+  .r5 .hd .bk{font-family:'Azeret Mono',monospace;font-size:10px;color:#3a3428;letter-spacing:1px;cursor:pointer}.r5 .hd .bk:hover{color:#d8c060}
+  .r5 .hd .nm{font-family:'Azeret Mono',monospace;font-size:14px;font-weight:500;color:#e8d890;letter-spacing:-.5px;text-shadow:0 0 6px rgba(232,200,64,.1)}
+  .r5 .hd .ph{font-family:'Azeret Mono',monospace;font-size:9px;color:#3a3428;letter-spacing:2px;text-transform:uppercase}
+  .r5 .tm{flex:1;background:#000;display:flex;align-items:center;justify-content:center;font-family:'Azeret Mono',monospace;font-size:12px;color:#18160e}
+  .r5 .st{font-family:'Azeret Mono',monospace;font-size:8px;letter-spacing:3px;text-transform:uppercase;color:#201c10;padding:0 16px 8px}
+  .r5 .sc{margin-bottom:12px}
+  .r5 .si{font-family:'Azeret Mono',monospace;font-size:11px;color:#504820;padding:4px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:color .1s}
+  .r5 .si:hover{color:#a89870}
+  .r5 .si.act{color:#d8c060;text-shadow:0 0 4px rgba(232,200,64,.15)}
+  .r5 .si .d{width:4px;height:4px;border-radius:50%;flex-shrink:0;box-shadow:0 0 3px currentColor}
+  .r5 .si .rt{margin-left:auto;font-size:8px;color:#201c10}
+
+  /* ══════════════════════════════════════════════════════════════
+     LIGHT THEMES
+     ══════════════════════════════════════════════════════════════ */
+
+  /* ── L1 · Bleached Brutalist — B inverted to light. Stark white,
+     black text, green accent, 1px gaps become light gray gutters.
+     ──────────────────────────────────────────────────────────── */
+  .l1 .pb{background:#fff;border:1px solid #e8e8e8}
+  .l1 .kan{padding:12px;display:flex;gap:1px;height:100%;background:#e0e0e0}
+  .l1 .kcol{flex:1;display:flex;flex-direction:column;gap:1px;background:#e0e0e0}
+  .l1 .kh{font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#999;padding:10px 12px;background:#fff;display:flex;justify-content:space-between}
+  .l1 .kh .ct{color:#ccc}
+  .l1 .kc{background:#fff;padding:10px 12px;border-left:2px solid transparent;cursor:pointer;transition:background .1s}
+  .l1 .kc:hover{background:#f8f8f8}
+  .l1 .kc.sel{border-left-color:#00aa44;background:#f8f8f8}
+  .l1 .cn{font-family:'Geist Mono',monospace;font-size:12px;font-weight:500;color:#222;display:flex;align-items:center;gap:8px}
+  .l1 .cn .d{width:5px;height:5px;border-radius:1px;flex-shrink:0}
+  .l1 .cbr{font-family:'Geist Mono',monospace;font-size:10px;color:#aaa;margin-top:2px;padding-left:13px}
+  .l1 .cch{display:flex;gap:6px;margin-top:5px;padding-left:13px}
+  .l1 .ch{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:1px 5px;border:none;border-radius:0}
+  .l1 .cg{color:#008844;background:rgba(0,136,68,.06)}.l1 .cb{color:#2266cc;background:rgba(34,102,204,.06)}.l1 .ca{color:#aa7700;background:rgba(170,119,0,.06)}.l1 .cr{color:#cc2222;background:rgba(204,34,34,.06)}.l1 .cd{color:#bbb;background:#f4f4f4}
+
+  .l1 .det{display:flex;height:100%}
+  .l1 .sb{width:200px;flex-shrink:0;background:#fff;border-right:1px solid #e0e0e0;padding:8px 0;overflow-y:auto}
+  .l1 .mn{flex:1;display:flex;flex-direction:column}
+  .l1 .hd{padding:8px 16px;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;gap:12px;font-family:'Geist Mono',monospace}
+  .l1 .hd .bk{font-size:12px;color:#999;cursor:pointer}.l1 .hd .bk:hover{color:#00aa44}
+  .l1 .hd .nm{font-size:12px;font-weight:500;color:#00aa44}
+  .l1 .hd .ph{font-size:10px;color:#999;letter-spacing:1px;text-transform:uppercase}
+  .l1 .tm{flex:1;background:#fafafa;display:flex;align-items:center;justify-content:center;font-family:'Geist Mono',monospace;font-size:12px;color:#ddd}
+  .l1 .st{font-family:'Geist Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#ccc;padding:6px 12px 4px;border-bottom:1px solid #e8e8e8}
+  .l1 .sc{margin-bottom:8px}
+  .l1 .si{font-family:'Geist Mono',monospace;font-size:11px;color:#888;padding:4px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .08s}
+  .l1 .si:hover{background:#f4f4f4;color:#444}
+  .l1 .si.act{color:#00aa44;background:rgba(0,170,68,.04)}
+  .l1 .si .d{width:4px;height:4px;border-radius:1px;flex-shrink:0}
+  .l1 .si .rt{margin-left:auto;font-size:9px;color:#ccc}
+
+  /* ── L2 · Paper Noir — H inverted. Off-white paper, black text,
+     no accent color at all. Selected = black bg + white text invert.
+     ──────────────────────────────────────────────────────────── */
+  .l2 .pb{background:#f5f3ef;border:1px solid #e0ddd6}
+  .l2 .kan{padding:24px 20px;display:flex;gap:1px;height:100%;background:#ddd9d0}
+  .l2 .kcol{flex:1;display:flex;flex-direction:column;background:#f5f3ef}
+  .l2 .kh{font-family:'Azeret Mono',monospace;font-size:9px;letter-spacing:3px;text-transform:uppercase;color:#a09888;padding:12px 16px 14px;display:flex;justify-content:space-between}
+  .l2 .kh .ct{color:#c8c0b0}
+  .l2 .kc{padding:14px 16px;border-bottom:1px solid #e8e4dc;cursor:pointer;transition:all .15s}
+  .l2 .kc:hover{background:#eeeae4}
+  .l2 .kc.sel{background:#1a1816;color:#f5f3ef}
+  .l2 .kc.sel .cn{color:#f5f3ef}
+  .l2 .kc.sel .cbr{color:#706860}
+  .l2 .cn{font-family:'Azeret Mono',monospace;font-size:13px;font-weight:500;color:#555;display:flex;align-items:center;gap:10px;transition:color .1s}
+  .l2 .cn .d{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .l2 .cbr{font-family:'Azeret Mono',monospace;font-size:10px;color:#c0b8a8;margin-top:4px;padding-left:18px}
+  .l2 .cch{display:flex;gap:8px;margin-top:6px;padding-left:18px}
+  .l2 .ch{font-family:'Azeret Mono',monospace;font-size:9px;padding:0;border:none;background:none;letter-spacing:.5px}
+  .l2 .cg{color:#1a8050}.l2 .cb{color:#2a60b0}.l2 .ca{color:#a07010}.l2 .cr{color:#b03030}.l2 .cd{color:#c0b8a8}
+  .l2 .kc.sel .cg{color:#60d0a0}.l2 .kc.sel .cb{color:#80b0f0}.l2 .kc.sel .ca{color:#e0c060}.l2 .kc.sel .cr{color:#f08080}.l2 .kc.sel .cd{color:#706860}
+
+  .l2 .det{display:flex;height:100%}
+  .l2 .sb{width:200px;flex-shrink:0;border-right:1px solid #e0ddd6;padding:16px 0;overflow-y:auto}
+  .l2 .mn{flex:1;display:flex;flex-direction:column}
+  .l2 .hd{padding:14px 20px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #e0ddd6}
+  .l2 .hd .bk{font-family:'Azeret Mono',monospace;font-size:11px;color:#a09888;cursor:pointer}.l2 .hd .bk:hover{color:#1a1816}
+  .l2 .hd .nm{font-family:'Azeret Mono',monospace;font-size:13px;font-weight:500;color:#1a1816}
+  .l2 .hd .ph{font-family:'Azeret Mono',monospace;font-size:9px;color:#a09888;letter-spacing:2px;text-transform:uppercase}
+  .l2 .tm{flex:1;background:#f0ede6;display:flex;align-items:center;justify-content:center;font-family:'Azeret Mono',monospace;font-size:12px;color:#d0c8b8}
+  .l2 .st{font-family:'Azeret Mono',monospace;font-size:8px;letter-spacing:3px;text-transform:uppercase;color:#c0b8a8;padding:4px 16px 8px}
+  .l2 .sc{margin-bottom:14px}
+  .l2 .si{font-family:'Azeret Mono',monospace;font-size:11px;color:#a09888;padding:5px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:color .1s}
+  .l2 .si:hover{color:#555}
+  .l2 .si.act{color:#1a1816;font-weight:500}
+  .l2 .si .d{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+  .l2 .si .rt{margin-left:auto;font-size:8px;color:#c0b8a8}
+</style>
+</head>
+<body>
+
+<div class="mh"><h1>Mood Board v4 — Focused</h1><p>Your five picks plus two new remixes and two light modes. Same mock data across all nine.</p></div>
+
+<nav>
+  <a href="#b" class="on">B · Brutalist</a>
+  <a href="#r1">R1 · Brut×Phos</a>
+  <a href="#h">H · Noir</a>
+  <a href="#r2">R2 · Noir×Brut</a>
+  <a href="#r4">R4 · Brut×Wire</a>
+  <a href="#r5" style="color:#706850">R5 · Noir×Phos</a>
+  <a href="#l1" style="color:#00aa44">L1 · Bleached Brut</a>
+  <a href="#l2" style="color:#a09888">L2 · Paper Noir</a>
+</nav>
+
+<!-- ═══ DARK THEMES ═══ -->
+<div style="max-width:1600px;margin:0 auto" class="sep">Dark Themes</div>
+
+<div class="tk b" id="b">
+  <div class="tk-l" style="color:#00ff66">B</div><h2>Brutalist Terminal</h2>
+  <p class="tk-d">Pure black. Geist Mono. 1px gaps. Left-border green. The anchor.</p>
+  <div class="tk-f">Font: <span>Geist Mono</span> · Accent: <span>#00ff66</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#00ff66"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">2 AGENTS</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#ffcc00"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">1 PENDING</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#00ff66"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#4488ff"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">APPROVED</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#282828"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">MERGED</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#00ff66"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#ffcc00"></span> test-writer <span class="rt">perm</span></div><div class="si" style="color:#282828">+ new</div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#00ff66"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#00ff66"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#00ff66"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← board</span><span style="color:#1a1a1a">|</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">$ _</div></div></div></div>
+  </div>
+</div>
+
+<div class="tk r1" id="r1">
+  <div class="tk-l" style="color:#e8c840">R1</div><h2>Brutalist × Phosphor</h2>
+  <p class="tk-d">B's structure + E's amber warmth. Space Mono. Glowing dots. Light scanlines. Left-border amber.</p>
+  <div class="tk-f">Font: <span>Space Mono</span> · Accent: <span>#e8c840</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#e8c840"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">2 AGENTS</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#e8a030"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">1 PENDING</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#80e850"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#a0c8e8"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">APPROVED</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#302810"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">MERGED</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#80e850"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#e8a030"></span> test-writer <span class="rt">perm</span></div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#e8c840"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#e8c840"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#80e850"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← board</span><span style="color:#181408">|</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">█</div></div></div></div>
+  </div>
+</div>
+
+<div class="tk h" id="h">
+  <div class="tk-l" style="color:#fff">H</div><h2>Noir Contrast</h2>
+  <p class="tk-d">Maximum contrast. Azeret Mono. White on black. Color for status only. Wide spacing.</p>
+  <div class="tk-f">Font: <span>Azeret Mono</span> · Accent: <span>#ffffff</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#44cc88"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">✦ 2 agents</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#ffaa00"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">⚡ 1 pending</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#44cc88"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#5588ff"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">approved</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#222"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">merged</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#44cc88"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#ffaa00"></span> test-writer <span class="rt">perm</span></div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#44cc88"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#44cc88"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#44cc88"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← Board</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">_</div></div></div></div>
+  </div>
+</div>
+
+<div class="tk r2" id="r2">
+  <div class="tk-l" style="color:#fff">R2</div><h2>Noir × Brutalist</h2>
+  <p class="tk-d">H's Azeret + monochrome + B's gap grid + 3px left-border. No card borders. Gap = divider. Gray → white on select.</p>
+  <div class="tk-f">Font: <span>Azeret Mono</span> · Accent: <span>#ffffff</span> · Borders: <span>none (gaps)</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#44cc88"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">✦ 2 agents</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#ffaa00"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">⚡ 1 pending</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#44cc88"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#5588ff"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">approved</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#1a1a1a"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">merged</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"></div><div class="sb2"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#44cc88"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#ffaa00"></span> test-writer <span class="rt">perm</span></div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#44cc88"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#44cc88"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#44cc88"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← BOARD</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">_</div></div></div></div>
+  </div>
+</div>
+
+<div class="tk r4" id="r4">
+  <div class="tk-l" style="color:#f050a0">R4</div><h2>Brutalist × Hot Wire</h2>
+  <p class="tk-d">B's black + gaps. Purple-tinted dividers. Pink for selection, green for status. Two-tone neon.</p>
+  <div class="tk-f">Font: <span>Geist Mono</span> · Select: <span>#f050a0</span> · Status: <span>#00ff66</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#30e090"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">2 AGENTS</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#f0b030"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">1 PENDING</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#30e090"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#5080f0"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">APPROVED</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#302c40"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">MERGED</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#f050a0"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#f0b030"></span> test-writer <span class="rt">perm</span></div><div class="si" style="color:#302c40">+ new</div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#30e090"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#30e090"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#30e090"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← board</span><span style="color:#151520">|</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">$ _</div></div></div></div>
+  </div>
+</div>
+
+<!-- New remix -->
+<div class="tk r5" id="r5">
+  <div class="tk-l" style="color:#d8c060">R5 — new</div><h2>Noir × Phosphor</h2>
+  <p class="tk-d">H's Azeret Mono + R2's gap-only structure + E's amber warmth. Amber-tinted monochrome — the warmth of phosphor with the drama of noir. Glowing dots. No green or blue accent, just warm amber through black.</p>
+  <div class="tk-f">Font: <span>Azeret Mono</span> · Accent: <span>#d8c060</span> · Structure: <span>R2 gaps + 3px left-border</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#d8c060"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">✦ 2 agents</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#d8a030"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">⚡ 1 pending</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#80c850"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#90a8c0"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">approved</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#201c10"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">merged</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"></div><div class="sb2"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#d8c060"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#d8a030"></span> test-writer <span class="rt">perm</span></div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#d8c060"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#d8c060"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#80c850"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← BOARD</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">█</div></div></div></div>
+  </div>
+</div>
+
+<!-- ═══ LIGHT THEMES ═══ -->
+<div style="max-width:1600px;margin:0 auto" class="sep">Light Themes</div>
+
+<div class="tk l1" id="l1">
+  <div class="tk-l" style="color:#00aa44">L1</div><h2>Bleached Brutalist</h2>
+  <p class="tk-d">B inverted. Stark white, Geist Mono, 1px light-gray gaps, green left-border. Same raw structure, just blasted with light. The terminal goes dark (embedded), everything else is paper-white.</p>
+  <div class="tk-f">Font: <span>Geist Mono</span> · Accent: <span>#00aa44</span> · Base: <span>#ffffff</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#00aa44"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">2 AGENTS</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#cc8800"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">1 PENDING</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#00aa44"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#2266cc"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">APPROVED</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#ddd"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">MERGED</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#00aa44"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#cc8800"></span> test-writer <span class="rt">perm</span></div><div class="si" style="color:#ccc">+ new</div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#00aa44"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#00aa44"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#00aa44"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← board</span><span style="color:#e0e0e0">|</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">terminal (dark embed)</div></div></div></div>
+  </div>
+</div>
+
+<div class="tk l2" id="l2">
+  <div class="tk-l" style="color:#1a1816">L2</div><h2>Paper Noir</h2>
+  <p class="tk-d">H inverted to warm off-white. Azeret Mono. No accent color — selected card inverts to black background with white text. Warm stone tones. Like a printed technical spec on good paper.</p>
+  <div class="tk-f">Font: <span>Azeret Mono</span> · Accent: <span>none (inversion)</span> · Base: <span>#f5f3ef</span></div>
+  <div class="pr">
+    <div class="pb"><div class="pl">Kanban</div><div class="kan"><div class="kcol"><div class="kh">Active <span class="ct">3</span></div><div class="kc sel"><div class="cn"><span class="d" style="background:#60d0a0"></span> feat-remote-acl</div><div class="cbr">(main) *</div><div class="cch"><span class="ch cg">✦ 2 agents</span><span class="ch ca">PR #42</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#cc8800"></span> fix-auth-flow</div><div class="cbr">(main)</div><div class="cch"><span class="ch cb">⚡ 1 pending</span></div></div><div class="kc"><div class="cn"><span class="d" style="background:#1a8050"></span> refactor-crypto</div><div class="cbr">(dev-v2)</div></div></div><div class="kcol"><div class="kh">Review <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#2a60b0"></span> api-pagination</div><div class="cbr">(main)</div><div class="cch"><span class="ch cg">approved</span></div></div></div><div class="kcol"><div class="kh">Done <span class="ct">1</span></div><div class="kc"><div class="cn"><span class="d" style="background:#d0c8b8"></span> setup-ci</div><div class="cbr">(main)</div><div class="cch"><span class="ch cd">merged</span></div></div></div></div></div>
+    <div class="pb"><div class="pl">Detail</div><div class="det"><div class="sb"><div class="sc"><div class="st">Agents</div><div class="si act"><span class="d" style="background:#1a8050"></span> refactor-session <span class="rt">idle</span></div><div class="si"><span class="d" style="background:#cc8800"></span> test-writer <span class="rt">perm</span></div></div><div class="sc"><div class="st">Terminals</div><div class="si"><span class="d" style="background:#1a8050"></span> zsh:main <span class="rt">2m</span></div><div class="si"><span class="d" style="background:#1a8050"></span> zsh:tests <span class="rt">5m</span></div></div><div class="sc"><div class="st">Services</div><div class="si"><span class="d" style="background:#1a8050"></span> dev-server <span class="rt">:3000</span></div></div></div><div class="mn"><div class="hd"><span class="bk">← Board</span><span class="nm">feat-remote-acl</span><span class="ph">active</span></div><div class="tm">terminal (dark embed)</div></div></div></div>
+  </div>
+</div>
+
+<div style="height:120px"></div>
+
+<script>
+  const ls=document.querySelectorAll('nav a'),ts=document.querySelectorAll('.tk');
+  ts.forEach(t=>new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){ls.forEach(l=>l.classList.remove('on'));const a=document.querySelector(`nav a[href="#${e.target.id}"]`);if(a)a.classList.add('on')}})},{rootMargin:'-30% 0px -30% 0px'}).observe(t));
+</script>
+</body>
+</html>
