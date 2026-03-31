@@ -1640,6 +1640,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
       </div>
     ) : null;
+    const handleBackToBoard = async () => {
+      if (terminalMode === 'attached' && attachedBackendKey) {
+        try {
+          await multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Failed to detach session');
+          return;
+        }
+      }
+
+      handleBoardSelectWorkspace(null);
+    };
 
     // ── Workspace detail page (full-screen, replaces board) ────────────────
     if (selectedWorkspaceForDetail) {
@@ -1694,7 +1706,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               }
             }}
             onDeleteSession={handleDeleteSession}
-            onClose={() => handleBoardSelectWorkspace(null)}
+            onClose={() => {
+              void handleBackToBoard();
+            }}
           >
             {inlineTerminalOutlet}
           </WorkspaceDetailPage>
