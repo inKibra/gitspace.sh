@@ -1,7 +1,10 @@
 /**
  * KanbanBoard Web - columns and workspace cards for browser.
+ * Desktop: side-by-side columns with 1px gap gutters.
+ * Mobile (<640px): tab bar at top, one phase visible at a time.
  */
 
+import { useState } from 'react';
 import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
 import { PHASE_LABELS } from '../app/shared/board/types.js';
 import type { WorkspacePhase } from '../types/config.js';
@@ -179,30 +182,85 @@ export function KanbanBoardWeb({
   workspaceStatusById = {},
   fullHeight = false,
 }: KanbanBoardWebProps) {
+  const [mobilePhaseIndex, setMobilePhaseIndex] = useState(0);
+  const safeIndex = Math.min(mobilePhaseIndex, groups.length - 1);
+  const mobileGroup = groups[safeIndex];
+
   return (
-    <div className={`flex flex-1 gap-px overflow-x-auto bg-[var(--gs-gap)] ${fullHeight ? 'h-full' : ''}`}>
-      {groups.map((group) => (
-        <div
-          key={group.phase}
-          className={`flex min-w-[180px] flex-1 flex-col bg-[var(--gs-bg)] ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
-        >
-          <div className="flex justify-between items-baseline px-3 py-2.5 text-[10px] tracking-[2px] uppercase text-[var(--gs-text-dim)]">
-            <span>{PHASE_LABELS[group.phase] ?? group.phase}</span>
-            <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length}</span>
-          </div>
-          <div className="flex flex-col gap-0">
-            {group.workspaces.map((w) => (
-              <WorkspaceCard
-                key={w.selectionKey}
-                entry={w}
-                isSelected={w.selectionKey === selectedWorkspaceId}
-                onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
-                status={workspaceStatusById[w.selectionKey]}
-              />
-            ))}
-          </div>
+    <>
+      {/* ── Mobile: tab bar + single phase ── */}
+      <div className={`flex flex-col sm:hidden ${fullHeight ? 'h-full' : 'flex-1'}`}>
+        {/* Phase tab bar */}
+        <div className="flex border-b border-[var(--gs-border)]">
+          {groups.map((group, i) => {
+            const isActive = i === safeIndex;
+            const count = group.workspaces.length;
+            return (
+              <button
+                key={group.phase}
+                type="button"
+                onClick={() => setMobilePhaseIndex(i)}
+                className={
+                  'flex-1 py-2.5 text-[10px] tracking-[1.5px] uppercase text-center transition-colors ' +
+                  (isActive
+                    ? 'text-[var(--gs-text)] border-b-2 border-b-[var(--gs-selected-border)]'
+                    : 'text-[var(--gs-text-dim)]')
+                }
+              >
+                {PHASE_LABELS[group.phase]?.slice(0, 4) ?? group.phase}
+                {count > 0 && <span className="ml-1 text-[var(--gs-text-ghost)]">{count}</span>}
+              </button>
+            );
+          })}
         </div>
-      ))}
-    </div>
+
+        {/* Cards for active phase */}
+        <div className="flex-1 overflow-y-auto">
+          {mobileGroup && mobileGroup.workspaces.length > 0 ? (
+            <div className="flex flex-col">
+              {mobileGroup.workspaces.map((w) => (
+                <WorkspaceCard
+                  key={w.selectionKey}
+                  entry={w}
+                  isSelected={w.selectionKey === selectedWorkspaceId}
+                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
+                  status={workspaceStatusById[w.selectionKey]}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center py-12 text-[var(--gs-text-ghost)] text-xs">
+              No workspaces in {PHASE_LABELS[mobileGroup?.phase] ?? 'this phase'}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Desktop: side-by-side columns ── */}
+      <div className={`hidden sm:flex flex-1 gap-px overflow-x-auto bg-[var(--gs-gap)] ${fullHeight ? 'h-full' : ''}`}>
+        {groups.map((group) => (
+          <div
+            key={group.phase}
+            className={`flex min-w-[180px] flex-1 flex-col bg-[var(--gs-bg)] ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
+          >
+            <div className="flex justify-between items-baseline px-3 py-2.5 text-[10px] tracking-[2px] uppercase text-[var(--gs-text-dim)]">
+              <span>{PHASE_LABELS[group.phase] ?? group.phase}</span>
+              <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length}</span>
+            </div>
+            <div className="flex flex-col gap-0">
+              {group.workspaces.map((w) => (
+                <WorkspaceCard
+                  key={w.selectionKey}
+                  entry={w}
+                  isSelected={w.selectionKey === selectedWorkspaceId}
+                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
+                  status={workspaceStatusById[w.selectionKey]}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
   );
 }

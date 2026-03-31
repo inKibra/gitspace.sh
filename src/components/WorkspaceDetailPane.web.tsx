@@ -9,7 +9,7 @@
  * Main: terminal outlet (children) or empty state
  */
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
@@ -100,8 +100,256 @@ function ThemeSwitcher() {
   );
 }
 
-/* ─── Main component ──────────────────────────────────────────────────────── */
+/* ─── SidebarContent — extracted for desktop sidebar + mobile bottom sheet ─── */
 
+function SidebarContent(props: {
+  detailModel: ReturnType<typeof useWorkspaceDetailModel>;
+  workspace: WorkspaceDetailPaneWebProps['workspace'];
+  workspaceSessions: ReturnType<typeof useWorkspaceDetailModel>['workspaceSessions'];
+  attachedSessionId: string | null;
+  attachedAgentSessionId: string | null;
+  onAttachSession: WorkspaceDetailPaneProps['onAttachSession'];
+  onAbortAgentSession?: WorkspaceDetailPaneProps['onAbortAgentSession'];
+  onCloseAgentSession?: WorkspaceDetailPaneProps['onCloseAgentSession'];
+  onArchiveAgentSession?: WorkspaceDetailPaneProps['onArchiveAgentSession'];
+  onRestoreAgentSession?: WorkspaceDetailPaneProps['onRestoreAgentSession'];
+  onCreateAgentSession?: WorkspaceDetailPaneProps['onCreateAgentSession'];
+  onStopProcess?: WorkspaceDetailPaneProps['onStopProcess'];
+  onDeleteSession?: WorkspaceDetailPaneProps['onDeleteSession'];
+  onOpenGitHubPullRequest?: WorkspaceDetailPaneProps['onOpenGitHubPullRequest'];
+  onOpenReview?: WorkspaceDetailPaneProps['onOpenReview'];
+  onRequestStatusChange?: WorkspaceDetailPaneProps['onRequestStatusChange'];
+  onOpenEvents: WorkspaceDetailPaneProps['onOpenEvents'];
+  agentSessionCount: number;
+  pendingPermissions: number;
+  pullRequest?: { url?: string };
+  onDismiss?: () => void;
+}) {
+  const {
+    detailModel, workspace, workspaceSessions, attachedSessionId, attachedAgentSessionId,
+    onAttachSession, onAbortAgentSession, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
+    onCreateAgentSession, onStopProcess, onDeleteSession, onOpenGitHubPullRequest, onOpenReview,
+    onRequestStatusChange, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
+  } = props;
+  const {
+    workspaceReplays, activeAgentSessions, archivedAgentSessions, showArchivedAgents, toggleArchivedAgents,
+    agentRows, agentTodoPhases, sessionRows, visibleReplayRows, hasMoreReplayRows, seeAllReplayLabel,
+    notesSummary, visibleTodoRows, visibleRecentNoteRows, serviceRows, pmRows, footerActions,
+    actions: detailActions,
+  } = detailModel;
+  const shellSessions = workspaceSessions.filter((s) => !s.processName);
+  const attachedServiceSession = workspaceSessions.find((s) => s.id === attachedSessionId);
+  const attachedServiceIdentity = attachedServiceSession?.processName
+    ? { processName: attachedServiceSession.processName, instance: attachedServiceSession.processInstance ?? 1 }
+    : null;
+
+  /** Wrap sidebar actions: dismiss bottom sheet on mobile after action */
+  const act = (fn: () => void) => { fn(); onDismiss?.(); };
+
+  return (
+    <>
+      <div>
+      {/* AI AGENTS */}
+      <SidebarSection
+        title="AI Agents"
+        extra={<>
+          {agentSessionCount > 0 && <span className="text-[10px] text-[var(--gs-text-ghost)]">{agentSessionCount}</span>}
+          {pendingPermissions > 0 && <span className="text-[10px] text-[var(--gs-warning-bright)]">⚡{pendingPermissions}</span>}
+        </>}
+      >
+        {activeAgentSessions.length === 0 ? (
+          <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No agents</div>
+        ) : (
+          agentRows.filter((row) => row.bucket === 'active').map((row) => {
+            const agentState = row.state;
+            const dotColor =
+              agentState === 'needs-permission' ? 'text-[var(--gs-warning-bright)]'
+              : agentState === 'running' ? 'text-[var(--gs-running)]'
+              : agentState === 'waiting' ? 'text-[var(--gs-info)]'
+              : agentState === 'retrying' || agentState === 'error' ? 'text-[var(--gs-danger)]'
+              : 'text-[var(--gs-text-ghost)]';
+            return (
+              <div key={row.id} className="flex items-center gap-1">
+                <SidebarItem
+                  dotColor={dotColor}
+                  label={row.title}
+                  subtitle={row.modelLabel}
+                  rightLabel={row.lastActiveLabel ?? undefined}
+                  active={row.id === attachedAgentSessionId}
+                  onClick={() => act(() => void detailActions.openAgentSession(row.id))}
+                />
+                {onAbortAgentSession && agentState === 'running' && (
+                  <button type="button" onClick={() => void detailActions.abortAgentSession(row.id)} className="text-[10px] text-[var(--gs-danger-hover)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">✕</button>
+                )}
+                {onCloseAgentSession && agentState !== 'running' && (
+                  <button type="button" onClick={() => void detailActions.closeAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">×</button>
+                )}
+              </div>
+            );
+          })
+        )}
+        {agentRows.filter((row) => row.bucket === 'closed').map((row) => (
+          <div key={`closed:${row.id}`} className="flex items-center gap-1">
+            <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="closed" onClick={() => act(() => void detailActions.openAgentSession(row.id))} />
+            {onArchiveAgentSession && (
+              <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">arc</button>
+            )}
+          </div>
+        ))}
+        {archivedAgentSessions.length > 0 && (
+          <>
+            <SidebarItem label={`Archived agent sessions (${archivedAgentSessions.length})`} rightLabel={showArchivedAgents ? 'hide' : 'show'} onClick={toggleArchivedAgents} />
+            {showArchivedAgents && agentRows.filter((row) => row.bucket === 'archived').map((row) => (
+              <div key={`archived:${row.id}`} className="flex items-center gap-1">
+                <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="archived" />
+                {onRestoreAgentSession && (
+                  <button type="button" onClick={() => void detailActions.restoreAgentSession(row.id)} className="text-[10px] text-[var(--gs-success)] hover:text-[var(--gs-accent)] flex-shrink-0 px-1">res</button>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+        {onCreateAgentSession && (
+          <SidebarItem label="+ New agent session" onClick={() => act(() => void detailActions.createAgentSession())} />
+        )}
+      </SidebarSection>
+
+      {/* AGENT TASKS */}
+      {agentTodoPhases && agentTodoPhases.length > 0 && (
+        <SidebarSection title="Agent Tasks" extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{agentTodoPhases.reduce((n, p) => n + p.tasks.filter(t => t.status === 'completed').length, 0)}/{agentTodoPhases.reduce((n, p) => n + p.tasks.length, 0)} done</span>}>
+          {agentTodoPhases.map((phase) => (
+            <div key={phase.name} className="mb-1">
+              <div className="text-[10px] text-[var(--gs-text-muted)] uppercase tracking-wide px-1.5 mb-0.5">{phase.name}</div>
+              {phase.tasks.map((task, i) => {
+                const dotColor = task.status === 'completed' ? 'text-[var(--gs-success)]' : task.status === 'in_progress' ? 'text-[var(--gs-info)]' : task.status === 'abandoned' ? 'text-[var(--gs-text-ghost)]' : 'text-[var(--gs-text-muted)]';
+                return <SidebarItem key={`${phase.name}-${i}`} dotColor={dotColor} label={task.content} rightLabel={task.status === 'in_progress' ? '...' : undefined} />;
+              })}
+            </div>
+          ))}
+        </SidebarSection>
+      )}
+
+      {/* TERMINALS */}
+      <SidebarSection title="Terminals">
+        {shellSessions.length === 0 ? (
+          <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No sessions</div>
+        ) : (
+          sessionRows.map((row) => {
+            const s = workspaceSessions.find((session) => session.id === row.id)!;
+            if (s.processName) return null;
+            const isOpen = attachedSessionId === row.id;
+            return (
+              <div key={row.id} className="flex items-center gap-1">
+                <SidebarItem
+                  dotColor={isOpen ? 'text-[var(--gs-success)]' : row.attached ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-running)]'}
+                  label={row.label} subtitle={row.subtitle} rightLabel={row.alertLabel ?? row.statusLabel}
+                  highlight={isOpen} active={row.attached && !isOpen}
+                  onClick={() => act(() => void detailActions.attachSession(row.id))}
+                />
+                {onDeleteSession && (
+                  <button type="button" onClick={() => detailActions.deleteSession(s.id, s.name)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">×</button>
+                )}
+              </div>
+            );
+          })
+        )}
+        <SidebarItem label="+ New session" onClick={() => act(() => void detailActions.createSession())} />
+      </SidebarSection>
+
+      {/* SERVICES */}
+      {serviceRows.length > 0 && (
+        <SidebarSection title="Services">
+          {serviceRows.map((service) => {
+            const localUrl = service.localUrl;
+            const isOpen = attachedServiceIdentity?.processName === service.processName && attachedServiceIdentity.instance === service.instance;
+            return (
+              <div key={service.key}>
+                <div className="flex items-center gap-1">
+                  <SidebarItem
+                    dotColor={isOpen ? 'text-[var(--gs-success)]' : service.state === 'running' ? 'text-[var(--gs-running)]' : 'text-[var(--gs-text-ghost)]'}
+                    label={service.label} subtitle={service.subtitle ?? localUrl}
+                    rightLabel={service.state === 'disabled' ? undefined : (service.alertLabel ?? service.state)}
+                    highlight={isOpen}
+                    onClick={service.state === 'disabled' ? undefined : () => act(() => void detailActions.activateService(service.processName, service.instance, service.state))}
+                  />
+                  {service.state === 'running' && service.attachableSessionId && (
+                    <button type="button" onClick={() => onAttachSession({ sessionId: service.attachableSessionId, viewOnly: true })} className="text-[10px] text-[var(--gs-info)] hover:text-[var(--gs-info-light)] flex-shrink-0 px-1">att</button>
+                  )}
+                  {service.state === 'running' && localUrl && (() => {
+                    const targetUrl = service.hostedUrl ?? `http://${localUrl}`;
+                    return <button type="button" onClick={() => window.open(targetUrl, '_blank', 'noopener,noreferrer')} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-info)] flex-shrink-0 px-1">↗</button>;
+                  })()}
+                  {service.state === 'running' && onStopProcess && (
+                    <button type="button" onClick={() => onStopProcess({ workspaceId: workspace.id, processName: service.processName })} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">stop</button>
+                  )}
+                </div>
+                {service.state === 'running' && localUrl && (
+                  <div className="pl-5 text-[10px] text-[var(--gs-text-ghost)] truncate">
+                    {service.hostedUrl ? <a href={service.hostedUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[var(--gs-info)] transition-colors">{service.hostedUrl.replace(/^http:\/\//, '')}</a> : localUrl ? <span>{localUrl}</span> : null}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </SidebarSection>
+      )}
+
+      {/* REPLAYS */}
+      {workspaceReplays.length > 0 && (
+        <SidebarSection title="Replays">
+          {visibleReplayRows.map((replay) => (
+            <SidebarItem key={replay.replayId} dotColor={replay.tone === 'red' ? 'text-[var(--gs-danger-hover)]' : 'text-[var(--gs-success)]'} label={replay.label} onClick={() => act(() => void detailActions.openReplay(replay.replayId))} />
+          ))}
+          {hasMoreReplayRows && seeAllReplayLabel && (
+            <SidebarItem label={seeAllReplayLabel} rightLabel="/" onClick={() => act(() => void detailActions.openReplayHistory())} />
+          )}
+        </SidebarSection>
+      )}
+
+      {/* NOTES */}
+      {(notesSummary?.total ?? 0) > 0 && (
+        <SidebarSection title="Notes" extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{notesSummary?.openTodoCount ?? 0} todo</span>}>
+          {visibleTodoRows.map((note) => (
+            <SidebarItem key={note.id} dotColor={note.priority === 'high' ? 'text-[var(--gs-danger-hover)]' : note.priority === 'medium' ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-info)]'} label={note.label} rightLabel={note.priority} />
+          ))}
+          {visibleRecentNoteRows.map((note) => (
+            <SidebarItem key={note.id} dotColor="text-[var(--gs-text-ghost)]" label={note.label} rightLabel="note" />
+          ))}
+        </SidebarSection>
+      )}
+
+      {/* PM LINKS */}
+      {pmRows.length > 0 && (
+        <SidebarSection title="PM Links">
+          {pmRows.map((row) => (
+            <SidebarItem key={row.id} dotColor={row.tone === 'red' ? 'text-[var(--gs-danger-hover)]' : row.tone === 'green' ? 'text-[var(--gs-success)]' : row.tone === 'blue' ? 'text-[var(--gs-info)]' : 'text-[var(--gs-text-ghost)]'} label={row.label} rightLabel={row.detail} onClick={row.actionable && row.section === 'pull-request' && onOpenGitHubPullRequest ? () => void detailActions.footerAction('open-github-pr') : undefined} />
+          ))}
+        </SidebarSection>
+      )}
+
+      {/* SYSTEM */}
+      <SidebarSection title="System">
+        <SidebarItem label="Event Logs" dotColor="text-[var(--gs-running)]" rightLabel="live" onClick={() => act(() => onOpenEvents(workspace.id))} />
+      </SidebarSection>
+      </div>
+
+      <div className="mt-auto pt-3 border-t border-[var(--gs-border-muted)] space-y-0.5">
+        {pendingPermissions > 0 && (
+          <div className="px-1.5 text-[11px] text-[var(--gs-warning-bright)]">⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}</div>
+        )}
+        {footerActions.map((action) => {
+          if (action.id === 'open-github-pr' && (!onOpenGitHubPullRequest || !pullRequest?.url)) return null;
+          if (action.id === 'open-review' && !onOpenReview) return null;
+          if (action.id === 'change-status' && !onRequestStatusChange) return null;
+          const onClick = () => void detailActions.footerAction(action.id);
+          return <SidebarItem key={action.id} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
+        })}
+      </div>
+    </>
+  );
+}
+
+/* ─── Main component ──────────────────────────────────────────────────────── */
 export interface WorkspaceDetailPaneWebProps extends WorkspaceDetailPaneProps {
   /** Terminal outlet rendered in the main area when a session/agent is attached. */
   children?: ReactNode;
@@ -143,6 +391,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     pendingAgentAttach = false,
   } = props;
 
+  const [showMobileSidebar, setShowMobileSidebar] = useState(false);
 
   const detailModel = useWorkspaceDetailModel({
     workspace,
@@ -179,33 +428,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     workspaceReplays,
     visibleStripWorkspaces,
     stripDisplayItems,
-    activeAgentSessions,
-    archivedAgentSessions,
-    showArchivedAgents,
-    toggleArchivedAgents,
-    agentRows,
-    agentTodoPhases,
-    sessionRows,
-    visibleReplayRows,
-    hasMoreReplayRows,
-    seeAllReplayLabel,
-    notesSummary,
-    visibleTodoRows,
-    visibleRecentNoteRows,
-    serviceRows,
-    pmRows,
-    footerActions,
     actions: detailActions,
   } = detailModel;
   const pullRequest = workspace.pullRequest;
-  const shellSessions = workspaceSessions.filter((session) => !session.processName);
-  const attachedWorkspaceSession = workspaceSessions.find((session) => session.id === attachedSessionId) ?? null;
-  const attachedServiceIdentity = attachedWorkspaceSession?.processName
-    ? {
-        processName: attachedWorkspaceSession.processName,
-        instance: attachedWorkspaceSession.processInstance ?? 1,
-      }
-    : null;
 
   return (
     <div className="h-full flex flex-col bg-[var(--gs-bg)] overflow-hidden">
@@ -280,327 +505,35 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
       </div>
 
       {/* ── Sidebar + Main ── */}
-      <div className="flex-1 flex min-h-0">
-        {/* Sidebar */}
-        <div className="w-[240px] flex-shrink-0 border-r border-[var(--gs-border-muted)] bg-[var(--gs-sidebar-bg)] overflow-y-auto px-2 py-3 flex flex-col">
-          <div>
-          {/* AI AGENTS */}
-          <SidebarSection
-            title="AI Agents"
-            extra={
-              <>
-                {agentSessionCount > 0 && <span className="text-[10px] text-[var(--gs-text-ghost)]">{agentSessionCount}</span>}
-                {pendingPermissions > 0 && <span className="text-[10px] text-[var(--gs-warning-bright)]">⚡{pendingPermissions}</span>}
-              </>
-            }
-          >
-            {activeAgentSessions.length === 0 ? (
-              <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No agents</div>
-            ) : (
-              agentRows.filter((row) => row.bucket === 'active').map((row) => {
-                const agentState = row.state;
-                const dotColor =
-                  agentState === 'needs-permission' ? 'text-[var(--gs-warning-bright)]'
-                  : agentState === 'running' ? 'text-[var(--gs-running)]'
-                  : agentState === 'waiting' ? 'text-[var(--gs-info)]'
-                  : agentState === 'retrying' || agentState === 'error' ? 'text-[var(--gs-danger)]'
-                  : 'text-[var(--gs-text-ghost)]';
-                return (
-                  <div key={row.id} className="flex items-center gap-1">
-                    <SidebarItem
-                      dotColor={dotColor}
-                      label={row.title}
-                      subtitle={row.modelLabel}
-                      rightLabel={row.lastActiveLabel ?? undefined}
-                      active={row.id === attachedAgentSessionId}
-                      onClick={() => {
-                        void detailActions.openAgentSession(row.id);
-                      }}
-                    />
-                    {onAbortAgentSession && agentState === 'running' && (
-                      <button type="button" onClick={() => void detailActions.abortAgentSession(row.id)} className="text-[10px] text-[var(--gs-danger-hover)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">✕</button>
-                    )}
-                    {onCloseAgentSession && agentState !== 'running' && (
-                      <button type="button" onClick={() => void detailActions.closeAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">×</button>
-                    )}
-                  </div>
-                );
-              })
-            )}
-            {agentRows.filter((row) => row.bucket === 'closed').map((row) => (
-              <div key={`closed:${row.id}`} className="flex items-center gap-1">
-                <SidebarItem
-                  dotColor="text-[var(--gs-text-ghost)]"
-                  label={row.title}
-                  rightLabel="closed"
-                  onClick={() => {
-                    void detailActions.openAgentSession(row.id);
-                  }}
-                />
-                {onArchiveAgentSession && (
-                  <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">arc</button>
-                )}
-              </div>
-            ))}
-            {archivedAgentSessions.length > 0 && (
-              <>
-                <SidebarItem
-                  label={`Archived agent sessions (${archivedAgentSessions.length})`}
-                  rightLabel={showArchivedAgents ? 'hide' : 'show'}
-                  onClick={toggleArchivedAgents}
-                />
-                {showArchivedAgents && agentRows.filter((row) => row.bucket === 'archived').map((row) => (
-                  <div key={`archived:${row.id}`} className="flex items-center gap-1">
-                    <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="archived" />
-                    {onRestoreAgentSession && (
-                      <button type="button" onClick={() => void detailActions.restoreAgentSession(row.id)} className="text-[10px] text-[var(--gs-success)] hover:text-[var(--gs-accent)] flex-shrink-0 px-1">res</button>
-                    )}
-                  </div>
-                ))}
-              </>
-            )}
-            {onCreateAgentSession && (
-              <SidebarItem
-                label="+ New agent session"
-                onClick={() => void detailActions.createAgentSession()}
-              />
-            )}
-          </SidebarSection>
-
-          {/* AGENT TASKS — from in-process SDK todo state */}
-          {agentTodoPhases && agentTodoPhases.length > 0 && (
-            <SidebarSection
-              title="Agent Tasks"
-              extra={
-                <span className="text-[10px] text-[var(--gs-text-ghost)]">
-                  {agentTodoPhases.reduce((n, p) => n + p.tasks.filter(t => t.status === 'completed').length, 0)}/
-                  {agentTodoPhases.reduce((n, p) => n + p.tasks.length, 0)} done
-                </span>
-              }
-            >
-              {agentTodoPhases.map((phase) => (
-                <div key={phase.name} className="mb-1">
-                  <div className="text-[10px] text-[var(--gs-text-muted)] uppercase tracking-wide px-1.5 mb-0.5">{phase.name}</div>
-                  {phase.tasks.map((task, i) => {
-                    const dotColor =
-                      task.status === 'completed' ? 'text-[var(--gs-success)]'
-                      : task.status === 'in_progress' ? 'text-[var(--gs-info)]'
-                      : task.status === 'abandoned' ? 'text-[var(--gs-text-ghost)]'
-                      : 'text-[var(--gs-text-muted)]';
-                    return (
-                      <SidebarItem
-                        key={`${phase.name}-${i}`}
-                        dotColor={dotColor}
-                        label={task.content}
-                        rightLabel={task.status === 'in_progress' ? '...' : undefined}
-                      />
-                    );
-                  })}
-                </div>
-              ))}
-            </SidebarSection>
-          )}
-
-          {/* TERMINALS */}
-          <SidebarSection title="Terminals">
-            {shellSessions.length === 0 ? (
-              <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No sessions</div>
-            ) : (
-              sessionRows.map((row) => {
-                const s = workspaceSessions.find((session) => session.id === row.id)!;
-                if (s.processName) {
-                  return null;
-                }
-                const isOpen = attachedSessionId === row.id;
-                return (
-                  <div key={row.id} className="flex items-center gap-1">
-                    <SidebarItem
-                      dotColor={isOpen ? 'text-[var(--gs-success)]' : row.attached ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-running)]'}
-                      label={row.label}
-                      subtitle={row.subtitle}
-                      rightLabel={row.alertLabel ?? row.statusLabel}
-                      highlight={isOpen}
-                      active={row.attached && !isOpen}
-                      onClick={() => {
-                        void detailActions.attachSession(row.id);
-                      }}
-                    />
-                    {onDeleteSession && (
-                      <button type="button" onClick={() => detailActions.deleteSession(s.id, s.name)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">×</button>
-                    )}
-                  </div>
-                );
-              })
-            )}
-            <SidebarItem
-              label="+ New session"
-              onClick={() => void detailActions.createSession()}
-            />
-          </SidebarSection>
-
-          {/* SERVICES / PROCESSES */}
-          {/* TODO: Catch web up to the TUI service launcher once this pane shares the same explicit service selection + keyboard model. */}
-          {serviceRows.length > 0 && (
-            <SidebarSection title="Services">
-              {serviceRows.map((service) => {
-                  const localUrl = service.localUrl;
-                  const isOpen = attachedServiceIdentity?.processName === service.processName
-                    && attachedServiceIdentity.instance === service.instance;
-                  return (
-                    <div key={service.key}>
-                      <div className="flex items-center gap-1">
-                        <SidebarItem
-                          dotColor={isOpen ? 'text-[var(--gs-success)]' : service.state === 'running' ? 'text-[var(--gs-running)]' : 'text-[var(--gs-text-ghost)]'}
-                          label={service.label}
-                          subtitle={service.subtitle ?? localUrl}
-                          rightLabel={service.state === 'disabled' ? undefined : (service.alertLabel ?? service.state)}
-                          highlight={isOpen}
-                          onClick={service.state === 'disabled'
-                            ? undefined
-                            : service.state === 'running'
-                              ? () => void detailActions.activateService(service.processName, service.instance, service.state)
-                              : () => void detailActions.activateService(service.processName, service.instance, service.state)
-                          }
-                        />
-                        {service.state === 'running' && service.attachableSessionId && (
-                          <button
-                            type="button"
-                            onClick={() => onAttachSession({ sessionId: service.attachableSessionId, viewOnly: true })}
-                            className="text-[10px] text-[var(--gs-info)] hover:text-[var(--gs-info-light)] flex-shrink-0 px-1"
-                            title="Attach service terminal"
-                          >
-                            att
-                          </button>
-                        )}
-                        {service.state === 'running' && localUrl && (() => {
-                          const targetUrl = service.hostedUrl ?? `http://${localUrl}`;
-                          return (
-                            <button
-                              type="button"
-                              onClick={() => window.open(targetUrl, '_blank', 'noopener,noreferrer')}
-                              className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-info)] flex-shrink-0 px-1"
-                              title={`Open ${targetUrl}` }
-                            >
-                              ↗
-                            </button>
-                          );
-                        })()}
-                        {service.state === 'running' && onStopProcess && (
-                          <button
-                            type="button"
-                            onClick={() => onStopProcess({ workspaceId: workspace.id, processName: service.processName })}
-                            className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1"
-                            title="Stop service"
-                          >
-                            stop
-                          </button>
-                        )}
-                      </div>
-                      {service.state === 'running' && localUrl && (
-                        <div className="pl-5 text-[10px] text-[var(--gs-text-ghost)] truncate">
-                          {service.hostedUrl
-                            ? <a href={service.hostedUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[var(--gs-info)] transition-colors">{service.hostedUrl.replace(/^http:\/\//, '')}</a>
-                            : localUrl ? <span>{localUrl}</span> : null
-                          }
-                        </div>
-                      )}
-                    </div>
-                  );
-              })}
-            </SidebarSection>
-          )}
-
-          {/* REPLAYS */}
-          {workspaceReplays.length > 0 && (
-            <SidebarSection title="Replays">
-              {visibleReplayRows.map((replay) => {
-                const tone = replay.tone === 'red' ? 'text-[var(--gs-danger-hover)]' : 'text-[var(--gs-success)]';
-                return (
-                  <SidebarItem
-                    key={replay.replayId}
-                    dotColor={tone}
-                    label={replay.label}
-                    onClick={() => {
-                      void detailActions.openReplay(replay.replayId);
-                    }}
-                  />
-                );
-              })}
-              {hasMoreReplayRows && seeAllReplayLabel && (
-                <SidebarItem
-                  label={seeAllReplayLabel}
-                  rightLabel="/"
-                  onClick={() => {
-                    void detailActions.openReplayHistory();
-                  }}
-                />
-              )}
-            </SidebarSection>
-          )}
-
-          {(notesSummary?.total ?? 0) > 0 && (
-            <SidebarSection
-              title="Notes"
-              extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{notesSummary?.openTodoCount ?? 0} todo</span>}
-            >
-              {visibleTodoRows.map((note) => (
-                <SidebarItem
-                  key={note.id}
-                  dotColor={note.priority === 'high' ? 'text-[var(--gs-danger-hover)]' : note.priority === 'medium' ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-info)]'}
-                  label={note.label}
-                  rightLabel={note.priority}
-                />
-              ))}
-              {visibleRecentNoteRows.map((note) => (
-                <SidebarItem
-                  key={note.id}
-                  dotColor="text-[var(--gs-text-ghost)]"
-                  label={note.label}
-                  rightLabel="note"
-                />
-              ))}
-            </SidebarSection>
-          )}
-
-          {pmRows.length > 0 && (
-            <SidebarSection title="PM Links">
-              {pmRows.map((row) => (
-                <SidebarItem
-                  key={row.id}
-                  dotColor={row.tone === 'red' ? 'text-[var(--gs-danger-hover)]' : row.tone === 'green' ? 'text-[var(--gs-success)]' : row.tone === 'blue' ? 'text-[var(--gs-info)]' : 'text-[var(--gs-text-ghost)]'}
-                  label={row.label}
-                  rightLabel={row.detail}
-                  onClick={row.actionable && row.section === 'pull-request' && onOpenGitHubPullRequest ? () => void detailActions.footerAction('open-github-pr') : undefined}
-                />
-              ))}
-            </SidebarSection>
-          )}
-
-          {/* SYSTEM */}
-          <SidebarSection title="System">
-            <SidebarItem label="Event Logs" dotColor="text-[var(--gs-running)]" rightLabel="live" onClick={() => onOpenEvents(workspace.id)} />
-          </SidebarSection>
-          </div>
-
-          <div className="mt-auto pt-3 border-t border-[var(--gs-border-muted)] space-y-0.5">
-            {pendingPermissions > 0 && (
-              <div className="px-1.5 text-[11px] text-[var(--gs-warning-bright)]">
-                ⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}
-              </div>
-            )}
-            {footerActions.map((action) => {
-              if (action.id === 'open-github-pr' && (!onOpenGitHubPullRequest || !pullRequest?.url)) return null;
-              if (action.id === 'open-review' && !onOpenReview) return null;
-              if (action.id === 'change-status' && !onRequestStatusChange) return null;
-              const onClick = () => void detailActions.footerAction(action.id);
-              return <SidebarItem key={action.id} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
-            })}
-          </div>
+      <div className="flex-1 flex min-h-0 relative">
+        {/* Desktop sidebar (≥640px) */}
+        <div className="hidden sm:flex w-[240px] flex-shrink-0 border-r border-[var(--gs-border-muted)] bg-[var(--gs-sidebar-bg)] overflow-y-auto px-2 py-3 flex-col">
+          <SidebarContent
+            detailModel={detailModel}
+            workspace={workspace}
+            workspaceSessions={workspaceSessions}
+            attachedSessionId={attachedSessionId}
+            attachedAgentSessionId={attachedAgentSessionId}
+            onAttachSession={onAttachSession}
+            onAbortAgentSession={onAbortAgentSession}
+            onCloseAgentSession={onCloseAgentSession}
+            onArchiveAgentSession={onArchiveAgentSession}
+            onRestoreAgentSession={onRestoreAgentSession}
+            onCreateAgentSession={onCreateAgentSession}
+            onStopProcess={onStopProcess}
+            onDeleteSession={onDeleteSession}
+            onOpenGitHubPullRequest={onOpenGitHubPullRequest}
+            onOpenReview={onOpenReview}
+            onRequestStatusChange={onRequestStatusChange}
+            onOpenEvents={onOpenEvents}
+            agentSessionCount={agentSessionCount}
+            pendingPermissions={pendingPermissions}
+            pullRequest={pullRequest}
+          />
         </div>
 
         {/* Main area: terminal outlet */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Terminal outlet / empty state */}
           <div className="flex-1 min-h-0 flex flex-col">
             {children ? (
               children
@@ -613,13 +546,84 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 ) : (
                   <div className="text-center">
                     <div className="text-sm text-[var(--gs-text-ghost)]">No active session</div>
-                    <div className="text-xs text-[var(--gs-border)] mt-1">Attach a session or agent from the sidebar.</div>
+                    <div className="text-xs text-[var(--gs-border)] mt-1 hidden sm:block">Attach a session or agent from the sidebar.</div>
+                    <button
+                      type="button"
+                      onClick={() => setShowMobileSidebar(true)}
+                      className="sm:hidden mt-3 px-4 py-2 text-xs text-[var(--gs-text-muted)] border border-[var(--gs-border)] hover:text-[var(--gs-text)] hover:border-[var(--gs-border-active)]"
+                    >
+                      Open sidebar
+                    </button>
                   </div>
                 )}
               </div>
             )}
           </div>
+
+          {/* Mobile floating sidebar button — visible only when content is showing */}
+          {children && (
+            <button
+              type="button"
+              onClick={() => setShowMobileSidebar(true)}
+              className="sm:hidden fixed bottom-4 right-4 z-40 w-10 h-10 flex items-center justify-center bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] text-[var(--gs-text-muted)] active:bg-[var(--gs-bg-active)]"
+              title="Open sidebar"
+            >
+              ☰
+            </button>
+          )}
         </div>
+
+        {/* Mobile bottom sheet sidebar */}
+        {showMobileSidebar && (
+          <div className="sm:hidden fixed inset-0 z-50 flex flex-col">
+            {/* Backdrop */}
+            <div
+              className="flex-shrink-0"
+              style={{ height: '20%' }}
+              onClick={() => setShowMobileSidebar(false)}
+            />
+            {/* Sheet */}
+            <div className="flex-1 bg-[var(--gs-sidebar-bg)] border-t border-[var(--gs-border)] overflow-y-auto flex flex-col">
+              {/* Handle + close */}
+              <div className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--gs-border-muted)]">
+                <span className="text-xs text-[var(--gs-text-dim)] tracking-[2px] uppercase">Sidebar</span>
+                <button
+                  type="button"
+                  onClick={() => setShowMobileSidebar(false)}
+                  className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] px-2 py-1"
+                >
+                  ✕
+                </button>
+              </div>
+              {/* Sidebar content */}
+              <div className="flex-1 overflow-y-auto px-2 py-3">
+                <SidebarContent
+                  detailModel={detailModel}
+                  workspace={workspace}
+                  workspaceSessions={workspaceSessions}
+                  attachedSessionId={attachedSessionId}
+                  attachedAgentSessionId={attachedAgentSessionId}
+                  onAttachSession={onAttachSession}
+                  onAbortAgentSession={onAbortAgentSession}
+                  onCloseAgentSession={onCloseAgentSession}
+                  onArchiveAgentSession={onArchiveAgentSession}
+                  onRestoreAgentSession={onRestoreAgentSession}
+                  onCreateAgentSession={onCreateAgentSession}
+                  onStopProcess={onStopProcess}
+                  onDeleteSession={onDeleteSession}
+                  onOpenGitHubPullRequest={onOpenGitHubPullRequest}
+                  onOpenReview={onOpenReview}
+                  onRequestStatusChange={onRequestStatusChange}
+                  onOpenEvents={onOpenEvents}
+                  agentSessionCount={agentSessionCount}
+                  pendingPermissions={pendingPermissions}
+                  pullRequest={pullRequest}
+                  onDismiss={() => setShowMobileSidebar(false)}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
