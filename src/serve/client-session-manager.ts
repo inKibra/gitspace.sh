@@ -524,6 +524,7 @@ export class ClientSessionManager {
           },
           data: (sock, data) => {
             if (!session.sessionKeys) return;
+            if (session.tmuxSocket !== sock) return;
 
             // Accumulate in frame buffer (for handling partial frames)
             const prev = session.frameBuffer || Buffer.alloc(0);
@@ -601,18 +602,22 @@ export class ClientSessionManager {
 
           close: () => {
             // Check if this was a voluntary detach (tmuxSocket already cleared)
-            // vs an unexpected close
-            if (session.tmuxSocket) {
+            // vs an unexpected close on the currently attached socket.
+            if (session.tmuxSocket === socket) {
               console.log("[session-manager] tmux-lite socket closed unexpectedly");
               this.handleDisconnect(connectionId, "Session closed");
             } else {
-              console.log("[session-manager] tmux-lite socket closed (detached)");
+              console.log("[session-manager] tmux-lite socket closed (stale/detached)");
             }
           },
 
-          error: (_, e) => {
+          error: (sock, e) => {
             console.error("[session-manager] tmux-lite socket error:", e);
-            this.handleDisconnect(connectionId, e.message);
+            // Detached or replaced sockets can still surface late write/close
+            // errors. Only tear down the session if this exact socket is active.
+            if (session.tmuxSocket === sock) {
+              this.handleDisconnect(connectionId, e.message);
+            }
           },
         }
       });
