@@ -489,9 +489,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
         <button
           type="button"
           onClick={onClose}
-          className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] flex-shrink-0"
+          className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] flex-shrink-0 py-1 pr-2 min-h-[36px] flex items-center"
         >
-          ←
+          ← <span className="hidden sm:inline ml-1">Board</span>
         </button>
         <span className="hidden sm:inline text-[var(--gs-border)]">|</span>
         <div className="min-w-0 flex-1 truncate">
@@ -501,6 +501,14 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             {workspaceSessions.length} session(s) · {workspaceReplays.length} replay(s)
           </span>
         </div>
+        <button
+          type="button"
+          onClick={() => setShowMobileSidebar(true)}
+          className="sm:hidden px-2 py-1 text-xs text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
+          title="Open sidebar"
+        >
+          ☰
+        </button>
         <ThemeSwitcher />
       </div>
 
@@ -546,31 +554,12 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 ) : (
                   <div className="text-center">
                     <div className="text-sm text-[var(--gs-text-ghost)]">No active session</div>
-                    <div className="text-xs text-[var(--gs-border)] mt-1 hidden sm:block">Attach a session or agent from the sidebar.</div>
-                    <button
-                      type="button"
-                      onClick={() => setShowMobileSidebar(true)}
-                      className="sm:hidden mt-3 px-4 py-2 text-xs text-[var(--gs-text-muted)] border border-[var(--gs-border)] hover:text-[var(--gs-text)] hover:border-[var(--gs-border-active)]"
-                    >
-                      Open sidebar
-                    </button>
+                    <div className="text-xs text-[var(--gs-border)] mt-1">Attach a session or agent from the <span className="hidden sm:inline">sidebar</span><span className="sm:hidden">☰ menu</span>.</div>
                   </div>
                 )}
               </div>
             )}
           </div>
-
-          {/* Mobile floating sidebar button — visible only when content is showing */}
-          {children && (
-            <button
-              type="button"
-              onClick={() => setShowMobileSidebar(true)}
-              className="sm:hidden fixed bottom-4 right-4 z-40 w-10 h-10 flex items-center justify-center bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] text-[var(--gs-text-muted)] active:bg-[var(--gs-bg-active)]"
-              title="Open sidebar"
-            >
-              ☰
-            </button>
-          )}
         </div>
 
         {/* Mobile bottom sheet sidebar */}
