@@ -272,11 +272,11 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
         <div className="min-w-0 flex-1">
           <span className="font-medium text-[var(--gs-text)] truncate">{workspace.name}</span>
           <span className="ml-2 text-xs text-[var(--gs-text-muted)]">
-            {phase && <span className="px-1.5 py-0.5 rounded bg-[var(--gs-bg-active)] text-[var(--gs-info-light)] mr-2">{phaseLabel}</span>}
+            {phase && <span className="px-1.5 py-0.5 bg-[var(--gs-bg-active)] text-[var(--gs-info-light)] mr-2">{phaseLabel}</span>}
             {workspaceSessions.length} session(s) · {workspaceReplays.length} replay(s)
           </span>
-          <ThemeSwitcher />
         </div>
+        <ThemeSwitcher />
       </div>
 
       {/* ── Sidebar + Main ── */}
