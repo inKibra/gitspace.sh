@@ -233,6 +233,35 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         terminalRef.current = term;
 
         const fitAddon = new FitAddon();
+
+        // The FitAddon reserves 15px for a native scrollbar that ghostty
+        // does not use (it renders its own overlay scrollbar on the canvas).
+        // Override proposeDimensions to reclaim that space.
+        const originalPropose = fitAddon.proposeDimensions.bind(fitAddon);
+        fitAddon.proposeDimensions = () => {
+          const dims = originalPropose();
+          if (!dims) return dims;
+          // The original subtracted a 15px scrollbar constant from width.
+          // Ghostty's canvas-based scrollbar doesn't need it, so we add
+          // one extra column back when the cell width allows it.
+          const renderer = (term as any).renderer;
+          if (renderer && typeof renderer.getMetrics === 'function') {
+            const metrics = renderer.getMetrics();
+            if (metrics && metrics.width > 0) {
+              const element = (term as any).element;
+              if (element) {
+                const style = window.getComputedStyle(element);
+                const padL = parseInt(style.paddingLeft) || 0;
+                const padR = parseInt(style.paddingRight) || 0;
+                const available = element.clientWidth - padL - padR;
+                const cols = Math.max(2, Math.floor(available / metrics.width));
+                return { cols, rows: dims.rows };
+              }
+            }
+          }
+          return dims;
+        };
+
         term.loadAddon(fitAddon);
 
         term.onData((data: string) => {
