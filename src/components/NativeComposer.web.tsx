@@ -686,10 +686,6 @@ export function NativeComposer({
         display: 'flex',
         alignItems: 'center',
         gap: 0,
-        background: 'var(--gs-bg-elevated)',
-        border: '1px solid var(--gs-border)',
-        borderRadius: 'var(--gs-input-radius, 0px)',
-        overflow: 'hidden',
       }}>
         {/* Attach buttons — left side */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 0, flexShrink: 0, paddingLeft: 4 }}>
