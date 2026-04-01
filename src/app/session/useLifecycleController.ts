@@ -134,18 +134,23 @@ function toWizardSteps(
       };
     }
 
-    const stepType = (step as { type: string }).type;
-    const defaultValue = 'defaultValue' in step ? step.defaultValue : undefined;
-    const selectStep = stepType === 'select'
-      ? (step as { options?: Array<{ label: string; value: string }> })
-      : null;
+    if (step.type === 'select') {
+      return {
+        id: step.id,
+        title: step.title,
+        type: 'select',
+        description: step.description,
+        defaultValue: step.defaultValue,
+        options: step.options.map((option) => ({ label: option.label, value: option.value })),
+      };
+    }
+
     return {
       id: step.id,
       title: step.title,
       type: step.type,
       description: step.description,
-      defaultValue: stepType === 'input' || stepType === 'select' ? defaultValue : undefined,
-      options: selectStep?.options?.map((option) => ({ label: option.label, value: option.value })),
+      defaultValue: step.type === 'input' ? step.defaultValue : undefined,
       validation: buildOnboardingValidation(step),
     };
   });
@@ -297,10 +302,9 @@ export function useLifecycleController(
             const confirmResults: Record<string, ConfirmStepResult> = {};
 
             for (const step of onboardingSteps) {
-              const stepType = (step as { type: string }).type;
-              const defaultValue = 'defaultValue' in step ? step.defaultValue : undefined;
-              if ((stepType === 'input' || stepType === 'select') && 'configKey' in step && step.configKey) {
-                inputValues[step.configKey] = (values[step.id] ?? defaultValue ?? '').trim();
+              if ((step.type === 'input' || step.type === 'select') && step.configKey) {
+                const defaultValue = step.defaultValue ?? '';
+                inputValues[step.configKey] = (values[step.id] ?? defaultValue).trim();
                 continue;
               }
 

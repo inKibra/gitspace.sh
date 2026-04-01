@@ -91,11 +91,12 @@ function WorkspaceCard({
   const serviceNames = entry.processes?.map(p => p.name) ?? [];
 
   return (
-    <div
-      role="button"
+    <button
+      type="button"
       onClick={onSelect}
+      aria-pressed={isSelected}
       className={
-        'cursor-pointer px-3 py-2.5 border-l-2 transition-colors ' +
+        'w-full cursor-pointer px-3 py-2.5 border-l-2 transition-colors text-left ' +
         (isSelected
           ? 'border-l-[var(--gs-selected-border)] bg-[var(--gs-bg-selected)]'
           : 'border-l-transparent hover:bg-[var(--gs-bg-hover)]')
@@ -170,7 +171,7 @@ function WorkspaceCard({
           )}
         </div>
       )}
-    </div>
+    </button>
   );
 }
 

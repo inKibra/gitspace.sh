@@ -1,4 +1,4 @@
-import type { ConfirmStepResult, OnboardingStepType } from './bundle.js';
+import type { ConfirmStepResult, OnboardingStepType, SelectStepOption } from './bundle.js';
 
 export interface BundleConfigStep {
   id: string;
@@ -15,6 +15,7 @@ export interface BundleConfigStep {
   confirmPrompt?: string;
   value?: string;
   hasSecret?: boolean;
+  options?: SelectStepOption[];
   confirmResult?: ConfirmStepResult;
   confirmCheckedAt?: string;
 }

@@ -280,7 +280,7 @@ export async function stageUploadFile(
 
   let safeName = basename(fileName).replace(/[\/\\:*?"<>|]/g, '_');
   if (safeName.length > 200) safeName = safeName.slice(0, 200);
-  if (!safeName) safeName = 'upload';
+  if (!safeName || safeName === '.' || safeName === '..') safeName = 'upload';
 
   const stagingDir = join(target.workspacePath, '.gitspace', 'uploads');
   let bytes: Buffer;

@@ -56,13 +56,32 @@ function formatAgentSessionError(action: AgentSessionActionName, error: AgentSes
   }
 }
 
+function composeCallbacks<TArgs extends unknown[]>(
+  base: ((...args: TArgs) => void | Promise<void>) | undefined,
+  override: ((...args: TArgs) => void | Promise<void>) | undefined,
+  order: 'base-first' | 'override-first' = 'base-first',
+): ((...args: TArgs) => Promise<void>) | undefined {
+  if (!base && !override) {
+    return undefined;
+  }
+  return async (...args: TArgs) => {
+    if (order === 'override-first') {
+      await override?.(...args);
+      await base?.(...args);
+      return;
+    }
+    await base?.(...args);
+    await override?.(...args);
+  };
+}
+
 export function useAgentSessionActions(options: UseAgentSessionActionsOptions): UseAgentSessionActionsResult {
   const client = useAppClient(options.client ?? null);
 
   const resolveOpenCallbacks = useCallback((overrides?: AgentSessionOpenCallbacks): AgentSessionOpenCallbacks => ({
-    beforeOpen: overrides?.beforeOpen ?? options.beforeOpen,
-    onOpenSuccess: overrides?.onOpenSuccess ?? options.onOpenSuccess,
-    onOpenError: overrides?.onOpenError ?? options.onOpenError,
+    beforeOpen: composeCallbacks(options.beforeOpen, overrides?.beforeOpen),
+    onOpenSuccess: composeCallbacks(options.onOpenSuccess, overrides?.onOpenSuccess),
+    onOpenError: composeCallbacks(options.onOpenError, overrides?.onOpenError),
     attachOptions: overrides?.attachOptions ?? options.attachOptions,
   }), [options.beforeOpen, options.onOpenSuccess, options.onOpenError, options.attachOptions]);
 

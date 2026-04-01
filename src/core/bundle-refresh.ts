@@ -632,7 +632,7 @@ function buildPendingRequirementsSummary(steps: BundleRefreshStep[]): string[] {
   }
 
   const inputKeys = required
-    .filter((step) => step.type === 'input' && step.configKey)
+    .filter((step) => (step.type === 'input' || step.type === 'select') && step.configKey)
     .map((step) => step.configKey as string);
   const secretKeys = required
     .filter((step) => step.type === 'secret' && step.configKey)
@@ -729,7 +729,7 @@ export async function getBundleRefreshPlan(
   const autoConfirmResults: Record<string, ConfirmStepResult> = {};
 
   for (const onboardingStep of changes.currentBundle.onboarding || []) {
-    if (onboardingStep.type === 'input') {
+    if (onboardingStep.type === 'input' || onboardingStep.type === 'select') {
       const include = shouldIncludeInputStep(
         onboardingStep.configKey,
         previousValues,
@@ -748,8 +748,9 @@ export async function getBundleRefreshPlan(
         required: onboardingStep.required,
         configKey: onboardingStep.configKey,
         defaultValue: previousValues[onboardingStep.configKey] ?? onboardingStep.defaultValue,
-        validationPattern: onboardingStep.validationPattern,
-        validationMessage: onboardingStep.validationMessage,
+        validationPattern: onboardingStep.type === 'input' ? onboardingStep.validationPattern : undefined,
+        validationMessage: onboardingStep.type === 'input' ? onboardingStep.validationMessage : undefined,
+        options: onboardingStep.type === 'select' ? onboardingStep.options : undefined,
       });
       continue;
     }
@@ -957,7 +958,7 @@ export async function getBundleConfigState(
   const steps: BundleConfigStep[] = [];
 
   for (const step of changes.currentBundle.onboarding || []) {
-    if (step.type === 'input') {
+    if (step.type === 'input' || step.type === 'select') {
       steps.push({
         id: step.id,
         type: step.type,
@@ -966,9 +967,10 @@ export async function getBundleConfigState(
         required: step.required,
         configKey: step.configKey,
         defaultValue: step.defaultValue,
-        validationPattern: step.validationPattern,
-        validationMessage: step.validationMessage,
+        validationPattern: step.type === 'input' ? step.validationPattern : undefined,
+        validationMessage: step.type === 'input' ? step.validationMessage : undefined,
         value: inputValues[step.configKey],
+        options: step.type === 'select' ? step.options : undefined,
       });
       continue;
     }

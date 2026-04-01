@@ -105,6 +105,17 @@ function toWizardStep(step: BundleConfigStep): FlowWizardStep {
     };
   }
 
+  if (step.type === 'select') {
+    return {
+      id: step.id,
+      type: 'select',
+      title: step.title,
+      description: step.description,
+      defaultValue: step.value ?? step.defaultValue ?? '',
+      options: step.options?.map((option) => ({ label: option.label, value: option.value })) ?? [],
+    };
+  }
+
   if (step.type === 'input') {
     return {
       id: step.id,
@@ -151,8 +162,8 @@ function buildSubmission(
   const confirmResults: Record<string, ConfirmStepResult> = {};
 
   for (const step of state.steps) {
-    if (step.type === 'input' && step.configKey) {
-      const value = (values[step.id] ?? '').trim();
+    if ((step.type === 'input' || step.type === 'select') && step.configKey) {
+      const value = (values[step.id] ?? step.defaultValue ?? '').trim();
       inputValues[step.configKey] = value;
       continue;
     }

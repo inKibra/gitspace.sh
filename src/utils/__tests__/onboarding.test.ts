@@ -17,7 +17,7 @@ describe('onboarding', () => {
   let mockPromptInput: (message: string, options?: { default?: string }) => Promise<string | null>;
   let mockPromptPassword: () => Promise<string | null>;
   let mockPromptConfirm: () => Promise<boolean>;
-
+  let mockSelectOne: <T>(options: Array<{ label: string; value: T; description?: string }>, message: string) => Promise<T | null>;
   beforeEach(() => {
     // Reset mock implementations to defaults
     mockPromptInput = async (_message: string, options?: { default?: string }) => {
@@ -25,6 +25,7 @@ describe('onboarding', () => {
     };
     mockPromptPassword = async () => 'secret-value';
     mockPromptConfirm = async () => true;
+    mockSelectOne = async (options) => options[0]?.value ?? null;
 
     // Setup mocks before each test
     mock.module('../prompts', () => ({
@@ -36,6 +37,9 @@ describe('onboarding', () => {
       },
       promptConfirm: async () => {
         return mockPromptConfirm();
+      },
+      selectOne: async <T>(options: Array<{ label: string; value: T; description?: string }>, message: string) => {
+        return mockSelectOne(options, message);
       },
     }));
 
@@ -94,6 +98,28 @@ describe('onboarding', () => {
 
       expect(result.completed).toBe(true);
       expect(result.inputValues.userName).toBe('my-input');
+    });
+
+    it('should collect select values', async () => {
+      mockSelectOne = async (options) => options.find((option) => option.value === 'green')?.value ?? null;
+
+      const { runOnboarding } = await loadOnboardingModule();
+      const result = await runOnboarding([
+        {
+          id: 'color-step',
+          type: 'select',
+          title: 'Color',
+          description: 'Pick a color',
+          configKey: 'favoriteColor',
+          options: [
+            { label: 'Red', value: 'red' },
+            { label: 'Green', value: 'green' },
+          ],
+        },
+      ]);
+
+      expect(result.completed).toBe(true);
+      expect(result.inputValues.favoriteColor).toBe('green');
     });
 
     it('should collect secret values', async () => {

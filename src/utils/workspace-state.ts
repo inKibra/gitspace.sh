@@ -255,7 +255,7 @@ export function fingerprintValue(value: string): string {
 }
 
 export function getBundleStepKey(step: OnboardingStep): string {
-  if (step.type === 'input' || step.type === 'secret') {
+  if (step.type === 'input' || step.type === 'secret' || step.type === 'select') {
     return `${step.type}:${step.configKey}`;
   }
 
@@ -274,6 +274,22 @@ function fingerprintInputStep(step: InputStep): string {
       defaultValue: step.defaultValue ?? null,
       validationPattern: step.validationPattern ?? null,
       validationMessage: step.validationMessage ?? null,
+    })))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function fingerprintSelectStep(step: Extract<OnboardingStep, { type: 'select' }>): string {
+  return createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      type: step.type,
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      required: step.required !== false,
+      configKey: step.configKey,
+      defaultValue: step.defaultValue ?? null,
+      options: step.options,
     })))
     .digest('hex')
     .slice(0, 16);
@@ -314,6 +330,9 @@ function fingerprintConfirmStep(step: ConfirmStep): string {
 function fingerprintStep(step: OnboardingStep): string {
   if (step.type === 'input') {
     return fingerprintInputStep(step);
+  }
+  if (step.type === 'select') {
+    return fingerprintSelectStep(step);
   }
   if (step.type === 'secret') {
     return fingerprintSecretStep(step);

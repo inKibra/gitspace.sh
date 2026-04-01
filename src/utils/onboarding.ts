@@ -4,7 +4,7 @@
  */
 
 import { logger } from './logger.js';
-import { promptInput, promptConfirm, promptPassword } from './prompts.js';
+import { promptInput, promptConfirm, promptPassword, selectOne } from './prompts.js';
 import { checkCommandExists } from './deps.js';
 import type {
   OnboardingStep,
@@ -13,6 +13,7 @@ import type {
   ConfirmStep,
   SecretStep,
   InputStep,
+  SelectStep,
 } from '../types/bundle.js';
 
 /**
@@ -78,7 +79,7 @@ export async function runOnboarding(
     // Store values and metadata by step type
     if (step.type === 'secret') {
       result.secretValues[step.configKey] = stepResult as string;
-    } else if (step.type === 'input') {
+    } else if (step.type === 'input' || step.type === 'select') {
       result.inputValues[step.configKey] = stepResult as string;
     } else if (step.type === 'confirm') {
       const confirmResult: ConfirmStepResult = {
@@ -111,6 +112,8 @@ async function executeStep(
       return executeSecretStep(step, options);
     case 'input':
       return executeInputStep(step, options);
+    case 'select':
+      return executeSelectStep(step, options);
     default:
       logger.warning('Unknown step type, skipping');
       return '';
@@ -257,6 +260,27 @@ async function executeInputStep(step: InputStep, options: OnboardingOptions): Pr
   });
 
   return value;
+}
+
+/**
+ * Execute select step - choose one option
+ */
+async function executeSelectStep(step: SelectStep, options: OnboardingOptions): Promise<string | null> {
+  const previousValue = options.previousValues?.[step.configKey];
+  const defaultValue = previousValue ?? step.defaultValue;
+
+  if (previousValue && options.isRefresh) {
+    logger.dim(`  (current value: ${previousValue})`);
+  }
+
+  const orderedOptions = defaultValue
+    ? [
+        ...step.options.filter((option) => option.value === defaultValue),
+        ...step.options.filter((option) => option.value !== defaultValue),
+      ]
+    : step.options;
+
+  return selectOne(orderedOptions, `Choose ${step.title}:`);
 }
 
 /**

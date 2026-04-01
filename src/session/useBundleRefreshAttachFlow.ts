@@ -143,6 +143,17 @@ function toWizardStep(step: BundleRefreshStep): FlowWizardStep {
       ? `${step.description}\n\nLeave blank to keep the existing secret.`
       : step.description;
 
+  if (step.type === 'select') {
+    return {
+      id: step.id,
+      title: step.title,
+      type: 'select',
+      description: secretHint,
+      defaultValue: step.defaultValue,
+      options: step.options?.map((option) => ({ label: option.label, value: option.value })) ?? [],
+    };
+  }
+
   return {
     id: step.id,
     title: step.title,
@@ -236,9 +247,9 @@ function applyWizardValues(
   };
 
   for (const step of plan.steps) {
-    const stepType = (step as { type: string }).type;
-    if ((stepType === 'input' || stepType === 'select') && 'configKey' in step && step.configKey) {
-      const value = (values[step.id] ?? '').trim();
+    if ((step.type === 'input' || step.type === 'select') && step.configKey) {
+      const defaultValue = step.defaultValue ?? '';
+      const value = (values[step.id] ?? defaultValue).trim();
       next.inputValues[step.configKey] = value;
       continue;
     }

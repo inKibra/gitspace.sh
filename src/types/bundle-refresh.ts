@@ -1,6 +1,6 @@
-import type { ConfirmStepResult } from './bundle.js';
+import type { ConfirmStepResult, SelectStepOption } from './bundle.js';
 
-export type BundleRefreshStepType = 'input' | 'secret' | 'confirm' | 'info';
+export type BundleRefreshStepType = 'input' | 'secret' | 'confirm' | 'info' | 'select';
 
 export interface BundleRefreshStep {
   id: string;
@@ -16,6 +16,7 @@ export interface BundleRefreshStep {
   installUrl?: string;
   confirmPrompt?: string;
   hasExistingSecret?: boolean;
+  options?: SelectStepOption[];
 }
 
 export interface BundleRefreshPlan {

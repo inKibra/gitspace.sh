@@ -102,6 +102,7 @@ describe('useAgentSessionActions', () => {
     const beforeOpen = mock(() => undefined);
     const onOpenSuccess = mock(() => undefined);
     const client = makeClient();
+    const attachOptions = { cols: 120, rows: 40 };
 
     const { result } = renderHook(() => useAgentSessionActions({
       client,
@@ -114,6 +115,7 @@ describe('useAgentSessionActions', () => {
       },
       beforeOpen,
       onOpenSuccess,
+      attachOptions,
     }));
 
     result.current.createAndOpen('proj:ws-1');
@@ -129,6 +131,7 @@ describe('useAgentSessionActions', () => {
     expect(client.agentSessions.createAndOpen).toHaveBeenCalledWith({
       workspaceId: 'proj:ws-1',
       title: 'investigate auth bug',
+      attachOptions,
     });
     expect(close).toHaveBeenCalledTimes(1);
     expect(onOpenSuccess).toHaveBeenCalledTimes(1);

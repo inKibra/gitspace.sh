@@ -20,6 +20,7 @@ import type { AgentStateUpdateDelta, WorkspaceAgentState } from "../lib/tmux-lit
 import { send as sendTmuxLiteCommand, ensureServer as ensureTmuxLiteServer } from "../lib/tmux-lite/cli.js";
 import type { Command as TmuxCommand, Response as TmuxResponse } from "../lib/tmux-lite/protocol.js";
 import type { SessionKeys } from "../types/identity.js";
+import { logger } from "../utils/logger.js";
 
 // ============================================================================
 // ClientSessionManager Class
@@ -612,10 +613,10 @@ export class ClientSessionManager {
           },
 
           error: (sock, e) => {
-            console.error("[session-manager] tmux-lite socket error:", e);
             // Detached or replaced sockets can still surface late write/close
-            // errors. Only tear down the session if this exact socket is active.
+            // errors. Only log and tear down the session if this exact socket is active.
             if (session.tmuxSocket === sock) {
+              logger.error(`[session-manager] tmux-lite socket error for ${connectionId}: ${e.message}`);
               this.handleDisconnect(connectionId, e.message);
             }
           },
