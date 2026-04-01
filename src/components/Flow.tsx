@@ -187,6 +187,22 @@ function getWizardStepInputValue(
   return '';
 }
 
+function persistWizardStepValue(
+  flow: FlowWizard,
+  collectedValues: Record<string, string>,
+): Record<string, string> {
+  const currentStep = flow.steps[flow.currentStep];
+  if (!currentStep) return collectedValues;
+  if (currentStep.type !== 'input' && currentStep.type !== 'secret' && currentStep.type !== 'select') {
+    return collectedValues;
+  }
+  return {
+    ...collectedValues,
+    [currentStep.id]: flow.inputValue,
+  };
+}
+
+
 
 export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   const { onError } = props;
@@ -282,14 +298,13 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         }
       } else if (flow.type === 'wizard') {
         const currentStep = flow.steps[flow.currentStep];
-        const newValues = { ...flow.collectedValues };
+        const newValues = persistWizardStepValue(flow, flow.collectedValues);
 
-        if (currentStep && (currentStep.type === 'input' || currentStep.type === 'secret' || currentStep.type === 'select')) {
-          if ((currentStep.type === 'input' || currentStep.type === 'secret') && currentStep.validation) {
+        if (currentStep && (currentStep.type === 'input' || currentStep.type === 'secret')) {
+          if (currentStep.validation) {
             const error = currentStep.validation(flow.inputValue);
             if (error) return;
           }
-          newValues[currentStep.id] = flow.inputValue;
         }
 
         if (flow.currentStep === flow.steps.length - 1) {
@@ -452,10 +467,12 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   const nextStep = useCallback(() => {
     if (flow.type === 'wizard' && flow.currentStep < flow.steps.length - 1) {
       const nextStepData = flow.steps[flow.currentStep + 1];
+      const collectedValues = persistWizardStepValue(flow, flow.collectedValues);
       setFlow({
         ...flow,
         currentStep: flow.currentStep + 1,
-        inputValue: getWizardStepInputValue(nextStepData, flow.collectedValues),
+        collectedValues,
+        inputValue: getWizardStepInputValue(nextStepData, collectedValues),
       });
     }
   }, [flow]);
@@ -463,10 +480,12 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   const prevStep = useCallback(() => {
     if (flow.type === 'wizard' && flow.currentStep > 0) {
       const prevStepData = flow.steps[flow.currentStep - 1];
+      const collectedValues = persistWizardStepValue(flow, flow.collectedValues);
       setFlow({
         ...flow,
         currentStep: flow.currentStep - 1,
-        inputValue: getWizardStepInputValue(prevStepData, flow.collectedValues),
+        collectedValues,
+        inputValue: getWizardStepInputValue(prevStepData, collectedValues),
       });
     }
   }, [flow]);
