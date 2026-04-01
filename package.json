@@ -1,6 +1,6 @@
 {
   "name": "gitspace",
-  "version": "0.2.0-rc.36",
+  "version": "0.2.0-rc.38",
   "description": "CLI for managing GitHub workspaces with git worktrees and secure remote terminal access",
   "bin": {
     "gssh": "./bin/gssh"
@@ -27,10 +27,10 @@
     "check:arch:json": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type json"
   },
   "optionalDependencies": {
-    "@gitspace/darwin-arm64": "0.2.0-rc.36",
-    "@gitspace/darwin-x64": "0.2.0-rc.36",
-    "@gitspace/linux-x64": "0.2.0-rc.36",
-    "@gitspace/linux-arm64": "0.2.0-rc.36"
+    "@gitspace/darwin-arm64": "0.2.0-rc.38",
+    "@gitspace/darwin-x64": "0.2.0-rc.38",
+    "@gitspace/linux-x64": "0.2.0-rc.38",
+    "@gitspace/linux-arm64": "0.2.0-rc.38"
   },
   "keywords": [
     "cli",
