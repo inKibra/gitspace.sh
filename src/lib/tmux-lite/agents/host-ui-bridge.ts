@@ -129,6 +129,7 @@ export interface HostUIBridgeEmitter {
 
 interface PendingDialog<T> {
   sessionId: string;
+  dialogType: HostUIDialogResponse['type'];
   resolve: (value: T) => void;
   reject: (error: Error) => void;
 }
@@ -267,6 +268,10 @@ export class HostUIBridgeState {
     const pending = this.pendingDialogs.get(response.id);
     if (!pending) return false;
     this.pendingDialogs.delete(response.id);
+    if (pending.dialogType !== response.type) {
+      pending.reject(new Error(`Dialog type mismatch for ${response.id}: expected ${pending.dialogType}, received ${response.type}`));
+      return false;
+    }
     pending.resolve(response.value);
     return true;
   }
@@ -294,6 +299,7 @@ export class HostUIBridgeState {
     return new Promise<T>((resolve, reject) => {
       this.pendingDialogs.set(request.id, {
         sessionId: request.sessionId,
+        dialogType: request.type,
         resolve: resolve as (value: unknown) => void,
         reject,
       });

@@ -102,7 +102,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
             </p>
             <ActionRow>
               <button onClick={copyCurrentMessage} className={BTN_SECONDARY}>Copy</button>
-              <button onClick={flow.handleConfirm} className={BTN_PRIMARY}>OK</button>
+              <button onClick={() => { void flow.handleConfirm(); }} className={BTN_PRIMARY}>OK</button>
             </ActionRow>
           </div>
         </Modal>
@@ -147,7 +147,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
             <ActionRow>
               <button onClick={copyCurrentMessage} className={BTN_SECONDARY}>Copy</button>
               <button onClick={flow.handleCancel} className={BTN_SECONDARY}>{state.cancelLabel || 'Cancel'}</button>
-              <button onClick={flow.handleConfirm} className={state.variant === 'danger' ? BTN_DANGER : BTN_PRIMARY}>
+              <button onClick={() => { void flow.handleConfirm(); }} className={state.variant === 'danger' ? BTN_DANGER : BTN_PRIMARY}>
                 {state.confirmLabel || 'Confirm'}
               </button>
             </ActionRow>
@@ -174,7 +174,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
             <ActionRow>
               <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
               <button
-                onClick={flow.handleConfirm}
+                onClick={() => { void flow.handleConfirm(); }}
                 disabled={state.inputValue !== state.confirmText}
                 className={BTN_DANGER}
               >
@@ -203,7 +203,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
             <ActionRow>
               <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
               <button
-                onClick={flow.handleConfirm}
+                onClick={() => { void flow.handleConfirm(); }}
                 disabled={!!validationError && state.inputValue !== ''}
                 className={BTN_PRIMARY}
               >
@@ -241,8 +241,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
                       key={index}
                       type="button"
                       onClick={() => {
-                        flow.handleSelect(index);
-                        flow.handleConfirm();
+                        void flow.handleConfirm(index);
                       }}
                       className={`gs-select-item ${isSelected ? 'gs-select-item--active' : ''}`}
                     >
@@ -352,7 +351,7 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
               </button>
               <div className="flex flex-col-reverse gap-3 sm:flex-row">
                 <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
-                <button onClick={flow.handleConfirm} className={BTN_PRIMARY}>
+                <button onClick={() => { void flow.handleConfirm(); }} className={BTN_PRIMARY}>
                   {state.currentStep === state.steps.length - 1 ? 'Finish' : 'Continue →'}
                 </button>
               </div>

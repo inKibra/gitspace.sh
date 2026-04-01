@@ -245,7 +245,6 @@ export function BoardPage({
             groups={groups}
             selectedWorkspaceId={selectedWorkspaceId}
             onSelectWorkspace={onSelectWorkspace}
-            onPhaseChange={onPhaseChange}
             workspaceStatusById={workspaceStatusById}
             fullHeight
           />

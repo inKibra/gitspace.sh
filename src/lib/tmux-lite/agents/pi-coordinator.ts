@@ -415,6 +415,10 @@ export class PiCoordinator {
       ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
     if (existing) {
       if (existing.exitCode === undefined) {
+        if (options?.cols && options?.rows) {
+          const virtualTerminal = getVirtualTerminal(existing.id);
+          virtualTerminal?.resize(options.cols, options.rows);
+        }
         this.bindTerminalSession(target.workspaceId, existing.id, agentSessionId);
         return existing;
       }

@@ -9,7 +9,7 @@
  * Main: terminal outlet (children) or empty state
  */
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
@@ -74,28 +74,58 @@ function SidebarItem({
 function ThemeSwitcher() {
   const { theme, setTheme } = useTheme();
   const current = THEMES.find(t => t.id === theme);
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
   return (
-    <div className="relative group ml-auto flex-shrink-0">
+    <div ref={rootRef} className="relative ml-auto flex-shrink-0">
       <button
         type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
         className="px-2 py-0.5 text-[10px] rounded text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
         title={`Theme: ${current?.label ?? theme}`}
       >
         ◐
       </button>
-      <div className="hidden group-hover:block absolute right-0 top-full mt-1 py-1 min-w-[160px] bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] z-50">
-        {THEMES.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTheme(t.id)}
-            className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--gs-bg-active)] ${t.id === theme ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}
-          >
-            {t.label}
-            {t.group === 'light' ? ' ☀' : ''}
-          </button>
-        ))}
-      </div>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 py-1 min-w-[160px] bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] z-50" role="menu">
+          {THEMES.map(t => (
+            <button
+              key={t.id}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setTheme(t.id);
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--gs-bg-active)] ${t.id === theme ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}
+            >
+              {t.label}
+              {t.group === 'light' ? ' ☀' : ''}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

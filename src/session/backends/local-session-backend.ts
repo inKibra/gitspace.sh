@@ -471,6 +471,7 @@ export class LocalSessionBackend implements SessionBackend {
     const wasAttached = this.attachLifecycle.isAttached;
     await this.closeSessionSocket(false);
     this.attachLifecycle.reset();
+    this.attachedAgentSessionId = null;
     this.connected = false;
     this.emit({ type: 'status', status: 'disconnected' });
     if (wasAttached) {
@@ -1431,7 +1432,9 @@ export class LocalSessionBackend implements SessionBackend {
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const response = await this.sendTmuxCommand({ type: 'agent-prompt', target, agentSessionId, text, images });
+    if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
+    throw new Error(`Unexpected prompt response: ${response.type}`);
   }
 
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {

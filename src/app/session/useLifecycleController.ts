@@ -134,12 +134,14 @@ function toWizardSteps(
       };
     }
 
+    const stepType = (step as { type: string }).type;
+    const defaultValue = 'defaultValue' in step ? step.defaultValue : undefined;
     return {
       id: step.id,
       title: step.title,
       type: step.type,
       description: step.description,
-      defaultValue: step.type === 'input' ? step.defaultValue : undefined,
+      defaultValue: stepType === 'input' || stepType === 'select' ? defaultValue : undefined,
       validation: buildOnboardingValidation(step),
     };
   });
@@ -291,8 +293,10 @@ export function useLifecycleController(
             const confirmResults: Record<string, ConfirmStepResult> = {};
 
             for (const step of onboardingSteps) {
-              if (step.type === 'input') {
-                inputValues[step.configKey] = (values[step.id] ?? step.defaultValue ?? '').trim();
+              const stepType = (step as { type: string }).type;
+              const defaultValue = 'defaultValue' in step ? step.defaultValue : undefined;
+              if ((stepType === 'input' || stepType === 'select') && 'configKey' in step && step.configKey) {
+                inputValues[step.configKey] = (values[step.id] ?? defaultValue ?? '').trim();
                 continue;
               }
 

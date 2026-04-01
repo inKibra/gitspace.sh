@@ -7,7 +7,6 @@
 import { useState } from 'react';
 import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
 import { PHASE_LABELS } from '../app/shared/board/types.js';
-import type { WorkspacePhase } from '../types/config.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 
@@ -56,7 +55,6 @@ export interface KanbanBoardWebProps {
   groups: WorkspaceBoardGroup[];
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceKey: string | null) => void;
-  onPhaseChange?: (workspaceKey: string, phase: WorkspacePhase) => void;
   workspaceStatusById?: Record<string, WorkspaceStatusSummary>;
   /** When true, lanes stretch vertically to fill the container. */
   fullHeight?: boolean;
@@ -95,9 +93,7 @@ function WorkspaceCard({
   return (
     <div
       role="button"
-      tabIndex={0}
       onClick={onSelect}
-      onKeyDown={(e) => e.key === 'Enter' && onSelect()}
       className={
         'cursor-pointer px-3 py-2.5 border-l-2 transition-colors ' +
         (isSelected
@@ -117,7 +113,7 @@ function WorkspaceCard({
       )}
 
       {/* Status row: agents, terminals, services — readable text */}
-      {(agentTotal > 0 || (status && status.terminals.green > 0) || (status && (status.services.green > 0 || status.services.red > 0))) && (
+      {(agentTotal > 0 || (status && (status.terminals.green > 0 || status.terminals.red > 0)) || (status && (status.services.green > 0 || status.services.red > 0))) && (
         <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pl-[18px]">
           {/* Agents */}
           {status && status.agents.orange > 0 && (

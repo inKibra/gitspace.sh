@@ -27,7 +27,7 @@
   color-scheme: dark;
 
   /* Font stack */
-  --gs-font: 'Geist Mono', 'JetBrains Mono', 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  --gs-font: 'Geist Mono', 'JetBrains Mono', 'SF Mono', monaco, 'Cascadia Code', monospace;
 
   /* Backgrounds */
   --gs-bg: #000000;

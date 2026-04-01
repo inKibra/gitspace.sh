@@ -236,7 +236,8 @@ function applyWizardValues(
   };
 
   for (const step of plan.steps) {
-    if (step.type === 'input' && step.configKey) {
+    const stepType = (step as { type: string }).type;
+    if ((stepType === 'input' || stepType === 'select') && 'configKey' in step && step.configKey) {
       const value = (values[step.id] ?? '').trim();
       next.inputValues[step.configKey] = value;
       continue;

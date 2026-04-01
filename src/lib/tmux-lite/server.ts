@@ -294,12 +294,13 @@ function deleteOwnedEntries(map: Map<string, object>, socket: object): void {
 
 function pickAgentDialogWatcher(sessionId: string): object | null {
   const owner = agentSessionWatchOwners.get(sessionId);
-  if (owner && agentStateWatchers.has(owner)) {
+  if (!owner) {
+    return null;
+  }
+  if (agentStateWatchers.has(owner)) {
     return owner;
   }
-  for (const socket of agentStateWatchers) {
-    return socket;
-  }
+  agentSessionWatchOwners.delete(sessionId);
   return null;
 }
 
@@ -397,6 +398,7 @@ async function getAgentControlReady(): Promise<void> {
           sendRouterResponse(socket, { type: 'agent-dialog-request', request });
         } catch {
           agentDialogOwners.delete(request.id);
+          agentSessionWatchOwners.delete(request.sessionId);
           clearRouterSocketState(socket);
         }
       },
@@ -2990,6 +2992,7 @@ routerListener = Bun.listen({
             try {
               await getAgentControlReady();
               const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
+              deleteOwnedEntries(agentSessionWatchOwners, socket);
               agentSessionWatchOwners.set(cmd.agentSessionId, socket);
               res = { type: 'session', session };
               void broadcastMachineSnapshotReplacement().catch(() => {});

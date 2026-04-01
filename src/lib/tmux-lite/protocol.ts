@@ -2,6 +2,10 @@
  * tmux-lite protocol
  */
 
+import { SpacesError } from '../../types/errors.js';
+import { logger } from '../../utils/logger.js';
+
+
 /** Protocol version - increment when making breaking changes */
 export const PROTOCOL_VERSION = 1;
 
@@ -166,7 +170,9 @@ export function encodeRouterMessage(msg: Command | Response): Buffer {
   const json = JSON.stringify(msg);
   const len = Buffer.byteLength(json);
   if (len > MAX_ROUTER_MESSAGE_SIZE) {
-    throw new Error(`Router message size ${len} exceeds maximum ${MAX_ROUTER_MESSAGE_SIZE}`);
+    const message = `Router message size ${len} exceeds maximum ${MAX_ROUTER_MESSAGE_SIZE}`;
+    logger.error(message);
+    throw new SpacesError(message, 'SYSTEM_ERROR', 2);
   }
   const buf = Buffer.alloc(ROUTER_FRAME_HEADER_BYTES + len);
   buf.writeUInt32BE(len, 0);
@@ -184,7 +190,9 @@ export function decodeRouterMessages(buffer: Buffer): {
   while (offset + ROUTER_FRAME_HEADER_BYTES <= buffer.length) {
     const len = buffer.readUInt32BE(offset);
     if (len > MAX_ROUTER_MESSAGE_SIZE) {
-      throw new Error(`Router message size ${len} exceeds maximum ${MAX_ROUTER_MESSAGE_SIZE}`);
+      const message = `Router message size ${len} exceeds maximum ${MAX_ROUTER_MESSAGE_SIZE}`;
+      logger.error(message);
+      throw new SpacesError(message, 'SYSTEM_ERROR', 2);
     }
     const frameEnd = offset + ROUTER_FRAME_HEADER_BYTES + len;
     if (frameEnd > buffer.length) {

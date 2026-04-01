@@ -301,17 +301,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private readonly handlers = new Set<(event: BackendEvent) => void>();
 
   private readonly attachLifecycle = new AttachLifecycle((event) => {
-    // Inject agentSessionId into attached events so the session engine knows
-    // when an agent session is active.
-    if (event.type === 'attached') {
-      console.debug('[RemoteBackend] attached event, agentSessionId:', this.attachedAgentSessionId);
-      if (this.attachedAgentSessionId) {
-        this.emit({ ...event, agentSessionId: this.attachedAgentSessionId });
-        return;
-      }
+    if (event.type === 'attached' && this.pendingAttachedAgentSessionId) {
+      this.attachedAgentSessionId = this.pendingAttachedAgentSessionId;
+      this.pendingAttachedAgentSessionId = null;
+    }
+    if (event.type === 'attached' && this.attachedAgentSessionId) {
+      this.emit({ ...event, agentSessionId: this.attachedAgentSessionId });
+      return;
     }
     if (event.type === 'detached' || event.type === 'session_exited') {
       this.attachedAgentSessionId = null;
+      this.pendingAttachedAgentSessionId = null;
     }
     this.emit(event);
   });
@@ -319,6 +319,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private sessionKeys: SessionKeys | null = null;
   private isConnected = false;
   private attachedAgentSessionId: string | null = null;
+  private pendingAttachedAgentSessionId: string | null = null;
   private listenersAttached = false;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -787,15 +788,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
-    // Set only after a successful attach so a failed attach leaves state clean.
-    this.attachedAgentSessionId = agentSessionId;
+    this.pendingAttachedAgentSessionId = agentSessionId;
+    try {
+      await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+    } catch (error) {
+      this.pendingAttachedAgentSessionId = null;
+      throw error;
+    }
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
     await this.waitForInitialSnapshot();
     const response = await this.sendTmuxCommand({ type: 'agent-prompt', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, text, images });
+    if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
+    throw new Error(`Unexpected prompt response: ${response.type}`);
   }
 
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
@@ -1807,6 +1814,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingDetachTransition(new Error('Remote session disconnected'));
     this.handshakeState = null;
     this.sessionKeys = null;
+    this.attachedAgentSessionId = null;
+    this.pendingAttachedAgentSessionId = null;
     this.pendingReplayFrameChunks.clear();
     this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);

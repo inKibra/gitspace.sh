@@ -758,7 +758,7 @@ export class ClientSessionManager {
     const promises: Promise<void>[] = [];
 
     for (const [connectionId, session] of this.sessions) {
-      if (session.state !== 'browsing' || !session.sessionKeys) continue;
+      if ((session.state !== 'browsing' && session.state !== 'attached') || !session.sessionKeys) continue;
       promises.push(
         (async () => {
           try {

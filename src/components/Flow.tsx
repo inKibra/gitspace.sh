@@ -157,7 +157,7 @@ export interface UseFlowReturn {
   close: () => void;
 
   // Interaction handlers (for keyboard/click)
-  handleConfirm: () => Promise<void>;
+  handleConfirm: (selectedIndexOverride?: number) => Promise<void>;
   handleCancel: () => Promise<void>;
   handleInput: (value: string) => void;
   handleSelect: (index: number) => void;
@@ -249,7 +249,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   }, []);
 
   // Handle confirm action
-  const handleConfirm = useCallback(async () => {
+  const handleConfirm = useCallback(async (selectedIndexOverride?: number) => {
     const flowAtConfirm = flow;
     const closeIfUnchanged = () => {
       setFlow((current) => (current === flowAtConfirm ? { type: 'none' } : current));
@@ -267,20 +267,20 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
       } else if (flow.type === 'input') {
         if (flow.validation) {
           const error = flow.validation(flow.inputValue);
-          if (error) return; // Don't close if validation fails
+          if (error) return;
         }
         await flow.onSubmit(flow.inputValue);
         closeIfUnchanged();
       } else if (flow.type === 'select') {
         const visibleOptions = getVisibleSelectOptions(flow);
-        const entry = visibleOptions.find(({ index }) => index === flow.selectedIndex)
+        const resolvedIndex = selectedIndexOverride ?? flow.selectedIndex;
+        const entry = visibleOptions.find(({ index }) => index === resolvedIndex)
           ?? visibleOptions[0];
         if (entry) {
           await flow.onSelect(entry.option.value, entry.index);
           closeIfUnchanged();
         }
       } else if (flow.type === 'wizard') {
-        // Advance wizard or complete
         const currentStep = flow.steps[flow.currentStep];
         const newValues = { ...flow.collectedValues };
 
@@ -293,11 +293,9 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         }
 
         if (flow.currentStep === flow.steps.length - 1) {
-          // Last step - complete
           await flow.onComplete(newValues);
           closeIfUnchanged();
         } else {
-          // Move to next step
           const nextStep = flow.steps[flow.currentStep + 1];
           setFlow({
             ...flow,

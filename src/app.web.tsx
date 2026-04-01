@@ -547,7 +547,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, [closeAgentSessionAction]);
 
   const handleCreateAgentSession = useCallback((workspaceId: string) => {
-    createAgentSessionAction(workspaceId, { attachOptions: getWebAgentAttachSize() });
+    createAgentSessionAction(workspaceId, {
+      attachOptions: getWebAgentAttachSize(),
+      beforeOpen: () => {
+        setIsViewOnlySession(false);
+        attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
+        pendingAgentAttachTargetRef.current = null;
+        flushSync(() => {
+          setAgentAttachPending(true);
+          setPendingAgentAttachTarget(null);
+        });
+      },
+      onOpenSuccess: () => {
+        pendingAgentAttachTargetRef.current = null;
+        setAgentAttachPending(false);
+        setPendingAgentAttachTarget(null);
+      },
+    });
   }, [createAgentSessionAction, getWebAgentAttachSize]);
 
   const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {

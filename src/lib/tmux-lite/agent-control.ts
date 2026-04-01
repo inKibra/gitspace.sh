@@ -9,8 +9,9 @@ import { getArchivedSessions } from '../../agents/agent-db.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
 import type { AgentPromptImage } from './protocol.js';
+import { SpacesError } from '../../types/errors.js';
+import { logger } from '../../utils/logger.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
-
 
 export type AgentWorkspaceTarget = PiWorkspaceTarget;
 export type AgentSessionSummary = PiAgentSessionSummary;
@@ -268,8 +269,13 @@ export async function stageUploadFile(
   const { mkdirSync, writeFileSync } = await import('fs');
 
   const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+  const rejectUpload = (message: string): never => {
+    logger.error(`[agent-control] ${message} (file=${fileName}, workspace=${target.workspacePath})`);
+    throw new SpacesError(message, 'USER_ERROR', 1);
+  };
+
   if (data.length > MAX_UPLOAD_BYTES * 2) {
-    throw new Error(`Upload rejected: base64 input length ${data.length} exceeds maximum`);
+    rejectUpload(`Upload rejected: base64 input length ${data.length} exceeds maximum`);
   }
 
   let safeName = basename(fileName).replace(/[\/\\:*?"<>|]/g, '_');
@@ -277,31 +283,39 @@ export async function stageUploadFile(
   if (!safeName) safeName = 'upload';
 
   const stagingDir = join(target.workspacePath, '.gitspace', 'uploads');
-  mkdirSync(stagingDir, { recursive: true });
+  let bytes: Buffer;
+  try {
+    mkdirSync(stagingDir, { recursive: true });
 
-  const dotIdx = safeName.lastIndexOf('.');
-  const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
-  const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
+    const dotIdx = safeName.lastIndexOf('.');
+    const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
+    const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
 
-  const bytes = Buffer.from(data, 'base64');
-  if (bytes.length > MAX_UPLOAD_BYTES) {
-    throw new Error(`Upload rejected: decoded file size ${bytes.length} bytes exceeds limit of ${MAX_UPLOAD_BYTES} bytes`);
-  }
-
-  let counter = 0;
-  let finalName = safeName;
-  let finalPath = join(stagingDir, finalName);
-  for (;;) {
-    try {
-      writeFileSync(finalPath, bytes, { flag: 'wx' });
-      return { stagedPath: finalPath };
-    } catch (error) {
-      const code = error instanceof Error && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
-      if (code !== 'EEXIST') throw error;
-      counter += 1;
-      finalName = `${base}_${counter}${ext}`;
-      finalPath = join(stagingDir, finalName);
+    bytes = Buffer.from(data, 'base64');
+    if (bytes.length > MAX_UPLOAD_BYTES) {
+      rejectUpload(`Upload rejected: decoded file size ${bytes.length} bytes exceeds limit of ${MAX_UPLOAD_BYTES} bytes`);
     }
+
+    let counter = 0;
+    let finalName = safeName;
+    let finalPath = join(stagingDir, finalName);
+    for (;;) {
+      try {
+        writeFileSync(finalPath, bytes, { flag: 'wx' });
+        return { stagedPath: finalPath };
+      } catch (error) {
+        const code = error instanceof Error && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
+        if (code !== 'EEXIST') throw error;
+        counter += 1;
+        finalName = `${base}_${counter}${ext}`;
+        finalPath = join(stagingDir, finalName);
+      }
+    }
+  } catch (error) {
+    if (error instanceof SpacesError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error(`[agent-control] Failed staging upload ${fileName} in ${stagingDir}: ${message}`);
+    throw new SpacesError(`Failed to stage upload ${fileName}`, 'SYSTEM_ERROR', 2);
   }
 }
 
@@ -413,7 +427,8 @@ export async function getFileSuggestions(
     const workspacePath = target.workspacePath;
 
     const cleanPrefix = prefix.startsWith('@') ? prefix.slice(1) : prefix;
-    if (cleanPrefix.startsWith('/') || cleanPrefix.split('/').some((seg) => seg === '..')) {
+    const segments = cleanPrefix.split('/').filter(Boolean);
+    if (cleanPrefix.startsWith('/') || segments.some((seg) => seg === '..' || seg.startsWith('.') || ['node_modules', '__pycache__', '.git'].includes(seg))) {
       return [];
     }
 

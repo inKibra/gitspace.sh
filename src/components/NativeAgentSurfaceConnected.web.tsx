@@ -70,6 +70,12 @@ export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceCo
       augmentedText = augmentedText ? `${augmentedText}\n${suffix}` : suffix;
     }
 
+    const hasPromptText = augmentedText.trim().length > 0;
+    if (!hasPromptText && images.length === 0) {
+      toast.error('Nothing to send — all file attachments failed to stage.');
+      return;
+    }
+
     void engine.promptAgentSession(
       { backendKey: resolvedBackendKey, workspaceId, agentSessionId },
       augmentedText,
