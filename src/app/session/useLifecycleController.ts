@@ -134,6 +134,17 @@ function toWizardSteps(
       };
     }
 
+    if (step.type === 'select') {
+      return {
+        id: step.id,
+        title: step.title,
+        type: 'select',
+        description: step.description,
+        defaultValue: step.defaultValue,
+        options: step.options.map((option) => ({ label: option.label, value: option.value })),
+      };
+    }
+
     return {
       id: step.id,
       title: step.title,
@@ -291,8 +302,9 @@ export function useLifecycleController(
             const confirmResults: Record<string, ConfirmStepResult> = {};
 
             for (const step of onboardingSteps) {
-              if (step.type === 'input') {
-                inputValues[step.configKey] = (values[step.id] ?? step.defaultValue ?? '').trim();
+              if ((step.type === 'input' || step.type === 'select') && step.configKey) {
+                const defaultValue = step.defaultValue ?? '';
+                inputValues[step.configKey] = (values[step.id] ?? defaultValue).trim();
                 continue;
               }
 

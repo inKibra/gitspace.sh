@@ -354,7 +354,7 @@ function getRelevantSetupSteps(
   return steps.filter((step) => {
     const required = step.required !== false;
     if (required) {
-      return step.type === 'input' || step.type === 'secret' || step.type === 'confirm';
+      return step.type === 'input' || step.type === 'select' || step.type === 'secret' || step.type === 'confirm';
     }
 
     const key = getBundleStepKey(step);
@@ -362,6 +362,6 @@ function getRelevantSetupSteps(
       return false;
     }
 
-    return step.type === 'input' || step.type === 'secret' || step.type === 'confirm';
+    return step.type === 'input' || step.type === 'select' || step.type === 'secret' || step.type === 'confirm';
   });
 }

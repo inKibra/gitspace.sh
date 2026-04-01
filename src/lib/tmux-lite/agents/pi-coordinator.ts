@@ -1,8 +1,10 @@
-import type { OmpAgentSession } from './omp-types.js';
+import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
+import { HostUIBridgeState, type HostUIBridgeEmitter, type HostUIDialogResponse } from './host-ui-bridge.js';
 import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
   createVirtualSession as createTmuxVirtualSession,
+  resizeVirtualSession as resizeTmuxVirtualSession,
 } from '../cli.js';
 import type { Session as TmuxSession } from '../protocol.js';
 import {
@@ -169,10 +171,18 @@ export class PiCoordinator {
   private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
   private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
   private readonly activeSessions = new Map<string, OmpAgentSession>();
+  // Reverse index: agentSessionId → workspaceId, kept in sync with activeSessions.
+  private readonly sessionWorkspaceIds = new Map<string, string>();
   private readonly sessionUnsubscribers = new Map<string, () => void>();
   private readonly sessionsRoot: string | undefined;
   private readonly virtualModeHandles = new Map<string, VirtualInteractiveModeHandle>();
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
+
+  // Host UI bridge: routes extension dialog requests to the native surface
+  // and resolves responses from the client.
+  private readonly sessionUIBinders = new Map<string, OmpCreateSessionResult['setToolUIContext']>();
+  private readonly hostUIBridge = new HostUIBridgeState();
+  private hostUIEmitter: HostUIBridgeEmitter | null = null;
 
   constructor(sessionsRoot?: string) {
     this.sessionsRoot = sessionsRoot;
@@ -180,6 +190,28 @@ export class PiCoordinator {
 
   setEventHandler(handler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null): void {
     this.eventHandler = handler;
+  }
+
+  /**
+   * Install the bridge emitter that routes dialog requests and UI events
+   * to watching clients. Call once during server setup.
+   */
+  setHostUIEmitter(emitter: HostUIBridgeEmitter | null): void {
+    this.hostUIEmitter = emitter;
+    if (emitter) {
+      // Install host UI context on all already-active sessions
+      for (const [sessionId, binder] of this.sessionUIBinders) {
+        binder(this.hostUIBridge.createContextForSession(sessionId, emitter), true);
+      }
+    }
+  }
+
+  /**
+   * Route a dialog response from a client to the pending Promise.
+   * Returns true if the dialog was found and resolved.
+   */
+  resolveDialogResponse(response: HostUIDialogResponse): boolean {
+    return this.hostUIBridge.resolveDialog(response);
   }
 
   /**
@@ -210,12 +242,13 @@ export class PiCoordinator {
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
     const { createAgentSession: createPiAgentSession } = await importOmpModule();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
-    const { session } = await createPiAgentSession({
+    const result = await createPiAgentSession({
       agentDir,
       sessionManager,
       cwd: target.workspacePath,
-      // No extension needed — event handling is done in-process by bindSessionEvents.
+      hasUI: true,
     });
+    const { session, setToolUIContext } = result;
     if (title) {
       await sessionManager.setSessionName(title);
     }
@@ -224,7 +257,9 @@ export class PiCoordinator {
 
     const sessionId = session.sessionId;
     this.activeSessions.set(sessionId, session);
+    this.sessionWorkspaceIds.set(sessionId, target.workspaceId);
     this.bindSessionEvents(target, sessionId, title, session);
+    this.bindHostUI(sessionId, setToolUIContext);
 
     const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
     if (!sessionFile) {
@@ -269,9 +304,23 @@ export class PiCoordinator {
     return killed;
   }
 
-  async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string): Promise<void> {
+  async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string, images?: import('../protocol.js').AgentPromptImage[]): Promise<void> {
     const session = await this.ensureActiveSession(target, agentSessionId);
-    await session.prompt(text);
+
+    // Intercept /compact — call session.compact() directly instead of prompt()
+    const trimmed = text.trim();
+    if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
+      if (typeof session.compact === 'function') {
+        const instructions = trimmed.startsWith('/compact ') ? trimmed.slice('/compact '.length).trim() : undefined;
+        await session.compact(instructions || undefined);
+        return;
+      }
+    }
+
+    const piImages = images?.length
+      ? { images: images.map(img => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) }
+      : undefined;
+    await session.prompt(text, piImages);
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {
@@ -339,12 +388,17 @@ export class PiCoordinator {
    * Uses Pi's session ID to find and resume the right JSONL file.
    * Throws if the session file is not found (prevents silent mismatch).
    */
-  async ensureAgentTerminalSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<TmuxSession> {
+  async ensureAgentTerminalSession(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    sessionFile?: PiSessionFileInfo,
+    options?: { cols?: number; rows?: number },
+  ): Promise<TmuxSession> {
     const key = `${target.workspaceId}:${agentSessionId}`;
     const inFlight = this.inflightTerminalSessions.get(key);
     if (inFlight) return inFlight;
 
-    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId).finally(() => {
+    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId, sessionFile, options).finally(() => {
       this.inflightTerminalSessions.delete(key);
     });
     this.inflightTerminalSessions.set(key, ensurePromise);
@@ -354,19 +408,24 @@ export class PiCoordinator {
   private async ensureAgentTerminalSessionInternal(
     target: PiWorkspaceTarget,
     agentSessionId: string,
+    sessionFile?: PiSessionFileInfo,
+    options?: { cols?: number; rows?: number },
   ): Promise<TmuxSession> {
     const tmuxSessions = await listTmuxSessions();
     const existing = tmuxSessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
       ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
     if (existing) {
       if (existing.exitCode === undefined) {
+        if (options?.cols && options?.rows) {
+          await resizeTmuxVirtualSession(existing.id, options.cols, options.rows);
+        }
         this.bindTerminalSession(target.workspaceId, existing.id, agentSessionId);
         return existing;
       }
       this.releaseTerminalSession(existing.id);
     }
 
-    const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
         `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
@@ -374,19 +433,22 @@ export class PiCoordinator {
       );
     }
 
-    return this.createVirtualAgentSession(target, agentSessionId, match);
+    return this.createVirtualAgentSession(target, agentSessionId, match, options);
   }
 
   private async createVirtualAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
     sessionFile: PiSessionFileInfo,
+    options?: { cols?: number; rows?: number },
   ): Promise<TmuxSession> {
     const sdkSession = await this.ensureActiveSession(target, agentSessionId, sessionFile);
     const tmuxSession = await createTmuxVirtualSession(
       buildAgentTerminalSessionName(target, agentSessionId),
       target.workspacePath,
       {
+        cols: options?.cols,
+        rows: options?.rows,
         kind: PI_AGENT_TMUX_SESSION_KIND,
         hidden: true,
         metadata: {
@@ -446,7 +508,7 @@ export class PiCoordinator {
           );
         }
 
-        const { session } = await openPiSession(target.workspacePath, match.path);
+        const { session, setToolUIContext } = await openPiSession(target.workspacePath, match.path);
         if (session.sessionId !== agentSessionId) {
           session.dispose();
           throw new Error(
@@ -455,12 +517,14 @@ export class PiCoordinator {
         }
 
         this.activeSessions.set(agentSessionId, session);
+        this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);
         this.bindSessionEvents(
           target,
           agentSessionId,
           match.title ?? match.firstMessage ?? undefined,
           session,
         );
+        this.bindHostUI(agentSessionId, setToolUIContext);
         return session;
       } finally {
         this.inflightActiveSessions.delete(agentSessionId);
@@ -663,6 +727,8 @@ export class PiCoordinator {
     const unsubscribe = this.sessionUnsubscribers.get(sessionId);
     unsubscribe?.();
     this.sessionUnsubscribers.delete(sessionId);
+    this.sessionUIBinders.delete(sessionId);
+    this.hostUIBridge.rejectAllForSession(sessionId, `Agent session disposed: ${sessionId}`);
 
     const modeHandle = this.virtualModeHandles.get(sessionId);
     if (modeHandle) {
@@ -674,6 +740,21 @@ export class PiCoordinator {
     if (session) {
       session.dispose();
       this.activeSessions.delete(sessionId);
+      this.sessionWorkspaceIds.delete(sessionId);
+    }
+  }
+
+  /**
+   * Store the SDK's setToolUIContext binder for a session.
+   * If a host UI context is already installed, apply it immediately.
+   */
+  private bindHostUI(
+    sessionId: string,
+    setToolUIContext: OmpCreateSessionResult['setToolUIContext'],
+  ): void {
+    this.sessionUIBinders.set(sessionId, setToolUIContext);
+    if (this.hostUIEmitter) {
+      setToolUIContext(this.hostUIBridge.createContextForSession(sessionId, this.hostUIEmitter), true);
     }
   }
 
@@ -746,6 +827,58 @@ export class PiCoordinator {
     }
     return undefined;
   }
+  async listAvailableCommands(target: PiWorkspaceTarget): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
+    const commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> = [];
+
+    // 0. Built-in commands supported through the web surface
+    commands.push({ name: 'compact', description: 'Compact the session context', kind: 'extension' });
+
+    // 1. Collect custom commands from the active session for the requested workspace
+    //    (commands are workspace-scoped; skip any session belonging to a different workspace).
+    for (const [sessionId, session] of this.activeSessions) {
+      if (this.sessionWorkspaceIds.get(sessionId) !== target.workspaceId) continue;
+      try {
+        const customCmds = (session as any).customCommands;
+        if (Array.isArray(customCmds)) {
+          for (const cmd of customCmds) {
+            if (cmd?.command?.name && !commands.some(c => c.name === cmd.command.name)) {
+              commands.push({
+                name: cmd.command.name,
+                description: cmd.command.description ?? '',
+                kind: 'custom',
+              });
+            }
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+      break; // Only need one session's commands since they're workspace-scoped
+    }
+
+    // 2. Discover file-based slash commands from the workspace
+    try {
+      const ompModule = await import('@oh-my-pi/pi-coding-agent');
+      const discoverFn = ompModule.discoverSlashCommands ?? ompModule.loadSlashCommands;
+      if (typeof discoverFn === 'function') {
+        const slashCommands = await discoverFn({ cwd: target.workspacePath });
+        for (const cmd of slashCommands) {
+          if (!commands.some(c => c.name === cmd.name)) {
+            commands.push({
+              name: cmd.name,
+              description: cmd.description ?? '',
+              kind: 'file',
+            });
+          }
+        }
+      }
+    } catch {
+      // Non-fatal — Pi module may not be importable or discoverSlashCommands unavailable
+    }
+
+    return commands;
+  }
+
 }
 
 function mergeCreatedSession(

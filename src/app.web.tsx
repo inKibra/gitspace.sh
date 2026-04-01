@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { flushSync } from "react-dom";
 import type { SessionTerminalHandle } from "./components/SessionTerminal.web";
 import { ReplayTerminalWeb } from './components/ReplayTerminal.web';
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
@@ -58,6 +59,7 @@ import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.j
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
 
 import { browserPlatform } from './sdk/platforms/browser.js';
+import { NativeAgentSurfaceConnected } from './components/NativeAgentSurfaceConnected.web.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 
 // Replay helper
@@ -152,7 +154,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       if (st?.mode === 'attached') return key;
     }
     return null;
-  }, [multi]);
+  }, [multi, multiMachineState]);
 
   const attachedBackendState = attachedBackendKey ? multi.getBackendState(attachedBackendKey) : null;
   const terminalStatus = activeBackendState?.status ?? 'disconnected';
@@ -160,6 +162,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const attachedSessionName = attachedBackendState?.attachedSessionName ?? null;
   const attachedSessionMeta = attachedBackendState?.attachedSessionMeta ?? null;
   const commandError = attachedBackendState?.commandError ?? activeBackendState?.commandError ?? null;
+  // Always-current ref so callbacks can read commandError without it in their dep array.
+  const commandErrorRef = useRef(commandError);
+  commandErrorRef.current = commandError;
   const scriptState = attachedBackendState?.scriptState ?? activeBackendState?.scriptState ?? null;
   const notificationConfig = activeBackendState?.notificationConfig ?? null;
 
@@ -201,6 +206,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const flow = useFlow({
     onError: (error) => console.error('Flow error:', error),
   });
+
 
   const workspaceLifecycleClient = useMemo(() => ({
     multi,
@@ -268,6 +274,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const backendLiveEventIds = activeBackendState?.liveEventIds ?? [];
   const backendSavedEventFilters = activeBackendState?.savedEventFilters ?? [];
   const backendAttachedSessionId = attachedBackendState?.attachedSessionId ?? null;
+  const attachedTerminalInstanceKey = [
+    attachedBackendKey ?? 'none',
+    backendAttachedSessionId ?? 'none',
+    attachedBackendState?.attachedAgentSessionId ?? 'none',
+  ].join(':');
 
   const filteredWorkspaces = useMemo(
     () => workspaceRuntime.workspaces.filter((workspace) => workspace.backendKey === selectedBackendKey),
@@ -459,9 +470,73 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       toast.error(message);
     },
   });
-  const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await openAgentSessionAction(workspaceId, agentSessionId);
-  }, [openAgentSessionAction]);
+  const [agentAttachPending, setAgentAttachPending] = useState(false);
+  const [pendingAgentAttachTarget, setPendingAgentAttachTarget] = useState<{ workspaceId: string; agentSessionId: string } | null>(null);
+  // Refs that prevent two failure modes:
+  //   1. Stale commandError from a prior operation immediately clearing a fresh pending attach.
+  //   2. Stuck pending when open() returns null before any backend attach begins.
+  const attachPendingCommandErrorSnapshotRef = useRef<typeof commandError>(null);
+  const pendingAgentAttachTargetRef = useRef<{ workspaceId: string; agentSessionId: string } | null>(null);
+  // Clear pending only when the requested target actually attaches, or a *fresh* error arrives.
+  useEffect(() => {
+    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
+    const attachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
+    const targetReached = !!pendingAgentAttachTarget
+      && terminalMode === 'attached'
+      && attachedAgentSessionId === pendingAgentAttachTarget.agentSessionId
+      && attachedWorkspaceId === pendingAgentAttachTarget.workspaceId;
+    // Ignore commandError that already existed when this attach was requested.
+    const isFreshError = commandError != null && commandError !== attachPendingCommandErrorSnapshotRef.current;
+    if (agentAttachPending && (targetReached || isFreshError)) {
+      setAgentAttachPending(false);
+      setPendingAgentAttachTarget(null);
+      pendingAgentAttachTargetRef.current = null;
+    }
+  }, [agentAttachPending, pendingAgentAttachTarget, terminalMode, attachedBackendState, commandError]);
+  /** Estimate terminal cols/rows from viewport for initial agent session size. */
+  const getWebAgentAttachSize = useCallback(() => {
+    // Approximate: 8px per char, 18px per row (monospace at 14px font).
+    // Subtract ~260px for sidebar (hidden on mobile, but the resize will fix it).
+    const sidebarWidth = window.innerWidth >= 640 ? 260 : 0;
+    const availableWidth = Math.max(window.innerWidth - sidebarWidth - 32, 200);
+    const availableHeight = Math.max(window.innerHeight - 120, 200);
+    const cols = Math.max(Math.floor(availableWidth / 8), 40);
+    const rows = Math.max(Math.floor(availableHeight / 18), 10);
+    return { cols, rows };
+  }, []);
+
+  const handleOpenAgentSession = useCallback((workspaceId: string, agentSessionId: string) => {
+    const target = { workspaceId, agentSessionId };
+    // Snapshot current commandError so a stale error from a prior operation cannot
+    // immediately clear this pending attach before the backend has a chance to respond.
+    attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
+    pendingAgentAttachTargetRef.current = target;
+    flushSync(() => {
+      setAgentAttachPending(true);
+      setPendingAgentAttachTarget(target);
+    });
+    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: getWebAgentAttachSize() })
+      .then((result) => {
+        // open() returning null means the call failed before any backend attach was initiated.
+        // Clear pending only if no rapid session switch has since overtaken this request.
+        if (result === null) {
+          const cur = pendingAgentAttachTargetRef.current;
+          if (cur?.workspaceId === workspaceId && cur?.agentSessionId === agentSessionId) {
+            pendingAgentAttachTargetRef.current = null;
+            setAgentAttachPending(false);
+            setPendingAgentAttachTarget(null);
+          }
+        }
+      })
+      .catch(() => {
+        const cur = pendingAgentAttachTargetRef.current;
+        if (cur?.workspaceId === workspaceId && cur?.agentSessionId === agentSessionId) {
+          pendingAgentAttachTargetRef.current = null;
+          setAgentAttachPending(false);
+          setPendingAgentAttachTarget(null);
+        }
+      });
+  }, [openAgentSessionAction, getWebAgentAttachSize]);
 
   const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await abortAgentSessionAction(workspaceId, agentSessionId);
@@ -471,6 +546,31 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     await closeAgentSessionAction(workspaceId, agentSessionId);
   }, [closeAgentSessionAction]);
 
+  const handleCreateAgentSession = useCallback((workspaceId: string) => {
+    createAgentSessionAction(workspaceId, {
+      attachOptions: getWebAgentAttachSize(),
+      beforeOpen: () => {
+        setIsViewOnlySession(false);
+        attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
+        pendingAgentAttachTargetRef.current = null;
+        flushSync(() => {
+          setAgentAttachPending(true);
+          setPendingAgentAttachTarget(null);
+        });
+      },
+      onOpenSuccess: () => {
+        pendingAgentAttachTargetRef.current = null;
+        setAgentAttachPending(false);
+        setPendingAgentAttachTarget(null);
+      },
+      onOpenError: () => {
+        pendingAgentAttachTargetRef.current = null;
+        setAgentAttachPending(false);
+        setPendingAgentAttachTarget(null);
+      },
+    });
+  }, [createAgentSessionAction, getWebAgentAttachSize]);
+
   const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await archiveAgentSessionAction(workspaceId, agentSessionId);
   }, [archiveAgentSessionAction]);
@@ -478,13 +578,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const handleRestoreAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await restoreAgentSessionAction(workspaceId, agentSessionId);
   }, [restoreAgentSessionAction]);
-
-  const handleCreateAgentSession = useCallback((workspaceId: string) => {
-    createAgentSessionAction(workspaceId);
-  }, [createAgentSessionAction]);
-
-
-
 
   // ─── Resolve project name from workspaceId ────────────────────────────────
 
@@ -1320,17 +1413,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
     return (
       <>
-        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+        <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--gs-bg)] px-4">
           <div className="text-center">
-            <div className="text-lg text-[#e6edf3] mb-2">
-              Loading review for <span className="text-[#58a6ff]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
+            <div className="text-lg text-[var(--gs-text)] mb-2">
+              Loading review for <span className="text-[var(--gs-info)]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
             </div>
-            <div className="text-sm text-[#8b949e]">
+            <div className="text-sm text-[var(--gs-text-muted)]">
               {terminalStatus !== 'connected' ? 'Connecting...' : 'Resolving workspace backend...'}
             </div>
             <button
               onClick={() => { setView('terminal'); setReviewWorkspace(null); }}
-              className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+              className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"
             >
               Back to Workspaces
             </button>
@@ -1347,15 +1440,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     if (terminalStatus !== 'connected' || terminalMode !== 'browsing') {
       return (
         <>
-          <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+          <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--gs-bg)] px-4">
             <div className="text-center">
-              <div className="text-lg text-[#e6edf3] mb-2">
-                Loading replay for <span className="text-[#58a6ff]">{activeReplay.sessionName}</span>
+              <div className="text-lg text-[var(--gs-text)] mb-2">
+                Loading replay for <span className="text-[var(--gs-info)]">{activeReplay.sessionName}</span>
               </div>
-              <div className="text-sm text-[#8b949e]">Connecting...</div>
+              <div className="text-sm text-[var(--gs-text-muted)]">Connecting...</div>
               <button
                 onClick={() => { setView('terminal'); setActiveReplay(null); }}
-                className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+                className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"
               >
                 Back to Workspaces
               </button>
@@ -1461,45 +1554,49 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <Toaster theme="dark" position="top-right" richColors />
         {commandPalette.isOpen && (
           <div
-            className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-[10vh]"
+            className="gs-overlay-root"
             role="dialog"
             aria-label="Command palette"
             onClick={() => commandPalette.close()}
           >
+            <div className="absolute inset-0 gs-overlay-backdrop" />
             <div
-              className="w-full max-w-md rounded-lg border border-[#30363d] bg-[#21262d] shadow-xl"
+              className="gs-shell-card gs-shell-card--compact gs-shell-card--headerless"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="border-b border-[#30363d] px-3 py-2">
-                <input
-                  type="text"
-                  placeholder="Filter commands..."
-                  value={commandPalette.filter}
-                  onChange={(e) => commandPalette.setFilter(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') commandPalette.close();
-                    else if (e.key === 'ArrowDown') { e.preventDefault(); commandPalette.moveSelection(1); }
-                    else if (e.key === 'ArrowUp') { e.preventDefault(); commandPalette.moveSelection(-1); }
-                    else if (e.key === 'Enter') { e.preventDefault(); commandPalette.selectCurrent(); }
-                  }}
-                  className="w-full bg-transparent text-white placeholder-[#6e7681] outline-none"
-                  autoFocus
-                />
-              </div>
-              <ul className="max-h-[50vh] overflow-y-auto py-1">
-                {commandPalette.filteredCommands.map((cmd, i) => (
-                  <li
-                    key={cmd.id}
-                    className={`cursor-pointer px-3 py-2 text-sm ${i === commandPalette.selectedIndex ? 'bg-[#388bfd] text-white' : 'text-[#c9d1d9] hover:bg-[#30363d]'}`}
-                    onClick={() => { commandPalette.setSelectedIndex(i); commandPalette.selectCurrent(); }}
-                  >
-                    {cmd.label}
-                    {cmd.shortcut ? <span className="ml-2 text-[#6e7681]">{cmd.shortcut}</span> : null}
-                  </li>
-                ))}
-              </ul>
-              <div className="border-t border-[#30363d] px-3 py-1.5 text-xs text-[#6e7681]">
-                ↑↓ select · Enter run · Esc close
+              <div className="gs-shell-body gs-shell-body--flush">
+                <div className="border-b border-[var(--gs-border)] px-4 py-3">
+                  <div className="gs-shell-kicker">Command palette</div>
+                  <input
+                    type="text"
+                    placeholder="Filter commands..."
+                    value={commandPalette.filter}
+                    onChange={(e) => commandPalette.setFilter(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') commandPalette.close();
+                      else if (e.key === 'ArrowDown') { e.preventDefault(); commandPalette.moveSelection(1); }
+                      else if (e.key === 'ArrowUp') { e.preventDefault(); commandPalette.moveSelection(-1); }
+                      else if (e.key === 'Enter') { e.preventDefault(); commandPalette.selectCurrent(); }
+                    }}
+                    className="gs-field mt-2 min-h-[44px]"
+                    autoFocus
+                  />
+                </div>
+                <ul className="max-h-[50vh] overflow-y-auto">
+                  {commandPalette.filteredCommands.map((cmd, i) => (
+                    <li
+                      key={cmd.id}
+                      className={`gs-command-item cursor-pointer ${i === commandPalette.selectedIndex ? 'gs-command-item--active' : ''}` }
+                      onClick={() => { commandPalette.setSelectedIndex(i); commandPalette.selectCurrent(); }}
+                    >
+                      <span>{cmd.label}</span>
+                      {cmd.shortcut ? <span className="text-[var(--gs-text-dim)]">{cmd.shortcut}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                <div className="border-t border-[var(--gs-border)] px-4 py-2 text-[11px] uppercase tracking-[0.16em] text-[var(--gs-text-dim)]">
+                  ↑↓ select · enter run · esc close
+                </div>
               </div>
             </div>
           </div>
@@ -1551,44 +1648,73 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const attachedMatchesSelected = !backendAttachedWorkspaceId
       || !selectedRef
       || selectedRef.workspaceId === backendAttachedWorkspaceId;
-    const inlineTerminalOutlet = (terminalMode === 'attached' && attachedMatchesSelected) ? (
-      <AttachedTerminalPaneWeb
-        rootClassName="flex-1 min-h-0 flex flex-col bg-[#0d1117] overflow-hidden"
-        headerClassName="flex-shrink-0 px-3 py-2 border-b border-[#21262d] bg-[#161b22] flex items-center justify-between gap-2"
-        sessionName={attachedSessionName}
-        processTitle={attachedSessionMeta?.processTitle ?? null}
-        terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
-        lastAlertLabel={attachedSessionMeta?.lastAlertKind
-          ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
-          : null}
-        showConnectedLabel={true}
-        showMobileControls={showMobileControls}
-        inputMode={inputMode}
-        keyboardVisible={keyboardVisible}
-        onToggleInputMode={toggleInlineInputMode}
-        inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
-          inputMode
-            ? 'bg-[#22c55e] text-[#0d1117] font-medium'
-            : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
-        }`}
-        onDetach={() => multi.detachSession(inlineAttachedRef)}
-        detachButtonClassName="px-2 py-1 text-xs rounded border border-[#30363d] text-[#e6edf3] hover:bg-[#30363d]"
-        terminalContainerClassName={inlineTerminalContainerClass}
-        terminalRef={terminalRef}
-        onData={handleInlineKeyboardData}
-        setWriteCallback={setWriteCallback}
-        onResize={resizePty}
-        onActivity={handleTerminalActivity}
-        readOnly={isViewOnlySession}
-        allowTapFocus={inputMode || !showMobileControls}
-        allowTouchScroll={!inputMode}
-        onSendData={handleInlineSendData}
-        onFocusTerminal={handleInlineFocusTerminal}
-        modifiers={modifiers}
-        onModifiersChange={setModifiers}
-        showFloatingControls={showInlineFloatingControls}
-      />
+    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
+    const switchingAgentSession = !!pendingAgentAttachTarget
+      && agentAttachPending
+      && (attachedAgentSessionId !== pendingAgentAttachTarget.agentSessionId
+        || backendAttachedWorkspaceId !== pendingAgentAttachTarget.workspaceId);
+    const inlineTerminalOutlet = switchingAgentSession ? (
+      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
+        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+      </div>
+    ) : (terminalMode === 'attached' && attachedMatchesSelected) ? (
+      <div className="flex-1 min-h-0 flex flex-col">
+        <AttachedTerminalPaneWeb
+          key={attachedTerminalInstanceKey}
+          rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
+          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
+          sessionName={attachedSessionName}
+          processTitle={attachedSessionMeta?.processTitle ?? null}
+          terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
+          lastAlertLabel={attachedSessionMeta?.lastAlertKind
+            ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
+            : null}
+          showConnectedLabel={true}
+          showMobileControls={showMobileControls}
+          inputMode={inputMode}
+          keyboardVisible={keyboardVisible}
+          onToggleInputMode={toggleInlineInputMode}
+          inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
+            inputMode
+              ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] font-medium'
+              : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
+          }`}
+          onDetach={() => multi.detachSession(inlineAttachedRef)}
+          detachButtonClassName="px-2 py-1 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
+          terminalContainerClassName={inlineTerminalContainerClass}
+          terminalRef={terminalRef}
+          onData={handleInlineKeyboardData}
+          setWriteCallback={setWriteCallback}
+          onResize={resizePty}
+          onActivity={handleTerminalActivity}
+          readOnly={isViewOnlySession}
+          allowTapFocus={inputMode || !showMobileControls}
+          allowTouchScroll={!inputMode}
+          onSendData={handleInlineSendData}
+          onFocusTerminal={handleInlineFocusTerminal}
+          modifiers={modifiers}
+          onModifiersChange={setModifiers}
+          showFloatingControls={showInlineFloatingControls}
+        />
+        <NativeAgentSurfaceConnected backendKey={attachedBackendKey ?? activeBackendKey ?? undefined} />
+      </div>
+    ) : agentAttachPending ? (
+      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
+        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+      </div>
     ) : null;
+    const handleBackToBoard = async () => {
+      if (terminalMode === 'attached' && attachedBackendKey) {
+        try {
+          await multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Failed to detach session');
+          return;
+        }
+      }
+
+      handleBoardSelectWorkspace(null);
+    };
 
     // ── Workspace detail page (full-screen, replaces board) ────────────────
     if (selectedWorkspaceForDetail) {
@@ -1602,6 +1728,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             agentSessionCount={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0) : 0}
             pendingPermissions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0) : 0}
             attachedSessionId={backendAttachedSessionId}
+            attachedAgentSessionId={attachedBackendState?.attachedAgentSessionId ?? null}
+            pendingAgentAttach={agentAttachPending}
             allWorkspaces={allWorkspaceEntries}
             workspaceStatusById={workspaceStatusById}
             runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}
@@ -1641,7 +1769,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               }
             }}
             onDeleteSession={handleDeleteSession}
-            onClose={() => handleBoardSelectWorkspace(null)}
+            onClose={() => {
+              void handleBackToBoard();
+            }}
           >
             {inlineTerminalOutlet}
           </WorkspaceDetailPage>
@@ -1720,17 +1850,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return (
       <>
         <AttachedTerminalPaneWeb
-          rootClassName="w-screen h-screen flex flex-col bg-[#0d1117] overflow-hidden"
-          headerClassName="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2 flex-shrink-0"
+          key={attachedTerminalInstanceKey}
+          rootClassName="w-screen h-screen flex flex-col bg-[var(--gs-bg)] overflow-hidden"
+          headerClassName="bg-[var(--gs-bg-elevated)] px-4 py-2 flex items-center justify-between border-b border-[var(--gs-border)] min-h-[52px] gap-2 flex-shrink-0"
           leadingContent={(
             <button
               onClick={() => void multi.detachSession(attachedRef)}
-              className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+              className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] active:text-[var(--gs-accent)] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
             >
               ← <span className="hidden sm:inline ml-1">Workspaces</span>
             </button>
           )}
-          trailingContent={<span className="text-xs text-[#6e7681] hidden sm:inline">Shift+Esc</span>}
+          trailingContent={<span className="text-xs text-[var(--gs-text-dim)] hidden sm:inline">Shift+Esc</span>}
           sessionName={attachedSessionName}
           processTitle={attachedSessionMeta?.processTitle ?? null}
           terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
@@ -1744,11 +1875,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onToggleInputMode={toggleInputMode}
           inputButtonClassName={`px-3 py-2 text-sm rounded min-h-[44px] transition-all ${
             inputMode
-              ? 'bg-[#22c55e] text-[#0d1117] shadow-glow font-medium'
-              : 'bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d]'
+              ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] shadow-glow font-medium'
+              : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
           }`}
           onDetach={() => multi.detachSession(attachedRef)}
-          detachButtonClassName="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+          detachButtonClassName="px-3 py-2 text-sm bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded text-[var(--gs-text)] min-h-[44px] border border-[var(--gs-border)]"
           terminalContainerClassName={getTerminalContainerClass()}
           terminalRef={terminalRef}
           onData={handleKeyboardData}
@@ -1782,21 +1913,21 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   return (
     <>
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#0d1117] px-4">
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--gs-bg)] px-4">
         <div className="text-center">
-          <h1 className="text-xl font-bold text-[#e6edf3] mb-4">GitSpace</h1>
-          <div className="text-sm text-[#8b949e] mb-4">{statusMessage}</div>
+          <h1 className="text-xl font-bold text-[var(--gs-text)] mb-4">GitSpace</h1>
+          <div className="text-sm text-[var(--gs-text-muted)] mb-4">{statusMessage}</div>
           {!isError && (
             <div className="flex gap-1 justify-center">
               {[0, 1, 2].map((i) => (
-                <div key={i} className="w-1.5 h-1.5 rounded-full bg-[#3fb950] animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
+                <div key={i} className="w-1.5 h-1.5 rounded-full bg-[var(--gs-success)] animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
               ))}
             </div>
           )}
           {isError && (
             <button
               onClick={() => window.location.reload()}
-              className="mt-4 px-6 py-3 text-base bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded-lg text-[#e6edf3] min-h-[48px] border border-[#30363d]"
+              className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"   
             >
               Retry
             </button>

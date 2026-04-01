@@ -1,4 +1,5 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
+import type { HostUIBridgeEmitter, HostUIDialogResponse } from './agents/host-ui-bridge.js';
 import {
   defaultAgentEventManager,
   type AgentStateUpdateDelta,
@@ -7,8 +8,10 @@ import {
 import { getArchivedSessions } from '../../agents/agent-db.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
+import type { AgentPromptImage } from './protocol.js';
+import { SpacesError } from '../../types/errors.js';
+import { logger } from '../../utils/logger.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
-
 
 export type AgentWorkspaceTarget = PiWorkspaceTarget;
 export type AgentSessionSummary = PiAgentSessionSummary;
@@ -249,10 +252,71 @@ export async function createAgentSession(target: AgentWorkspaceTarget, title?: s
   return getKnownAgentSessions(target);
 }
 
-export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string): Promise<void> {
+export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string, images?: AgentPromptImage[]): Promise<void> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text);
+  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text, images);
+}
+
+export async function stageUploadFile(
+  target: AgentWorkspaceTarget,
+  fileName: string,
+  data: string,
+  mimeType: string,
+): Promise<{ stagedPath: string }> {
+  await ensureAgentControlInitialized();
+  const { join, basename } = await import('path');
+  const { mkdirSync, writeFileSync } = await import('fs');
+
+  const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+  const rejectUpload = (message: string): never => {
+    logger.error(`[agent-control] ${message} (file=${fileName}, workspace=${target.workspacePath})`);
+    throw new SpacesError(message, 'USER_ERROR', 1);
+  };
+
+  if (data.length > MAX_UPLOAD_BYTES * 2) {
+    rejectUpload(`Upload rejected: base64 input length ${data.length} exceeds maximum`);
+  }
+
+  let safeName = basename(fileName).replace(/[\/\\:*?"<>|]/g, '_');
+  if (safeName.length > 200) safeName = safeName.slice(0, 200);
+  if (!safeName || safeName === '.' || safeName === '..') safeName = 'upload';
+
+  const stagingDir = join(target.workspacePath, '.gitspace', 'uploads');
+  let bytes: Buffer;
+  try {
+    mkdirSync(stagingDir, { recursive: true });
+
+    const dotIdx = safeName.lastIndexOf('.');
+    const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
+    const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
+
+    bytes = Buffer.from(data, 'base64');
+    if (bytes.length > MAX_UPLOAD_BYTES) {
+      rejectUpload(`Upload rejected: decoded file size ${bytes.length} bytes exceeds limit of ${MAX_UPLOAD_BYTES} bytes`);
+    }
+
+    let counter = 0;
+    let finalName = safeName;
+    let finalPath = join(stagingDir, finalName);
+    for (;;) {
+      try {
+        writeFileSync(finalPath, bytes, { flag: 'wx' });
+        return { stagedPath: finalPath };
+      } catch (error) {
+        const code = error instanceof Error && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
+        if (code !== 'EEXIST') throw error;
+        counter += 1;
+        finalName = `${base}_${counter}${ext}`;
+        finalPath = join(stagingDir, finalName);
+      }
+    }
+  } catch (error) {
+    if (error instanceof SpacesError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error(`[agent-control] Failed staging upload ${fileName} in ${stagingDir}: ${message}`);
+    throw new SpacesError(`Failed to stage upload ${fileName}`, 'SYSTEM_ERROR', 2);
+  }
 }
 
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
@@ -291,14 +355,18 @@ export async function restoreAgentSession(target: AgentWorkspaceTarget, agentSes
   return getKnownAgentSessions(target);
 }
 
-export async function attachAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<import('./protocol.js').Session> {
+export async function attachAgentSession(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  options?: { cols?: number; rows?: number },
+): Promise<import('./protocol.js').Session> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
   defaultAgentEventManager.syncKnownSessions(
     target.workspaceId,
     await defaultPiCoordinator.refreshAgentSessions(target),
   );
-  const session = await defaultPiCoordinator.ensureAgentTerminalSession(target, agentSessionId);
+  const session = await defaultPiCoordinator.ensureAgentTerminalSession(target, agentSessionId, undefined, options);
   defaultAgentEventManager.markSessionOpen(target.workspaceId, agentSessionId);
   void defaultAgentEventManager.reconcileWorkspace(target.workspaceId);
   return session;
@@ -318,4 +386,89 @@ export async function respondToAgentPermission(
 
 export function markAgentSessionIdle(workspaceId: string, sessionId: string): void {
   defaultAgentEventManager.markSessionIdle(workspaceId, sessionId);
+}
+
+// ---------------------------------------------------------------------------
+// Host UI bridge wiring
+// ---------------------------------------------------------------------------
+
+/**
+ * Install the bridge emitter so extension dialog requests and UI events
+ * are broadcast to watching clients. Call once during tmux-lite server setup.
+ */
+export function setAgentHostUIEmitter(emitter: HostUIBridgeEmitter | null): void {
+  defaultPiCoordinator.setHostUIEmitter(emitter);
+}
+
+/**
+ * Route a dialog response from a client to the pending SDK Promise.
+ */
+export function resolveAgentDialogResponse(response: HostUIDialogResponse): boolean {
+  return defaultPiCoordinator.resolveDialogResponse(response);
+}
+
+export async function listAgentCommands(
+    target: AgentWorkspaceTarget,
+): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
+    await ensureAgentControlInitialized();
+    return defaultPiCoordinator.listAvailableCommands(target);
+}
+
+export async function getFileSuggestions(
+    target: AgentWorkspaceTarget,
+    prefix: string,
+    limit: number = 50,
+): Promise<Array<{ path: string; isDirectory: boolean }>> {
+    await ensureAgentControlInitialized();
+    const { join, relative } = await import('path');
+    const { readdirSync, realpathSync } = await import('fs');
+
+    const results: Array<{ path: string; isDirectory: boolean }> = [];
+    const workspacePath = target.workspacePath;
+
+    const cleanPrefix = prefix.startsWith('@') ? prefix.slice(1) : prefix;
+    const segments = cleanPrefix.split('/').filter(Boolean);
+    if (cleanPrefix.startsWith('/') || segments.some((seg) => seg === '..' || seg.startsWith('.') || ['node_modules', '__pycache__', '.git'].includes(seg))) {
+      return [];
+    }
+
+    const lastSlash = cleanPrefix.lastIndexOf('/');
+    const searchDir = lastSlash >= 0
+      ? join(workspacePath, cleanPrefix.slice(0, lastSlash))
+      : workspacePath;
+    const filePrefix = lastSlash >= 0
+      ? cleanPrefix.slice(lastSlash + 1).toLowerCase()
+      : cleanPrefix.toLowerCase();
+    const relativeBase = lastSlash >= 0 ? cleanPrefix.slice(0, lastSlash + 1) : '';
+
+    try {
+      const resolvedWorkspace = realpathSync(workspacePath);
+      const resolvedSearch = realpathSync(searchDir);
+      const relativeSearch = relative(resolvedWorkspace, resolvedSearch);
+      if (relativeSearch === '..' || relativeSearch.startsWith('../') || relativeSearch.startsWith('..\\')) {
+        return [];
+      }
+
+      const entries = readdirSync(resolvedSearch, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        if (entry.isDirectory() && ['node_modules', '__pycache__', '.git'].includes(entry.name)) continue;
+
+        if (entry.name.toLowerCase().startsWith(filePrefix)) {
+          results.push({
+            path: relativeBase + entry.name,
+            isDirectory: entry.isDirectory(),
+          });
+        }
+      }
+    } catch {
+      // Directory doesn't exist or isn't readable — return empty
+    }
+
+    results.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.path.localeCompare(b.path);
+    });
+
+    return results.slice(0, limit);
 }

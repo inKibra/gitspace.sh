@@ -5,7 +5,7 @@
 /**
  * Onboarding step types
  */
-export type OnboardingStepType = 'info' | 'confirm' | 'secret' | 'input';
+export type OnboardingStepType = 'info' | 'confirm' | 'secret' | 'input' | 'select';
 
 /**
  * Base interface for all onboarding steps
@@ -71,7 +71,26 @@ export interface InputStep extends BaseOnboardingStep {
   validationMessage?: string;
 }
 
-export type OnboardingStep = InfoStep | ConfirmStep | SecretStep | InputStep;
+export interface SelectStepOption {
+  label: string;
+  value: string;
+  description?: string;
+}
+
+/**
+ * Select step - Choose one value from a fixed list
+ */
+export interface SelectStep extends BaseOnboardingStep {
+  type: 'select';
+  /** Key to store the selected value under in project config */
+  configKey: string;
+  /** Default selected value (optional) */
+  defaultValue?: string;
+  /** Available options */
+  options: SelectStepOption[];
+}
+
+export type OnboardingStep = InfoStep | ConfirmStep | SecretStep | InputStep | SelectStep;
 
 /**
  * Persisted status for a confirm step.

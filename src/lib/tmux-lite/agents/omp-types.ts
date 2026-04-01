@@ -1,7 +1,8 @@
 export interface OmpAgentSession {
   sessionId: string;
   model?: unknown;
-  prompt(input: string): Promise<void>;
+  prompt(input: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }): Promise<void>;
+  compact?(customInstructions?: string): Promise<unknown>;
   subscribe(handler: (event: OmpAgentEvent) => void): () => void;
   setModel(model: unknown): Promise<void>;
   dispose(): void;
@@ -39,6 +40,58 @@ export interface OmpModelRegistryConstructor {
   new(authStorage: unknown): OmpModelRegistry;
 }
 
+// ---------------------------------------------------------------------------
+// High-level host UI context — the subset of ExtensionUIContext that GitSpace
+// can satisfy natively (select/confirm/input/editor/notify/status/widget).
+// Low-level component-factory methods (custom, setHeader, setFooter,
+// setEditorComponent, onTerminalInput) are excluded and fall through to the
+// Pi TUI / InteractiveMode fallback path.
+// ---------------------------------------------------------------------------
+
+/** Dialog options forwarded from the SDK's ExtensionUIDialogOptions. */
+export interface OmpDialogOptions {
+  onLeft?: () => void;
+  onRight?: () => void;
+  helpText?: string;
+}
+
+/**
+ * Host-implementable subset of Pi's ExtensionUIContext.
+ *
+ * GitSpace installs this via setToolUIContext() so extensions' high-level UI
+ * requests (select, confirm, input, editor, notify, status, widget, working
+ * message, editor text) are routed to the native host surface instead of the
+ * Pi TUI.
+ */
+export interface OmpHostUIContext {
+  select(title: string, options: string[], dialogOptions?: OmpDialogOptions): Promise<string | undefined>;
+  confirm(title: string, message: string, dialogOptions?: OmpDialogOptions): Promise<boolean>;
+  input(title: string, placeholder?: string, dialogOptions?: OmpDialogOptions): Promise<string | undefined>;
+  notify(message: string, type?: 'info' | 'warning' | 'error'): void;
+  setStatus(key: string, text: string | undefined): void;
+  setWorkingMessage(message?: string): void;
+  setWidget(key: string, content: string[] | undefined): void;
+  setEditorText(text: string): void;
+  pasteToEditor(text: string): void;
+  getEditorText(): string;
+  editor(title: string, prefill?: string): Promise<string | undefined>;
+  setTitle(title: string): void;
+}
+
+/**
+ * The full result of createAgentSession from the Pi SDK.
+ * GitSpace previously destructured only { session }, discarding setToolUIContext.
+ */
+export interface OmpCreateSessionResult {
+  session: OmpAgentSession;
+  /** Install a host UI context so extension UI requests route to the native surface. */
+  setToolUIContext: (uiContext: OmpHostUIContext, hasUI: boolean) => void;
+  extensionsResult?: unknown;
+  mcpManager?: unknown;
+  modelFallbackMessage?: string;
+}
+
+
 export interface OmpModule {
   SessionManager: OmpSessionManagerStatic;
   ModelRegistry: OmpModelRegistryConstructor;
@@ -51,7 +104,8 @@ export interface OmpModule {
     modelRegistry?: unknown;
     model?: unknown;
     additionalExtensionPaths?: string[];
-  }): Promise<{ session: OmpAgentSession }>;
+    hasUI?: boolean;
+  }): Promise<OmpCreateSessionResult>;
 }
 
 export interface PiAiModule {

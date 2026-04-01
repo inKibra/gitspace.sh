@@ -5,21 +5,18 @@
  * React components for rendering modals/dialogs on web.
  */
 
-import { useEffect } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { getVisibleSelectOptions, type UseFlowReturn, type FlowState } from './Flow.js';
-
-// ============================================================================
-// Props
-// ============================================================================
 
 interface FlowWebProps {
   flow: UseFlowReturn;
 }
 
-// ============================================================================
-// Main Component
-// ============================================================================
+const BTN_PRIMARY = 'gs-button-primary';
+const BTN_SECONDARY = 'gs-button-secondary';
+const BTN_DANGER = 'gs-button-danger';
+const FIELD = 'gs-field';
 
 export function FlowWeb({ flow }: FlowWebProps) {
   const { flow: state, isOpen, handleConfirm, handleCancel, moveUp, moveDown } = flow;
@@ -35,7 +32,6 @@ export function FlowWeb({ flow }: FlowWebProps) {
     void navigator.clipboard.writeText(message);
   };
 
-  // Keyboard handling
   useEffect(() => {
     if (!isOpen) return;
 
@@ -81,31 +77,16 @@ export function FlowWeb({ flow }: FlowWebProps) {
 
   if (!isOpen) return null;
 
-  const modalContent = (
-    <div
-      className="fixed inset-0 flex items-center justify-center"
-      style={{ zIndex: 9999, position: 'fixed', top: 0, left: 0, right: 0, bottom: 0 }}
-    >
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-[#0d1117]/80 backdrop-blur-sm"
-        style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
-        onClick={handleCancel}
-      />
-      {/* Modal */}
-      <div className="relative" style={{ zIndex: 10000, position: 'relative' }}>
+  return createPortal(
+    <div className="gs-overlay-root" role="dialog" aria-modal="true">
+      <div className="absolute inset-0 gs-overlay-backdrop" onClick={handleCancel} />
+      <div className="relative">
         {renderModal(state, flow, copyCurrentMessage)}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
-
-  // Use portal to render at document body level
-  return createPortal(modalContent, document.body);
 }
-
-// ============================================================================
-// Modal Renderers
-// ============================================================================
 
 function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: () => void) {
   switch (state.type) {
@@ -114,378 +95,328 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
 
     case 'message':
       return (
-        <Modal title={state.title}>
-          <p className={`mb-4 whitespace-pre-wrap max-h-80 overflow-y-auto ${getVariantClass(state.variant)}`}>
-            {state.message}
-          </p>
-          <div className="flex justify-end gap-3">
-            <button
-              onClick={copyCurrentMessage}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              Copy (C)
-            </button>
-            <button
-              onClick={flow.handleConfirm}
-              className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
-            >
-              OK
-            </button>
+        <Modal title={state.title} kicker={getVariantLabel(state.variant) ?? 'Notice'}>
+          <div className="gs-panel-block">
+            <p className={`whitespace-pre-wrap max-h-80 overflow-y-auto ${getVariantClass(state.variant)}`}>
+              {state.message}
+            </p>
+            <ActionRow>
+              <button onClick={copyCurrentMessage} className={BTN_SECONDARY}>Copy</button>
+              <button onClick={() => { void flow.handleConfirm(); }} className={BTN_PRIMARY}>OK</button>
+            </ActionRow>
           </div>
         </Modal>
       );
 
     case 'loading':
       return (
-        <Modal title={state.title}>
-          <div className="flex items-center gap-3">
-            <div className="animate-spin w-5 h-5 border-2 border-[#22c55e] border-t-transparent rounded-full shadow-glow" />
-            <span className="text-[#8b949e]">{state.message}</span>
+        <Modal title={state.title} kicker="Working">
+          <div className="gs-panel-block">
+            <div className="gs-loading-indicator">{state.message}</div>
+            <p className="gs-auth-note">Please keep this window open until the operation finishes.</p>
           </div>
         </Modal>
       );
 
     case 'help':
       return (
-        <Modal title="Keyboard Shortcuts" width="lg">
-          <div className="space-y-3">
-            {state.shortcuts.map((shortcut, idx) => (
-              <div key={idx} className="flex py-1">
-                <span className="w-20 sm:w-24 text-[#58a6ff] font-mono text-sm">{shortcut.key}</span>
-                <span className="text-[#8b949e] text-sm">{shortcut.description}</span>
-              </div>
-            ))}
-          </div>
-          <div className="mt-6 text-right">
-            <button
-              onClick={flow.handleCancel}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              Close
-            </button>
+        <Modal title="Keyboard Shortcuts" kicker="Reference" width="lg">
+          <div className="gs-panel-block">
+            <div className="gs-select-list">
+              {state.shortcuts.map((shortcut, idx) => (
+                <div key={idx} className="flex items-start justify-between gap-4 bg-[var(--gs-bg-surface)] px-4 py-3 text-sm">
+                  <span className="gs-info-text">{shortcut.key}</span>
+                  <span className="text-[var(--gs-text-muted)] text-right">{shortcut.description}</span>
+                </div>
+              ))}
+            </div>
+            <ActionRow>
+              <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Close</button>
+            </ActionRow>
           </div>
         </Modal>
       );
 
     case 'confirm':
       return (
-        <Modal title={state.title}>
-          <p className={`mb-4 whitespace-pre-wrap max-h-80 overflow-y-auto ${getVariantClass(state.variant)}`}>
-            {state.message}
-          </p>
-          <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
-            <button
-              onClick={copyCurrentMessage}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              Copy (C)
-            </button>
-            <button
-              onClick={flow.handleCancel}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              {state.cancelLabel || 'Cancel'}
-            </button>
-            <button
-              onClick={flow.handleConfirm}
-              className={`px-5 py-3 rounded-lg text-white min-h-[48px] font-medium ${
-                state.variant === 'danger'
-                  ? 'bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] border border-[#f85149]'
-                  : 'bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] shadow-glow'
-              }`}
-            >
-              {state.confirmLabel || 'Confirm'}
-            </button>
+        <Modal title={state.title} kicker={getVariantLabel(state.variant) ?? 'Confirm'}>
+          <div className="gs-panel-block">
+            <p className={`whitespace-pre-wrap max-h-80 overflow-y-auto ${getVariantClass(state.variant)}`}>
+              {state.message}
+            </p>
+            <ActionRow>
+              <button onClick={copyCurrentMessage} className={BTN_SECONDARY}>Copy</button>
+              <button onClick={flow.handleCancel} className={BTN_SECONDARY}>{state.cancelLabel || 'Cancel'}</button>
+              <button onClick={() => { void flow.handleConfirm(); }} className={state.variant === 'danger' ? BTN_DANGER : BTN_PRIMARY}>
+                {state.confirmLabel || 'Confirm'}
+              </button>
+            </ActionRow>
           </div>
         </Modal>
       );
 
     case 'confirm-typed':
       return (
-        <Modal title={state.title}>
-          <p className="mb-2 text-[#d29922]">{state.message}</p>
-          {state.warning && (
-            <p className="mb-4 text-[#f85149]">⚠️ {state.warning}</p>
-          )}
-          <p className="mb-2 text-[#8b949e]">
-            Type "<span className="text-[#e6edf3] font-mono">{state.confirmText}</span>" to confirm:
-          </p>
-          <input
-            type="text"
-            value={state.inputValue}
-            onChange={(e) => flow.handleInput(e.target.value)}
-            className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
-            autoFocus
-          />
-          <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
-            <button
-              onClick={flow.handleCancel}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={flow.handleConfirm}
-              disabled={state.inputValue !== state.confirmText}
-              className="px-5 py-3 bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] disabled:bg-[#21262d] disabled:border-[#30363d] disabled:text-[#6e7681] disabled:cursor-not-allowed text-white border border-[#f85149] rounded-lg min-h-[48px]"
-            >
-              Confirm
-            </button>
+        <Modal title={state.title} kicker="Destructive action">
+          <div className="gs-panel-block">
+            <p className="gs-warning-text whitespace-pre-wrap">{state.message}</p>
+            {state.warning && <p className="gs-danger-text">{state.warning}</p>}
+            <div className="gs-empty-panel">
+              Type <span className="gs-inline-code">{state.confirmText}</span> to confirm.
+            </div>
+            <input
+              type="text"
+              value={state.inputValue}
+              onChange={(e) => flow.handleInput(e.target.value)}
+              className={FIELD}
+              autoFocus
+            />
+            <ActionRow>
+              <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
+              <button
+                onClick={() => { void flow.handleConfirm(); }}
+                disabled={state.inputValue !== state.confirmText}
+                className={BTN_DANGER}
+              >
+                Confirm
+              </button>
+            </ActionRow>
           </div>
         </Modal>
       );
 
-    case 'input':
+    case 'input': {
       const validationError = state.validation?.(state.inputValue);
       return (
-        <Modal title={state.title}>
-          <label className="block mb-2 text-[#8b949e]">{state.label}</label>
-          <input
-            type="text"
-            value={state.inputValue}
-            onChange={(e) => flow.handleInput(e.target.value)}
-            placeholder={state.placeholder}
-            className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
-            autoFocus
-          />
-          {validationError && (
-            <p className="mt-2 text-[#f85149] text-sm">{validationError}</p>
-          )}
-          <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 mt-6">
-            <button
-              onClick={flow.handleCancel}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={flow.handleConfirm}
-              disabled={!!validationError && state.inputValue !== ''}
-              className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] disabled:bg-[#21262d] disabled:border-[#30363d] disabled:text-[#6e7681] disabled:cursor-not-allowed disabled:shadow-none text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
-            >
-              Submit
-            </button>
-          </div>
-        </Modal>
-      );
-
-    case 'select': {
-      const visibleOptions = getVisibleSelectOptions(state);
-      return (
-        <Modal title={state.title} width="lg">
-          {state.searchable && (
-            <div className="mb-4">
-              <input
-                type="text"
-                value={state.searchQuery ?? ''}
-                onChange={(e) => flow.updateSelectQuery(e.target.value)}
-                placeholder="Filter options..."
-                className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
-                autoFocus
-              />
-            </div>
-          )}
-          <div className="space-y-2 max-h-64 sm:max-h-80 overflow-y-auto -mx-2 px-2">
-            {visibleOptions.length === 0 && (
-              <div className="p-4 rounded-lg border border-[#30363d] bg-[#0d1117] text-sm text-[#8b949e]">
-                No matches for "{state.searchQuery ?? ''}".
-              </div>
-            )}
-            {visibleOptions.map(({ option, index }) => {
-              const isSelected = index === state.selectedIndex;
-              return (
-                <div
-                  key={index}
-                  onClick={() => {
-                    flow.handleSelect(index);
-                    flow.handleConfirm();
-                  }}
-                  className={`p-4 rounded-lg cursor-pointer min-h-[52px] border ${
-                    isSelected
-                      ? 'bg-[#21262d] border-[#58a6ff] border-l-4'
-                      : 'border-[#30363d] hover:bg-[#161b22] active:bg-[#21262d]'
-                  }`}
-                >
-                  <div className="text-[#e6edf3]">{option.label}</div>
-                  {option.description && (
-                    <div className="text-sm text-[#8b949e] mt-1">{option.description}</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <div className="flex justify-end gap-3 mt-6">
-            <button
-              onClick={flow.handleCancel}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              Cancel
-            </button>
+        <Modal title={state.title} kicker="Input">
+          <div className="gs-panel-block">
+            <label className="gs-panel-label">{state.label}</label>
+            <input
+              type="text"
+              value={state.inputValue}
+              onChange={(e) => flow.handleInput(e.target.value)}
+              placeholder={state.placeholder}
+              className={FIELD}
+              autoFocus
+            />
+            {validationError && <p className="gs-danger-text text-sm">{validationError}</p>}
+            <ActionRow>
+              <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
+              <button
+                onClick={() => { void flow.handleConfirm(); }}
+                disabled={!!validationError && state.inputValue !== ''}
+                className={BTN_PRIMARY}
+              >
+                Submit
+              </button>
+            </ActionRow>
           </div>
         </Modal>
       );
     }
 
-    case 'wizard':
+    case 'select': {
+      const visibleOptions = getVisibleSelectOptions(state);
+      return (
+        <Modal title={state.title} kicker="Select" width="lg">
+          <div className="gs-panel-block">
+            {state.searchable && (
+              <input
+                type="text"
+                value={state.searchQuery ?? ''}
+                onChange={(e) => flow.updateSelectQuery(e.target.value)}
+                placeholder="Filter options..."
+                className={FIELD}
+                autoFocus
+              />
+            )}
+            {visibleOptions.length === 0 ? (
+              <div className="gs-empty-panel">No matches for "{state.searchQuery ?? ''}".</div>
+            ) : (
+              <div className="gs-select-list max-h-64 sm:max-h-80 overflow-y-auto">
+                {visibleOptions.map(({ option, index }) => {
+                  const isSelected = index === state.selectedIndex;
+                  return (
+                    <button
+                      key={index}
+                      type="button"
+                      onClick={() => {
+                        void flow.handleConfirm(index);
+                      }}
+                      className={`gs-select-item ${isSelected ? 'gs-select-item--active' : ''}`}
+                    >
+                      <div>{option.label}</div>
+                      {option.description && (
+                        <div className="mt-1 text-sm text-[var(--gs-text-dim)]">{option.description}</div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <ActionRow>
+              <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
+            </ActionRow>
+          </div>
+        </Modal>
+      );
+    }
+
+    case 'wizard': {
       const step = state.steps[state.currentStep];
       if (!step) return null;
 
       return (
-        <Modal title={state.title} width="xl">
-          {/* Progress indicator */}
-          <div className="flex gap-1 mb-4">
-            {state.steps.map((_, idx) => (
-              <div
-                key={idx}
-                className={`h-1.5 flex-1 rounded ${
-                  idx < state.currentStep
-                    ? 'bg-[#22c55e]'
-                    : idx === state.currentStep
-                    ? 'bg-[#58a6ff]'
-                    : 'bg-[#30363d]'
-                }`}
-              />
-            ))}
-          </div>
+        <Modal title={state.title} kicker={`Step ${state.currentStep + 1} / ${state.steps.length}`} width="xl">
+          <div className="gs-panel-block">
+            <div className="gs-shell-meta-row">
+              {state.steps.map((wizardStep, idx) => (
+                <span
+                  key={wizardStep.id}
+                  className={idx === state.currentStep ? 'text-[var(--gs-text)]' : idx < state.currentStep ? 'gs-success-text' : 'text-[var(--gs-text-dim)]'}
+                >
+                  {wizardStep.title}
+                </span>
+              ))}
+            </div>
 
-          {/* Step content */}
-          <div className="mb-6">
-            <h3 className="text-lg font-medium text-[#22c55e] mb-2">{step.title}</h3>
-            {step.description && (
-              <p className="text-[#8b949e] mb-4">{step.description}</p>
-            )}
+            <div className="gs-panel-block">
+              <h3 className="text-[var(--gs-text)]">{step.title}</h3>
+              {step.description && <p className="text-[var(--gs-text-muted)]">{step.description}</p>}
 
-            {step.type === 'info' && (
-              <p className="text-[#e6edf3]">Tap Continue to proceed.</p>
-            )}
+              {step.type === 'info' && <p className="text-[var(--gs-text-muted)]">Continue when you're ready.</p>}
 
-            {(step.type === 'input' || step.type === 'secret') && (
-              <input
-                type={step.type === 'secret' ? 'password' : 'text'}
-                value={state.inputValue}
-                onChange={(e) => flow.handleInput(e.target.value)}
-                placeholder={step.placeholder}
-                className="w-full p-3 text-base bg-[#0d1117] border border-[#30363d] rounded-lg text-[#e6edf3] focus:border-[#22c55e] focus:outline-none focus:shadow-glow transition-all"
-                autoFocus
-              />
-            )}
+              {(step.type === 'input' || step.type === 'secret') && (
+                <input
+                  type={step.type === 'secret' ? 'password' : 'text'}
+                  value={state.inputValue}
+                  onChange={(e) => flow.handleInput(e.target.value)}
+                  placeholder={step.placeholder}
+                  className={FIELD}
+                  autoFocus
+                />
+              )}
 
-            {step.type === 'confirm' && (
-              <div className="p-4 bg-[#161b22] border border-[#30363d] rounded-lg">
-                {step.checkStatus === 'checking' && (
-                  <div className="flex items-center gap-2 text-[#d29922]">
-                    <div className="animate-spin w-4 h-4 border-2 border-[#d29922] border-t-transparent rounded-full" />
-                    Checking...
-                  </div>
-                )}
-                {step.checkStatus === 'found' && (
-                  <div className="text-[#3fb950]">✅ Found and ready</div>
-                )}
-                {step.checkStatus === 'missing' && (
-                  <div>
-                    <div className="text-[#f85149] mb-2">❌ Not found</div>
-                    {step.installUrl && (
-                      <a
-                        href={step.installUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-[#58a6ff] hover:underline active:text-[#79c0ff]"
+              {step.type === 'confirm' && (
+                <div className="gs-empty-panel">
+                  {step.checkStatus === 'checking' && (
+                    <div className="gs-loading-indicator">Checking requirement…</div>
+                  )}
+                  {step.checkStatus === 'found' && <div className="gs-success-text">Found and ready.</div>}
+                  {step.checkStatus === 'missing' && (
+                    <div className="gs-panel-block">
+                      <div className="gs-danger-text">Requirement not found.</div>
+                      {step.installUrl && (
+                        <a
+                          href={step.installUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="gs-info-text hover:underline"
+                        >
+                          Open install instructions
+                        </a>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {step.type === 'select' && step.options && (
+                <div className="gs-select-list">
+                  {step.options.map((option, idx) => {
+                    const isSelected = state.inputValue === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => flow.handleSelect(idx)}
+                        aria-pressed={isSelected}
+                        className={`gs-select-item text-left ${isSelected ? 'gs-select-item--active' : ''}`}
                       >
-                        Install from {step.installUrl}
-                      </a>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
-            {step.type === 'select' && step.options && (
-              <div className="space-y-2">
-                {step.options.map((option, idx) => (
-                  <div
-                    key={idx}
-                    className="p-4 bg-[#161b22] border border-[#30363d] rounded-lg hover:bg-[#21262d] active:bg-[#161b22] cursor-pointer min-h-[48px]"
-                  >
-                    {option.label}
-                  </div>
-                ))}
+            <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+              <button
+                onClick={flow.prevStep}
+                disabled={state.currentStep === 0}
+                className={BTN_SECONDARY}
+              >
+                ← Back
+              </button>
+              <div className="flex flex-col-reverse gap-3 sm:flex-row">
+                <button onClick={flow.handleCancel} className={BTN_SECONDARY}>Cancel</button>
+                <button onClick={() => { void flow.handleConfirm(); }} className={BTN_PRIMARY}>
+                  {state.currentStep === state.steps.length - 1 ? 'Finish' : 'Continue →'}
+                </button>
               </div>
-            )}
-          </div>
-
-          {/* Navigation */}
-          <div className="flex flex-col-reverse sm:flex-row justify-between gap-3">
-            <button
-              onClick={flow.prevStep}
-              disabled={state.currentStep === 0}
-              className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] disabled:bg-[#161b22] disabled:text-[#6e7681] disabled:border-transparent text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-            >
-              ← Back
-            </button>
-            <div className="flex flex-col-reverse sm:flex-row gap-3">
-              <button
-                onClick={flow.handleCancel}
-                className="px-5 py-3 bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] text-[#e6edf3] border border-[#30363d] rounded-lg min-h-[48px]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={flow.handleConfirm}
-                className="px-5 py-3 bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium rounded-lg min-h-[48px] shadow-glow"
-              >
-                {state.currentStep === state.steps.length - 1 ? 'Finish' : 'Continue →'}
-              </button>
             </div>
           </div>
         </Modal>
       );
+    }
 
     default:
       return null;
   }
 }
 
-// ============================================================================
-// Helper Components
-// ============================================================================
-
 interface ModalProps {
   title: string;
-  children: React.ReactNode;
+  children: ReactNode;
   width?: 'sm' | 'md' | 'lg' | 'xl';
+  kicker?: string;
 }
 
-function Modal({ title, children, width = 'md' }: ModalProps) {
-  const widthClass = {
-    sm: 'sm:max-w-sm',
-    md: 'sm:max-w-md',
-    lg: 'sm:max-w-lg',
-    xl: 'sm:max-w-xl',
-  }[width];
+function Modal({ title, children, width = 'md', kicker }: ModalProps) {
+  const widthClass = width === 'sm'
+    ? 'gs-shell-card--compact'
+    : width === 'md'
+      ? 'gs-shell-card--compact'
+      : width === 'lg'
+        ? ''
+        : 'gs-shell-card--wide';
 
   return (
-    <div className={`bg-[#161b22] shadow-xl w-full mx-0 sm:mx-4 p-5 sm:p-6 border-0 sm:border border-[#30363d]
-      fixed sm:relative inset-0 sm:inset-auto sm:rounded-lg
-      flex flex-col sm:block max-h-screen sm:max-h-[90vh] overflow-y-auto
-      ${widthClass}`}
-    >
-      <h2 className="text-xl font-semibold text-[#22c55e] mb-4 flex-shrink-0">{title}</h2>
-      <div className="flex-1 min-h-0 text-[#e6edf3]">{children}</div>
+    <div className={`gs-shell-card ${widthClass}`}>
+      <div className="gs-shell-header">
+        <div className="gs-shell-title-stack">
+          <div className="gs-shell-kicker">{kicker ?? 'Panel'}</div>
+          <h2 className="gs-shell-title">{title}</h2>
+        </div>
+      </div>
+      <div className="gs-shell-body">{children}</div>
     </div>
   );
 }
 
-// ============================================================================
-// Utilities
-// ============================================================================
+function ActionRow({ children }: { children: ReactNode }) {
+  return <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">{children}</div>;
+}
 
 function getVariantClass(variant?: 'info' | 'success' | 'warning' | 'error' | 'danger'): string {
   switch (variant) {
-    case 'success': return 'text-[#3fb950]';
-    case 'warning': return 'text-[#d29922]';
+    case 'success': return 'gs-success-text';
+    case 'warning': return 'gs-warning-text';
     case 'error':
-    case 'danger': return 'text-[#f85149]';
-    case 'info':
-    default: return 'text-[#8b949e]';
+    case 'danger': return 'gs-danger-text';
+    case 'info': return 'gs-info-text';
+    default: return 'text-[var(--gs-text-muted)]';
+  }
+}
+
+function getVariantLabel(variant?: 'info' | 'success' | 'warning' | 'error' | 'danger'): string | null {
+  switch (variant) {
+    case 'success': return 'Success';
+    case 'warning': return 'Warning';
+    case 'error':
+    case 'danger': return 'Danger';
+    case 'info': return 'Info';
+    default: return null;
   }
 }

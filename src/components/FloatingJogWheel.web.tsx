@@ -165,7 +165,7 @@ export function FloatingJogWheel({ onDirection }: FloatingJogWheelProps): React.
     >
       {/* Outer ring */}
       <div
-        className="absolute rounded-full border-2 border-[#30363d] bg-[#161b22]/90"
+        className="absolute rounded-full border-2 border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]/90"
         style={{
           width: JOYSTICK_RADIUS * 2,
           height: JOYSTICK_RADIUS * 2,
@@ -182,7 +182,7 @@ export function FloatingJogWheel({ onDirection }: FloatingJogWheelProps): React.
 
       {/* Center knob */}
       <div
-        className="absolute rounded-full bg-[#22c55e] shadow-glow transition-transform duration-75"
+        className="absolute rounded-full bg-[var(--gs-accent)] shadow-glow transition-transform duration-75"
         style={{
           width: 32,
           height: 32,
@@ -191,7 +191,7 @@ export function FloatingJogWheel({ onDirection }: FloatingJogWheelProps): React.
       />
 
       {/* Label */}
-      <div className="absolute text-[10px] text-[#6e7681] whitespace-nowrap" style={{ bottom: -16 }}>
+      <div className="absolute text-[10px] text-[var(--gs-text-dim)] whitespace-nowrap" style={{ bottom: -16 }}>
         Arrows
       </div>
     </div>
@@ -223,7 +223,7 @@ function DirectionIndicator({ direction, active }: DirectionIndicatorProps): Rea
   return (
     <div
       className={`absolute text-lg font-bold transition-colors duration-75 ${
-        active ? 'text-[#22c55e]' : 'text-[#30363d]'
+        active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-border)]'
       }`}
       style={{
         ...positions[direction],

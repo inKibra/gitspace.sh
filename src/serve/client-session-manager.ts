@@ -13,11 +13,14 @@ import { HandshakeHandler, type HandshakeMessage, type EstablishedSession } from
 import { createFrame, openFrame, MASTER_STREAM_ID } from "../lib/tmux-lite/crypto/frames.js";
 import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType, type SessionEvent } from "../lib/tmux-lite/protocol.js";
 import { RemoteSessionHandler, type RemoteClientSession } from "../lib/remote-session/index.js";
-import { STREAM_ID, canWrite, type ServeOptions, type ClientSession, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
+import { STREAM_ID, canWrite, canManage, type ServeOptions, type ClientSession, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
 import { createBufferedSocketWriter } from "../utils/bun-socket-writer.js";
 import { serializeRemoteMessage } from "../lib/remote-session/protocol.js";
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from "../lib/tmux-lite/agent-event-manager.js";
+import { send as sendTmuxLiteCommand, ensureServer as ensureTmuxLiteServer } from "../lib/tmux-lite/cli.js";
+import type { Command as TmuxCommand, Response as TmuxResponse } from "../lib/tmux-lite/protocol.js";
 import type { SessionKeys } from "../types/identity.js";
+import { logger } from "../utils/logger.js";
 
 // ============================================================================
 // ClientSessionManager Class
@@ -262,9 +265,19 @@ export class ClientSessionManager {
       // Debug: console.log(`[session-manager] Attached message: streamId=${result.streamId}, dataLen=${result.data.length}`);
 
       if (result.streamId === STREAM_ID.CONTROL) {
-        // Control message (resize, detach) - parse and encode for tmux-lite protocol
+        // Control message - parse and route appropriately
         const msg = JSON.parse(new TextDecoder().decode(result.data));
-        console.log(`[session-manager] Control message: ${msg.type}`);
+
+        if (msg.type === 'tmux_command') {
+          // tmux_command sent while attached — route through session handler
+          // (e.g. agent-prompt, agent-abort). Must respond on the encrypted channel.
+          const responseMsg = await this.handleAttachedTmuxCommand(session, msg.requestId, msg.command);
+          if (responseMsg) {
+            const respData = new TextEncoder().encode(JSON.stringify(responseMsg));
+            return createFrame(STREAM_ID.CONTROL, respData, session.sessionKeys.sendKey);
+          }
+          return null;
+        }
 
         if (msg.type === "detach") {
           // Handle detach specially - close tmux socket and send response to client
@@ -295,7 +308,6 @@ export class ClientSessionManager {
         }
 
         // Forward control messages directly to tmux-lite after attach-init.
-
         this.writeToTmuxSocket(session, encodeControl(msg));
       } else {
         // Raw PTY input (STREAM_ID.DATA) - send directly to socket
@@ -319,6 +331,28 @@ export class ClientSessionManager {
     } catch (e) {
       console.error("[session-manager] Error handling attached message:", e);
       return null;
+    }
+  }
+
+  /**
+   * Route a tmux_command while in attached state (e.g. agent-prompt, agent-abort).
+   * Returns the MachineToClientMessage to send back, or null on error.
+   */
+  private async handleAttachedTmuxCommand(
+    session: ClientSession,
+    requestId: string,
+    command: TmuxCommand,
+  ): Promise<{ type: 'tmux_command_response'; requestId: string; response: TmuxResponse } | null> {
+    if (session.viewOnly || !canManage(session.accessType)) {
+      return { type: 'tmux_command_response', requestId, response: { type: 'error', message: 'Permission denied' } };
+    }
+    try {
+      await ensureTmuxLiteServer();
+      const response = await sendTmuxLiteCommand(command);
+      return { type: 'tmux_command_response', requestId, response };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { type: 'tmux_command_response', requestId, response: { type: 'error', message } };
     }
   }
 
@@ -360,8 +394,8 @@ export class ClientSessionManager {
     await this.remoteSessionHandler.handleMessage(remoteSession, data, sendResponse);
 
     // Check if we're now attached (after attach_session command)
+    // Keep machine snapshot pushes active so sidebar state stays live.
     if (remoteSession.state === "attached" && remoteSession.attachedSessionId) {
-      this.remoteSessionHandler.onClientLeavesBrowsing(connectionId);
       session.state = "attached";
       session.attachedSessionId = remoteSession.attachedSessionId;
       session.attachedSessionName = remoteSession.attachedSessionName;
@@ -491,6 +525,7 @@ export class ClientSessionManager {
           },
           data: (sock, data) => {
             if (!session.sessionKeys) return;
+            if (session.tmuxSocket !== sock) return;
 
             // Accumulate in frame buffer (for handling partial frames)
             const prev = session.frameBuffer || Buffer.alloc(0);
@@ -568,18 +603,22 @@ export class ClientSessionManager {
 
           close: () => {
             // Check if this was a voluntary detach (tmuxSocket already cleared)
-            // vs an unexpected close
-            if (session.tmuxSocket) {
+            // vs an unexpected close on the currently attached socket.
+            if (session.tmuxSocket === socket) {
               console.log("[session-manager] tmux-lite socket closed unexpectedly");
               this.handleDisconnect(connectionId, "Session closed");
             } else {
-              console.log("[session-manager] tmux-lite socket closed (detached)");
+              console.log("[session-manager] tmux-lite socket closed (stale/detached)");
             }
           },
 
-          error: (_, e) => {
-            console.error("[session-manager] tmux-lite socket error:", e);
-            this.handleDisconnect(connectionId, e.message);
+          error: (sock, e) => {
+            // Detached or replaced sockets can still surface late write/close
+            // errors. Only log and tear down the session if this exact socket is active.
+            if (session.tmuxSocket === sock) {
+              logger.error(`[session-manager] tmux-lite socket error for ${connectionId}: ${e.message}`);
+              this.handleDisconnect(connectionId, e.message);
+            }
           },
         }
       });
@@ -692,7 +731,35 @@ export class ClientSessionManager {
     const promises: Promise<void>[] = [];
 
     for (const [connectionId, session] of this.sessions) {
-      if (session.state !== 'browsing' || !session.sessionKeys) continue;
+      if (!session.sessionKeys) continue;
+      if (session.state !== 'browsing' && session.state !== 'attached') continue;
+      promises.push(
+        (async () => {
+          try {
+            const frame = await createFrame(0, data, session.sessionKeys!.sendKey);
+            const sendToClient = this.createSendCallback(connectionId);
+            sendToClient(Buffer.from(frame));
+          } catch {
+            // Non-fatal — skip this client
+          }
+        })(),
+      );
+    }
+
+    await Promise.allSettled(promises);
+  }
+
+  /**
+   * Broadcast a raw remote-session message to all authenticated browsing clients.
+   * Used for host UI dialog requests and events.
+   */
+  async broadcastRawMessage(message: Record<string, unknown>): Promise<void> {
+    const msg = serializeRemoteMessage(message as any);
+    const data = new TextEncoder().encode(msg);
+    const promises: Promise<void>[] = [];
+
+    for (const [connectionId, session] of this.sessions) {
+      if ((session.state !== 'browsing' && session.state !== 'attached') || !session.sessionKeys) continue;
       promises.push(
         (async () => {
           try {

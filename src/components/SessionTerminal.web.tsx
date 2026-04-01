@@ -194,32 +194,38 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         }
 
         const container = containerRef.current;
+
+        // Resolve CSS custom properties — xterm needs actual color values,
+        // not var() references.
+        const cs = getComputedStyle(document.documentElement);
+        const v = (name: string) => cs.getPropertyValue(name).trim();
+
         const term = new GhosttyTerminal({
           fontSize: 14,
           fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
           theme: {
-            background: "#0d1117",
-            foreground: "#e6edf3",
-            cursor: "#22c55e",
-            cursorAccent: "#0d1117",
-            selectionBackground: "#22c55e33",
-            selectionForeground: "#e6edf3",
-            black: "#484f58",
-            red: "#ff7b72",
-            green: "#3fb950",
-            yellow: "#d29922",
-            blue: "#58a6ff",
-            magenta: "#bc8cff",
-            cyan: "#39c5cf",
-            white: "#b1bac4",
-            brightBlack: "#6e7681",
-            brightRed: "#ffa198",
-            brightGreen: "#56d364",
-            brightYellow: "#e3b341",
-            brightBlue: "#79c0ff",
-            brightMagenta: "#d2a8ff",
-            brightCyan: "#56d4dd",
-            brightWhite: "#f0f6fc",
+            background: v('--gs-terminal-bg'),
+            foreground: v('--gs-terminal-fg'),
+            cursor: v('--gs-terminal-cursor'),
+            cursorAccent: v('--gs-terminal-cursor-accent'),
+            selectionBackground: v('--gs-terminal-selection'),
+            selectionForeground: v('--gs-terminal-fg'),
+            black: '#484f58',
+            red: '#ff7b72',
+            green: '#3fb950',
+            yellow: '#d29922',
+            blue: '#58a6ff',
+            magenta: '#bc8cff',
+            cyan: '#39c5cf',
+            white: '#b1bac4',
+            brightBlack: '#6e7681',
+            brightRed: '#ffa198',
+            brightGreen: '#56d364',
+            brightYellow: '#e3b341',
+            brightBlue: '#79c0ff',
+            brightMagenta: '#d2a8ff',
+            brightCyan: '#56d4dd',
+            brightWhite: '#f0f6fc',
           },
         });
 
@@ -227,6 +233,35 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         terminalRef.current = term;
 
         const fitAddon = new FitAddon();
+
+        // The FitAddon reserves 15px for a native scrollbar that ghostty
+        // does not use (it renders its own overlay scrollbar on the canvas).
+        // Override proposeDimensions to reclaim that space.
+        const originalPropose = fitAddon.proposeDimensions.bind(fitAddon);
+        fitAddon.proposeDimensions = () => {
+          const dims = originalPropose();
+          if (!dims) return dims;
+          // The original subtracted a 15px scrollbar constant from width.
+          // Ghostty's canvas-based scrollbar doesn't need it, so we add
+          // one extra column back when the cell width allows it.
+          const renderer = (term as any).renderer;
+          if (renderer && typeof renderer.getMetrics === 'function') {
+            const metrics = renderer.getMetrics();
+            if (metrics && metrics.width > 0) {
+              const element = (term as any).element;
+              if (element) {
+                const style = window.getComputedStyle(element);
+                const padL = parseInt(style.paddingLeft) || 0;
+                const padR = parseInt(style.paddingRight) || 0;
+                const available = element.clientWidth - padL - padR;
+                const cols = Math.max(2, Math.floor(available / metrics.width));
+                return { cols, rows: dims.rows };
+              }
+            }
+          }
+          return dims;
+        };
+
         term.loadAddon(fitAddon);
 
         term.onData((data: string) => {
@@ -485,7 +520,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   return (
     <div
       ref={containerRef}
-      className="w-full h-full bg-[#0d1117]"
+      className="w-full h-full bg-[var(--gs-bg)]"
     />
   );
 });

@@ -72,8 +72,8 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
   }, [items]);
 
   const shellClassName = embedded
-    ? 'h-full flex flex-col bg-[#0d1117]'
-    : 'h-screen flex flex-col bg-[#0d1117]';
+    ? 'h-full flex flex-col bg-[var(--gs-bg)]'
+    : 'h-screen flex flex-col bg-[var(--gs-bg)]';
   const resolvedEmptyTitle = emptyTitle ?? 'No workspaces found';
   const resolvedEmptyDescription = emptyDescription ?? 'Create a workspace from the app instead of dropping to the CLI.';
   const resolvedEmptyActionLabel = emptyActionLabel ?? 'New Workspace or Project';
@@ -92,15 +92,15 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
           inboxUnreadCount={inboxUnreadCount}
           onDisconnect={onDisconnect}
         />
-        <div className="flex-1 flex flex-col items-center justify-center text-[#8b949e] px-4">
+        <div className="flex-1 flex flex-col items-center justify-center text-[var(--gs-text-muted)] px-4">
           <div className="text-lg mb-2 text-center">{resolvedEmptyTitle}</div>
-          <div className="text-sm text-[#6e7681] text-center max-w-md">
+          <div className="text-sm text-[var(--gs-text-dim)] text-center max-w-md">
             {resolvedEmptyDescription}
           </div>
           {handleEmptyAction && (
             <button
               onClick={handleEmptyAction}
-              className="mt-5 px-4 py-3 rounded-lg bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] text-[#0d1117] font-medium min-h-[48px] shadow-glow"
+              className="mt-5 px-4 py-3 rounded-lg bg-[var(--gs-accent)] hover:bg-[var(--gs-accent-hover)] active:bg-[var(--gs-accent-hover)] text-[var(--gs-text-on-accent)] font-medium min-h-[48px] shadow-glow"
             >
               {resolvedEmptyActionLabel}
             </button>
@@ -148,10 +148,10 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 role="button"
                 tabIndex={0}
                 className={
-                  `px-4 py-3 text-xs uppercase tracking-wide border-b border-[#30363d] min-h-[52px] flex items-center justify-between gap-3 cursor-pointer ${
+                  `px-4 py-3 text-xs uppercase tracking-wide border-b border-[var(--gs-border)] min-h-[52px] flex items-center justify-between gap-3 cursor-pointer ${
                     isSelected
-                      ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff] text-[#e6edf3]'
-                      : 'bg-[#161b22] text-[#6e7681] hover:bg-[#1b2129] active:bg-[#21262d]'
+                      ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)] text-[var(--gs-text)]'
+                      : 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-hover)] active:bg-[var(--gs-bg-active)]'
                   }`
                 }
               >
@@ -198,27 +198,27 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 role="button"
                 tabIndex={0}
                 className={`
-                  px-4 py-4 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[56px] gap-3
-                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                  px-4 py-4 cursor-pointer border-b border-[var(--gs-border)] flex items-center justify-between min-h-[56px] gap-3
+                  ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
                   ${ws.isStale ? 'opacity-60' : ''}
                 `}
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <span className="text-[#6e7681] w-5 flex-shrink-0 text-center">
+                  <span className="text-[var(--gs-text-dim)] w-5 flex-shrink-0 text-center">
                     {item.expanded ? '▼' : '▶'}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="text-[#e6edf3] font-medium truncate">{ws.name}</div>
+                    <div className="text-[var(--gs-text)] font-medium truncate">{ws.name}</div>
                     {ws.branch && (
-                      <div className="text-xs text-[#8b949e] truncate">
-                        <span className="text-[#d2a8ff]">{ws.branch}</span>
+                      <div className="text-xs text-[var(--gs-text-muted)] truncate">
+                        <span className="text-[var(--gs-purple)]">{ws.branch}</span>
                       </div>
                     )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0 ml-2 flex-wrap justify-end">
                   {ws.sessionCount > 0 && (
-                    <span className="text-xs px-2 py-1 rounded bg-[#238636] text-[#e6edf3]">
+                    <span className="text-xs px-2 py-1 rounded bg-[var(--gs-success-muted)] text-[var(--gs-text)]">
                       {ws.sessionCount}
                     </span>
                   )}
@@ -263,21 +263,21 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 role="button"
                 tabIndex={0}
                 className={`
-                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px] gap-3
-                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] flex items-center justify-between min-h-[52px] gap-3
+                  ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
                 `}
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${session.attached ? 'bg-[#d29922]' : 'bg-[#3fb950]'}`} />
+                  <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${session.attached ? 'bg-[var(--gs-warning)]' : 'bg-[var(--gs-success)]'}`} />
                   <div className="min-w-0 flex-1">
-                    <span className="text-[#8b949e] truncate block">{session.name.split(':').pop()}</span>
+                    <span className="text-[var(--gs-text-muted)] truncate block">{session.name.split(':').pop()}</span>
                     {(item.subtitle ?? session.processTitle ?? session.terminalTitle) && (
-                      <span className="text-xs text-[#d29922] truncate block">{item.subtitle ?? session.processTitle ?? session.terminalTitle}</span>
+                      <span className="text-xs text-[var(--gs-warning)] truncate block">{item.subtitle ?? session.processTitle ?? session.terminalTitle}</span>
                     )}
                   </div>
                 </div>
                 <div className="flex items-center gap-3 flex-shrink-0 ml-2">
-                  <div className="text-xs text-[#6e7681] hidden sm:block">
+                  <div className="text-xs text-[var(--gs-text-dim)] hidden sm:block">
                     {item.alertLabel ?? (session.attached ? 'attached' : formatTime(session.createdAt))}
                   </div>
                   {onDeleteSession && (
@@ -303,11 +303,11 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 onKeyDown={(e) => { if (!isActivateKey(e.key)) return; e.preventDefault(); e.stopPropagation(); void activateIndex(index); }}
                 role="button"
                 tabIndex={0}
-                className={`pl-8 sm:pl-10 pr-4 py-2 cursor-pointer border-b border-[#30363d] flex items-center gap-2 min-h-[36px] ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22]'}`}
+                className={`pl-8 sm:pl-10 pr-4 py-2 cursor-pointer border-b border-[var(--gs-border)] flex items-center gap-2 min-h-[36px] ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)]'}`}
               >
-                <span className="text-[#6e7681] text-xs">{arrow}</span>
-                <span className="text-[#8b949e] text-xs font-medium">History</span>
-                <span className="text-[#6e7681] text-xs">({item.count})</span>
+                <span className="text-[var(--gs-text-dim)] text-xs">{arrow}</span>
+                <span className="text-[var(--gs-text-muted)] text-xs font-medium">History</span>
+                <span className="text-[var(--gs-text-dim)] text-xs">({item.count})</span>
               </div>
             );
           }
@@ -322,18 +322,18 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 onKeyDown={(e) => { if (!isActivateKey(e.key)) return; e.preventDefault(); e.stopPropagation(); void activateIndex(index); }}
                 role="button"
                 tabIndex={0}
-                className={`pl-8 sm:pl-10 pr-4 py-2 cursor-pointer border-b border-[#30363d] flex items-center gap-2 min-h-[36px] ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22]'}`}
+                className={`pl-8 sm:pl-10 pr-4 py-2 cursor-pointer border-b border-[var(--gs-border)] flex items-center gap-2 min-h-[36px] ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)]'}`}
               >
-                <span className="text-[#d29922] text-xs">{arrow}</span>
-                <span className="text-[#d29922] text-xs font-medium">Orphaned History</span>
-                <span className="text-[#6e7681] text-xs">({item.count})</span>
+                <span className="text-[var(--gs-warning)] text-xs">{arrow}</span>
+                <span className="text-[var(--gs-warning)] text-xs font-medium">Orphaned History</span>
+                <span className="text-[var(--gs-text-dim)] text-xs">({item.count})</span>
               </div>
             );
           }
 
           if (item.type === 'replay') {
             const replay = item.replay;
-            const tone = replay.status === 'crashed' ? 'text-[#ff7b72]' : 'text-[#79c0ff]';
+            const tone = replay.status === 'crashed' ? 'text-[var(--gs-danger-hover)]' : 'text-[var(--gs-info-light)]';
             const dismissed = replay.dismissedAt ? ' opacity-50' : '';
             return (
               <div
@@ -343,16 +343,16 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 onKeyDown={(e) => { if (!isActivateKey(e.key)) return; e.preventDefault(); e.stopPropagation(); void activateIndex(index); }}
                 role="button"
                 tabIndex={0}
-                className={`pl-12 sm:pl-14 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[48px] gap-3${dismissed} ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}`}
+                className={`pl-12 sm:pl-14 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] flex items-center justify-between min-h-[48px] gap-3${dismissed} ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}`}
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1">
                   <span className={`${tone} flex-shrink-0 text-xs`}>↺</span>
                   <div className="min-w-0 flex-1">
-                    <span className="text-[#8b949e] truncate block text-sm">{replay.sessionName}</span>
+                    <span className="text-[var(--gs-text-muted)] truncate block text-sm">{replay.sessionName}</span>
                     <span className={`text-xs truncate block ${tone}`}>{replay.status === 'crashed' ? 'crashed' : 'replay'}</span>
                   </div>
                 </div>
-                <div className="text-xs text-[#6e7681] hidden sm:block shrink-0">
+                <div className="text-xs text-[var(--gs-text-dim)] hidden sm:block shrink-0">
                   {formatTime(replay.endedAt ?? replay.startedAt)}
                 </div>
               </div>
@@ -361,7 +361,7 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
 
           if (item.type === 'process') {
             const statusIcon = item.status === 'running' ? '▶' : item.status === 'failed' ? '✗' : '■';
-            const statusColor = item.status === 'running' ? 'text-[#3fb950]' : item.status === 'failed' ? 'text-[#f85149]' : 'text-[#8b949e]';
+            const statusColor = item.status === 'running' ? 'text-[var(--gs-success)]' : item.status === 'failed' ? 'text-[var(--gs-danger)]' : 'text-[var(--gs-text-muted)]';
             const portInfo = item.ports?.length ? `:${item.ports.map((port) => port.port).join(',')}` : '';
 
             return (
@@ -383,15 +383,15 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                 role="button"
                 tabIndex={0}
                 className={`
-                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] flex items-center justify-between min-h-[52px] gap-3
-                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] flex items-center justify-between min-h-[52px] gap-3
+                  ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
                 `}
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1">
                   <span className={`w-2.5 h-2.5 flex-shrink-0 ${statusColor}`}>{statusIcon}</span>
                   <div className="min-w-0 flex-1">
-                    <span className="text-[#e6edf3] truncate block">{item.processName}#{item.instance}</span>
-                    <span className="text-xs text-[#8b949e] truncate block">{item.subtitle ?? portInfo}</span>
+                    <span className="text-[var(--gs-text)] truncate block">{item.processName}#{item.instance}</span>
+                    <span className="text-xs text-[var(--gs-text-muted)] truncate block">{item.subtitle ?? portInfo}</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0 ml-2">
@@ -485,19 +485,19 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   void activateIndex(index);
                 }}
                 className={`
-                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center justify-between
-                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                  pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] min-h-[48px] flex items-center justify-between
+                  ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
                 `}
               >
-                <span className="text-[#c678dd]">{item.expanded ? '▾' : '▸'} ✦ Agent Sessions</span>
+                <span className="text-[var(--gs-purple)]">{item.expanded ? '▾' : '▸'} ✦ Agent Sessions</span>
                 <div className="flex items-center gap-1">
                   {(item.pendingPermissions ?? 0) > 0 && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-[#d29922] text-[#0d1117] font-medium">
+                    <span className="text-xs px-2 py-0.5 rounded bg-[var(--gs-warning)] text-[var(--gs-text-on-accent)] font-medium">
                       ⚡{item.pendingPermissions}
                     </span>
                   )}
                   {(item.count ?? 0) > 0 && (
-                    <span className="text-xs px-2 py-1 rounded bg-[#30363d] text-[#e6edf3]">{item.count}</span>
+                    <span className="text-xs px-2 py-1 rounded bg-[var(--gs-border)] text-[var(--gs-text)]">{item.count}</span>
                   )}
                 </div>
               </div>
@@ -514,10 +514,10 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
               : state === 'retrying' ? `↻ ${label}`
               : `◦ ${label}`;
             const signalColor =
-              state === 'needs-permission' ? 'text-[#f59e0b]'
-              : state === 'running' ? 'text-[#10b981]'
-              : state === 'waiting' ? 'text-[#3b82f6]'
-              : 'text-[#52525b]';
+              state === 'needs-permission' ? 'text-[var(--gs-warning-bright)]'
+              : state === 'running' ? 'text-[var(--gs-running)]'
+              : state === 'waiting' ? 'text-[var(--gs-info)]'
+              : 'text-[var(--gs-text-muted)]';
             return (
               <div
                 key={`agent-session-${item.workspaceId}-${item.session.id}`}
@@ -526,18 +526,18 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   void activateIndex(index);
                 }}
                 className={`
-                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center justify-between
-                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] min-h-[48px] flex items-center justify-between
+                  ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
                 `}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-[#c678dd] truncate text-sm">✦ {item.session.title}</div>
+                  <div className="text-[var(--gs-purple)] truncate text-sm">❖ {item.session.title}</div>
                   <div className={`text-xs truncate ${signalColor}`}>
                     {signal}
                   </div>
                 </div>
                 {item.session.updatedAt && (
-                  <div className="text-xs text-[#6e7681] ml-3 shrink-0 hidden sm:block">
+                  <div className="text-xs text-[var(--gs-text-dim)] ml-3 shrink-0 hidden sm:block">
                     {formatTime(new Date(item.session.updatedAt).getTime())}
                   </div>
                 )}
@@ -554,11 +554,11 @@ export function SpacesBrowserWeb(props: SpacesBrowserWebProps) {
                   void activateIndex(index);
                 }}
                 className={`
-                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
-                  ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+                  pl-14 sm:pl-16 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] min-h-[48px] flex items-center
+                  ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
                 `}
               >
-                <span className="text-[#c678dd] text-sm">+ New Agent Session</span>
+                <span className="text-[var(--gs-purple)] text-sm">+ New Agent Session</span>
               </div>
             );
           }
@@ -620,18 +620,18 @@ function Header({
   onDisconnect?: () => void;
 }) {
   return (
-    <div className="bg-[#161b22] px-4 py-3 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-3">
+    <div className="bg-[var(--gs-bg-elevated)] px-4 py-3 flex items-center justify-between border-b border-[var(--gs-border)] min-h-[52px] gap-3">
       <div className="flex items-center gap-3 min-w-0 flex-1">
         <button
           type="button"
           onClick={onBack}
           onKeyDown={stopButtonActivationPropagation}
           aria-label="Back"
-          className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
+          className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] active:text-[var(--gs-accent)] py-2 pr-2 -ml-2 min-h-[44px] flex items-center flex-shrink-0"
         >
           ← <span className="hidden sm:inline ml-1">Back</span>
         </button>
-        <div className="text-[#e6edf3] font-medium truncate">
+        <div className="text-[var(--gs-text)] font-medium truncate">
           {machineName || 'Workspaces'}
         </div>
       </div>
@@ -641,11 +641,11 @@ function Header({
             type="button"
             onClick={onOpenInbox}
             onKeyDown={stopButtonActivationPropagation}
-            className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+            className="px-3 py-2 text-sm bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded text-[var(--gs-text)] min-h-[44px] border border-[var(--gs-border)]"
           >
             Inbox
             {inboxUnreadCount > 0 && (
-              <span className="ml-2 px-1.5 py-0.5 text-xs bg-[#58a6ff] rounded-full text-[#0d1117] font-medium">
+              <span className="ml-2 px-1.5 py-0.5 text-xs bg-[var(--gs-info)] rounded-full text-[var(--gs-text-on-accent)] font-medium">
                 {inboxUnreadCount}
               </span>
             )}
@@ -657,7 +657,7 @@ function Header({
             onClick={onHelp}
             onKeyDown={stopButtonActivationPropagation}
             aria-label="Help"
-            className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] active:bg-[#161b22] rounded text-[#e6edf3] min-h-[44px] border border-[#30363d]"
+            className="px-3 py-2 text-sm bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded text-[var(--gs-text)] min-h-[44px] border border-[var(--gs-border)]"
           >
             ? <span className="hidden sm:inline ml-1">Help</span>
           </button>
@@ -668,7 +668,7 @@ function Header({
             onClick={onCreate}
             onKeyDown={stopButtonActivationPropagation}
             aria-label="New workspace or project"
-            className="px-3 py-2 text-sm bg-[#22c55e] hover:bg-[#16a34a] active:bg-[#16a34a] rounded text-[#0d1117] font-medium min-h-[44px] shadow-glow"
+            className="px-3 py-2 text-sm bg-[var(--gs-accent)] hover:bg-[var(--gs-accent-hover)] active:bg-[var(--gs-accent-hover)] rounded text-[var(--gs-text-on-accent)] font-medium min-h-[44px] shadow-glow"
           >
             + <span className="hidden sm:inline ml-1">New</span>
           </button>
@@ -677,7 +677,7 @@ function Header({
           type="button"
           onClick={onRefresh}
           onKeyDown={stopButtonActivationPropagation}
-          className="text-sm text-[#8b949e] hover:text-[#e6edf3] active:text-[#22c55e] py-2 pl-2 min-h-[44px] flex items-center flex-shrink-0"
+          className="text-sm text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] active:text-[var(--gs-accent)] py-2 pl-2 min-h-[44px] flex items-center flex-shrink-0"
         >
           Refresh
         </button>
@@ -687,7 +687,7 @@ function Header({
             onClick={onDisconnect}
             onKeyDown={stopButtonActivationPropagation}
             aria-label="Disconnect"
-            className="px-3 py-2 text-sm bg-[#f85149] hover:bg-[#ff7b72] active:bg-[#da3633] rounded text-white min-h-[44px] border border-[#f85149]"
+            className="px-3 py-2 text-sm bg-[var(--gs-danger)] hover:bg-[var(--gs-danger-hover)] active:bg-[var(--gs-danger-active)] rounded text-white min-h-[44px] border border-[var(--gs-danger)]"
           >
             <span className="hidden sm:inline">Disconnect</span>
             <span className="sm:hidden">×</span>
@@ -708,13 +708,13 @@ function Footer({
   const hint = getFooterHint(selectedItem, hasVisibleActions);
 
   return (
-    <div className="bg-[#161b22] px-4 py-2 border-t border-[#30363d] safe-bottom">
-      <div className="hidden sm:flex gap-4 text-xs text-[#6e7681] flex-wrap">
+    <div className="bg-[var(--gs-bg-elevated)] px-4 py-2 border-t border-[var(--gs-border)] safe-bottom">
+      <div className="hidden sm:flex gap-4 text-xs text-[var(--gs-text-dim)] flex-wrap">
         {hint.desktop.map((item) => (
           <span key={item}>{item}</span>
         ))}
       </div>
-      <div className="sm:hidden text-xs text-[#6e7681] text-center">
+      <div className="sm:hidden text-xs text-[var(--gs-text-dim)] text-center">
         {hint.mobile}
       </div>
     </div>
@@ -792,10 +792,10 @@ function ActionButton({
   tone?: 'neutral' | 'danger' | 'success';
 }) {
   const toneClass = tone === 'danger'
-    ? 'bg-[#2d1617] border-[#f85149]/40 text-[#ff7b72] hover:bg-[#3a1d1f]'
+    ? 'bg-[var(--gs-chip-red-bg)] border-[var(--gs-danger)]/40 text-[var(--gs-danger-hover)] hover:bg-[var(--gs-chip-red-bg)]'
     : tone === 'success'
-      ? 'bg-[#14261a] border-[#22c55e]/40 text-[#3fb950] hover:bg-[#183321]'
-      : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:bg-[#30363d] hover:text-[#e6edf3]';
+      ? 'bg-[var(--gs-chip-green-bg)] border-[var(--gs-accent)]/40 text-[var(--gs-success)] hover:bg-[var(--gs-chip-green-bg)]'
+      : 'bg-[var(--gs-btn-secondary-bg)] border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:bg-[var(--gs-border)] hover:text-[var(--gs-text)]';
 
   return (
     <button
@@ -831,14 +831,14 @@ function SimpleTreeRow({
   selectedRef?: RefObject<HTMLDivElement | null>;
 }) {
   const textClass = tone === 'warning'
-    ? 'text-[#ffaa55]'
+    ? 'text-[var(--gs-warning-bright)]'
     : tone === 'error'
-      ? 'text-[#f85149]'
+      ? 'text-[var(--gs-danger)]'
       : tone === 'accent'
-        ? 'text-[#58a6ff]'
+        ? 'text-[var(--gs-info)]'
         : tone === 'violet'
-          ? 'text-[#d2a8ff]'
-          : 'text-[#8b949e]';
+          ? 'text-[var(--gs-purple)]'
+          : 'text-[var(--gs-text-muted)]';
 
   return (
     <div
@@ -858,8 +858,8 @@ function SimpleTreeRow({
       role="button"
       tabIndex={0}
       className={`
-        pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[#30363d] min-h-[48px] flex items-center
-        ${isSelected ? 'bg-[#21262d] border-l-4 border-l-[#58a6ff]' : 'hover:bg-[#161b22] active:bg-[#21262d]'}
+        pl-10 sm:pl-12 pr-4 py-3 cursor-pointer border-b border-[var(--gs-border)] min-h-[48px] flex items-center
+        ${isSelected ? 'bg-[var(--gs-bg-active)] border-l-4 border-l-[var(--gs-info)]' : 'hover:bg-[var(--gs-bg-elevated)] active:bg-[var(--gs-bg-active)]'}
       `}
       title={title}
     >

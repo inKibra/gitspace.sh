@@ -95,11 +95,14 @@ describe('useAppClient', () => {
 });
 
 describe('useAgentSessionActions', () => {
-  it('wires create flow submission through the client and open callbacks', async () => {
+  it('shows creating state before closing into attach flow', async () => {
     const showInputCalls: Array<{ onSubmit: (value: string) => Promise<void> | void }> = [];
+    const showLoading = mock(() => undefined);
+    const close = mock(() => undefined);
     const beforeOpen = mock(() => undefined);
     const onOpenSuccess = mock(() => undefined);
     const client = makeClient();
+    const attachOptions = { cols: 120, rows: 40 };
 
     const { result } = renderHook(() => useAgentSessionActions({
       client,
@@ -107,9 +110,12 @@ describe('useAgentSessionActions', () => {
         showInput: (options) => {
           showInputCalls.push({ onSubmit: options.onSubmit });
         },
+        showLoading,
+        close,
       },
       beforeOpen,
       onOpenSuccess,
+      attachOptions,
     }));
 
     result.current.createAndOpen('proj:ws-1');
@@ -118,10 +124,16 @@ describe('useAgentSessionActions', () => {
     await showInputCalls[0]?.onSubmit('  investigate auth bug  ');
 
     expect(beforeOpen).toHaveBeenCalledTimes(1);
+    expect(showLoading).toHaveBeenCalledWith({
+      title: 'Creating Agent Session',
+      message: 'Creating investigate auth bug...',
+    });
     expect(client.agentSessions.createAndOpen).toHaveBeenCalledWith({
       workspaceId: 'proj:ws-1',
       title: 'investigate auth bug',
+      attachOptions,
     });
+    expect(close).toHaveBeenCalledTimes(1);
     expect(onOpenSuccess).toHaveBeenCalledTimes(1);
   });
 
@@ -152,5 +164,44 @@ describe('useAgentSessionActions', () => {
     expect(onError.mock.calls[0]?.[0]).toBe(
       "Failed to open agent session: workspace proj:ws-1 exists on multiple machines; select the workspace's machine first.",
     );
+  });
+
+  it('calls onOpenError when createAndOpen fails', async () => {
+    const showInputCalls: Array<{ onSubmit: (value: string) => Promise<void> | void }> = [];
+    const showLoading = mock(() => undefined);
+    const close = mock(() => undefined);
+    const onOpenError = mock((_error: AgentSessionCommandError) => undefined);
+    const onError = mock((_message: string, _error: AgentSessionCommandError) => undefined);
+    const client = makeClient({
+      createAndOpen: mock(async () => ({
+        ok: false as const,
+        error: {
+          code: 'workspace-not-found' as const,
+          message: 'workspace missing',
+          workspaceId: 'proj:ws-1',
+        },
+      })),
+    });
+
+    const { result } = renderHook(() => useAgentSessionActions({
+      client,
+      flow: {
+        showInput: (options) => {
+          showInputCalls.push({ onSubmit: options.onSubmit });
+        },
+        showLoading,
+        close,
+      },
+      onError,
+    }));
+
+    result.current.createAndOpen('proj:ws-1', { onOpenError });
+    expect(showInputCalls.length).toBe(1);
+
+    await showInputCalls[0]?.onSubmit('broken');
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(onOpenError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 });

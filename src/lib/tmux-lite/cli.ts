@@ -813,6 +813,8 @@ export async function createVirtualSession(
   name: string,
   cwd: string,
   options?: {
+    cols?: number;
+    rows?: number;
     kind?: import('./protocol.js').SessionKind;
     hidden?: boolean;
     metadata?: Record<string, string>;
@@ -823,6 +825,8 @@ export async function createVirtualSession(
     type: 'new-virtual',
     name,
     cwd,
+    cols: options?.cols,
+    rows: options?.rows,
     kind: options?.kind,
     hidden: options?.hidden,
     metadata: options?.metadata,
@@ -830,6 +834,12 @@ export async function createVirtualSession(
   if (res.type === 'session') return res.session;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
+}
+
+export async function resizeVirtualSession(id: string, cols: number, rows: number): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: 'virtual-resize', id, cols, rows });
+  if (res.type === 'error') throw new Error(res.message);
 }
 
 export async function killSession(id: string): Promise<void> {
@@ -936,9 +946,10 @@ export async function restoreAgentSession(
 export async function attachAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
+  options?: { cols?: number; rows?: number },
 ): Promise<Session> {
   await ensureServer();
-  const res = await send({ type: 'agent-attach', target, agentSessionId });
+  const res = await send({ type: 'agent-attach', target, agentSessionId, cols: options?.cols, rows: options?.rows });
   if (res.type === 'session') return res.session;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -972,6 +983,8 @@ export async function respondToAgentPermission(
 export async function watchAgentState(handlers: {
   onSnapshot?: (workspaces: import('./agent-event-manager.js').WorkspaceAgentState[]) => void;
   onUpdate?: (delta: import('./agent-event-manager.js').AgentStateUpdateDelta) => void;
+  onDialogRequest?: (request: import('./agents/host-ui-bridge.js').HostUIDialogRequest) => void;
+  onUIEvent?: (event: import('./agents/host-ui-bridge.js').HostUIEvent) => void;
   onError?: (error: Error) => void;
 }): Promise<() => void> {
   await ensureServer();
@@ -1025,6 +1038,14 @@ export async function watchAgentState(handlers: {
               }
               if (message.type === 'agent-state-update') {
                 handlers.onUpdate?.(message.delta);
+                continue;
+              }
+              if (message.type === 'agent-dialog-request') {
+                handlers.onDialogRequest?.(message.request);
+                continue;
+              }
+              if (message.type === 'agent-ui-event') {
+                handlers.onUIEvent?.(message.event);
                 continue;
               }
               if (message.type === 'error') {

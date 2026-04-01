@@ -270,6 +270,24 @@ export interface MachineSnapshotPush {
   snapshot: import('../tmux-lite/machine/protocol.js').MachineSnapshot;
 }
 
+/**
+ * Machine pushes a host UI dialog request to the client.
+ * The client should render the dialog and send back an agent-dialog-response.
+ */
+export interface AgentDialogRequestPush {
+  type: 'agent_dialog_request';
+  request: import('../tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest;
+}
+
+/**
+ * Machine pushes a fire-and-forget host UI event to the client.
+ * Status updates, notifications, widget changes, etc.
+ */
+export interface AgentUIEventPush {
+  type: 'agent_ui_event';
+  event: import('../tmux-lite/agents/host-ui-bridge.js').HostUIEvent;
+}
+
 
 
 // ============================================================================
@@ -304,7 +322,9 @@ export type MachineToClientMessage =
   | TmuxCommandResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
-  | MachineSnapshotPush;
+  | MachineSnapshotPush
+  | AgentDialogRequestPush
+  | AgentUIEventPush;
 
 /** All remote session messages */
 export type RemoteSessionMessage =

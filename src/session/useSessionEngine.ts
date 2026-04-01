@@ -88,6 +88,7 @@ function dispatchBackendEvent(
           sessionName: event.sessionName ?? null,
         },
         workspaceId: event.workspaceId ?? null,
+        agentSessionId: event.agentSessionId ?? null,
       });
       break;
     case 'session_meta':

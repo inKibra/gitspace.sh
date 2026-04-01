@@ -18,7 +18,7 @@ export type WorkspaceDetailPageProps = WorkspaceDetailPaneProps & {
 
 export function WorkspaceDetailPage({ children, ...props }: WorkspaceDetailPageProps) {
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
+    <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
       <WorkspaceDetailPaneWeb {...props}>
         {children}
       </WorkspaceDetailPaneWeb>

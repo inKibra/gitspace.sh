@@ -136,11 +136,11 @@ type InlineAnnotationMeta =
 type HunkControlMeta = Extract<InlineAnnotationMeta, { kind: 'hunk-control' }>;
 
 const CHANGE_COLOR: Record<ReviewChangedFile['changeType'], string> = {
-  new: '#22c55e',
-  deleted: '#f85149',
-  renamed: '#d29922',
-  copied: '#3fb950',
-  modified: '#58a6ff',
+  new: 'var(--gs-accent)',
+  deleted: 'var(--gs-danger)',
+  renamed: 'var(--gs-warning)',
+  copied: 'var(--gs-success)',
+  modified: 'var(--gs-info)',
 };
 
 const CHANGE_LABEL: Record<ReviewChangedFile['changeType'], string> = {
@@ -762,8 +762,8 @@ export function DiffViewer({
           height: '20px',
           borderRadius: '999px',
           border: 'none',
-          background: '#1a76d4',
-          color: '#0d1117',
+          background: 'var(--gs-info)',
+          color: 'var(--gs-text-on-accent)',
           cursor: 'pointer',
           fontSize: '14px',
           fontWeight: 700,
@@ -783,7 +783,7 @@ export function DiffViewer({
 
     if (meta.kind === 'thread') {
       const thread = meta.thread;
-      const color = thread.decision ? getReviewDecisionColor(thread.decision) : '#58a6ff';
+      const color = thread.decision ? getReviewDecisionColor(thread.decision) : 'var(--gs-info)';
       const count = thread.comments.length;
 
       return (
@@ -801,8 +801,8 @@ export function DiffViewer({
               width: '16px',
               height: '16px',
               borderRadius: '999px',
-              border: `1px solid ${color}66`,
-              background: `${color}33`,
+              border: `1px solid color-mix(in srgb, ${color} 40%, transparent)`,
+              background: `color-mix(in srgb, ${color} 20%, transparent)`,
               color,
               cursor: 'pointer',
               fontSize: '10px',
@@ -835,8 +835,8 @@ export function DiffViewer({
             pointerEvents: 'auto',
             boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)',
             borderRadius: '4px',
-            border: `1px solid ${tint}33`,
-            background: '#161b22',
+            border: `1px solid color-mix(in srgb, ${tint} 20%, transparent)`,
+            background: 'var(--gs-bg-elevated)',
             padding: '1px',
           }}
           onMouseEnter={() => meta.threadId && onThreadHover?.(meta.threadId)}
@@ -847,7 +847,7 @@ export function DiffViewer({
             onClick={() => {
               void setHunkDecision(meta, 'rejected').catch(() => {});
             }}
-            style={actionButtonStyle(meta.decision === 'rejected', '#f85149')}
+            style={actionButtonStyle(meta.decision === 'rejected', 'var(--gs-danger)')}
           >
             Reject
           </button>
@@ -856,7 +856,7 @@ export function DiffViewer({
             onClick={() => {
               void setHunkDecision(meta, 'approved').catch(() => {});
             }}
-            style={actionButtonStyle(meta.decision === 'approved', '#22c55e', true)}
+            style={actionButtonStyle(meta.decision === 'approved', 'var(--gs-accent)', true)}
           >
             Approve
           </button>
@@ -879,7 +879,7 @@ export function DiffViewer({
                   onThreadClick?.(meta.threadId);
                 }
               }}
-              style={actionButtonStyle(false, '#58a6ff')}
+              style={actionButtonStyle(false, 'var(--gs-info)')}
             >
               Threads {meta.threadIds.length > 1 ? `(${meta.threadIds.length})` : ''}
             </button>
@@ -888,7 +888,7 @@ export function DiffViewer({
             <button
               title="Comment on hunk"
               onClick={() => openHunkCommentForm(meta)}
-              style={actionButtonStyle(false, '#58a6ff')}
+              style={actionButtonStyle(false, 'var(--gs-info)')}
             >
               Comment
             </button>
@@ -926,7 +926,7 @@ export function DiffViewer({
 
   if (files.length === 0) {
     return (
-      <div style={{ padding: '32px', textAlign: 'center', color: '#8b949e' }}>
+      <div style={{ padding: '32px', textAlign: 'center', color: 'var(--gs-text-muted)' }}>
         No changed files.
       </div>
     );
@@ -970,18 +970,18 @@ export function DiffViewer({
         width: `${fileListWidth}px`,
         flexShrink: 0,
         overflow: 'hidden',
-        background: '#0d1117',
+        background: 'var(--gs-bg)',
         display: 'flex',
         flexDirection: 'column',
       }}>
         <div style={{
           padding: '8px 10px 6px',
           fontSize: '11px',
-          color: '#6e7681',
+          color: 'var(--gs-text-dim)',
           fontWeight: 600,
           textTransform: 'uppercase',
           letterSpacing: '0.06em',
-          borderBottom: '1px solid #21262d',
+          borderBottom: '1px solid var(--gs-border-muted)',
           flexShrink: 0,
           display: 'flex',
           alignItems: 'center',
@@ -1008,7 +1008,7 @@ export function DiffViewer({
 
         <div style={{ flex: 1, overflow: 'auto' }}>
           {visibleFiles.length === 0 ? (
-            <div style={{ padding: '12px 10px', fontSize: '12px', color: '#6e7681' }}>
+            <div style={{ padding: '12px 10px', fontSize: '12px', color: 'var(--gs-text-dim)' }}>
               No visible files.
             </div>
           ) : fileListMode === 'tree' ? (
@@ -1039,7 +1039,7 @@ export function DiffViewer({
           width: '6px',
           cursor: 'col-resize',
           background: 'transparent',
-          borderLeft: '1px solid #30363d',
+          borderLeft: '1px solid var(--gs-border)',
           flexShrink: 0,
         }}
       />
@@ -1047,9 +1047,9 @@ export function DiffViewer({
       <div ref={diffHostRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <div style={{
           padding: '8px 12px',
-          borderBottom: '1px solid #30363d',
-          background: '#161b22',
-          color: '#8b949e',
+          borderBottom: '1px solid var(--gs-border)',
+          background: 'var(--gs-bg-elevated)',
+          color: 'var(--gs-text-muted)',
           fontSize: '12px',
           display: 'flex',
           gap: '14px',
@@ -1059,7 +1059,7 @@ export function DiffViewer({
           <span>Hover a line and click <b>+</b> to comment</span>
           <span>Drag line numbers to comment on a range</span>
           <span>
-            Hunk actions: <span style={{ color: '#22c55e' }}>Approve</span> / <span style={{ color: '#f85149' }}>Reject</span>
+            Hunk actions: <span style={{ color: 'var(--gs-accent)' }}>Approve</span> / <span style={{ color: 'var(--gs-danger)' }}>Reject</span>
           </span>
 
           {!contextReady && (
@@ -1070,9 +1070,9 @@ export function DiffViewer({
                 fontSize: '11px',
                 padding: '2px 8px',
                 borderRadius: '4px',
-                border: '1px solid #30363d',
-                background: '#21262d',
-                color: '#8b949e',
+                border: '1px solid var(--gs-border)',
+                background: 'var(--gs-btn-secondary-bg)',
+                color: 'var(--gs-text-muted)',
                 cursor: contextLoading ? 'wait' : 'pointer',
               }}
             >
@@ -1080,16 +1080,16 @@ export function DiffViewer({
             </button>
           )}
 
-          {contextReady && <span style={{ color: '#22c55e' }}>Context expansion ready</span>}
-          {contextError && <span style={{ color: '#f85149' }}>Context load failed: {contextError}</span>}
+          {contextReady && <span style={{ color: 'var(--gs-accent)' }}>Context expansion ready</span>}
+          {contextError && <span style={{ color: 'var(--gs-danger)' }}>Context load failed: {contextError}</span>}
         </div>
 
         {selectedDiffLoading ? (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8b949e', fontSize: '13px' }}>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--gs-text-muted)', fontSize: '13px' }}>
             Loading file diff...
           </div>
         ) : selectedDiffError ? (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f85149', fontSize: '13px', padding: '16px' }}>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--gs-danger)', fontSize: '13px', padding: '16px' }}>
             Failed to load file diff: {selectedDiffError}
           </div>
         ) : renderedFileDiff ? (
@@ -1103,7 +1103,7 @@ export function DiffViewer({
             />
           </div>
         ) : (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8b949e' }}>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--gs-text-muted)' }}>
             Select a file to view its diff.
           </div>
         )}
@@ -1115,20 +1115,20 @@ export function DiffViewer({
           bottom: 0,
           left: 0,
           right: 0,
-          background: '#161b22',
-          borderTop: '1px solid #30363d',
+          background: 'var(--gs-bg-elevated)',
+          borderTop: '1px solid var(--gs-border)',
           padding: '12px 16px',
           zIndex: 100,
         }}>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', maxWidth: '860px', margin: '0 auto' }}>
             <div style={{ flex: 1 }}>
               {commentForm.target.kind === 'hunk' && (
-                <div style={{ marginBottom: '6px', fontSize: '12px', color: '#8b949e' }}>
+                <div style={{ marginBottom: '6px', fontSize: '12px', color: 'var(--gs-text-muted)' }}>
                   Commenting on hunk
                 </div>
               )}
               {commentForm.target.kind === 'line' && (
-                <div style={{ marginBottom: '6px', fontSize: '12px', color: '#8b949e' }}>
+                <div style={{ marginBottom: '6px', fontSize: '12px', color: 'var(--gs-text-muted)' }}>
                   Commenting on line {commentForm.target.startLine}
                   {commentForm.target.startLine !== commentForm.target.endLine
                     ? `-${commentForm.target.endLine}`
@@ -1142,10 +1142,10 @@ export function DiffViewer({
                 rows={3}
                 style={{
                   width: '100%',
-                  background: '#0d1117',
-                  border: '1px solid #30363d',
+                  background: 'var(--gs-bg)',
+                  border: '1px solid var(--gs-border)',
                   borderRadius: '6px',
-                  color: '#e6edf3',
+                  color: 'var(--gs-text)',
                   padding: '8px',
                   fontSize: '13px',
                   resize: 'vertical',
@@ -1172,8 +1172,8 @@ export function DiffViewer({
                 disabled={submitting}
                 style={{
                   padding: '8px 16px',
-                  background: '#22c55e',
-                  color: '#0d1117',
+                  background: 'var(--gs-accent)',
+                  color: 'var(--gs-text-on-accent)',
                   border: 'none',
                   borderRadius: '6px',
                   cursor: submitting ? 'wait' : 'pointer',
@@ -1190,9 +1190,9 @@ export function DiffViewer({
                 }}
                 style={{
                   padding: '8px 16px',
-                  background: '#21262d',
-                  color: '#8b949e',
-                  border: '1px solid #30363d',
+                  background: 'var(--gs-btn-secondary-bg)',
+                  color: 'var(--gs-text-muted)',
+                  border: '1px solid var(--gs-border)',
                   borderRadius: '6px',
                   cursor: 'pointer',
                   fontSize: '13px',
@@ -1217,9 +1217,9 @@ function miniToggleStyle(active: boolean): CSSProperties {
     fontSize: '10px',
     padding: '3px 6px',
     borderRadius: '999px',
-    border: '1px solid #30363d',
-    background: active ? '#1f6feb22' : '#161b22',
-    color: active ? '#58a6ff' : '#8b949e',
+    border: '1px solid var(--gs-border)',
+    background: active ? 'var(--gs-chip-blue-bg)' : 'var(--gs-bg-elevated)',
+    color: active ? 'var(--gs-info)' : 'var(--gs-text-muted)',
     cursor: 'pointer',
   };
 }
@@ -1257,8 +1257,8 @@ function renderFileListRow({
         gap: '6px',
         padding: '5px 10px',
         paddingLeft: `${10 + depth * 14}px`,
-        background: isSelected ? '#161b22' : 'transparent',
-        borderLeft: isSelected ? '2px solid #58a6ff' : '2px solid transparent',
+        background: isSelected ? 'var(--gs-bg-elevated)' : 'transparent',
+        borderLeft: isSelected ? '2px solid var(--gs-info)' : '2px solid transparent',
         borderTop: 'none',
         borderRight: 'none',
         borderBottom: 'none',
@@ -1277,13 +1277,13 @@ function renderFileListRow({
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
         fontSize: '12px',
-        color: isSelected ? '#e6edf3' : '#8b949e',
+        color: isSelected ? 'var(--gs-text)' : 'var(--gs-text-muted)',
         fontFamily: 'monospace',
       }}>
-        {dirPart && <span style={{ color: '#6e7681' }}>{dirPart}</span>}
+        {dirPart && <span style={{ color: 'var(--gs-text-dim)' }}>{dirPart}</span>}
         {basePart}
       </span>
-      {reviewState?.isApproved && <span style={{ color: '#22c55e', fontSize: '10px' }}>OK</span>}
+      {reviewState?.isApproved && <span style={{ color: 'var(--gs-accent)', fontSize: '10px' }}>OK</span>}
     </button>
   );
 }
@@ -1393,15 +1393,15 @@ function renderFileTreeNodes({
           gap: '6px',
           padding: '5px 10px',
           paddingLeft: `${10 + depth * 14}px`,
-          color: '#8b949e',
+          color: 'var(--gs-text-muted)',
           fontSize: '12px',
         }}
       >
-        <button type="button" onClick={() => onToggleFolder(node.path)} style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', padding: 0 }}>
+        <button type="button" onClick={() => onToggleFolder(node.path)} style={{ background: 'none', border: 'none', color: 'var(--gs-text-muted)', cursor: 'pointer', padding: 0 }}>
           {isExpanded ? '▾' : '▸'}
         </button>
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
-        <span style={{ fontSize: '10px', color: allApproved ? '#22c55e' : '#6e7681' }}>{childFiles.length}</span>
+        <span style={{ fontSize: '10px', color: allApproved ? 'var(--gs-accent)' : 'var(--gs-text-dim)' }}>{childFiles.length}</span>
         {onApproveFolder && (
           <button
             type="button"
@@ -1411,9 +1411,9 @@ function renderFileTreeNodes({
               fontSize: '10px',
               padding: '2px 6px',
               borderRadius: '999px',
-              border: '1px solid #30363d',
-              background: allApproved ? '#161b22' : '#22c55e22',
-              color: allApproved ? '#6e7681' : '#22c55e',
+              border: '1px solid var(--gs-border)',
+              background: allApproved ? 'var(--gs-bg-elevated)' : 'var(--gs-terminal-selection)',
+              color: allApproved ? 'var(--gs-text-dim)' : 'var(--gs-accent)',
               cursor: allApproved ? 'default' : 'pointer',
             }}
           >
@@ -1517,16 +1517,16 @@ function expandToAbsoluteLines(lines: string[], start: number, total: number): s
 function actionButtonStyle(active: boolean, color: string, success = false): CSSProperties {
   return {
     border: success
-      ? `1px solid ${active ? `${color}88` : `${color}66`}`
-      : `1px solid ${active ? `${color}66` : '#30363d'}`,
+      ? `1px solid ${active ? `color-mix(in srgb, ${color} 53%, transparent)` : `color-mix(in srgb, ${color} 40%, transparent)`}`
+      : `1px solid ${active ? `color-mix(in srgb, ${color} 40%, transparent)` : 'var(--gs-border)'}`,
     background: success
       ? active
         ? color
-        : `${color}cc`
+        : `color-mix(in srgb, ${color} 80%, transparent)`
       : active
-        ? `${color}33`
-        : '#21262d',
-    color: success ? '#0d1117' : active ? color : '#c9d1d9',
+        ? `color-mix(in srgb, ${color} 20%, transparent)`
+        : 'var(--gs-btn-secondary-bg)',
+    color: success ? 'var(--gs-text-on-accent)' : active ? color : 'var(--gs-text-secondary)',
     borderRadius: '4px',
     fontSize: '11px',
     padding: '1px 8px',

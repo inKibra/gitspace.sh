@@ -1136,6 +1136,12 @@ export async function serveStart(options: {
         applyAgentDelta(delta);
         void sessionManager.broadcastAgentStateUpdate(delta);
       },
+      onDialogRequest: (request) => {
+        void sessionManager.broadcastRawMessage({ type: 'agent_dialog_request', request });
+      },
+      onUIEvent: (event) => {
+        void sessionManager.broadcastRawMessage({ type: 'agent_ui_event', event });
+      },
       onError: (error) => {
         logger.error(`[serve] tmux-lite agent watch failed: ${error.message}`);
       },

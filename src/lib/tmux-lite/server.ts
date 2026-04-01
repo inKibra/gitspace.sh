@@ -58,6 +58,7 @@ import {
   getKnownAgentSessions,
   listLiveAgentSessions,
   promptAgentSession,
+  stageUploadFile,
   rebindPiTerminalSessionOwnership,
   releasePiTerminalSessionOwnership,
   respondToAgentPermission,
@@ -65,6 +66,10 @@ import {
   subscribeAgentControl,
   syncKnownWorkspaces,
   markAgentSessionIdle,
+  setAgentHostUIEmitter,
+  resolveAgentDialogResponse,
+  listAgentCommands,
+  getFileSuggestions,
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
@@ -267,6 +272,8 @@ interface RouterSocketState {
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
 const agentStateWatchers = new Set<object>();
 const machineStateWatchers = new Set<object>();
+const agentSessionWatchOwners = new Map<string, object>();
+const agentDialogOwners = new Map<string, object>();
 
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
@@ -277,9 +284,31 @@ function getRouterSocketState(socket: object): RouterSocketState {
   return state;
 }
 
+function deleteOwnedEntries(map: Map<string, object>, socket: object): void {
+  for (const [key, owner] of map) {
+    if (owner === socket) {
+      map.delete(key);
+    }
+  }
+}
+
+function pickAgentDialogWatcher(sessionId: string): object | null {
+  const owner = agentSessionWatchOwners.get(sessionId);
+  if (!owner) {
+    return null;
+  }
+  if (agentStateWatchers.has(owner)) {
+    return owner;
+  }
+  agentSessionWatchOwners.delete(sessionId);
+  return null;
+}
+
 function clearRouterSocketState(socket: object): void {
   agentStateWatchers.delete(socket);
   machineStateWatchers.delete(socket);
+  deleteOwnedEntries(agentSessionWatchOwners, socket);
+  deleteOwnedEntries(agentDialogOwners, socket);
   routerSocketStates.delete(socket);
 }
 
@@ -287,6 +316,34 @@ function sendRouterResponse(socket: any, response: Response): void {
   const socketState = getRouterSocketState(socket);
   if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
   else socket.write(encodeRouterMessage(response));
+}
+
+const MIN_TERMINAL_COLS = 20;
+const MAX_TERMINAL_COLS = 1000;
+const MIN_TERMINAL_ROWS = 5;
+const MAX_TERMINAL_ROWS = 400;
+
+function clampTerminalDimension(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function clampTerminalSize(
+  cols: unknown,
+  rows: unknown,
+  fallback: { cols: number; rows: number } = { cols: 80, rows: 24 },
+): { cols: number; rows: number } {
+  return {
+    cols: clampTerminalDimension(cols, fallback.cols, MIN_TERMINAL_COLS, MAX_TERMINAL_COLS),
+    rows: clampTerminalDimension(rows, fallback.rows, MIN_TERMINAL_ROWS, MAX_TERMINAL_ROWS),
+  };
 }
 
 function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
@@ -354,8 +411,39 @@ async function getAgentControlReady(): Promise<void> {
       });
     });
     agentControlSubscribed = true;
+
+    // Install the host UI bridge emitter so extension dialog requests
+    // and UI events are broadcast to all watching clients.
+    setAgentHostUIEmitter({
+      emitDialogRequest(request) {
+        const socket = pickAgentDialogWatcher(request.sessionId);
+        if (!socket) {
+          throw new Error(`No watching client for session ${request.sessionId}`);
+        }
+        try {
+          agentDialogOwners.set(request.id, socket);
+          sendRouterResponse(socket, { type: 'agent-dialog-request', request });
+        } catch (error) {
+          agentDialogOwners.delete(request.id);
+          agentSessionWatchOwners.delete(request.sessionId);
+          clearRouterSocketState(socket);
+          throw error instanceof Error ? error : new Error(String(error));
+        }
+      },
+      emitEvent(event) {
+        for (const socket of agentStateWatchers) {
+          try {
+            sendRouterResponse(socket, { type: 'agent-ui-event', event });
+          } catch {
+            clearRouterSocketState(socket);
+          }
+        }
+      },
+    });
   }
+
 }
+
 
 function ensureWorkspacePmSubscribed(): void {
   if (workspacePmSubscribed) {
@@ -1613,10 +1701,14 @@ function createSessionSocketHandlers(
       if (!session) return;
 
       const applyResize = (cols: number, rows: number) => {
+        const nextSize = clampTerminalSize(cols, rows, {
+          cols: session.xterm.cols,
+          rows: session.xterm.rows,
+        });
         try {
-          session.ptyTerminal.resize(cols, rows);
-          session.xterm.resize(cols, rows);
-          recordReplayEvent(session, { type: "resize", cols, rows });
+          session.ptyTerminal.resize(nextSize.cols, nextSize.rows);
+          session.xterm.resize(nextSize.cols, nextSize.rows);
+          recordReplayEvent(session, { type: "resize", cols: nextSize.cols, rows: nextSize.rows });
           scheduleReplayCheckpoint(session, true);
           // Send SIGWINCH to process group so children (vim, etc.) get it
           try {
@@ -1997,6 +2089,8 @@ function createVirtualSession(
   name: string | undefined,
   cwd: string,
   options?: {
+    cols?: number;
+    rows?: number;
     kind?: import('./protocol.js').SessionKind;
     hidden?: boolean;
     metadata?: Record<string, string>;
@@ -2011,8 +2105,7 @@ function createVirtualSession(
   }
   safeUnlink(socketPath);
 
-  const cols = 80;
-  const rows = 24;
+  const { cols, rows } = clampTerminalSize(options?.cols, options?.rows);
   const xterm = new XTerminal({
     cols,
     rows,
@@ -2097,9 +2190,13 @@ function createVirtualSession(
       if (!session) return;
 
       const applyResize = (cols: number, rows: number) => {
+        const nextSize = clampTerminalSize(cols, rows, {
+          cols: session.xterm.cols,
+          rows: session.xterm.rows,
+        });
         try {
-          virtualTerminal.resize(cols, rows);
-          session.xterm.resize(cols, rows);
+          virtualTerminal.resize(nextSize.cols, nextSize.rows);
+          session.xterm.resize(nextSize.cols, nextSize.rows);
         } catch {}
       };
 
@@ -2354,6 +2451,8 @@ routerListener = Bun.listen({
           case 'new-virtual':
             try {
               const session = createVirtualSession(cmd.name, cmd.cwd, {
+                cols: cmd.cols,
+                rows: cmd.rows,
                 kind: cmd.kind,
                 hidden: cmd.hidden,
                 metadata: cmd.metadata,
@@ -2364,6 +2463,26 @@ routerListener = Bun.listen({
               const errMsg = e instanceof Error ? e.message : String(e);
               console.error(`[server] createVirtualSession failed: ${errMsg}`);
               res = { type: 'error', message: `Failed to create virtual session: ${errMsg}` };
+            }
+            break;
+
+          case 'virtual-resize':
+            try {
+              const session = sessions.get(cmd.id);
+              if (!session || !session.virtualTerminal) {
+                res = { type: 'error', message: `Virtual session not found: ${cmd.id}` };
+                break;
+              }
+              const { cols, rows } = clampTerminalSize(cmd.cols, cmd.rows, {
+                cols: session.xterm.cols,
+                rows: session.xterm.rows,
+              });
+              session.virtualTerminal.resize(cols, rows);
+              session.xterm.resize(cols, rows);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resize virtual session: ${errMsg}` };
             }
             break;
 
@@ -2522,11 +2641,23 @@ routerListener = Bun.listen({
           case 'agent-prompt':
             try {
               await getAgentControlReady();
-              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text);
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images);
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+            }
+            break;
+
+
+          case 'agent-stage-upload':
+            try {
+              await getAgentControlReady();
+              const stageResult = await stageUploadFile(cmd.target, cmd.fileName, cmd.data, cmd.mimeType);
+              res = { type: 'agent-staged', stagedPath: stageResult.stagedPath };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to stage upload: ${errMsg}` };
             }
             break;
 
@@ -2917,8 +3048,11 @@ routerListener = Bun.listen({
           case 'agent-attach':
             try {
               await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId);
+              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
+              deleteOwnedEntries(agentSessionWatchOwners, socket);
+              agentSessionWatchOwners.set(cmd.agentSessionId, socket);
               res = { type: 'session', session };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
@@ -2938,6 +3072,48 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to respond to agent permission: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-dialog-response':
+            try {
+              const owner = agentDialogOwners.get(cmd.dialogId);
+              if (!owner || owner !== socket) {
+                res = { type: 'agent-bool', ok: false };
+                break;
+              }
+              const resolved = resolveAgentDialogResponse({
+                type: cmd.dialogType,
+                id: cmd.dialogId,
+                value: cmd.value as any,
+              });
+              agentDialogOwners.delete(cmd.dialogId);
+              res = { type: 'agent-bool', ok: resolved };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resolve dialog: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-list-commands':
+            try {
+              await getAgentControlReady();
+              const commands = await listAgentCommands(cmd.target);
+              res = { type: 'agent-commands', commands };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list commands: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-file-suggestions':
+            try {
+              await getAgentControlReady();
+              const suggestions = await getFileSuggestions(cmd.target, cmd.prefix, cmd.limit);
+              res = { type: 'agent-file-suggestions', suggestions };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to get file suggestions: ${errMsg}` };
             }
             break;
 

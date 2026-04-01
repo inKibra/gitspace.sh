@@ -384,7 +384,23 @@ export class LocalSessionBackend implements SessionBackend {
   private readonly deps: LocalSessionBackendDependencies;
   private readonly handlers = new Set<(event: BackendEvent) => void>();
   private connected = false;
-  private readonly attachLifecycle = new AttachLifecycle((event) => this.emit(event));
+  private attachedAgentSessionId: string | null = null;
+  private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
+  private readonly attachLifecycle = new AttachLifecycle((event) => {
+    if (event.type === 'attached' && this.pendingAttachedAgentSession?.sessionId === event.sessionId) {
+      this.attachedAgentSessionId = this.pendingAttachedAgentSession.agentSessionId;
+      this.pendingAttachedAgentSession = null;
+    }
+    if (event.type === 'attached' && this.attachedAgentSessionId) {
+      this.emit({ ...event, agentSessionId: this.attachedAgentSessionId });
+      return;
+    }
+    if (event.type === 'detached' || event.type === 'session_exited') {
+      this.attachedAgentSessionId = null;
+      this.pendingAttachedAgentSession = null;
+    }
+    this.emit(event);
+  });
   private sessionSocket: LocalSessionSocketConnection | null = null;
   private sessionSocketSessionId: string | null = null;
   private sessionSocketGeneration = 0;
@@ -459,6 +475,8 @@ export class LocalSessionBackend implements SessionBackend {
     const wasAttached = this.attachLifecycle.isAttached;
     await this.closeSessionSocket(false);
     this.attachLifecycle.reset();
+    this.attachedAgentSessionId = null;
+    this.pendingAttachedAgentSession = null;
     this.connected = false;
     this.emit({ type: 'status', status: 'disconnected' });
     if (wasAttached) {
@@ -1399,15 +1417,51 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent restore response');
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean } = {}): Promise<void> {
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const response = await this.sendTmuxCommand({ type: 'agent-attach', target, agentSessionId });
+    const response = await this.sendTmuxCommand({ type: 'agent-attach', target, agentSessionId, cols: options.cols, rows: options.rows });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    await this.refreshMachineSnapshotState();
-    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly });
+    this.pendingAttachedAgentSession = {
+      agentSessionId,
+      sessionId: response.session.id,
+    };
+    try {
+      await this.refreshMachineSnapshotState();
+      await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+    } catch (error) {
+      this.pendingAttachedAgentSession = null;
+      this.attachedAgentSessionId = null;
+      throw error;
+    }
+  }
+
+  async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-prompt', target, agentSessionId, text, images });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error(`Unexpected prompt response: ${response.type}`);
+  }
+
+  async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-stage-upload', target, fileName, data, mimeType });
+    if (response.type === 'agent-staged') return { stagedPath: response.stagedPath };
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected stage upload response');
+  }
+
+  async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
+    if (response.type === 'agent-bool') {
+      if (response.ok) return;
+      throw new Error(`Dialog is no longer pending: ${dialogId}`);
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected dialog response acknowledgement');
   }
 
   // ============================================================================
@@ -1450,5 +1504,21 @@ export class LocalSessionBackend implements SessionBackend {
     const prefs = await this.loadAgentPrefs();
     prefs[workspaceId] = sessionId;
     await this.saveAgentPrefs(prefs);
+  }
+
+  async listAgentCommands(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-list-commands', target });
+    if (response.type === 'agent-commands') return response.commands;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected list commands response');
+  }
+
+  async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-file-suggestions', target, prefix, limit });
+    if (response.type === 'agent-file-suggestions') return response.suggestions;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected file suggestions response');
   }
 }

@@ -5,6 +5,7 @@
  * for the `gssh machine serve` command group.
  */
 
+import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getSpacesDir } from '../core/config.js';
@@ -32,9 +33,19 @@ export function getServePidFile(): string {
   return join(getServeDaemonDir(), 'serve.pid');
 }
 
-/** Get serve status socket path */
+/** Maximum Unix domain socket path length (macOS: 104 bytes). */
+const MAX_UNIX_SOCKET_PATH = 104;
+
+/** Get serve status socket path, shortened if the full path would exceed the OS limit. */
 export function getServeSocketPath(): string {
-  return join(getServeDaemonDir(), 'serve.sock');
+  const full = join(getServeDaemonDir(), 'serve.sock');
+  if (Buffer.byteLength(full) <= MAX_UNIX_SOCKET_PATH) {
+    return full;
+  }
+  // Fall back to /tmp with a hash of the daemon dir to avoid collisions.
+  // createHash imported at module level — safe for ESM (no require)
+  const hash = createHash('sha256').update(getServeDaemonDir()).digest('hex').slice(0, 12);
+  return `/tmp/gssh-serve-${hash}.sock`;
 }
 
 /** Get serve log file path */

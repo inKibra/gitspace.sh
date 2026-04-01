@@ -90,11 +90,11 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
         <code key={key} style={{
           fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
           fontSize: '11px',
-          background: '#0d1117',
-          border: '1px solid #30363d',
+          background: 'var(--gs-bg)',
+          border: '1px solid var(--gs-border)',
           borderRadius: '3px',
           padding: '0 4px',
-          color: '#c9d1d9',
+          color: 'var(--gs-text-secondary)',
         }}>
           {token.slice(1, -1)}
         </code>
@@ -122,7 +122,7 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          style={{ color: '#58a6ff' }}
+          style={{ color: 'var(--gs-info)' }}
         >
           {label}
         </a>
@@ -173,8 +173,8 @@ function renderMarkdownBody(markdown: string, keyPrefix: string): ReactNode[] {
         margin: '0 0 6px 0',
         padding: '8px',
         borderRadius: '6px',
-        background: '#0d1117',
-        border: '1px solid #30363d',
+        background: 'var(--gs-bg)',
+        border: '1px solid var(--gs-border)',
         overflowX: 'auto',
       }}>
         <code style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: '11px' }}>
@@ -320,22 +320,22 @@ export function ThreadPanel({
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        background: '#0d1117',
-        borderLeft: '1px solid #30363d',
+        background: 'var(--gs-bg)',
+        borderLeft: '1px solid var(--gs-border)',
       }}>
         <div style={{
           padding: '12px 16px',
-          borderBottom: '1px solid #30363d',
+          borderBottom: '1px solid var(--gs-border)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
         }}>
-          <span style={{ fontSize: '13px', fontWeight: 600, color: '#e6edf3' }}>Review Threads</span>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--gs-text)' }}>Review Threads</span>
           {onClose && (
-            <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: '16px' }}>×</button>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--gs-text-muted)', cursor: 'pointer', fontSize: '16px' }}>×</button>
           )}
         </div>
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8b949e', fontSize: '13px' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--gs-text-muted)', fontSize: '13px' }}>
           {filterMode === 'current-file'
             ? 'No threads for the current file.'
             : filterMode === 'current-hunk'
@@ -351,22 +351,22 @@ export function ThreadPanel({
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
-      background: '#0d1117',
-      borderLeft: '1px solid #30363d',
+      background: 'var(--gs-bg)',
+      borderLeft: '1px solid var(--gs-border)',
       overflow: 'hidden',
     }}>
       {/* Header */}
       <div style={{
         padding: '12px 16px',
-        borderBottom: '1px solid #30363d',
+        borderBottom: '1px solid var(--gs-border)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
         flexShrink: 0,
       }}>
-        <span style={{ fontSize: '13px', fontWeight: 600, color: '#e6edf3' }}>
+        <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--gs-text)' }}>
           Review Threads
-          <span style={{ marginLeft: '8px', fontSize: '11px', color: '#8b949e', fontWeight: 400 }}>
+          <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--gs-text-muted)', fontWeight: 400 }}>
             ({visibleThreads.filter((t) => !t.resolved).length} open)
           </span>
         </span>
@@ -377,9 +377,9 @@ export function ThreadPanel({
               fontSize: '10px',
               padding: '2px 8px',
               borderRadius: '999px',
-              border: '1px solid #30363d',
-              background: filterMode === 'all' ? '#1f6feb33' : '#21262d',
-              color: filterMode === 'all' ? '#58a6ff' : '#8b949e',
+              border: '1px solid var(--gs-border)',
+              background: filterMode === 'all' ? 'var(--gs-chip-blue-bg)' : 'var(--gs-btn-secondary-bg)',
+              color: filterMode === 'all' ? 'var(--gs-info)' : 'var(--gs-text-muted)',
               cursor: 'pointer',
             }}
           >
@@ -392,9 +392,9 @@ export function ThreadPanel({
               fontSize: '10px',
               padding: '2px 8px',
               borderRadius: '999px',
-              border: '1px solid #30363d',
-              background: filterMode === 'current-file' ? '#1f6feb33' : '#21262d',
-              color: filterMode === 'current-file' ? '#58a6ff' : '#8b949e',
+              border: '1px solid var(--gs-border)',
+              background: filterMode === 'current-file' ? 'var(--gs-chip-blue-bg)' : 'var(--gs-btn-secondary-bg)',
+              color: filterMode === 'current-file' ? 'var(--gs-info)' : 'var(--gs-text-muted)',
               cursor: currentFilePath ? 'pointer' : 'not-allowed',
             }}
           >
@@ -407,9 +407,9 @@ export function ThreadPanel({
               fontSize: '10px',
               padding: '2px 8px',
               borderRadius: '999px',
-              border: '1px solid #30363d',
-              background: filterMode === 'current-hunk' ? '#1f6feb33' : '#21262d',
-              color: filterMode === 'current-hunk' ? '#58a6ff' : '#8b949e',
+              border: '1px solid var(--gs-border)',
+              background: filterMode === 'current-hunk' ? 'var(--gs-chip-blue-bg)' : 'var(--gs-btn-secondary-bg)',
+              color: filterMode === 'current-hunk' ? 'var(--gs-info)' : 'var(--gs-text-muted)',
               cursor: hunkFocus ? 'pointer' : 'not-allowed',
             }}
           >
@@ -418,7 +418,7 @@ export function ThreadPanel({
           {onClose && (
             <button
               onClick={onClose}
-              style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: '16px', padding: '0 4px' }}
+              style={{ background: 'none', border: 'none', color: 'var(--gs-text-muted)', cursor: 'pointer', fontSize: '16px', padding: '0 4px' }}
             >
               ×
             </button>
@@ -429,15 +429,15 @@ export function ThreadPanel({
       {filterMode === 'current-hunk' && hunkFocus && (
         <div style={{
           padding: '8px 12px',
-          borderBottom: '1px solid #21262d',
+          borderBottom: '1px solid var(--gs-border-muted)',
           fontSize: '11px',
-          color: '#8b949e',
-          background: '#11161d',
+          color: 'var(--gs-text-muted)',
+          background: 'var(--gs-bg)',
           display: 'flex',
           gap: '6px',
           alignItems: 'center',
         }}>
-          <span style={{ color: '#58a6ff', fontWeight: 600 }}>Hunk filter</span>
+          <span style={{ color: 'var(--gs-info)', fontWeight: 600 }}>Hunk filter</span>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {normalizeHunkHeader(hunkFocus.hunkHeader)}
           </span>
@@ -448,9 +448,9 @@ export function ThreadPanel({
               fontSize: '10px',
               padding: '1px 6px',
               borderRadius: '3px',
-              border: '1px solid #30363d',
-              background: '#21262d',
-              color: '#8b949e',
+              border: '1px solid var(--gs-border)',
+              background: 'var(--gs-btn-secondary-bg)',
+              color: 'var(--gs-text-muted)',
               cursor: 'pointer',
             }}
           >
@@ -471,9 +471,9 @@ export function ThreadPanel({
               key={thread.id}
               ref={(el) => { threadRefs.current[thread.id] = el; }}
               style={{
-                borderBottom: '1px solid #21262d',
-                background: isSelected ? '#161b22' : isHovered ? '#1b2230' : 'transparent',
-                boxShadow: isHovered ? 'inset 2px 0 0 #58a6ff' : undefined,
+                borderBottom: '1px solid var(--gs-border-muted)',
+                background: isSelected ? 'var(--gs-bg-elevated)' : isHovered ? 'var(--gs-bg-hover)' : 'transparent',
+                boxShadow: isHovered ? 'inset 2px 0 0 var(--gs-info)' : undefined,
               }}
             >
               {/* Thread header */}
@@ -494,9 +494,9 @@ export function ThreadPanel({
                   )}
                   {/* Resolved badge */}
                   {thread.resolved && (
-                    <span style={{ fontSize: '11px', color: '#6e7681' }}>✓ Resolved</span>
+                    <span style={{ fontSize: '11px', color: 'var(--gs-text-dim)' }}>✓ Resolved</span>
                   )}
-                  <span style={{ fontSize: '11px', color: '#6e7681', marginLeft: 'auto' }}>
+                  <span style={{ fontSize: '11px', color: 'var(--gs-text-dim)', marginLeft: 'auto' }}>
                     {targetLabel(thread)}
                   </span>
                   {thread.target.kind !== 'workspace' && (
@@ -506,9 +506,9 @@ export function ThreadPanel({
                         fontSize: '10px',
                         padding: '1px 6px',
                         borderRadius: '3px',
-                        border: '1px solid #30363d',
-                        background: '#21262d',
-                        color: '#58a6ff',
+                        border: '1px solid var(--gs-border)',
+                        background: 'var(--gs-btn-secondary-bg)',
+                        color: 'var(--gs-info)',
                         cursor: 'pointer',
                       }}
                     >
@@ -532,9 +532,9 @@ export function ThreadPanel({
                           borderRadius: '4px',
                           border: '1px solid',
                           cursor: 'pointer',
-                          background: decision === d ? REVIEW_DECISION_COLORS[d] + '33' : '#21262d',
-                          color: decision === d ? REVIEW_DECISION_COLORS[d] : '#8b949e',
-                          borderColor: decision === d ? REVIEW_DECISION_COLORS[d] + '66' : '#30363d',
+                          background: decision === d ? REVIEW_DECISION_COLORS[d] + '33' : 'var(--gs-btn-secondary-bg)',
+                          color: decision === d ? REVIEW_DECISION_COLORS[d] : 'var(--gs-text-muted)',
+                          borderColor: decision === d ? REVIEW_DECISION_COLORS[d] + '66' : 'var(--gs-border)',
                         }}
                       >
                         {d === 'approved' ? '✓ Approve' : d === 'rejected' ? '✗ Reject' : '⏳ Pending'}
@@ -550,14 +550,14 @@ export function ThreadPanel({
                     style={{
                       marginBottom: '8px',
                       paddingLeft: idx > 0 ? '12px' : 0,
-                      borderLeft: idx > 0 ? '2px solid #21262d' : 'none',
+                      borderLeft: idx > 0 ? '2px solid var(--gs-border-muted)' : 'none',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
-                      <span style={{ fontSize: '12px', fontWeight: 600, color: '#58a6ff' }}>{comment.author}</span>
-                      <span style={{ fontSize: '11px', color: '#6e7681' }}>{formatDate(comment.createdAt)}</span>
+                      <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--gs-info)' }}>{comment.author}</span>
+                      <span style={{ fontSize: '11px', color: 'var(--gs-text-dim)' }}>{formatDate(comment.createdAt)}</span>
                       {comment.githubId && (
-                        <span style={{ fontSize: '10px', color: '#6e7681' }}>· GH</span>
+                        <span style={{ fontSize: '10px', color: 'var(--gs-text-dim)' }}>· GH</span>
                       )}
                     </div>
 
@@ -569,10 +569,10 @@ export function ThreadPanel({
                           rows={3}
                           style={{
                             width: '100%',
-                            background: '#161b22',
-                            border: '1px solid #30363d',
+                            background: 'var(--gs-bg-elevated)',
+                            border: '1px solid var(--gs-border)',
                             borderRadius: '4px',
-                            color: '#e6edf3',
+                            color: 'var(--gs-text)',
                             padding: '6px',
                             fontSize: '12px',
                             resize: 'vertical',
@@ -589,8 +589,8 @@ export function ThreadPanel({
                             style={{
                               fontSize: '11px',
                               padding: '3px 10px',
-                              background: '#22c55e',
-                              color: '#0d1117',
+                              background: 'var(--gs-accent)',
+                              color: 'var(--gs-text-on-accent)',
                               border: 'none',
                               borderRadius: '4px',
                               cursor: 'pointer',
@@ -603,9 +603,9 @@ export function ThreadPanel({
                             style={{
                               fontSize: '11px',
                               padding: '3px 10px',
-                              background: '#21262d',
-                              color: '#8b949e',
-                              border: '1px solid #30363d',
+                              background: 'var(--gs-btn-secondary-bg)',
+                              color: 'var(--gs-text-muted)',
+                              border: '1px solid var(--gs-border)',
                               borderRadius: '4px',
                               cursor: 'pointer',
                             }}
@@ -619,7 +619,7 @@ export function ThreadPanel({
                         <div style={{
                           flex: 1,
                           fontSize: '12px',
-                          color: '#e6edf3',
+                          color: 'var(--gs-text)',
                           margin: 0,
                           whiteSpace: 'normal',
                           wordBreak: 'break-word',
@@ -635,8 +635,8 @@ export function ThreadPanel({
                                 fontSize: '10px',
                                 padding: '1px 5px',
                                 background: 'none',
-                                color: '#6e7681',
-                                border: '1px solid #30363d',
+                                color: 'var(--gs-text-dim)',
+                                border: '1px solid var(--gs-border)',
                                 borderRadius: '3px',
                                 cursor: 'pointer',
                               }}
@@ -651,8 +651,8 @@ export function ThreadPanel({
                                 fontSize: '10px',
                                 padding: '1px 5px',
                                 background: 'none',
-                                color: '#f85149',
-                                border: '1px solid #f8514944',
+                                color: 'var(--gs-danger)',
+                                border: '1px solid var(--gs-danger)',
                                 borderRadius: '3px',
                                 cursor: 'pointer',
                               }}
@@ -676,10 +676,10 @@ export function ThreadPanel({
                       rows={2}
                       style={{
                         width: '100%',
-                        background: '#161b22',
-                        border: '1px solid #30363d',
+                        background: 'var(--gs-bg-elevated)',
+                        border: '1px solid var(--gs-border)',
                         borderRadius: '4px',
-                        color: '#e6edf3',
+                        color: 'var(--gs-text)',
                         padding: '6px',
                         fontSize: '12px',
                         resize: 'vertical',
@@ -702,8 +702,8 @@ export function ThreadPanel({
                         style={{
                           fontSize: '11px',
                           padding: '3px 10px',
-                          background: '#22c55e',
-                          color: '#0d1117',
+                          background: 'var(--gs-accent)',
+                          color: 'var(--gs-text-on-accent)',
                           border: 'none',
                           borderRadius: '4px',
                           cursor: 'pointer',
@@ -716,9 +716,9 @@ export function ThreadPanel({
                         style={{
                           fontSize: '11px',
                           padding: '3px 10px',
-                          background: '#21262d',
-                          color: '#8b949e',
-                          border: '1px solid #30363d',
+                          background: 'var(--gs-btn-secondary-bg)',
+                          color: 'var(--gs-text-muted)',
+                          border: '1px solid var(--gs-border)',
                           borderRadius: '4px',
                           cursor: 'pointer',
                         }}
@@ -735,8 +735,8 @@ export function ThreadPanel({
                         fontSize: '11px',
                         padding: '2px 8px',
                         background: 'none',
-                        color: '#58a6ff',
-                        border: '1px solid #30363d',
+                        color: 'var(--gs-info)',
+                        border: '1px solid var(--gs-border)',
                         borderRadius: '4px',
                         cursor: 'pointer',
                       }}
@@ -751,8 +751,8 @@ export function ThreadPanel({
                         fontSize: '11px',
                         padding: '2px 8px',
                         background: 'none',
-                        color: thread.resolved ? '#6e7681' : '#22c55e',
-                        border: '1px solid #30363d',
+                        color: thread.resolved ? 'var(--gs-text-dim)' : 'var(--gs-accent)',
+                        border: '1px solid var(--gs-border)',
                         borderRadius: '4px',
                         cursor: 'pointer',
                       }}

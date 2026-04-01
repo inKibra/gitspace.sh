@@ -50,24 +50,24 @@ export function ScriptTerminal({
       : 'Complete';
 
   const statusColor = isRunning
-    ? 'text-[#d29922]'
+    ? 'text-[var(--gs-warning)]'
     : error
-      ? 'text-[#ff7b72]'
-      : 'text-[#3fb950]';
+      ? 'text-[var(--gs-danger-hover)]'
+      : 'text-[var(--gs-success)]';
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#0d1117]">
-      <div className="bg-[#161b22] px-4 py-2 flex items-center justify-between border-b border-[#30363d] min-h-[52px] gap-2">
+    <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
+      <div className="bg-[var(--gs-bg-elevated)] px-4 py-2 flex items-center justify-between border-b border-[var(--gs-border)] min-h-[52px] gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[#3fb950] font-medium">{PHASE_LABELS[phase]}</span>
-          <span className="text-[#8b949e] truncate">- {workspaceName}</span>
+          <span className="text-[var(--gs-success)] font-medium">{PHASE_LABELS[phase]}</span>
+          <span className="text-[var(--gs-text-muted)] truncate">- {workspaceName}</span>
         </div>
         <div className="flex items-center gap-3">
           <span className={`text-sm ${statusColor}`}>{statusText}</span>
           {isRunning && onCancel && (
             <button
               onClick={onCancel}
-              className="px-3 py-2 text-sm bg-[#4d2d00] hover:bg-[#6b3f00] rounded text-[#ffd8a8] border border-[#8b5a2b]"
+              className="px-3 py-2 text-sm bg-[var(--gs-chip-amber-bg)] hover:bg-[var(--gs-chip-amber-border)] rounded text-[var(--gs-warning-bright)] border border-[var(--gs-chip-amber-border)]"
             >
               Cancel Scripts
             </button>
@@ -79,14 +79,14 @@ export function ScriptTerminal({
                   onClick={() => {
                     void onAttachAnyway();
                   }}
-                  className="px-3 py-2 text-sm bg-[#0f3d2e] hover:bg-[#14553f] rounded text-[#b6f2d6] border border-[#2f8f68]"
+                  className="px-3 py-2 text-sm bg-[var(--gs-chip-green-bg)] hover:bg-[var(--gs-success-muted)] rounded text-[var(--gs-chip-green-text)] border border-[var(--gs-chip-green-border)]"
                 >
                   Attach Anyway
                 </button>
               )}
               <button
                 onClick={onBack}
-                className="px-3 py-2 text-sm bg-[#21262d] hover:bg-[#30363d] rounded text-[#e6edf3] border border-[#30363d]"
+                className="px-3 py-2 text-sm bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] rounded text-[var(--gs-text)] border border-[var(--gs-border)]"
               >
                 Back
               </button>
@@ -106,7 +106,7 @@ export function ScriptTerminal({
       </div>
 
       {error && !isRunning && (
-        <div className="bg-[#331111] border-t border-[#552222] px-3 py-1 text-[#ff7b72] text-sm truncate">
+        <div className="bg-[var(--gs-chip-red-bg)] border-t border-[var(--gs-chip-red-border)] px-3 py-1 text-[var(--gs-danger-hover)] text-sm truncate">
           {error}
         </div>
       )}

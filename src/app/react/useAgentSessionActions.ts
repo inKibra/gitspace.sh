@@ -12,11 +12,13 @@ import { useAppClient } from './useAppClient.js';
 export interface AgentSessionOpenCallbacks {
   beforeOpen?: () => void | Promise<void>;
   onOpenSuccess?: (value: AppClientAgentSessionOpenValue) => void | Promise<void>;
+  onOpenError?: (error: AgentSessionCommandError) => void | Promise<void>;
+  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number };
 }
 
 export interface UseAgentSessionActionsOptions extends AgentSessionOpenCallbacks {
   client?: AppClient | AppClientContext | null;
-  flow: Pick<UseFlowReturn, 'showInput'>;
+  flow: Pick<UseFlowReturn, 'showInput'> & Partial<Pick<UseFlowReturn, 'showLoading' | 'close'>>;
   onError?: (message: string, error: AgentSessionCommandError) => void;
 }
 
@@ -54,13 +56,34 @@ function formatAgentSessionError(action: AgentSessionActionName, error: AgentSes
   }
 }
 
+function composeCallbacks<TArgs extends unknown[]>(
+  base: ((...args: TArgs) => void | Promise<void>) | undefined,
+  override: ((...args: TArgs) => void | Promise<void>) | undefined,
+  order: 'base-first' | 'override-first' = 'base-first',
+): ((...args: TArgs) => Promise<void>) | undefined {
+  if (!base && !override) {
+    return undefined;
+  }
+  return async (...args: TArgs) => {
+    if (order === 'override-first') {
+      await override?.(...args);
+      await base?.(...args);
+      return;
+    }
+    await base?.(...args);
+    await override?.(...args);
+  };
+}
+
 export function useAgentSessionActions(options: UseAgentSessionActionsOptions): UseAgentSessionActionsResult {
   const client = useAppClient(options.client ?? null);
 
   const resolveOpenCallbacks = useCallback((overrides?: AgentSessionOpenCallbacks): AgentSessionOpenCallbacks => ({
-    beforeOpen: overrides?.beforeOpen ?? options.beforeOpen,
-    onOpenSuccess: overrides?.onOpenSuccess ?? options.onOpenSuccess,
-  }), [options.beforeOpen, options.onOpenSuccess]);
+    beforeOpen: composeCallbacks(options.beforeOpen, overrides?.beforeOpen),
+    onOpenSuccess: composeCallbacks(options.onOpenSuccess, overrides?.onOpenSuccess),
+    onOpenError: composeCallbacks(options.onOpenError, overrides?.onOpenError),
+    attachOptions: overrides?.attachOptions ?? options.attachOptions,
+  }), [options.beforeOpen, options.onOpenSuccess, options.onOpenError, options.attachOptions]);
 
   const reportError = useCallback((action: AgentSessionActionName, error: AgentSessionCommandError): void => {
     options.onError?.(formatAgentSessionError(action, error), error);
@@ -74,8 +97,9 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
     const resolvedCallbacks = resolveOpenCallbacks(callbacks);
     await resolvedCallbacks.beforeOpen?.();
 
-    const result = await client.agentSessions.open({ workspaceId, agentSessionId });
+    const result = await client.agentSessions.open({ workspaceId, agentSessionId, attachOptions: resolvedCallbacks.attachOptions });
     if (!result.ok) {
+      await resolvedCallbacks.onOpenError?.(result.error);
       reportError('open', result.error);
       return null;
     }
@@ -83,7 +107,6 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
     await resolvedCallbacks.onOpenSuccess?.(result.value);
     return result.value;
   }, [client, reportError, resolveOpenCallbacks]);
-
   const createAndOpen = useCallback((workspaceId: string, callbacks?: AgentSessionOpenCallbacks): void => {
     const resolvedCallbacks = resolveOpenCallbacks(callbacks);
     options.flow.showInput({
@@ -93,13 +116,25 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
       onSubmit: async (value) => {
         await resolvedCallbacks.beforeOpen?.();
         const title = value.trim() || undefined;
-        const result = await client.agentSessions.createAndOpen({ workspaceId, title });
-        if (!result.ok) {
-          reportError('create', result.error);
-          return;
-        }
+        options.flow.showLoading?.({
+          title: 'Creating Agent Session',
+          message: title ? `Creating ${title}...` : 'Creating agent session...',
+        });
+        try {
+          const result = await client.agentSessions.createAndOpen({ workspaceId, title, attachOptions: resolvedCallbacks.attachOptions });
+          if (!result.ok) {
+            options.flow.close?.();
+            await resolvedCallbacks.onOpenError?.(result.error);
+            reportError('create', result.error);
+            return;
+          }
 
-        await resolvedCallbacks.onOpenSuccess?.(result.value);
+          options.flow.close?.();
+          await resolvedCallbacks.onOpenSuccess?.(result.value);
+        } catch (error) {
+          options.flow.close?.();
+          throw error;
+        }
       },
     });
   }, [client, options.flow, reportError, resolveOpenCallbacks]);

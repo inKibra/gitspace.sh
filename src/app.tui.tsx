@@ -38,7 +38,7 @@ import {
 } from './components/index.js';
 import { FlowTUI } from './components/Flow.tui.js';
 import { KanbanBoardTUI } from './components/KanbanBoard.tui.js';
-import { WorkspaceDetailScreen } from './components/WorkspaceDetailScreen.tui.js';
+import { WorkspaceDetailScreen, WORKSPACE_DETAIL_TERMINAL_RESERVED_COLS, WORKSPACE_DETAIL_TERMINAL_RESERVED_ROWS } from './components/WorkspaceDetailScreen.tui.js';
 import type { TreeItem } from './components/SpacesBrowser.js';
 import { InboxTUI } from './components/Inbox.tui.js';
 import { useInboxPage } from './app/react/index.js';
@@ -366,7 +366,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const currentProject =
     localProjects.find((project) => project.isCurrent)?.name ?? localProjects[0]?.name ?? null;
 
-  const getLocalAttachSize = useCallback(() => {
+  const getTerminalViewportSize = useCallback((reservedCols = 0, reservedRows = 0) => {
     let cols = process.stdout.columns || 0;
     let rows = process.stdout.rows || 0;
     if (cols <= 0 || rows <= 0) {
@@ -377,11 +377,24 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
       }
     }
 
+    const viewportCols = cols > 0 ? cols : 80;
+    const viewportRows = rows > 0 ? rows : 24;
     return {
-      cols: cols > 0 ? cols : 80,
-      rows: Math.max(1, (rows > 0 ? rows : 24) - 1),
+      cols: Math.max(40, viewportCols - reservedCols),
+      rows: Math.max(1, viewportRows - reservedRows),
     };
   }, []);
+
+  const getLocalAttachSize = useCallback(() => {
+    return getTerminalViewportSize(0, 1);
+  }, [getTerminalViewportSize]);
+
+  const getWorkspaceDetailAgentAttachSize = useCallback(() => {
+    return getTerminalViewportSize(
+      WORKSPACE_DETAIL_TERMINAL_RESERVED_COLS,
+      WORKSPACE_DETAIL_TERMINAL_RESERVED_ROWS,
+    );
+  }, [getTerminalViewportSize]);
 
   const resolveLocalWorkspaceProjectName = useCallback((workspaceId: string) => {
     const separator = workspaceId.indexOf(':');
@@ -1121,12 +1134,16 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   }, [restoreAgentSessionAction]);
 
   const handleOpenAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await openAgentSessionAction(workspaceId, agentSessionId);
-  }, [openAgentSessionAction]);
+    await openAgentSessionAction(workspaceId, agentSessionId, {
+      attachOptions: getWorkspaceDetailAgentAttachSize(),
+    });
+  }, [openAgentSessionAction, getWorkspaceDetailAgentAttachSize]);
 
   const handleCreateAgentSession = useCallback((workspaceId: string) => {
-    createAgentSessionAction(workspaceId);
-  }, [createAgentSessionAction]);
+    createAgentSessionAction(workspaceId, {
+      attachOptions: getWorkspaceDetailAgentAttachSize(),
+    });
+  }, [createAgentSessionAction, getWorkspaceDetailAgentAttachSize]);
 
   // Spaces browser hook (full project list; when a workspace is selected we show WorkspaceDetailPaneTUI instead)
   const spacesBrowserProps = useSpacesBrowser({

@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import rootPackageJson from '../../../../package.json';
 import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
-import type { OmpAgentSession, OmpModule, PiAiModule } from './omp-types.js';
+import type { OmpAgentSession, OmpModule, OmpCreateSessionResult, PiAiModule } from './omp-types.js';
 
 const OMP_PACKAGE = '@oh-my-pi/pi-coding-agent';
 const PI_AI_PACKAGE = '@oh-my-pi/pi-ai';
@@ -229,14 +229,16 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     }
   }
 
-  const { session } = await createAgentSession({
+  const result = await createAgentSession({
     agentDir,
     sessionManager,
     cwd,
     authStorage,
     modelRegistry,
     model: restoredModel,
+    hasUI: true,
   });
+  const { session, setToolUIContext } = result;
   if (restoredModel && !session.model) {
     await session.setModel(restoredModel);
   }
@@ -244,6 +246,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     agentDir,
     sessionManager,
     session,
+    setToolUIContext,
   };
 }
 
