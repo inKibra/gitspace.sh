@@ -46,10 +46,10 @@
         "typescript": "^5.9.3",
       },
       "optionalDependencies": {
-        "@gitspace/darwin-arm64": "0.2.0-rc.36",
-        "@gitspace/darwin-x64": "0.2.0-rc.36",
-        "@gitspace/linux-arm64": "0.2.0-rc.36",
-        "@gitspace/linux-x64": "0.2.0-rc.36",
+        "@gitspace/darwin-arm64": "0.2.0-rc.38",
+        "@gitspace/darwin-x64": "0.2.0-rc.38",
+        "@gitspace/linux-arm64": "0.2.0-rc.38",
+        "@gitspace/linux-x64": "0.2.0-rc.38",
       },
     },
   },
@@ -160,13 +160,13 @@
 
     "@fly/sprites": ["@fly/sprites@0.0.1-rc37", "", {}, "sha512-yzjJ8bsBl1XoECSols0iFvvmlqiog22ODO8F3Z+8mao44ZaMYiOVjRTuSd2g+rE0OFuj0u/ctlpPTHfVdpgWKA=="],
 
-    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.36", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-S5f7P0oI4SA1OBeoNBk/S64VHwviIFTf1TmxLLn8FyK9CISqk5Y0/XUNUsHxShHhONOCVb3wlfG/zUYIobX/jw=="],
+    "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.38", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-0oqD0sb+w09n8O2+Fa8zULqS5dPutHpxpiuKHKSFU99/KEM7eNj/OXbS39vn9RQUrduaY+QkHs6nVTaWWjZlfQ=="],
 
-    "@gitspace/darwin-x64": ["@gitspace/darwin-x64@0.2.0-rc.36", "", { "os": "darwin", "cpu": "x64", "bin": { "gssh-darwin-x64": "bin/gssh" } }, "sha512-IYV/uNUIDduMT9h13d4RKbKDRvgiFFAx04z6VfhRDYx5oTtt/SQMx9hNK26yGdVL9jB0REUJKF4j8hnWbrwNnw=="],
+    "@gitspace/darwin-x64": ["@gitspace/darwin-x64@0.2.0-rc.38", "", { "os": "darwin", "cpu": "x64", "bin": { "gssh-darwin-x64": "bin/gssh" } }, "sha512-tZundEmfhmq2GCROi8CyphL/NisuJIDfpJAwSr8F4HRLp8A0tagFB+Phn0ffEV/tT8Z3YHfMrnCu8Ch44zswQQ=="],
 
-    "@gitspace/linux-arm64": ["@gitspace/linux-arm64@0.2.0-rc.36", "", { "os": "linux", "cpu": "arm64", "bin": { "gssh-linux-arm64": "bin/gssh" } }, "sha512-uF9zVa0YwNVQ6mLDANcBBoyPjeMzqXX85+EbOC8f/bUbkH5wVeCn61Jvc9Yz7O/p02KFWA2c+o1fnrRWC8BQwg=="],
+    "@gitspace/linux-arm64": ["@gitspace/linux-arm64@0.2.0-rc.38", "", { "os": "linux", "cpu": "arm64", "bin": { "gssh-linux-arm64": "bin/gssh" } }, "sha512-CF62/RGuDviVSiwyledDVKByf8NHcZrZKb80+I1gpMZJHaz2/CtPIOPD8+i9fMvGHQXFLYPa4Ve/IE9ewQAFEw=="],
 
-    "@gitspace/linux-x64": ["@gitspace/linux-x64@0.2.0-rc.36", "", { "os": "linux", "cpu": "x64", "bin": { "gssh-linux-x64": "bin/gssh" } }, "sha512-JUM4KSvoV64vmiTfN/BtRXUU4y2/eY9Reoi1RFZSMolwGWnRG2PENii6xbFcXU2oon1/nKGq462zM9h8QuGTrw=="],
+    "@gitspace/linux-x64": ["@gitspace/linux-x64@0.2.0-rc.38", "", { "os": "linux", "cpu": "x64", "bin": { "gssh-linux-x64": "bin/gssh" } }, "sha512-VmekNilF1J2Q/Q4cZzRNK4YD+XUjdp3zETAkccIoUKRHaPMF8wQkDHUb7UVzM/6nDC25lI2GTI55OR+ZGNirfA=="],
 
     "@google/genai": ["@google/genai@1.46.0", "", { "dependencies": { "google-auth-library": "^10.3.0", "p-retry": "^4.6.2", "protobufjs": "^7.5.4", "ws": "^8.18.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.2" }, "optionalPeers": ["@modelcontextprotocol/sdk"] }, "sha512-ewPMN5JkKfgU5/kdco9ZhXBHDPhVqZpMQqIFQhwsHLf8kyZfx1cNpw1pHo1eV6PGEW7EhIBFi3aYZraFndAXqg=="],
 
