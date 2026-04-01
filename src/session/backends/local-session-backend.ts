@@ -1419,8 +1419,13 @@ export class LocalSessionBackend implements SessionBackend {
       throw new Error('Unexpected agent attach response');
     }
     this.attachedAgentSessionId = agentSessionId;
-    await this.refreshMachineSnapshotState();
-    await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+    try {
+      await this.refreshMachineSnapshotState();
+      await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+    } catch (error) {
+      this.attachedAgentSessionId = null;
+      throw error;
+    }
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
@@ -1439,7 +1444,12 @@ export class LocalSessionBackend implements SessionBackend {
 
   async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
     const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
+    if (response.type === 'agent-bool') {
+      if (response.ok) return;
+      throw new Error(`Dialog is no longer pending: ${dialogId}`);
+    }
     if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected dialog response acknowledgement');
   }
 
   // ============================================================================

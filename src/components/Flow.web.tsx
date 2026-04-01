@@ -324,9 +324,20 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
 
               {step.type === 'select' && step.options && (
                 <div className="gs-select-list">
-                  {step.options.map((option, idx) => (
-                    <div key={idx} className="gs-select-item">{option.label}</div>
-                  ))}
+                  {step.options.map((option, idx) => {
+                    const isSelected = state.inputValue === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => flow.handleSelect(idx)}
+                        aria-pressed={isSelected}
+                        className={`gs-select-item text-left ${isSelected ? 'gs-select-item--active' : ''}`}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>

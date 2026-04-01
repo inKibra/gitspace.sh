@@ -265,17 +265,13 @@ export async function stageUploadFile(
 ): Promise<{ stagedPath: string }> {
   await ensureAgentControlInitialized();
   const { join, basename } = await import('path');
-  const { mkdirSync, writeFileSync, existsSync } = await import('fs');
+  const { mkdirSync, writeFileSync } = await import('fs');
 
-  // Conservative upload size limit: 20 MB decoded.
-  // Base64 encodes 3 bytes as 4 chars, so a 20 MB payload is at most ~27 MB of base64.
-  // Reject oversized strings before allocating the decode buffer.
   const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
   if (data.length > MAX_UPLOAD_BYTES * 2) {
     throw new Error(`Upload rejected: base64 input length ${data.length} exceeds maximum`);
   }
 
-  // Sanitize filename: strip path components, limit length
   let safeName = basename(fileName).replace(/[\/\\:*?"<>|]/g, '_');
   if (safeName.length > 200) safeName = safeName.slice(0, 200);
   if (!safeName) safeName = 'upload';
@@ -283,29 +279,30 @@ export async function stageUploadFile(
   const stagingDir = join(target.workspacePath, '.gitspace', 'uploads');
   mkdirSync(stagingDir, { recursive: true });
 
-  // Deduplicate: if file exists, append _N before extension
-  let finalName = safeName;
-  let finalPath = join(stagingDir, finalName);
-  if (existsSync(finalPath)) {
-    const dotIdx = safeName.lastIndexOf('.');
-    const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
-    const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
-    let counter = 1;
-    while (existsSync(finalPath)) {
-      finalName = `${base}_${counter}${ext}`;
-      finalPath = join(stagingDir, finalName);
-      counter++;
-    }
-  }
+  const dotIdx = safeName.lastIndexOf('.');
+  const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
+  const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
 
-  // Decode and validate byte size before writing — do not partially commit an oversized file.
   const bytes = Buffer.from(data, 'base64');
   if (bytes.length > MAX_UPLOAD_BYTES) {
     throw new Error(`Upload rejected: decoded file size ${bytes.length} bytes exceeds limit of ${MAX_UPLOAD_BYTES} bytes`);
   }
-  writeFileSync(finalPath, bytes);
 
-  return { stagedPath: finalPath };
+  let counter = 0;
+  let finalName = safeName;
+  let finalPath = join(stagingDir, finalName);
+  for (;;) {
+    try {
+      writeFileSync(finalPath, bytes, { flag: 'wx' });
+      return { stagedPath: finalPath };
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (code !== 'EEXIST') throw error;
+      counter += 1;
+      finalName = `${base}_${counter}${ext}`;
+      finalPath = join(stagingDir, finalName);
+    }
+  }
 }
 
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
@@ -409,61 +406,54 @@ export async function getFileSuggestions(
     limit: number = 50,
 ): Promise<Array<{ path: string; isDirectory: boolean }>> {
     await ensureAgentControlInitialized();
-    const { join, resolve } = await import('path');
-    const { readdirSync } = await import('fs');
+    const { join, relative } = await import('path');
+    const { readdirSync, realpathSync } = await import('fs');
 
     const results: Array<{ path: string; isDirectory: boolean }> = [];
     const workspacePath = target.workspacePath;
 
-    // Normalize prefix: strip leading @ if present
     const cleanPrefix = prefix.startsWith('@') ? prefix.slice(1) : prefix;
-
-    // Reject absolute paths and any segment that is `..`; either can escape the workspace.
     if (cleanPrefix.startsWith('/') || cleanPrefix.split('/').some((seg) => seg === '..')) {
-        return [];
+      return [];
     }
 
-    // Determine search directory and name prefix from the cleaned input
     const lastSlash = cleanPrefix.lastIndexOf('/');
     const searchDir = lastSlash >= 0
-        ? join(workspacePath, cleanPrefix.slice(0, lastSlash))
-        : workspacePath;
+      ? join(workspacePath, cleanPrefix.slice(0, lastSlash))
+      : workspacePath;
     const filePrefix = lastSlash >= 0
-        ? cleanPrefix.slice(lastSlash + 1).toLowerCase()
-        : cleanPrefix.toLowerCase();
+      ? cleanPrefix.slice(lastSlash + 1).toLowerCase()
+      : cleanPrefix.toLowerCase();
     const relativeBase = lastSlash >= 0 ? cleanPrefix.slice(0, lastSlash + 1) : '';
 
-    // Resolved guard: ensure searchDir is still inside the workspace (defense in depth).
-    const resolvedSearch = resolve(searchDir);
-    const resolvedWorkspace = resolve(workspacePath);
-    if (resolvedSearch !== resolvedWorkspace && !resolvedSearch.startsWith(resolvedWorkspace + '/')) {
-        return [];
-    }
-
     try {
-        const entries = readdirSync(searchDir, { withFileTypes: true });
-        for (const entry of entries) {
-            if (results.length >= limit) break;
-            // Skip hidden files and noisy directories
-            if (entry.name.startsWith('.')) continue;
-            if (entry.isDirectory() && ['node_modules', '__pycache__', '.git'].includes(entry.name)) continue;
+      const resolvedWorkspace = realpathSync(workspacePath);
+      const resolvedSearch = realpathSync(searchDir);
+      const relativeSearch = relative(resolvedWorkspace, resolvedSearch);
+      if (relativeSearch === '..' || relativeSearch.startsWith('../') || relativeSearch.startsWith('..\\')) {
+        return [];
+      }
 
-            if (entry.name.toLowerCase().startsWith(filePrefix)) {
-                results.push({
-                    path: relativeBase + entry.name,
-                    isDirectory: entry.isDirectory(),
-                });
-            }
+      const entries = readdirSync(resolvedSearch, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        if (entry.isDirectory() && ['node_modules', '__pycache__', '.git'].includes(entry.name)) continue;
+
+        if (entry.name.toLowerCase().startsWith(filePrefix)) {
+          results.push({
+            path: relativeBase + entry.name,
+            isDirectory: entry.isDirectory(),
+          });
         }
+      }
     } catch {
-        // Directory doesn't exist or isn't readable — return empty
+      // Directory doesn't exist or isn't readable — return empty
     }
 
-    // Directories first, then alphabetical within each group
     results.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.path.localeCompare(b.path);
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.path.localeCompare(b.path);
     });
 
-    return results;
+    return results.slice(0, limit);
 }

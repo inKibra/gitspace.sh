@@ -274,6 +274,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const backendLiveEventIds = activeBackendState?.liveEventIds ?? [];
   const backendSavedEventFilters = activeBackendState?.savedEventFilters ?? [];
   const backendAttachedSessionId = attachedBackendState?.attachedSessionId ?? null;
+  const attachedTerminalInstanceKey = [
+    attachedBackendKey ?? 'none',
+    backendAttachedSessionId ?? 'none',
+    attachedBackendState?.attachedAgentSessionId ?? 'none',
+  ].join(':');
 
   const filteredWorkspaces = useMemo(
     () => workspaceRuntime.workspaces.filter((workspace) => workspace.backendKey === selectedBackendKey),
@@ -1634,6 +1639,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     ) : (terminalMode === 'attached' && attachedMatchesSelected) ? (
       <div className="flex-1 min-h-0 flex flex-col">
         <AttachedTerminalPaneWeb
+          key={attachedTerminalInstanceKey}
           rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
           headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
           sessionName={attachedSessionName}
@@ -1669,7 +1675,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onModifiersChange={setModifiers}
           showFloatingControls={showInlineFloatingControls}
         />
-        <NativeAgentSurfaceConnected />
+        <NativeAgentSurfaceConnected backendKey={attachedBackendKey ?? activeBackendKey ?? undefined} />
       </div>
     ) : agentAttachPending ? (
       <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
@@ -1823,6 +1829,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return (
       <>
         <AttachedTerminalPaneWeb
+          key={attachedTerminalInstanceKey}
           rootClassName="w-screen h-screen flex flex-col bg-[var(--gs-bg)] overflow-hidden"
           headerClassName="bg-[var(--gs-bg-elevated)] px-4 py-2 flex items-center justify-between border-b border-[var(--gs-border)] min-h-[52px] gap-2 flex-shrink-0"
           leadingContent={(

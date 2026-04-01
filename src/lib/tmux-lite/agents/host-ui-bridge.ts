@@ -9,12 +9,12 @@
  *     → returns the result to the SDK
  *
  * The bridge is installed into each agent session via setToolUIContext().
- * Dialog requests are broadcast to all watching clients (web/TUI).
- * Only the first response resolves the pending Promise.
+ * Dialog requests are emitted to the owning native client and resolved from its response.
  */
 
 import type { OmpHostUIContext, OmpDialogOptions } from './omp-types.js';
 
+type HostUIDialogOptions = Pick<OmpDialogOptions, 'helpText'>;
 // ---------------------------------------------------------------------------
 // Dialog request types — server → client
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ export type HostUIDialogRequest =
       sessionId: string;
       title: string;
       options: string[];
-      dialogOptions?: OmpDialogOptions;
+      dialogOptions?: HostUIDialogOptions;
     }
   | {
       type: 'confirm';
@@ -34,7 +34,7 @@ export type HostUIDialogRequest =
       sessionId: string;
       title: string;
       message: string;
-      dialogOptions?: OmpDialogOptions;
+      dialogOptions?: HostUIDialogOptions;
     }
   | {
       type: 'input';
@@ -42,7 +42,7 @@ export type HostUIDialogRequest =
       sessionId: string;
       title: string;
       placeholder?: string;
-      dialogOptions?: OmpDialogOptions;
+      dialogOptions?: HostUIDialogOptions;
     }
   | {
       type: 'editor';
@@ -133,6 +133,12 @@ interface PendingDialog<T> {
   reject: (error: Error) => void;
 }
 
+function sanitizeDialogOptions(dialogOptions?: OmpDialogOptions): HostUIDialogOptions | undefined {
+  if (!dialogOptions?.helpText) return undefined;
+  return { helpText: dialogOptions.helpText };
+}
+
+
 let dialogIdCounter = 0;
 function nextDialogId(): string {
   return `dlg-${++dialogIdCounter}-${Date.now().toString(36)}`;
@@ -159,7 +165,7 @@ export class HostUIBridgeState {
           sessionId,
           title,
           options,
-          dialogOptions,
+          dialogOptions: sanitizeDialogOptions(dialogOptions),
         });
       },
 
@@ -170,7 +176,7 @@ export class HostUIBridgeState {
           sessionId,
           title,
           message,
-          dialogOptions,
+          dialogOptions: sanitizeDialogOptions(dialogOptions),
         });
       },
 
@@ -181,7 +187,7 @@ export class HostUIBridgeState {
           sessionId,
           title,
           placeholder,
-          dialogOptions,
+          dialogOptions: sanitizeDialogOptions(dialogOptions),
         });
       },
 

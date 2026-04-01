@@ -157,11 +157,17 @@ export function getSessionSocketPath(id: string): string {
   return socketPath;
 }
 
+export const MAX_ROUTER_MESSAGE_SIZE = 32 * 1024 * 1024;
+
+
 const ROUTER_FRAME_HEADER_BYTES = 4;
 
 export function encodeRouterMessage(msg: Command | Response): Buffer {
   const json = JSON.stringify(msg);
   const len = Buffer.byteLength(json);
+  if (len > MAX_ROUTER_MESSAGE_SIZE) {
+    throw new Error(`Router message size ${len} exceeds maximum ${MAX_ROUTER_MESSAGE_SIZE}`);
+  }
   const buf = Buffer.alloc(ROUTER_FRAME_HEADER_BYTES + len);
   buf.writeUInt32BE(len, 0);
   buf.write(json, ROUTER_FRAME_HEADER_BYTES);
@@ -177,6 +183,9 @@ export function decodeRouterMessages(buffer: Buffer): {
 
   while (offset + ROUTER_FRAME_HEADER_BYTES <= buffer.length) {
     const len = buffer.readUInt32BE(offset);
+    if (len > MAX_ROUTER_MESSAGE_SIZE) {
+      throw new Error(`Router message size ${len} exceeds maximum ${MAX_ROUTER_MESSAGE_SIZE}`);
+    }
     const frameEnd = offset + ROUTER_FRAME_HEADER_BYTES + len;
     if (frameEnd > buffer.length) {
       break;

@@ -724,6 +724,7 @@ export class PiCoordinator {
     unsubscribe?.();
     this.sessionUnsubscribers.delete(sessionId);
     this.sessionUIBinders.delete(sessionId);
+    this.hostUIBridge.rejectAllForSession(sessionId, `Agent session disposed: ${sessionId}`);
 
     const modeHandle = this.virtualModeHandles.get(sessionId);
     if (modeHandle) {

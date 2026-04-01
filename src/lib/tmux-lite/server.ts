@@ -272,6 +272,8 @@ interface RouterSocketState {
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
 const agentStateWatchers = new Set<object>();
 const machineStateWatchers = new Set<object>();
+const agentSessionWatchOwners = new Map<string, object>();
+const agentDialogOwners = new Map<string, object>();
 
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
@@ -282,9 +284,30 @@ function getRouterSocketState(socket: object): RouterSocketState {
   return state;
 }
 
+function deleteOwnedEntries(map: Map<string, object>, socket: object): void {
+  for (const [key, owner] of map) {
+    if (owner === socket) {
+      map.delete(key);
+    }
+  }
+}
+
+function pickAgentDialogWatcher(sessionId: string): object | null {
+  const owner = agentSessionWatchOwners.get(sessionId);
+  if (owner && agentStateWatchers.has(owner)) {
+    return owner;
+  }
+  for (const socket of agentStateWatchers) {
+    return socket;
+  }
+  return null;
+}
+
 function clearRouterSocketState(socket: object): void {
   agentStateWatchers.delete(socket);
   machineStateWatchers.delete(socket);
+  deleteOwnedEntries(agentSessionWatchOwners, socket);
+  deleteOwnedEntries(agentDialogOwners, socket);
   routerSocketStates.delete(socket);
 }
 
@@ -364,12 +387,17 @@ async function getAgentControlReady(): Promise<void> {
     // and UI events are broadcast to all watching clients.
     setAgentHostUIEmitter({
       emitDialogRequest(request) {
-        for (const socket of agentStateWatchers) {
-          try {
-            sendRouterResponse(socket, { type: 'agent-dialog-request', request });
-          } catch {
-            agentStateWatchers.delete(socket);
-          }
+        const socket = pickAgentDialogWatcher(request.sessionId);
+        if (!socket) {
+          console.warn(`[server] dropping host UI dialog ${request.id}: no watching client for session ${request.sessionId}`);
+          return;
+        }
+        try {
+          agentDialogOwners.set(request.id, socket);
+          sendRouterResponse(socket, { type: 'agent-dialog-request', request });
+        } catch {
+          agentDialogOwners.delete(request.id);
+          clearRouterSocketState(socket);
         }
       },
       emitEvent(event) {
@@ -377,7 +405,7 @@ async function getAgentControlReady(): Promise<void> {
           try {
             sendRouterResponse(socket, { type: 'agent-ui-event', event });
           } catch {
-            agentStateWatchers.delete(socket);
+            clearRouterSocketState(socket);
           }
         }
       },
@@ -2962,6 +2990,7 @@ routerListener = Bun.listen({
             try {
               await getAgentControlReady();
               const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
+              agentSessionWatchOwners.set(cmd.agentSessionId, socket);
               res = { type: 'session', session };
               void broadcastMachineSnapshotReplacement().catch(() => {});
             } catch (e) {
@@ -2988,11 +3017,17 @@ routerListener = Bun.listen({
 
           case 'agent-dialog-response':
             try {
+              const owner = agentDialogOwners.get(cmd.dialogId);
+              if (owner && owner !== socket) {
+                res = { type: 'agent-bool', ok: false };
+                break;
+              }
               const resolved = resolveAgentDialogResponse({
                 type: cmd.dialogType,
                 id: cmd.dialogId,
                 value: cmd.value as any,
               });
+              agentDialogOwners.delete(cmd.dialogId);
               res = { type: 'agent-bool', ok: resolved };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

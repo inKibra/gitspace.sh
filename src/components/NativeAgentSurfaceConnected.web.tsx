@@ -1,15 +1,20 @@
 /** @jsxImportSource react */
 import { useCallback } from 'react';
+import { toast } from 'sonner';
 import { useGitSpace } from '../sdk/index.js';
 import { NativeAgentSurface } from './NativeAgentSurface.web.js';
 import type { HostUIDialogResponse } from '../lib/tmux-lite/agents/host-ui-bridge.js';
 
-export function NativeAgentSurfaceConnected() {
+interface NativeAgentSurfaceConnectedProps {
+  backendKey?: string | null;
+}
+
+export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceConnectedProps = {}) {
   const { engine, state: multiState } = useGitSpace();
-  const activeBackendKey = multiState.activeBackendKey;
+  const resolvedBackendKey = backendKey ?? multiState.activeBackendKey;
 
   // Read agent session context and host UI state from multiState (reactive).
-  const activeBackend = activeBackendKey ? multiState.byBackend[activeBackendKey] : null;
+  const activeBackend = resolvedBackendKey ? multiState.byBackend[resolvedBackendKey] : null;
   const agentSessionId = activeBackend?.attachedAgentSessionId ?? null;
   const workspaceId = activeBackend?.attachedWorkspaceId ?? null;
   const agentAttached = !!(agentSessionId && workspaceId);
@@ -17,21 +22,19 @@ export function NativeAgentSurfaceConnected() {
   const workingMessage = activeBackend?.agentWorkingMessage;
 
   const handleSubmit = useCallback(async (text: string, rawImages: Array<{ dataUrl: string; name: string }>, rawFiles: Array<{ name: string; dataUrl: string }>) => {
-    if (!activeBackendKey || !agentSessionId || !workspaceId) return;
-    // Convert data URLs to raw base64 + mimeType for the agent prompt pipeline
+    if (!resolvedBackendKey || !agentSessionId || !workspaceId) return;
     const images = rawImages
       .filter(img => img.dataUrl)
       .map(img => {
-        // dataUrl format: "data:<mimeType>;base64,<data>"
         const commaIdx = img.dataUrl.indexOf(',');
-        const meta = img.dataUrl.slice(0, commaIdx); // "data:image/png;base64"
+        const meta = img.dataUrl.slice(0, commaIdx);
         const mimeType = meta.replace('data:', '').replace(';base64', '');
         const data = img.dataUrl.slice(commaIdx + 1);
         return { data, mimeType };
       });
 
-    // Stage non-image files and collect @ references
     let augmentedText = text;
+    const stagedFileNames: string[] = [];
     for (const file of rawFiles) {
       if (!file.dataUrl) continue;
       try {
@@ -40,26 +43,27 @@ export function NativeAgentSurfaceConnected() {
         const mimeType = meta.replace('data:', '').replace(';base64', '');
         const data = file.dataUrl.slice(commaIdx + 1);
         const result = await engine.stageUpload(
-          { backendKey: activeBackendKey, workspaceId },
+          { backendKey: resolvedBackendKey, workspaceId },
           file.name,
           data,
           mimeType,
         );
+        stagedFileNames.push(file.name);
         augmentedText = augmentedText
           ? `${augmentedText} @${result.stagedPath}`
           : `@${result.stagedPath}`;
       } catch (err) {
         console.error('Failed to stage file:', file.name, err);
+        toast.error(`Failed to attach ${file.name}`);
       }
     }
 
-    // Build attachment indicators so the prompt text is honest about what's attached
     const indicators: string[] = [];
     for (const img of rawImages) {
       if (img.dataUrl) indicators.push(`[image: ${img.name}]`);
     }
-    for (const file of rawFiles) {
-      if (file.dataUrl) indicators.push(`[file: ${file.name}]`);
+    for (const fileName of stagedFileNames) {
+      indicators.push(`[file: ${fileName}]`);
     }
     if (indicators.length > 0) {
       const suffix = indicators.join(' ');
@@ -67,40 +71,46 @@ export function NativeAgentSurfaceConnected() {
     }
 
     void engine.promptAgentSession(
-      { backendKey: activeBackendKey, workspaceId, agentSessionId },
+      { backendKey: resolvedBackendKey, workspaceId, agentSessionId },
       augmentedText,
       images.length > 0 ? images : undefined,
     );
-  }, [engine, activeBackendKey, workspaceId, agentSessionId]);
+  }, [engine, resolvedBackendKey, workspaceId, agentSessionId]);
 
   const handleAbort = useCallback(() => {
-    if (!activeBackendKey || !agentSessionId || !workspaceId) return;
-    void engine.abortAgentSession({ backendKey: activeBackendKey, workspaceId, agentSessionId });
-  }, [engine, activeBackendKey, workspaceId, agentSessionId]);
+    if (!resolvedBackendKey || !agentSessionId || !workspaceId) return;
+    void engine.abortAgentSession({ backendKey: resolvedBackendKey, workspaceId, agentSessionId });
+  }, [engine, resolvedBackendKey, workspaceId, agentSessionId]);
 
   const handleDialogResponse = useCallback((response: HostUIDialogResponse) => {
-    if (!activeBackendKey) return;
-    void engine.sendDialogResponse(activeBackendKey, response.id, response.type, response.value);
-    engine.clearPendingDialog(activeBackendKey);
-  }, [engine, activeBackendKey]);
+    if (!resolvedBackendKey) return;
+    void engine.sendDialogResponse(resolvedBackendKey, response.id, response.type, response.value)
+      .then(() => {
+        engine.clearPendingDialog(resolvedBackendKey);
+      })
+      .catch((error) => {
+        console.error('Failed to send dialog response', error);
+        toast.error(error instanceof Error ? error.message : 'Failed to submit dialog response');
+      });
+  }, [engine, resolvedBackendKey]);
 
   const handleRequestCommands = useCallback(async () => {
-    if (!activeBackendKey || !workspaceId) return [];
+    if (!resolvedBackendKey || !workspaceId) return [];
     try {
-      return await engine.listAgentCommands({ backendKey: activeBackendKey, workspaceId });
+      return await engine.listAgentCommands({ backendKey: resolvedBackendKey, workspaceId });
     } catch {
       return [];
     }
-  }, [engine, activeBackendKey, workspaceId]);
+  }, [engine, resolvedBackendKey, workspaceId]);
 
   const handleRequestFileSuggestions = useCallback(async (prefix: string) => {
-    if (!activeBackendKey || !workspaceId) return [];
+    if (!resolvedBackendKey || !workspaceId) return [];
     try {
-      return await engine.getFileSuggestions({ backendKey: activeBackendKey, workspaceId }, prefix, 20);
+      return await engine.getFileSuggestions({ backendKey: resolvedBackendKey, workspaceId }, prefix, 20);
     } catch {
       return [];
     }
-  }, [engine, activeBackendKey, workspaceId]);
+  }, [engine, resolvedBackendKey, workspaceId]);
 
   return (
     <NativeAgentSurface

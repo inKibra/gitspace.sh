@@ -808,7 +808,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
     const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
+    if (response.type === 'agent-bool') {
+      if (response.ok) return;
+      throw new Error(`Dialog is no longer pending: ${dialogId}`);
+    }
     if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected dialog response acknowledgement');
   }
 
   async listAgentCommands(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {

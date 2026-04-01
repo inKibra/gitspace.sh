@@ -175,6 +175,19 @@ export interface UseFlowReturn {
 // Hook Implementation
 // ============================================================================
 
+function getWizardStepInputValue(
+  step: FlowWizardStep | undefined,
+  collectedValues: Record<string, string>,
+): string {
+  if (!step) return '';
+  const collectedValue = collectedValues[step.id];
+  if (typeof collectedValue === 'string') return collectedValue;
+  if (typeof step.defaultValue === 'string') return step.defaultValue;
+  if (step.type === 'select') return step.options?.[0]?.value ?? '';
+  return '';
+}
+
+
 export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   const { onError } = props;
 
@@ -225,12 +238,13 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
   // Show wizard
   const showWizard = useCallback((opts: Omit<FlowWizard, 'type' | 'currentStep' | 'collectedValues' | 'inputValue'>) => {
     const firstStep = opts.steps[0];
+    const collectedValues: Record<string, string> = {};
     setFlow({
       type: 'wizard',
       ...opts,
       currentStep: 0,
-      collectedValues: {},
-      inputValue: firstStep?.defaultValue || '',
+      collectedValues,
+      inputValue: getWizardStepInputValue(firstStep, collectedValues),
     });
   }, []);
 
@@ -270,8 +284,8 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         const currentStep = flow.steps[flow.currentStep];
         const newValues = { ...flow.collectedValues };
 
-        if (currentStep && (currentStep.type === 'input' || currentStep.type === 'secret')) {
-          if (currentStep.validation) {
+        if (currentStep && (currentStep.type === 'input' || currentStep.type === 'secret' || currentStep.type === 'select')) {
+          if ((currentStep.type === 'input' || currentStep.type === 'secret') && currentStep.validation) {
             const error = currentStep.validation(flow.inputValue);
             if (error) return;
           }
@@ -289,7 +303,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
             ...flow,
             currentStep: flow.currentStep + 1,
             collectedValues: newValues,
-            inputValue: nextStep?.defaultValue || '',
+            inputValue: getWizardStepInputValue(nextStep, newValues),
           });
         }
       } else if (flow.type === 'message' || flow.type === 'help') {
@@ -345,6 +359,20 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         ...flow,
         selectedIndex: hasVisibleIndex ? index : fallbackIndex,
       });
+      return;
+    }
+
+    if (flow.type === 'wizard') {
+      const step = flow.steps[flow.currentStep];
+      if (step?.type !== 'select' || !step.options?.length) {
+        return;
+      }
+      const option = step.options[index] ?? step.options[0];
+      if (!option) return;
+      setFlow({
+        ...flow,
+        inputValue: option.value,
+      });
     }
   }, [flow]);
 
@@ -379,6 +407,17 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
       const currentVisiblePosition = visibleOptions.findIndex(({ index }) => index === flow.selectedIndex);
       const nextVisiblePosition = currentVisiblePosition <= 0 ? 0 : currentVisiblePosition - 1;
       setFlow({ ...flow, selectedIndex: visibleOptions[nextVisiblePosition]?.index ?? flow.selectedIndex });
+      return;
+    }
+
+    if (flow.type === 'wizard') {
+      const step = flow.steps[flow.currentStep];
+      if (step?.type !== 'select' || !step.options?.length) {
+        return;
+      }
+      const currentIndex = Math.max(0, step.options.findIndex((option) => option.value === flow.inputValue));
+      const nextIndex = currentIndex <= 0 ? 0 : currentIndex - 1;
+      setFlow({ ...flow, inputValue: step.options[nextIndex]?.value ?? flow.inputValue });
     }
   }, [flow]);
 
@@ -395,6 +434,19 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
         ? 0
         : Math.min(visibleOptions.length - 1, currentVisiblePosition + 1);
       setFlow({ ...flow, selectedIndex: visibleOptions[nextVisiblePosition]?.index ?? flow.selectedIndex });
+      return;
+    }
+
+    if (flow.type === 'wizard') {
+      const step = flow.steps[flow.currentStep];
+      if (step?.type !== 'select' || !step.options?.length) {
+        return;
+      }
+      const currentIndex = step.options.findIndex((option) => option.value === flow.inputValue);
+      const nextIndex = currentIndex < 0
+        ? 0
+        : Math.min(step.options.length - 1, currentIndex + 1);
+      setFlow({ ...flow, inputValue: step.options[nextIndex]?.value ?? flow.inputValue });
     }
   }, [flow]);
 
@@ -405,7 +457,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
       setFlow({
         ...flow,
         currentStep: flow.currentStep + 1,
-        inputValue: nextStepData?.defaultValue || '',
+        inputValue: getWizardStepInputValue(nextStepData, flow.collectedValues),
       });
     }
   }, [flow]);
@@ -416,7 +468,7 @@ export function useFlow(props: UseFlowProps = {}): UseFlowReturn {
       setFlow({
         ...flow,
         currentStep: flow.currentStep - 1,
-        inputValue: prevStepData?.defaultValue || '',
+        inputValue: getWizardStepInputValue(prevStepData, flow.collectedValues),
       });
     }
   }, [flow]);
