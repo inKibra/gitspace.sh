@@ -342,7 +342,7 @@ export class ClientSessionManager {
     requestId: string,
     command: TmuxCommand,
   ): Promise<{ type: 'tmux_command_response'; requestId: string; response: TmuxResponse } | null> {
-    if (!canManage(session.accessType)) {
+    if (session.viewOnly || !canManage(session.accessType)) {
       return { type: 'tmux_command_response', requestId, response: { type: 'error', message: 'Permission denied' } };
     }
     try {

@@ -385,15 +385,19 @@ export class LocalSessionBackend implements SessionBackend {
   private readonly handlers = new Set<(event: BackendEvent) => void>();
   private connected = false;
   private attachedAgentSessionId: string | null = null;
+  private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
   private readonly attachLifecycle = new AttachLifecycle((event) => {
-    // Inject agentSessionId into attached events so the session engine knows
-    // when an agent session is active (mirrors remote backend behavior).
+    if (event.type === 'attached' && this.pendingAttachedAgentSession?.sessionId === event.sessionId) {
+      this.attachedAgentSessionId = this.pendingAttachedAgentSession.agentSessionId;
+      this.pendingAttachedAgentSession = null;
+    }
     if (event.type === 'attached' && this.attachedAgentSessionId) {
       this.emit({ ...event, agentSessionId: this.attachedAgentSessionId });
       return;
     }
     if (event.type === 'detached' || event.type === 'session_exited') {
       this.attachedAgentSessionId = null;
+      this.pendingAttachedAgentSession = null;
     }
     this.emit(event);
   });
@@ -472,6 +476,7 @@ export class LocalSessionBackend implements SessionBackend {
     await this.closeSessionSocket(false);
     this.attachLifecycle.reset();
     this.attachedAgentSessionId = null;
+    this.pendingAttachedAgentSession = null;
     this.connected = false;
     this.emit({ type: 'status', status: 'disconnected' });
     if (wasAttached) {
@@ -1419,11 +1424,15 @@ export class LocalSessionBackend implements SessionBackend {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    this.attachedAgentSessionId = agentSessionId;
+    this.pendingAttachedAgentSession = {
+      agentSessionId,
+      sessionId: response.session.id,
+    };
     try {
       await this.refreshMachineSnapshotState();
       await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
     } catch (error) {
+      this.pendingAttachedAgentSession = null;
       this.attachedAgentSessionId = null;
       throw error;
     }

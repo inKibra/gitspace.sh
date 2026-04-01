@@ -318,6 +318,34 @@ function sendRouterResponse(socket: any, response: Response): void {
   else socket.write(encodeRouterMessage(response));
 }
 
+const MIN_TERMINAL_COLS = 20;
+const MAX_TERMINAL_COLS = 1000;
+const MIN_TERMINAL_ROWS = 5;
+const MAX_TERMINAL_ROWS = 400;
+
+function clampTerminalDimension(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function clampTerminalSize(
+  cols: unknown,
+  rows: unknown,
+  fallback: { cols: number; rows: number } = { cols: 80, rows: 24 },
+): { cols: number; rows: number } {
+  return {
+    cols: clampTerminalDimension(cols, fallback.cols, MIN_TERMINAL_COLS, MAX_TERMINAL_COLS),
+    rows: clampTerminalDimension(rows, fallback.rows, MIN_TERMINAL_ROWS, MAX_TERMINAL_ROWS),
+  };
+}
+
 function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
   for (const socket of agentStateWatchers) {
     try {
@@ -390,16 +418,16 @@ async function getAgentControlReady(): Promise<void> {
       emitDialogRequest(request) {
         const socket = pickAgentDialogWatcher(request.sessionId);
         if (!socket) {
-          console.warn(`[server] dropping host UI dialog ${request.id}: no watching client for session ${request.sessionId}`);
-          return;
+          throw new Error(`No watching client for session ${request.sessionId}`);
         }
         try {
           agentDialogOwners.set(request.id, socket);
           sendRouterResponse(socket, { type: 'agent-dialog-request', request });
-        } catch {
+        } catch (error) {
           agentDialogOwners.delete(request.id);
           agentSessionWatchOwners.delete(request.sessionId);
           clearRouterSocketState(socket);
+          throw error instanceof Error ? error : new Error(String(error));
         }
       },
       emitEvent(event) {
@@ -413,7 +441,9 @@ async function getAgentControlReady(): Promise<void> {
       },
     });
   }
+
 }
+
 
 function ensureWorkspacePmSubscribed(): void {
   if (workspacePmSubscribed) {
@@ -1671,10 +1701,14 @@ function createSessionSocketHandlers(
       if (!session) return;
 
       const applyResize = (cols: number, rows: number) => {
+        const nextSize = clampTerminalSize(cols, rows, {
+          cols: session.xterm.cols,
+          rows: session.xterm.rows,
+        });
         try {
-          session.ptyTerminal.resize(cols, rows);
-          session.xterm.resize(cols, rows);
-          recordReplayEvent(session, { type: "resize", cols, rows });
+          session.ptyTerminal.resize(nextSize.cols, nextSize.rows);
+          session.xterm.resize(nextSize.cols, nextSize.rows);
+          recordReplayEvent(session, { type: "resize", cols: nextSize.cols, rows: nextSize.rows });
           scheduleReplayCheckpoint(session, true);
           // Send SIGWINCH to process group so children (vim, etc.) get it
           try {
@@ -2071,8 +2105,7 @@ function createVirtualSession(
   }
   safeUnlink(socketPath);
 
-  const cols = options?.cols && options.cols > 0 ? options.cols : 80;
-  const rows = options?.rows && options.rows > 0 ? options.rows : 24;
+  const { cols, rows } = clampTerminalSize(options?.cols, options?.rows);
   const xterm = new XTerminal({
     cols,
     rows,
@@ -2157,9 +2190,13 @@ function createVirtualSession(
       if (!session) return;
 
       const applyResize = (cols: number, rows: number) => {
+        const nextSize = clampTerminalSize(cols, rows, {
+          cols: session.xterm.cols,
+          rows: session.xterm.rows,
+        });
         try {
-          virtualTerminal.resize(cols, rows);
-          session.xterm.resize(cols, rows);
+          virtualTerminal.resize(nextSize.cols, nextSize.rows);
+          session.xterm.resize(nextSize.cols, nextSize.rows);
         } catch {}
       };
 
@@ -2426,6 +2463,26 @@ routerListener = Bun.listen({
               const errMsg = e instanceof Error ? e.message : String(e);
               console.error(`[server] createVirtualSession failed: ${errMsg}`);
               res = { type: 'error', message: `Failed to create virtual session: ${errMsg}` };
+            }
+            break;
+
+          case 'virtual-resize':
+            try {
+              const session = sessions.get(cmd.id);
+              if (!session || !session.virtualTerminal) {
+                res = { type: 'error', message: `Virtual session not found: ${cmd.id}` };
+                break;
+              }
+              const { cols, rows } = clampTerminalSize(cmd.cols, cmd.rows, {
+                cols: session.xterm.cols,
+                rows: session.xterm.rows,
+              });
+              session.virtualTerminal.resize(cols, rows);
+              session.xterm.resize(cols, rows);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resize virtual session: ${errMsg}` };
             }
             break;
 
@@ -3021,7 +3078,7 @@ routerListener = Bun.listen({
           case 'agent-dialog-response':
             try {
               const owner = agentDialogOwners.get(cmd.dialogId);
-              if (owner && owner !== socket) {
+              if (!owner || owner !== socket) {
                 res = { type: 'agent-bool', ok: false };
                 break;
               }

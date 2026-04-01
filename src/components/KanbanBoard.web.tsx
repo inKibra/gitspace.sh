@@ -137,10 +137,13 @@ function WorkspaceCard({
             <PmChip label={`${status.terminals.red} term err`} tone="red" />
           )}
 
-          {/* Services — show names */}
-          {status && status.services.green > 0 && serviceNames.length > 0 && (
+          {/* Services — show names without implying per-service health */}
+          {status && status.services.green > 0 && (
+            <PmChip label={`${status.services.green} svc run`} tone="dim" />
+          )}
+          {serviceNames.length > 0 && (
             serviceNames.map(svc => (
-              <PmChip key={svc} label={svc} tone="green" />
+              <PmChip key={svc} label={svc} tone="dim" />
             ))
           )}
           {status && status.services.red > 0 && (

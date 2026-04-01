@@ -836,6 +836,12 @@ export async function createVirtualSession(
   throw new Error('Unexpected response');
 }
 
+export async function resizeVirtualSession(id: string, cols: number, rows: number): Promise<void> {
+  await ensureServer();
+  const res = await send({ type: 'virtual-resize', id, cols, rows });
+  if (res.type === 'error') throw new Error(res.message);
+}
+
 export async function killSession(id: string): Promise<void> {
   await ensureServer();
   const res = await send({ type: "kill", id });

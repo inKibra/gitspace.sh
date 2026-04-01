@@ -301,9 +301,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private readonly handlers = new Set<(event: BackendEvent) => void>();
 
   private readonly attachLifecycle = new AttachLifecycle((event) => {
-    if (event.type === 'attached' && this.pendingAttachedAgentSessionId) {
-      this.attachedAgentSessionId = this.pendingAttachedAgentSessionId;
-      this.pendingAttachedAgentSessionId = null;
+    if (
+      event.type === 'attached'
+      && this.pendingAttachedAgentSession?.sessionId === event.sessionId
+    ) {
+      this.attachedAgentSessionId = this.pendingAttachedAgentSession.agentSessionId;
+      this.pendingAttachedAgentSession = null;
     }
     if (event.type === 'attached' && this.attachedAgentSessionId) {
       this.emit({ ...event, agentSessionId: this.attachedAgentSessionId });
@@ -311,7 +314,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     if (event.type === 'detached' || event.type === 'session_exited') {
       this.attachedAgentSessionId = null;
-      this.pendingAttachedAgentSessionId = null;
+      this.pendingAttachedAgentSession = null;
     }
     this.emit(event);
   });
@@ -319,7 +322,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private sessionKeys: SessionKeys | null = null;
   private isConnected = false;
   private attachedAgentSessionId: string | null = null;
-  private pendingAttachedAgentSessionId: string | null = null;
+  private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
   private listenersAttached = false;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -788,11 +791,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    this.pendingAttachedAgentSessionId = agentSessionId;
+    this.pendingAttachedAgentSession = {
+      agentSessionId,
+      sessionId: response.session.id,
+    };
     try {
       await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
     } catch (error) {
-      this.pendingAttachedAgentSessionId = null;
+      this.pendingAttachedAgentSession = null;
       throw error;
     }
   }
@@ -1815,7 +1821,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.handshakeState = null;
     this.sessionKeys = null;
     this.attachedAgentSessionId = null;
-    this.pendingAttachedAgentSessionId = null;
+    this.pendingAttachedAgentSession = null;
     this.pendingReplayFrameChunks.clear();
     this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);

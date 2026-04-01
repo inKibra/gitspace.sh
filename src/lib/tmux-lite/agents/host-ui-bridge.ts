@@ -134,6 +134,20 @@ interface PendingDialog<T> {
   reject: (error: Error) => void;
 }
 
+function isValidDialogResponseValue(dialogType: HostUIDialogResponse['type'], value: unknown): boolean {
+  switch (dialogType) {
+    case 'confirm':
+      return typeof value === 'boolean';
+    case 'select':
+    case 'input':
+    case 'editor':
+      return typeof value === 'string' || typeof value === 'undefined';
+    default:
+      return false;
+  }
+}
+
+
 function sanitizeDialogOptions(dialogOptions?: OmpDialogOptions): HostUIDialogOptions | undefined {
   if (!dialogOptions?.helpText) return undefined;
   return { helpText: dialogOptions.helpText };
@@ -272,6 +286,10 @@ export class HostUIBridgeState {
       pending.reject(new Error(`Dialog type mismatch for ${response.id}: expected ${pending.dialogType}, received ${response.type}`));
       return false;
     }
+    if (!isValidDialogResponseValue(pending.dialogType, response.value)) {
+      pending.reject(new Error(`Dialog value mismatch for ${response.id}: invalid payload for ${pending.dialogType}`));
+      return false;
+    }
     pending.resolve(response.value);
     return true;
   }
@@ -303,7 +321,12 @@ export class HostUIBridgeState {
         resolve: resolve as (value: unknown) => void,
         reject,
       });
-      emitter.emitDialogRequest(request);
+      try {
+        emitter.emitDialogRequest(request);
+      } catch (error) {
+        this.pendingDialogs.delete(request.id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 }

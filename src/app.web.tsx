@@ -563,6 +563,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         setAgentAttachPending(false);
         setPendingAgentAttachTarget(null);
       },
+      onOpenError: () => {
+        pendingAgentAttachTargetRef.current = null;
+        setAgentAttachPending(false);
+        setPendingAgentAttachTarget(null);
+      },
     });
   }, [createAgentSessionAction, getWebAgentAttachSize]);
 

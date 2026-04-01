@@ -349,6 +349,7 @@ export type Command =
       hidden?: boolean;
       metadata?: Record<string, string>;
     }
+  | { type: 'virtual-resize'; id: string; cols: number; rows: number }
   | {
       type: 'attach-prepare';
       requestId: string;

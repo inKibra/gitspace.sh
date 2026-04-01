@@ -162,4 +162,43 @@ describe('useAgentSessionActions', () => {
       "Failed to open agent session: workspace proj:ws-1 exists on multiple machines; select the workspace's machine first.",
     );
   });
+
+  it('calls onOpenError when createAndOpen fails', async () => {
+    const showInputCalls: Array<{ onSubmit: (value: string) => Promise<void> | void }> = [];
+    const showLoading = mock(() => undefined);
+    const close = mock(() => undefined);
+    const onOpenError = mock((_error: AgentSessionCommandError) => undefined);
+    const onError = mock((_message: string, _error: AgentSessionCommandError) => undefined);
+    const client = makeClient({
+      createAndOpen: mock(async () => ({
+        ok: false as const,
+        error: {
+          code: 'workspace-not-found' as const,
+          message: 'workspace missing',
+          workspaceId: 'proj:ws-1',
+        },
+      })),
+    });
+
+    const { result } = renderHook(() => useAgentSessionActions({
+      client,
+      flow: {
+        showInput: (options) => {
+          showInputCalls.push({ onSubmit: options.onSubmit });
+        },
+        showLoading,
+        close,
+      },
+      onError,
+    }));
+
+    result.current.createAndOpen('proj:ws-1', { onOpenError });
+    expect(showInputCalls.length).toBe(1);
+
+    await showInputCalls[0]?.onSubmit('broken');
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(onOpenError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
 });

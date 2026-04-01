@@ -12,6 +12,7 @@ import { useAppClient } from './useAppClient.js';
 export interface AgentSessionOpenCallbacks {
   beforeOpen?: () => void | Promise<void>;
   onOpenSuccess?: (value: AppClientAgentSessionOpenValue) => void | Promise<void>;
+  onOpenError?: (error: AgentSessionCommandError) => void | Promise<void>;
   attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number };
 }
 
@@ -61,8 +62,9 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
   const resolveOpenCallbacks = useCallback((overrides?: AgentSessionOpenCallbacks): AgentSessionOpenCallbacks => ({
     beforeOpen: overrides?.beforeOpen ?? options.beforeOpen,
     onOpenSuccess: overrides?.onOpenSuccess ?? options.onOpenSuccess,
+    onOpenError: overrides?.onOpenError ?? options.onOpenError,
     attachOptions: overrides?.attachOptions ?? options.attachOptions,
-  }), [options.beforeOpen, options.onOpenSuccess, options.attachOptions]);
+  }), [options.beforeOpen, options.onOpenSuccess, options.onOpenError, options.attachOptions]);
 
   const reportError = useCallback((action: AgentSessionActionName, error: AgentSessionCommandError): void => {
     options.onError?.(formatAgentSessionError(action, error), error);
@@ -78,6 +80,7 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
 
     const result = await client.agentSessions.open({ workspaceId, agentSessionId, attachOptions: resolvedCallbacks.attachOptions });
     if (!result.ok) {
+      await resolvedCallbacks.onOpenError?.(result.error);
       reportError('open', result.error);
       return null;
     }
@@ -85,7 +88,6 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
     await resolvedCallbacks.onOpenSuccess?.(result.value);
     return result.value;
   }, [client, reportError, resolveOpenCallbacks]);
-
   const createAndOpen = useCallback((workspaceId: string, callbacks?: AgentSessionOpenCallbacks): void => {
     const resolvedCallbacks = resolveOpenCallbacks(callbacks);
     options.flow.showInput({
@@ -99,15 +101,21 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
           title: 'Creating Agent Session',
           message: title ? `Creating ${title}...` : 'Creating agent session...',
         });
-        const result = await client.agentSessions.createAndOpen({ workspaceId, title, attachOptions: resolvedCallbacks.attachOptions });
-        if (!result.ok) {
-          options.flow.close?.();
-          reportError('create', result.error);
-          return;
-        }
+        try {
+          const result = await client.agentSessions.createAndOpen({ workspaceId, title, attachOptions: resolvedCallbacks.attachOptions });
+          if (!result.ok) {
+            options.flow.close?.();
+            await resolvedCallbacks.onOpenError?.(result.error);
+            reportError('create', result.error);
+            return;
+          }
 
-        options.flow.close?.();
-        await resolvedCallbacks.onOpenSuccess?.(result.value);
+          options.flow.close?.();
+          await resolvedCallbacks.onOpenSuccess?.(result.value);
+        } catch (error) {
+          options.flow.close?.();
+          throw error;
+        }
       },
     });
   }, [client, options.flow, reportError, resolveOpenCallbacks]);

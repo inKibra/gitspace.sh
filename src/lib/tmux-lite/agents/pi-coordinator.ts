@@ -4,6 +4,7 @@ import {
   killSession as killTmuxSession,
   listSessions as listTmuxSessions,
   createVirtualSession as createTmuxVirtualSession,
+  resizeVirtualSession as resizeTmuxVirtualSession,
 } from '../cli.js';
 import type { Session as TmuxSession } from '../protocol.js';
 import {
@@ -416,8 +417,7 @@ export class PiCoordinator {
     if (existing) {
       if (existing.exitCode === undefined) {
         if (options?.cols && options?.rows) {
-          const virtualTerminal = getVirtualTerminal(existing.id);
-          virtualTerminal?.resize(options.cols, options.rows);
+          await resizeTmuxVirtualSession(existing.id, options.cols, options.rows);
         }
         this.bindTerminalSession(target.workspaceId, existing.id, agentSessionId);
         return existing;
