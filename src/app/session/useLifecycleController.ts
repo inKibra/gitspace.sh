@@ -136,12 +136,16 @@ function toWizardSteps(
 
     const stepType = (step as { type: string }).type;
     const defaultValue = 'defaultValue' in step ? step.defaultValue : undefined;
+    const selectStep = stepType === 'select'
+      ? (step as { options?: Array<{ label: string; value: string }> })
+      : null;
     return {
       id: step.id,
       title: step.title,
       type: step.type,
       description: step.description,
       defaultValue: stepType === 'input' || stepType === 'select' ? defaultValue : undefined,
+      options: selectStep?.options?.map((option) => ({ label: option.label, value: option.value })),
       validation: buildOnboardingValidation(step),
     };
   });
