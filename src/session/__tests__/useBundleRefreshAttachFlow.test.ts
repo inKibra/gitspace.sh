@@ -1,27 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test'
 import { act, renderHook } from '@testing-library/react'
-import { Window } from 'happy-dom'
+import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js'
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js'
 import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js'
 import { useBundleRefreshAttachFlow } from '../useBundleRefreshAttachFlow.js'
 
 const TEST_REF: BackendScopedWorkspaceRef = { backendKey: 'local', workspaceId: 'test-project:test-workspace' }
 
-const domWindow = new Window()
-const originalWindow = globalThis.window
-const originalDocument = globalThis.document
+beforeAll(() => setupTestDom())
 
-beforeAll(() => {
-  // @ts-expect-error test DOM setup
-  globalThis.window = domWindow
-  // @ts-expect-error test DOM setup
-  globalThis.document = domWindow.document
-})
-
-afterAll(() => {
-  globalThis.window = originalWindow
-  globalThis.document = originalDocument
-})
+afterAll(() => teardownTestDom())
 
 function makePlan(overrides: Partial<BundleRefreshPlan> = {}): BundleRefreshPlan {
   return {

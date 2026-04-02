@@ -340,7 +340,7 @@ describe('RemoteSessionBackend', () => {
 
     await connectAndHandshake(backend, socket);
 
-    const machineSnapshot = createEmptyMachineSnapshot();
+    const machineSnapshot = createEmptyMachineSnapshot() as any;
     machineSnapshot.workspacesById['alpha:ws-1'] = {
       id: 'alpha:ws-1',
       name: 'ws-1',

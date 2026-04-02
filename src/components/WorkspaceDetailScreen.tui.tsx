@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * WorkspaceDetailScreen - Full-screen workspace detail view for TUI.
  *

@@ -19,6 +19,14 @@ export interface CreateRemoteBackendParams {
   machineId: string;
   deviceCertificate: string;
   machineLabel?: string;
+  storage?: KeyValueStorage | null;
+}
+
+/** Platform-neutral key-value storage (browser: localStorage, Bun: null or file-backed). */
+export interface KeyValueStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
 }
 
 /**
@@ -62,6 +70,12 @@ export interface PlatformAdapters {
    * Required when a relay is configured.
    */
   getDeviceCertificate?: (identity: Identity) => Promise<string>;
+
+  /** Optional key-value storage for persisting preferences (browser: localStorage). */
+  storage?: KeyValueStorage | null;
+
+  /** Optional clipboard write function (browser: navigator.clipboard.writeText). */
+  copyToClipboard?: (text: string) => Promise<void>;
 }
 
 // ─── Engine configuration ─────────────────────────────────────────────────────

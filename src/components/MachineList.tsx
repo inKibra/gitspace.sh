@@ -31,6 +31,7 @@ export interface UseMachineListProps {
   publicKey?: string | null;
   onConnect: (machine: MachineInfo) => void;
   onRefresh: () => void | Promise<void>;
+  copyToClipboard?: (text: string) => Promise<void>;
 }
 
 /** Machine list item with selection state */
@@ -72,7 +73,7 @@ export interface UseMachineListReturn {
 // ============================================================================
 
 export function useMachineList(props: UseMachineListProps): UseMachineListReturn {
-  const { machines, status, error, publicKey, onConnect, onRefresh } = props;
+  const { machines, status, error, publicKey, onConnect, onRefresh, copyToClipboard } = props;
 
   // Local UI state
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -117,16 +118,16 @@ export function useMachineList(props: UseMachineListProps): UseMachineListReturn
   }, [selectedMachine, onConnect]);
 
   const copyPublicKey = useCallback(async () => {
-    if (!publicKey) return;
+    if (!publicKey || !copyToClipboard) return;
 
     try {
-      await navigator.clipboard.writeText(publicKey);
+      await copyToClipboard(publicKey);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (e) {
       console.error('Failed to copy:', e);
     }
-  }, [publicKey]);
+  }, [publicKey, copyToClipboard]);
 
   const refresh = useCallback(async () => {
     await onRefresh();

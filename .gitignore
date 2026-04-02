@@ -8,6 +8,9 @@ pnpm-lock.yaml
 dist/
 npm/
 *.tsbuildinfo
+*.js.map
+*.d.ts.map
+*.jsx.map
 src/relay/embedded-assets.generated.js
 src/cloud/bootstrap-bundle.generated.js
 src/version.generated.ts

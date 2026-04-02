@@ -174,6 +174,7 @@ export interface RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHe
   signer: <T extends object>(message: T, identity: Identity) => T;
   crypto: RemoteSessionCryptoAdapter;
   handshake: RemoteSessionHandshakeAdapter<THandshakeState, TServerHello, TServerAuth>;
+  storage?: import('../../sdk/engine/types.js').KeyValueStorage | null;
 }
 
 const MACHINE_TO_CLIENT_TYPES = new Set<string>([
@@ -385,6 +386,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     timeout: ReturnType<typeof setTimeout>;
   } | null = null;
   private readonly machineStateClient = new MachineStateClient();
+  private readonly storage: import('../../sdk/engine/types.js').KeyValueStorage | null | undefined;
 
   constructor(options: RemoteSessionBackendOptions<TSocket, THandshakeState, TServerHello, TServerAuth>) {
     this.descriptor = options.descriptor;
@@ -396,6 +398,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.signer = options.signer;
     this.crypto = options.crypto;
     this.handshake = options.handshake;
+    this.storage = options.storage;
   }
 
   onEvent(handler: (event: BackendEvent) => void): () => void {
@@ -1991,16 +1994,27 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private remoteAgentPrefsCache: Record<string, string> = {};
 
   async getAgentSessionPreference(workspaceId: string): Promise<string | null> {
-    return this.remoteAgentPrefsCache[workspaceId] ?? null;
+    const cached = this.remoteAgentPrefsCache[workspaceId];
+    if (cached) return cached;
+    // Fall back to persistent storage (e.g. localStorage) so preferences
+    // survive page reloads even though the in-memory cache is empty.
+    try {
+      const stored = this.storage?.getItem(`gssh:agent-session:${workspaceId}`) ?? null;
+      if (stored) {
+        this.remoteAgentPrefsCache[workspaceId] = stored;
+        return stored;
+      }
+    } catch { /* storage unavailable */ }
+    return null;
   }
 
   async setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void> {
     this.remoteAgentPrefsCache[workspaceId] = sessionId;
-    // Best-effort: also persist to localStorage if available (web context)
+    // Best-effort: also persist to storage if available
     try {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(`gssh:agent-session:${workspaceId}`, sessionId);
-      }
-    } catch { /* non-fatal */ }
+      this.storage?.setItem(`gssh:agent-session:${workspaceId}`, sessionId);
+    } catch (e) {
+      console.warn('[remote-session-backend] Failed to persist agent session preference:', e);
+    }
   }
 }

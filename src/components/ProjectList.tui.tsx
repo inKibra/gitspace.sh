@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * ProjectList - TUI Display Component
  *

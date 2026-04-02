@@ -93,7 +93,7 @@ export class TailGhosttyTerminalRenderable extends GhosttyTerminalRenderable {
       const styledText = terminalDataToStyledText(data, state._highlights, cursor);
       state.textBuffer.setStyledText(styledText);
       state.updateTextInfo();
-      state._lineCount = state.textBufferView.logicalLineInfo.lineStarts.length;
+      state._lineCount = state.textBufferView?.logicalLineInfo?.lineStarts?.length ?? 0;
       state._ansiDirty = false;
       this._offset = data.offset;
       this._totalLines = data.totalLines;

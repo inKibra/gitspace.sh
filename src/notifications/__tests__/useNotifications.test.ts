@@ -1,19 +1,12 @@
 import { describe, expect, it, beforeEach, afterEach, mock, jest, beforeAll, afterAll } from 'bun:test';
 import { renderHook, act } from '@testing-library/react';
-import { Window } from 'happy-dom';
+import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
 import { useNotifications } from '../useNotifications';
 import type { NotificationConfig, ToastNotification } from '../types';
 import type { InboxItem } from '../../lib/remote-session/protocol';
 
-// Setup happy-dom for React Testing Library
-const window = new Window();
-const originalWindow = globalThis.window;
-const originalDocument = globalThis.document;
-
-// @ts-expect-error - assigning Window to globalThis
-globalThis.window = window;
-// @ts-expect-error - assigning Document to globalThis
-globalThis.document = window.document;
+beforeAll(() => setupTestDom());
+afterAll(() => teardownTestDom());
 
 // ============================================================================
 // Test Fixtures

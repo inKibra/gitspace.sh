@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
+    "target": "ES2024",
     "module": "ESNext",
-    "lib": ["ESNext", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
+    "lib": ["ES2024"],
     "moduleResolution": "bundler",
     "rootDir": "./src",
     "outDir": "./dist",
@@ -15,8 +15,8 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
-    "jsx": "react-jsx",
-    "jsxImportSource": "@opentui/react"
+    "types": ["bun"],
+    "jsx": "react-jsx"
   },
   "include": ["src/**/*"],
   "exclude": [
@@ -24,6 +24,8 @@
     "dist",
     "src/app.web.tsx",
     "src/**/*.web.ts",
-    "src/**/*.web.tsx"
+    "src/**/*.web.tsx",
+    "src/**/*.web.test.ts",
+    "src/**/*.web.test.tsx"
   ]
 }

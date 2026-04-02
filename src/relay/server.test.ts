@@ -157,7 +157,7 @@ describe('relay basics', () => {
   test('serves health endpoint', async () => {
     const res = await fetch(`${relayHttpBase}/health`);
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await res.json() as any;
     expect(body.status).toBe('ok');
     expect(body.configuredHostname).toBe(TEST_HOST);
     expect(body.loopbackAllowed).toBe(true);

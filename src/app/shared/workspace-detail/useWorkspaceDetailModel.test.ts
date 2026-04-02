@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook } from '@testing-library/react';
-import { Window } from 'happy-dom';
+import { setupTestDom, teardownTestDom } from '../../../test/setup-dom.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,10 +8,8 @@ import { useWorkspaceDetailModel } from './useWorkspaceDetailModel.js';
 import type { WorkspaceInfo } from '../../../components/SpacesBrowser.js';
 import { buildProcessHostname } from '../../../utils/hostnames.js';
 
-const domWindow = new Window();
-const originalWindow = globalThis.window;
-const originalDocument = globalThis.document;
-const originalNavigator = globalThis.navigator;
+beforeAll(() => setupTestDom());
+afterAll(() => teardownTestDom());
 
 const originalHome = process.env.HOME;
 const originalSessionDir = process.env.TMUX_LITE_SESSION_DIR;
@@ -27,17 +25,6 @@ function makeWorkspace(): WorkspaceInfo {
   };
 }
 
-beforeAll(() => {
-  globalThis.window = domWindow as unknown as typeof globalThis.window;
-  globalThis.document = domWindow.document as unknown as typeof globalThis.document;
-  globalThis.navigator = domWindow.navigator as unknown as typeof globalThis.navigator;
-});
-
-afterAll(() => {
-  globalThis.window = originalWindow;
-  globalThis.document = originalDocument;
-  globalThis.navigator = originalNavigator;
-});
 
 afterEach(() => {
   if (tempHomeDir) {

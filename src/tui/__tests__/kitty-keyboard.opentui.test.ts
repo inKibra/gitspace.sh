@@ -15,8 +15,6 @@ describe('OpenTUI kitty keyboard integration', () => {
       exitOnCtrlC: false,
       targetFps: 1,
       useMouse: false,
-      useConsole: false,
-      useAlternateScreen: false,
       useKittyKeyboard: VT_KITTY_KEYBOARD_CONFIG,
     })
 

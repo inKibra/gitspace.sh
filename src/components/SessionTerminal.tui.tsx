@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * SessionTerminal - embedded PTY terminal for session backends.
  *
@@ -6,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { extend, useKeyboard, useRenderer } from '@opentui/react';
+import { decodePasteBytes } from '@opentui/core';
 import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core';
 import { TailGhosttyTerminalRenderable } from './TailGhosttyTerminal.tui.js';
 import { getTailWindowOffset } from './session-terminal-tail-window.js';
@@ -425,7 +427,7 @@ export function SessionTerminal({
       if (modalOpen || readOnly || uiModeEnabled) {
         return;
       }
-      const text = event.text ?? '';
+      const text = decodePasteBytes(event.bytes);
       if (!text) {
         return;
       }

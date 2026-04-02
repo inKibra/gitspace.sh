@@ -28,15 +28,9 @@ function createSession() {
 mock.module('../pi-runtime.js', () => ({
   getPiAgentDir: mock(() => '/tmp/mock-pi-agent-dir'),
   setupPiEnvironment: mock(() => ({})),
-  ensureOmpInstalled: mock(async () => '/tmp/omp'),
   createPiSessionManager: mock(async () => ({
     agentDir: '/tmp/pi-agent',
     sessionManager: {},
-  })),
-  importOmpModule: mock(async () => ({
-    createAgentSession: mock(async () => ({
-      session: createSession(),
-    })),
   })),
   openPiSession: mock(async () => {
     openPiSessionCalls += 1;
@@ -48,6 +42,14 @@ mock.module('../pi-runtime.js', () => ({
     };
   }),
   persistInitialPiSessionModel: mock(async () => {}),
+}));
+
+mock.module('@oh-my-pi/pi-coding-agent', () => ({
+  createAgentSession: mock(async () => ({
+    session: createSession(),
+    setToolUIContext: mock(() => {}),
+  })),
+  discoverSlashCommands: mock(async () => []),
 }));
 
 const { PiCoordinator } = await import('../pi-coordinator.js');

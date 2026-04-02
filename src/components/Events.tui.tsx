@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * Events - TUI Display Component
  */

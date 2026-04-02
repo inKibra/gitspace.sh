@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test'
 import { act, renderHook } from '@testing-library/react'
-import { Window } from 'happy-dom'
+import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js'
 import type { MachineInfo } from '../../components/MachineList.js'
 import type {
   RelaySocketAdapter,
@@ -8,9 +8,6 @@ import type {
 } from '../machine-directory-client.js'
 import { useMachineDirectory } from '../useMachineDirectory.js'
 
-const domWindow = new Window()
-const originalWindow = globalThis.window
-const originalDocument = globalThis.document
 
 const OPEN = 1
 const CLOSED = 3
@@ -21,17 +18,9 @@ interface FakeSocket {
   sent: string[]
 }
 
-beforeAll(() => {
-  // @ts-expect-error test DOM setup
-  globalThis.window = domWindow
-  // @ts-expect-error test DOM setup
-  globalThis.document = domWindow.document
-})
+beforeAll(() => setupTestDom())
 
-afterAll(() => {
-  globalThis.window = originalWindow
-  globalThis.document = originalDocument
-})
+afterAll(() => teardownTestDom())
 
 function createAdapter(holder: { socket: FakeSocket | null }): RelaySocketAdapter<FakeSocket> {
   return {

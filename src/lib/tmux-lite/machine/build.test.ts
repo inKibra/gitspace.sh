@@ -52,6 +52,8 @@ describe('buildMachineSnapshot', () => {
           pendingQuestions: {},
           lastMessages: {},
           errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -91,6 +93,8 @@ describe('buildMachineSnapshot', () => {
           },
           lastMessages: {},
           errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -122,6 +126,8 @@ describe('buildMachineSnapshot', () => {
           pendingQuestions: {},
           lastMessages: {},
           errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
         } satisfies WorkspaceAgentState,
       },
     });

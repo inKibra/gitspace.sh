@@ -32,7 +32,6 @@ export { useCommandPaletteOrchestration, type UseCommandPaletteOrchestrationOpti
 export { useInboxPage, type UseInboxPageOptions } from './useInboxPage.js';
 export { useReview, type UseReviewOptions, type UseReviewReturn } from './useReview.js';
 export { usePreferencesAdapter, type PreferencesService, type UsePreferencesAdapterOptions, type UsePreferencesAdapterResult } from './usePreferencesAdapter.js';
-export { useIdentityGate, type UseIdentityGateReturn, type GateStep } from './useIdentityGate.js';
 // Web-safe shell adapters
 export {
   useUserActivity,

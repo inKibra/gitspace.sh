@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { extend, useKeyboard } from '@opentui/react';
 import { GhosttyTerminalRenderable } from 'ghostty-opentui/terminal-buffer';

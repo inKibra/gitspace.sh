@@ -1,0 +1,13 @@
+diff --git a/src/ptree.ts b/src/ptree.ts
+index 736a7c22958be51c8d3ef2032466261b34f75314..d4e64aa40c050246a2171ecf6c8b06973e4889b7 100644
+--- a/src/ptree.ts
++++ b/src/ptree.ts
+@@ -243,7 +243,7 @@ export class ChildProcess<In extends InMask = InMask> {
+ 	}
+ 
+ 	async bytes(): Promise<Uint8Array> {
+-		return new Response(this.stdout).bytes();
++		return (new Response(this.stdout) as any).bytes();
+ 	}
+ 
+ 	// ── Wait ─────────────────────────────────────────────────────────────

@@ -1,26 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook } from '@testing-library/react';
-import { Window } from 'happy-dom';
+import { setupTestDom, teardownTestDom } from '../../../test/setup-dom.js';
 import type { SessionBackend, BackendDescriptor } from '../../../session/backend.js';
 import { buildRemoteBackendKey } from '../../../session/backend-key.js';
 import type { MachineInfo } from '../../../components/MachineList.js';
 import type { RelaySigner } from '../../../relay-client/machine-directory-client.js';
 
-const domWindow = new Window();
-const originalWindow = globalThis.window;
-const originalDocument = globalThis.document;
-
-beforeAll(() => {
-  // @ts-expect-error test DOM setup
-  globalThis.window = domWindow;
-  // @ts-expect-error test DOM setup
-  globalThis.document = domWindow.document;
-});
-
-afterAll(() => {
-  globalThis.window = originalWindow;
-  globalThis.document = originalDocument;
-});
+beforeAll(() => setupTestDom());
+afterAll(() => teardownTestDom());
 
 let machineListHandler: ((machines: MachineInfo[]) => void) | null = null;
 

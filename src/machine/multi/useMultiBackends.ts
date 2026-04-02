@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GitSpaceEngine, LOCAL_BACKEND_KEY } from '../../sdk/engine/engine.js';
-import type { GitSpaceConfig } from '../../sdk/engine/types.js';
+import type { GitSpaceConfig, KeyValueStorage } from '../../sdk/engine/types.js';
 import type { BackendSessionState } from '../../session/types.js';
 import type {
   AttachSessionParams,
@@ -77,6 +77,8 @@ export interface UseMultiBackendsOptions {
   relaySocketAdapter?: RelaySocketAdapter<any>;
   createRelaySigner?: (identity: Identity) => RelaySigner;
   getDeviceCertificate?: (identity: Identity) => Promise<string>;
+  storage?: KeyValueStorage | null;
+  copyToClipboard?: (text: string) => Promise<void>;
 }
 
 /**
@@ -95,6 +97,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     relaySocketAdapter,
     createRelaySigner,
     getDeviceCertificate,
+    storage,
+    copyToClipboard,
   } = options;
 
   // Store platform factories in refs so engine creation uses latest values
@@ -105,6 +109,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     relaySocketAdapter,
     createRelaySigner,
     getDeviceCertificate,
+    storage,
+    copyToClipboard,
   });
   useEffect(() => {
     platformRef.current = {
@@ -113,6 +119,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
       relaySocketAdapter,
       createRelaySigner,
       getDeviceCertificate,
+      storage,
+      copyToClipboard,
     };
   });
 
@@ -126,6 +134,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
         relaySocketAdapter: platformRef.current.relaySocketAdapter,
         createRelaySigner: platformRef.current.createRelaySigner,
         getDeviceCertificate: platformRef.current.getDeviceCertificate,
+        storage: platformRef.current.storage,
+        copyToClipboard: platformRef.current.copyToClipboard,
       },
       relay: enabled ? relay : null,
       identity: enabled ? identity : null,

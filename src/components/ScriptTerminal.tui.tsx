@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * ScriptTerminal - read-only terminal for workspace script output.
  */

@@ -1,4 +1,5 @@
 import type { Identity } from '../../types/identity.js'
+import type { KeyValueStorage } from '../../sdk/engine/types.js'
 import type { X3DHClientState, X3DHResponseMessage, X3DHResultMessage } from '../../session/crypto/handshake.web.js'
 import {
   createClientHello,
@@ -75,6 +76,7 @@ export interface BrowserRemoteSessionConnectParams {
   machineId: string
   deviceCertificate: string
   machineLabel?: string
+  storage?: KeyValueStorage | null
 }
 
 /**
@@ -115,6 +117,7 @@ export function createBrowserRemoteSessionBackend(
       signer: signRelayMessage,
       crypto: browserCryptoAdapter,
       handshake: browserHandshakeAdapter,
+      storage: params.storage,
     }),
   }
 }

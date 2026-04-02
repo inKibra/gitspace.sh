@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * SpacesBrowser - TUI Display Component
  *

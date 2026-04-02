@@ -11,10 +11,6 @@
 import type { VirtualTerminal } from './virtual-terminal.js';
 import type { OmpAgentSession } from './omp-types.js';
 
-const OMP_PACKAGE = '@oh-my-pi/pi-coding-agent';
-const OMP_DISCOVERY_PACKAGE = '@oh-my-pi/pi-coding-agent/discovery';
-const PI_TUI_PACKAGE = '@oh-my-pi/pi-tui';
-
 interface InteractiveModeInstance {
   ui: any;
   init(): Promise<void>;
@@ -44,17 +40,13 @@ export async function startVirtualInteractiveMode(
     agentDir?: string;
   },
 ): Promise<VirtualInteractiveModeHandle> {
-  const ompModule = await import(OMP_PACKAGE) as any;
-  const discoveryModule = await import(OMP_DISCOVERY_PACKAGE) as any;
-  const tuiModule = await import(PI_TUI_PACKAGE) as any;
-
-  const { InteractiveMode, submitInteractiveInput, Settings, initTheme } = ompModule;
-  const { initializeWithSettings } = discoveryModule;
-  const { TUI } = tuiModule;
-
-  if (!InteractiveMode || !TUI || !Settings || !initializeWithSettings || !initTheme) {
-    throw new Error('Failed to import InteractiveMode/TUI/settings bootstrap from oh-my-pi packages');
-  }
+  // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
+  // signal handlers that call process.exit, provider registration, etc.) that
+  // conflict with OpenTUI's terminal management. Keep these lazy so they only
+  // load when actually starting an interactive mode session.
+  const { InteractiveMode, submitInteractiveInput, Settings, initTheme, VERSION: OMP_VERSION } = await import('@oh-my-pi/pi-coding-agent');
+  const { initializeWithSettings } = await import('@oh-my-pi/pi-coding-agent/discovery');
+  const { TUI } = await import('@oh-my-pi/pi-tui');
 
   const sessionSettings = (session as any).settings;
   const cwd = options?.cwd ?? (session as any).sessionManager?.getCwd?.() ?? process.cwd();
@@ -72,10 +64,10 @@ export async function startVirtualInteractiveMode(
     activeSettings.get('theme.light'),
   );
 
-  const version = options?.version ?? ompModule.VERSION ?? 'unknown';
+  const version = options?.version ?? OMP_VERSION ?? 'unknown';
   const changelog = options?.changelogMarkdown;
 
-  const mode: InteractiveModeInstance = new InteractiveMode(session, version, changelog);
+  const mode = new InteractiveMode(session as any, version, changelog) as any as InteractiveModeInstance;
 
   const showHardwareCursor = sessionSettings?.get?.('showHardwareCursor') ?? false;
   mode.ui = new TUI(virtualTerminal, showHardwareCursor);
@@ -100,11 +92,12 @@ export async function startVirtualInteractiveMode(
         const input = await mode.getUserInput();
         if (!running) break;
         if (input.cancelled) continue;
-        await (submitInteractiveInput as SubmitInteractiveInputFn)(mode, session, input);
+        await (submitInteractiveInput as any)(mode, session, input);
       }
     } catch (error) {
       if (running) {
-        console.error('[virtual-interactive-mode] Input loop error:', error);
+        running = false;
+        console.error('[virtual-interactive-mode] Input loop crashed:', error);
       }
     }
   })();
@@ -118,8 +111,8 @@ export async function startVirtualInteractiveMode(
       running = false;
       try {
         await mode.shutdown();
-      } catch {
-        // ignore already-stopped shutdown failures
+      } catch (err) {
+        console.warn('[virtual-interactive-mode] Shutdown error (may be already stopped):', err);
       }
       await Promise.race([
         loopPromise,

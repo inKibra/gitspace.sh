@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * TUI Application v2 - Using Shared Components
  *
@@ -7,7 +8,7 @@
  * - useSpacesBrowser for workspace browsing
  */
 
-import { createCliRenderer } from '@opentui/core';
+import { createCliRenderer, decodePasteBytes } from '@opentui/core';
 import type { PasteEvent } from '@opentui/core';
 import { createRoot, useKeyboard, useRenderer } from '@opentui/react';
 import { useState, useEffect, useCallback, useReducer, Fragment, useRef, useMemo } from 'react';
@@ -1337,7 +1338,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
 
   useEffect(() => {
     const handlePaste = (event: PasteEvent) => {
-      const rawText = event.text ?? '';
+      const rawText = decodePasteBytes(event.bytes);
 
       if (flow.isOpen && applySearchableSelectPaste(flow, rawText)) {
         event.preventDefault();

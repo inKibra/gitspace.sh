@@ -218,7 +218,7 @@ async function fetchSubdomainListing(headers: Record<string, string>): Promise<S
     throw new SpacesError(`Failed to list subdomains: ${res.statusText}`, 'SYSTEM_ERROR', 2);
   }
 
-  const subdomains: SubdomainInfo[] = await res.json();
+  const subdomains = await res.json() as SubdomainInfo[];
   return { subdomains, warnings, serveMetadataSupported };
 }
 
@@ -1093,7 +1093,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
     );
   }
 
-  const { available, reason } = await checkRes.json();
+  const { available, reason } = await checkRes.json() as { available: boolean; reason: string };
   if (!available) {
     throw new SpacesError(
       `Subdomain "${subdomain}" is not available: ${reason}`,
@@ -1110,11 +1110,11 @@ export async function hostReserve(subdomain: string): Promise<void> {
   });
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: res.statusText }));
+    const error = await res.json().catch(() => ({ error: res.statusText })) as { error: string };
     throw new SpacesError(`Failed to reserve: ${error.error}`, 'USER_ERROR');
   }
 
-  const data: SubdomainCreateResponse = await res.json();
+  const data = await res.json() as SubdomainCreateResponse;
 
   logger.info('Configuring DNS...');
 
@@ -1130,7 +1130,7 @@ export async function hostReserve(subdomain: string): Promise<void> {
       throw new SpacesError('Failed to get tunnel token', 'SYSTEM_ERROR');
     }
 
-    const tokenData = await tokenRes.json();
+    const tokenData = await tokenRes.json() as { tunnelToken?: string };
     tunnelToken = tokenData.tunnelToken;
   }
 
@@ -1192,7 +1192,7 @@ export async function hostRelease(subdomain?: string): Promise<void> {
   });
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: res.statusText }));
+    const error = await res.json().catch(() => ({ error: res.statusText })) as { error: string };
     throw new SpacesError(`Failed to release: ${error.error}`, 'USER_ERROR');
   }
 
@@ -1234,7 +1234,7 @@ export async function hostList(): Promise<void> {
     );
   }
 
-  const subdomains: SubdomainInfo[] = await res.json();
+  const subdomains = await res.json() as SubdomainInfo[];
 
   if (subdomains.length === 0) {
     logger.log('No subdomains reserved.');
@@ -1272,7 +1272,7 @@ export async function hostSetPrimary(subdomain: string): Promise<void> {
   });
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: res.statusText }));
+    const error = await res.json().catch(() => ({ error: res.statusText })) as { error: string };
     throw new SpacesError(`Failed: ${error.error}`, 'USER_ERROR');
   }
 

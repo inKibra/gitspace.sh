@@ -43,7 +43,6 @@ import { deriveUnlockKey } from "./unlock-kdf.js";
  * In some environments, process.cwd() is a better anchor than import.meta.dir.
  */
 const WEB_DIST_CANDIDATES = [
-  join(import.meta.dir, "../web/dist"),
   join(import.meta.dir, "../../web/dist"),
   join(process.cwd(), "web/dist"),
 ];

@@ -347,7 +347,7 @@ describe("Identity Chain E2E: Relay -> Machine -> Client", () => {
     const res = await fetch(`${relay.httpBase}/health`);
     expect(res.ok).toBe(true);
 
-    const body = await res.json();
+    const body = await res.json() as any;
     expect(body.status).toBe("ok");
   });
 
@@ -796,7 +796,7 @@ describe("Identity Chain E2E: Relay -> Machine -> Client", () => {
       const res = await fetch(`http://127.0.0.1:${server2.port}/health`);
       expect(res.ok).toBe(true);
 
-      const body = await res.json();
+      const body = await res.json() as any;
       expect(body.status).toBe("ok");
     } finally {
       server2.stop(true);

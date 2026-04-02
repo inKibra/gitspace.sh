@@ -11,7 +11,15 @@ export function browserPlatform(): PlatformAdapters {
     relaySocketAdapter: browserRelaySocketAdapter,
     // Curry identity so the engine can sign individual messages without re-passing identity.
     createRelaySigner: (identity) => (msg) => signRelayMessage(msg, identity),
-    // getStoredDeviceCert returns string | null; relay auth requires a string.
+    // Returns empty string when no cert exists yet — the relay auth flow may
+    // still succeed (e.g. during enrollment) or fail with a clear auth error.
+    // Throwing here would crash the engine before it can show the identity gate.
     getDeviceCertificate: async () => getStoredDeviceCert() ?? '',
+    storage: {
+      getItem: (key) => localStorage.getItem(key),
+      setItem: (key, value) => localStorage.setItem(key, value),
+      removeItem: (key) => localStorage.removeItem(key),
+    },
+    copyToClipboard: (text) => navigator.clipboard.writeText(text),
   };
 }

@@ -5,7 +5,7 @@
 
 import type { ReactNode } from 'react';
 import type { Identity } from '../types/identity';
-import { useIdentityGate } from '../app/react';
+import { useIdentityGate } from '../app/react/useIdentityGate.web.js';
 
 interface IdentityGateProps {
   onIdentityReady: (identity: Identity) => void;

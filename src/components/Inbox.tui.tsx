@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * Inbox - TUI Display Component
  *

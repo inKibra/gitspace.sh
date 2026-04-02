@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 /**
  * KanbanBoard TUI - columns and workspace cards for terminal.
  * Figma-aligned: command bar above, full-width columns, horizontal scroll, richer cards.

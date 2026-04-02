@@ -1,0 +1,38 @@
+diff --git a/src/modes/components/footer.ts b/src/modes/components/footer.ts
+index 85e702b63655d0ab168f7cf4b0ad1a2e7197a264..fd439512905b12f6089b1e7ab587106e7c332288 100644
+--- a/src/modes/components/footer.ts
++++ b/src/modes/components/footer.ts
+@@ -154,7 +154,7 @@ export class FooterComponent implements Component {
+ 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+ 
+ 		// Replace home directory with ~
+-		let pwd = shortenPath(getProjectDir());
++		let pwd = shortenPath(this.session.sessionManager.getCwd());
+ 
+ 		// Add git branch if available
+ 		const branch = this.#getCurrentBranch();
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index c6bf87d62f889021ccc1b3857710d3a2ff30c7a9..df4578da4896929f736f66b4af77b60c52a6f392 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -5283,6 +5283,7 @@ export class AgentSession {
+ 				signal: this.#bashAbortController.signal,
+ 				sessionKey: this.sessionId,
+ 				timeout: clampTimeout("bash") * 1000,
++				cwd,
+ 			});
+ 
+ 			this.recordBashResult(command, result, options);
+diff --git a/src/tools/gemini-image.ts b/src/tools/gemini-image.ts
+index 2be33254ed5a1304513a305035006406b9e430c3..2b044634911197b0cfbf8223cc7d5d7c05abded4 100644
+--- a/src/tools/gemini-image.ts
++++ b/src/tools/gemini-image.ts
+@@ -290,7 +290,7 @@ async function loadImageFromUrl(imageUrl: string, signal?: AbortSignal): Promise
+ 	if (!contentType?.startsWith("image/")) {
+ 		throw new Error(`Unsupported image type from URL: ${imageUrl}`);
+ 	}
+-	const buffer = await response.bytes();
++	const buffer = await (response as any).bytes();
+ 	return { data: buffer.toBase64(), mimeType: contentType };
+ }
+ 

@@ -784,6 +784,7 @@ export class GitSpaceEngine {
               machineId: machine.machineId,
               deviceCertificate,
               machineLabel: machine.label,
+              storage: this.platform.storage,
             });
             this.dispatch({ type: 'REGISTER_BACKEND', descriptor: backend.descriptor });
             this.manager.register(backend);

@@ -58,7 +58,7 @@ import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
 
-import { browserPlatform } from './sdk/platforms/browser.js';
+import { browserPlatform } from './sdk/platforms/browser.web.js';
 import { NativeAgentSurfaceConnected } from './components/NativeAgentSurfaceConnected.web.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 

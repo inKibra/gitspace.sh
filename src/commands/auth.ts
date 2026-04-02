@@ -227,7 +227,7 @@ export async function authLogin(
     );
   }
 
-  const deviceData: DeviceCodeResponse = await deviceRes.json();
+  const deviceData = await deviceRes.json() as DeviceCodeResponse;
   const { device_code, user_code, verification_uri, interval } = deviceData;
 
   // Step 2: Display code and open browser
@@ -288,14 +288,14 @@ export async function authLogin(
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    const error = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
     throw new SpacesError(
       `Authentication failed: ${error.error || response.statusText}`,
       'USER_ERROR'
     );
   }
 
-  const { token, user }: GitspaceAuthResponse = await response.json();
+  const { token, user } = await response.json() as GitspaceAuthResponse;
 
   // Step 5: Save token to keychain
   await setSecret('GITSPACE_TOKEN', token);
@@ -383,7 +383,7 @@ export async function authStatus(): Promise<void> {
       return;
     }
 
-    const user = await res.json();
+    const user = await res.json() as { github_username: string; email: string | null; name: string | null };
     logger.log(`Logged in as: ${user.github_username}`);
     logger.log(`Email: ${user.email || '(not set)'}`);
     if (user.name) {
@@ -457,7 +457,7 @@ async function pollForGitHubToken(
       }),
     });
 
-    const data: GitHubTokenResponse = await res.json();
+    const data = await res.json() as GitHubTokenResponse;
 
     if (data.access_token) {
       return data.access_token;

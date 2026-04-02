@@ -11,9 +11,11 @@ import type {
 } from '../../../agents/backend.js';
 import {
   createPiSessionManager,
-  importOmpModule,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
+// Dynamic import: oh-my-pi has module-level side effects (postmortem signal
+// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
+const importOmpCodingAgent = () => import('@oh-my-pi/pi-coding-agent');
 import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 
 class PiSessionHandle implements AgentSessionHandle {
@@ -116,7 +118,7 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    const { createAgentSession } = await importOmpModule();
+    const { createAgentSession } = await importOmpCodingAgent();
     const { agentDir, sessionManager } = await createPiSessionManager(cwd);
     const result = await createAgentSession({
       agentDir,

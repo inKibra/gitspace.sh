@@ -9,10 +9,12 @@ import {
 import type { Session as TmuxSession } from '../protocol.js';
 import {
   createPiSessionManager,
-  importOmpModule,
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
+// Dynamic import: oh-my-pi has module-level side effects (postmortem signal
+// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
+const importOmpCodingAgent = () => import('@oh-my-pi/pi-coding-agent');
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
@@ -240,15 +242,18 @@ export class PiCoordinator {
    * when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    const { createAgentSession: createPiAgentSession } = await importOmpModule();
+    const { createAgentSession: createPiAgentSessionSdk } = await importOmpCodingAgent();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
-    const result = await createPiAgentSession({
+    const result = await createPiAgentSessionSdk({
       agentDir,
       sessionManager,
       cwd: target.workspacePath,
       hasUI: true,
     });
-    const { session, setToolUIContext } = result;
+    const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
+    if (!session?.sessionId || typeof setToolUIContext !== 'function') {
+      throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
+    }
     if (title) {
       await sessionManager.setSessionName(title);
     }
@@ -858,22 +863,19 @@ export class PiCoordinator {
 
     // 2. Discover file-based slash commands from the workspace
     try {
-      const ompModule = await import('@oh-my-pi/pi-coding-agent');
-      const discoverFn = ompModule.discoverSlashCommands ?? ompModule.loadSlashCommands;
-      if (typeof discoverFn === 'function') {
-        const slashCommands = await discoverFn({ cwd: target.workspacePath });
-        for (const cmd of slashCommands) {
-          if (!commands.some(c => c.name === cmd.name)) {
-            commands.push({
-              name: cmd.name,
-              description: cmd.description ?? '',
-              kind: 'file',
-            });
-          }
+      const { discoverSlashCommands } = await importOmpCodingAgent();
+      const slashCommands = await discoverSlashCommands({ cwd: target.workspacePath });
+      for (const cmd of slashCommands) {
+        if (!commands.some(c => c.name === cmd.name)) {
+          commands.push({
+            name: cmd.name,
+            description: cmd.description ?? '',
+            kind: 'file',
+          });
         }
       }
     } catch {
-      // Non-fatal — Pi module may not be importable or discoverSlashCommands unavailable
+      // Non-fatal — slash command discovery can fail for workspaces without Pi config
     }
 
     return commands;

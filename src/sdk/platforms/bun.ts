@@ -12,5 +12,7 @@ export function bunPlatform(): PlatformAdapters {
     relaySocketAdapter: nodeRelaySocketAdapter,
     createRelaySigner: createNodeRelaySigner,
     getDeviceCertificate: createLocalDeviceCertificate,
+    storage: null,
+    copyToClipboard: undefined,
   };
 }
