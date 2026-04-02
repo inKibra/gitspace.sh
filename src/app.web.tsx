@@ -1703,6 +1703,19 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
       </div>
     ) : null;
+    const handleSelectWorkspaceFromDetail = async (workspaceSelectionKey: string) => {
+      if (workspaceSelectionKey === selectedWorkspaceForDetail.selectionKey) return;
+      if (terminalMode === 'attached' && attachedBackendKey) {
+        try {
+          await multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Failed to detach session');
+          return;
+        }
+      }
+      handleBoardSelectWorkspace(workspaceSelectionKey);
+    };
+
     const handleBackToBoard = async () => {
       if (terminalMode === 'attached' && attachedBackendKey) {
         try {
@@ -1733,7 +1746,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             allWorkspaces={allWorkspaceEntries}
             workspaceStatusById={workspaceStatusById}
             runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}
-            onSelectWorkspace={(wid) => handleBoardSelectWorkspace(wid)}
+            onSelectWorkspace={handleSelectWorkspaceFromDetail}
             onOpenAgentSession={handleOpenAgentSession}
             onCreateAgentSession={handleCreateAgentSession}
             onAbortAgentSession={handleAbortAgentSession}

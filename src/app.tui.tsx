@@ -677,6 +677,16 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
     await refreshWorkspaces();
   }, [multi, refreshWorkspaces]);
 
+  const handleSelectWorkspaceFromDetail = useCallback(async (workspaceSelectionKey: string) => {
+    if (workspaceSelectionKey === workspaceBoardState.selectedWorkspaceId) return;
+    if (localSessionMode === 'attached') {
+      setIsViewOnlySession(false);
+      setAttachedAgentSession(null);
+      await multi.detachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: '' });
+    }
+    handleBoardSelectWorkspace(workspaceSelectionKey);
+  }, [handleBoardSelectWorkspace, localSessionMode, multi, workspaceBoardState.selectedWorkspaceId]);
+
   // Delete workspace
   const handleDeleteWorkspace = useCallback((workspace: { id: string; name: string; sessionCount: number }) => {
     flow.showConfirmTyped({
@@ -2100,7 +2110,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
           allWorkspaces={allWorkspaceEntries}
           workspaceStatusById={workspaceStatusById}
           runtime={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null}
-          onSelectWorkspace={(workspaceSelectionKey) => handleBoardSelectWorkspace(workspaceSelectionKey)}
+          onSelectWorkspace={handleSelectWorkspaceFromDetail}
           onAbortAgentSession={handleAbortAgentSession}
           onCloseAgentSession={handleCloseAgentSession}
           onArchiveAgentSession={handleArchiveAgentSession}

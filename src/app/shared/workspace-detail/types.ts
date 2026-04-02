@@ -16,7 +16,7 @@ export interface WorkspaceDetailModelInput {
   workspaceStatusById?: Record<string, WorkspaceDetailStripStatus>;
   runtime?: WorkspaceRuntimeEntry | null;
   actions?: {
-    onSelectWorkspace?: (workspaceId: string) => void;
+    onSelectWorkspace?: (workspaceSelectionKey: string) => void | Promise<void>;
     onAttachSession?: (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => void | Promise<void>;
     onOpenReplay?: (replayId: string) => void | Promise<void>;
     onOpenReplayHistory?: (args: { workspaceId: string; workspaceName: string; replayRows: WorkspaceDetailReplayRow[] }) => void | Promise<void>;
@@ -124,7 +124,7 @@ export interface WorkspaceDetailModel {
     rightLabel?: string;
   }>;
   actions: {
-    selectWorkspace: (workspaceId: string) => void;
+    selectWorkspace: (workspaceSelectionKey: string) => void | Promise<void>;
     attachSession: (sessionId: string) => void | Promise<void>;
     createSession: () => void | Promise<void>;
     deleteSession: (sessionId: string, sessionName: string) => void;

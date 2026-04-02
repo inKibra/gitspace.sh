@@ -98,6 +98,7 @@
   "patchedDependencies": {
     "@oh-my-pi/pi-coding-agent@13.17.5": "patches/@oh-my-pi%2Fpi-coding-agent@13.17.5.patch",
     "@oh-my-pi/pi-utils@13.17.5": "patches/@oh-my-pi%2Fpi-utils@13.17.5.patch",
-    "markit-ai@0.5.0": "patches/markit-ai@0.5.0.patch"
+    "markit-ai@0.5.0": "patches/markit-ai@0.5.0.patch",
+    "@oh-my-pi/pi-natives@13.17.5": "patches/@oh-my-pi%2Fpi-natives@13.17.5.patch"
   }
 }

@@ -1,0 +1,48 @@
+diff --git a/src/native.ts b/src/native.ts
+index e683d2895b89f33e3257b161a924ac87c5262418..b824bc58e0735e4de49e63f01f3c22a92be16d95 100644
+--- a/src/native.ts
++++ b/src/native.ts
+@@ -181,10 +181,41 @@ function maybeExtractEmbeddedAddon(errors: string[]): string | null {
+ 		return null;
+ 	}
+ }
++
++function maybeExtractPackagedAddon(errors: string[]): string | null {
++	if (!isCompiledBinary) return null;
++	try {
++		fs.mkdirSync(versionedDir, { recursive: true });
++	} catch (err) {
++		const message = err instanceof Error ? err.message : String(err);
++		errors.push(`packaged addon dir: ${message}`);
++		return null;
++	}
++
++	for (const filename of addonFilenames) {
++		const targetPath = path.join(versionedDir, filename);
++		if (fs.existsSync(targetPath)) {
++			return targetPath;
++		}
++		for (const sourcePath of [path.join(nativeDir, filename), path.join(execDir, filename)]) {
++			if (!fs.existsSync(sourcePath)) continue;
++			try {
++				const buffer = fs.readFileSync(sourcePath);
++				fs.writeFileSync(targetPath, buffer);
++				return targetPath;
++			} catch (err) {
++				const message = err instanceof Error ? err.message : String(err);
++				errors.push(`packaged addon copy (${filename} from ${sourcePath}): ${message}`);
++			}
++		}
++	}
++	return null;
++}
+ function loadNative(): NativeBindings {
+ 	const errors: string[] = [];
+-	const embeddedCandidate = logger.time("native:maybeExtractEmbeddedAddon", () => maybeExtractEmbeddedAddon(errors));
+-	const runtimeCandidates = embeddedCandidate ? [embeddedCandidate, ...dedupedCandidates] : dedupedCandidates;
++	const extractedCandidate = logger.time("native:maybeExtractEmbeddedAddon", () => maybeExtractEmbeddedAddon(errors))
++		?? logger.time("native:maybeExtractPackagedAddon", () => maybeExtractPackagedAddon(errors));
++	const runtimeCandidates = extractedCandidate ? [extractedCandidate, ...dedupedCandidates] : dedupedCandidates;
+ 	for (const candidate of runtimeCandidates) {
+ 		try {
+ 			const bindings = logger.time(`native:loadNative:require:${path.basename(candidate)}`, () =>

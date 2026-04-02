@@ -370,8 +370,8 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
   }, []);
 
   const modelActions: WorkspaceDetailModel['actions'] = useMemo(() => ({
-    selectWorkspace: (workspaceId: string) => {
-      void actions.onSelectWorkspace?.(workspaceId);
+    selectWorkspace: (workspaceSelectionKey: string) => {
+      void actions.onSelectWorkspace?.(workspaceSelectionKey);
     },
     attachSession: (sessionId: string) => actions.onAttachSession?.({ sessionId }),
     createSession: () => actions.onAttachSession?.({ workspaceId: workspace.id }),

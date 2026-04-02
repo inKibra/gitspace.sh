@@ -494,7 +494,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
               <button
                 key={w.id}
                 type="button"
-                onClick={() => detailActions.selectWorkspace(w.id)}
+                onClick={() => detailActions.selectWorkspace(w.selectionKey ?? w.id)}
                 className={
                   'flex items-center gap-1 px-2 py-1 rounded text-xs flex-shrink-0 transition-colors ' +
                   (isCurrent
