@@ -1704,7 +1704,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       </div>
     ) : null;
     const handleSelectWorkspaceFromDetail = async (workspaceSelectionKey: string) => {
-      if (workspaceSelectionKey === selectedWorkspaceForDetail.selectionKey) return;
+      if (workspaceSelectionKey === selectedWorkspaceForDetail?.selectionKey) return;
       if (terminalMode === 'attached' && attachedBackendKey) {
         try {
           await multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });

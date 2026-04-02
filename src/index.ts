@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+// Pre-extract embedded native addon before pi-natives initializes (no-op in dev).
+import './native-addon-embed.generated.js';
+
 /**
  * GitSpace CLI (gssh) - Main entry point
  *
