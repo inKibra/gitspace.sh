@@ -2014,7 +2014,9 @@ function createSession(
   }
 
   // Handle process exit
-  proc.exited.then(handleProcessExit(id, sessionName, xterm, socketPath, disposeDsr, getProcessTitle));
+  proc.exited
+    .then(handleProcessExit(id, sessionName, xterm, socketPath, disposeDsr, getProcessTitle))
+    .catch((err: unknown) => console.error(`[${sessionName}] proc.exited handler failed:`, err));
 
   // Create session info
   const info: Session = {
@@ -3204,11 +3206,15 @@ routerListener = Bun.listen({
 
         sendRouterResponse(socket, res);
         if (res.type === 'agent-watch-started') {
-          sendRouterResponse(socket, { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) });
+          try {
+            sendRouterResponse(socket, { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) });
+          } catch {}
         }
         if (res.type === 'machine-watch-started') {
-          const snapshot = await buildCurrentMachineSnapshot();
-          sendRouterResponse(socket, { type: 'machine-snapshot', snapshot });
+          try {
+            const snapshot = await buildCurrentMachineSnapshot();
+            sendRouterResponse(socket, { type: 'machine-snapshot', snapshot });
+          } catch {}
         }
       }
     },
@@ -3219,30 +3225,9 @@ routerListener = Bun.listen({
   }
 });
 
-// Handle unexpected termination - kill all session processes
-function cleanupAndExit(signal: string) {
-  console.log(`\nReceived ${signal}, cleaning up sessions...`);
-  for (const [id, s] of sessions) {
-    try {
-      markReplayCrashed(s);
-      s.xterm.dispose();
-      signalSubprocessTree(s.proc, 'SIGKILL');
-    } catch {}
-  }
-  // Clean up PID file
-  try { unlinkSync(PID_FILE); } catch {}
-  process.exit(0);
-}
-
-process.on('SIGTERM', () => cleanupAndExit('SIGTERM'));
-process.on('SIGINT', () => cleanupAndExit('SIGINT'));
-process.on('SIGHUP', () => cleanupAndExit('SIGHUP'));
-
-console.log("tmux-lite server running (xterm-headless)");
-console.log(`Socket: ${ROUTER_SOCKET}\n`);
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
   process.on(signal, () => {
+    console.log(`\nReceived ${signal}, cleaning up sessions...`);
     shutdownServer();
     process.exit(0);
   });

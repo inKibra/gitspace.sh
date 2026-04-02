@@ -744,9 +744,22 @@ export class PiCoordinator {
 
     const session = this.activeSessions.get(sessionId);
     if (session) {
-      session.dispose();
       this.activeSessions.delete(sessionId);
       this.sessionWorkspaceIds.delete(sessionId);
+      // Pi SDK has module-level postmortem signal handlers that can call
+      // process.exit() during dispose, which would kill the entire tmux-lite
+      // server and all sessions. Guard against both thrown errors and exit.
+      const originalExit = process.exit;
+      try {
+        process.exit = ((code?: number) => {
+          console.error(`[pi-coordinator] Blocked process.exit(${code}) during session dispose for ${sessionId}`);
+        }) as never;
+        session.dispose();
+      } catch (err) {
+        console.error(`[pi-coordinator] session.dispose() threw for ${sessionId}:`, err);
+      } finally {
+        process.exit = originalExit;
+      }
     }
   }
 

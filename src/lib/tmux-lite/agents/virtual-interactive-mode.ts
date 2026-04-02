@@ -110,10 +110,19 @@ export async function startVirtualInteractiveMode(
     },
     async stop() {
       running = false;
+      // Pi SDK's InteractiveMode.shutdown() can trigger module-level postmortem
+      // signal handlers that call process.exit(), killing the entire tmux-lite
+      // server. Guard against both thrown errors and synchronous exit.
+      const originalExit = process.exit;
       try {
+        process.exit = ((code?: number) => {
+          console.error(`[virtual-interactive-mode] Blocked process.exit(${code}) during shutdown`);
+        }) as never;
         await mode.shutdown();
       } catch (err) {
         console.warn('[virtual-interactive-mode] Shutdown error (may be already stopped):', err);
+      } finally {
+        process.exit = originalExit;
       }
       await Promise.race([
         loopPromise,

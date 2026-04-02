@@ -13,7 +13,7 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { join, basename } from 'path';
-import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { createServer, type AddressInfo } from 'net';
 import { tmpdir } from 'os';
 
@@ -176,6 +176,33 @@ async function shutdown(exitCode = 0): Promise<void> {
     } catch {
       // Already dead
     }
+  }
+
+  // Kill the tmux-lite server — it's a grandchild process spawned by serve
+  // that survives after serve exits because it's not in the same process group.
+  try {
+    const sandboxName = deriveSandboxName();
+    const pidFile = `/tmp/tmux-lite-${sandboxName}.pid`;
+    if (existsSync(pidFile)) {
+      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+      if (pid && !isNaN(pid)) {
+        try {
+          process.kill(pid, 'SIGTERM');
+          log('dev', `Sent SIGTERM to tmux-lite server (pid ${pid})`);
+          // Give it a moment to shut down cleanly
+          await Bun.sleep(500);
+          try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch {}
+        } catch {
+          // Already dead
+        }
+      }
+      try { unlinkSync(pidFile); } catch {}
+    }
+    // Clean up sandbox socket file
+    const socketFile = `/tmp/tmux-lite-${sandboxName}.sock`;
+    try { unlinkSync(socketFile); } catch {}
+  } catch {
+    // Best-effort cleanup
   }
 
   process.exit(exitCode);

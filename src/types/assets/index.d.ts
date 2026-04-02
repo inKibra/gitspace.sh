@@ -12,9 +12,3 @@ declare module "*.py" {
   const content: string;
   export default content;
 }
-
-
-declare module "*.node" {
-  const content: string;
-  export default content;
-}
