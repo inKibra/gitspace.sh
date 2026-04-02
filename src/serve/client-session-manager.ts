@@ -55,6 +55,7 @@ export class ClientSessionManager {
   private remoteSessionHandler: RemoteSessionHandler;
   private options: ServeOptions;
   private eventHandler: ServeEventHandler | null = null;
+  private readonly inboundMessageQueues = new Map<string, Promise<Uint8Array | null>>();
 
   constructor(options: ServeOptions) {
     this.options = options;
@@ -168,6 +169,24 @@ export class ClientSessionManager {
    * @returns Response to send back (if any)
    */
   async handleMessage(
+    connectionId: string,
+    data: Uint8Array
+  ): Promise<Uint8Array | null> {
+    const previous = this.inboundMessageQueues.get(connectionId) ?? Promise.resolve<Uint8Array | null>(null);
+    const next = previous
+      .catch(() => null)
+      .then(() => this.handleMessageNow(connectionId, data));
+    this.inboundMessageQueues.set(connectionId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.inboundMessageQueues.get(connectionId) === next) {
+        this.inboundMessageQueues.delete(connectionId);
+      }
+    }
+  }
+
+  private async handleMessageNow(
     connectionId: string,
     data: Uint8Array
   ): Promise<Uint8Array | null> {
@@ -420,9 +439,16 @@ export class ClientSessionManager {
     data: Uint8Array
   ): Promise<Uint8Array | null> {
     try {
-      // Parse as JSON handshake message
+      // Parse as JSON handshake message. During handshake establishment, a later
+      // encrypted frame can arrive before the state flip completes; ignore obviously
+      // non-JSON payloads instead of treating them as fatal handshake errors.
       const jsonStr = new TextDecoder().decode(data);
-      const envelope = JSON.parse(jsonStr) as HandshakeMessageEnvelope;
+      const trimmed = jsonStr.trimStart();
+      if (!trimmed.startsWith('{')) {
+        console.warn('[session-manager] Ignoring non-JSON payload while handshaking');
+        return null;
+      }
+      const envelope = JSON.parse(trimmed) as HandshakeMessageEnvelope;
 
       if (envelope.type !== "handshake") {
         console.warn(`[session-manager] Expected handshake, got: ${envelope.type}`);

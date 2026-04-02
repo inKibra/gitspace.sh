@@ -250,6 +250,21 @@ function writeToClient(session: SessionData, data: Buffer): void {
   session.client.write(data);
 }
 
+function writeChunkedPtyToClient(session: SessionData, data: Buffer | Uint8Array | string): number {
+  const bytes = typeof data === 'string' ? Buffer.from(data) : Buffer.from(data);
+  if (bytes.length === 0) return 0;
+  let offset = 0;
+  let chunkCount = 0;
+  while (offset < bytes.length) {
+    const chunkEnd = Math.min(offset + PTY_CHUNK_SIZE, bytes.length);
+    const chunk = bytes.subarray(offset, chunkEnd);
+    writeToClient(session, encodePTY(chunk));
+    chunkCount += 1;
+    offset = chunkEnd;
+  }
+  return chunkCount;
+}
+
 function flushClient(session: SessionData): void {
   if (session.clientWriter) session.clientWriter.flush();
 }
@@ -1558,8 +1573,8 @@ function sendSerializedState(session: SessionData, sessionName: string): void {
   try {
     // Send reset first to clear any bad modes
     console.log(`[${sessionName}] sending TERM_RESET`);
-    writeToClient(session, encodePTY(TERM_RESET));
-    writeToClient(session, encodePTY(Buffer.from("\x1b[2J\x1b[H"))); // clear + home
+    writeChunkedPtyToClient(session, TERM_RESET);
+    writeChunkedPtyToClient(session, Buffer.from("\x1b[2J\x1b[H")); // clear + home
 
     if (!skipSerialize) {
       // Get serialized terminal state (including modes) for consistent redraws
@@ -1577,20 +1592,10 @@ function sendSerializedState(session: SessionData, sessionName: string): void {
         console.log(`[${sessionName}] serialized ${serializedBytes.length} bytes (${sizeKB}KB)`);
       }
 
-      // Send in chunks if too large for a single frame
-      if (serializedBytes.length > PTY_CHUNK_SIZE) {
-        let offset = 0;
-        let chunkNum = 0;
-        while (offset < serializedBytes.length) {
-          const chunkEnd = Math.min(offset + PTY_CHUNK_SIZE, serializedBytes.length);
-          const chunk = serializedBytes.subarray(offset, chunkEnd);
-          writeToClient(session, encodePTY(chunk));
-          chunkNum++;
-          offset = chunkEnd;
-        }
-        console.log(`[${sessionName}] attached (restored ${serializedBytes.length} bytes in ${chunkNum} chunks)`);
+      const chunkCount = writeChunkedPtyToClient(session, serializedBytes);
+      if (chunkCount > 1) {
+        console.log(`[${sessionName}] attached (restored ${serializedBytes.length} bytes in ${chunkCount} chunks)`);
       } else {
-        writeToClient(session, encodePTY(serializedBytes));
         console.log(`[${sessionName}] attached (restored ${serializedBytes.length} bytes)`);
       }
     } else {
@@ -1599,8 +1604,8 @@ function sendSerializedState(session: SessionData, sessionName: string): void {
   } catch (e) {
     console.log(`[${sessionName}] serialize error:`, e);
     // Fallback: just send a reset
-    writeToClient(session, encodePTY(TERM_RESET));
-    writeToClient(session, encodePTY(Buffer.from("\x1b[2J\x1b[H")));
+    writeChunkedPtyToClient(session, TERM_RESET);
+    writeChunkedPtyToClient(session, Buffer.from("\x1b[2J\x1b[H"));
   }
 }
 
@@ -2138,7 +2143,7 @@ function createVirtualSession(
         session.attachDirty = true;
         return;
       }
-      writeToClient(session, encodePTY(data));
+      writeChunkedPtyToClient(session, data);
     });
   });
 
