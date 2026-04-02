@@ -6,8 +6,11 @@ import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
 // signal handlers that call process.exit, provider registration) that conflict
-// with OpenTUI's terminal management. Keep these lazy.
-const importOmpCodingAgent = () => import('@oh-my-pi/pi-coding-agent');
+// with OpenTUI's terminal management. Keep these lazy and narrow so attach does
+// not evaluate the package root barrel (which pulls in far more modules).
+const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
+const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
+const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');
 const importPiAi = () => import('@oh-my-pi/pi-ai');
 
 /**
@@ -60,7 +63,7 @@ export function setupPiEnvironment(
  * Create a SessionManager pinned to GitSpace's managed Pi session root for a workspace.
  */
 export async function createPiSessionManager(cwd: string) {
-  const { SessionManager } = await importOmpCodingAgent();
+  const { SessionManager } = await importSessionManagerModule();
   const agentDir = ensurePiAgentDir();
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const sessionDir = SessionManager.getDefaultSessionDir(cwd, agentDir);
@@ -75,12 +78,9 @@ export async function createPiSessionManager(cwd: string) {
  * again after a tmux-lite restart.
  */
 export async function openPiSession(cwd: string, sessionFilePath: string) {
-  const {
-    SessionManager,
-    createAgentSession,
-    discoverAuthStorage,
-    ModelRegistry,
-  } = await importOmpCodingAgent();
+  const { SessionManager } = await importSessionManagerModule();
+  const { createAgentSession, discoverAuthStorage } = await importSdk();
+  const { ModelRegistry } = await importModelRegistryModule();
   const { getBundledModel } = await importPiAi();
   const agentDir = ensurePiAgentDir();
   process.env.PI_CODING_AGENT_DIR = agentDir;

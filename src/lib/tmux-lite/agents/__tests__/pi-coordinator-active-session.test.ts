@@ -44,12 +44,15 @@ mock.module('../pi-runtime.js', () => ({
   persistInitialPiSessionModel: mock(async () => {}),
 }));
 
-mock.module('@oh-my-pi/pi-coding-agent', () => ({
+mock.module('@oh-my-pi/pi-coding-agent/sdk', () => ({
   createAgentSession: mock(async () => ({
     session: createSession(),
     setToolUIContext: mock(() => {}),
   })),
-  discoverSlashCommands: mock(async () => []),
+}));
+
+mock.module('@oh-my-pi/pi-coding-agent/extensibility/slash-commands', () => ({
+  loadSlashCommands: mock(async () => []),
 }));
 
 const { PiCoordinator } = await import('../pi-coordinator.js');

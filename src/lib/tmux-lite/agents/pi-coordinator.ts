@@ -12,9 +12,10 @@ import {
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
-// Dynamic import: oh-my-pi has module-level side effects (postmortem signal
+// Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
 // handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
-const importOmpCodingAgent = () => import('@oh-my-pi/pi-coding-agent');
+const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
+const importSlashCommands = () => import('@oh-my-pi/pi-coding-agent/extensibility/slash-commands');
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
@@ -242,7 +243,7 @@ export class PiCoordinator {
    * when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    const { createAgentSession: createPiAgentSessionSdk } = await importOmpCodingAgent();
+    const { createAgentSession: createPiAgentSessionSdk } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
     const result = await createPiAgentSessionSdk({
       agentDir,
@@ -863,7 +864,7 @@ export class PiCoordinator {
 
     // 2. Discover file-based slash commands from the workspace
     try {
-      const { discoverSlashCommands } = await importOmpCodingAgent();
+      const { loadSlashCommands: discoverSlashCommands } = await importSlashCommands();
       const slashCommands = await discoverSlashCommands({ cwd: target.workspacePath });
       for (const cmd of slashCommands) {
         if (!commands.some(c => c.name === cmd.name)) {

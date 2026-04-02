@@ -40,11 +40,12 @@ export async function startVirtualInteractiveMode(
     agentDir?: string;
   },
 ): Promise<VirtualInteractiveModeHandle> {
-  // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
-  // signal handlers that call process.exit, provider registration, etc.) that
-  // conflict with OpenTUI's terminal management. Keep these lazy so they only
   // load when actually starting an interactive mode session.
-  const { InteractiveMode, submitInteractiveInput, Settings, initTheme, VERSION: OMP_VERSION } = await import('@oh-my-pi/pi-coding-agent');
+  const { InteractiveMode } = await import('@oh-my-pi/pi-coding-agent/modes/interactive-mode');
+  const { submitInteractiveInput } = await import('@oh-my-pi/pi-coding-agent/main');
+  const { Settings } = await import('@oh-my-pi/pi-coding-agent/config/settings');
+  const { initTheme } = await import('@oh-my-pi/pi-coding-agent/modes/theme/theme');
+  const { VERSION: OMP_VERSION } = await import('@oh-my-pi/pi-utils');
   const { initializeWithSettings } = await import('@oh-my-pi/pi-coding-agent/discovery');
   const { TUI } = await import('@oh-my-pi/pi-tui');
 
