@@ -79,7 +79,7 @@ async function waitForServeReady(expectedRelayUrl: string, timeoutMs: number): P
 async function registerBrowserEnrollment(host: string, port: number, enrollment: RelayOneTimeBrowserEnrollment): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(`http://${host}:${port}/__dev_identity`, {
+    response = await fetch(`http://${host}:${port}/__enroll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(enrollment),

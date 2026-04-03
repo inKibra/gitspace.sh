@@ -15,8 +15,8 @@ import {
   decryptLegacyMnemonic,
   clearLegacyMnemonicStorage,
   deriveRootIdentityFromMnemonic,
-  loadDevBrowserIdentity,
-  storeDevBrowserIdentity,
+  loadEnrolledBrowserIdentity,
+  storeEnrolledBrowserIdentity,
 } from '../../lib/storage/identity-store.web';
 import {
   isValidMnemonic,
@@ -104,23 +104,23 @@ export function useIdentityGate(
 
     async function check() {
       // Dev mode: check for auto-provisioned identity from bun run dev:web
-      const devIdentity = loadDevBrowserIdentity();
+      const devIdentity = loadEnrolledBrowserIdentity();
       if (devIdentity) {
         if (!cancelled) onIdentityReady(devIdentity.identity);
         return;
       }
 
-      // Try fetching dev identity from dev server using enrollment token from URL.
+      // Try fetching enrolled identity from dev server using enrollment token from URL.
       // The token is a one-time secret passed via ?enroll=TOKEN in the dev URL.
       const enrollToken = new URLSearchParams(window.location.search).get('enroll');
       if (enrollToken) {
         try {
-          const res = await fetch(`/__dev_identity?token=${encodeURIComponent(enrollToken)}`);
+          const res = await fetch(`/__enroll?token=${encodeURIComponent(enrollToken)}`);
           if (res.ok) {
             const data = await res.json();
             if (data?.identity && data?.deviceCert) {
-              storeDevBrowserIdentity(data);
-              const loaded = loadDevBrowserIdentity();
+              storeEnrolledBrowserIdentity(data);
+              const loaded = loadEnrolledBrowserIdentity();
               if (loaded && !cancelled) {
                 // Clean the enrollment token from the URL so it isn't leaked
                 // in bookmarks, history, or referrer headers.

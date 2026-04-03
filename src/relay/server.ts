@@ -660,12 +660,12 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         });
       }
 
-      // One-time browser bootstrap for local web flows. The payload is only
+      // One-time browser enrollment endpoint for local web flows. The payload is only
       // available on a local-only relay (no hosted hostname) and only over
       // loopback. When a tunnel/proxy is active (hostname is configured),
       // every proxied request arrives from loopback, so we refuse the
       // endpoint entirely in that mode.
-      if (url.pathname === "/__dev_identity") {
+      if (url.pathname === "/__enroll") {
         if (hostname) {
           return new Response("Not available on hosted relay", { status: 403 });
         }

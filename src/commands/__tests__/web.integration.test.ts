@@ -217,7 +217,7 @@ describe('gssh web integration', () => {
       expect(reportedPort).toBe(port);
       expect(webUrl).toContain(`127.0.0.1:${port}`);
 
-      const first = await fetch(`http://127.0.0.1:${port}/__dev_identity?token=${token}`);
+      const first = await fetch(`http://127.0.0.1:${port}/__enroll?token=${token}`);
       expect(first.status).toBe(200);
       const payload = await first.json() as {
         identity: { id: string; signingPublicKey: string; keyExchangePublicKey: string };
@@ -234,7 +234,7 @@ describe('gssh web integration', () => {
       };
       expect(cert.deviceSigningPublicKey).toBe(payload.identity.signingPublicKey);
       expect(cert.deviceKeyExchangePublicKey).toBe(payload.identity.keyExchangePublicKey);
-      const second = await fetch(`http://127.0.0.1:${port}/__dev_identity?token=${token}`);
+      const second = await fetch(`http://127.0.0.1:${port}/__enroll?token=${token}`);
       expect(second.status).toBe(404);
 
       const health = await fetch(`http://127.0.0.1:${port}/health`);

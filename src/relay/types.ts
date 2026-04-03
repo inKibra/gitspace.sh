@@ -45,7 +45,7 @@ export interface Pipe {
 }
 
 export interface RelayOneTimeBrowserEnrollment {
-  /** Single-use enrollment token expected in /__dev_identity?token=... */
+  /** Single-use enrollment token expected in /__enroll?token=... */
   token: string;
   /** Browser device identity serialized in the existing web storage format. */
   identity: StoredIdentity;
@@ -80,7 +80,7 @@ export interface RelayServerConfig {
    */
   preAuthorizedMachines?: string[] | Set<string>;
   /**
-   * Single-use browser enrollment payload exposed via /__dev_identity.
+   * Single-use browser enrollment payload exposed via /__enroll.
    * Intended for local bootstrap flows such as `gssh web`.
    */
   oneTimeBrowserEnrollment?: RelayOneTimeBrowserEnrollment;

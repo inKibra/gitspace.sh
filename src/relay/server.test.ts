@@ -204,7 +204,7 @@ describe('relay basics', () => {
     });
 
     try {
-      const register = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__dev_identity`, {
+      const register = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__enroll`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -215,13 +215,13 @@ describe('relay basics', () => {
       });
       expect(register.status).toBe(204);
 
-      const first = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__dev_identity?token=${token}`);
+      const first = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__enroll?token=${token}`);
       expect(first.status).toBe(200);
       const payload = await first.json() as { identity: { id: string }; deviceCert: string };
       expect(payload.identity.id).toBe(browserIdentity.id);
       expect(payload.deviceCert).toContain('deviceSigningPublicKey');
 
-      const second = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__dev_identity?token=${token}`);
+      const second = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__enroll?token=${token}`);
       expect(second.status).toBe(404);
     } finally {
       singleUseRelay.stop(true);

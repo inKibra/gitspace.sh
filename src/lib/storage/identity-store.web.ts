@@ -172,8 +172,8 @@ export async function unlockDeviceIdentity(pin: string): Promise<Identity> {
 export function getStoredDeviceCert(): string | null {
   const blob = readBlob();
   if (blob?.deviceCert) return blob.deviceCert;
-  // Check dev identity fallback
-  const devRaw = localStorage.getItem('gssh.browser.dev-identity.v1');
+  // Check enrolled identity fallback
+  const devRaw = localStorage.getItem('gssh.browser.enrolled.v1');
   if (devRaw) {
     try { return JSON.parse(devRaw).deviceCert ?? null; } catch { /* */ }
   }
@@ -299,31 +299,31 @@ export function deriveRootIdentityFromMnemonic(mnemonic: string): Identity {
 }
 
 
-// ─── Dev mode identity provisioning ──────────────────────────────────────────
+// ─── Enrolled browser identity provisioning ─────────────────────────────────
 
-const DEV_IDENTITY_KEY = 'gssh.browser.dev-identity.v1';
+const ENROLLED_IDENTITY_KEY = 'gssh.browser.enrolled.v1';
 
 /**
- * Store a pre-provisioned dev identity. Used by `bun run dev:web` to bypass
+ * Store a pre-provisioned enrolled identity. Used by `bun run dev:web` to bypass
  * the full identity gate setup flow.
  *
  * The identity is stored unencrypted (no PIN) because it is ephemeral —
  * regenerated on each dev session start, signed by the user's real root
  * identity, and only lives in the dev browser's localStorage.
  */
-export function storeDevBrowserIdentity(data: {
+export function storeEnrolledBrowserIdentity(data: {
   identity: StoredIdentity;
   deviceCert: string;
 }): void {
-  localStorage.setItem(DEV_IDENTITY_KEY, JSON.stringify(data));
+  localStorage.setItem(ENROLLED_IDENTITY_KEY, JSON.stringify(data));
 }
 
 /**
- * Load a dev-provisioned identity. Returns the Identity and device cert,
- * or null if no dev identity is stored.
+ * Load an enrolled browser identity. Returns the Identity and device cert,
+ * or null if no enrolled identity is stored.
  */
-export function loadDevBrowserIdentity(): { identity: Identity; deviceCert: string } | null {
-  const raw = localStorage.getItem(DEV_IDENTITY_KEY);
+export function loadEnrolledBrowserIdentity(): { identity: Identity; deviceCert: string } | null {
+  const raw = localStorage.getItem(ENROLLED_IDENTITY_KEY);
   if (!raw) return null;
   try {
     const data = JSON.parse(raw) as { identity: StoredIdentity; deviceCert: string };
@@ -335,6 +335,6 @@ export function loadDevBrowserIdentity(): { identity: Identity; deviceCert: stri
   }
 }
 
-export function hasDevBrowserIdentity(): boolean {
-  return localStorage.getItem(DEV_IDENTITY_KEY) !== null;
+export function hasEnrolledBrowserIdentity(): boolean {
+  return localStorage.getItem(ENROLLED_IDENTITY_KEY) !== null;
 }

@@ -150,17 +150,17 @@ const stubExportNames = [
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
-    // In dev mode, serve the auto-provisioned browser identity at /__dev_identity.
+    // In dev mode, serve the auto-provisioned browser identity at /__enroll.
     // Requires a one-time enrollment token to prevent ambient local trust.
     // The token is burned after first successful use.
     ...(process.env.DEV_IDENTITY_PATH && process.env.DEV_ENROLL_TOKEN ? (() => {
       let enrollToken: string | null = process.env.DEV_ENROLL_TOKEN!;
       return [{
-        name: 'serve-dev-identity',
+        name: 'serve-enroll-identity',
         configureServer(server: import('vite').ViteDevServer) {
           server.middlewares.use((req, res, next) => {
             const reqUrl = req.url ?? '';
-            if (!reqUrl.startsWith('/__dev_identity')) { next(); return; }
+            if (!reqUrl.startsWith('/__enroll')) { next(); return; }
 
             // Parse token from query string
             const url = new URL(reqUrl, 'http://localhost');
