@@ -192,7 +192,7 @@ function getRecommendedLocalRelayHost(bind: string): string {
   return bind;
 }
 
-function buildLocalRelayUrl(bind: string, port: number): string {
+export function buildLocalRelayUrl(bind: string, port: number): string {
   return `ws://${formatRelayHostForUrl(getRecommendedLocalRelayHost(bind))}:${port}/ws`;
 }
 
@@ -857,7 +857,7 @@ export async function stopRelay(): Promise<void> {
   logger.success("relay stopped");
 }
 
-function getRelayStatusSnapshot(): RelayStatusSnapshot {
+export function getRelayStatusSnapshot(): RelayStatusSnapshot {
   const state = readRelayState();
   if (!state) {
     return {

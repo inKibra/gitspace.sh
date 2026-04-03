@@ -11,6 +11,7 @@
  *   gssh user identity|auth|host|config|notifications|migrate
  *   gssh cloud setup|status|list|launch|stop|resume|destroy
  *   gssh relay start|machines
+ *   gssh web
  *   gssh status
  *   gssh space [context|review|process|events|bundle]  (hidden)
  *
@@ -28,7 +29,7 @@ import { registerCloudCommands } from './commands/cloud.js';
 import { registerRelayCommands } from './commands/relay.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerInviteCommands } from './commands/invite.js';
-
+import { registerWebCommand } from './commands/web.js';
 /**
  * Create the CLI program with all commands registered.
  *
@@ -53,6 +54,7 @@ export function createProgram(version: string): Command {
   registerCloudCommands(program);
   registerRelayCommands(program);
   registerStatusCommand(program);
+  registerWebCommand(program);
 
   // Hidden session-only commands
   registerSpaceCommands(program);

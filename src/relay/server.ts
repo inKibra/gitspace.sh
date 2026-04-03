@@ -127,6 +127,21 @@ async function serveStaticFile(pathname: string): Promise<Response | null> {
   }
 
   return null;
+
+}
+
+export async function hasRelayWebUiAssets(): Promise<boolean> {
+  if (hasEmbeddedAssets()) {
+    return true;
+  }
+
+  for (const resolvedPath of resolveAssetPaths("/index.html")) {
+    if (await Bun.file(resolvedPath).exists()) {
+      return true;
+    }
+  }
+
+  return false;
 }
 import {
   registerMachine,
@@ -565,6 +580,15 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
     console.log(`[relay] Pre-authorized ${preAuthorizedMachines.size} machine(s)`);
   }
 
+  const oneTimeBrowserEnrollments = new Map(
+    config.oneTimeBrowserEnrollment
+      ? [[config.oneTimeBrowserEnrollment.token, {
+          identity: config.oneTimeBrowserEnrollment.identity,
+          deviceCert: config.oneTimeBrowserEnrollment.deviceCert,
+        }]]
+      : [],
+  );
+
   /**
    * Client connections by connectionId (for routing machine → client)
    */
@@ -636,6 +660,59 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         });
       }
 
+      // One-time browser bootstrap for local web flows. The payload is only
+      // available over loopback and is removed on first successful GET.
+      if (url.pathname === "/__dev_identity") {
+        const requestIp = server.requestIP(req)?.address;
+        if (!isLoopbackIp(requestIp)) {
+          return new Response("Forbidden", { status: 403 });
+        }
+
+        if (req.method === "POST") {
+          let payload: unknown;
+          try {
+            payload = await req.json();
+          } catch {
+            return new Response("Invalid JSON", { status: 400 });
+          }
+
+          const enrollment = payload as Partial<{ token: string; identity: unknown; deviceCert: string }>;
+          if (typeof enrollment.token !== "string" || enrollment.token.length === 0 || typeof enrollment.deviceCert !== "string") {
+            return new Response("Invalid enrollment payload", { status: 400 });
+          }
+
+          oneTimeBrowserEnrollments.set(enrollment.token, {
+            identity: enrollment.identity as import("../types/identity.js").StoredIdentity,
+            deviceCert: enrollment.deviceCert,
+          });
+          return new Response(null, {
+            status: 204,
+            headers: { "Cache-Control": "no-store, max-age=0" },
+          });
+        }
+
+        if (req.method !== "GET") {
+          return new Response("Method Not Allowed", { status: 405 });
+        }
+
+        const token = url.searchParams.get("token");
+        if (!token) {
+          return new Response("Missing token", { status: 400 });
+        }
+
+        const enrollment = oneTimeBrowserEnrollments.get(token);
+        if (!enrollment) {
+          return new Response("Not Found", { status: 404 });
+        }
+
+        oneTimeBrowserEnrollments.delete(token);
+        return Response.json(enrollment, {
+          headers: {
+            "Cache-Control": "no-store, max-age=0",
+          },
+        });
+      }
+
       // When a hosted hostname is configured, keep that host reachable while also
       // preserving same-machine loopback access for local clients and daemons.
       if (hostname) {
@@ -646,7 +723,6 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           return new Response("Not found", { status: 404 });
         }
       }
-
       // WebSocket upgrade
       // - Machines and clients connect freely
       // - Machine authentication happens via challenge-response during registration

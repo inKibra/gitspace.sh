@@ -18,6 +18,7 @@ import {
   createTestIdentity,
   toPublicIdentity,
 } from '../lib/tmux-lite/crypto/__tests__/helpers/test-identities';
+import { serializeIdentity } from '../lib/tmux-lite/crypto/identity';
 import { createDeviceCertificate } from '../lib/tmux-lite/crypto/device-cert';
 import { createRootInviteToken, parseRootInviteToken } from '../lib/tmux-lite/crypto/root-invites';
 import { ensureControlStore, removeVaultCategory, setVaultMeta } from './control/store';
@@ -192,6 +193,42 @@ describe('relay basics', () => {
       hostedRelay.stop(true);
     }
   });
+
+  test('registers and serves one-time browser enrollment payload exactly once', async () => {
+    const browserIdentity = createTestIdentity('Browser Dev Identity');
+    const token = 'dev-token-once';
+    const singleUseRelay = startRelayServer({
+      bind: TEST_HOST,
+      hostname: TEST_HOST,
+      disableRateLimit: true,
+      identity: generateRelayIdentity('dev-identity-relay'),
+    });
+
+    try {
+      const register = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__dev_identity`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token,
+          identity: serializeIdentity(browserIdentity),
+          deviceCert: buildDeviceCertificate(browserIdentity, ownerUserRoot),
+        }),
+      });
+      expect(register.status).toBe(204);
+
+      const first = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__dev_identity?token=${token}`);
+      expect(first.status).toBe(200);
+      const payload = await first.json() as { identity: { id: string }; deviceCert: string };
+      expect(payload.identity.id).toBe(browserIdentity.id);
+      expect(payload.deviceCert).toContain('deviceSigningPublicKey');
+
+      const second = await fetch(`http://${TEST_HOST}:${singleUseRelay.port}/__dev_identity?token=${token}`);
+      expect(second.status).toBe(404);
+    } finally {
+      singleUseRelay.stop(true);
+    }
+  });
+
 
   test('rejects unknown endpoint', async () => {
     const res = await fetch(`${relayHttpBase}/unknown`);

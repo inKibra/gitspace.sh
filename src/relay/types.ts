@@ -9,6 +9,7 @@
  */
 
 import type { ServerWebSocket } from "bun";
+import type { StoredIdentity } from "../types/identity.js";
 import type { RelayIdentity } from "./identity.js";
 
 /**
@@ -43,6 +44,16 @@ export interface Pipe {
   openedAt: number;
 }
 
+export interface RelayOneTimeBrowserEnrollment {
+  /** Single-use enrollment token expected in /__dev_identity?token=... */
+  token: string;
+  /** Browser device identity serialized in the existing web storage format. */
+  identity: StoredIdentity;
+  /** Root-signed browser device certificate JSON. */
+  deviceCert: string;
+}
+
+
 /**
  * Relay server startup configuration.
  * Distinct from RelayEnrollment (persisted client-side enrollment) and
@@ -68,4 +79,9 @@ export interface RelayServerConfig {
    * Used for ephemeral local relays where the creating process knows which machine will connect.
    */
   preAuthorizedMachines?: string[] | Set<string>;
+  /**
+   * Single-use browser enrollment payload exposed via /__dev_identity.
+   * Intended for local bootstrap flows such as `gssh web`.
+   */
+  oneTimeBrowserEnrollment?: RelayOneTimeBrowserEnrollment;
 }
