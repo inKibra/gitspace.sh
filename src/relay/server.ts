@@ -661,8 +661,15 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
       }
 
       // One-time browser bootstrap for local web flows. The payload is only
-      // available over loopback and is removed on first successful GET.
+      // available on a local-only relay (no hosted hostname) and only over
+      // loopback. When a tunnel/proxy is active (hostname is configured),
+      // every proxied request arrives from loopback, so we refuse the
+      // endpoint entirely in that mode.
       if (url.pathname === "/__dev_identity") {
+        if (hostname) {
+          return new Response("Not available on hosted relay", { status: 403 });
+        }
+
         const requestIp = server.requestIP(req)?.address;
         if (!isLoopbackIp(requestIp)) {
           return new Response("Forbidden", { status: 403 });
@@ -676,13 +683,27 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
             return new Response("Invalid JSON", { status: 400 });
           }
 
-          const enrollment = payload as Partial<{ token: string; identity: unknown; deviceCert: string }>;
+          const enrollment = payload as Partial<{ token: string; identity: Partial<Record<string, unknown>>; deviceCert: string }>;
           if (typeof enrollment.token !== "string" || enrollment.token.length === 0 || typeof enrollment.deviceCert !== "string") {
             return new Response("Invalid enrollment payload", { status: 400 });
           }
 
+          // Validate StoredIdentity shape so a malformed POST doesn't burn
+          // the one-time token with garbage the browser can't use.
+          const id = enrollment.identity;
+          if (
+            !id
+            || typeof id.id !== "string"
+            || typeof id.signingPublicKey !== "string"
+            || typeof id.signingSecretKey !== "string"
+            || typeof id.keyExchangePublicKey !== "string"
+            || typeof id.keyExchangePrivateKey !== "string"
+          ) {
+            return new Response("Invalid identity in enrollment payload", { status: 400 });
+          }
+
           oneTimeBrowserEnrollments.set(enrollment.token, {
-            identity: enrollment.identity as import("../types/identity.js").StoredIdentity,
+            identity: id as unknown as import("../types/identity.js").StoredIdentity,
             deviceCert: enrollment.deviceCert,
           });
           return new Response(null, {

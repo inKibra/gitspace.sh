@@ -199,7 +199,6 @@ describe('relay basics', () => {
     const token = 'dev-token-once';
     const singleUseRelay = startRelayServer({
       bind: TEST_HOST,
-      hostname: TEST_HOST,
       disableRateLimit: true,
       identity: generateRelayIdentity('dev-identity-relay'),
     });

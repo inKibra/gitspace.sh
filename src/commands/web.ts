@@ -29,8 +29,8 @@ function buildCliCommand(args: string[]): string[] {
     : [process.execPath, ...args];
 }
 
-function buildLocalWebUrl(port: number, token: string): string {
-  return `http://localhost:${port}/?enroll=${encodeURIComponent(token)}`;
+function buildLocalWebUrl(host: string, port: number, token: string): string {
+  return `http://${host}:${port}/?enroll=${encodeURIComponent(token)}`;
 }
 
 async function waitForRelayHttpReady(port: number, timeoutMs: number): Promise<void> {
@@ -76,10 +76,10 @@ async function waitForServeReady(expectedRelayUrl: string, timeoutMs: number): P
   );
 }
 
-async function registerBrowserEnrollment(port: number, enrollment: RelayOneTimeBrowserEnrollment): Promise<void> {
+async function registerBrowserEnrollment(host: string, port: number, enrollment: RelayOneTimeBrowserEnrollment): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(`http://127.0.0.1:${port}/__dev_identity`, {
+    response = await fetch(`http://${host}:${port}/__dev_identity`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(enrollment),
@@ -226,9 +226,16 @@ export async function startLocalWeb(options: WebCommandOptions = {}): Promise<vo
   try {
     const relaySnapshot = getRelayStatusSnapshot();
     let relayWsUrl: string;
-
+    let relayHttpHost: string;
     if (relaySnapshot.running) {
-      if (configuredOwnerUserRootId && configuredOwnerUserRootId !== userRoot.id) {
+      if (!configuredOwnerUserRootId) {
+        throw new SpacesError(
+          'The running relay has no owner identity bound. Stop it first so `gssh web` can restart it with your current identity.',
+          'USER_ERROR',
+          1,
+        );
+      }
+      if (configuredOwnerUserRootId !== userRoot.id) {
         throw new SpacesError(
           'The running relay is bound to a different user root identity. Stop it first, or recover the original identity before using `gssh web`.',
           'USER_ERROR',
@@ -246,6 +253,7 @@ export async function startLocalWeb(options: WebCommandOptions = {}): Promise<vo
         throw new SpacesError('Relay runtime state is incomplete. Stop the relay and retry.', 'SYSTEM_ERROR', 2);
       }
       relayWsUrl = relaySnapshot.relayUrl;
+      relayHttpHost = relaySnapshot.bind === '0.0.0.0' ? '127.0.0.1' : relaySnapshot.bind === '::' ? '::1' : relaySnapshot.bind;
       logger.info(`Reusing local relay on port ${port}`);
     } else {
       logger.info(`Starting local relay on port ${port}...`);
@@ -263,6 +271,7 @@ export async function startLocalWeb(options: WebCommandOptions = {}): Promise<vo
         watchUnexpectedExit(relayChild, 'relay', () => shuttingDown),
       ]);
       relayWsUrl = buildLocalRelayUrl('127.0.0.1', port);
+      relayHttpHost = '127.0.0.1';
     }
 
     if (isServeRunning()) {
@@ -276,6 +285,10 @@ export async function startLocalWeb(options: WebCommandOptions = {}): Promise<vo
           'USER_ERROR',
           1,
         );
+      }
+      if (status.relay.status !== 'connected') {
+        logger.info('Waiting for existing serve daemon to connect to relay...');
+        await waitForServeReady(relayWsUrl, SERVE_START_TIMEOUT_MS);
       }
       logger.info('Reusing running machine serve daemon');
     } else {
@@ -301,9 +314,9 @@ export async function startLocalWeb(options: WebCommandOptions = {}): Promise<vo
       identity: serializeIdentity(browserIdentity),
       deviceCert: await createLocalDeviceCertificate(browserIdentity),
     };
-    await registerBrowserEnrollment(port, enrollment);
+    await registerBrowserEnrollment(relayHttpHost, port, enrollment);
 
-    const browserUrl = buildLocalWebUrl(port, enrollment.token);
+    const browserUrl = buildLocalWebUrl(relayHttpHost, port, enrollment.token);
     logger.success(`Local web UI: ${browserUrl}`);
 
     const browserResult = await openBrowserUrl(browserUrl);

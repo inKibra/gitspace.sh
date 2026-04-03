@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type AddressInfo } from 'node:net';
+import { deriveIdentityId } from '../../lib/tmux-lite/crypto/identity';
 
 interface DevIdentityOutput {
   userRootStored: {
@@ -164,6 +165,7 @@ describe('gssh web integration', () => {
     const sandboxName = `web-test-${Date.now()}`;
     const relayStatePath = join(testHome, 'gitspace', '.relay', 'runtime', 'relay-state.json');
     const servePidPath = join(testHome, '.serve', 'serve.pid');
+    let subprocess: Bun.Subprocess | null = null;
 
     try {
       const identityOutput = await generateSandboxIdentity(repoRoot);
@@ -183,7 +185,7 @@ describe('gssh web integration', () => {
         BROWSER: 'definitely-not-a-browser',
       } as Record<string, string>;
 
-      const subprocess = Bun.spawn({
+      subprocess = Bun.spawn({
         cmd: ['bun', 'src/index.ts', 'web', '--port', String(port), '--yes', '--password-stdin'],
         cwd: repoRoot,
         env,
@@ -191,21 +193,21 @@ describe('gssh web integration', () => {
         stdout: 'pipe',
         stderr: 'pipe',
       });
-      subprocess.stdin.write('dev\n');
-      subprocess.stdin.end();
-
+      const stdin = subprocess.stdin as import('bun').FileSink;
+      stdin.write('dev\n');
+      stdin.end();
       let stdout = '';
       let stderr = '';
-      const captureStdout = startCapture(subprocess.stdout, (chunk) => {
+      const captureStdout = startCapture(subprocess.stdout as ReadableStream<Uint8Array> | null, (chunk) => {
         stdout += chunk;
       });
-      const captureStderr = startCapture(subprocess.stderr, (chunk) => {
+      const captureStderr = startCapture(subprocess.stderr as ReadableStream<Uint8Array> | null, (chunk) => {
         stderr += chunk;
       });
 
       const urlMatch = await waitForMatch(
         () => `${stdout}\n${stderr}`,
-        /Local web UI:\s+(http:\/\/localhost:(\d+)\/\?enroll=([^\s]+))/,
+        /Local web UI:\s+(http:\/\/127\.0\.0\.1:(\d+)\/\?enroll=([^\s]+))/,
         120_000,
       );
       const webUrl = urlMatch[1]!;
@@ -213,7 +215,7 @@ describe('gssh web integration', () => {
       const token = urlMatch[3]!;
 
       expect(reportedPort).toBe(port);
-      expect(webUrl).toContain(`localhost:${port}`);
+      expect(webUrl).toContain(`127.0.0.1:${port}`);
 
       const first = await fetch(`http://127.0.0.1:${port}/__dev_identity?token=${token}`);
       expect(first.status).toBe(200);
@@ -223,6 +225,9 @@ describe('gssh web integration', () => {
       };
       expect(typeof payload.identity.id).toBe('string');
       expect(payload.identity.id.length).toBeGreaterThan(0);
+      // Verify identity ID is derived from signing public key
+      const expectedId = deriveIdentityId(new Uint8Array(Buffer.from(payload.identity.signingPublicKey, 'base64')));
+      expect(payload.identity.id).toBe(expectedId);
       const cert = JSON.parse(payload.deviceCert) as {
         deviceSigningPublicKey: string;
         deviceKeyExchangePublicKey: string;
@@ -243,8 +248,11 @@ describe('gssh web integration', () => {
       expect(existsSync(relayStatePath)).toBe(false);
 
       const combinedOutput = `${stdout}\n${stderr}`;
-      expect(combinedOutput).toContain(`Local web UI: http://localhost:${port}/?enroll=`);
+      expect(combinedOutput).toContain(`Local web UI: http://127.0.0.1:${port}/?enroll=`);
     } finally {
+      if (subprocess) {
+        await stopProcess(subprocess).catch(() => {});
+      }
       if (existsSync(testDir)) {
         rmSync(testDir, { recursive: true, force: true });
       }
