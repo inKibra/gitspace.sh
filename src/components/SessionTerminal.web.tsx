@@ -439,19 +439,47 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
             return;
           }
 
-          try {
-            term.write(new TextDecoder().decode(chunk));
-          } catch (error) {
-            console.error('[session-terminal:web] term.write failed', {
-              byteLength: chunk.byteLength,
-              byteOffset: chunk.byteOffset,
-              preview: Array.from(chunk.slice(0, 32)),
-              viewportY: term.viewportY,
-              cols: term.cols,
-              rows: term.rows,
-              error,
-            });
-            throw error;
+          // Feed large payloads to the Ghostty WASM terminal in bounded
+          // slices.  A single >100KB write can exceed the WASM linear memory
+          // budget allocated for the render viewport, causing an
+          // out-of-bounds trap in ghostty_render_state_get_viewport.
+          //
+          // Write slices synchronously in a loop — no callback chaining.
+          // Ghostty processes each write before returning, so every slice
+          // is fully consumed before the next is fed.
+          const MAX_WRITE_BYTES = 16384;
+          let offset = 0;
+
+          while (offset < chunk.length) {
+            let end = Math.min(offset + MAX_WRITE_BYTES, chunk.length);
+            // Walk backwards to a UTF-8-safe boundary so we never split
+            // a multi-byte codepoint between two write() calls.
+            if (end < chunk.length) {
+              let safeEnd = end;
+              while (safeEnd > offset && (chunk[safeEnd]! & 0xC0) === 0x80) {
+                safeEnd--;
+              }
+              if (safeEnd > offset) {
+                end = safeEnd;
+              }
+            }
+
+            try {
+              term.write(chunk.subarray(offset, end));
+            } catch (error) {
+              console.error('[session-terminal:web] term.write failed', {
+                sliceLength: end - offset,
+                totalLength: chunk.length,
+                offset,
+                viewportY: term.viewportY,
+                cols: term.cols,
+                rows: term.rows,
+                error,
+              });
+              throw error;
+            }
+
+            offset = end;
           }
 
           if (wasScrolledUp && term.viewportY === 0) {
