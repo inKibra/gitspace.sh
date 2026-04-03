@@ -20,6 +20,7 @@ export function registerWebCommand(parent: Command): void {
     .command('web')
     .description('Start the local relay + serve web stack on this machine')
     .option('--port <port>', 'Local relay/web port', '4480')
+    .option('--relay', 'Start a hosted relay with cloudflared tunnel to your gitspace.sh subdomain')
     .option('-y, --yes', 'Auto-confirm prompts')
     .option('--takeover', 'Clear persisted relay/serve owner state before starting newly launched services')
     .option('--password-stdin', 'Read the local device identity password from stdin and pass it through to machine serve')
@@ -27,6 +28,7 @@ export function registerWebCommand(parent: Command): void {
       const { startLocalWeb } = await import('../../commands/web.js');
       await startLocalWeb({
         port: parseWebPort(options.port),
+        relay: options.relay,
         yes: options.yes,
         takeover: options.takeover,
         passwordStdin: options.passwordStdin,

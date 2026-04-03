@@ -660,19 +660,22 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         });
       }
 
-      // One-time browser enrollment endpoint for local web flows. The payload is only
-      // available on a local-only relay (no hosted hostname) and only over
-      // loopback. When a tunnel/proxy is active (hostname is configured),
-      // every proxied request arrives from loopback, so we refuse the
-      // endpoint entirely in that mode.
+      // One-time browser enrollment endpoint. POST (runtime registration)
+      // is blocked when a hosted hostname is configured because all tunnel-
+      // proxied requests arrive from loopback, making the IP check useless.
+      // GET (token redemption) is allowed on hosted relays: tokens can only
+      // be seeded via config at startup, and the general hostname guard
+      // below validates the Host header.
       if (url.pathname === "/__enroll") {
-        if (hostname) {
-          return new Response("Not available on hosted relay", { status: 403 });
+        if (hostname && req.method !== "GET") {
+          return new Response("POST not available on hosted relay", { status: 403 });
         }
 
-        const requestIp = server.requestIP(req)?.address;
-        if (!isLoopbackIp(requestIp)) {
-          return new Response("Forbidden", { status: 403 });
+        if (!hostname) {
+          const requestIp = server.requestIP(req)?.address;
+          if (!isLoopbackIp(requestIp)) {
+            return new Response("Forbidden", { status: 403 });
+          }
         }
 
         if (req.method === "POST") {

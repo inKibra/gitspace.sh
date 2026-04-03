@@ -750,12 +750,32 @@ export async function startRelay(options: {
   let tunnelProcess: ReturnType<typeof Bun.spawn> | null = null;
   let server: ReturnType<typeof createRelayServer> | null = null;
 
+  // Read one-time browser enrollment from a file written by the parent
+  // supervisor (e.g. `gssh web`). The file is consumed and deleted so the
+  // enrollment payload is not persisted on disk after relay startup.
+  let oneTimeBrowserEnrollment: import('../relay/types.js').RelayOneTimeBrowserEnrollment | undefined;
+  const enrollmentFilePath = process.env.GITSPACE_RELAY_ENROLLMENT_FILE?.trim();
+  if (enrollmentFilePath) {
+    try {
+      const raw = readFileSync(enrollmentFilePath, 'utf-8');
+      rmSync(enrollmentFilePath, { force: true });
+      oneTimeBrowserEnrollment = JSON.parse(raw) as import('../relay/types.js').RelayOneTimeBrowserEnrollment;
+    } catch (error) {
+      throw new SpacesError(
+        `Failed to read enrollment file ${enrollmentFilePath}: ${error instanceof Error ? error.message : String(error)}`,
+        'SYSTEM_ERROR',
+        2,
+      );
+    }
+  }
+
   try {
     server = await createRelayServer({
       port,
       bind,
       hostname,
       identity,
+      oneTimeBrowserEnrollment,
     });
 
     writeRelayState({
