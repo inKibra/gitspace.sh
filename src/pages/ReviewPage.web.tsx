@@ -3,7 +3,7 @@
  * ReviewPage — full review dashboard.
  */
 
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { DiffViewer, type HunkFocusTarget } from '../components/DiffViewer.web.js';
 import { ThreadPanel } from '../components/ThreadPanel.web.js';
 import { useReviewPageModel } from '../app/shared/review/useReviewPageModel.js';
@@ -96,9 +96,14 @@ export function ReviewPage({
   }, [sendReviewRequest, projectName, workspaceName]);
 
   useEffect(() => {
+    // Deliberately key this effect to workspace identity only.
+    // loadThreads/loadChangedFiles are recreated when upstream callback
+    // identities churn, which was causing a refetch loop. Initial review
+    // loading should happen when the workspace changes, not when callback
+    // references change.
     void loadThreads().catch(() => {});
     void loadChangedFiles();
-  }, [projectName, workspaceName, loadChangedFiles, loadThreads]);
+  }, [projectName, workspaceName]);
 
   const handleRefresh = useCallback(() => {
     void loadThreads().catch(() => {});

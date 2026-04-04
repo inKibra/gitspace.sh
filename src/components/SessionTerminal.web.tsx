@@ -78,6 +78,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   const allowTapFocusRef = useRef(allowTapFocus);
   const setWriteCallbackRef = useRef(setWriteCallback);
   const readOnlyRef = useRef(readOnly);
+  const followOutputRef = useRef(true);
 
   // Touch state with accumulated delta pattern
   const touchStateRef = useRef<{
@@ -142,8 +143,17 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
 
     const linesPerPage = Math.max(1, (terminal.rows ?? 1) - 1);
     terminal.scrollLines(direction === 'up' ? -linesPerPage : linesPerPage);
+    syncFollowOutputState();
     onActivityRef.current?.();
     return true;
+  }, []);
+
+  const syncFollowOutputState = useCallback(() => {
+    const terminal = terminalRef.current as unknown as TerminalViewportLike | null;
+    if (!terminal) {
+      return;
+    }
+    followOutputRef.current = (terminal.viewportY ?? 0) === 0;
   }, []);
 
   // Expose methods via ref for external control (e.g., from TerminalControls)
@@ -405,6 +415,9 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
               terminalRef.current.scrollLines(scrollEvents);
               touchStateRef.current.accumulatedDelta -=
                 scrollEvents * SCROLL_ACCUMULATOR_THRESHOLD;
+              requestAnimationFrame(() => {
+                syncFollowOutputState();
+              });
             }
           }
 
@@ -424,36 +437,52 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           }
 
           touchStateRef.current = null;
+          syncFollowOutputState();
+        };
+
+        const handleWheel = () => {
+          syncFollowOutputState();
         };
 
         container.addEventListener('touchstart', handleTouchStart, { passive: true });
         container.addEventListener('touchmove', handleTouchMove, { passive: false });
         container.addEventListener('touchend', handleTouchEnd, { passive: true });
+        container.addEventListener('wheel', handleWheel, { passive: true });
+
+        // Ghostty-web's writeInternal() unconditionally calls scrollToBottom()
+        // on every write when viewportY !== 0. This makes it impossible to
+        // scroll up while output is streaming. Patch the instance to suppress
+        // scroll-to-bottom when the user has intentionally scrolled away.
+        // followOutputRef tracks whether the user is pinned to bottom.
+        const originalScrollToBottom = term.scrollToBottom.bind(term);
+        term.scrollToBottom = () => {
+          if (followOutputRef.current) {
+            originalScrollToBottom();
+          }
+        };
+
+        // Also track scroll state via ghostty-web's own onScroll event.
+        // This catches programmatic scrollLines() calls (e.g. page up/down)
+        // and any internal scroll state changes we might miss from DOM events.
+        const scrollDisposable = term.onScroll(() => {
+          syncFollowOutputState();
+        });
 
         setWriteCallbackRef.current((data: Uint8Array) => {
-          const wasScrolledUp = term.viewportY > 0;
-          const viewportBefore = term.viewportY;
           const chunk = new Uint8Array(data);
 
           if (chunk.byteLength === 0) {
             return;
           }
 
-          // Feed large payloads to the Ghostty WASM terminal in bounded
-          // slices.  A single >100KB write can exceed the WASM linear memory
-          // budget allocated for the render viewport, causing an
-          // out-of-bounds trap in ghostty_render_state_get_viewport.
-          //
-          // Write slices synchronously in a loop — no callback chaining.
-          // Ghostty processes each write before returning, so every slice
-          // is fully consumed before the next is fed.
+          // Feed large payloads in bounded slices. A single >100KB write can
+          // exceed the WASM linear memory budget allocated for the render
+          // viewport, causing an out-of-bounds trap.
           const MAX_WRITE_BYTES = 16384;
           let offset = 0;
 
           while (offset < chunk.length) {
             let end = Math.min(offset + MAX_WRITE_BYTES, chunk.length);
-            // Walk backwards to a UTF-8-safe boundary so we never split
-            // a multi-byte codepoint between two write() calls.
             if (end < chunk.length) {
               let safeEnd = end;
               while (safeEnd > offset && (chunk[safeEnd]! & 0xC0) === 0x80) {
@@ -480,12 +509,6 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
             }
 
             offset = end;
-          }
-
-          if (wasScrolledUp && term.viewportY === 0) {
-            requestAnimationFrame(() => {
-              term.scrollLines(-viewportBefore);
-            });
           }
         });
 
@@ -523,6 +546,8 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           container.removeEventListener('touchstart', handleTouchStart);
           container.removeEventListener('touchmove', handleTouchMove);
           container.removeEventListener('touchend', handleTouchEnd);
+          container.removeEventListener('wheel', handleWheel);
+          scrollDisposable.dispose();
           observer.disconnect();
           term.dispose();
           terminalRef.current = null;
@@ -543,7 +568,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         setWriteCallbackRef.current(null);
       }
     };
-  }, [tryConsumePageNavigation]);
+  }, [syncFollowOutputState, tryConsumePageNavigation]);
 
   return (
     <div

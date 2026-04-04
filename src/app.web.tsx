@@ -146,6 +146,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const activeBackendKey = multiMachineState.activeBackendKey;
   const activeBackendState = activeBackendKey ? multi.getBackendState(activeBackendKey) : null;
+  const reviewBackendState = reviewWorkspace?.backendKey ? multi.getBackendState(reviewWorkspace.backendKey) : null;
 
   // Find the backend that is currently in "attached" mode
   const attachedBackendKey = useMemo(() => {
@@ -158,6 +159,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const attachedBackendState = attachedBackendKey ? multi.getBackendState(attachedBackendKey) : null;
   const terminalStatus = activeBackendState?.status ?? 'disconnected';
+  const reviewTerminalStatus = reviewBackendState?.status ?? 'disconnected';
   const terminalMode = attachedBackendState?.mode ?? (activeBackendState?.mode ?? 'browsing');
   const attachedSessionName = attachedBackendState?.attachedSessionName ?? null;
   const attachedSessionMeta = attachedBackendState?.attachedSessionMeta ?? null;
@@ -948,6 +950,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     multi,
     workspaceRefs: [],
   }), [multi]);
+  const handleReplayReviewError = useCallback((message: string) => {
+    flow.showMessage({ title: 'Replay/Review Failed', message, variant: 'error' });
+  }, [flow]);
+
   const {
     sendReviewRequest: sendReviewRequestAction,
     toggleReplayDismissed: toggleReplayDismissedAction,
@@ -956,10 +962,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     loadReplayTimeline: loadReplayTimelineAction,
   } = useReplayReviewActions({
     client: replayReviewClient,
-    onError: (message) => {
-      flow.showMessage({ title: 'Replay/Review Failed', message, variant: 'error' });
-    },
+    onError: handleReplayReviewError,
   });
+
+  // Stable callback for ReviewPage — avoids infinite re-render loop from
+  // unstable inline arrow creating new sendReviewRequest identity each render.
+  const reviewSendRequest = useCallback(
+    (operation: import('./types/review.js').ReviewOperation) => {
+      if (!reviewWorkspace?.backendKey) return Promise.reject(new Error('No backend'));
+      return sendReviewRequestAction(reviewWorkspace.backendKey, reviewWorkspace.workspaceId, operation);
+    },
+    [sendReviewRequestAction, reviewWorkspace?.backendKey, reviewWorkspace?.workspaceId],
+  );
 
   const replayBackendKey = selectedBackendKey ?? getTargetBackendKey();
 
@@ -1392,18 +1406,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   // ─── Review view ───────────────────────────────────────────────────────────
 
   if (view === 'review' && reviewWorkspace) {
-    if (terminalStatus === 'connected' && reviewWorkspace.backendKey) {
-      const reviewRef: BackendScopedWorkspaceRef = {
-        backendKey: reviewWorkspace.backendKey,
-        workspaceId: reviewWorkspace.workspaceId,
-      };
+    if (reviewTerminalStatus === 'connected' && reviewWorkspace.backendKey) {
       return (
         <>
           <ReviewPage
             projectName={reviewWorkspace.projectName}
             workspaceName={reviewWorkspace.workspaceId}
             workspaceLabel={reviewWorkspace.workspaceLabel}
-            sendReviewRequest={(operation) => sendReviewRequestAction(reviewRef.backendKey, reviewRef.workspaceId, operation)}
+            sendReviewRequest={reviewSendRequest}
             onBack={() => { setView('terminal'); setReviewWorkspace(null); }}
           />
           <Toaster theme="dark" position="top-right" richColors />
@@ -1419,7 +1429,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               Loading review for <span className="text-[var(--gs-info)]">{reviewWorkspace.workspaceLabel ?? reviewWorkspace.workspaceId}</span>
             </div>
             <div className="text-sm text-[var(--gs-text-muted)]">
-              {terminalStatus !== 'connected' ? 'Connecting...' : 'Resolving workspace backend...'}
+              {reviewTerminalStatus !== 'connected' ? 'Connecting...' : 'Resolving workspace backend...'}
             </div>
             <button
               onClick={() => { setView('terminal'); setReviewWorkspace(null); }}

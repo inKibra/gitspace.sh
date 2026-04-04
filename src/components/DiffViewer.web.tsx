@@ -1095,6 +1095,7 @@ export function DiffViewer({
         ) : renderedFileDiff ? (
           <div data-diff-scroll-container style={{ flex: 1, overflow: 'auto' }}>
             <FileDiff
+              key={renderedFileDiff.cacheKey ?? selectedKey ?? selectedFile?.filePath ?? 'diff'}
               fileDiff={renderedFileDiff}
               options={fileDiffOptions}
               lineAnnotations={lineAnnotations}
@@ -1289,50 +1290,48 @@ function renderFileListRow({
 }
 
 function buildFileTree(files: ReviewChangedFile[]): FileTreeNode[] {
-  const root = new Map<string, FileTreeNode>();
+  const rootNodes: FileTreeNode[] = [];
+
+  const findOrCreateChild = (children: FileTreeNode[], name: string, type: 'folder' | 'file', path: string): FileTreeNode => {
+    const existing = children.find((child) => child.name === name && child.type === type);
+    if (existing) {
+      return existing;
+    }
+    const node: FileTreeNode = {
+      type,
+      name,
+      path,
+      files: [],
+      children: [],
+    };
+    children.push(node);
+    children.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return node;
+  };
 
   for (const file of files) {
     const parts = file.filePath.split('/');
-    let current = root;
+    let currentChildren = rootNodes;
     let currentPath = '';
+
     for (let index = 0; index < parts.length; index += 1) {
       const part = parts[index]!;
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       const isFile = index === parts.length - 1;
-      const existing = current.get(part);
-      if (existing) {
-        if (isFile) existing.files.push(file);
-        current = ensureChildMap(existing);
-        continue;
+      const node = findOrCreateChild(currentChildren, part, isFile ? 'file' : 'folder', currentPath);
+
+      if (isFile) {
+        node.files.push(file);
       }
-      const node: FileTreeNode = {
-        type: isFile ? 'file' : 'folder',
-        name: part,
-        path: currentPath,
-        files: isFile ? [file] : [],
-        children: [],
-      };
-      current.set(part, node);
-      current = ensureChildMap(node);
+
+      currentChildren = node.children;
     }
   }
 
-  return sortTreeNodes([...root.values()]);
-}
-
-function ensureChildMap(node: FileTreeNode): Map<string, FileTreeNode> {
-  const map = new Map<string, FileTreeNode>();
-  for (const child of node.children) {
-    map.set(child.name, child);
-  }
-  node.children = [...map.values()];
-  return new Proxy(map, {
-    set(target, property, value) {
-      const result = Reflect.set(target, property, value);
-      node.children = sortTreeNodes([...target.values()]);
-      return result;
-    },
-  });
+  return sortTreeNodes(rootNodes);
 }
 
 function sortTreeNodes(nodes: FileTreeNode[]): FileTreeNode[] {
