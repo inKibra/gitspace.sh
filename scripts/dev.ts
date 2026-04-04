@@ -2,9 +2,9 @@
 /**
  * Full-stack web development server.
  *
- * Starts relay + machine serve + Vite dev server with dynamically-picked free
- * ports and sandboxed state directories. Each worktree gets isolated state so
- * multiple dev environments can run side by side.
+ * Starts relay + machine serve + Vite dev server with a stable relay port
+ * preference plus sandboxed state directories. Each worktree gets isolated state
+ * so multiple dev environments can run side by side.
  *
  * Usage:
  *   bun scripts/dev.ts
@@ -44,14 +44,25 @@ function log(label: keyof typeof COLORS, msg: string): void {
 
 // ─── Port allocation ─────────────────────────────────────────────────────────
 
-function findFreePort(): Promise<number> {
+const DEFAULT_DEV_RELAY_PORT = 4480;
+const DEFAULT_DEV_WEB_PORT = 5173;
+function findFreePort(preferredPort?: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer();
-    server.listen(0, '127.0.0.1', () => {
+    const onError = (error: Error & { code?: string }) => {
+      server.close();
+      if (preferredPort && error.code === 'EADDRINUSE') {
+        resolve(findFreePort(preferredPort + 1));
+        return;
+      }
+      reject(error);
+    };
+
+    server.once('error', onError);
+    server.listen(preferredPort ?? 0, '127.0.0.1', () => {
       const port = (server.address() as AddressInfo).port;
       server.close(() => resolve(port));
     });
-    server.on('error', reject);
   });
 }
 
@@ -216,7 +227,10 @@ const DEV_PASSWORD = 'dev';
 
 async function main(): Promise<void> {
   const sandboxName = deriveSandboxName();
-  const [relayPort, vitePort] = await Promise.all([findFreePort(), findFreePort()]);
+  const [relayPort, vitePort] = await Promise.all([
+    findFreePort(DEFAULT_DEV_RELAY_PORT),
+    findFreePort(DEFAULT_DEV_WEB_PORT),
+  ]);
 
   // Wipe and recreate sandbox directory tree (each run gets a fresh state)
   const sandboxDir = join(tmpdir(), `gssh-dev-${sandboxName}`);

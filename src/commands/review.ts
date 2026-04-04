@@ -5,7 +5,7 @@
  *   Opens the browser-based review UI at http://localhost:<port>?view=review&workspace=<current>
  *
  * Sub-commands:
- *   gssh workspace review notes --project <name> --workspace <name>
+ *   gssh workspace review list --project <name> --workspace <name>
  *     Print saved review threads as structured JSON (LLM-friendly).
  *
  *   gssh workspace review import --project <name> --workspace <name> [--pr <number>]
@@ -326,16 +326,16 @@ export async function openReview(options: ReviewOptions = {}): Promise<void> {
 }
 
 // ============================================================================
-// gssh workspace review notes
+// gssh workspace review list
 // ============================================================================
 
-export interface ReviewNotesOptions {
+export interface ReviewListOptions {
   workspace?: string;
   project?: string;
   format?: 'json' | 'text';
 }
 
-export async function showReviewNotes(options: ReviewNotesOptions = {}): Promise<void> {
+export async function showReviewList(options: ReviewListOptions = {}): Promise<void> {
   const ctx = resolveCurrentWorkspace(options);
   if (!ctx) {
     logger.error('Could not determine current project/workspace. Use --project and --workspace flags.');

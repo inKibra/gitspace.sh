@@ -9,6 +9,7 @@ import {
 import type { Session as TmuxSession } from '../protocol.js';
 import {
   createPiSessionManager,
+  getManagedPiExtensionPaths,
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
@@ -249,6 +250,7 @@ export class PiCoordinator {
       agentDir,
       sessionManager,
       cwd: target.workspacePath,
+      additionalExtensionPaths: getManagedPiExtensionPaths(),
       hasUI: true,
     });
     const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
@@ -885,15 +887,27 @@ export class PiCoordinator {
     // 0. Built-in commands supported through the web surface
     commands.push({ name: 'compact', description: 'Compact the session context', kind: 'extension' });
 
-    // 1. Collect custom commands from the active session for the requested workspace
+    // 1. Collect extension/custom commands from the active session for the requested workspace
     //    (commands are workspace-scoped; skip any session belonging to a different workspace).
     for (const [sessionId, session] of this.activeSessions) {
       if (this.sessionWorkspaceIds.get(sessionId) !== target.workspaceId) continue;
       try {
+        const reserved = new Set(commands.map((command) => command.name));
+        const extensionCommands = session.extensionRunner?.getRegisteredCommands(reserved) ?? [];
+        for (const cmd of extensionCommands) {
+          if (cmd?.name && !commands.some((command) => command.name === cmd.name)) {
+            commands.push({
+              name: cmd.name,
+              description: cmd.description ?? '',
+              kind: 'extension',
+            });
+          }
+        }
+
         const customCmds = (session as any).customCommands;
         if (Array.isArray(customCmds)) {
           for (const cmd of customCmds) {
-            if (cmd?.command?.name && !commands.some(c => c.name === cmd.command.name)) {
+            if (cmd?.command?.name && !commands.some(command => command.name === cmd.command.name)) {
               commands.push({
                 name: cmd.command.name,
                 description: cmd.command.description ?? '',
@@ -924,7 +938,6 @@ export class PiCoordinator {
     } catch {
       // Non-fatal — slash command discovery can fail for workspaces without Pi config
     }
-
     return commands;
   }
 

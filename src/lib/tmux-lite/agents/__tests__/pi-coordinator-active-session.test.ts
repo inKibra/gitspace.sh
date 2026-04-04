@@ -21,6 +21,9 @@ function createSession() {
       subscribeCalls += 1;
       return () => {};
     }),
+    extensionRunner: {
+      getRegisteredCommands: mock(() => ([{ name: 'space', description: 'Run GitSpace workspace-scoped commands' }])),
+    },
     dispose: mock(() => {}),
   };
 }
@@ -123,5 +126,17 @@ describe('PiCoordinator active session open serialization', () => {
     await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, 'retry message');
     expect(openPiSessionCalls).toBe(2);
     expect(promptCalls).toBe(1);
+  });
+
+  it('includes extension commands like /space in available command listings', async () => {
+    const coordinator = new PiCoordinator(SESSIONS_DIR);
+
+    await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, 'prime session');
+    const commands = await coordinator.listAvailableCommands(sessionTarget);
+
+    expect(commands).toEqual(expect.arrayContaining([
+      { name: 'compact', description: 'Compact the session context', kind: 'extension' },
+      { name: 'space', description: 'Run GitSpace workspace-scoped commands', kind: 'extension' },
+    ]));
   });
 });

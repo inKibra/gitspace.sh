@@ -15,6 +15,9 @@ export interface OmpAgentSession {
    */
   abort(): Promise<void>;
   getQueuedMessages?(): { steering: readonly string[]; followUp: readonly string[] };
+  extensionRunner?: {
+    getRegisteredCommands(reserved?: Set<string>): Array<{ name: string; description?: string }>;
+  };
   dispose(): void;
 }
 

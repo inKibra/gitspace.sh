@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { PiBackend } from '../pi-backend.js';
 import { PiCoordinator } from '../pi-coordinator.js';
-import { getPiAgentDir } from '../pi-runtime.js';
-import { mkdtempSync } from 'node:fs';
+import { getManagedPiBinDir, getManagedPiExtensionPaths, getPiAgentDir, setupPiEnvironment } from '../pi-runtime.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -11,6 +11,40 @@ describe('pi-runtime', () => {
     const dir = getPiAgentDir();
     expect(dir).toContain('gitspace');
     expect(dir).toEndWith('.pi');
+  });
+
+  it('includes the managed GitSpace space command extension', () => {
+    expect(getManagedPiExtensionPaths()).toEqual([expect.stringContaining('space-command.ts')]);
+  });
+
+  it('creates a managed space shim and prepends it to PATH', () => {
+    const originalHome = process.env.HOME;
+    const originalPath = process.env.PATH;
+    const tempHome = mkdtempSync(join(tmpdir(), 'pi-env-'));
+    process.env.HOME = tempHome;
+    process.env.PATH = '/usr/bin';
+
+    try {
+      const env = setupPiEnvironment({ workspaceId: 'test:ws' });
+      const binDir = getManagedPiBinDir();
+      const shimPath = join(binDir, 'space');
+
+      expect(env.PI_CODING_AGENT_DIR).toBe(getPiAgentDir());
+      expect(env.PATH.split(':')[0]).toBe(binDir);
+      expect(existsSync(shimPath)).toBe(true);
+      expect(readFileSync(shimPath, 'utf8')).toContain(' space "$@"');
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
+    }
   });
 });
 

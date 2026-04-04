@@ -246,7 +246,7 @@ describe('workspace shell hooks integration', () => {
 
     const output = await runCommandInSession(
       session.socketPath,
-      'space review notes --format json; printf "__SPACE_EXIT__%s\\n" "$?"; exit\n'
+      'space review list --format json; printf "__SPACE_EXIT__%s\\n" "$?"; exit\n'
     );
 
     const normalized = output.replace(/\r/g, '');
@@ -258,7 +258,7 @@ describe('workspace shell hooks integration', () => {
     expect(argv).toEqual([
       'space',
       'review',
-      'notes',
+      'list',
       '--format',
       'json',
     ]);

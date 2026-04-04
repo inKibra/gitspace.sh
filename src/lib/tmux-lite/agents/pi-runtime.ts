@@ -1,7 +1,10 @@
-import { join } from 'node:path';
-import { mkdirSync, existsSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+import { chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
+import { resolveWorkspaceSessionLauncherArgs } from '../../../session/workspace-shell-hooks.js';
+import { escapeShellArg } from '../../../utils/shell-escape.js';
 import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
@@ -12,7 +15,6 @@ const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
 const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');
 const importPiAi = () => import('@oh-my-pi/pi-ai');
-
 /**
  * Pi agent directory, scoped under the configured workspace root.
  *
@@ -25,6 +27,62 @@ const importPiAi = () => import('@oh-my-pi/pi-ai');
 export function getPiAgentDir(): string {
   return join(getWorkspaceRoot(), '.pi');
 }
+
+export function getManagedPiBinDir(): string {
+  return join(getPiAgentDir(), 'bin');
+}
+
+function buildShellCommand(args: string[]): string {
+  return args
+    .map((arg) => (/^[A-Za-z0-9_./:-]+$/.test(arg) ? arg : escapeShellArg(arg)))
+    .join(' ');
+}
+
+function prependPathEntry(pathEntry: string, currentPath: string | undefined): string {
+  const segments = (currentPath ?? '').split(delimiter).filter(Boolean);
+  if (segments.includes(pathEntry)) {
+    return [pathEntry, ...segments.filter((segment) => segment !== pathEntry)].join(delimiter);
+  }
+  return currentPath && currentPath.length > 0
+    ? `${pathEntry}${delimiter}${currentPath}`
+    : pathEntry;
+}
+
+function ensureManagedPiBinScripts(): string {
+  const binDir = getManagedPiBinDir();
+  if (!existsSync(binDir)) {
+    mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  }
+
+  const launcherCommand = buildShellCommand([...resolveWorkspaceSessionLauncherArgs(), 'space']);
+  const spaceScriptPath = join(binDir, 'space');
+  writeFileSync(spaceScriptPath, `#!/bin/sh\nexec ${launcherCommand} "$@"\n`, { mode: 0o755 });
+  chmodSync(spaceScriptPath, 0o755);
+
+  return binDir;
+}
+
+function buildManagedPiEnvironment(): Record<string, string> {
+  const agentDir = ensurePiAgentDir();
+  const binDir = ensureManagedPiBinScripts();
+  return {
+    PI_CODING_AGENT_DIR: agentDir,
+    PATH: prependPathEntry(binDir, process.env.PATH),
+  };
+}
+
+function applyManagedPiEnvironment(): Record<string, string> {
+  const env = buildManagedPiEnvironment();
+  process.env.PI_CODING_AGENT_DIR = env.PI_CODING_AGENT_DIR;
+  process.env.PATH = env.PATH;
+  return env;
+}
+
+
+export function getManagedPiExtensionPaths(): string[] {
+  return [fileURLToPath(new URL('./extensions/space-command.ts', import.meta.url))];
+}
+
 
 /**
  * Ensure the Pi agent directory exists with expected subdirectories.
@@ -52,11 +110,8 @@ export function ensurePiAgentDir(): string {
  */
 export function setupPiEnvironment(
   _target: AgentWorkspaceTarget,
-): Record<string, string> {
-  const agentDir = ensurePiAgentDir();
-  return {
-    PI_CODING_AGENT_DIR: agentDir,
-  };
+ ): Record<string, string> {
+  return buildManagedPiEnvironment();
 }
 
 /**
@@ -64,11 +119,10 @@ export function setupPiEnvironment(
  */
 export async function createPiSessionManager(cwd: string) {
   const { SessionManager } = await importSessionManagerModule();
-  const agentDir = ensurePiAgentDir();
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  const sessionDir = SessionManager.getDefaultSessionDir(cwd, agentDir);
+  const env = applyManagedPiEnvironment();
+  const sessionDir = SessionManager.getDefaultSessionDir(cwd, env.PI_CODING_AGENT_DIR);
   return {
-    agentDir,
+    agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager: SessionManager.create(cwd, sessionDir),
   };
 }
@@ -82,11 +136,10 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
   const { createAgentSession, discoverAuthStorage } = await importSdk();
   const { ModelRegistry } = await importModelRegistryModule();
   const { getBundledModel } = await importPiAi();
-  const agentDir = ensurePiAgentDir();
-  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const env = applyManagedPiEnvironment();
   const sessionManager = await SessionManager.open(sessionFilePath);
   const sessionContext = sessionManager.buildSessionContext();
-  const authStorage = await discoverAuthStorage(agentDir);
+  const authStorage = await discoverAuthStorage(env.PI_CODING_AGENT_DIR);
   const modelRegistry = new ModelRegistry(authStorage);
   await modelRegistry.refresh('online-if-uncached');
 
@@ -110,12 +163,13 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
   }
 
   const result = await createAgentSession({
-    agentDir,
+    agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager,
     cwd,
     authStorage,
     modelRegistry,
     model: restoredModel,
+    additionalExtensionPaths: getManagedPiExtensionPaths(),
     hasUI: true,
   });
   const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
@@ -126,7 +180,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     await session.setModel(restoredModel);
   }
   return {
-    agentDir,
+    agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager,
     session,
     setToolUIContext,

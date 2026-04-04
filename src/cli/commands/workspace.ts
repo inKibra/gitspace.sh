@@ -156,7 +156,7 @@ export function registerWorkspaceCommands(parent: Command): void {
     }));
 
   // --------------------------------------------------------------------------
-  // Review subcommands: gssh workspace review [notes|import|push|hunks|add-hunk|add-file|add-line]
+  // Review subcommands: gssh workspace review [list|import|push|hunks|add-hunk|add-file|add-line]
   // --------------------------------------------------------------------------
   registerWorkspaceReviewCommands(cmd);
 
@@ -263,17 +263,17 @@ function registerWorkspaceReviewCommands(workspace: Command): void {
     .command('review')
     .description('Diff review system');
 
-  // gssh workspace review notes --project <p> --workspace <w>
+  // gssh workspace review list --project <p> --workspace <w>
   requireProjectAndWorkspace(
     review
-      .command('notes')
+      .command('list')
       .description('Print review threads as structured JSON (LLM-friendly)')
   )
     .option('--format <format>', 'Output format: json (default) or text')
     .action(withErrorHandler(async (options) => {
       useExplicitContext(options);
-      const { showReviewNotes } = await import('../../commands/review.js');
-      await showReviewNotes(options);
+      const { showReviewList } = await import('../../commands/review.js');
+      await showReviewList(options);
     }));
 
   // gssh workspace review import --project <p> --workspace <w>

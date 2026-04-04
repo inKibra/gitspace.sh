@@ -1,22 +1,34 @@
 import { describe, expect, it } from 'bun:test';
-import { buildWorkspaceSessionCommand, buildWorkspaceSessionHooks, resolveWorkspaceSessionLauncherArgs } from '../workspace-shell-hooks.js';
+import {
+  buildWorkspaceScopedExecCommand,
+  buildWorkspaceSessionCommand,
+  buildWorkspaceSessionEnv,
+  buildWorkspaceSessionHooks,
+  resolveWorkspaceSessionLauncherArgs,
+} from '../workspace-shell-hooks.js';
+
+describe('buildWorkspaceSessionEnv', () => {
+  it('injects workspace environment context', () => {
+    expect(buildWorkspaceSessionEnv('acme', 'feature-1')).toEqual({
+      GSSH_SESSION_MODE: 'workspace',
+      GSSH_SPACE_PROJECT: 'acme',
+      GSSH_SPACE_WORKSPACE: 'feature-1',
+    });
+  });
+});
 
 describe('buildWorkspaceSessionHooks', () => {
   it('injects workspace environment context', () => {
     const hooks = buildWorkspaceSessionHooks('acme', 'feature-1', ['gssh']);
 
-    expect(hooks.env).toEqual({
-      GSSH_SESSION_MODE: 'workspace',
-      GSSH_SPACE_PROJECT: 'acme',
-      GSSH_SPACE_WORKSPACE: 'feature-1',
-    });
+    expect(hooks.env).toEqual(buildWorkspaceSessionEnv('acme', 'feature-1'));
   });
 
   it('builds bash and zsh space function with escaped args', () => {
     const hooks = buildWorkspaceSessionHooks("acme's repo", 'feat one', ['gssh']);
 
     const expected =
-      `space() { GSSH_SPACE_PROJECT='acme'\\''s repo' GSSH_SPACE_WORKSPACE='feat one' gssh space "$@"; }`;
+      String.raw`space() { GSSH_SPACE_PROJECT='acme'\''s repo' GSSH_SPACE_WORKSPACE='feat one' gssh space "$@"; }`;
 
     expect(hooks.shellInit?.bash).toBe(expected);
     expect(hooks.shellInit?.zsh).toBe(expected);
@@ -38,6 +50,24 @@ describe('buildWorkspaceSessionCommand', () => {
     expect(buildWorkspaceSessionCommand(['commit'], ['bun', '/tmp/dev repo/src/index.ts'])).toEqual({
       command: 'bun',
       args: ['/tmp/dev repo/src/index.ts', 'space', 'commit'],
+    });
+  });
+});
+
+describe('buildWorkspaceScopedExecCommand', () => {
+  it('wraps workspace commands in a scoped env invocation', () => {
+    expect(buildWorkspaceScopedExecCommand('acme', 'feature-1', ['review', 'list'], ['bun', '/tmp/dev repo/src/index.ts'])).toEqual({
+      command: 'env',
+      args: [
+        'GSSH_SESSION_MODE=workspace',
+        'GSSH_SPACE_PROJECT=acme',
+        'GSSH_SPACE_WORKSPACE=feature-1',
+        'bun',
+        '/tmp/dev repo/src/index.ts',
+        'space',
+        'review',
+        'list',
+      ],
     });
   });
 });

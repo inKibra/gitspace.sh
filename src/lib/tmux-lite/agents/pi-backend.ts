@@ -11,6 +11,7 @@ import type {
 } from '../../../agents/backend.js';
 import {
   createPiSessionManager,
+  getManagedPiExtensionPaths,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
@@ -124,6 +125,7 @@ export class PiBackend implements AgentBackend {
       agentDir,
       sessionManager,
       cwd,
+      additionalExtensionPaths: getManagedPiExtensionPaths(),
       hasUI: true,
     });
     const { session } = result;

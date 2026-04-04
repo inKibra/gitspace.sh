@@ -22,6 +22,14 @@ function buildShellCommand(args: string[]): string {
     .join(' ');
 }
 
+export function buildWorkspaceSessionEnv(projectName: string, workspaceId: string): Record<string, string> {
+  return {
+    GSSH_SESSION_MODE: 'workspace',
+    GSSH_SPACE_PROJECT: projectName,
+    GSSH_SPACE_WORKSPACE: workspaceId,
+  };
+}
+
 export function buildWorkspaceSessionCommand(spaceArgs: string[], launcherArgs: string[] = resolveWorkspaceSessionLauncherArgs()): {
   command: string;
   args: string[];
@@ -32,6 +40,25 @@ export function buildWorkspaceSessionCommand(spaceArgs: string[], launcherArgs: 
   }
 
   return { command, args };
+}
+
+export function buildWorkspaceScopedExecCommand(
+  projectName: string,
+  workspaceId: string,
+  spaceArgs: string[],
+  launcherArgs: string[] = resolveWorkspaceSessionLauncherArgs()
+): {
+  command: string;
+  args: string[];
+} {
+  const workspaceCommand = buildWorkspaceSessionCommand(spaceArgs, launcherArgs);
+  const envAssignments = Object.entries(buildWorkspaceSessionEnv(projectName, workspaceId))
+    .map(([key, value]) => `${key}=${value}`);
+
+  return {
+    command: 'env',
+    args: [...envAssignments, workspaceCommand.command, ...workspaceCommand.args],
+  };
 }
 
 /**
@@ -47,7 +74,8 @@ export function buildWorkspaceSessionHooks(
   projectName: string,
   workspaceId: string,
   launcherArgs: string[] = resolveWorkspaceSessionLauncherArgs()
-): SessionCreateHooks {
+ ): SessionCreateHooks {
+  const workspaceEnv = buildWorkspaceSessionEnv(projectName, workspaceId);
   const escapedProject = escapeShellArg(projectName);
   const escapedWorkspace = escapeShellArg(workspaceId);
   const launcherCommand = buildShellCommand(launcherArgs);
@@ -57,11 +85,7 @@ export function buildWorkspaceSessionHooks(
   const spaceFunction = `space() { GSSH_SPACE_PROJECT=${escapedProject} GSSH_SPACE_WORKSPACE=${escapedWorkspace} ${launcherCommand} space "$@"; }`;
 
   return {
-    env: {
-      GSSH_SESSION_MODE: 'workspace',
-      GSSH_SPACE_PROJECT: projectName,
-      GSSH_SPACE_WORKSPACE: workspaceId,
-    },
+    env: workspaceEnv,
     shellInit: {
       bash: spaceFunction,
       zsh: spaceFunction,

@@ -1,9 +1,10 @@
 /**
  * gssh space [context|review|notes|service|hosting|events|bundle]
  *
- * Hidden command surface intended for use inside tmux-lite workspace sessions.
- * Context is resolved from GSSH_SPACE_PROJECT / GSSH_SPACE_WORKSPACE env vars
- * set by tmux-lite when spawning workspace sessions.
+ * Hidden workspace-scoped command surface. Typical usage inside a workspace is
+ * `space review list`, not `gssh space review list`.
+ * Context is resolved from GSSH_SPACE_PROJECT / GSSH_SPACE_WORKSPACE when present,
+ * and otherwise falls back to detecting the current workspace from the cwd.
  *
  * @module cli/commands/space
  */
@@ -14,16 +15,10 @@ import { useSessionContext, getWorkspacePath } from '../workspace-context.js';
 import { logger } from '../../utils/logger.js';
 
 function requireSessionContext(): { project: string; workspace: string } {
-  if (process.env.GSSH_SESSION_MODE !== 'workspace') {
-    logger.error('Not inside a workspace session.');
-    logger.log('Space commands are only available in workspace session mode.');
-    process.exit(1);
-  }
-
   const ctx = useSessionContext();
   if (!ctx || !ctx.project || !ctx.workspace) {
-    logger.error('Workspace session context is missing.');
-    logger.log('Space commands require GSSH_SPACE_PROJECT and GSSH_SPACE_WORKSPACE env vars.');
+    logger.error('Workspace context is missing.');
+    logger.log('Space commands require either a workspace-scoped shell or a cwd inside a GitSpace workspace.');
     process.exit(1);
   }
 
@@ -34,10 +29,11 @@ function requireSessionContext(): { project: string; workspace: string } {
 }
 
 
+
 export function registerSpaceCommands(parent: Command): void {
   const cmd = parent
     .command('space', { hidden: true })
-    .description('Workspace-scoped commands (session-only)');
+    .description('Workspace-scoped commands such as `space review list`');
 
   cmd
     .command('context')
@@ -144,13 +140,13 @@ function registerSpaceReviewCommands(space: Command): void {
     .description('Diff review system');
 
   review
-    .command('notes')
+    .command('list')
     .description('Print review threads as structured JSON')
     .option('--format <format>', 'Output format: json (default) or text')
     .action(withErrorHandler(async (options) => {
       requireSessionContext();
-      const { showReviewNotes } = await import('../../commands/review.js');
-      await showReviewNotes(options);
+      const { showReviewList } = await import('../../commands/review.js');
+      await showReviewList(options);
     }));
 
   review

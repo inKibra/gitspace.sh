@@ -7,13 +7,15 @@
  *    No CWD detection, no global config fallback.
  *
  * 2. **Session mode** (space command): reads GSSH_SPACE_PROJECT / GSSH_SPACE_WORKSPACE
- *    env vars set by tmux-lite when spawning workspace sessions.
+ *    env vars first, then falls back to detecting the current workspace from CWD.
  *
  * @module workspace-context
  */
 
 import { join } from 'path';
 import { getProjectWorkspacesDir } from '../core/config.js';
+import { getWorkspaceRoot } from '../core/paths.js';
+import { detectWorkspaceContextFromCwd } from '../utils/workspace-id.js';
 import { SpacesError } from '../types/errors.js';
 
 // ============================================================================
@@ -61,24 +63,32 @@ export function resolveExplicitContext(options: {
 // ============================================================================
 
 /**
- * Resolve workspace context from session environment variables.
+ * Resolve workspace context from session environment variables or the current cwd.
  *
- * Used by the hidden `space` command inside tmux-lite workspace sessions.
- * Reads GSSH_SPACE_PROJECT and GSSH_SPACE_WORKSPACE env vars.
+ * Used by the hidden `space` command inside workspace-aware shells and Pi sessions.
+ * Env vars win; when absent we infer the workspace from the current directory.
  *
- * @returns Resolved context, or null if not in a workspace session
+ * @returns Resolved context, or null if no workspace context can be determined
  */
 export function resolveSessionContext(): WorkspaceContext | null {
   const project = process.env.GSSH_SPACE_PROJECT;
   const workspace = process.env.GSSH_SPACE_WORKSPACE;
 
-  if (!project) {
+  if (project) {
+    return {
+      project,
+      workspace: workspace || undefined,
+    };
+  }
+
+  const detected = detectWorkspaceContextFromCwd(process.cwd(), getWorkspaceRoot());
+  if (!detected) {
     return null;
   }
 
   return {
-    project,
-    workspace: workspace || undefined,
+    project: detected.projectName,
+    workspace: detected.workspaceName,
   };
 }
 
@@ -96,9 +106,9 @@ export function useExplicitContext(options: {
 }
 
 /**
- * Resolve session context from env vars.
+ * Resolve session/workspace context for `space` commands.
  *
- * @returns Resolved context, or null if not in a workspace session
+ * @returns Resolved context, or null if no workspace context is available
  */
 export function useSessionContext(): WorkspaceContext | null {
   return resolveSessionContext();
