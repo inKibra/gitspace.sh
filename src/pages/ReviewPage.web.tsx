@@ -3,7 +3,7 @@
  * ReviewPage — full review dashboard.
  */
 
-import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { DiffViewer, type HunkFocusTarget } from '../components/DiffViewer.web.js';
 import { ThreadPanel } from '../components/ThreadPanel.web.js';
 import { useReviewPageModel } from '../app/shared/review/useReviewPageModel.js';
