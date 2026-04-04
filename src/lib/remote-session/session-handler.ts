@@ -361,14 +361,478 @@ export class RemoteSessionHandler {
         );
         break;
 
-      case 'tmux_command':
+      case 'list_github_repos':
         if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to run tmux commands', {
-            requestId: msg.requestId,
-          });
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTmuxCommand(session, msg.requestId, msg.command, sendResponse);
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'github-repos',
+          org: msg.org,
+        }, sendResponse);
+        break;
+
+      case 'list_remote_branches':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'remote-branches',
+          projectName: msg.projectName,
+        }, sendResponse);
+        break;
+
+      case 'list_linear_issues':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'linear-issues',
+          projectName: msg.projectName,
+        }, sendResponse);
+        break;
+
+      case 'create_project':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'project-create',
+          repository: msg.repository,
+          projectName: msg.projectName,
+          baseBranch: msg.baseBranch,
+          setCurrent: msg.setCurrent,
+        }, sendResponse);
+        break;
+
+      case 'prepare_project_creation':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'project-prepare',
+          repository: msg.repository,
+          projectName: msg.projectName,
+          baseBranch: msg.baseBranch,
+          setCurrent: msg.setCurrent,
+        }, sendResponse);
+        break;
+
+      case 'finalize_project_creation':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'project-finalize',
+          projectName: msg.projectName,
+          repository: msg.repository,
+          baseBranch: msg.baseBranch,
+          bundle: msg.bundle,
+          inputValues: msg.inputValues,
+          secretValues: msg.secretValues,
+          confirmResults: msg.confirmResults,
+          setCurrent: msg.setCurrent,
+        }, sendResponse);
+        break;
+
+      case 'cancel_project_creation':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'project-cancel',
+          projectName: msg.projectName,
+        }, sendResponse);
+        break;
+
+      case 'delete_project':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'project-delete',
+          projectName: msg.projectName,
+        }, sendResponse);
+        break;
+
+      case 'create_workspace':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'workspace-create',
+          projectName: msg.projectName,
+          workspaceName: msg.workspaceName,
+          branchName: msg.branchName,
+          baseBranch: msg.baseBranch,
+          workspaceSource: msg.workspaceSource,
+          linearIssue: msg.linearIssue,
+        }, sendResponse);
+        break;
+
+      case 'set_workspace_phase':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'workspace-set-phase',
+          projectName: msg.projectName,
+          workspaceName: msg.workspaceName,
+          phase: msg.phase,
+        }, sendResponse);
+        break;
+
+      case 'kill_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'kill',
+          id: msg.sessionId,
+        }, sendResponse);
+        break;
+
+      case 'start_process':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'service-start',
+          workspaceId: msg.workspaceId,
+          processName: msg.processName,
+          instance: msg.instance,
+        }, sendResponse);
+        break;
+
+      case 'stop_process':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'service-stop',
+          workspaceId: msg.workspaceId,
+          processName: msg.processName,
+        }, sendResponse);
+        break;
+
+      case 'request_events':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'events-request',
+          workspacePath: msg.workspacePath,
+          filter: msg.filter,
+          limit: msg.limit,
+          sinceMs: msg.sinceMs,
+        }, sendResponse);
+        break;
+
+      case 'get_bundle_refresh_plan':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'bundle-refresh-plan',
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+        }, sendResponse);
+        break;
+
+      case 'apply_bundle_refresh':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'bundle-refresh-apply',
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+          submission: msg.submission,
+        }, sendResponse);
+        break;
+
+      case 'get_bundle_config_state':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'bundle-config-state',
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+        }, sendResponse);
+        break;
+
+      case 'apply_bundle_config':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'bundle-config-apply',
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+          submission: msg.submission,
+        }, sendResponse);
+        break;
+
+      case 'request_review':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'review-request',
+          requestId: msg.requestId,
+          operation: msg.operation,
+        }, sendResponse);
+        break;
+
+      case 'get_inbox':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'inbox',
+        }, sendResponse);
+        break;
+
+      case 'clear_inbox':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'inbox-clear',
+          id: msg.id,
+        }, sendResponse);
+        break;
+
+      case 'mark_inbox_read':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'inbox-read',
+          id: msg.id,
+        }, sendResponse);
+        break;
+
+      case 'get_notification_config':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'notification-config-get',
+        }, sendResponse);
+        break;
+
+      case 'update_notification_config':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'notification-config-update',
+          config: msg.config,
+        }, sendResponse);
+        break;
+
+      case 'list_agent_sessions':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-sessions',
+          target: msg.target,
+          mode: msg.mode,
+        }, sendResponse);
+        break;
+
+      case 'create_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-create',
+          target: msg.target,
+          title: msg.title,
+        }, sendResponse);
+        break;
+
+      case 'abort_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-abort',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'interrupt_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access to interrupt agent sessions', { requestId: msg.requestId });
+          return;
+        }
+        // Note: Pi SDK session.abort() means "interrupt current turn", not kill the session
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-interrupt',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'close_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-close',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'archive_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-archive',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'restore_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-restore',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'attach_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-attach',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          cols: msg.cols,
+          rows: msg.rows,
+        }, sendResponse);
+        break;
+
+      case 'prompt_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-prompt',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          text: msg.text,
+          images: msg.images,
+          streamingBehavior: msg.streamingBehavior,
+        }, sendResponse);
+        break;
+
+      case 'stage_agent_upload':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-stage-upload',
+          target: msg.target,
+          fileName: msg.fileName,
+          data: msg.data,
+          mimeType: msg.mimeType,
+        }, sendResponse);
+        break;
+
+      case 'respond_agent_dialog':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-dialog-response',
+          dialogId: msg.dialogId,
+          dialogType: msg.dialogType,
+          value: msg.value,
+        }, sendResponse);
+        break;
+
+      case 'respond_agent_permission':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-permission',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          permissionId: msg.permissionId,
+          response: msg.response,
+        }, sendResponse);
+        break;
+
+      case 'list_agent_commands':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-list-commands',
+          target: msg.target,
+        }, sendResponse);
+        break;
+
+      case 'get_agent_file_suggestions':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-file-suggestions',
+          target: msg.target,
+          prefix: msg.prefix,
+          limit: msg.limit,
+        }, sendResponse);
         break;
 
       default: {
@@ -379,24 +843,24 @@ export class RemoteSessionHandler {
     }
   }
 
-  private async handleTmuxCommand(
+  private async handleTypedCommand(
     session: RemoteClientSession,
     requestId: string,
-    command: TmuxCommand,
+    tmuxCommand: TmuxCommand,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
     try {
       await ensureServer();
-      const response = await sendTmuxCommand(command);
+      const response = await sendTmuxCommand(tmuxCommand);
       await this.sendMessage(session, sendResponse, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId,
         response,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.sendMessage(session, sendResponse, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId,
         response: { type: 'error', message },
       });

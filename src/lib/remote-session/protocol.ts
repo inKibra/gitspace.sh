@@ -1,9 +1,10 @@
 /**
  * Remote transport protocol for encrypted client<->machine communication.
  *
- * App and machine operations flow through tmux-lite via `tmux_command`.
- * The remaining top-level messages are transport-oriented attached/replay flows
- * plus machine and agent snapshot pushes.
+ * Each operation has an explicit request type. The server responds with a
+ * CommandResponse wrapping the tmux-lite Response for request/response
+ * correlation. Unsolicited pushes (machine_snapshot, agent_state_*, etc.)
+ * are sent without a request.
  */
 
 // Re-export InboxItem from tmux-lite protocol
@@ -97,10 +98,304 @@ export interface CancelPendingAttachRequest {
   type: 'cancel_pending_attach';
 }
 
-export interface TmuxCommandRequest {
-  type: 'tmux_command';
+// ============================================================================
+// Explicit Remote Commands (replaces generic tmux_command tunnel)
+// ============================================================================
+
+// --- Lifecycle & Discovery ---
+
+export interface ListGithubReposRequest {
+  type: 'list_github_repos';
   requestId: string;
-  command: import('../tmux-lite/protocol.js').Command;
+  org?: string;
+}
+
+export interface ListRemoteBranchesRequest {
+  type: 'list_remote_branches';
+  requestId: string;
+  projectName: string;
+}
+
+export interface ListLinearIssuesRequest {
+  type: 'list_linear_issues';
+  requestId: string;
+  projectName: string;
+}
+
+// --- Project CRUD ---
+
+export interface CreateProjectRequest {
+  type: 'create_project';
+  requestId: string;
+  repository: string;
+  projectName?: string;
+  baseBranch?: string;
+  setCurrent?: boolean;
+}
+
+export interface PrepareProjectCreationRequest {
+  type: 'prepare_project_creation';
+  requestId: string;
+  repository: string;
+  projectName?: string;
+  baseBranch?: string;
+  setCurrent?: boolean;
+}
+
+export interface FinalizeProjectCreationRequest {
+  type: 'finalize_project_creation';
+  requestId: string;
+  projectName: string;
+  repository: string;
+  baseBranch: string;
+  bundle?: import('../../types/bundle.js').SpacesBundle;
+  inputValues?: Record<string, string>;
+  secretValues?: Record<string, string>;
+  confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>;
+  setCurrent?: boolean;
+}
+
+export interface CancelProjectCreationRequest {
+  type: 'cancel_project_creation';
+  requestId: string;
+  projectName: string;
+}
+
+export interface DeleteProjectRequest {
+  type: 'delete_project';
+  requestId: string;
+  projectName: string;
+}
+
+// --- Workspace CRUD ---
+
+export interface CreateWorkspaceRequest {
+  type: 'create_workspace';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  branchName?: string;
+  baseBranch?: string;
+  workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource;
+  linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
+}
+
+export interface SetWorkspacePhaseRequest {
+  type: 'set_workspace_phase';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  phase: import('../../types/config.js').WorkspacePhase;
+}
+
+export interface KillSessionRequest {
+  type: 'kill_session';
+  requestId: string;
+  sessionId: string;
+}
+
+// --- Process Management ---
+
+export interface StartProcessRequest {
+  type: 'start_process';
+  requestId: string;
+  workspaceId: string;
+  processName: string;
+  instance?: number;
+}
+
+export interface StopProcessRequest {
+  type: 'stop_process';
+  requestId: string;
+  workspaceId: string;
+  processName: string;
+}
+
+export interface RequestEventsRequest {
+  type: 'request_events';
+  requestId: string;
+  workspacePath: string;
+  filter?: import('../../types/events.js').WideEventFilter;
+  limit?: number;
+  sinceMs?: number;
+}
+
+// --- Bundle & Review ---
+
+export interface GetBundleRefreshPlanRequest {
+  type: 'get_bundle_refresh_plan';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+}
+
+export interface ApplyBundleRefreshRequest {
+  type: 'apply_bundle_refresh';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+  submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission;
+}
+
+export interface GetBundleConfigStateRequest {
+  type: 'get_bundle_config_state';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+}
+
+export interface ApplyBundleConfigRequest {
+  type: 'apply_bundle_config';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+  submission: import('../../types/bundle-config.js').BundleConfigSubmission;
+}
+
+export interface RequestReviewRequest {
+  type: 'request_review';
+  requestId: string;
+  operation: import('../../types/review.js').ReviewOperation;
+}
+
+// --- Inbox & Preferences ---
+
+export interface GetInboxRequest {
+  type: 'get_inbox';
+  requestId: string;
+}
+
+export interface ClearInboxRequest {
+  type: 'clear_inbox';
+  requestId: string;
+  id?: string;
+}
+
+export interface MarkInboxReadRequest {
+  type: 'mark_inbox_read';
+  requestId: string;
+  id: string;
+}
+
+export interface GetNotificationConfigRequest {
+  type: 'get_notification_config';
+  requestId: string;
+}
+
+export interface UpdateNotificationConfigRequest {
+  type: 'update_notification_config';
+  requestId: string;
+  config: import('../../notifications/types.js').NotificationConfig;
+}
+
+// --- Agent Operations ---
+
+export interface ListAgentSessionsRequest {
+  type: 'list_agent_sessions';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  mode?: 'known' | 'live';
+}
+
+export interface CreateAgentSessionRequest {
+  type: 'create_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  title?: string;
+}
+
+export interface AbortAgentSessionRequest {
+  type: 'abort_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface InterruptAgentSessionRequest {
+  type: 'interrupt_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface CloseAgentSessionRequest {
+  type: 'close_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface ArchiveAgentSessionRequest {
+  type: 'archive_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface RestoreAgentSessionRequest {
+  type: 'restore_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface AttachAgentSessionRequest {
+  type: 'attach_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  cols?: number;
+  rows?: number;
+}
+
+export interface PromptAgentSessionRequest {
+  type: 'prompt_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  text: string;
+  images?: import('../tmux-lite/protocol.js').AgentPromptImage[];
+  streamingBehavior?: 'steer' | 'followUp';
+}
+
+export interface StageAgentUploadRequest {
+  type: 'stage_agent_upload';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  fileName: string;
+  data: string;
+  mimeType: string;
+}
+
+export interface RespondAgentDialogRequest {
+  type: 'respond_agent_dialog';
+  requestId: string;
+  dialogId: string;
+  dialogType: 'select' | 'confirm' | 'input' | 'editor';
+  value: string | boolean | undefined;
+}
+
+export interface RespondAgentPermissionRequest {
+  type: 'respond_agent_permission';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  permissionId: string;
+  response: 'allow' | 'deny';
+}
+
+export interface ListAgentCommandsRequest {
+  type: 'list_agent_commands';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
+export interface GetAgentFileSuggestionsRequest {
+  type: 'get_agent_file_suggestions';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  prefix: string;
+  limit?: number;
 }
 
 /** Delete a workspace */
@@ -236,8 +531,12 @@ export interface ScriptOutputResponse {
   error?: string;
 }
 
-export interface TmuxCommandResponse {
-  type: 'tmux_command_response';
+/**
+ * Response to any explicit remote command request.
+ * Wraps the tmux-lite Response with a requestId for correlation.
+ */
+export interface CommandResponse {
+  type: 'command_response';
   requestId: string;
   response: import('../tmux-lite/protocol.js').Response;
 }
@@ -304,7 +603,51 @@ export type ClientToMachineMessage =
   | AttachSessionRequest
   | CancelPendingAttachRequest
   | DeleteWorkspaceRequest
-  | TmuxCommandRequest
+  // Explicit remote commands (lifecycle & discovery)
+  | ListGithubReposRequest
+  | ListRemoteBranchesRequest
+  | ListLinearIssuesRequest
+  // Project CRUD
+  | CreateProjectRequest
+  | PrepareProjectCreationRequest
+  | FinalizeProjectCreationRequest
+  | CancelProjectCreationRequest
+  | DeleteProjectRequest
+  // Workspace CRUD
+  | CreateWorkspaceRequest
+  | SetWorkspacePhaseRequest
+  | KillSessionRequest
+  // Process management
+  | StartProcessRequest
+  | StopProcessRequest
+  | RequestEventsRequest
+  // Bundle & review
+  | GetBundleRefreshPlanRequest
+  | ApplyBundleRefreshRequest
+  | GetBundleConfigStateRequest
+  | ApplyBundleConfigRequest
+  | RequestReviewRequest
+  // Inbox & preferences
+  | GetInboxRequest
+  | ClearInboxRequest
+  | MarkInboxReadRequest
+  | GetNotificationConfigRequest
+  | UpdateNotificationConfigRequest
+  // Agent operations
+  | ListAgentSessionsRequest
+  | CreateAgentSessionRequest
+  | AbortAgentSessionRequest
+  | InterruptAgentSessionRequest
+  | CloseAgentSessionRequest
+  | ArchiveAgentSessionRequest
+  | RestoreAgentSessionRequest
+  | AttachAgentSessionRequest
+  | PromptAgentSessionRequest
+  | StageAgentUploadRequest
+  | RespondAgentDialogRequest
+  | RespondAgentPermissionRequest
+  | ListAgentCommandsRequest
+  | GetAgentFileSuggestionsRequest
   ;
 
 /** All messages from machine to client (browsing mode) */
@@ -319,7 +662,7 @@ export type MachineToClientMessage =
   | ErrorResponse
   | WorkspaceDeletedResponse
   | ScriptOutputResponse
-  | TmuxCommandResponse
+  | CommandResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
   | MachineSnapshotPush
@@ -360,25 +703,57 @@ export function serializeRemoteMessage(msg: RemoteSessionMessage): string {
 /**
  * Check if a message is a browse command
  */
-export function isBrowseMessage(msg: RemoteSessionMessage): msg is
-  | ListReplaysRequest
-  | GetReplayFrameRequest
-  | GetReplayTimelineRequest
-  | DismissReplayRequest
-  | UndismissReplayRequest
-  | AttachSessionRequest
-  | CancelPendingAttachRequest
-  | DeleteWorkspaceRequest
-  | TmuxCommandRequest {
-  return [
+export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachineMessage {
+  // All ClientToMachineMessage types are browse-mode messages.
+  // This list is maintained alongside the ClientToMachineMessage union above.
+  const BROWSE_TYPES: ReadonlySet<string> = new Set([
     'list_replays',
     'get_replay_frame',
     'get_replay_timeline',
     'dismiss_replay',
     'undismiss_replay',
-    "attach_session",
+    'attach_session',
     'cancel_pending_attach',
     'delete_workspace',
-    'tmux_command',
-  ].includes(msg.type);
+    // Explicit remote commands
+    'list_github_repos',
+    'list_remote_branches',
+    'list_linear_issues',
+    'create_project',
+    'prepare_project_creation',
+    'finalize_project_creation',
+    'cancel_project_creation',
+    'delete_project',
+    'create_workspace',
+    'set_workspace_phase',
+    'kill_session',
+    'start_process',
+    'stop_process',
+    'request_events',
+    'get_bundle_refresh_plan',
+    'apply_bundle_refresh',
+    'get_bundle_config_state',
+    'apply_bundle_config',
+    'request_review',
+    'get_inbox',
+    'clear_inbox',
+    'mark_inbox_read',
+    'get_notification_config',
+    'update_notification_config',
+    'list_agent_sessions',
+    'create_agent_session',
+    'abort_agent_session',
+    'interrupt_agent_session',
+    'close_agent_session',
+    'archive_agent_session',
+    'restore_agent_session',
+    'attach_agent_session',
+    'prompt_agent_session',
+    'stage_agent_upload',
+    'respond_agent_dialog',
+    'respond_agent_permission',
+    'list_agent_commands',
+    'get_agent_file_suggestions',
+  ]);
+  return BROWSE_TYPES.has(msg.type);
 }

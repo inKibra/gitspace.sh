@@ -51,6 +51,7 @@ import {
   attachAgentSession as ensureAgentTerminalSession,
   archiveAgentSession,
   abortAgentSession,
+  interruptAgentSession,
   closeAgentSession,
   createAgentSession,
   ensureAgentControlInitialized,
@@ -2648,7 +2649,7 @@ routerListener = Bun.listen({
           case 'agent-prompt':
             try {
               await getAgentControlReady();
-              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images);
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -3016,6 +3017,17 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to abort agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-interrupt':
+            try {
+              await getAgentControlReady();
+              const ok = await interruptAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to interrupt agent session: ${errMsg}` };
             }
             break;
 

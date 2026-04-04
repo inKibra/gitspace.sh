@@ -81,6 +81,11 @@ export type AgentEvent =
       payload: unknown;
     }
   | {
+      type: 'queued_messages';
+      sessionId: string;
+      queued: { steering: readonly string[]; followUp: readonly string[] };
+    }
+  | {
       type: 'error';
       sessionId: string;
       error: string;

@@ -910,6 +910,23 @@ export async function abortAgentSession(
   throw new Error('Unexpected response');
 }
 
+/**
+ * Interrupt the agent's current turn without killing the session.
+ * Calls the Pi SDK's session.abort() under the hood.
+ *
+ * Compare with abortAgentSession() which kills the tmux terminal session.
+ */
+export async function interruptAgentSession(
+  target: AgentWorkspaceTargetPayload,
+  agentSessionId: string,
+): Promise<boolean> {
+  await ensureServer();
+  const res = await send({ type: 'agent-interrupt', target, agentSessionId });
+  if (res.type === 'agent-bool') return res.ok;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
 export async function closeAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
@@ -959,9 +976,11 @@ export async function promptAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
   text: string,
+  images?: import('./protocol.js').AgentPromptImage[],
+  options?: { streamingBehavior?: 'steer' | 'followUp' },
 ): Promise<void> {
   await ensureServer();
-  const res = await send({ type: 'agent-prompt', target, agentSessionId, text });
+  const res = await send({ type: 'agent-prompt', target, agentSessionId, text, images, streamingBehavior: options?.streamingBehavior });
   if (res.type === 'ok') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');

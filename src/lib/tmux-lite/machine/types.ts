@@ -163,6 +163,7 @@ export interface MachineAgentSessionRecord {
   linkedTerminalSessionId?: string;
   modelInfo?: import('../../../agents/agent-runtime-types.js').AgentModelInfo;
   todoPhases?: import('../../../agents/agent-runtime-types.js').TodoPhase[];
+  queuedMessages?: { steering: string[]; followUp: string[] };
 }
 
 export interface MachineProcessRecord {

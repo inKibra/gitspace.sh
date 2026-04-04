@@ -368,12 +368,12 @@ describe('RemoteSessionBackend', () => {
     await Bun.sleep(0);
 
     const tmuxCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { type: string; requestId: string; command: { type: string } };
-    expect(tmuxCommand.type).toBe('tmux_command');
-    expect(tmuxCommand.command).toMatchObject({ type: 'agent-attach', agentSessionId: 'agent-1' });
+    expect(tmuxCommand.type).toBe('attach_agent_session');
+    expect(tmuxCommand).toMatchObject({ agentSessionId: 'agent-1' });
 
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId: tmuxCommand.requestId,
         response: {
           type: 'session',
@@ -452,11 +452,11 @@ describe('RemoteSessionBackend', () => {
     const pending = backend.listAgentSessions('project:workspace');
     await Bun.sleep(0);
     const sent = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { requestId: string; type: string };
-    expect(sent.type).toBe('tmux_command');
+    expect(sent.type).toBe('list_agent_sessions');
 
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId: sent.requestId,
         response: {
           type: 'agent-sessions',
@@ -942,11 +942,11 @@ it('does not emit attached until the real attach event arrives and preserves pre
     const requestPromise = backend.requestEvents('/tmp/alpha/workspaces/ws-2');
     await Bun.sleep(0);
     const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[sentBefore]);
-    expect(command).toMatchObject({ type: 'tmux_command' });
+    expect(command).toMatchObject({ type: 'request_events' });
     const requestId = (command as { requestId: string }).requestId;
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId,
         response: { type: 'events-list', workspaceId: 'alpha:ws-2', events: [], liveEventIds: [], savedEventFilters: savedFilters },
       })
@@ -994,7 +994,7 @@ it('does not emit attached until the real attach event arrives and preserves pre
     const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[sentBefore]) as { requestId: string };
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId: command.requestId,
         response: { type: 'events-list', workspaceId: 'alpha:ws-2', events: [], liveEventIds: [], savedEventFilters: savedFilters },
       })
@@ -1514,11 +1514,11 @@ it('does not emit attached until the real attach event arrives and preserves pre
     const pending = backend.startProcess('project:workspace', 'web', 1);
     await Bun.sleep(0);
     const sent = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { requestId: string; type: string };
-    expect(sent.type).toBe('tmux_command');
+    expect(sent.type).toBe('start_process');
 
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
-        type: 'tmux_command_response',
+        type: 'command_response',
         requestId: sent.requestId,
         response: {
           type: 'error',

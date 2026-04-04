@@ -93,6 +93,9 @@ export function ensureAgentControlInitialized(): Promise<void> {
             }
             break;
           }
+          case 'queued_messages':
+            defaultAgentEventManager.setExternalQueuedMessages(target.workspaceId, event.sessionId, event.queued);
+            break;
           case 'error':
             defaultAgentEventManager.setExternalError(target.workspaceId, event.sessionId, event.error);
             break;
@@ -252,10 +255,10 @@ export async function createAgentSession(target: AgentWorkspaceTarget, title?: s
   return getKnownAgentSessions(target);
 }
 
-export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string, images?: AgentPromptImage[]): Promise<void> {
+export async function promptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string, text: string, images?: AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text, images);
+  await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text, images, options);
 }
 
 export async function stageUploadFile(
@@ -319,11 +322,31 @@ export async function stageUploadFile(
   }
 }
 
+/**
+ * Kill the agent's tmux terminal session entirely.
+ *
+ * WARNING — naming confusion: in the Pi SDK, "abort" means "interrupt the
+ * current turn." In GitSpace, abortAgentSession means "kill the session."
+ * For interrupting the current turn without killing the session, use
+ * interruptAgentSession() instead.
+ */
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  // Pi doesn't have a separate abort API — closing the session stops the agent.
   return defaultPiCoordinator.closeAgentSession(target, agentSessionId);
+}
+
+/**
+ * Interrupt the agent's current turn (stop LLM streaming / tool execution)
+ * without killing the session. The session stays alive for new prompts.
+ *
+ * This calls the Pi SDK's session.abort() — which, despite its name, is an
+ * interrupt, not a kill. See the naming note on abortAgentSession().
+ */
+export async function interruptAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+  await ensureAgentControlInitialized();
+  defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
+  return defaultPiCoordinator.interruptAgentSession(target, agentSessionId);
 }
 
 export async function closeAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<AgentSessionSummary[]> {

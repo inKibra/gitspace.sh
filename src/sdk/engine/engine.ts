@@ -454,6 +454,17 @@ export class GitSpaceEngine {
     );
   }
 
+  /**
+   * Interrupt the agent's current turn without killing the session.
+   * Use this for the "stop" button. Compare with abortAgentSession()
+   * which kills the tmux session entirely.
+   */
+  interruptAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
+    return this.withRefBackend(ref, (b) =>
+      b.interruptAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? Promise.resolve(false)
+    );
+  }
+
   closeAgentSession(ref: BackendScopedAgentSessionRef) {
     return this.withRefBackend(ref, (b) =>
       b.closeAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? Promise.resolve([])
@@ -484,9 +495,9 @@ export class GitSpaceEngine {
     }
   }
 
-  promptAgentSession(ref: BackendScopedAgentSessionRef, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
+  promptAgentSession(ref: BackendScopedAgentSessionRef, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     return this.withRefBackend(ref, (b) =>
-      b.promptAgentSession?.(ref.workspaceId, ref.agentSessionId, text, images) ?? Promise.resolve()
+      b.promptAgentSession?.(ref.workspaceId, ref.agentSessionId, text, images, options) ?? Promise.resolve()
     );
   }
 

@@ -1384,6 +1384,18 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent abort response');
   }
 
+  async interruptAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    // Note: 'agent-interrupt' gracefully stops the current turn; 'agent-abort' kills the tmux session.
+    const response = await this.sendTmuxCommand({ type: 'agent-interrupt', target, agentSessionId });
+    if (response.type === 'agent-bool') {
+      await this.refreshMachineSnapshotState();
+      return response.ok;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent interrupt response');
+  }
+
   async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const response = await this.sendTmuxCommand({ type: 'agent-close', target, agentSessionId });
@@ -1438,9 +1450,9 @@ export class LocalSessionBackend implements SessionBackend {
     }
   }
 
-  async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
+  async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const response = await this.sendTmuxCommand({ type: 'agent-prompt', target, agentSessionId, text, images });
+    const response = await this.sendTmuxCommand({ type: 'agent-prompt', target, agentSessionId, text, images, streamingBehavior: options?.streamingBehavior });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error(`Unexpected prompt response: ${response.type}`);

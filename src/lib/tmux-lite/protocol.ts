@@ -378,11 +378,12 @@ export type Command =
   | { type: 'agent-sessions'; target: AgentWorkspaceTargetPayload; mode?: 'known' | 'live' }
   | { type: 'agent-create'; target: AgentWorkspaceTargetPayload; title?: string }
   | { type: 'agent-abort'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-interrupt'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-close'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; cols?: number; rows?: number }
-  | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[] }
+  | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[]; streamingBehavior?: 'steer' | 'followUp' }
   | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
   | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }

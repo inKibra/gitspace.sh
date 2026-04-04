@@ -72,6 +72,7 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
     const errorMessages: WorkspaceAgentState['errorMessages'] = {};
     const todoPhases: WorkspaceAgentState['todoPhases'] = {};
     const modelInfo: WorkspaceAgentState['modelInfo'] = {};
+    const queuedMessages: WorkspaceAgentState['queuedMessages'] = {};
 
     for (const sessionId of snapshot.agentSessionIdsByWorkspaceId[workspace.id] ?? []) {
       const session = snapshot.agentSessionsById[sessionId];
@@ -115,6 +116,9 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       if (session.modelInfo) {
         modelInfo[session.id] = session.modelInfo;
       }
+      if (session.queuedMessages && (session.queuedMessages.steering.length > 0 || session.queuedMessages.followUp.length > 0)) {
+        queuedMessages[session.id] = session.queuedMessages;
+      }
     }
 
     result[workspace.id] = {
@@ -127,6 +131,7 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       errorMessages,
       todoPhases,
       modelInfo,
+      queuedMessages,
     };
   }
   return result;

@@ -54,6 +54,7 @@ describe('buildMachineSnapshot', () => {
           errorMessages: {},
           todoPhases: {},
           modelInfo: {},
+          queuedMessages: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -95,6 +96,7 @@ describe('buildMachineSnapshot', () => {
           errorMessages: {},
           todoPhases: {},
           modelInfo: {},
+          queuedMessages: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -104,6 +106,38 @@ describe('buildMachineSnapshot', () => {
     expect(snapshot.agentSessionsById['agent-1']?.pendingQuestionCount).toBe(1);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.permissionAgentCount).toBe(1);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.runningAgentCount).toBe(0);
+  });
+
+  it('projects SDK queued steering and follow-up messages into the machine snapshot', () => {
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: 1,
+      terminalSessions: [],
+      workspaces: [makeWorkspace()],
+      agentStateByWorkspaceId: {
+        'demo:ws-1': {
+          workspaceId: 'demo:ws-1',
+          sessions: [{ id: 'agent-1', title: 'Agent 1' }],
+          statuses: { 'agent-1': { type: 'busy' } },
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
+          queuedMessages: {
+            'agent-1': {
+              steering: ['tighten the scope'],
+              followUp: ['summarize the result'],
+            },
+          },
+        } satisfies WorkspaceAgentState,
+      },
+    });
+
+    expect(snapshot.agentSessionsById['agent-1']?.queuedMessages).toEqual({
+      steering: ['tighten the scope'],
+      followUp: ['summarize the result'],
+    });
   });
 
   it('keeps PTY linkage per terminal when one PTY forks to a new Pi session', () => {
@@ -128,6 +162,7 @@ describe('buildMachineSnapshot', () => {
           errorMessages: {},
           todoPhases: {},
           modelInfo: {},
+          queuedMessages: {},
         } satisfies WorkspaceAgentState,
       },
     });

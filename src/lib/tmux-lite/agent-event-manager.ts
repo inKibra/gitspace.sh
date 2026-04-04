@@ -44,6 +44,8 @@ export interface WorkspaceAgentState {
   todoPhases: Record<string, TodoPhase[]>;
   /** Model info per session (populated when session runs in-process via SDK). */
   modelInfo: Record<string, AgentModelInfo>;
+  /** SDK-backed queued steer/follow-up messages per session for UI display. */
+  queuedMessages: Record<string, { steering: string[]; followUp: string[] }>;
 }
 
 export type AgentStateUpdateDelta =
@@ -171,6 +173,7 @@ export class AgentEventManager {
     delete state.errorMessages[sessionId];
     delete state.todoPhases[sessionId];
     delete state.modelInfo[sessionId];
+    delete state.queuedMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
@@ -238,6 +241,20 @@ export class AgentEventManager {
     const state = this.getOrCreateState(workspaceId);
     state.modelInfo[sessionId] = modelInfo;
     this.emit({ type: 'agent_model_update', workspaceId, sessionId, modelInfo });
+  }
+
+  setExternalQueuedMessages(workspaceId: string, sessionId: string, queued: { steering: readonly string[]; followUp: readonly string[] }): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    if (queued.steering.length === 0 && queued.followUp.length === 0) {
+      delete state.queuedMessages[sessionId];
+    } else {
+      state.queuedMessages[sessionId] = {
+        steering: [...queued.steering],
+        followUp: [...queued.followUp],
+      };
+    }
+    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
   addPendingQuestion(workspaceId: string, sessionId: string, question: PendingQuestion): void {
@@ -322,6 +339,7 @@ export class AgentEventManager {
     delete state.errorMessages[sessionId];
     delete state.todoPhases[sessionId];
     delete state.modelInfo[sessionId];
+    delete state.queuedMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.suppressedSessionIds.get(workspaceId)?.delete(sessionId);
     let archived = this.archivedSessionIds.get(workspaceId);
@@ -388,6 +406,7 @@ export class AgentEventManager {
         errorMessages: {},
         todoPhases: {},
         modelInfo: {},
+        queuedMessages: {},
       };
       this.workspaceStates.set(workspaceId, state);
     }

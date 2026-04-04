@@ -310,7 +310,28 @@ export class PiCoordinator {
     return killed;
   }
 
-  async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string, images?: import('../protocol.js').AgentPromptImage[]): Promise<void> {
+  /**
+   * Interrupt the agent's current turn without killing the session.
+   * Calls the Pi SDK's session.abort() which stops LLM streaming and tool
+   * execution, then waits for the agent to become idle. The session stays
+   * alive and can accept new prompts afterward.
+   *
+   * Compare with closeAgentSession() which kills the tmux terminal session.
+   */
+  async interruptAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+    const session = this.activeSessions.get(agentSessionId);
+    if (!session) {
+      return false;
+    }
+    try {
+      await session.abort();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string, images?: import('../protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     const session = await this.ensureActiveSession(target, agentSessionId);
 
     // Intercept /compact — call session.compact() directly instead of prompt()
@@ -326,7 +347,8 @@ export class PiCoordinator {
     const piImages = images?.length
       ? { images: images.map(img => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) }
       : undefined;
-    await session.prompt(text, piImages);
+    await session.prompt(text, { ...piImages, streamingBehavior: options?.streamingBehavior });
+    this.emitQueuedMessages(target, agentSessionId, session);
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {
@@ -541,6 +563,15 @@ export class PiCoordinator {
     return ensurePromise;
   }
 
+  private emitQueuedMessages(target: PiWorkspaceTarget, sessionId: string, session: OmpAgentSession): void {
+    if (!this.eventHandler || typeof session.getQueuedMessages !== 'function') return;
+    this.eventHandler(target, {
+      type: 'queued_messages',
+      sessionId,
+      queued: session.getQueuedMessages(),
+    });
+  }
+
 
   private bindSessionEvents(
     target: PiWorkspaceTarget,
@@ -558,6 +589,8 @@ export class PiCoordinator {
     unsubscribers.push(
       session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
         if (!this.eventHandler || typeof piEvent.type !== 'string') return;
+
+        this.emitQueuedMessages(target, sessionId, session);
 
         switch (piEvent.type) {
           case 'message_update':

@@ -1,10 +1,20 @@
 export interface OmpAgentSession {
   sessionId: string;
   model?: unknown;
-  prompt(input: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }): Promise<void>;
+  prompt(input: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }>; streamingBehavior?: 'steer' | 'followUp' }): Promise<void>;
   compact?(customInstructions?: string): Promise<unknown>;
   subscribe(handler: (event: OmpAgentEvent) => void): () => void;
   setModel(model: unknown): Promise<void>;
+  /**
+   * Interrupt the current agent turn (stop LLM streaming / tool execution).
+   * The session stays alive and can accept new prompts afterward.
+   *
+   * NOTE: This is the Pi SDK's `AgentSession.abort()`. Do not confuse with
+   * GitSpace's `abortAgentSession()` which KILLS the tmux session entirely.
+   * GitSpace naming: interrupt = stop current turn, abort = kill session.
+   */
+  abort(): Promise<void>;
+  getQueuedMessages?(): { steering: readonly string[]; followUp: readonly string[] };
   dispose(): void;
 }
 

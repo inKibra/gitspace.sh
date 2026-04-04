@@ -1,0 +1,33 @@
+# ast-grep rule: Prevent reintroduction of the generic tmux_command tunnel
+# in the remote session protocol.
+#
+# The tmux_command tunnel was removed because it exposed the entire tmux-lite
+# Command union to remote clients with no per-operation access control.
+# All remote operations must use explicit protocol message types.
+#
+# Run: npx @ast-grep/cli scan --rule rules/no-tmux-command-tunnel.yml src/
+# Or:  bun run check:no-tunnel
+
+id: no-tmux-command-tunnel
+language: typescript
+severity: error
+message: |
+  Do not use 'tmux_command' or 'tmux_command_response' in the remote session protocol.
+  All remote operations must use explicit protocol message types defined in
+  src/lib/remote-session/protocol.ts. The generic tunnel was removed to enforce
+  per-operation access control for remote clients.
+note: |
+  If you need a new remote operation, add an explicit request type to
+  ClientToMachineMessage and a handler in RemoteSessionHandler.processMessage().
+rule:
+  any:
+    - pattern: "'tmux_command'"
+    - pattern: "'tmux_command_response'"
+    - pattern: '"tmux_command"'
+    - pattern: '"tmux_command_response"'
+    - pattern: "TmuxCommandRequest"
+    - pattern: "TmuxCommandResponse"
+files:
+  - "src/lib/remote-session/**"
+  - "src/session/backends/remote-session-backend.ts"
+  - "src/serve/client-session-manager.ts"

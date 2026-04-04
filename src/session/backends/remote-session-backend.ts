@@ -17,8 +17,7 @@ import {
   type GetReplayFrameRequest,
   type DismissReplayRequest,
   type UndismissReplayRequest,
-  type TmuxCommandRequest,
-  type TmuxCommandResponse,
+  type CommandResponse,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
@@ -57,7 +56,7 @@ import {
   machineSnapshotToSessions,
   machineSnapshotToWorkspaces,
 } from '../../machine/state/selectors.js';
-import type { Command as TmuxCommand, Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
+import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
@@ -190,7 +189,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'script_output',
   'process_started',
   'process_stopped',
-  'tmux_command_response',
+  'command_response',
   'agent_state_snapshot',
   'agent_state_update',
   'machine_snapshot',
@@ -375,7 +374,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
     | null = null;
   private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
-  private pendingTmuxCommands = new Map<string, {
+  private pendingTypedCommands = new Map<string, {
     resolve: (response: TmuxResponse) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
@@ -462,21 +461,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listGithubRepos(org?: string): Promise<string[]> {
-    const response = await this.sendTmuxCommand({ type: 'github-repos', org });
+    const response = await this.sendTypedCommand({ type: 'list_github_repos', requestId: crypto.randomUUID(), org });
     if (response.type === 'github-repos') return response.repos;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected GitHub repo response');
   }
 
   async listRemoteBranches(projectName: string): Promise<string[]> {
-    const response = await this.sendTmuxCommand({ type: 'remote-branches', projectName });
+    const response = await this.sendTypedCommand({ type: 'list_remote_branches', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'remote-branches') return response.branches;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected remote branches response');
   }
 
   async listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]> {
-    const response = await this.sendTmuxCommand({ type: 'linear-issues', projectName });
+    const response = await this.sendTypedCommand({ type: 'list_linear_issues', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'linear-issues') return response.issues;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected linear issues response');
@@ -492,7 +491,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceName: string,
     phase: import('../../types/config.js').WorkspacePhase
   ): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'workspace-set-phase', projectName, workspaceName, phase });
+    const response = await this.sendTypedCommand({ type: 'set_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
     if (response.type === 'ok') {
       await this.listWorkspaces();
       return;
@@ -664,35 +663,35 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async createProject(params: CreateProjectParams): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'project-create', ...params });
+    const response = await this.sendTypedCommand({ type: 'create_project', requestId: crypto.randomUUID(), ...params });
     if (response.type === 'project-created') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected project create response');
   }
 
   async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
-    const response = await this.sendTmuxCommand({ type: 'project-prepare', ...params });
+    const response = await this.sendTypedCommand({ type: 'prepare_project_creation', requestId: crypto.randomUUID(), ...params });
     if (response.type === 'project-prepared') return response.result;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected project prepare response');
   }
 
   async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'project-finalize', ...params });
+    const response = await this.sendTypedCommand({ type: 'finalize_project_creation', requestId: crypto.randomUUID(), ...params });
     if (response.type === 'project-created') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected project finalize response');
   }
 
   async cancelProjectCreation(projectName: string): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'project-cancel', projectName });
+    const response = await this.sendTypedCommand({ type: 'cancel_project_creation', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'project-cancelled') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected project cancel response');
   }
 
   async createWorkspace(params: CreateWorkspaceParams): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'workspace-create', ...params });
+    const response = await this.sendTypedCommand({ type: 'create_workspace', requestId: crypto.randomUUID(), ...params });
     if (response.type === 'workspace-created') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected workspace create response');
@@ -700,7 +699,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async deleteProject(projectName: string, params: DeleteProjectParams = {}): Promise<void> {
     void params;
-    const response = await this.sendTmuxCommand({ type: 'project-delete', projectName });
+    const response = await this.sendTypedCommand({ type: 'delete_project', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'project-deleted') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected project delete response');
@@ -738,7 +737,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-sessions', target: this.getAgentWorkspaceTarget(workspaceId), mode: 'live' });
+    const response = await this.sendTypedCommand({ type: 'list_agent_sessions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), mode: 'live' });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent sessions response');
@@ -746,7 +745,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-create', target: this.getAgentWorkspaceTarget(workspaceId), title });
+    const response = await this.sendTypedCommand({ type: 'create_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), title });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent create response');
@@ -754,15 +753,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-abort', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendTypedCommand({ type: 'abort_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-bool') return response.ok;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent abort response');
   }
 
+  async interruptAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTypedCommand({ type: 'interrupt_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (response.type === 'agent-bool') return response.ok;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected agent interrupt response');
+  }
+
   async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-close', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendTypedCommand({ type: 'close_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent close response');
@@ -770,7 +777,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async archiveAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-archive', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendTypedCommand({ type: 'archive_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent archive response');
@@ -778,7 +785,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async restoreAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-restore', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendTypedCommand({ type: 'restore_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent restore response');
@@ -789,7 +796,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (this.attachLifecycle.isAttached) {
       await this.detachSession();
     }
-    const response = await this.sendTmuxCommand({ type: 'agent-attach', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
+    const response = await this.sendTypedCommand({ type: 'attach_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
@@ -806,9 +813,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
-  async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[]): Promise<void> {
+  async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-prompt', target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, text, images });
+    const response = await this.sendTypedCommand({ type: 'prompt_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, text, images, streamingBehavior: options?.streamingBehavior });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error(`Unexpected prompt response: ${response.type}`);
@@ -816,14 +823,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-stage-upload', target: this.getAgentWorkspaceTarget(workspaceId), fileName, data, mimeType });
+    const response = await this.sendTypedCommand({ type: 'stage_agent_upload', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), fileName, data, mimeType });
     if (response.type === 'agent-staged') return { stagedPath: response.stagedPath };
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected stage upload response');
   }
 
   async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
+    const response = await this.sendTypedCommand({ type: 'respond_agent_dialog', requestId: crypto.randomUUID(), dialogId, dialogType, value });
     if (response.type === 'agent-bool') {
       if (response.ok) return;
       throw new Error(`Dialog is no longer pending: ${dialogId}`);
@@ -834,7 +841,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async listAgentCommands(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-list-commands', target: this.getAgentWorkspaceTarget(workspaceId) });
+    const response = await this.sendTypedCommand({ type: 'list_agent_commands', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId) });
     if (response.type === 'agent-commands') return response.commands;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected list commands response');
@@ -842,7 +849,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'agent-file-suggestions', target: this.getAgentWorkspaceTarget(workspaceId), prefix, limit });
+    const response = await this.sendTypedCommand({ type: 'get_agent_file_suggestions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), prefix, limit });
     if (response.type === 'agent-file-suggestions') return response.suggestions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected file suggestions response');
@@ -909,7 +916,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async killSession(sessionId: string): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'kill', id: sessionId });
+    const response = await this.sendTypedCommand({ type: 'kill_session', requestId: crypto.randomUUID(), sessionId });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected kill session response');
@@ -972,7 +979,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
-    const response = await this.sendTmuxCommand({ type: 'bundle-refresh-plan', projectName, workspaceId });
+    const response = await this.sendTypedCommand({ type: 'get_bundle_refresh_plan', requestId: crypto.randomUUID(), projectName, workspaceId });
     if (response.type === 'bundle-refresh-plan') return response.plan;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle refresh plan response');
@@ -983,14 +990,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     submission: BundleRefreshSubmission
   ): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'bundle-refresh-apply', projectName, workspaceId, submission });
+    const response = await this.sendTypedCommand({ type: 'apply_bundle_refresh', requestId: crypto.randomUUID(), projectName, workspaceId, submission });
     if (response.type === 'bundle-refresh-applied') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle refresh apply response');
   }
 
   async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
-    const response = await this.sendTmuxCommand({ type: 'bundle-config-state', projectName, workspaceId });
+    const response = await this.sendTypedCommand({ type: 'get_bundle_config_state', requestId: crypto.randomUUID(), projectName, workspaceId });
     if (response.type === 'bundle-config-state') return response.state;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle config state response');
@@ -1001,7 +1008,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     submission: BundleConfigSubmission
   ): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'bundle-config-apply', projectName, workspaceId, submission });
+    const response = await this.sendTypedCommand({ type: 'apply_bundle_config', requestId: crypto.randomUUID(), projectName, workspaceId, submission });
     if (response.type === 'bundle-config-applied') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle config apply response');
@@ -1009,7 +1016,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async requestInbox(): Promise<void> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTmuxCommand({ type: 'inbox' });
+    const response = await this.sendTypedCommand({ type: 'get_inbox', requestId: crypto.randomUUID() });
     if (response.type === 'inbox') {
       const sessions = machineSnapshotToSessions(this.machineStateClient.getSnapshot());
       const activeSessionIds = new Set(sessions.map((session) => session.id));
@@ -1022,7 +1029,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async clearInbox(id?: string): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'inbox-clear', id });
+    const response = await this.sendTypedCommand({ type: 'clear_inbox', requestId: crypto.randomUUID(), id });
     if (response.type === 'ok') {
       await this.requestInbox();
       return;
@@ -1032,7 +1039,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async markInboxRead(id: string): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'inbox-read', id });
+    const response = await this.sendTypedCommand({ type: 'mark_inbox_read', requestId: crypto.randomUUID(), id });
     if (response.type === 'ok') {
       await this.requestInbox();
       return;
@@ -1042,7 +1049,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async getNotificationConfig(): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'notification-config-get' });
+    const response = await this.sendTypedCommand({ type: 'get_notification_config', requestId: crypto.randomUUID() });
     if (response.type === 'notification-config') {
       this.emit({ type: 'notification_config', config: response.config });
       return;
@@ -1052,7 +1059,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async updateNotificationConfig(config: NotificationConfig): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'notification-config-update', config });
+    const response = await this.sendTypedCommand({ type: 'update_notification_config', requestId: crypto.randomUUID(), config });
     if (response.type === 'notification-config') {
       this.emit({ type: 'notification_config', config: response.config });
       return;
@@ -1062,7 +1069,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult> {
-    const response = await this.sendTmuxCommand({ type: 'review-request', requestId: crypto.randomUUID(), operation });
+    const requestId = crypto.randomUUID();
+    console.debug('[review-debug] remote backend sendReviewRequest start', {
+      op: operation.op,
+      requestId,
+    });
+    const response = await this.sendTypedCommand({ type: 'request_review', requestId, operation });
+    console.debug('[review-debug] remote backend sendReviewRequest response', {
+      op: operation.op,
+      requestId,
+      responseType: response.type,
+      reviewRequestId: response.type === 'review-response' ? response.requestId : undefined,
+    });
     if (response.type === 'review-response') {
       if (response.error) {
         throw new ReviewRequestError(response.error.message, response.error.code, { op: operation.op, requestId: response.requestId });
@@ -1079,8 +1097,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
-    const response = await this.sendTmuxCommand({
-      type: 'service-start',
+    const response = await this.sendTypedCommand({
+      type: 'start_process',
+      requestId: crypto.randomUUID(),
       workspaceId,
       processName,
       instance,
@@ -1102,8 +1121,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async stopProcess(workspaceId: string, processName: string): Promise<void> {
-    const response = await this.sendTmuxCommand({
-      type: 'service-stop',
+    const response = await this.sendTypedCommand({
+      type: 'stop_process',
+      requestId: crypto.randomUUID(),
       workspaceId,
       processName,
     });
@@ -1127,7 +1147,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     limit?: number,
     sinceMs?: number,
   ): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'events-request', workspacePath, filter, limit, sinceMs });
+    const response = await this.sendTypedCommand({ type: 'request_events', requestId: crypto.randomUUID(), workspacePath, filter, limit, sinceMs });
     if (response.type === 'events-list') {
       this.emit({ type: 'events', events: response.events, liveEventIds: response.liveEventIds, savedEventFilters: response.savedEventFilters ?? [] });
       return;
@@ -1419,12 +1439,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.agentStateCache = machineSnapshotToAgentState(message.snapshot);
         this.resolveInitialSnapshot();
         return;
-      case 'tmux_command_response':
-        this.resolveTmuxCommand(message);
+      case 'command_response':
+        this.resolveTypedCommand(message as CommandResponse);
         return;
       case 'error':
         if (message.requestId) {
-          this.rejectPendingTmuxCommand(message.requestId, message.message);
+          this.rejectPendingTypedCommand(message.requestId, message.message);
         }
         this.rejectPendingReplayFrame(message.message, { requestId: message.requestId, force: !message.requestId });
         this.rejectPendingReplayTimeline(message.message, undefined, true);
@@ -1739,49 +1759,39 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(snapshot) });
   }
 
-  private async sendTmuxCommand(command: TmuxCommand): Promise<TmuxResponse> {
-    const requestId = crypto.randomUUID();
-    const message: TmuxCommandRequest = { type: 'tmux_command', requestId, command };
+  private async sendTypedCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TmuxResponse> {
+    const requestId = request.requestId;
     return new Promise<TmuxResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const pending = this.pendingTmuxCommands.get(requestId);
-        if (!pending) {
-          return;
-        }
-        this.pendingTmuxCommands.delete(requestId);
-        reject(new Error(`Timed out waiting for tmux command response (${command.type})`));
+        const pending = this.pendingTypedCommands.get(requestId);
+        if (!pending) return;
+        this.pendingTypedCommands.delete(requestId);
+        reject(new Error(`Timed out waiting for command response (${request.type})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-
-      this.pendingTmuxCommands.set(requestId, { resolve, reject, timeout });
-      void this.sendCommand(message).catch((error) => {
-        const pending = this.pendingTmuxCommands.get(requestId);
-        if (!pending) {
-          return;
-        }
+      this.pendingTypedCommands.set(requestId, { resolve, reject, timeout });
+      void this.sendCommand(request).catch((error) => {
+        const pending = this.pendingTypedCommands.get(requestId);
+        if (!pending) return;
         clearTimeout(pending.timeout);
-        this.pendingTmuxCommands.delete(requestId);
+        this.pendingTypedCommands.delete(requestId);
         pending.reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
   }
 
-  private resolveTmuxCommand(message: TmuxCommandResponse): void {
-    const pending = this.pendingTmuxCommands.get(message.requestId);
-    if (!pending) {
-      return;
-    }
+  private resolveTypedCommand(message: CommandResponse): void {
+    const pending = this.pendingTypedCommands.get(message.requestId);
+    if (!pending) return;
     clearTimeout(pending.timeout);
-    this.pendingTmuxCommands.delete(message.requestId);
+    this.pendingTypedCommands.delete(message.requestId);
     pending.resolve(message.response);
   }
 
-  private rejectPendingTmuxCommand(requestId: string, message: string): void {
-    const pending = this.pendingTmuxCommands.get(requestId);
-    if (!pending) {
-      return;
-    }
+  private rejectPendingTypedCommand(requestId: string, message: string): void {
+    const pending = this.pendingTypedCommands.get(requestId);
+    if (!pending) return;
     clearTimeout(pending.timeout);
-    this.pendingTmuxCommands.delete(requestId);
+    this.pendingTypedCommands.delete(requestId);
     pending.reject(new Error(message));
   }
 
@@ -1831,11 +1841,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingUndismissReplay('Remote session disconnected', undefined, true);
     this.rejectPendingWorkspaceDelete('DELETE_FAILED', 'Remote session disconnected', undefined, true);
-    for (const pending of this.pendingTmuxCommands.values()) {
+    for (const pending of this.pendingTypedCommands.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error('Remote session disconnected'));
     }
-    this.pendingTmuxCommands.clear();
+    this.pendingTypedCommands.clear();
     this.rejectInitialSnapshot(new Error('Remote session disconnected'));
     this.machineStateClient.replaceSnapshot(createEmptyMachineSnapshot());
     this.connectPromise = null;
@@ -1973,8 +1983,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     response: 'allow' | 'deny',
   ): Promise<boolean> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendTmuxCommand({
-      type: 'agent-permission',
+    const tmuxResponse = await this.sendTypedCommand({
+      type: 'respond_agent_permission',
+      requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),
       agentSessionId,
       permissionId,

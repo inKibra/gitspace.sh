@@ -287,10 +287,17 @@ export class ClientSessionManager {
         // Control message - parse and route appropriately
         const msg = JSON.parse(new TextDecoder().decode(result.data));
 
-        if (msg.type === 'tmux_command') {
-          // tmux_command sent while attached — route through session handler
-          // (e.g. agent-prompt, agent-abort). Must respond on the encrypted channel.
-          const responseMsg = await this.handleAttachedTmuxCommand(session, msg.requestId, msg.command);
+        // Explicit commands allowed while attached (agent interaction)
+        const ATTACHED_COMMAND_TYPES = new Set([
+          'prompt_agent_session',
+          'abort_agent_session',
+          'interrupt_agent_session',
+          'respond_agent_permission',
+          'respond_agent_dialog',
+        ]);
+
+        if (ATTACHED_COMMAND_TYPES.has(msg.type)) {
+          const responseMsg = await this.handleAttachedCommand(session, msg);
           if (responseMsg) {
             const respData = new TextEncoder().encode(JSON.stringify(responseMsg));
             return createFrame(STREAM_ID.CONTROL, respData, session.sessionKeys.sendKey);
@@ -326,7 +333,15 @@ export class ClientSessionManager {
           return null; // attach-init handles the resize
         }
 
-        // Forward control messages directly to tmux-lite after attach-init.
+        // Browse-mode commands sent while attached (e.g. review, inbox,
+        // workspace ops from the web sidebar). Route through the session
+        // handler instead of forwarding to the tmux-lite session socket.
+        if (msg.requestId && typeof msg.type === 'string') {
+          return this.handleBrowseMessage(connectionId, session, data);
+        }
+
+        // Forward PTY control messages (resize, attach-init) directly to
+        // tmux-lite. Only genuine SessionCtrl messages reach here.
         this.writeToTmuxSocket(session, encodeControl(msg));
       } else {
         // Raw PTY input (STREAM_ID.DATA) - send directly to socket
@@ -354,24 +369,61 @@ export class ClientSessionManager {
   }
 
   /**
-   * Route a tmux_command while in attached state (e.g. agent-prompt, agent-abort).
-   * Returns the MachineToClientMessage to send back, or null on error.
+   * Handle an explicit command message while in attached state (agent interaction only).
+   * Returns the CommandResponse to send back, or null on error.
    */
-  private async handleAttachedTmuxCommand(
+  private async handleAttachedCommand(
     session: ClientSession,
-    requestId: string,
-    command: TmuxCommand,
-  ): Promise<{ type: 'tmux_command_response'; requestId: string; response: TmuxResponse } | null> {
+    msg: { type: string; requestId: string; [key: string]: unknown },
+  ): Promise<{ type: 'command_response'; requestId: string; response: TmuxResponse } | null> {
     if (session.viewOnly || !canManage(session.accessType)) {
-      return { type: 'tmux_command_response', requestId, response: { type: 'error', message: 'Permission denied' } };
+      return { type: 'command_response', requestId: msg.requestId, response: { type: 'error', message: 'Permission denied' } };
     }
     try {
+      let tmuxCommand: TmuxCommand;
+      switch (msg.type) {
+        case 'prompt_agent_session':
+          tmuxCommand = {
+            type: 'agent-prompt',
+            target: msg.target as any,
+            agentSessionId: msg.agentSessionId as string,
+            text: msg.text as string,
+            images: msg.images as any,
+            streamingBehavior: msg.streamingBehavior as any,
+          };
+          break;
+        case 'abort_agent_session':
+          tmuxCommand = { type: 'agent-abort', target: msg.target as any, agentSessionId: msg.agentSessionId as string };
+          break;
+        case 'interrupt_agent_session':
+          tmuxCommand = { type: 'agent-interrupt', target: msg.target as any, agentSessionId: msg.agentSessionId as string };
+          break;
+        case 'respond_agent_permission':
+          tmuxCommand = {
+            type: 'agent-permission',
+            target: msg.target as any,
+            agentSessionId: msg.agentSessionId as string,
+            permissionId: msg.permissionId as string,
+            response: msg.response as 'allow' | 'deny',
+          };
+          break;
+        case 'respond_agent_dialog':
+          tmuxCommand = {
+            type: 'agent-dialog-response',
+            dialogId: msg.dialogId as string,
+            dialogType: msg.dialogType as any,
+            value: msg.value as any,
+          };
+          break;
+        default:
+          return { type: 'command_response', requestId: msg.requestId, response: { type: 'error', message: `Command ${msg.type} not allowed while attached` } };
+      }
       await ensureTmuxLiteServer();
-      const response = await sendTmuxLiteCommand(command);
-      return { type: 'tmux_command_response', requestId, response };
+      const response = await sendTmuxLiteCommand(tmuxCommand);
+      return { type: 'command_response', requestId: msg.requestId, response };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { type: 'tmux_command_response', requestId, response: { type: 'error', message } };
+      return { type: 'command_response', requestId: msg.requestId, response: { type: 'error', message } };
     }
   }
 
