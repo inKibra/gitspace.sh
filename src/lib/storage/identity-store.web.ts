@@ -338,3 +338,7 @@ export function loadEnrolledBrowserIdentity(): { identity: Identity; deviceCert:
 export function hasEnrolledBrowserIdentity(): boolean {
   return localStorage.getItem(ENROLLED_IDENTITY_KEY) !== null;
 }
+
+export function clearEnrolledBrowserIdentity(): void {
+  localStorage.removeItem(ENROLLED_IDENTITY_KEY);
+}

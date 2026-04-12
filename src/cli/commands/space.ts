@@ -14,6 +14,39 @@ import { withErrorHandler } from '../error.js';
 import { useSessionContext, getWorkspacePath } from '../workspace-context.js';
 import { logger } from '../../utils/logger.js';
 
+function shouldRenderWorkspaceScopedUsage(): boolean {
+  const ctx = useSessionContext();
+  return !!(ctx?.project && ctx.workspace);
+}
+
+function buildSpaceCommandUsage(cmd: Command): string {
+  let cmdName = cmd.name();
+  const aliases = (cmd as Command & { _aliases?: string[] })._aliases ?? [];
+  if (aliases[0]) {
+    cmdName = `${cmdName}|${aliases[0]}`;
+  }
+
+  let ancestors = '';
+  for (let ancestor = cmd.parent; ancestor; ancestor = ancestor.parent) {
+    if (ancestor.name() === 'space') {
+      ancestors = shouldRenderWorkspaceScopedUsage() ? `space ${ancestors}` : `gssh space ${ancestors}`;
+      break;
+    }
+    ancestors = `${ancestor.name()} ${ancestors}`;
+  }
+
+  return `${ancestors}${cmdName} ${cmd.usage()}`.trim();
+}
+
+function configureSpaceHelpRecursively(command: Command): void {
+  command.configureHelp({
+    commandUsage: buildSpaceCommandUsage,
+  });
+  for (const subcommand of command.commands) {
+    configureSpaceHelpRecursively(subcommand);
+  }
+}
+
 function requireSessionContext(): { project: string; workspace: string } {
   const ctx = useSessionContext();
   if (!ctx || !ctx.project || !ctx.workspace) {
@@ -51,6 +84,7 @@ export function registerSpaceCommands(parent: Command): void {
   registerSpaceHostingCommands(cmd);
   registerSpaceEventsCommands(cmd);
   registerSpaceBundleCommands(cmd);
+  configureSpaceHelpRecursively(cmd);
 }
 
 

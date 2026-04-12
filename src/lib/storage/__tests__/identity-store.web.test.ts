@@ -58,9 +58,13 @@ import {
   clearUnlockedDeviceIdentity,
   hasLegacyMnemonicStorage,
   clearLegacyMnemonicStorage,
+  clearEnrolledBrowserIdentity,
+  hasEnrolledBrowserIdentity,
+  loadEnrolledBrowserIdentity,
+  storeEnrolledBrowserIdentity,
 } from '../identity-store.web.js';
 import { generateMnemonic, mnemonicToUserIdentity } from '../../tmux-lite/crypto/user-identity.js';
-import { generateIdentity } from '../../tmux-lite/crypto/identity.js';
+import { generateIdentity, serializeIdentity } from '../../tmux-lite/crypto/identity.js';
 import { verifyDeviceCertificate } from '../../tmux-lite/crypto/device-cert.js';
 import type { DeviceCertificate } from '../../../types/identity.js';
 
@@ -259,5 +263,28 @@ describe('identity-store.web — legacy mnemonic storage detection', () => {
 
     clearLegacyMnemonicStorage();
     expect(hasLegacyMnemonicStorage()).toBe(false);
+  });
+});
+
+describe('identity-store.web — enrolled browser identity', () => {
+  beforeEach(() => {
+    mockLocalStorage.clear();
+    clearUnlockedDeviceIdentity();
+  });
+
+  it('clears enrolled browser identity storage', () => {
+    const identity = generateIdentity('Browser Local Web');
+    storeEnrolledBrowserIdentity({
+      identity: serializeIdentity(identity),
+      deviceCert: 'device-cert',
+    });
+
+    expect(hasEnrolledBrowserIdentity()).toBe(true);
+    expect(loadEnrolledBrowserIdentity()?.identity.id).toBe(identity.id);
+
+    clearEnrolledBrowserIdentity();
+
+    expect(hasEnrolledBrowserIdentity()).toBe(false);
+    expect(loadEnrolledBrowserIdentity()).toBeNull();
   });
 });

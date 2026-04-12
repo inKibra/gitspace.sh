@@ -15,6 +15,7 @@ import {
   decryptLegacyMnemonic,
   clearLegacyMnemonicStorage,
   deriveRootIdentityFromMnemonic,
+  clearEnrolledBrowserIdentity,
   loadEnrolledBrowserIdentity,
   storeEnrolledBrowserIdentity,
 } from '../../lib/storage/identity-store.web';
@@ -103,15 +104,9 @@ export function useIdentityGate(
     let cancelled = false;
 
     async function check() {
-      // Dev mode: check for auto-provisioned identity from bun run dev:web
-      const devIdentity = loadEnrolledBrowserIdentity();
-      if (devIdentity) {
-        if (!cancelled) onIdentityReady(devIdentity.identity);
-        return;
-      }
-
-      // Try fetching enrolled identity from dev server using enrollment token from URL.
-      // The token is a one-time secret passed via ?enroll=TOKEN in the dev URL.
+      // Dev mode: if an explicit enrollment token is present in the URL, it is
+      // authoritative for this page load and must override any stale previously
+      // stored dev identity from an earlier `bun run dev:web` session.
       const enrollToken = new URLSearchParams(window.location.search).get('enroll');
       if (enrollToken) {
         try {
@@ -119,11 +114,10 @@ export function useIdentityGate(
           if (res.ok) {
             const data = await res.json();
             if (data?.identity && data?.deviceCert) {
+              clearEnrolledBrowserIdentity();
               storeEnrolledBrowserIdentity(data);
               const loaded = loadEnrolledBrowserIdentity();
               if (loaded && !cancelled) {
-                // Clean the enrollment token from the URL so it isn't leaked
-                // in bookmarks, history, or referrer headers.
                 const cleanUrl = new URL(window.location.href);
                 cleanUrl.searchParams.delete('enroll');
                 window.history.replaceState({}, '', cleanUrl.toString());
@@ -135,6 +129,15 @@ export function useIdentityGate(
         } catch {
           // Dev endpoint not available
         }
+      }
+
+      // Fall back to any previously provisioned dev identity only after trying
+      // the explicit enrollment token. Otherwise a stale localStorage entry can
+      // mask the current dev session's browser enrollment.
+      const devIdentity = loadEnrolledBrowserIdentity();
+      if (devIdentity) {
+        if (!cancelled) onIdentityReady(devIdentity.identity);
+        return;
       }
 
       if (cancelled) return;
