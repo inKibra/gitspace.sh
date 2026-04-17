@@ -58,10 +58,11 @@ import {
 } from '../../machine/state/selectors.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
+import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
-const DEFAULT_LIFECYCLE_TIMEOUT_MS = 30000;
+const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10000;
 
 interface RelayDataMessage {
   type: 'data';
@@ -706,7 +707,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async attachSession(params: AttachSessionParams): Promise<void> {
-    if (this.attachLifecycle.isAttached) {
+    if (this.attachLifecycle.isTransportActive) {
       await this.detachSession();
     }
 
@@ -754,7 +755,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     await this.waitForInitialSnapshot();
     const response = await this.sendTypedCommand({ type: 'abort_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
-    if (response.type === 'agent-bool') return response.ok;
+    if (response.type === 'agent-bool') {
+      if (response.ok) {
+        this.applyOptimisticAgentState(agentSessionId, { state: 'closed' });
+      }
+      return response.ok;
+    }
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent abort response');
   }
@@ -770,7 +776,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
     const response = await this.sendTypedCommand({ type: 'close_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
-    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'agent-sessions') {
+      this.applyOptimisticAgentState(agentSessionId, { state: 'closed', closedAt: new Date().toISOString() });
+      return response.sessions;
+    }
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent close response');
   }
@@ -778,7 +787,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async archiveAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
     const response = await this.sendTypedCommand({ type: 'archive_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
-    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'agent-sessions') {
+      this.applyOptimisticAgentState(agentSessionId, { state: 'archived', archivedAt: new Date().toISOString() });
+      return response.sessions;
+    }
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent archive response');
   }
@@ -786,7 +798,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async restoreAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
     const response = await this.sendTypedCommand({ type: 'restore_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
-    if (response.type === 'agent-sessions') return response.sessions;
+    if (response.type === 'agent-sessions') {
+      this.applyOptimisticAgentState(agentSessionId, { state: 'closed', archivedAt: undefined });
+      return response.sessions;
+    }
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent restore response');
   }
@@ -883,6 +898,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const waitForDetach = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingDetachTransition = null;
+        this.attachLifecycle.clearAttachment({ emitDetached: true });
+        this.attachedAgentSessionId = null;
+        this.pendingAttachedAgentSession = null;
         reject(new Error('Timed out waiting for remote detach'));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
       this.pendingDetachTransition = {
@@ -1194,6 +1212,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           ? `Socket closed before handshake completed (code=${info?.code ?? 'unknown'}, reason=${info?.reason || 'none'})`
           : 'Socket closed before handshake completed';
         this.rejectConnect(new Error(closeMessage));
+        if (this.attachLifecycle.isTransportActive) {
+          this.attachLifecycle.clearAttachment({ emitDetached: true });
+          this.attachedAgentSessionId = null;
+          this.pendingAttachedAgentSession = null;
+        }
         this.resetState();
         this.emit({ type: 'status', status: 'disconnected' });
       },
@@ -1438,6 +1461,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.emitDerivedMachineState();
         this.agentStateCache = machineSnapshotToAgentState(message.snapshot);
         this.resolveInitialSnapshot();
+        // Stale-attachment guard: if the session we're attached to is no longer
+        // present in the snapshot, the server removed it. Emit exited so the
+        // frontend transitions out of attached state and preserves workspace context.
+        // Only runs when fully attached (not during the attaching phase).
+        if (this.attachLifecycle.isAttached && this.attachLifecycle.sessionId) {
+          const sid = this.attachLifecycle.sessionId;
+          if (!(sid in message.snapshot.terminalSessionsById)) {
+            this.attachLifecycle.emitExited(undefined, sid);
+            this.attachedAgentSessionId = null;
+          }
+        }
         return;
       case 'command_response':
         this.resolveTypedCommand(message as CommandResponse);
@@ -1759,6 +1793,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(snapshot) });
   }
 
+  private applyOptimisticAgentState(agentSessionId: string, patch: Partial<MachineAgentSessionRecord>): void {
+    const snapshot = this.machineStateClient.getSnapshot();
+    const agent = snapshot.agentSessionsById[agentSessionId];
+    if (!agent) return;
+    this.machineStateClient.applyEvent({
+      type: 'agent-session-upserted',
+      snapshotNonce: snapshot.snapshotNonce,
+      session: { ...agent, ...patch },
+    });
+    this.emitDerivedMachineState();
+  }
+
   private async sendTypedCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TmuxResponse> {
     const requestId = request.requestId;
     return new Promise<TmuxResponse>((resolve, reject) => {
@@ -1819,6 +1865,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private rejectConnect(error: Error): void {
+    this.listenersAttached = false;
     if (this.connectReject) {
       this.connectReject(error);
     }
@@ -1828,6 +1875,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private resetState(): void {
+    this.listenersAttached = false;
     this.isConnected = false;
     this.attachLifecycle.reset();
     this.rejectPendingDetachTransition(new Error('Remote session disconnected'));

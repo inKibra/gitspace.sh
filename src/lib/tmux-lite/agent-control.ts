@@ -333,7 +333,9 @@ export async function stageUploadFile(
 export async function abortAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
-  return defaultPiCoordinator.closeAgentSession(target, agentSessionId);
+  const result = await defaultPiCoordinator.closeAgentSession(target, agentSessionId);
+  defaultAgentEventManager.markSessionClosed(target.workspaceId, agentSessionId);
+  return result;
 }
 
 /**

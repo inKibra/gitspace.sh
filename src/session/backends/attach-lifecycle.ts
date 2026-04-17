@@ -128,7 +128,8 @@ export class AttachLifecycle {
   }
 
   clearAttachment(options: ClearAttachOptions = {}): void {
-    const hadAttached = this.attachedSessionId !== null;
+    const hadSession = this.attachedSessionId !== null;
+    const wasAttached = this.phase === 'attached';
     this.phase = 'browsing';
     this.attachedSessionId = null;
     if (!options.preserveWorkspaceId) {
@@ -139,7 +140,10 @@ export class AttachLifecycle {
     }
     this.clearPtyBuffer();
 
-    if ((options.emitDetached ?? false) && hadAttached) {
+    // Emit detached if we had a session the UI knew about (hadSession) or were
+    // fully attached. Pure attaching-with-no-sessionId is invisible to the UI
+    // so no detach event is needed.
+    if ((options.emitDetached ?? false) && (hadSession || wasAttached)) {
       this.emit({ type: 'detached' });
     }
   }

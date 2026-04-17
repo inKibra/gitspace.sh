@@ -271,7 +271,7 @@ export class PiCoordinator {
 
     const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
     if (!sessionFile) {
-      this.disposeActiveSession(sessionId);
+      await this.disposeActiveSession(sessionId);
       throw new Error(
         `Timed out waiting for Pi to create a session file for workspace '${target.workspaceId}'.`,
       );
@@ -290,24 +290,29 @@ export class PiCoordinator {
 
   async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
     let killed = false;
-    let killedTerminalSessionId: string | null = null;
+    let foundTerminalSessionId: string | null = null;
     try {
       const sessions = await listTmuxSessions();
       const pty = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
         ?? this.findMappedTmuxSession(sessions, target.workspaceId, agentSessionId);
       if (pty) {
-        await killTmuxSession(pty.id);
-        killed = true;
-        killedTerminalSessionId = pty.id;
+        foundTerminalSessionId = pty.id;
+        try {
+          await killTmuxSession(pty.id);
+          killed = true;
+        } catch {
+          // Kill failed (session already dead?) — still release below
+        }
       }
     } catch {
-      // non-fatal
+      // listTmuxSessions failed — still try to dispose SDK session below
     }
-    if (killedTerminalSessionId) {
-      this.releaseTerminalSession(killedTerminalSessionId);
+    if (foundTerminalSessionId) {
+      this.releaseTerminalSession(foundTerminalSessionId);
     }
+    // Always dispose the SDK session if no terminal owners remain
     if (!this.hasTerminalOwners(target.workspaceId, agentSessionId)) {
-      this.disposeActiveSession(agentSessionId);
+      await this.disposeActiveSession(agentSessionId);
     }
     return killed;
   }
@@ -326,7 +331,12 @@ export class PiCoordinator {
       return false;
     }
     try {
-      await session.abort();
+      await Promise.race([
+        session.abort(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Interrupt timed out')), 10000),
+        ),
+      ]);
       return true;
     } catch {
       return false;
@@ -389,7 +399,9 @@ export class PiCoordinator {
     const nextOwnerCount = this.bindTerminalSession(workspaceId, terminalSessionId, nextAgentSessionId);
     const previousOwnerCount = previous ? this.getTerminalOwnerCount(previous.workspaceId, previous.agentSessionId) : 0;
     if (previous && previousOwnerCount === 0 && previous.agentSessionId !== nextAgentSessionId) {
-      this.disposeActiveSession(previous.agentSessionId);
+      void this.disposeActiveSession(previous.agentSessionId).catch((err) => {
+        console.error(`[pi-coordinator] Failed to dispose agent session ${previous.agentSessionId}:`, err);
+      });
     }
     return {
       previousAgentSessionId: previous?.agentSessionId,
@@ -405,7 +417,9 @@ export class PiCoordinator {
     if (!binding) return null;
     const remainingOwnerCount = this.getTerminalOwnerCount(binding.workspaceId, binding.agentSessionId);
     if (remainingOwnerCount === 0) {
-      this.disposeActiveSession(binding.agentSessionId);
+      void this.disposeActiveSession(binding.agentSessionId).catch((err) => {
+        console.error(`[pi-coordinator] Failed to dispose agent session ${binding.agentSessionId}:`, err);
+      });
     }
     return {
       ...binding,
@@ -764,7 +778,7 @@ export class PiCoordinator {
     });
   }
 
-  private disposeActiveSession(sessionId: string): void {
+  private async disposeActiveSession(sessionId: string): Promise<void> {
     const unsubscribe = this.sessionUnsubscribers.get(sessionId);
     unsubscribe?.();
     this.sessionUnsubscribers.delete(sessionId);
@@ -774,7 +788,14 @@ export class PiCoordinator {
     const modeHandle = this.virtualModeHandles.get(sessionId);
     if (modeHandle) {
       this.virtualModeHandles.delete(sessionId);
-      void modeHandle.stop().catch(() => {});
+      try {
+        await Promise.race([
+          modeHandle.stop(),
+          new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      } catch {
+        // Shutdown failed or timed out — proceed with session dispose
+      }
     }
 
     const session = this.activeSessions.get(sessionId);

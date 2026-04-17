@@ -569,7 +569,7 @@ function clearIdleTimer(session: SessionData): void {
   }
 }
 
-function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean } = {}): void {
+function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean; killed?: boolean } = {}): void {
   clearIdleTimer(session);
   session.idleState.outputSinceIdle = 0;
   clearAttachTimer(session);
@@ -591,7 +591,7 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
   const workspaceId = session.info.metadata?.workspaceId;
   const agentSessionId = session.info.metadata?.agentSessionId;
   releasePiTerminalSessionOwnership(session.info.id);
-  if (workspaceId && agentSessionId) {
+  if (workspaceId && agentSessionId && !options.killed) {
     markAgentSessionIdle(workspaceId, agentSessionId);
   }
 }
@@ -2592,7 +2592,7 @@ routerListener = Bun.listen({
                 s.virtualTerminal.stop();
                 removeVirtualTerminal(s.info.id);
               }
-              cleanupSessionResources(s);
+              cleanupSessionResources(s, { killed: true });
               try { s.xterm.dispose(); } catch {}
               void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: "ok" };

@@ -19,6 +19,7 @@ import {
   isRelayTrusted,
   addTrustedRelay,
   getTrustedRelay,
+  removeTrustedRelay,
   isCloudReachableRelayUrl,
   isLocalhost,
   type RelayTrustStatus,
@@ -368,13 +369,28 @@ async function verifyRelayTrust(
   relayLabel: string | undefined,
   explicitPubkey?: string,
   autoYes: boolean = false,
-): Promise<RelayTrustResult> {
+  takeover: boolean = false,
+ ): Promise<RelayTrustResult> {
   const computedFingerprint = formatRelayFingerprint(relayPublicKey);
   if (relayFingerprint !== computedFingerprint) {
     logger.error(
       `Relay at ${relayUrl} reported fingerprint ${relayFingerprint}, but computed ${computedFingerprint} from relayPublicKey.`,
     );
     return { trusted: false, reason: 'Relay identity response is inconsistent' };
+  }
+
+  // --takeover is an explicit, operator-initiated trust reset. By passing
+  // --takeover the caller has consented to rebinding to whatever relay
+  // identity is currently reachable at `relayUrl`. We forget any existing
+  // pin so the subsequent trust flow treats this relay as `unknown` and
+  // re-anchors trust via the normal path (auto-trust on --yes, or prompt).
+  // This is intentional for recovery from stale pins and for dev/CI use;
+  // callers who want strict trust preservation must omit --takeover.
+  if (takeover) {
+    const removed = removeTrustedRelay(relayUrl);
+    if (removed) {
+      logger.warning(`Forgetting trusted relay pin for ${relayUrl} due to --takeover.`);
+    }
   }
 
   const trustStatus = isRelayTrusted(relayUrl, relayPublicKey);
@@ -568,7 +584,8 @@ async function connectToRelay(
   enrollmentToken?: string,
   deviceCertificate?: string,
   autoYes?: boolean,
-): Promise<{ relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null> {
+  takeover?: boolean,
+ ): Promise<{ relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null> {
   let trustedRelayIdentity: { relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null = null;
 
   await connectMachineRelay(
@@ -585,6 +602,7 @@ async function connectToRelay(
         relayLabel,
         explicitPubkey,
         Boolean(autoYes),
+        Boolean(takeover),
       );
 
       if (trustResult.trusted) {
@@ -775,6 +793,7 @@ export async function serveStart(options: {
         relayIdentity.label,
         options.relayPubkey,
         Boolean(options.yes),
+        Boolean(options.takeover),
       );
       if (!trustResult.trusted) {
         throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
@@ -1020,6 +1039,7 @@ export async function serveStart(options: {
         relayIdentity.label,
         options.relayPubkey,
         Boolean(options.yes),
+        Boolean(options.takeover),
       );
       if (!trustResult.trusted) {
         throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
@@ -1193,6 +1213,7 @@ export async function serveStart(options: {
       enrollmentToken,
       deviceCertificate,
       options.yes,
+      options.takeover,
     );
 
     if (trustedRelayIdentity) {

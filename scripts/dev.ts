@@ -13,9 +13,14 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { join, basename } from 'path';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { createServer, type AddressInfo } from 'net';
 import { tmpdir } from 'os';
+
+import { createRootInviteToken } from '../src/lib/tmux-lite/crypto/root-invites.js';
+import { mnemonicToUserIdentity } from '../src/lib/tmux-lite/crypto/user-identity.js';
+
+import { queryServeStatus } from '../src/serve/daemon.js';
 
 const ROOT = join(import.meta.dir, '..');
 const ENTRY = join(ROOT, 'src/index.ts');
@@ -44,7 +49,7 @@ function log(label: keyof typeof COLORS, msg: string): void {
 
 // ─── Port allocation ─────────────────────────────────────────────────────────
 
-const DEFAULT_DEV_RELAY_PORT = 4480;
+// Relay port is chosen fresh each run to avoid collisions with stale daemons
 const DEFAULT_DEV_WEB_PORT = 5173;
 function findFreePort(preferredPort?: number): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -89,6 +94,28 @@ async function waitForPort(port: number, timeoutMs = 15000): Promise<void> {
   throw new Error(`Timed out waiting for port ${port}`);
 }
 
+async function waitForServeReady(expectedRelayUrl: string, serveDaemonDir: string, timeoutMs = 15000): Promise<void> {
+  const previousServeDir = process.env.GITSPACE_SERVE_DAEMON_DIR;
+  process.env.GITSPACE_SERVE_DAEMON_DIR = serveDaemonDir;
+  try {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const status = await queryServeStatus();
+      if (status?.relay.url === expectedRelayUrl && status.relay.status === 'connected') {
+        return;
+      }
+      await Bun.sleep(200);
+    }
+  } finally {
+    if (previousServeDir === undefined) {
+      delete process.env.GITSPACE_SERVE_DAEMON_DIR;
+    } else {
+      process.env.GITSPACE_SERVE_DAEMON_DIR = previousServeDir;
+    }
+  }
+  throw new Error(`Timed out waiting for serve to connect to ${expectedRelayUrl}`);
+}
+
 // ─── Sandbox ─────────────────────────────────────────────────────────────────
 
 function deriveSandboxName(): string {
@@ -96,6 +123,60 @@ function deriveSandboxName(): string {
   const worktreeName = basename(ROOT);
   // Sanitize to alphanumeric + dash/underscore (TMUX_LITE_SANDBOX requirement)
   return worktreeName.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+/, 'dev-');
+}
+
+interface SandboxBootstrapPaths {
+  keypairPath: string;
+  secretsPath: string;
+  devIdentityPath: string;
+}
+
+interface SandboxBootstrapValidation {
+  valid: boolean;
+  reason?: string;
+}
+
+/**
+ * Check that all interdependent bootstrap artifacts exist and parse. The
+ * identity keypair, the test secrets file (with USER_ROOT_IDENTITY), and the
+ * browser identity are written together on first run. If any is missing or
+ * malformed, the sandbox is considered incomplete and the caller should
+ * regenerate the full set — partial repair risks pairing mismatched identities.
+ */
+function validateSandboxBootstrap(paths: SandboxBootstrapPaths): SandboxBootstrapValidation {
+  if (!existsSync(paths.keypairPath)) {
+    return { valid: false, reason: `missing ${basename(paths.keypairPath)}` };
+  }
+  if (!existsSync(paths.secretsPath)) {
+    return { valid: false, reason: `missing ${basename(paths.secretsPath)}` };
+  }
+  if (!existsSync(paths.devIdentityPath)) {
+    return { valid: false, reason: `missing ${basename(paths.devIdentityPath)}` };
+  }
+  try {
+    JSON.parse(readFileSync(paths.keypairPath, 'utf-8'));
+  } catch {
+    return { valid: false, reason: `malformed ${basename(paths.keypairPath)}` };
+  }
+  try {
+    JSON.parse(readFileSync(paths.devIdentityPath, 'utf-8'));
+  } catch {
+    return { valid: false, reason: `malformed ${basename(paths.devIdentityPath)}` };
+  }
+  try {
+    const outer = JSON.parse(readFileSync(paths.secretsPath, 'utf-8')) as {
+      entries?: Record<string, string>;
+    };
+    const blob = outer.entries?.['com.gitspace:secrets'];
+    if (!blob) return { valid: false, reason: 'secrets.json missing com.gitspace:secrets entry' };
+    const parsed = JSON.parse(blob) as { global?: Record<string, string> };
+    if (!parsed.global?.USER_ROOT_IDENTITY) {
+      return { valid: false, reason: 'secrets.json missing USER_ROOT_IDENTITY' };
+    }
+  } catch {
+    return { valid: false, reason: `malformed ${basename(paths.secretsPath)}` };
+  }
+  return { valid: true };
 }
 
 // ─── Process management ──────────────────────────────────────────────────────
@@ -160,11 +241,13 @@ function spawnChild(
   children.push(proc);
   pipeOutput(proc, label);
 
-  // Monitor for unexpected exit
+  // Any unexpected exit (including code 0) tears the whole stack down — no
+  // component should exit on its own while we are running. This closes a hole
+  // where a clean exit-0 left us with a half-dead stack and orphaned state.
   proc.exited.then((code) => {
-    if (!shuttingDown && code !== 0) {
-      log(label, `Process exited with code ${code}`);
-      shutdown(1);
+    if (!shuttingDown) {
+      log(label, `Process exited with code ${code ?? 'unknown'}`);
+      shutdown(code ?? 1);
     }
   });
 
@@ -227,65 +310,84 @@ const DEV_PASSWORD = 'dev';
 
 async function main(): Promise<void> {
   const sandboxName = deriveSandboxName();
+  // relayPort: random free port (no preferred port) so stale daemons can't
+  // collide with us. vitePort prefers the classic 5173 for habitual DX.
   const [relayPort, vitePort] = await Promise.all([
-    findFreePort(DEFAULT_DEV_RELAY_PORT),
+    findFreePort(),
     findFreePort(DEFAULT_DEV_WEB_PORT),
   ]);
 
-  // Wipe and recreate sandbox directory tree (each run gets a fresh state)
+  // Persistent sandbox directory tree — survives across dev:web restarts so
+  // bundle secrets, identity, and relay config don't need to be re-entered.
   const sandboxDir = join(tmpdir(), `gssh-dev-${sandboxName}`);
-  rmSync(sandboxDir, { recursive: true, force: true });
   const identityDir = join(sandboxDir, 'identity');
   const controlDir = join(sandboxDir, 'relay-control');
+  const relayDir = join(sandboxDir, 'relay');
   const serveDaemonDir = join(sandboxDir, 'serve');
-  for (const dir of [identityDir, controlDir, serveDaemonDir]) {
+  for (const dir of [identityDir, controlDir, relayDir, serveDaemonDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
-  log('dev', `Sandbox: ${sandboxName}`);
+  // Validate all required bootstrap artifacts before reuse. If any are
+  // missing or malformed, regenerate the full identity set — identity,
+  // secrets, and browser identity are interdependent so partial repair is
+  // unsafe.
+  const keypairPath = join(identityDir, 'keypair.json');
+  const secretsPath = join(sandboxDir, 'secrets.json');
+  const devIdentityPath = join(sandboxDir, 'dev-browser-identity.json');
+  const bootstrapValidation = validateSandboxBootstrap({ keypairPath, secretsPath, devIdentityPath });
+  const isFirstRun = !bootstrapValidation.valid;
+
+  log('dev', `Sandbox: ${sandboxName}${isFirstRun ? ' (regenerating identity)' : ''}`);
+  if (isFirstRun && bootstrapValidation.reason) {
+    log('dev', `  reason: ${bootstrapValidation.reason}`);
+  }
   log('dev', `Relay port: ${relayPort}`);
   log('dev', `Vite port: ${vitePort}`);
   log('dev', '');
 
-  // Generate a self-contained sandbox identity (root + browser device).
-  // No user password needed — everything is freshly generated.
-  log('dev', 'Generating sandbox identity...');
-  const identityScript = join(import.meta.dir, 'dev-identity.ts');
-  const genProc = spawn(['bun', identityScript], {
-    cwd: ROOT,
-    env: process.env as Record<string, string>,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    stdin: 'ignore',
-  });
-  const genExit = await genProc.exited;
-  if (genExit !== 0) {
-    const stderr = await new Response(genProc.stderr).text();
-    log('dev', `Failed to generate identity: ${stderr.trim()}`);
-    await shutdown(1);
-    return;
+  // Generate sandbox identity only on first run or if prior bootstrap is
+  // incomplete. Reuse on subsequent healthy runs so relay identity stays
+  // stable and bundle secrets persist. 
+
+  if (isFirstRun) {
+    log('dev', 'Generating sandbox identity...');
+    const identityScript = join(import.meta.dir, 'dev-identity.ts');
+    const genProc = spawn(['bun', identityScript], {
+      cwd: ROOT,
+      env: process.env as Record<string, string>,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'ignore',
+    });
+    const genExit = await genProc.exited;
+    if (genExit !== 0) {
+      const stderr = await new Response(genProc.stderr).text();
+      log('dev', `Failed to generate identity: ${stderr.trim()}`);
+      await shutdown(1);
+      return;
+    }
+    const genOutput = JSON.parse(await new Response(genProc.stdout).text());
+
+    // Write root keypair.json so serve can load the device identity
+    writeFileSync(keypairPath, JSON.stringify(genOutput.keypairStorage, null, 2), { mode: 0o600 });
+
+    // Seed test secrets file with user root identity (bypasses system keychain)
+    const unifiedBlob = {
+      global: { USER_ROOT_IDENTITY: JSON.stringify(genOutput.userRootStored) },
+      projects: {},
+      metadata: { schemaVersion: 2, legacyMigrationComplete: true, legacyEntriesRetained: false },
+    };
+    writeFileSync(secretsPath, JSON.stringify({
+      entries: { 'com.gitspace:secrets': JSON.stringify(unifiedBlob) },
+    }), { mode: 0o600 });
+
+    // Write browser identity for the Vite dev endpoint
+    writeFileSync(devIdentityPath, JSON.stringify(genOutput.browserIdentity));
+    log('dev', 'Sandbox identity generated');
+  } else {
+    log('dev', 'Reusing existing sandbox identity');
   }
-  const genOutput = JSON.parse(await new Response(genProc.stdout).text());
-
-  // Write root keypair.json so serve can load the device identity
-  const keypairPath = join(identityDir, 'keypair.json');
-  writeFileSync(keypairPath, JSON.stringify(genOutput.keypairStorage, null, 2), { mode: 0o600 });
-
-  // Seed test secrets file with user root identity (bypasses system keychain)
-  const secretsPath = join(sandboxDir, 'secrets.json');
-  const unifiedBlob = {
-    global: { USER_ROOT_IDENTITY: JSON.stringify(genOutput.userRootStored) },
-    projects: {},
-    metadata: { schemaVersion: 2, legacyMigrationComplete: true, legacyEntriesRetained: false },
-  };
-  writeFileSync(secretsPath, JSON.stringify({
-    entries: { 'com.gitspace:secrets': JSON.stringify(unifiedBlob) },
-  }), { mode: 0o600 });
-
-  // Write browser identity for the Vite dev endpoint
-  const devIdentityPath = join(sandboxDir, 'dev-browser-identity.json');
-  writeFileSync(devIdentityPath, JSON.stringify(genOutput.browserIdentity));
-  log('dev', 'Sandbox identity generated');
   log('dev', '');
 
   // Shared env for relay + serve: sandbox identity + test secrets file.
@@ -293,14 +395,46 @@ async function main(): Promise<void> {
   // same project/workspace metadata as the TUI.
   const sandboxEnv = {
     GITSPACE_IDENTITY_DIR: identityDir,
+    GITSPACE_RELAY_DIR: relayDir,
     GSSH_TEST_RUNTIME: '1',
     GSSH_ENABLE_TEST_SECRETS_BACKEND: '1',
     GSSH_TEST_SECRETS_FILE: secretsPath,
   };
 
+  const unifiedSecrets = JSON.parse(
+    JSON.parse(readFileSync(secretsPath, 'utf-8')).entries['com.gitspace:secrets']
+  ) as { global: Record<string, string> };
+  const storedUserRoot = JSON.parse(unifiedSecrets.global.USER_ROOT_IDENTITY) as { mnemonic: string };
+  const ownerUserRoot = mnemonicToUserIdentity(storedUserRoot.mnemonic);
+  const keypairStorage = JSON.parse(readFileSync(keypairPath, 'utf-8')) as {
+    signingPublicKey: string;
+    keyExchangePublicKey: string;
+  };
+  const relayUrl = `ws://127.0.0.1:${relayPort}/ws`;
+  const enrollmentToken = createRootInviteToken({
+    type: 'relay-machine',
+    owner: ownerUserRoot,
+    relayUrl,
+    targetMachineSigningKey: keypairStorage.signingPublicKey,
+    targetMachineKeyExchangeKey: keypairStorage.keyExchangePublicKey,
+    expiresAt: Date.now() + 60 * 60 * 1000,
+    maxUses: 1,
+    label: 'Dev Sandbox Machine',
+  });
+
+
   // Phase 1: Start relay
   log('dev', 'Starting relay...');
-  spawnChild('relay', ['bun', ENTRY, 'relay', 'start', '--port', String(relayPort)], {
+  // Relay runs in foreground as a direct child of this supervisor so Ctrl+C
+  // truly kills it — no daemon fork, no stale listener on restart. --yes
+  // auto-confirms the --takeover prompt since the child has no stdin.
+  spawnChild('relay', [
+    'bun', ENTRY, 'relay', 'start',
+    '--foreground',
+    '--takeover',
+    '--yes',
+    '--port', String(relayPort),
+  ], {
     ...sandboxEnv,
     GITSPACE_CONTROL_DIR: controlDir,
   });
@@ -315,10 +449,17 @@ async function main(): Promise<void> {
   log('dev', 'Relay ready');
 
   // Phase 2: Start serve with the dev password piped via stdin
-  const relayUrl = `ws://127.0.0.1:${relayPort}/ws`;
   log('dev', 'Starting serve...');
   const serveProc = spawnChild('serve',
-    ['bun', ENTRY, 'machine', 'serve', 'start', '--foreground', '--relay', relayUrl, '--password-stdin'],
+    [
+      'bun', ENTRY, 'machine', 'serve', 'start',
+      '--takeover',
+      '--yes',
+      '--foreground',
+      '--relay', relayUrl,
+      '--enrollment-token', enrollmentToken,
+      '--password-stdin',
+    ],
     { ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName, GITSPACE_SERVE_DAEMON_DIR: serveDaemonDir },
     undefined,
     { stdin: 'pipe' },
@@ -326,8 +467,13 @@ async function main(): Promise<void> {
   serveProc.stdin.write(DEV_PASSWORD + '\n');
   serveProc.stdin.end();
 
-  // Give serve a moment to initialize
-  await Bun.sleep(2000);
+  try {
+    await waitForServeReady(relayUrl, serveDaemonDir);
+  } catch (error) {
+    log('dev', `Serve failed to connect: ${error instanceof Error ? error.message : String(error)}`);
+    await shutdown(1);
+    return;
+  }
   log('dev', 'Serve started');
 
   // Phase 3: Start Vite dev server with enrollment token

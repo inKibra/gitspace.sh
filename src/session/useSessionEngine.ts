@@ -124,6 +124,19 @@ function dispatchBackendEvent(
     case 'machine_snapshot':
       dispatch({ type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: event.snapshot });
       break;
+    case 'host_ui_dialog_request':
+      dispatch({ type: 'SET_HOST_UI_DIALOG', backendKey, request: event.request });
+      break;
+    case 'host_ui_event':
+      if (event.event.type === 'working-message') {
+        dispatch({ type: 'SET_HOST_UI_WORKING_MESSAGE', backendKey, message: event.event.payload.message });
+      }
+      break;
+    case 'process_started':
+      // Process events are reflected in machine_snapshot; no separate dispatch needed
+      break;
+    case 'process_stopped':
+      break;
     default:
       break;
   }
@@ -172,6 +185,7 @@ export function useSessionEngine() {
 
   const disconnectBackend = useCallback(async (backendKey: BackendKey): Promise<void> => {
     await getManager().disconnect(backendKey);
+    dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
     dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'disconnected' });
   }, [getManager]);
 

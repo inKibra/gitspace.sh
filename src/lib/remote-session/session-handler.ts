@@ -14,6 +14,7 @@ import {
   type SessionInfo,
 } from "./protocol";
 import type { MachineSnapshot } from "../tmux-lite/machine/protocol.js";
+import { applyMachineEventToSnapshot } from '../tmux-lite/machine/snapshot-patch.js';
 import type { SessionKeys, AccessType } from "../../types/identity.js";
 
 // Import tmux-lite API for session management
@@ -159,6 +160,8 @@ export class RemoteSessionHandler {
   private machineWatchUnsubscribe: (() => void) | null = null;
   /** connectionId → async send function for unsolicited machine snapshot pushes */
   private machineSnapshotWatchers = new Map<string, (msg: MachineToClientMessage) => Promise<void>>();
+  /** Periodic timer that re-broadcasts the latest snapshot for client reconciliation */
+  private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
 
 
   /**
@@ -179,7 +182,14 @@ export class RemoteSessionHandler {
 
     if (this.tmuxLiteAvailable) {
       await this.startMachineWatch();
-    }
+      // Re-broadcast the current snapshot every 30 s so clients that missed
+      // an update can reconcile without needing an explicit poll.
+      this.reconciliationTimer = setInterval(() => {
+        if (this.latestMachineSnapshot) {
+          void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot: this.latestMachineSnapshot });
+        }
+      }, 30000);
+    }  // end if (this.tmuxLiteAvailable)
   }
 
   /**
@@ -194,14 +204,15 @@ export class RemoteSessionHandler {
           void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot });
         },
         onEvent: (event) => {
-          // tmux-lite broadcasts session creation/kill, workspace changes, agent
-          // updates, etc. via machine-event / snapshot-replaced — NOT via onSnapshot.
-          // We must handle them here so remote clients see live changes.
           if (event.type === 'snapshot-replaced') {
             this.latestMachineSnapshot = event.snapshot;
+          } else if (this.latestMachineSnapshot) {
+            this.latestMachineSnapshot = applyMachineEventToSnapshot(this.latestMachineSnapshot, event);
+          }
+          if (this.latestMachineSnapshot) {
             void this.broadcastMachineSnapshot({
               type: 'machine_snapshot',
-              snapshot: event.snapshot,
+              snapshot: this.latestMachineSnapshot,
             });
           }
         },
@@ -1287,6 +1298,11 @@ export class RemoteSessionHandler {
     this.machineWatchUnsubscribe?.();
     this.machineWatchUnsubscribe = null;
     this.machineSnapshotWatchers.clear();
+    // Stop periodic reconciliation timer
+    if (this.reconciliationTimer !== null) {
+      clearInterval(this.reconciliationTimer);
+      this.reconciliationTimer = null;
+    }
 
     // Clean up process schedulers
     for (const timer of this.processSchedulers.values()) {

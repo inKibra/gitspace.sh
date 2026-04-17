@@ -50,7 +50,7 @@ export function registerRelayCommands(parent: Command): void {
     .option('--label <label>', 'Human-readable label for this relay')
     .option('-y, --yes', 'Auto-confirm prompts')
     .option('--foreground', "Run in foreground (don't daemonize)")
-    .option('--takeover', 'Clear persisted relay owner state so the current identity can take over')
+    .option('--takeover', 'Reclaim this relay: clear persisted owner/control state and forget any stale trust pin so the current identity can rebind. Use when recovering from mismatched ownership or trust pins.')
     .action(withErrorHandler(async (options) => {
       const { startRelay } = await import('../../commands/relay.js');
       await startRelay({
