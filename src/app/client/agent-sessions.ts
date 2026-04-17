@@ -33,7 +33,8 @@ export interface MutateAgentSessionArgs {
 export interface AppAgentSessionsClient {
   open: (args: OpenAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionOpenValue>>;
   createAndOpen: (args: CreateAndOpenAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionOpenValue>>;
-  abort: (args: MutateAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>>;
+  kill: (args: MutateAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>>;
+  stopAgentTurn: (args: MutateAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>>;
   close: (args: MutateAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>>;
   archive: (args: MutateAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>>;
   restore: (args: MutateAgentSessionArgs) => Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>>;
@@ -114,7 +115,7 @@ async function openResolvedAgentSession(
 async function mutateAgentSession(
   context: AppClientContext,
   args: MutateAgentSessionArgs,
-  operation: 'abort' | 'close' | 'archive' | 'restore',
+  operation: 'kill' | 'stopAgentTurn' | 'close' | 'archive' | 'restore',
 ): Promise<AgentSessionCommandResult<AppClientAgentSessionMutationValue>> {
   const refResult = resolveAgentSessionRef(context, args.workspaceId, args.agentSessionId);
   if (!refResult.ok) {
@@ -130,22 +131,49 @@ async function mutateAgentSession(
   const backend = backendResult.value;
 
   try {
-    if (operation === 'abort') {
+    if (operation === 'kill') {
       if (!backend.abortAgentSession) {
         return agentSessionFailure({
           code: 'operation-unavailable',
-          message: 'Agent abort unavailable',
+          message: 'Agent kill unavailable',
           workspaceId: args.workspaceId,
           agentSessionId: args.agentSessionId,
           backendKey: workspaceRef.backendKey,
         });
       }
 
-      const aborted = await backend.abortAgentSession(args.workspaceId, args.agentSessionId);
-      if (!aborted) {
+      // backend.abortAgentSession is the wire-level kill command — name stays.
+      const killed = await backend.abortAgentSession(args.workspaceId, args.agentSessionId);
+      if (!killed) {
         return agentSessionFailure({
-          code: 'abort-failed',
-          message: `Agent session ${args.agentSessionId} could not be aborted`,
+          code: 'kill-failed',
+          message: `Agent session ${args.agentSessionId} could not be killed`,
+          workspaceId: args.workspaceId,
+          agentSessionId: args.agentSessionId,
+          backendKey: workspaceRef.backendKey,
+        });
+      }
+
+      return agentSessionSuccess({ workspaceRef, agentSessionRef });
+    }
+
+    if (operation === 'stopAgentTurn') {
+      if (!backend.interruptAgentSession) {
+        return agentSessionFailure({
+          code: 'operation-unavailable',
+          message: 'Agent turn interrupt unavailable',
+          workspaceId: args.workspaceId,
+          agentSessionId: args.agentSessionId,
+          backendKey: workspaceRef.backendKey,
+        });
+      }
+
+      // backend.interruptAgentSession is the wire-level interrupt command — name stays.
+      const stopped = await backend.interruptAgentSession(args.workspaceId, args.agentSessionId);
+      if (!stopped) {
+        return agentSessionFailure({
+          code: 'stop-turn-failed',
+          message: `Agent turn for session ${args.agentSessionId} could not be stopped`,
           workspaceId: args.workspaceId,
           agentSessionId: args.agentSessionId,
           backendKey: workspaceRef.backendKey,
@@ -205,7 +233,9 @@ async function mutateAgentSession(
           ? 'archive-failed'
           : operation === 'restore'
             ? 'restore-failed'
-            : 'abort-failed',
+            : operation === 'kill'
+              ? 'kill-failed'
+              : 'stop-turn-failed',
       message: describeAppClientError(error, `Failed to ${operation} agent session`),
       workspaceId: args.workspaceId,
       agentSessionId: args.agentSessionId,
@@ -281,7 +311,8 @@ export function createAppAgentSessionsClient(context: AppClientContext): AppAgen
         workspaceRef,
       });
     },
-    abort: (args) => mutateAgentSession(context, args, 'abort'),
+    kill: (args) => mutateAgentSession(context, args, 'kill'),
+    stopAgentTurn: (args) => mutateAgentSession(context, args, 'stopAgentTurn'),
     close: (args) => mutateAgentSession(context, args, 'close'),
     archive: (args) => mutateAgentSession(context, args, 'archive'),
     restore: (args) => mutateAgentSession(context, args, 'restore'),

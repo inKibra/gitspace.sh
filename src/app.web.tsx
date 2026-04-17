@@ -460,7 +460,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const {
     open: openAgentSessionAction,
     createAndOpen: createAgentSessionAction,
-    abort: abortAgentSessionAction,
+    kill: killAgentSessionAction,
+    stopAgentTurn: stopAgentTurnAction,
     close: closeAgentSessionAction,
     archive: archiveAgentSessionAction,
     restore: restoreAgentSessionAction,
@@ -540,9 +541,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       });
   }, [openAgentSessionAction, getWebAgentAttachSize]);
 
-  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await abortAgentSessionAction(workspaceId, agentSessionId);
-  }, [abortAgentSessionAction]);
+  const handleKillAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await killAgentSessionAction(workspaceId, agentSessionId);
+  }, [killAgentSessionAction]);
+
+  const handleStopAgentTurn = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await stopAgentTurnAction(workspaceId, agentSessionId);
+  }, [stopAgentTurnAction]);
 
   const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await closeAgentSessionAction(workspaceId, agentSessionId);
@@ -1759,7 +1764,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             onSelectWorkspace={handleSelectWorkspaceFromDetail}
             onOpenAgentSession={handleOpenAgentSession}
             onCreateAgentSession={handleCreateAgentSession}
-            onAbortAgentSession={handleAbortAgentSession}
+            onKillAgentSession={handleKillAgentSession}
+            onStopAgentTurn={handleStopAgentTurn}
             onCloseAgentSession={handleCloseAgentSession}
             onArchiveAgentSession={handleArchiveAgentSession}
             onRestoreAgentSession={handleRestoreAgentSession}

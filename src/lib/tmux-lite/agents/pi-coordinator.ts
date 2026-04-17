@@ -359,8 +359,16 @@ export class PiCoordinator {
     const piImages = images?.length
       ? { images: images.map(img => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) }
       : undefined;
-    await session.prompt(text, { ...piImages, streamingBehavior: options?.streamingBehavior });
-    this.emitQueuedMessages(target, agentSessionId, session);
+    // Turn accepted: ok responds immediately. Turn progress and completion flow through existing agent/machine events.
+    session.prompt(text, { ...piImages, streamingBehavior: options?.streamingBehavior })
+      .then(() => { this.emitQueuedMessages(target, agentSessionId, session); })
+      .catch((err: unknown) => {
+        const error = err instanceof Error ? err.message : String(err);
+        console.error(`[pi-coordinator] prompt failed for session ${agentSessionId}:`, err);
+        if (this.eventHandler) {
+          this.eventHandler(target, { type: 'error', sessionId: agentSessionId, error });
+        }
+      });
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {

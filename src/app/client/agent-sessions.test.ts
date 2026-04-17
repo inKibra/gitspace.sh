@@ -60,9 +60,14 @@ function makeMulti(
       const backend = backendByKey[ref.backendKey];
       return backend?.createAgentSession?.(ref.workspaceId, title) ?? [];
     },
-    abortAgentSession: async (ref) => {
+    killAgentSession: async (ref) => {
       const backend = backendByKey[ref.backendKey];
+      // backend.abortAgentSession is the wire-level kill command — name stays.
       return backend?.abortAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? false;
+    },
+    stopAgentTurn: async (ref) => {
+      const backend = backendByKey[ref.backendKey];
+      return backend?.interruptAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? false;
     },
     closeAgentSession: async (ref) => {
       const backend = backendByKey[ref.backendKey];

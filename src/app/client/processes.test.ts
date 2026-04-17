@@ -46,7 +46,8 @@ function makeContext(workspaceRefs: BackendScopedWorkspaceRef[], backendByKey: R
   const multi: AppClientMulti = {
     getBackend: (backendKey) => backendByKey[backendKey] ?? null,
     createAgentSession: async () => [],
-    abortAgentSession: async () => false,
+    killAgentSession: async () => false,
+    stopAgentTurn: async () => false,
     closeAgentSession: async () => [],
     archiveAgentSession: async () => [],
     restoreAgentSession: async () => [],

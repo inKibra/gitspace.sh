@@ -139,7 +139,7 @@ function SidebarContent(props: {
   attachedSessionId: string | null;
   attachedAgentSessionId: string | null;
   onAttachSession: WorkspaceDetailPaneProps['onAttachSession'];
-  onAbortAgentSession?: WorkspaceDetailPaneProps['onAbortAgentSession'];
+  onStopAgentTurn?: WorkspaceDetailPaneProps['onStopAgentTurn'];
   onCloseAgentSession?: WorkspaceDetailPaneProps['onCloseAgentSession'];
   onArchiveAgentSession?: WorkspaceDetailPaneProps['onArchiveAgentSession'];
   onRestoreAgentSession?: WorkspaceDetailPaneProps['onRestoreAgentSession'];
@@ -157,7 +157,7 @@ function SidebarContent(props: {
 }) {
   const {
     detailModel, workspace, workspaceSessions, attachedSessionId, attachedAgentSessionId,
-    onAttachSession, onAbortAgentSession, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
+    onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onOpenGitHubPullRequest, onOpenReview,
     onRequestStatusChange, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
   } = props;
@@ -208,8 +208,8 @@ function SidebarContent(props: {
                   active={row.id === attachedAgentSessionId}
                   onClick={() => act(() => void detailActions.openAgentSession(row.id))}
                 />
-                {onAbortAgentSession && agentState === 'running' && (
-                  <button type="button" onClick={() => void detailActions.abortAgentSession(row.id)} className="text-[10px] text-[var(--gs-danger-hover)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">✕</button>
+                {onStopAgentTurn && agentState === 'running' && (
+                  <button type="button" onClick={() => void detailActions.stopAgentTurn(row.id)} className="text-[10px] text-[var(--gs-danger-hover)] hover:text-[var(--gs-danger-hover)] flex-shrink-0 px-1">✕</button>
                 )}
                 {onCloseAgentSession && agentState !== 'running' && (
                   <button type="button" onClick={() => void detailActions.closeAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">×</button>
@@ -406,7 +406,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     onOpenEvents,
     onOpenAgentSession,
     onCreateAgentSession,
-    onAbortAgentSession,
+    onKillAgentSession,
+    onStopAgentTurn,
     onCloseAgentSession,
     onArchiveAgentSession,
     onRestoreAgentSession,
@@ -444,7 +445,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
       onRequestStatusChange,
       onOpenAgentSession,
       onCreateAgentSession,
-      onAbortAgentSession,
+      onKillAgentSession,
+      onStopAgentTurn,
       onCloseAgentSession,
       onArchiveAgentSession,
       onRestoreAgentSession,
@@ -553,7 +555,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             attachedSessionId={attachedSessionId}
             attachedAgentSessionId={attachedAgentSessionId}
             onAttachSession={onAttachSession}
-            onAbortAgentSession={onAbortAgentSession}
+            onStopAgentTurn={onStopAgentTurn}
             onCloseAgentSession={onCloseAgentSession}
             onArchiveAgentSession={onArchiveAgentSession}
             onRestoreAgentSession={onRestoreAgentSession}
@@ -623,7 +625,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   attachedSessionId={attachedSessionId}
                   attachedAgentSessionId={attachedAgentSessionId}
                   onAttachSession={onAttachSession}
-                  onAbortAgentSession={onAbortAgentSession}
+                  onStopAgentTurn={onStopAgentTurn}
                   onCloseAgentSession={onCloseAgentSession}
                   onArchiveAgentSession={onArchiveAgentSession}
                   onRestoreAgentSession={onRestoreAgentSession}

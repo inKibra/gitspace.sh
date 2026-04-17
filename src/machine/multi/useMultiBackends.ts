@@ -212,7 +212,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   // Agent session
   const respondToAgentPermission = useCallback((ref: BackendScopedAgentSessionRef, permissionId: string, response: 'allow' | 'deny') => engine.respondToAgentPermission(ref, permissionId, response), [engine]);
   const createAgentSession = useCallback((ref: BackendScopedWorkspaceRef, title?: string) => engine.createAgentSession(ref, title), [engine]);
-  const abortAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.abortAgentSession(ref), [engine]);
+  const killAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.killAgentSession(ref), [engine]);
+  const stopAgentTurn = useCallback((ref: BackendScopedAgentSessionRef) => engine.stopAgentTurn(ref), [engine]);
   const closeAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.closeAgentSession(ref), [engine]);
   const archiveAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.archiveAgentSession(ref), [engine]);
   const restoreAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.restoreAgentSession(ref), [engine]);
@@ -276,7 +277,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
 
     respondToAgentPermission,
     createAgentSession,
-    abortAgentSession,
+    killAgentSession,
+    stopAgentTurn,
     closeAgentSession,
     archiveAgentSession,
     restoreAgentSession,

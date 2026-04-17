@@ -30,7 +30,8 @@ export interface WorkspaceDetailModelInput {
     onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
     onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
-    onAbortAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+    onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+    onStopAgentTurn?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onCloseAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onArchiveAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
@@ -134,7 +135,8 @@ export interface WorkspaceDetailModel {
     footerAction: (id: 'open-github-pr' | 'open-review' | 'launch-commit' | 'edit-bundle-config' | 'edit-process-config' | 'change-status') => void | Promise<void>;
     openAgentSession: (agentSessionId: string) => void | Promise<void>;
     createAgentSession: () => void | Promise<void>;
-    abortAgentSession: (agentSessionId: string) => void | Promise<void>;
+    killAgentSession: (agentSessionId: string) => void | Promise<void>;
+    stopAgentTurn: (agentSessionId: string) => void | Promise<void>;
     closeAgentSession: (agentSessionId: string) => void | Promise<void>;
     archiveAgentSession: (agentSessionId: string) => void | Promise<void>;
     restoreAgentSession: (agentSessionId: string) => void | Promise<void>;

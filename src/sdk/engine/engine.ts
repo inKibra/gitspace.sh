@@ -448,18 +448,24 @@ export class GitSpaceEngine {
     );
   }
 
-  abortAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
+  /**
+   * Destroy the agent session entirely (kills the backing tmux session).
+   * Use this for row-menu / explicit close actions. Compare with stopAgentTurn()
+   * which only cancels the current LLM turn and leaves the session alive.
+   */
+  killAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
     return this.withRefBackend(ref, (b) =>
       b.abortAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? Promise.resolve(false)
     );
   }
 
   /**
-   * Interrupt the agent's current turn without killing the session.
-   * Use this for the "stop" button. Compare with abortAgentSession()
-   * which kills the tmux session entirely.
+   * Cancel the current LLM turn without killing the session.
+   * The session remains alive and transitions to IDLE. Use this for the
+   * composer stop button and the sidebar ✕ shown on a running agent.
+   * Compare with killAgentSession() which destroys the session entirely.
    */
-  interruptAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
+  stopAgentTurn(ref: BackendScopedAgentSessionRef): Promise<boolean> {
     return this.withRefBackend(ref, (b) =>
       b.interruptAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? Promise.resolve(false)
     );

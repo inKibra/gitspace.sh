@@ -29,16 +29,20 @@ export interface UseAgentSessionActionsResult {
     callbacks?: AgentSessionOpenCallbacks,
   ) => Promise<AppClientAgentSessionOpenValue | null>;
   createAndOpen: (workspaceId: string, callbacks?: AgentSessionOpenCallbacks) => void;
-  abort: (workspaceId: string, agentSessionId: string) => Promise<AppClientAgentSessionMutationValue | null>;
+  kill: (workspaceId: string, agentSessionId: string) => Promise<AppClientAgentSessionMutationValue | null>;
+  stopAgentTurn: (workspaceId: string, agentSessionId: string) => Promise<AppClientAgentSessionMutationValue | null>;
   close: (workspaceId: string, agentSessionId: string) => Promise<AppClientAgentSessionMutationValue | null>;
   archive: (workspaceId: string, agentSessionId: string) => Promise<AppClientAgentSessionMutationValue | null>;
   restore: (workspaceId: string, agentSessionId: string) => Promise<AppClientAgentSessionMutationValue | null>;
 }
 
-type AgentSessionActionName = 'open' | 'create' | 'abort' | 'close' | 'archive' | 'restore';
+type AgentSessionActionName = 'open' | 'create' | 'kill' | 'stopAgentTurn' | 'close' | 'archive' | 'restore';
 
 function getActionLabel(action: AgentSessionActionName): string {
-  return action === 'create' ? 'create agent session' : `${action} agent session`;
+  if (action === 'create') return 'create agent session';
+  if (action === 'kill') return 'kill agent session';
+  if (action === 'stopAgentTurn') return 'stop agent turn';
+  return `${action} agent session`;
 }
 
 function formatAgentSessionError(action: AgentSessionActionName, error: AgentSessionCommandError): string {
@@ -139,13 +143,26 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
     });
   }, [client, options.flow, reportError, resolveOpenCallbacks]);
 
-  const abort = useCallback(async (
+  const kill = useCallback(async (
     workspaceId: string,
     agentSessionId: string,
   ): Promise<AppClientAgentSessionMutationValue | null> => {
-    const result = await client.agentSessions.abort({ workspaceId, agentSessionId });
+    const result = await client.agentSessions.kill({ workspaceId, agentSessionId });
     if (!result.ok) {
-      reportError('abort', result.error);
+      reportError('kill', result.error);
+      return null;
+    }
+
+    return result.value;
+  }, [client, reportError]);
+
+  const stopAgentTurn = useCallback(async (
+    workspaceId: string,
+    agentSessionId: string,
+  ): Promise<AppClientAgentSessionMutationValue | null> => {
+    const result = await client.agentSessions.stopAgentTurn({ workspaceId, agentSessionId });
+    if (!result.ok) {
+      reportError('stopAgentTurn', result.error);
       return null;
     }
 
@@ -194,7 +211,8 @@ export function useAgentSessionActions(options: UseAgentSessionActionsOptions): 
   return {
     open,
     createAndOpen,
-    abort,
+    kill,
+    stopAgentTurn,
     close,
     archive,
     restore,

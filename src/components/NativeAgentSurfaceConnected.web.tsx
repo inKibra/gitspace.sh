@@ -94,9 +94,10 @@ export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceCo
     }
   }, [engine, resolvedBackendKey, workspaceId, agentSessionId, isSubmitting]);
 
-  const handleAbort = useCallback(() => {
+  const handleStop = useCallback(() => {
     if (!resolvedBackendKey || !agentSessionId || !workspaceId) return;
-    void engine.abortAgentSession({ backendKey: resolvedBackendKey, workspaceId, agentSessionId });
+    // stopAgentTurn cancels the current LLM turn; the session stays alive.
+    void engine.stopAgentTurn({ backendKey: resolvedBackendKey, workspaceId, agentSessionId });
   }, [engine, resolvedBackendKey, workspaceId, agentSessionId]);
 
   const handleDialogResponse = useCallback((response: HostUIDialogResponse) => {
@@ -136,7 +137,7 @@ export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceCo
       workingMessage={workingMessage}
       pendingDialog={pendingDialog}
       onSubmit={handleSubmit}
-      onAbort={handleAbort}
+      onAbort={handleStop}
       onDialogResponse={handleDialogResponse}
       isSubmitting={isSubmitting}
       onRequestCommands={handleRequestCommands}

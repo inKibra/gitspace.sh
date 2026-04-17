@@ -1025,7 +1025,8 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const {
     open: openAgentSessionAction,
     createAndOpen: createAgentSessionAction,
-    abort: abortAgentSessionAction,
+    kill: killAgentSessionAction,
+    stopAgentTurn: stopAgentTurnAction,
     close: closeAgentSessionAction,
     archive: archiveAgentSessionAction,
     restore: restoreAgentSessionAction,
@@ -1116,9 +1117,13 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
     }
   }, [allWorkspaceEntries, flow]);
 
-  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await abortAgentSessionAction(workspaceId, agentSessionId);
-  }, [abortAgentSessionAction]);
+  const handleKillAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await killAgentSessionAction(workspaceId, agentSessionId);
+  }, [killAgentSessionAction]);
+
+  const handleStopAgentTurn = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await stopAgentTurnAction(workspaceId, agentSessionId);
+  }, [stopAgentTurnAction]);
 
   const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     const closed = await closeAgentSessionAction(workspaceId, agentSessionId);
@@ -2111,7 +2116,8 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
           workspaceStatusById={workspaceStatusById}
           runtime={workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null}
           onSelectWorkspace={handleSelectWorkspaceFromDetail}
-          onAbortAgentSession={handleAbortAgentSession}
+          onKillAgentSession={handleKillAgentSession}
+          onStopAgentTurn={handleStopAgentTurn}
           onCloseAgentSession={handleCloseAgentSession}
           onArchiveAgentSession={handleArchiveAgentSession}
           onRestoreAgentSession={handleRestoreAgentSession}

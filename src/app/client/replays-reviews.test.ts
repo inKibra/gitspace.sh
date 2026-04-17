@@ -45,7 +45,8 @@ function makeContext(backend: SessionBackend): AppClientContext {
   const multi: AppClientMulti = {
     getBackend: () => backend,
     createAgentSession: async () => [],
-    abortAgentSession: async () => false,
+    killAgentSession: async () => false,
+    stopAgentTurn: async () => false,
     closeAgentSession: async () => [],
     archiveAgentSession: async () => [],
     restoreAgentSession: async () => [],

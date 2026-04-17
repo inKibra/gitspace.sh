@@ -118,7 +118,8 @@ export interface WorkspaceDetailScreenProps extends WorkspaceDetailPaneProps {
     canAttachAnyway?: boolean;
     onAttachAnyway?: () => void | Promise<void>;
   };
-  onAbortAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onStopAgentTurn?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCloseAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onArchiveAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
@@ -157,7 +158,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
     onSelectWorkspace,
     terminalBindings,
     scriptBindings,
-    onAbortAgentSession,
+    onKillAgentSession,
+    onStopAgentTurn,
     onCloseAgentSession,
     onArchiveAgentSession,
     onRestoreAgentSession,
@@ -192,7 +194,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
       onRequestStatusChange: onChangeStatus ? (workspaceId) => onChangeStatus(workspaceId, PHASES[statusPickerCursor] ?? 'code') : undefined,
       onOpenAgentSession,
       onCreateAgentSession,
-      onAbortAgentSession,
+      onKillAgentSession,
+      onStopAgentTurn,
       onCloseAgentSession,
       onArchiveAgentSession,
       onRestoreAgentSession,
@@ -618,8 +621,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
           }
           if (key.raw === 'K') {
             const item = sidebarItems[sidebarCursor];
-            if (item?.kind === 'agent' && !item.closedAt && onAbortAgentSession) {
-              void onAbortAgentSession(workspace.id, item.id);
+            if (item?.kind === 'agent' && !item.closedAt && onKillAgentSession) {
+              void onKillAgentSession(workspace.id, item.id);
               return;
             }
           }
@@ -670,7 +673,8 @@ export function WorkspaceDetailScreen(props: WorkspaceDetailScreenProps) {
         activateCurrentSidebarItem,
         applyStatusPicker,
         moveWorkspacePhase,
-        onAbortAgentSession,
+        onKillAgentSession,
+        onStopAgentTurn,
         onCloseAgentSession,
         onArchiveAgentSession,
         onRestoreAgentSession,

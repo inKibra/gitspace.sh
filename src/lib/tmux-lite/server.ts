@@ -2649,6 +2649,7 @@ routerListener = Bun.listen({
           case 'agent-prompt':
             try {
               await getAgentControlReady();
+              // ok here means the turn was accepted. Turn progress and completion are surfaced via existing agent events, not via this response.
               await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
               res = { type: 'ok' };
             } catch (e) {

@@ -7,7 +7,8 @@ import type { WorkspacePhase } from '../../types/config.js';
 export interface AppClientMulti {
   getBackend: (backendKey: BackendKey) => SessionBackend | null;
   createAgentSession: (ref: BackendScopedWorkspaceRef, title?: string) => Promise<AppClientAgentSessionSummary[]>;
-  abortAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<boolean>;
+  killAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<boolean>;
+  stopAgentTurn: (ref: BackendScopedAgentSessionRef) => Promise<boolean>;
   closeAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
   archiveAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
   restoreAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;

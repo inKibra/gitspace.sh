@@ -39,7 +39,8 @@ export interface WorkspaceDetailPaneProps {
   onOpenEvents: (workspaceId: string) => void;
   onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
-  onAbortAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onStopAgentTurn?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCloseAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onArchiveAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
