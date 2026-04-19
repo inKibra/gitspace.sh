@@ -26,6 +26,8 @@ export interface ScriptRuntimeState {
   isRunning: boolean;
   error?: string;
   exitCode?: number;
+  /** Workspace this script phase belongs to — consumers can detect stale state */
+  workspaceId?: string;
 }
 
 export interface BackendSessionState {

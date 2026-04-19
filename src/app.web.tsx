@@ -174,6 +174,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const ptyBackendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
   useEffect(() => {
     const key = attachedBackendKey ?? activeBackendKey;
     if (!key) return;
@@ -195,6 +196,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     ptyBackendRef.current?.setPtyOutputHandler?.(fn);
   }, []);
 
+  const setScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    scriptWriteCallbackRef.current = fn;
+    ptyBackendRef.current?.setScriptOutputHandler?.(fn);
+  }, []);
+
   // Re-attach write callback when backend changes
   useEffect(() => {
     const key = attachedBackendKey ?? activeBackendKey;
@@ -202,6 +208,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const b = multi.getBackend(key) as RemoteSessionPtyBackend | null;
     ptyBackendRef.current = b;
     b?.setPtyOutputHandler?.(writeCallbackRef.current);
+    b?.setScriptOutputHandler?.(scriptWriteCallbackRef.current);
   }, [attachedBackendKey, activeBackendKey, multi]);
 
   // ─── Flow / Modal system ───────────────────────────────────────────────────
@@ -1508,12 +1515,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return (
       <>
         <ScriptTerminal
+          key={lastScriptWorkspaceIdRef.current ?? 'none'}
           phase={scriptState?.phase ?? 'pre'}
           workspaceName={scriptWorkspaceName}
           isRunning={isRunning}
           error={scriptState?.error}
           exitCode={scriptState?.exitCode}
-          setWriteCallback={setWriteCallback}
+          setWriteCallback={setScriptWriteCallback}
           canAttachAnyway={attachController.canAttachAnyway}
           onAttachAnyway={async () => {
             await attachController.attachAnyway();

@@ -49,6 +49,7 @@ export type RemoteSessionConnectionStatus =
 
 export interface RemoteSessionPtyBackend extends SessionBackend {
   setPtyOutputHandler?: (handler: ((data: Uint8Array) => void) | null) => void;
+  setScriptOutputHandler?: (handler: ((data: Uint8Array) => void) | null) => void;
   writePtyData?: (data: Uint8Array) => Promise<void>;
   resizePty?: (cols: number, rows: number) => Promise<void>;
 }
@@ -122,6 +123,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   send: (data: Uint8Array) => void;
   resize: (cols: number, rows: number) => void;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
+  setScriptWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
 
   inbox: InboxItem[];
   inboxUnreadCount: number;
@@ -175,6 +177,7 @@ export function useRemoteSessionClient<ConnectParams>(
   const activeBackendKeyRef = useRef<BackendKey | null>(null);
   const backendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
 
   const activeBackendState = useMemo(() => {
     const backendKey = activeBackendKeyRef.current;
@@ -215,6 +218,9 @@ export function useRemoteSessionClient<ConnectParams>(
       const { backendKey, backend } = createBackend(params);
       if (backend.setPtyOutputHandler) {
         backend.setPtyOutputHandler(writeCallbackRef.current);
+      }
+      if (backend.setScriptOutputHandler) {
+        backend.setScriptOutputHandler(scriptWriteCallbackRef.current);
       }
 
       backendRef.current = backend;
@@ -500,6 +506,11 @@ export function useRemoteSessionClient<ConnectParams>(
     backendRef.current?.setPtyOutputHandler?.(fn);
   }, []);
 
+  const setScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    scriptWriteCallbackRef.current = fn;
+    backendRef.current?.setScriptOutputHandler?.(fn);
+  }, []);
+
   const requestInbox = useCallback(() => {
     void withActiveBackend((backendKey) => engine.requestInbox(backendKey));
   }, [engine, withActiveBackend]);
@@ -653,6 +664,7 @@ export function useRemoteSessionClient<ConnectParams>(
     send,
     resize,
     setWriteCallback,
+    setScriptWriteCallback,
 
     inbox: activeBackendState?.inbox ?? [],
     inboxUnreadCount: activeBackendState?.inboxUnreadCount ?? 0,
@@ -715,6 +727,7 @@ export function useRemoteSessionClient<ConnectParams>(
     send,
     resize,
     setWriteCallback,
+    setScriptWriteCallback,
     requestInbox,
     clearInboxItem,
     markInboxItemRead,

@@ -112,7 +112,13 @@ function dispatchBackendEvent(
         backendKey,
         scriptState: event.done && !event.error
           ? null
-          : { phase: event.phase, isRunning: !event.done, error: event.error, exitCode: event.exitCode },
+          : {
+              phase: event.phase,
+              isRunning: !event.done,
+              error: event.error,
+              exitCode: event.exitCode,
+              workspaceId: event.workspaceId,
+            },
       });
       break;
     case 'events':
@@ -186,6 +192,7 @@ export function useSessionEngine() {
   const disconnectBackend = useCallback(async (backendKey: BackendKey): Promise<void> => {
     await getManager().disconnect(backendKey);
     dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
+    dispatch({ type: 'SET_SCRIPT_STATE', backendKey, scriptState: null });
     dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'disconnected' });
   }, [getManager]);
 

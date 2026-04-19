@@ -27,6 +27,7 @@ export type BackendEvent =
       done?: boolean;
       error?: string;
       exitCode?: number;
+      workspaceId?: string;
     }
   | { type: 'notification_config'; config: NotificationConfig }
   | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean; workspaceId?: string; agentSessionId?: string }

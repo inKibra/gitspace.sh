@@ -70,6 +70,7 @@ import { GitSpaceProvider, useGitSpace, LOCAL_BACKEND_KEY, type SessionBackend }
 /** Local backend with PTY output handler for TUI terminal rendering. */
 type LocalSessionPtyBackend = SessionBackend & {
   setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void;
+  setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void;
 };
 import { toBackendScopedWorkspaceKey } from './machine/multi/types.js';
 import { bunPlatform } from './sdk/platforms/bun.js';
@@ -313,6 +314,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const localBackend = multi.getBackend(LOCAL_BACKEND_KEY) as LocalSessionPtyBackend | null;
   const localBackendRef = useRef<LocalSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
   useEffect(() => { localBackendRef.current = localBackend; }, [localBackend]);
 
   const sendLocalPty = useCallback((data: Uint8Array) => {
@@ -326,6 +328,10 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const setLocalWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     writeCallbackRef.current = fn;
     localBackendRef.current?.setPtyOutputHandler(fn);
+  }, []);
+  const setLocalScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    scriptWriteCallbackRef.current = fn;
+    localBackendRef.current?.setScriptOutputHandler(fn);
   }, []);
 
   // Derive projects from the machine snapshot for the local backend
@@ -2021,13 +2027,14 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
         <Toaster position="top-right" />
         <box flexDirection="column" flexGrow={1} width="100%" height="100%">
           <ScriptTerminal
+            key={lastScriptWorkspaceIdRef.current ?? 'none'}
             phase={phase}
             workspaceName={scriptWorkspaceName}
             isRunning={isRunning}
             error={localScriptState?.error}
             exitCode={localScriptState?.exitCode}
             modalOpen={flow.isOpen}
-            setWriteCallback={setLocalWriteCallback}
+            setWriteCallback={setLocalScriptWriteCallback}
           />
           <StatusBar hint={scriptHint} rightHint={keyboardModeHint} />
           {!isRunning && <FlowTUI flow={flow} />}
@@ -2140,7 +2147,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
             workspaceName: scriptWorkspaceName,
             scriptState: localScriptState,
             modalOpen: flow.isOpen,
-            setWriteCallback: setLocalWriteCallback,
+            setWriteCallback: setLocalScriptWriteCallback,
             canAttachAnyway: canAttachLocalAnyway,
             onAttachAnyway: handleAttachLocalAnyway,
           }}

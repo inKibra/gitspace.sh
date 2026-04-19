@@ -313,8 +313,10 @@ describe('RemoteSessionBackend', () => {
       done: undefined,
       error: undefined,
       exitCode: undefined,
+      workspaceId: undefined,
     });
-    expect(ptyChunks).toEqual(['setup output']);
+    // Script bytes flow through the script channel, not the PTY handler.
+    expect(ptyChunks).toEqual([]);
   });
 
   it('forwards workspace context when attaching an agent session terminal', async () => {
@@ -746,6 +748,7 @@ it('does not emit attached until the real attach event arrives and preserves pre
     const socket = createFakeSocket();
     const events: BackendEvent[] = [];
     const ptyChunks: string[] = [];
+    const scriptChunks: string[] = [];
 
     const backend = new RemoteSessionBackend({
       descriptor: {
@@ -768,6 +771,9 @@ it('does not emit attached until the real attach event arrives and preserves pre
     backend.onEvent((event) => events.push(event));
     backend.setPtyOutputHandler((data) => {
       ptyChunks.push(new TextDecoder().decode(data));
+    });
+    backend.setScriptOutputHandler((data) => {
+      scriptChunks.push(new TextDecoder().decode(data));
     });
 
     await connectAndHandshake(backend, socket);
@@ -813,7 +819,9 @@ it('does not emit attached until the real attach event arrives and preserves pre
     );
     await Bun.sleep(0);
 
-    expect(ptyChunks).toEqual([
+    // Script bytes flow through the dedicated script channel, not the PTY handler.
+    expect(ptyChunks).toEqual([]);
+    expect(scriptChunks).toEqual([
       '==> pre scripts...\n',
       '==> setup scripts...\n',
       'installing deps\n',

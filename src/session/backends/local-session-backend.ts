@@ -428,6 +428,10 @@ export class LocalSessionBackend implements SessionBackend {
     this.attachLifecycle.setOutputHandler(handler);
   }
 
+  setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
+    this.attachLifecycle.setScriptOutputHandler(handler);
+  }
+
   async connect(): Promise<void> {
     await this.deps.ensureServer();
     try {
@@ -737,8 +741,9 @@ export class LocalSessionBackend implements SessionBackend {
           },
           onScriptOutput: (event) => {
             currentPhase = event.phase;
-            this.emitPtyData(Buffer.from(event.data, 'base64'));
-            this.emit({ type: 'script_output', phase: event.phase, data: Buffer.from(event.data, 'base64'), done: event.done, error: event.error });
+            const data = Buffer.from(event.data, 'base64');
+            this.attachLifecycle.pushScriptData(data);
+            this.emit({ type: 'script_output', phase: event.phase, data, done: event.done, error: event.error, workspaceId: params.workspaceId });
           },
         });
         targetSession = prepared.session;
@@ -828,8 +833,8 @@ export class LocalSessionBackend implements SessionBackend {
         scriptPolicy: params.scriptPolicy,
         onScriptOutput: (event) => {
           const data = Buffer.from(event.data, 'base64');
-          this.emitPtyData(data);
-          this.emit({ type: 'script_output', phase: 'remove', data, done: event.done, error: event.error });
+          this.attachLifecycle.pushScriptData(data);
+          this.emit({ type: 'script_output', phase: 'remove', data, done: event.done, error: event.error, workspaceId: resolvedWorkspaceId });
         },
       });
     } catch (error) {

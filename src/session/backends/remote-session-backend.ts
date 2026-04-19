@@ -412,6 +412,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.attachLifecycle.setOutputHandler(handler);
   }
 
+  setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
+    this.attachLifecycle.setScriptOutputHandler(handler);
+  }
+
   async connect(): Promise<void> {
     if (this.isConnected) {
       return;
@@ -1507,7 +1511,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private handleScriptOutput(message: ScriptOutputResponse): void {
     const data = message.data ? this.crypto.decodeBase64(message.data) : new Uint8Array(0);
     if (data.length > 0) {
-      this.emitPtyData(data);
+      this.attachLifecycle.pushScriptData(data);
     }
 
     this.emit({
@@ -1517,6 +1521,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       done: message.done,
       error: message.error,
       exitCode: message.exitCode,
+      workspaceId: this.attachLifecycle.workspaceId ?? undefined,
     });
   }
 

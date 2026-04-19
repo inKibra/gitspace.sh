@@ -569,6 +569,8 @@ describe('LocalSessionBackend', () => {
       phase: 'select',
       data: new Uint8Array(0),
       done: true,
+      error: undefined,
+      workspaceId: 'ws-1',
     });
 
     expect(createdSessions).toEqual([
@@ -1415,6 +1417,8 @@ describe('LocalSessionBackend', () => {
       phase: 'remove',
       data: new Uint8Array(0),
       done: true,
+      error: undefined,
+      workspaceId: 'ws-1',
     });
   });
 
@@ -1471,6 +1475,7 @@ describe('LocalSessionBackend', () => {
       data: new Uint8Array(0),
       done: true,
       error: 'Remove scripts failed: cleanup failed',
+      workspaceId: 'ws-1',
     });
   });
 

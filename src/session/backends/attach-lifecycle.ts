@@ -41,6 +41,12 @@ export class AttachLifecycle {
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
 
+  // Script output flows on its own channel so script bytes never leak into
+  // session terminals. Separate buffer + handler, separate UTF-8 boundary state.
+  private scriptOutputHandler: ((data: Uint8Array) => void) | null = null;
+  private pendingScriptChunks: Uint8Array[] = [];
+  private pendingScriptUtf8Bytes = new Uint8Array(0);
+
   private readonly emit: (event: BackendEvent) => void;
 
   constructor(emit: (event: BackendEvent) => void) {
@@ -79,6 +85,16 @@ export class AttachLifecycle {
     const pending = concatUint8Array(this.pendingPtyChunks);
     this.pendingPtyChunks = [];
     this.pushPtyData(pending);
+  }
+
+  setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
+    this.scriptOutputHandler = handler;
+    if (!handler || this.pendingScriptChunks.length === 0) {
+      return;
+    }
+    const pending = concatUint8Array(this.pendingScriptChunks);
+    this.pendingScriptChunks = [];
+    this.pushScriptData(pending);
   }
 
   beginAttach(options: BeginAttachOptions = {}): void {
@@ -183,16 +199,45 @@ export class AttachLifecycle {
     }
   }
 
+  pushScriptData(data: Uint8Array): void {
+    if (!this.scriptOutputHandler) {
+      this.pendingScriptChunks.push(data);
+      return;
+    }
+
+    const combined = this.pendingScriptUtf8Bytes.length
+      ? concatUint8Array([this.pendingScriptUtf8Bytes, data])
+      : data;
+
+    const boundary = findUtf8Boundary(combined);
+    if (boundary < combined.length) {
+      this.pendingScriptUtf8Bytes = combined.slice(boundary);
+    } else {
+      this.pendingScriptUtf8Bytes = new Uint8Array(0);
+    }
+
+    const chunk = combined.slice(0, boundary);
+    if (chunk.length > 0) {
+      this.scriptOutputHandler(chunk);
+    }
+  }
+
   reset(): void {
     this.phase = 'browsing';
     this.attachedSessionId = null;
     this.attachedWorkspaceId = null;
     this.viewOnly = false;
     this.clearPtyBuffer();
+    this.clearScriptBuffer();
   }
 
   private clearPtyBuffer(): void {
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
+  }
+
+  clearScriptBuffer(): void {
+    this.pendingScriptChunks = [];
+    this.pendingScriptUtf8Bytes = new Uint8Array(0);
   }
 }
