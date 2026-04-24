@@ -33,6 +33,9 @@ export interface SessionTerminalHandle {
 
 interface TerminalViewportLike {
   viewportY?: number;
+  /** Settled integer scroll target; use this for follow-output detection so
+   *  mid-animation fractional viewportY values don't flip the flag. */
+  targetViewportY?: number;
   rows?: number;
   scrollLines: (lines: number) => void;
   buffer?: {
@@ -153,7 +156,9 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
     if (!terminal) {
       return;
     }
-    followOutputRef.current = (terminal.viewportY ?? 0) === 0;
+    // Use targetViewportY (settled integer) rather than viewportY (fractional during animations).
+    // Reading viewportY mid-animation produces 0.007 ≠ 0 and silently disables follow.
+    followOutputRef.current = (terminal.targetViewportY ?? terminal.viewportY ?? 0) === 0;
   }, []);
 
   // Expose methods via ref for external control (e.g., from TerminalControls)
@@ -440,6 +445,47 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           syncFollowOutputState();
         };
 
+        // Pixel-mode wheel events (trackpad, Magic Mouse, etc.) produce
+        // fractional deltaY/rowHeight line deltas. ghostty-web's internal
+        // handler passes that fractional value straight to smoothScrollTo,
+        // which leaves viewportY fractional at rest. The renderer's row-index
+        // arithmetic uses Math.floor(viewportY) while its scrollback/viewport
+        // branch uses raw viewportY, so one screen row per frame resolves to
+        // a null scrollback line and is skipped entirely — pixels from the
+        // previous paint persist (the 'ghost row' we see on empty lines).
+        //
+        // We intercept pixel-mode wheel events on document in capture phase
+        // (earlier than ghostty-web's own capture listener on the element),
+        // accumulate fractional pixel deltas into whole rows, and call
+        // scrollLines() which always keeps viewportY integer.
+        let wheelAccumPx = 0;
+        const handleWheelCapture = (event: WheelEvent) => {
+          if (!container.contains(event.target as Node)) return;
+          if (event.deltaMode !== 0) return;    // line/page mode is already integer
+          if (event.deltaY === 0) return;
+          // In alt-screen mode ghostty-web translates wheel to arrow keys for
+          // apps like vim/less. Leave that path alone.
+          if ((term as { wasmTerm?: { isAlternateScreen?: () => boolean } }).wasmTerm?.isAlternateScreen?.()) return;
+
+          event.preventDefault();
+          event.stopPropagation();
+
+          const metrics = (term as { renderer?: { getMetrics?: () => { height: number } } }).renderer?.getMetrics?.();
+          const rowHeight = metrics?.height ?? 20;
+          wheelAccumPx += event.deltaY;
+          const lines = Math.trunc(wheelAccumPx / rowHeight);
+          wheelAccumPx -= lines * rowHeight;
+          if (lines !== 0) {
+            // scrollLines: positive = scroll content up (reveal newer output).
+            // event.deltaY > 0 means wheel scrolled down = scroll content up.
+            term.scrollLines(lines);
+          }
+          syncFollowOutputState();
+        };
+
+        // Keep the existing element-scoped handler purely for follow-state
+        // tracking. Its pixel-mode path is a no-op because our capture
+        // interceptor has already preventDefault'd and stopPropagation'd.
         const handleWheel = () => {
           syncFollowOutputState();
         };
@@ -448,6 +494,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         container.addEventListener('touchmove', handleTouchMove, { passive: false });
         container.addEventListener('touchend', handleTouchEnd, { passive: true });
         container.addEventListener('wheel', handleWheel, { passive: true });
+        document.addEventListener('wheel', handleWheelCapture, { passive: false, capture: true });
 
         // Ghostty-web's writeInternal() unconditionally calls scrollToBottom()
         // on every write when viewportY !== 0. This makes it impossible to
@@ -547,6 +594,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           container.removeEventListener('touchmove', handleTouchMove);
           container.removeEventListener('touchend', handleTouchEnd);
           container.removeEventListener('wheel', handleWheel);
+          document.removeEventListener('wheel', handleWheelCapture, { capture: true });
           scrollDisposable.dispose();
           observer.disconnect();
           term.dispose();
