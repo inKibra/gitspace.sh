@@ -33,9 +33,6 @@ export interface SessionTerminalHandle {
 
 interface TerminalViewportLike {
   viewportY?: number;
-  /** Settled integer scroll target; use this for follow-output detection so
-   *  mid-animation fractional viewportY values don't flip the flag. */
-  targetViewportY?: number;
   rows?: number;
   scrollLines: (lines: number) => void;
   buffer?: {
@@ -156,9 +153,12 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
     if (!terminal) {
       return;
     }
-    // Use targetViewportY (settled integer) rather than viewportY (fractional during animations).
-    // Reading viewportY mid-animation produces 0.007 ≠ 0 and silently disables follow.
-    followOutputRef.current = (terminal.targetViewportY ?? terminal.viewportY ?? 0) === 0;
+    // viewportY is the live scroll position. With our wheel intercept in place,
+    // every scroll path (scrollLines / scrollToLine / scrollToBottom / scrollbar
+    // drag) keeps viewportY integer, so a strict === 0 check is reliable.
+    // targetViewportY is only updated by smoothScrollTo — which we bypass, so
+    // it stays stale at 0 forever and would falsely report "at bottom".
+    followOutputRef.current = (terminal.viewportY ?? 0) === 0;
   }, []);
 
   // Expose methods via ref for external control (e.g., from TerminalControls)
