@@ -711,7 +711,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async attachSession(params: AttachSessionParams): Promise<void> {
     if (this.attachLifecycle.isTransportActive) {
-      await this.detachSession();
+      // Switching sessions: tell the server to close the prior tmux-lite
+      // socket but don't wait for the round-trip. The server's per-connection
+      // queue serializes detach → attach_session, and the new 'attached' event
+      // is what unblocks the client UI. Awaiting the detached event before
+      // sending attach_session was pure wait theater — one extra RTT for no
+      // observable benefit.
+      this.rejectPendingDetachTransition(new Error('Superseded by new attach'));
+      this.attachedAgentSessionId = null;
+      this.pendingAttachedAgentSession = null;
+      this.attachLifecycle.clearAttachment({ emitDetached: true });
+      void this.sendCommand({ type: 'detach' }).catch((error) => {
+        console.warn('[remote-session] fire-and-forget detach failed:', error);
+      });
     }
 
     this.attachLifecycle.beginAttach({
@@ -814,9 +826,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
     await this.waitForInitialSnapshot();
-    if (this.attachLifecycle.isAttached) {
-      await this.detachSession();
-    }
+    // attachSession() handles detaching from the prior tmux-lite session via
+    // its own fire-and-forget detach path; no need for an extra round-trip here.
     const response = await this.sendTypedCommand({ type: 'attach_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
