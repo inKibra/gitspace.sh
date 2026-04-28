@@ -127,6 +127,8 @@ export interface MachineTerminalSessionRecord {
   workspaceId?: string;
   projectId?: string;
   cwd: string;
+  /** Unix socket path for tmux-lite session attach. Populated from Session.socketPath in build.ts. */
+  socketPath: string;
   kind: 'shell' | 'process' | 'agent';
   hidden: boolean;
   state: MachineTerminalSessionState;

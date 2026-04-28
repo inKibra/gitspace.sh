@@ -166,6 +166,7 @@ export function buildMachineSnapshot(params: {
       name: session.name,
       workspaceId,
       projectId,
+      socketPath: session.socketPath,
       cwd: session.cwd,
       kind: session.kind === 'agent'
         ? 'agent'

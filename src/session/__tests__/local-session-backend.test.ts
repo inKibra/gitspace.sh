@@ -222,6 +222,7 @@ async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencie
       name: session.name,
       workspaceId: workspace?.id,
       projectId: workspace?.projectName,
+      socketPath: session.socketPath,
       cwd: session.cwd,
       kind: (isAgentSession ? 'agent' : 'shell') as 'agent' | 'shell',
       hidden: session.hidden ?? false,

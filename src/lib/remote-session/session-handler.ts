@@ -1164,9 +1164,28 @@ export class RemoteSessionHandler {
           return;
         }
 
-        // Find existing session
-        const sessions = await listSessions();
-        targetSession = sessions.find(s => s.id === msg.sessionId) ?? null;
+        // Resolve target session. Prefer the cached machine snapshot to avoid
+        // a Unix-socket round-trip to tmux-lite on every attach. Fall back to
+        // a live listSessions() only if the session isn't in the snapshot yet
+        // (e.g. it was just created and the snapshot hasn't propagated).
+        const cachedRecord = this.latestMachineSnapshot?.terminalSessionsById[msg.sessionId];
+        if (cachedRecord) {
+          targetSession = {
+            id: cachedRecord.id,
+            name: cachedRecord.name,
+            socketPath: cachedRecord.socketPath,
+            pid: 0,
+            attached: cachedRecord.attached,
+            cwd: cachedRecord.cwd,
+            createdAt: cachedRecord.createdAt,
+            exitCode: cachedRecord.exitCode,
+            kind: cachedRecord.kind === 'agent' ? 'agent' : 'shell',
+            hidden: cachedRecord.hidden,
+          };
+        } else {
+          const sessions = await listSessions();
+          targetSession = sessions.find(s => s.id === msg.sessionId) ?? null;
+        }
       }
 
       if (!targetSession) {
