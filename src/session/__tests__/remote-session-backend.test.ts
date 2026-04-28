@@ -392,8 +392,8 @@ describe('RemoteSessionBackend', () => {
       workspaceId: 'alpha:ws-1',
       viewOnly: undefined,
       sessionName: undefined,
-      cols: undefined,
-      rows: undefined,
+      cols: 80,
+      rows: 24,
       scriptPolicy: undefined,
       command: undefined,
       args: undefined,
@@ -1161,6 +1161,8 @@ it('does not emit attached until the real attach event arrives and preserves pre
     expect(existingAttach).toEqual({
       type: 'attach_session',
       sessionId: 'existing-session',
+      cols: 80,
+      rows: 24,
     });
   });
 

@@ -83,8 +83,8 @@ export interface AttachSessionRequest {
   sessionId?: string;     // Attach to existing session
   workspaceId?: string;   // Create new session in workspace
   sessionName?: string;   // Name for new session (optional)
-  cols?: number;          // Terminal dimensions
-  rows?: number;
+  cols: number;          // Terminal dimensions (required, used to send attach-init proactively)
+  rows: number;
   scriptPolicy?: 'auto' | 'skip';
   command?: string;       // Command to run (process sessions)
   args?: string[];        // Command arguments

@@ -724,8 +724,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       sessionId: params.sessionId,
       workspaceId: params.workspaceId,
       sessionName: params.sessionName,
-      cols: params.cols,
-      rows: params.rows,
+      // cols/rows are required on the wire so the server can send attach-init
+      // immediately on socket open. Fall back to 80x24 if a caller didn't
+      // pass them; the terminal will resize to its real viewport on mount.
+      cols: params.cols ?? 80,
+      rows: params.rows ?? 24,
       scriptPolicy: params.scriptPolicy,
       viewOnly: params.viewOnly,
       command: params.command,

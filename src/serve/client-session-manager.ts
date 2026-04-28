@@ -238,7 +238,6 @@ export class ClientSessionManager {
     session.sessionSocketPath = undefined;
     session.initialCols = undefined;
     session.initialRows = undefined;
-    session.waitingForResize = undefined;
     session.frameBuffer = undefined;
 
     if (socket) {
@@ -324,14 +323,7 @@ export class ClientSessionManager {
           return frame;
         }
 
-        // First-resize gate: defer attach-init until client sends actual dimensions
-        if (msg.type === 'resize' && session.waitingForResize) {
-          // First resize — send attach-init with actual dimensions
-          console.log(`[session-manager] First resize: ${msg.cols}x${msg.rows} - sending attach-init`);
-          session.waitingForResize = false;
-          this.writeToTmuxSocket(session, encodeControl({ type: 'attach-init', cols: msg.cols, rows: msg.rows, clientType: 'web' }));
-          return null; // attach-init handles the resize
-        }
+
 
         // Browse-mode commands sent while attached (e.g. review, inbox,
         // workspace ops from the web sidebar). Route through the session
@@ -349,12 +341,6 @@ export class ClientSessionManager {
         if (session.viewOnly || !canWrite(session.accessType)) {
           console.warn(`[session-manager] Read-only client ${connectionId} attempted PTY write - denied`);
           return null; // Silently drop input from read-only clients
-        }
-
-        // Only forward if we've sent attach-init (waitingForResize is false)
-        if (session.waitingForResize) {
-          console.warn('[session-manager] Ignoring PTY data before attach-init');
-          return null;
         }
 
         // Wrap PTY data in a frame for the framed protocol
@@ -705,10 +691,19 @@ export class ClientSessionManager {
       session.tmuxSocket = socket;
       session.tmuxSocketWriter = createBufferedSocketWriter(socket);
 
-      // Don't send attach-init yet — wait for the first resize from client
-      // This ensures tmux-lite receives the actual terminal dimensions
-      session.waitingForResize = true;
-      console.log(`[session-manager] Connected to tmux-lite session: ${session.sessionSocketPath} (waiting for resize)`);
+      // Send attach-init immediately with the dimensions the client provided
+      // in attach_session. This breaks the previous deadlock where tmux-lite
+      // waited for attach-init while the client waited for an `attached` event
+      // (which only fired after attach-init), forcing a 5s fallback timeout.
+      const cols = session.initialCols ?? 80;
+      const rows = session.initialRows ?? 24;
+      this.writeToTmuxSocket(session, encodeControl({
+        type: 'attach-init',
+        cols,
+        rows,
+        clientType: 'web',
+      }));
+      console.log(`[session-manager] Connected to tmux-lite session: ${session.sessionSocketPath} (sent attach-init ${cols}x${rows})`);
     } catch (e) {
       console.error("[session-manager] Failed to connect to tmux-lite session:", e);
       this.handleDisconnect(connectionId, "Failed to connect to session");

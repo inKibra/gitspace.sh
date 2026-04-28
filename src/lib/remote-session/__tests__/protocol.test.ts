@@ -94,7 +94,7 @@ const AGENT_TARGET = { workspaceId: 'w1', workspaceName: 'w1', workspacePath: '/
 describe('message union coverage', () => {
   it('accepts current client messages', () => {
     const clientMessages: ClientToMachineMessage[] = [
-      { type: 'attach_session' },
+      { type: 'attach_session', cols: 80, rows: 24 },
       { type: 'list_github_repos', requestId: 'req-repos' },
       { type: 'list_remote_branches', requestId: 'req-branches', projectName: 'p1' },
       { type: 'list_linear_issues', requestId: 'req-linear', projectName: 'p1' },

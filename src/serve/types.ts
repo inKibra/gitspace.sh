@@ -111,8 +111,6 @@ export interface ClientSession {
   /** Initial terminal size requested by the client before attach-init is sent */
   initialCols?: number;
   initialRows?: number;
-  /** When true, we haven't sent attach-init yet — waiting for the first resize with real dimensions */
-  waitingForResize?: boolean;
   /** Buffer for incomplete frames from tmux-lite socket */
   frameBuffer?: Buffer;
 }
