@@ -1629,8 +1629,6 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
       sendSerializedState(session, sessionName);
       sendCursorState(session);
 
-      writeToClient(session, encodeControl({ type: "attach-ready", cols: session.xterm.cols, rows: session.xterm.rows }));
-
       const attachStart = Date.now();
       const finalizeAttach = () => {
         if (session.pendingWrites > 0 && Date.now() - attachStart < 500) {

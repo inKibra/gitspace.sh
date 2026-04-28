@@ -571,7 +571,6 @@ export type SessionCtrl =
 
 /** Session events (server → client) */
 export type SessionEvent =
-  | { type: "attach-ready"; cols: number; rows: number }
   | { type: "attached" }
   | {
       type: 'session-meta';

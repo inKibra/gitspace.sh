@@ -86,7 +86,7 @@ interface HandshakeEnvelope {
 type AuthorizationPayload = { type: 'access_list' };
 
 interface SessionEventMessage {
-  type: 'attach-ready' | 'attached' | 'exited' | 'kicked' | 'session-meta';
+  type: 'attached' | 'exited' | 'kicked' | 'session-meta';
   sessionId?: string;
   sessionName?: string;
   processTitle?: string;
@@ -212,7 +212,6 @@ function isSessionEventMessage(value: unknown): value is SessionEventMessage {
   }
   const message = value as Partial<SessionEventMessage>;
   return (
-    message.type === 'attach-ready' ||
     message.type === 'attached' ||
     message.type === 'exited' ||
     message.type === 'kicked' ||
