@@ -1973,11 +1973,103 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private agentStateCache: Record<string, WorkspaceAgentState> = {};
   private agentStateHandlers = new Set<(delta: AgentStateUpdateDelta) => void>();
 
+  private toMachineAgentSessionRecord(workspace: WorkspaceAgentState, sessionId: string): MachineAgentSessionRecord | null {
+    const snapshot = this.machineStateClient.getSnapshot();
+    const workspaceRecord = snapshot.workspacesById[workspace.workspaceId];
+    const session = workspace.sessions.find((item) => item.id === sessionId);
+    if (!workspaceRecord || !session) {
+      return null;
+    }
+
+    const pendingPermissionIds = (workspace.pendingPermissions[sessionId] ?? []).map((permission) => permission.id);
+    const pendingQuestionIds = (workspace.pendingQuestions[sessionId] ?? []).map((question) => question.id);
+    const status = workspace.statuses[sessionId];
+    const errorMessage = workspace.errorMessages[sessionId]
+      ?? (status?.type === 'retry' ? status.message : undefined);
+    const state: MachineAgentSessionRecord['state'] = session.archivedAt
+      ? 'archived'
+      : session.closedAt
+        ? 'closed'
+        : pendingPermissionIds.length > 0 || pendingQuestionIds.length > 0
+          ? 'permission-needed'
+          : status?.type === 'retry' || errorMessage
+            ? 'retrying'
+            : status?.type === 'busy'
+              ? 'running'
+              : 'waiting';
+
+    return {
+      id: session.id,
+      workspaceId: workspace.workspaceId,
+      projectId: workspaceRecord.projectId,
+      title: session.title,
+      state,
+      updatedAt: session.updatedAt,
+      closedAt: session.closedAt,
+      archivedAt: session.archivedAt,
+      pendingPermissionIds,
+      pendingPermissionCount: pendingPermissionIds.length,
+      pendingQuestionIds,
+      pendingQuestionCount: pendingQuestionIds.length,
+      errorMessage,
+      lastMessagePreview: workspace.lastMessages[sessionId],
+      modelInfo: workspace.modelInfo[sessionId],
+      todoPhases: workspace.todoPhases[sessionId],
+      queuedMessages: workspace.queuedMessages[sessionId],
+    };
+  }
+
+  private syncAgentWorkspaceIntoMachineSnapshot(workspace: WorkspaceAgentState): boolean {
+    const snapshot = this.machineStateClient.getSnapshot();
+    if (!snapshot.workspacesById[workspace.workspaceId]) {
+      return false;
+    }
+
+    let changed = false;
+    const nextIds = new Set(workspace.sessions.map((session) => session.id));
+    for (const existingId of snapshot.agentSessionIdsByWorkspaceId[workspace.workspaceId] ?? []) {
+      const existing = snapshot.agentSessionsById[existingId];
+      if (existing && existing.state !== 'archived' && !nextIds.has(existingId)) {
+        this.machineStateClient.applyEvent({
+          type: 'agent-session-removed',
+          snapshotNonce: snapshot.snapshotNonce,
+          sessionId: existingId,
+          workspaceId: workspace.workspaceId,
+        });
+        changed = true;
+      }
+    }
+
+    for (const session of workspace.sessions) {
+      const record = this.toMachineAgentSessionRecord(workspace, session.id);
+      if (!record) continue;
+      this.machineStateClient.applyEvent({
+        type: 'agent-session-upserted',
+        snapshotNonce: snapshot.snapshotNonce,
+        session: record,
+      });
+      changed = true;
+    }
+
+    return changed;
+  }
+
+  private syncAgentStateCacheIntoMachineSnapshot(): void {
+    let changed = false;
+    for (const workspace of Object.values(this.agentStateCache)) {
+      changed = this.syncAgentWorkspaceIntoMachineSnapshot(workspace) || changed;
+    }
+    if (changed) {
+      this.emitDerivedMachineState();
+    }
+  }
+
   private handleAgentStateSnapshot(msg: AgentStateSnapshotPush): void {
     this.agentStateCache = {};
     for (const workspace of msg.workspaces) {
       this.agentStateCache[workspace.workspaceId] = workspace;
     }
+    this.syncAgentStateCacheIntoMachineSnapshot();
     // Emit a snapshot delta so subscribers can refresh
     const snapshot: AgentStateUpdateDelta = {
       type: 'agent_state_snapshot',
@@ -2028,6 +2120,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         }
       }
     }
+    this.syncAgentStateCacheIntoMachineSnapshot();
     for (const handler of this.agentStateHandlers) {
       try { handler(delta); } catch { /* non-fatal */ }
     }

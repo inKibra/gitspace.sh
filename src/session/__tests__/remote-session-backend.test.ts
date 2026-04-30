@@ -319,6 +319,108 @@ describe('RemoteSessionBackend', () => {
     expect(ptyChunks).toEqual([]);
   });
 
+  it('projects pushed agent state snapshots into machine snapshot events', async () => {
+    const socket = createFakeSocket();
+    const events: BackendEvent[] = [];
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+    backend.onEvent((event) => events.push(event));
+
+    await connectAndHandshake(backend, socket);
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_snapshot',
+        snapshot: {
+          ...createEmptyMachineSnapshot(),
+          projectsById: {
+            alpha: {
+              id: 'alpha',
+              name: 'alpha',
+              repository: 'org/alpha',
+              isCurrent: true,
+              workspaceIds: ['alpha:ws-1'],
+              workspaceCount: 1,
+            },
+          },
+          projectOrder: ['alpha'],
+          workspacesById: {
+            'alpha:ws-1': {
+              id: 'alpha:ws-1',
+              name: 'ws-1',
+              projectId: 'alpha',
+              projectName: 'alpha',
+              path: '/tmp/alpha/ws-1',
+              terminalSessionIds: [],
+              agentSessionIds: [],
+              processIds: [],
+              replayIds: [],
+              summary: {
+                terminalCount: 0,
+                attachedTerminalCount: 0,
+                runningTerminalCount: 0,
+                failedTerminalCount: 0,
+                agentCount: 0,
+                runningAgentCount: 0,
+                waitingAgentCount: 0,
+                permissionAgentCount: 0,
+                retryingAgentCount: 0,
+                closedAgentCount: 0,
+                archivedAgentCount: 0,
+                configuredProcessCount: 0,
+                runningProcessCount: 0,
+                failedProcessCount: 0,
+              },
+            },
+          },
+          workspaceOrder: ['alpha:ws-1'],
+          workspaceIdsByProjectId: { alpha: ['alpha:ws-1'] },
+        },
+      })
+    );
+    await Bun.sleep(0);
+
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'agent_state_snapshot',
+        workspaces: [{
+          workspaceId: 'alpha:ws-1',
+          sessions: [{ id: 'agent-1', title: 'Agent 1' }],
+          statuses: { 'agent-1': { type: 'idle' } },
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
+          queuedMessages: {},
+        }],
+      })
+    );
+    await Bun.sleep(0);
+
+    const machineEvents = events.filter(
+      (event): event is Extract<BackendEvent, { type: 'machine_snapshot' }> => event.type === 'machine_snapshot',
+    );
+    const latestSnapshot = machineEvents.at(-1)?.snapshot;
+    expect(latestSnapshot?.agentSessionsById['agent-1']?.state).toBe('waiting');
+    expect(latestSnapshot?.agentSessionIdsByWorkspaceId['alpha:ws-1']).toContain('agent-1');
+  });
+
   it('forwards workspace context when attaching an agent session terminal', async () => {
     const socket = createFakeSocket();
 
