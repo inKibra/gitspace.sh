@@ -298,6 +298,11 @@ export class ClientSessionManager {
           return null;
         }
 
+        if (msg.type === 'attach_session') {
+          return this.handleBrowseMessage(connectionId, session, data);
+        }
+
+
         if (msg.requestId && typeof msg.type === 'string') {
           return this.handleBrowseMessage(connectionId, session, data);
         }

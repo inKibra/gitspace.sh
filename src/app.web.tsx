@@ -1809,9 +1809,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onClose={() => {
             void handleBackToBoard();
           }}
-        >
-          {inlineTerminalOutlet}
-        </WorkspaceDetailPage>
+        />
       );
 
       return (
