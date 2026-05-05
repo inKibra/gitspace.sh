@@ -13,11 +13,11 @@ import {
   type ReplayTimelineResponse,
   type ReplayDismissedResponse,
   type ReplayUndismissedResponse,
-  type SessionCtrl,
   type GetReplayFrameRequest,
   type DismissReplayRequest,
   type UndismissReplayRequest,
   type CommandResponse,
+  type RemoteSessionControl,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
@@ -61,6 +61,7 @@ import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
+const DEFAULT_PANE_STREAM_ID = 2;
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10000;
 
@@ -88,6 +89,7 @@ type AuthorizationPayload = { type: 'access_list' };
 interface SessionEventMessage {
   type: 'attached' | 'exited' | 'kicked' | 'session-meta';
   sessionId?: string;
+  streamId: number;
   sessionName?: string;
   processTitle?: string;
   terminalTitle?: string;
@@ -721,7 +723,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       this.attachedAgentSessionId = null;
       this.pendingAttachedAgentSession = null;
       this.attachLifecycle.clearAttachment({ emitDetached: true });
-      void this.sendCommand({ type: 'detach' }).catch((error) => {
+      void this.sendCommand({ type: 'detach', streamId: DEFAULT_PANE_STREAM_ID }).catch((error) => {
         console.warn('[remote-session] fire-and-forget detach failed:', error);
       });
     }
@@ -732,6 +734,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
     const command: AttachSessionRequest = {
       type: 'attach_session',
+      streamId: DEFAULT_PANE_STREAM_ID,
       sessionId: params.sessionId,
       workspaceId: params.workspaceId,
       sessionName: params.sessionName,
@@ -936,7 +939,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
 
     try {
-      const ctrl: SessionCtrl = { type: 'detach' };
+      const ctrl: RemoteSessionControl = { type: 'detach', streamId: DEFAULT_PANE_STREAM_ID };
       await this.sendCommand(ctrl);
       await waitForDetach;
     } catch (error) {
@@ -1211,7 +1214,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async resizePty(cols: number, rows: number): Promise<void> {
-    const ctrl: SessionCtrl = { type: 'resize', cols, rows };
+    const ctrl: RemoteSessionControl = { type: 'resize', streamId: DEFAULT_PANE_STREAM_ID, cols, rows };
     await this.sendCommand(ctrl);
   }
 
@@ -1768,7 +1771,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.attachLifecycle.pushPtyData(data);
   }
 
-  private async sendCommand(message: ClientToMachineMessage | SessionCtrl): Promise<void> {
+  private async sendCommand(message: ClientToMachineMessage | RemoteSessionControl): Promise<void> {
     this.assertConnected();
 
     const keys = this.sessionKeys;

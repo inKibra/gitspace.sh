@@ -76,6 +76,7 @@ export interface RemoteClientSession {
   /** Initial terminal size requested by the client before attach-init is sent */
   initialCols?: number;
   initialRows?: number;
+  streamId?: number;
   /** When true, PTY writes from this client are blocked server-side */
   viewOnly?: boolean;
 }
@@ -1070,11 +1071,12 @@ export class RemoteSessionHandler {
   private async handleAttachSession(
     session: RemoteClientSession,
     msg: {
+      streamId: number;
       sessionId?: string;
       workspaceId?: string;
       sessionName?: string;
-      cols?: number;
-      rows?: number;
+      cols: number;
+      rows: number;
       scriptPolicy?: 'auto' | 'skip';
       viewOnly?: boolean;
       command?: string;
@@ -1195,6 +1197,7 @@ export class RemoteSessionHandler {
 
       session.state = "attached";
       session.attachedSessionId = targetSession.id;
+      session.streamId = msg.streamId;
       session.attachedSessionName = targetSession.name;
       session.sessionSocketPath = targetSession.socketPath;
       session.initialCols = msg.cols;

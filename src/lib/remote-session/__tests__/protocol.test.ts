@@ -94,7 +94,7 @@ const AGENT_TARGET = { workspaceId: 'w1', workspaceName: 'w1', workspacePath: '/
 describe('message union coverage', () => {
   it('accepts current client messages', () => {
     const clientMessages: ClientToMachineMessage[] = [
-      { type: 'attach_session', cols: 80, rows: 24 },
+      { type: 'attach_session', streamId: 2, cols: 80, rows: 24 },
       { type: 'list_github_repos', requestId: 'req-repos' },
       { type: 'list_remote_branches', requestId: 'req-branches', projectName: 'p1' },
       { type: 'list_linear_issues', requestId: 'req-linear', projectName: 'p1' },
@@ -126,8 +126,9 @@ describe('message union coverage', () => {
 
   it('accepts current machine messages', () => {
     const machineMessages: MachineToClientMessage[] = [
-      { type: 'detached' },
-      { type: 'session_exited', sessionId: 's1', exitCode: 0 },
+      { type: 'attached', streamId: 2, sessionId: 's1', sessionName: 'shell' },
+      { type: 'detached', streamId: 2 },
+      { type: 'session_exited', sessionId: 's1', streamId: 2, exitCode: 0 },
       { type: 'error', code: 'TEST', message: 'test error' },
       { type: 'command_response', requestId: 'req-repos', response: { type: 'github-repos', repos: [] } },
       { type: 'command_response', requestId: 'req-branches', response: { type: 'remote-branches', projectName: 'p1', branches: ['main'] } },
@@ -154,6 +155,6 @@ describe('message union coverage', () => {
       { type: 'agent_state_update', delta: { type: 'agent_state_snapshot', workspaces: {} } },
       { type: 'replay_frame', requestId: 'req-3', replayId: 'r1', frame: { replayId: 'r1', checkpoint: null, events: [] }, chunkIndex: 0, totalChunks: 1 },
     ];
-    expect(machineMessages).toHaveLength(27);
+    expect(machineMessages).toHaveLength(28);
   });
 });

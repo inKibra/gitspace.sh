@@ -35,9 +35,13 @@ export type {
 } from '../../types/bundle.js';
 export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../tmux-lite/replay/types.js';
 
-// Re-export attached mode control types from tmux-lite
-// These are used in attached mode for resize/detach/attach-init
+// Re-export tmux-lite attach-init/event types used on the machine-local Unix socket.
 export type { SessionCtrl, SessionEvent } from "../tmux-lite/protocol.js";
+
+export type RemoteSessionControl =
+  | { type: 'resize'; streamId: number; cols: number; rows: number }
+  | { type: 'detach'; streamId: number }
+  | { type: 'detach_all' };
 
 // ============================================================================
 // Client → Machine Messages (Browsing Mode)
@@ -80,6 +84,7 @@ export interface UndismissReplayRequest {
 /** Attach to a session (existing or new) */
 export interface AttachSessionRequest {
   type: "attach_session";
+  streamId: number;       // Per-pane PTY stream ID (2+; 0/1 are reserved)
   sessionId?: string;     // Attach to existing session
   workspaceId?: string;   // Create new session in workspace
   sessionName?: string;   // Name for new session (optional)
@@ -488,15 +493,40 @@ export interface ReplayUndismissedResponse {
 }
 
 
+/** Attached to session */
+export interface AttachedResponse {
+  type: 'attached';
+  streamId: number;
+  sessionId: string;
+  sessionName?: string;
+  viewOnly?: boolean;
+}
+
+/** Attached session metadata */
+export interface SessionMetaResponse {
+  type: 'session-meta';
+  streamId: number;
+  sessionName: string;
+  processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: import('../tmux-lite/protocol.js').InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
+}
+
+
 /** Detached from session - back to browsing mode */
 export interface DetachedResponse {
   type: "detached";
+  streamId: number;
 }
 
 /** Session exited */
 export interface SessionExitedResponse {
   type: "session_exited";
   sessionId: string;
+  streamId: number;
   exitCode: number;
 }
 
@@ -657,6 +687,8 @@ export type MachineToClientMessage =
   | ReplayTimelineResponse
   | ReplayDismissedResponse
   | ReplayUndismissedResponse
+  | AttachedResponse
+  | SessionMetaResponse
   | DetachedResponse
   | SessionExitedResponse
   | ErrorResponse

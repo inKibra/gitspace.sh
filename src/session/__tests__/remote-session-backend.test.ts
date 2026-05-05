@@ -490,6 +490,7 @@ describe('RemoteSessionBackend', () => {
     const attachCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as Record<string, unknown>;
     expect(attachCommand).toEqual({
       type: 'attach_session',
+      streamId: 2,
       sessionId: 'tmux-agent-1',
       workspaceId: 'alpha:ws-1',
       viewOnly: undefined,
@@ -678,6 +679,7 @@ it('does not emit attached until the real attach event arrives and preserves pre
   socket.handlers?.onMessage(
     makeRelayDataPayload(cryptoAdapter, {
       type: 'attached',
+      streamId: 2,
       sessionId: 'sess-1',
       sessionName: 'alpha:ws-1:1',
     })
@@ -1251,6 +1253,7 @@ it('does not emit attached until the real attach event arrives and preserves pre
     const workspaceAttach = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
     expect(workspaceAttach).toEqual({
       type: 'attach_session',
+      streamId: 2,
       workspaceId: 'test-project:feature-a',
       sessionName: 'new-session',
       cols: 100,
@@ -1262,6 +1265,7 @@ it('does not emit attached until the real attach event arrives and preserves pre
     const existingAttach = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
     expect(existingAttach).toEqual({
       type: 'attach_session',
+      streamId: 2,
       sessionId: 'existing-session',
       cols: 80,
       rows: 24,

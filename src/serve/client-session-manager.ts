@@ -238,6 +238,7 @@ export class ClientSessionManager {
     session.sessionSocketPath = undefined;
     session.initialCols = undefined;
     session.initialRows = undefined;
+    session.streamId = undefined;
     session.frameBuffer = undefined;
 
     if (socket) {
@@ -316,7 +317,7 @@ export class ClientSessionManager {
           });
 
           // Send detached response to client
-          const detachedMsg = JSON.stringify({ type: "detached" });
+          const detachedMsg = JSON.stringify({ type: "detached", streamId: msg.streamId });
           const detachedData = new TextEncoder().encode(detachedMsg);
           const frame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
           console.log("[session-manager] Sent detached response, returning to browsing mode");
@@ -460,6 +461,7 @@ export class ClientSessionManager {
       session.sessionSocketPath = remoteSession.sessionSocketPath;
       session.initialCols = remoteSession.initialCols;
       session.initialRows = remoteSession.initialRows;
+      session.streamId = remoteSession.streamId;
 
       // Connect to tmux-lite session socket for PTY I/O
       await this.attachToTmuxLiteSession(connectionId, session);
@@ -616,6 +618,12 @@ export class ClientSessionManager {
               if (frame.type === FrameType.CONTROL) {
                 // Decode and handle control events
                 const event = decodeControl(frame.payload) as SessionEvent;
+                const streamId = session.streamId;
+                if (streamId === undefined) {
+                  console.error('[session-manager] Attached session missing streamId');
+                  this.handleDisconnect(connectionId, 'Attached session missing streamId');
+                  return;
+                }
 
                 if (event.type === "exited") {
                   console.log(`[session-manager] Session exited: ${event.code}`);
@@ -623,7 +631,7 @@ export class ClientSessionManager {
                   this.returnAttachedSessionToBrowsing(connectionId, session);
 
                   if (exitedSessionId) {
-                    const exitMsg = JSON.stringify({ type: "session_exited", sessionId: exitedSessionId, exitCode: event.code });
+                    const exitMsg = JSON.stringify({ type: "session_exited", sessionId: exitedSessionId, streamId, exitCode: event.code });
                     const exitData = new TextEncoder().encode(exitMsg);
                     const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
                     sendToClient(Buffer.from(encFrame));
@@ -632,7 +640,7 @@ export class ClientSessionManager {
                 } else if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
                   this.returnAttachedSessionToBrowsing(connectionId, session);
-                  const detachedMsg = JSON.stringify({ type: "detached" });
+                  const detachedMsg = JSON.stringify({ type: "detached", streamId });
                   const detachedData = new TextEncoder().encode(detachedMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
@@ -643,13 +651,14 @@ export class ClientSessionManager {
                   const encFrame = createFrame(STREAM_ID.DATA, eventData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
                 } else if (event.type === 'session-meta') {
-                  const metaMsg = JSON.stringify(event);
+                  const metaMsg = JSON.stringify({ ...event, streamId });
                   const metaData = new TextEncoder().encode(metaMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, metaData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
                 } else if (event.type === 'attached' && session.attachedSessionId) {
                   const attachedMsg = JSON.stringify({
                     type: 'attached',
+                    streamId,
                     sessionId: session.attachedSessionId,
                     sessionName: session.attachedSessionName,
                   });
@@ -659,7 +668,7 @@ export class ClientSessionManager {
                 }
               } else if (frame.type === FrameType.PTY) {
                 // Forward PTY data to web client
-                const encFrame = createFrame(STREAM_ID.DATA, frame.payload, session.sessionKeys.sendKey);
+                const encFrame = createFrame(streamId, frame.payload, session.sessionKeys.sendKey);
                 sendToClient(Buffer.from(encFrame));
               }
             }

@@ -111,6 +111,8 @@ export interface ClientSession {
   /** Initial terminal size requested by the client before attach-init is sent */
   initialCols?: number;
   initialRows?: number;
+  /** Per-pane stream ID requested by the client. */
+  streamId?: number;
   /** Buffer for incomplete frames from tmux-lite socket */
   frameBuffer?: Buffer;
 }
