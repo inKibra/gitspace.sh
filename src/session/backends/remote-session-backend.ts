@@ -1207,7 +1207,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       throw new Error('Session keys are not established');
     }
 
-    const frame = await this.crypto.createFrame(this.crypto.masterStreamId, data, key.sendKey);
+    const frame = await this.crypto.createFrame(DEFAULT_PANE_STREAM_ID, data, key.sendKey);
     const encoded = this.crypto.encodeBase64(frame);
     const message: RelayDataMessage = { type: 'data', data: encoded };
     this.socketAdapter.send(this.socket, JSON.stringify(message));
