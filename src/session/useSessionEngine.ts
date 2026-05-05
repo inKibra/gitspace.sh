@@ -282,6 +282,16 @@ export function useSessionEngine() {
   const deleteProject = useCallback((backendKey: BackendKey, projectName: string, params?: DeleteProjectParams) =>
     withBackend(backendKey, async (b) => { await b.deleteProject(projectName, params); await b.listProjects(); await b.listWorkspaces(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const attachPane = useCallback((backendKey: BackendKey, params: import('./backend.js').AttachPaneParams) =>
+    withBackend(backendKey, (b) => b.attachPane?.(params) ?? b.attachSession(params)), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const detachPane = useCallback((backendKey: BackendKey, paneId: string) =>
+    withBackend(backendKey, (b) => b.detachPane?.(paneId) ?? b.detachSession()), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const detachAllPanes = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.detachAllPanes?.() ?? b.detachSession()), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+
   const attachSession = useCallback((backendKey: BackendKey, params: AttachSessionParams) =>
     withBackend(backendKey, (b) => b.attachSession(params)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -406,6 +416,9 @@ export function useSessionEngine() {
     cancelProjectCreation,
     createWorkspace,
     deleteProject,
+    attachPane,
+    detachPane,
+    detachAllPanes,
     attachSession,
     detachSession,
     cancelPendingScripts,
