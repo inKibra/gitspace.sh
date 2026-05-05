@@ -32,6 +32,12 @@ export interface BackendDescriptor {
   relayUrl?: string;
 }
 
+export interface AttachPaneParams extends AttachSessionParams {
+  paneId: string;
+  agentSessionId?: string;
+}
+
+
 export interface AttachSessionParams {
   sessionId?: string;
   workspaceId?: string;
@@ -127,6 +133,9 @@ export interface SessionBackend {
   createWorkspace(params: CreateWorkspaceParams): Promise<void>;
   deleteProject(projectName: string, params?: DeleteProjectParams): Promise<void>;
 
+  attachPane?(params: AttachPaneParams): Promise<void>;
+  detachPane?(paneId: string): Promise<void>;
+  detachAllPanes?(): Promise<void>;
   attachSession(params: AttachSessionParams): Promise<void>;
   detachSession(): Promise<void>;
   cancelPendingScripts?(): Promise<void>;
@@ -163,6 +172,9 @@ export interface SessionBackend {
   stopProcess?(workspaceId: string, processName: string): Promise<void>;
   requestEvents?(workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number): Promise<void>;
 
+  writePaneData?(paneId: string, data: Uint8Array): Promise<void>;
+  resizePane?(paneId: string, cols: number, rows: number): Promise<void>;
+  setPaneOutputHandler?(paneId: string, handler: ((data: Uint8Array) => void) | null): void;
   writePtyData?(data: Uint8Array): Promise<void>;
   resizePty?(cols: number, rows: number): Promise<void>;
   createCheckpoint?(sessionId: string): Promise<void>;

@@ -25,6 +25,7 @@ import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
 import { AttachLifecycle } from './attach-lifecycle.js';
+import { PaneLifecycle } from './pane-lifecycle.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import {
   ReviewRequestError,
@@ -34,6 +35,7 @@ import {
 import { throwServiceStartError } from './service-start-error.js';
 import type {
   AttachSessionParams,
+  AttachPaneParams,
   BackendDescriptor,
   CreateProjectParams,
   FinalizeProjectParams,
@@ -62,6 +64,7 @@ import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/type
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_PANE_STREAM_ID = 2;
+const DEFAULT_PANE_ID = 'default';
 const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 30000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10000;
 
@@ -325,6 +328,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private isConnected = false;
   private attachedAgentSessionId: string | null = null;
   private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
+  private readonly panes = new Map<string, PaneLifecycle>();
+  private nextStreamId = DEFAULT_PANE_STREAM_ID;
   private listenersAttached = false;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -411,6 +416,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
     this.attachLifecycle.setOutputHandler(handler);
+  }
+
+  setPaneOutputHandler(paneId: string, handler: ((data: Uint8Array) => void) | null): void {
+    this.panes.get(paneId)?.setOutputHandler(handler);
   }
 
   setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
@@ -712,35 +721,49 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async attachSession(params: AttachSessionParams): Promise<void> {
-    if (this.attachLifecycle.isTransportActive) {
-      // Switching sessions: tell the server to close the prior tmux-lite
-      // socket but don't wait for the round-trip. The server's per-connection
-      // queue serializes detach → attach_session, and the new 'attached' event
-      // is what unblocks the client UI. Awaiting the detached event before
-      // sending attach_session was pure wait theater — one extra RTT for no
-      // observable benefit.
+    await this.attachPane({ ...params, paneId: DEFAULT_PANE_ID });
+  }
+
+  async attachPane(params: AttachPaneParams): Promise<void> {
+    const existingPane = this.panes.get(params.paneId);
+    if (existingPane) {
+      this.panes.delete(params.paneId);
+      void this.sendCommand({ type: 'detach', streamId: existingPane.streamId }).catch((error) => {
+        console.warn('[remote-session] fire-and-forget pane detach failed:', error);
+      });
+    }
+
+    if (params.paneId === DEFAULT_PANE_ID && this.attachLifecycle.isTransportActive) {
       this.rejectPendingDetachTransition(new Error('Superseded by new attach'));
       this.attachedAgentSessionId = null;
       this.pendingAttachedAgentSession = null;
       this.attachLifecycle.clearAttachment({ emitDetached: true });
-      void this.sendCommand({ type: 'detach', streamId: DEFAULT_PANE_STREAM_ID }).catch((error) => {
-        console.warn('[remote-session] fire-and-forget detach failed:', error);
+    }
+
+    const streamId = params.paneId === DEFAULT_PANE_ID ? DEFAULT_PANE_STREAM_ID : this.nextStreamId++;
+    const pane = new PaneLifecycle({
+      paneId: params.paneId,
+      streamId,
+      sessionId: params.sessionId ?? null,
+      workspaceId: params.workspaceId ?? null,
+      agentSessionId: params.agentSessionId ?? null,
+      viewOnly: params.viewOnly ?? false,
+    });
+    this.panes.set(params.paneId, pane);
+
+    if (params.paneId === DEFAULT_PANE_ID) {
+      this.attachLifecycle.beginAttach({
+        workspaceId: params.workspaceId ?? null,
+        viewOnly: params.viewOnly ?? false,
       });
     }
 
-    this.attachLifecycle.beginAttach({
-      workspaceId: params.workspaceId ?? null,
-      viewOnly: params.viewOnly ?? false,
-    });
     const command: AttachSessionRequest = {
       type: 'attach_session',
-      streamId: DEFAULT_PANE_STREAM_ID,
+      streamId,
       sessionId: params.sessionId,
       workspaceId: params.workspaceId,
       sessionName: params.sessionName,
-      // cols/rows are required on the wire so the server can send attach-init
-      // immediately on socket open. Fall back to 80x24 if a caller didn't
-      // pass them; the terminal will resize to its real viewport on mount.
       cols: params.cols ?? 80,
       rows: params.rows ?? 24,
       scriptPolicy: params.scriptPolicy,
@@ -841,7 +864,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       sessionId: response.session.id,
     };
     try {
-      await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+      await this.attachPane({ paneId: DEFAULT_PANE_ID, sessionId: response.session.id, workspaceId, agentSessionId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
     } catch (error) {
       this.pendingAttachedAgentSession = null;
       throw error;
@@ -891,61 +914,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async detachSession(): Promise<void> {
-    if (!this.attachLifecycle.isTransportActive) {
-      return;
-    }
+    await this.detachPane(DEFAULT_PANE_ID);
+  }
 
-    // If we're still in the attaching phase (scripts running, no PTY socket yet),
-    // just clear local state — there's nothing to detach on the machine side.
-    if (this.attachLifecycle.isAttaching) {
+  async detachPane(paneId: string): Promise<void> {
+    const pane = this.panes.get(paneId);
+    if (!pane) return;
+    this.panes.delete(paneId);
+    if (paneId === DEFAULT_PANE_ID) {
       this.attachLifecycle.clearAttachment({ emitDetached: true });
-      return;
+      this.attachedAgentSessionId = null;
+      this.pendingAttachedAgentSession = null;
     }
-    if (this.pendingDetachTransition) {
-      return new Promise<void>((resolve, reject) => {
-        const pending = this.pendingDetachTransition;
-        if (!pending) {
-          resolve();
-          return;
-        }
-        const currentResolve = pending.resolve;
-        const currentReject = pending.reject;
-        pending.resolve = () => { currentResolve(); resolve(); };
-        pending.reject = (error: Error) => { currentReject(error); reject(error); };
-      });
+    await this.sendCommand({ type: 'detach', streamId: pane.streamId });
+    if (paneId !== DEFAULT_PANE_ID) {
+      this.emit({ type: 'pane_detached', paneId });
     }
+  }
 
-    const waitForDetach = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingDetachTransition = null;
-        this.attachLifecycle.clearAttachment({ emitDetached: true });
-        this.attachedAgentSessionId = null;
-        this.pendingAttachedAgentSession = null;
-        reject(new Error('Timed out waiting for remote detach'));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingDetachTransition = {
-        resolve: () => {
-          clearTimeout(timeout);
-          this.pendingDetachTransition = null;
-          resolve();
-        },
-        reject: (error: Error) => {
-          clearTimeout(timeout);
-          this.pendingDetachTransition = null;
-          reject(error);
-        },
-        timeout,
-      };
-    });
-
-    try {
-      const ctrl: RemoteSessionControl = { type: 'detach', streamId: DEFAULT_PANE_STREAM_ID };
-      await this.sendCommand(ctrl);
-      await waitForDetach;
-    } catch (error) {
-      this.rejectPendingDetachTransition(error instanceof Error ? error : new Error(String(error)));
-      throw error;
-    }
+  async detachAllPanes(): Promise<void> {
+    this.panes.clear();
+    this.attachLifecycle.clearAttachment({ emitDetached: true });
+    this.attachedAgentSessionId = null;
+    this.pendingAttachedAgentSession = null;
+    await this.sendCommand({ type: 'detach_all' });
   }
 
   async cancelPendingScripts(): Promise<void> {
@@ -1197,9 +1189,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async writePtyData(data: Uint8Array): Promise<void> {
-    if (this.attachLifecycle.currentViewOnly) {
-      return;
-    }
+    await this.writePaneData(DEFAULT_PANE_ID, data);
+  }
+
+  async writePaneData(paneId: string, data: Uint8Array): Promise<void> {
+    const pane = this.panes.get(paneId);
+    if (!pane || pane.viewOnly) return;
     this.assertConnected();
 
     const key = this.sessionKeys;
@@ -1207,14 +1202,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       throw new Error('Session keys are not established');
     }
 
-    const frame = await this.crypto.createFrame(DEFAULT_PANE_STREAM_ID, data, key.sendKey);
+    const frame = await this.crypto.createFrame(pane.streamId, data, key.sendKey);
     const encoded = this.crypto.encodeBase64(frame);
     const message: RelayDataMessage = { type: 'data', data: encoded };
     this.socketAdapter.send(this.socket, JSON.stringify(message));
   }
 
   async resizePty(cols: number, rows: number): Promise<void> {
-    const ctrl: RemoteSessionControl = { type: 'resize', streamId: DEFAULT_PANE_STREAM_ID, cols, rows };
+    await this.resizePane(DEFAULT_PANE_ID, cols, rows);
+  }
+
+  async resizePane(paneId: string, cols: number, rows: number): Promise<void> {
+    const pane = this.panes.get(paneId);
+    if (!pane) return;
+    const ctrl: RemoteSessionControl = { type: 'resize', streamId: pane.streamId, cols, rows };
     await this.sendCommand(ctrl);
   }
 
@@ -1348,6 +1349,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
 
+    if (opened.streamId > (this.crypto.controlStreamId ?? DEFAULT_CONTROL_STREAM_ID)) {
+      const pane = this.findPaneByStreamId(opened.streamId);
+      pane?.pushPtyData(opened.data);
+      if (pane?.paneId === DEFAULT_PANE_ID) {
+        this.emitPtyData(opened.data);
+      }
+      return;
+    }
+
     const decodedText = new TextDecoder().decode(opened.data);
     const parsedMessage = safeJsonParse(decodedText);
 
@@ -1456,14 +1466,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'replay_undismissed':
         this.resolveUndismissReplay(message);
         return;
-      case 'detached':
-        this.attachLifecycle.clearAttachment({ emitDetached: true });
-        this.resolvePendingDetachTransition();
+      case 'detached': {
+        const pane = this.findPaneByStreamId(message.streamId);
+        if (pane) {
+          this.panes.delete(pane.paneId);
+          this.emit({ type: 'pane_detached', paneId: pane.paneId });
+          if (pane.paneId === DEFAULT_PANE_ID) {
+            this.attachLifecycle.clearAttachment({ emitDetached: true });
+            this.resolvePendingDetachTransition();
+          }
+        }
         return;
-      case 'session_exited':
-        this.attachLifecycle.emitExited(message.exitCode, message.sessionId);
-        this.resolvePendingDetachTransition();
+      }
+      case 'session_exited': {
+        const pane = this.findPaneByStreamId(message.streamId);
+        if (pane) {
+          this.panes.delete(pane.paneId);
+          this.emit({ type: 'pane_exited', paneId: pane.paneId, sessionId: message.sessionId, exitCode: message.exitCode });
+          if (pane.paneId === DEFAULT_PANE_ID) {
+            this.attachLifecycle.emitExited(message.exitCode, message.sessionId);
+            this.resolvePendingDetachTransition();
+          }
+        }
         return;
+      }
       case 'workspace_deleted':
         this.resolveWorkspaceDelete(message.workspaceId);
         return;
@@ -1481,15 +1507,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.emitDerivedMachineState();
         this.agentStateCache = machineSnapshotToAgentState(message.snapshot);
         this.resolveInitialSnapshot();
-        // Stale-attachment guard: if the session we're attached to is no longer
-        // present in the snapshot, the server removed it. Emit exited so the
-        // frontend transitions out of attached state and preserves workspace context.
-        // Only runs when fully attached (not during the attaching phase).
-        if (this.attachLifecycle.isAttached && this.attachLifecycle.sessionId) {
-          const sid = this.attachLifecycle.sessionId;
-          if (!(sid in message.snapshot.terminalSessionsById)) {
-            this.attachLifecycle.emitExited(undefined, sid);
-            this.attachedAgentSessionId = null;
+        for (const pane of [...this.panes.values()]) {
+          if (pane.sessionId && !(pane.sessionId in message.snapshot.terminalSessionsById)) {
+            this.panes.delete(pane.paneId);
+            this.emit({ type: 'pane_exited', paneId: pane.paneId, sessionId: pane.sessionId });
+            if (pane.paneId === DEFAULT_PANE_ID) {
+              this.attachLifecycle.emitExited(undefined, pane.sessionId);
+              this.attachedAgentSessionId = null;
+            }
           }
         }
         return;
@@ -1696,31 +1721,71 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
+  private findPaneByStreamId(streamId: number): PaneLifecycle | null {
+    for (const pane of this.panes.values()) {
+      if (pane.streamId === streamId) return pane;
+    }
+    return null;
+  }
+
   private handleSessionEvent(message: SessionEventMessage): void {
+    const pane = this.findPaneByStreamId(message.streamId);
+
     if (message.type === 'kicked') {
-      this.attachLifecycle.clearAttachment({ emitDetached: true });
-      this.resolvePendingDetachTransition();
+      if (pane) {
+        this.panes.delete(pane.paneId);
+        this.emit({ type: 'pane_detached', paneId: pane.paneId });
+        if (pane.paneId === DEFAULT_PANE_ID) {
+          this.attachLifecycle.clearAttachment({ emitDetached: true });
+          this.resolvePendingDetachTransition();
+        }
+      }
       return;
     }
 
     if (message.type === 'exited') {
-      this.attachLifecycle.emitExited(message.code, message.sessionId);
-      this.resolvePendingDetachTransition();
+      if (pane) {
+        this.panes.delete(pane.paneId);
+        this.emit({ type: 'pane_exited', paneId: pane.paneId, sessionId: message.sessionId ?? pane.sessionId ?? '', exitCode: message.code });
+        if (pane.paneId === DEFAULT_PANE_ID) {
+          this.attachLifecycle.emitExited(message.code, message.sessionId);
+          this.resolvePendingDetachTransition();
+        }
+      }
       return;
     }
 
-    if (message.type === 'attached' && message.sessionId) {
-      this.attachLifecycle.confirmAttached({
+    if (message.type === 'attached' && message.sessionId && pane) {
+      pane.confirmAttached({
         sessionId: message.sessionId,
         sessionName: message.sessionName,
-        workspaceId: this.attachLifecycle.workspaceId,
-        viewOnly: this.attachLifecycle.currentViewOnly,
+        workspaceId: pane.workspaceId,
+        agentSessionId: pane.agentSessionId,
+        viewOnly: pane.viewOnly,
       });
+      this.emit({
+        type: 'pane_attached',
+        paneId: pane.paneId,
+        streamId: pane.streamId,
+        sessionId: message.sessionId,
+        sessionName: message.sessionName,
+        workspaceId: pane.workspaceId ?? undefined,
+        agentSessionId: pane.agentSessionId ?? undefined,
+        viewOnly: pane.viewOnly,
+      });
+      if (pane.paneId === DEFAULT_PANE_ID) {
+        this.attachLifecycle.confirmAttached({
+          sessionId: message.sessionId,
+          sessionName: message.sessionName,
+          workspaceId: this.attachLifecycle.workspaceId,
+          viewOnly: this.attachLifecycle.currentViewOnly,
+        });
+      }
       return;
     }
 
-    if (message.type === 'session-meta') {
-      this.attachLifecycle.emitSessionMeta({
+    if (message.type === 'session-meta' && pane) {
+      const meta = {
         sessionName: message.sessionName ?? null,
         processTitle: message.processTitle ?? null,
         terminalTitle: message.terminalTitle ?? null,
@@ -1728,7 +1793,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         lastAlertPreview: message.lastAlertPreview ?? null,
         lastAlertAt: message.lastAlertAt ?? null,
         unreadAlertCount: message.unreadAlertCount ?? null,
-      });
+      };
+      pane.setMeta(meta);
+      this.emit({ type: 'pane_meta', paneId: pane.paneId, meta });
+      if (pane.paneId === DEFAULT_PANE_ID) {
+        this.attachLifecycle.emitSessionMeta(meta);
+      }
     }
   }
 
@@ -1899,6 +1969,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.listenersAttached = false;
     this.isConnected = false;
     this.attachLifecycle.reset();
+    this.panes.clear();
+    this.nextStreamId = DEFAULT_PANE_STREAM_ID;
     this.rejectPendingDetachTransition(new Error('Remote session disconnected'));
     this.handshakeState = null;
     this.sessionKeys = null;

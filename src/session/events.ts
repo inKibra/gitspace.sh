@@ -30,6 +30,10 @@ export type BackendEvent =
       workspaceId?: string;
     }
   | { type: 'notification_config'; config: NotificationConfig }
+  | { type: 'pane_attached'; paneId: string; streamId: number; sessionId: string; sessionName?: string; viewOnly?: boolean; workspaceId?: string; agentSessionId?: string }
+  | { type: 'pane_meta'; paneId: string; meta: AttachedSessionMeta }
+  | { type: 'pane_detached'; paneId: string }
+  | { type: 'pane_exited'; paneId: string; sessionId: string; exitCode?: number }
   | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean; workspaceId?: string; agentSessionId?: string }
   | { type: 'session_meta'; meta: AttachedSessionMeta }
   | { type: 'detached' }
