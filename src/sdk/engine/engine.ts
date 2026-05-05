@@ -509,7 +509,7 @@ export class GitSpaceEngine {
     );
   }
 
-  async attachAgentSession(ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number }): Promise<void> {
+  async attachAgentSession(ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string }): Promise<void> {
     this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: true });
     try {
       return await this.withRefBackend(ref, (b) =>

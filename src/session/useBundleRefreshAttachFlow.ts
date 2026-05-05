@@ -24,6 +24,8 @@ export interface BundleRefreshAttachParams {
   args?: string[];
   /** Environment variables for the custom command */
   env?: Record<string, string>;
+  /** Pane/tab target. Omitted only for legacy single-terminal attach paths. */
+  paneId?: string;
 }
 
 interface PendingAttach {

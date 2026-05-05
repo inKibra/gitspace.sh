@@ -12,6 +12,7 @@ export interface AttachSelectionParams {
   workspaceId?: string
   viewOnly?: boolean
   backendKey?: BackendKey
+  paneId?: string
 }
 
 export type AttachTarget = 'session' | 'workspace'
@@ -253,6 +254,9 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       if (selection.viewOnly !== undefined) {
         attachParams.viewOnly = selection.viewOnly
       }
+      if (selection.paneId !== undefined) {
+        attachParams.paneId = selection.paneId
+      }
 
       await attach(attachParams, selection.backendKey)
       return
@@ -273,6 +277,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         await attach({
           workspaceId: selection.workspaceId,
           sessionName: sessionName.trim() || undefined,
+          paneId: selection.paneId,
         }, selection.backendKey)
       },
     })

@@ -504,6 +504,32 @@ describe('RemoteSessionBackend', () => {
     });
 
     await attachPromise;
+
+    const tabAttachPromise = backend.attachAgentSession('alpha:ws-1', 'agent-2', { paneId: 'agent-tab' });
+    await Bun.sleep(0);
+
+    const secondTmuxCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { type: string; requestId: string };
+    expect(secondTmuxCommand.type).toBe('attach_agent_session');
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'command_response',
+        requestId: secondTmuxCommand.requestId,
+        response: {
+          type: 'session',
+          session: { id: 'tmux-agent-2', name: 'agent:ws-1:agent-2', workspaceId: 'alpha:ws-1', attached: false, createdAt: 2 },
+        },
+      })
+    );
+    await Bun.sleep(0);
+
+    const secondAttachCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as Record<string, unknown>;
+    expect(secondAttachCommand).toMatchObject({
+      type: 'attach_session',
+      streamId: 3,
+      sessionId: 'tmux-agent-2',
+      workspaceId: 'alpha:ws-1',
+    });
+    await tabAttachPromise;
   });
 
   it('resolves agent session list responses from machine messages', async () => {

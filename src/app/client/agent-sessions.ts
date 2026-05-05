@@ -16,13 +16,13 @@ import type {
 export interface OpenAgentSessionArgs {
   workspaceId: string;
   agentSessionId: string;
-  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number };
+  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string };
 }
 
 export interface CreateAndOpenAgentSessionArgs {
   workspaceId: string;
   title?: string;
-  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number };
+  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string };
 }
 
 export interface MutateAgentSessionArgs {

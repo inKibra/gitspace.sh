@@ -10,6 +10,7 @@ import {
 } from "./components/TerminalControls.web";
 import { AttachedTerminalPaneWeb } from './components/AttachedTerminalPane.web.js';
 import { DockviewWorkspaceShell } from './components/DockviewWorkspaceShell.web.js';
+import { PaneTerminalPanel } from './components/PaneTerminalPanel.web.js';
 import { IdentityGate } from "./components/IdentityGate.web";
 import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
@@ -60,7 +61,6 @@ import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.j
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
 
 import { browserPlatform } from './sdk/platforms/browser.web.js';
-import { NativeAgentSurfaceConnected } from './components/NativeAgentSurfaceConnected.web.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 
 // Replay helper
@@ -176,6 +176,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const ptyBackendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
   const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const nextPaneIdRef = useRef(1);
   useEffect(() => {
     const key = attachedBackendKey ?? activeBackendKey;
     if (!key) return;
@@ -200,6 +201,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const setScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     scriptWriteCallbackRef.current = fn;
     ptyBackendRef.current?.setScriptOutputHandler?.(fn);
+  }, []);
+
+  const allocatePaneId = useCallback((prefix: string) => {
+    nextPaneIdRef.current += 1;
+    return `${prefix}-${Date.now().toString(36)}-${nextPaneIdRef.current.toString(36)}`;
   }, []);
 
   // Re-attach write callback when backend changes
@@ -490,12 +496,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const pendingAgentAttachTargetRef = useRef<{ workspaceId: string; agentSessionId: string } | null>(null);
   // Clear pending only when the requested target actually attaches, or a *fresh* error arrives.
   useEffect(() => {
-    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
-    const attachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
+    const attachedPanes = Object.values(attachedBackendState?.attachedPanes ?? {});
     const targetReached = !!pendingAgentAttachTarget
       && terminalMode === 'attached'
-      && attachedAgentSessionId === pendingAgentAttachTarget.agentSessionId
-      && attachedWorkspaceId === pendingAgentAttachTarget.workspaceId;
+      && attachedPanes.some((pane) =>
+        pane.agentSessionId === pendingAgentAttachTarget.agentSessionId
+        && pane.workspaceId === pendingAgentAttachTarget.workspaceId
+      );
     // Ignore commandError that already existed when this attach was requested.
     const isFreshError = commandError != null && commandError !== attachPendingCommandErrorSnapshotRef.current;
     if (agentAttachPending && (targetReached || isFreshError)) {
@@ -526,7 +533,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       setAgentAttachPending(true);
       setPendingAgentAttachTarget(target);
     });
-    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: getWebAgentAttachSize() })
+    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: { ...getWebAgentAttachSize(), paneId: allocatePaneId('agent') } })
       .then((result) => {
         // open() returning null means the call failed before any backend attach was initiated.
         // Clear pending only if no rapid session switch has since overtaken this request.
@@ -547,7 +554,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           setPendingAgentAttachTarget(null);
         }
       });
-  }, [openAgentSessionAction, getWebAgentAttachSize]);
+  }, [openAgentSessionAction, getWebAgentAttachSize, allocatePaneId]);
 
   const handleKillAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await killAgentSessionAction(workspaceId, agentSessionId);
@@ -875,11 +882,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
     setIsViewOnlySession(params.viewOnly ?? false);
+    const paneId = allocatePaneId(params.sessionId ? 'session' : 'workspace');
     await attachController.attachFromSelection({
       ...params,
       backendKey: params.sessionId ? (selectedBackendKey ?? attachedBackendKey ?? activeBackendKey ?? undefined) : undefined,
+      paneId,
     });
-  }, [activeBackendKey, attachController, attachedBackendKey, selectedBackendKey]);
+  }, [activeBackendKey, attachController, attachedBackendKey, selectedBackendKey, allocatePaneId]);
 
   // ─── Process actions ───────────────────────────────────────────────────────
 
@@ -1628,36 +1637,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       </>
     );
 
-    const inlineAttachedRef: BackendScopedWorkspaceRef = {
-      backendKey: attachedBackendKey ?? selectedBackendKey ?? activeBackendKey ?? 'local',
-      workspaceId: '',
-    };
-
-    const handleInlineSendData = (data: string) => {
-      if (data === PAGE_UP && terminalRef.current?.pageUp()) return;
-      if (data === PAGE_DOWN && terminalRef.current?.pageDown()) return;
-      if (isViewOnlySession) return;
-      sendPty(new TextEncoder().encode(data));
-    };
-
-    const handleInlineKeyboardData = (data: Uint8Array) => {
-      if (isViewOnlySession) return;
-      const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
-      if (hasModifiers) {
-        const modified = applyModifiersToInput(data, modifiers);
-        sendPty(modified);
-        setModifiers({ ctrl: false, shift: false, alt: false });
-      } else {
-        sendPty(data);
-      }
-    };
-
-    const handleInlineFocusTerminal = () => terminalRef.current?.focus();
     const toggleInlineInputMode = () => {
       const newInputMode = !inputMode;
       setInputMode(newInputMode);
-      if (newInputMode) terminalRef.current?.focus();
-      else terminalRef.current?.blur();
     };
 
     const showInlineFloatingControls = showMobileControls && !keyboardVisible;
@@ -1667,66 +1649,54 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       return 'flex-1 min-h-0 terminal-with-floating-controls';
     })();
 
-    // Only show inline terminal when the attached session belongs to the
-    // currently selected workspace (or no workspace tracking is available).
-    const attachedMatchesSelected = !backendAttachedWorkspaceId
-      || !selectedRef
-      || selectedRef.workspaceId === backendAttachedWorkspaceId;
-    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
-    const switchingAgentSession = !!pendingAgentAttachTarget
-      && agentAttachPending
-      && (attachedAgentSessionId !== pendingAgentAttachTarget.agentSessionId
-        || backendAttachedWorkspaceId !== pendingAgentAttachTarget.workspaceId);
-    const inlineTerminalOutlet = switchingAgentSession ? (
-      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
-        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
-      </div>
-    ) : (terminalMode === 'attached' && attachedMatchesSelected) ? (
-      <div className="flex-1 min-h-0 flex flex-col">
-        <AttachedTerminalPaneWeb
-          key={attachedTerminalInstanceKey}
-          rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
-          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
-          sessionName={attachedSessionName}
-          processTitle={attachedSessionMeta?.processTitle ?? null}
-          terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
-          lastAlertLabel={attachedSessionMeta?.lastAlertKind
-            ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
-            : null}
-          showConnectedLabel={true}
-          showMobileControls={showMobileControls}
-          inputMode={inputMode}
-          keyboardVisible={keyboardVisible}
-          onToggleInputMode={toggleInlineInputMode}
-          inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
-            inputMode
-              ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] font-medium'
-              : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
-          }`}
-          onDetach={() => multi.detachSession(inlineAttachedRef)}
-          detachButtonClassName="px-2 py-1 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
-          terminalContainerClassName={inlineTerminalContainerClass}
-          terminalRef={terminalRef}
-          onData={handleInlineKeyboardData}
-          setWriteCallback={setWriteCallback}
-          onResize={resizePty}
-          onActivity={handleTerminalActivity}
-          readOnly={isViewOnlySession}
-          allowTapFocus={inputMode || !showMobileControls}
-          allowTouchScroll={!inputMode}
-          onSendData={handleInlineSendData}
-          onFocusTerminal={handleInlineFocusTerminal}
-          modifiers={modifiers}
-          onModifiersChange={setModifiers}
-          showFloatingControls={showInlineFloatingControls}
-        />
-        <NativeAgentSurfaceConnected backendKey={attachedBackendKey ?? activeBackendKey ?? undefined} />
-      </div>
-    ) : agentAttachPending ? (
-      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
-        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
-      </div>
-    ) : null;
+    const paneBackendKey = attachedBackendKey ?? activeBackendKey ?? selectedBackendKey ?? null;
+    const paneBackend = paneBackendKey ? (multi.getBackend(paneBackendKey) as RemoteSessionPtyBackend | null) : null;
+    const attachedPaneEntries = Object.values(attachedBackendState?.attachedPanes ?? {})
+      .filter((pane) => !pane.workspaceId || !selectedRef || pane.workspaceId === selectedRef.workspaceId);
+    const terminalPanels = attachedPaneEntries.map((pane) => {
+      const shortSessionName = (pane.sessionName ?? pane.sessionId).split(':').pop() ?? pane.sessionId;
+      const title = pane.agentSessionId
+        ? `Agent ${shortSessionName.slice(0, 12)}`
+        : shortSessionName.slice(0, 18);
+      return {
+        id: pane.paneId,
+        title,
+        render: () => (
+          <PaneTerminalPanel
+            pane={pane}
+            backend={paneBackend}
+            backendKey={paneBackendKey}
+            showMobileControls={showMobileControls}
+            inputMode={inputMode}
+            keyboardVisible={keyboardVisible}
+            onToggleInputMode={toggleInlineInputMode}
+            inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
+              inputMode
+                ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] font-medium'
+                : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
+            }`}
+            terminalContainerClassName={inlineTerminalContainerClass}
+            onActivity={handleTerminalActivity}
+            allowTapFocus={inputMode || !showMobileControls}
+            allowTouchScroll={!inputMode}
+            modifiers={modifiers}
+            onModifiersChange={setModifiers}
+            showFloatingControls={showInlineFloatingControls}
+          />
+        ),
+      };
+    });
+    if (agentAttachPending && pendingAgentAttachTarget && !terminalPanels.some((panel) => panel.id === `pending:${pendingAgentAttachTarget.agentSessionId}`)) {
+      terminalPanels.push({
+        id: `pending:${pendingAgentAttachTarget.agentSessionId}`,
+        title: 'Attaching…',
+        render: () => (
+          <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
+            <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+          </div>
+        ),
+      });
+    }
     const handleSelectWorkspaceFromDetail = async (workspaceSelectionKey: string) => {
       if (workspaceSelectionKey === selectedWorkspaceForDetail?.selectionKey) return;
       if (terminalMode === 'attached' && attachedBackendKey) {
@@ -1811,12 +1781,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               void handleBackToBoard();
             }}
           >
-            {inlineTerminalOutlet ? (
+            {terminalPanels.length > 0 ? (
               <DockviewWorkspaceShell
                 backendKey={selectedWorkspaceForDetail.backendKey}
                 workspaceId={selectedWorkspaceForDetail.id}
-                showTerminal={true}
-                renderTerminal={() => inlineTerminalOutlet}
+                panels={terminalPanels}
               />
             ) : null}
           </WorkspaceDetailPage>

@@ -7,28 +7,30 @@ import type { HostUIDialogResponse } from '../lib/tmux-lite/agents/host-ui-bridg
 
 interface NativeAgentSurfaceConnectedProps {
   backendKey?: string | null;
+  workspaceId?: string | null;
+  agentSessionId?: string | null;
 }
 
-export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceConnectedProps = {}) {
+export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSessionId }: NativeAgentSurfaceConnectedProps = {}) {
   const { engine, state: multiState } = useGitSpace();
   const resolvedBackendKey = backendKey ?? multiState.activeBackendKey;
 
   // Read agent session context and host UI state from multiState (reactive).
   const activeBackend = resolvedBackendKey ? multiState.byBackend[resolvedBackendKey] : null;
-  const agentSessionId = activeBackend?.attachedAgentSessionId ?? null;
-  const workspaceId = activeBackend?.attachedWorkspaceId ?? null;
-  const agentAttached = !!(agentSessionId && workspaceId);
+  const resolvedAgentSessionId = agentSessionId ?? activeBackend?.attachedAgentSessionId ?? null;
+  const resolvedWorkspaceId = workspaceId ?? activeBackend?.attachedWorkspaceId ?? null;
+  const agentAttached = !!(resolvedAgentSessionId && resolvedWorkspaceId);
   const pendingDialog = activeBackend?.pendingDialogRequest ?? null;
   const workingMessage = activeBackend?.agentWorkingMessage;
   const attachedAgentState = useMemo(
-    () => (agentSessionId ? activeBackend?.snapshot?.agentSessionsById[agentSessionId] ?? null : null),
-    [activeBackend?.snapshot, agentSessionId],
+    () => (resolvedAgentSessionId ? activeBackend?.snapshot?.agentSessionsById[resolvedAgentSessionId] ?? null : null),
+    [activeBackend?.snapshot, resolvedAgentSessionId],
   );
   const agentBusy = attachedAgentState?.state === 'running' || attachedAgentState?.state === 'retrying';
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = useCallback(async (text: string, rawImages: Array<{ dataUrl: string; name: string }>, rawFiles: Array<{ name: string; dataUrl: string }>) => {
-    if (!resolvedBackendKey || !agentSessionId || !workspaceId || isSubmitting) return;
+    if (!resolvedBackendKey || !resolvedAgentSessionId || !resolvedWorkspaceId || isSubmitting) return;
     setIsSubmitting(true);
     try {
       const images = rawImages
@@ -51,7 +53,7 @@ export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceCo
           const mimeType = meta.replace('data:', '').replace(';base64', '');
           const data = file.dataUrl.slice(commaIdx + 1);
           const result = await engine.stageUpload(
-            { backendKey: resolvedBackendKey, workspaceId },
+            { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId },
             file.name,
             data,
             mimeType,
@@ -85,20 +87,20 @@ export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceCo
       }
 
       await engine.promptAgentSession(
-        { backendKey: resolvedBackendKey, workspaceId, agentSessionId },
+        { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
         augmentedText,
         images.length > 0 ? images : undefined,
       );
     } finally {
       setIsSubmitting(false);
     }
-  }, [engine, resolvedBackendKey, workspaceId, agentSessionId, isSubmitting]);
+  }, [engine, resolvedBackendKey, resolvedWorkspaceId, resolvedAgentSessionId, isSubmitting]);
 
   const handleStop = useCallback(() => {
-    if (!resolvedBackendKey || !agentSessionId || !workspaceId) return;
+    if (!resolvedBackendKey || !resolvedAgentSessionId || !resolvedWorkspaceId) return;
     // stopAgentTurn cancels the current LLM turn; the session stays alive.
-    void engine.stopAgentTurn({ backendKey: resolvedBackendKey, workspaceId, agentSessionId });
-  }, [engine, resolvedBackendKey, workspaceId, agentSessionId]);
+    void engine.stopAgentTurn({ backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId });
+  }, [engine, resolvedBackendKey, resolvedWorkspaceId, resolvedAgentSessionId]);
 
   const handleDialogResponse = useCallback((response: HostUIDialogResponse) => {
     if (!resolvedBackendKey) return;
@@ -113,22 +115,22 @@ export function NativeAgentSurfaceConnected({ backendKey }: NativeAgentSurfaceCo
   }, [engine, resolvedBackendKey]);
 
   const handleRequestCommands = useCallback(async () => {
-    if (!resolvedBackendKey || !workspaceId) return [];
+    if (!resolvedBackendKey || !resolvedWorkspaceId) return [];
     try {
-      return await engine.listAgentCommands({ backendKey: resolvedBackendKey, workspaceId });
+      return await engine.listAgentCommands({ backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId });
     } catch {
       return [];
     }
-  }, [engine, resolvedBackendKey, workspaceId]);
+  }, [engine, resolvedBackendKey, resolvedWorkspaceId]);
 
   const handleRequestFileSuggestions = useCallback(async (prefix: string) => {
-    if (!resolvedBackendKey || !workspaceId) return [];
+    if (!resolvedBackendKey || !resolvedWorkspaceId) return [];
     try {
-      return await engine.getFileSuggestions({ backendKey: resolvedBackendKey, workspaceId }, prefix, 20);
+      return await engine.getFileSuggestions({ backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId }, prefix, 20);
     } catch {
       return [];
     }
-  }, [engine, resolvedBackendKey, workspaceId]);
+  }, [engine, resolvedBackendKey, resolvedWorkspaceId]);
 
   return (
     <NativeAgentSurface

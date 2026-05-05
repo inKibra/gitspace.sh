@@ -1,4 +1,4 @@
-import type { AttachSessionParams } from '../../session/backend.js';
+import type { AttachPaneParams, AttachSessionParams } from '../../session/backend.js';
 import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js';
 import type { AppClientContext } from './context.js';
 import { agentSessionFailure, agentSessionSuccess, describeAppClientError, type AgentSessionCommandResult } from './errors.js';
@@ -16,7 +16,12 @@ export function createAppSessionsClient(context: AppClientContext): AppSessionsC
         return agentSessionFailure({ code: 'backend-unavailable', message: `Backend ${ref.backendKey} is not available`, workspaceId: ref.workspaceId, backendKey: ref.backendKey });
       }
       try {
-        await backend.attachSession(params);
+        const paneId = (params as AttachPaneParams).paneId;
+        if (paneId && backend.attachPane) {
+          await backend.attachPane({ ...params, paneId });
+        } else {
+          await backend.attachSession(params);
+        }
         return agentSessionSuccess(ref);
       } catch (error) {
         return agentSessionFailure({ code: 'attach-failed', message: describeAppClientError(error, 'Failed to attach session'), workspaceId: ref.workspaceId, backendKey: ref.backendKey, cause: error });

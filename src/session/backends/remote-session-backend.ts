@@ -329,7 +329,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private attachedAgentSessionId: string | null = null;
   private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
   private readonly panes = new Map<string, PaneLifecycle>();
-  private nextStreamId = DEFAULT_PANE_STREAM_ID;
+  private nextStreamId = DEFAULT_PANE_STREAM_ID + 1;
   private listenersAttached = false;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -850,7 +850,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected agent restore response');
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
+  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string } = {}): Promise<void> {
     await this.waitForInitialSnapshot();
     // attachSession() handles detaching from the prior tmux-lite session via
     // its own fire-and-forget detach path; no need for an extra round-trip here.
@@ -859,12 +859,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    this.pendingAttachedAgentSession = {
-      agentSessionId,
-      sessionId: response.session.id,
-    };
+    const paneId = options.paneId ?? DEFAULT_PANE_ID;
+    if (paneId === DEFAULT_PANE_ID) {
+      this.pendingAttachedAgentSession = {
+        agentSessionId,
+        sessionId: response.session.id,
+      };
+    }
     try {
-      await this.attachPane({ paneId: DEFAULT_PANE_ID, sessionId: response.session.id, workspaceId, agentSessionId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
+      await this.attachPane({ paneId, sessionId: response.session.id, workspaceId, agentSessionId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
     } catch (error) {
       this.pendingAttachedAgentSession = null;
       throw error;
@@ -1970,7 +1973,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.isConnected = false;
     this.attachLifecycle.reset();
     this.panes.clear();
-    this.nextStreamId = DEFAULT_PANE_STREAM_ID;
+    this.nextStreamId = DEFAULT_PANE_STREAM_ID + 1;
     this.rejectPendingDetachTransition(new Error('Remote session disconnected'));
     this.handshakeState = null;
     this.sessionKeys = null;

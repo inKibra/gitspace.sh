@@ -13,7 +13,7 @@ export interface AgentSessionOpenCallbacks {
   beforeOpen?: () => void | Promise<void>;
   onOpenSuccess?: (value: AppClientAgentSessionOpenValue) => void | Promise<void>;
   onOpenError?: (error: AgentSessionCommandError) => void | Promise<void>;
-  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number };
+  attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string };
 }
 
 export interface UseAgentSessionActionsOptions extends AgentSessionOpenCallbacks {
