@@ -89,6 +89,26 @@ function dispatchBackendEvent(
       return { type: 'SET_INBOX', backendKey, items: evt.items, unreadCount: evt.unreadCount };
     case 'notification_config':
       return { type: 'SET_NOTIFICATION_CONFIG', backendKey, config: evt.config };
+    case 'pane_attached':
+      return {
+        type: 'ADD_PANE',
+        backendKey,
+        pane: {
+          paneId: evt.paneId,
+          streamId: evt.streamId,
+          sessionId: evt.sessionId,
+          sessionName: evt.sessionName ?? null,
+          meta: { sessionName: evt.sessionName ?? null },
+          workspaceId: evt.workspaceId ?? null,
+          agentSessionId: evt.agentSessionId ?? null,
+          viewOnly: evt.viewOnly ?? false,
+        },
+      };
+    case 'pane_meta':
+      return { type: 'UPDATE_PANE_META', backendKey, paneId: evt.paneId, meta: evt.meta };
+    case 'pane_detached':
+    case 'pane_exited':
+      return { type: 'REMOVE_PANE', backendKey, paneId: evt.paneId };
     case 'attached':
       return {
         type: 'SET_ATTACHED_SESSION',

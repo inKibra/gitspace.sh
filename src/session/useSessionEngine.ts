@@ -78,6 +78,31 @@ function dispatchBackendEvent(
     case 'notification_config':
       dispatch({ type: 'SET_NOTIFICATION_CONFIG', backendKey, config: event.config });
       break;
+    case 'pane_attached':
+      dispatch({
+        type: 'ADD_PANE',
+        backendKey,
+        pane: {
+          paneId: event.paneId,
+          streamId: event.streamId,
+          sessionId: event.sessionId,
+          sessionName: event.sessionName ?? null,
+          meta: { sessionName: event.sessionName ?? null },
+          workspaceId: event.workspaceId ?? null,
+          agentSessionId: event.agentSessionId ?? null,
+          viewOnly: event.viewOnly ?? false,
+        },
+      });
+      break;
+    case 'pane_meta':
+      dispatch({ type: 'UPDATE_PANE_META', backendKey, paneId: event.paneId, meta: event.meta });
+      break;
+    case 'pane_detached':
+      dispatch({ type: 'REMOVE_PANE', backendKey, paneId: event.paneId });
+      break;
+    case 'pane_exited':
+      dispatch({ type: 'REMOVE_PANE', backendKey, paneId: event.paneId });
+      break;
     case 'attached':
       dispatch({
         type: 'SET_ATTACHED_SESSION',

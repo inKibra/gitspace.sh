@@ -26,6 +26,7 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
     attachedWorkspaceId: null,
     attachedAgentSessionId: null,
     pendingAgentAttach: false,
+    attachedPanes: {},
     scriptState: null,
     events: [],
     liveEventIds: [],
@@ -294,6 +295,23 @@ export function sessionEngineReducer(
         : preserveContextOnExit
           ? backend.attachedWorkspaceId
           : null;
+      const nextAttachedPanes = attached
+        ? {
+            ...backend.attachedPanes,
+            default: {
+              paneId: 'default',
+              streamId: 2,
+              sessionId: action.sessionId!,
+              sessionName: nextSessionName,
+              meta: nextMeta,
+              workspaceId: nextWorkspaceId,
+              agentSessionId: action.agentSessionId ?? null,
+              viewOnly: false,
+            },
+          }
+        : preserveContextOnExit
+          ? backend.attachedPanes
+          : {};
       return {
         ...state,
         backends: {
@@ -306,6 +324,7 @@ export function sessionEngineReducer(
             attachedSessionMeta: nextMeta,
             attachedWorkspaceId: nextWorkspaceId,
             attachedAgentSessionId: attached ? (action.agentSessionId ?? null) : null,
+            attachedPanes: nextAttachedPanes,
             pendingDialogRequest: attached ? backend.pendingDialogRequest : null,
             agentWorkingMessage: attached ? backend.agentWorkingMessage : undefined,
             pendingAgentAttach: false,
@@ -313,6 +332,74 @@ export function sessionEngineReducer(
         },
       };
     }
+
+    case 'ADD_PANE': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            mode: 'attached',
+            attachedPanes: { ...backend.attachedPanes, [action.pane.paneId]: action.pane },
+            pendingAgentAttach: false,
+          },
+        },
+      };
+    }
+
+    case 'REMOVE_PANE': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      const attachedPanes = { ...backend.attachedPanes };
+      delete attachedPanes[action.paneId];
+      const hasPanes = Object.keys(attachedPanes).length > 0;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            attachedPanes,
+            mode: hasPanes ? 'attached' : 'browsing',
+          },
+        },
+      };
+    }
+
+    case 'UPDATE_PANE_META': {
+      const backend = state.backends[action.backendKey];
+      const pane = backend?.attachedPanes[action.paneId];
+      if (!backend || !pane) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            attachedPanes: {
+              ...backend.attachedPanes,
+              [action.paneId]: { ...pane, meta: action.meta },
+            },
+          },
+        },
+      };
+    }
+
+    case 'CLEAR_ALL_PANES': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: { ...backend, attachedPanes: {}, mode: 'browsing' },
+        },
+      };
+    }
+
 
     case 'SET_ATTACHED_SESSION_META': {
       const backend = state.backends[action.backendKey];
@@ -325,6 +412,9 @@ export function sessionEngineReducer(
             ...backend,
             attachedSessionMeta: action.meta,
             attachedSessionName: action.meta?.sessionName ?? backend.attachedSessionName,
+            attachedPanes: backend.attachedPanes.default
+              ? { ...backend.attachedPanes, default: { ...backend.attachedPanes.default, meta: action.meta } }
+              : backend.attachedPanes,
           },
         },
       };

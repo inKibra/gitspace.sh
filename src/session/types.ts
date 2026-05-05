@@ -30,6 +30,18 @@ export interface ScriptRuntimeState {
   workspaceId?: string;
 }
 
+export interface AttachedPaneState {
+  paneId: string;
+  streamId: number;
+  sessionId: string;
+  sessionName: string | null;
+  meta: AttachedSessionMeta | null;
+  workspaceId: string | null;
+  agentSessionId: string | null;
+  viewOnly: boolean;
+}
+
+
 export interface BackendSessionState {
   descriptor: BackendDescriptor;
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -56,6 +68,7 @@ export interface BackendSessionState {
   attachedAgentSessionId: string | null;
   /** Set when an agent session open/attach is in progress. Cleared on attach or error. */
   pendingAgentAttach: boolean;
+  attachedPanes: Record<string, AttachedPaneState>;
 
   scriptState: ScriptRuntimeState | null;
 
@@ -114,6 +127,14 @@ export type SessionEngineAction =
       agentSessionId?: string | null;
       preserveContextOnExit?: boolean;
     }
+  | {
+      type: 'ADD_PANE';
+      backendKey: BackendKey;
+      pane: AttachedPaneState;
+    }
+  | { type: 'REMOVE_PANE'; backendKey: BackendKey; paneId: string }
+  | { type: 'UPDATE_PANE_META'; backendKey: BackendKey; paneId: string; meta: AttachedSessionMeta | null }
+  | { type: 'CLEAR_ALL_PANES'; backendKey: BackendKey }
   | {
       type: 'SET_ATTACHED_SESSION_META';
       backendKey: BackendKey;
