@@ -9,6 +9,7 @@ import {
   type ModifierState,
 } from "./components/TerminalControls.web";
 import { AttachedTerminalPaneWeb } from './components/AttachedTerminalPane.web.js';
+import { DockviewWorkspaceShell } from './components/DockviewWorkspaceShell.web.js';
 import { IdentityGate } from "./components/IdentityGate.web";
 import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
@@ -1754,64 +1755,74 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
     // ── Workspace detail page (full-screen, replaces board) ────────────────
     if (selectedWorkspaceForDetail) {
+      const workspaceDetailOutlet = (
+        <WorkspaceDetailPage
+          workspace={selectedWorkspaceForDetail}
+          sessions={detailSessions}
+          replays={detailReplays}
+          agentSessions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessions ?? []) : []}
+          agentSessionCount={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0) : 0}
+          pendingPermissions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0) : 0}
+          attachedSessionId={backendAttachedSessionId}
+          attachedAgentSessionId={attachedBackendState?.attachedAgentSessionId ?? null}
+          pendingAgentAttach={agentAttachPending}
+          allWorkspaces={allWorkspaceEntries}
+          workspaceStatusById={workspaceStatusById}
+          runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}
+          onSelectWorkspace={handleSelectWorkspaceFromDetail}
+          onOpenAgentSession={handleOpenAgentSession}
+          onCreateAgentSession={handleCreateAgentSession}
+          onKillAgentSession={handleKillAgentSession}
+          onStopAgentTurn={handleStopAgentTurn}
+          onCloseAgentSession={handleCloseAgentSession}
+          onArchiveAgentSession={handleArchiveAgentSession}
+          onRestoreAgentSession={handleRestoreAgentSession}
+          onAttachSession={handleAttachSession}
+          onOpenReplay={handleOpenReplay}
+          onOpenReplayHistory={handleOpenReplayHistory}
+          onStartProcess={(params) => processActions.handleStartProcess(params)}
+          onStartProcessAttach={(params) => processActions.handleStartProcessAttach(params)}
+          onStopProcess={(params) => processActions.handleStopProcess(params)}
+          onEditProcesses={handleEditProcesses}
+          onManageBundleConfig={handleManageBundleConfig}
+          onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
+          onOpenReview={handleOpenReview}
+          onRequestStatusChange={() => {
+            showWorkspaceStatusSelect({
+              showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
+              onSelectPhase: (phase) => {
+                workspaceBoardState.setPhase(selectedWorkspaceForDetail.selectionKey, phase);
+                flow.close();
+              },
+            });
+          }}
+          onOpenEvents={(workspaceId) => {
+            const w = filteredWorkspaces.find((x) => x.id === workspaceId);
+            if (w) {
+              setEventsWorkspacePath(w.path);
+              setEventsWorkspaceLabel(w.name);
+              setShowEvents(true);
+              void multi.requestEvents(getWorkspaceRef(workspaceId, w.backendKey as BackendKey));
+            }
+          }}
+          onDeleteSession={handleDeleteSession}
+          onClose={() => {
+            void handleBackToBoard();
+          }}
+        >
+          {inlineTerminalOutlet}
+        </WorkspaceDetailPage>
+      );
+
       return (
         <>
-          <WorkspaceDetailPage
-            workspace={selectedWorkspaceForDetail}
-            sessions={detailSessions}
-            replays={detailReplays}
-            agentSessions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessions ?? []) : []}
-            agentSessionCount={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0) : 0}
-            pendingPermissions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0) : 0}
-            attachedSessionId={backendAttachedSessionId}
-            attachedAgentSessionId={attachedBackendState?.attachedAgentSessionId ?? null}
-            pendingAgentAttach={agentAttachPending}
-            allWorkspaces={allWorkspaceEntries}
-            workspaceStatusById={workspaceStatusById}
-            runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}
-            onSelectWorkspace={handleSelectWorkspaceFromDetail}
-            onOpenAgentSession={handleOpenAgentSession}
-            onCreateAgentSession={handleCreateAgentSession}
-            onKillAgentSession={handleKillAgentSession}
-            onStopAgentTurn={handleStopAgentTurn}
-            onCloseAgentSession={handleCloseAgentSession}
-            onArchiveAgentSession={handleArchiveAgentSession}
-            onRestoreAgentSession={handleRestoreAgentSession}
-             onAttachSession={handleAttachSession}
-             onOpenReplay={handleOpenReplay}
-             onOpenReplayHistory={handleOpenReplayHistory}
-             onStartProcess={(params) => processActions.handleStartProcess(params)}
-            onStartProcessAttach={(params) => processActions.handleStartProcessAttach(params)}
-            onStopProcess={(params) => processActions.handleStopProcess(params)}
-            onEditProcesses={handleEditProcesses}
-            onManageBundleConfig={handleManageBundleConfig}
-            onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
-            onOpenReview={handleOpenReview}
-            onRequestStatusChange={() => {
-              showWorkspaceStatusSelect({
-                showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
-                onSelectPhase: (phase) => {
-                  workspaceBoardState.setPhase(selectedWorkspaceForDetail.selectionKey, phase);
-                  flow.close();
-                },
-              });
-            }}
-            onOpenEvents={(workspaceId) => {
-              const w = filteredWorkspaces.find((x) => x.id === workspaceId);
-              if (w) {
-                setEventsWorkspacePath(w.path);
-                setEventsWorkspaceLabel(w.name);
-                setShowEvents(true);
-                void multi.requestEvents(getWorkspaceRef(workspaceId, w.backendKey as BackendKey));
-              }
-            }}
-            onDeleteSession={handleDeleteSession}
-            onClose={() => {
-              void handleBackToBoard();
-            }}
-          >
-            {inlineTerminalOutlet}
-          </WorkspaceDetailPage>
+          <DockviewWorkspaceShell
+            backendKey={selectedWorkspaceForDetail.backendKey}
+            workspaceId={selectedWorkspaceForDetail.id}
+            showTerminal={Boolean(inlineTerminalOutlet)}
+            renderWorkspace={() => workspaceDetailOutlet}
+            renderTerminal={() => inlineTerminalOutlet}
+          />
           {overlays}
         </>
       );

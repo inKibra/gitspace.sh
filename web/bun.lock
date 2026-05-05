@@ -9,6 +9,8 @@
         "@noble/curves": "^2.0.1",
         "@noble/hashes": "^2.0.1",
         "@pierre/diffs": "^1.0.11",
+        "dockview": "^6.0.1",
+        "dockview-react": "^6.0.1",
         "ghostty-web": "^0.4.0",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",
@@ -368,6 +370,12 @@
     "devlop": ["devlop@1.1.0", "", { "dependencies": { "dequal": "^2.0.0" } }, "sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA=="],
 
     "diff": ["diff@8.0.3", "", {}, "sha512-qejHi7bcSD4hQAZE0tNAawRK1ZtafHDmMTMkrrIGgSLl7hTnQHmKCeB45xAcbfTqK2zowkM3j3bHt/4b/ARbYQ=="],
+
+    "dockview": ["dockview@6.0.1", "", { "dependencies": { "dockview-core": "^6.0.1" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-4PMPq4W+E05VV8I+857m94H1P3I343GeowQIaC8Zk2NhFAEIx5Jxsb0se0ylRd5kASjJf3BcmAqdcF6xlXR0RQ=="],
+
+    "dockview-core": ["dockview-core@6.0.1", "", {}, "sha512-Mreb+kTjSrfN9NtVU3LddpA76WXwviaFunAsPCzg04uwZIpjEx7OC607Qfrqg26C6S1r28pxxifkgUWGIs8r6w=="],
+
+    "dockview-react": ["dockview-react@6.0.1", "", { "dependencies": { "dockview": "^6.0.1" } }, "sha512-unAUG5TgQ+Fq9oYCQ7WMr6kqTdBJDpAYi9EpTQIYQ8rwVVaY/Id7YniQ7PAP8GUAauLsoxi2nGxcflxmWfHgEw=="],
 
     "electron-to-chromium": ["electron-to-chromium@1.5.267", "", {}, "sha512-0Drusm6MVRXSOJpGbaSVgcQsuB4hEkMpHXaVstcPmhu5LIedxs1xNK/nIxmQIU/RPC0+1/o0AVZfBTkTNJOdUw=="],
 

@@ -26,6 +26,8 @@
         "commander": "^12.1.0",
         "conf": "^12.0.0",
         "diff": "^8.0.4",
+        "dockview": "^6.0.1",
+        "dockview-react": "^6.0.1",
         "ghostty-opentui": "^1.3.13",
         "hono": "^4.6.0",
         "open": "^11.0.0",
@@ -727,6 +729,12 @@
     "diff": ["diff@8.0.4", "", {}, "sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw=="],
 
     "dingbat-to-unicode": ["dingbat-to-unicode@1.0.1", "", {}, "sha512-98l0sW87ZT58pU4i61wa2OHwxbiYSbuxsCBozaVnYX2iCnr3bLM3fIes1/ej7h1YdOKuKt/MLs706TVnALA65w=="],
+
+    "dockview": ["dockview@6.0.1", "", { "dependencies": { "dockview-core": "^6.0.1" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-4PMPq4W+E05VV8I+857m94H1P3I343GeowQIaC8Zk2NhFAEIx5Jxsb0se0ylRd5kASjJf3BcmAqdcF6xlXR0RQ=="],
+
+    "dockview-core": ["dockview-core@6.0.1", "", {}, "sha512-Mreb+kTjSrfN9NtVU3LddpA76WXwviaFunAsPCzg04uwZIpjEx7OC607Qfrqg26C6S1r28pxxifkgUWGIs8r6w=="],
+
+    "dockview-react": ["dockview-react@6.0.1", "", { "dependencies": { "dockview": "^6.0.1" } }, "sha512-unAUG5TgQ+Fq9oYCQ7WMr6kqTdBJDpAYi9EpTQIYQ8rwVVaY/Id7YniQ7PAP8GUAauLsoxi2nGxcflxmWfHgEw=="],
 
     "doctrine": ["doctrine@3.0.0", "", { "dependencies": { "esutils": "^2.0.2" } }, "sha512-yS+Q5i3hBf7GBkd4KG8a7eBNNWNGLTaEwwYWUijIYM7zrlYDM0BFXHjjPWlWZ1Rg7UaddZeIDmi9jF3HmqiQ2w=="],
 
