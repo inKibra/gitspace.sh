@@ -91,7 +91,7 @@ export function PaneTerminalPanel({
   }, [onFocus]);
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col">
+    <div className="h-full min-h-0 flex flex-col overflow-hidden">
       <AttachedTerminalPaneWeb
         rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
         headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
@@ -125,11 +125,13 @@ export function PaneTerminalPanel({
         showFloatingControls={showFloatingControls}
       />
       {pane.agentSessionId && pane.workspaceId ? (
-        <NativeAgentSurfaceConnected
-          backendKey={backendKey}
-          workspaceId={pane.workspaceId}
-          agentSessionId={pane.agentSessionId}
-        />
+        <div className="flex-shrink-0">
+          <NativeAgentSurfaceConnected
+            backendKey={backendKey}
+            workspaceId={pane.workspaceId}
+            agentSessionId={pane.agentSessionId}
+          />
+        </div>
       ) : null}
     </div>
   );

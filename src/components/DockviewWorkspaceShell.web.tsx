@@ -15,7 +15,7 @@ type PanelParams = {
 
 function DockPanel(props: IDockviewPanelProps<PanelParams>) {
   const { render } = props.params;
-  return <div className="h-full min-h-0 bg-[var(--gs-bg)] overflow-hidden">{render()}</div>;
+  return <div className="h-full min-h-0 bg-[var(--gs-bg)] overflow-hidden flex flex-col">{render()}</div>;
 }
 
 export interface DockviewWorkspaceShellProps {
