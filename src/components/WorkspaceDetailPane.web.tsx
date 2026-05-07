@@ -9,13 +9,38 @@
  * Main: terminal outlet (children) or empty state
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
 import { useTheme, THEMES } from '../lib/theme.web.js';
 
 /* ─── Sidebar helpers ─────────────────────────────────────────────────────── */
+
+const SIDEBAR_WIDTH_STORAGE_KEY = 'gssh:workspace-detail-sidebar-width';
+const SIDEBAR_CLOSED_STORAGE_KEY = 'gssh:workspace-detail-sidebar-closed';
+const DEFAULT_SIDEBAR_WIDTH = 240;
+const MIN_SIDEBAR_WIDTH = 180;
+const MAX_SIDEBAR_WIDTH = 420;
+
+function readStoredSidebarWidth(): number {
+  if (typeof window === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
+  try {
+    const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+    return Number.isFinite(value) ? Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, value)) : DEFAULT_SIDEBAR_WIDTH;
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH;
+  }
+}
+
+function readStoredSidebarClosed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(SIDEBAR_CLOSED_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 function SidebarSection({ title, extra, children }: { title: string; extra?: ReactNode; children: ReactNode }) {
   return (
@@ -431,6 +456,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
   } = props;
 
   const [showMobileSidebar, setShowMobileSidebar] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth);
+  const [sidebarClosed, setSidebarClosed] = useState(readStoredSidebarClosed);
 
   const detailModel = useWorkspaceDetailModel({
     workspace,
@@ -471,6 +498,39 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     actions: detailActions,
   } = detailModel;
   const pullRequest = workspace.pullRequest;
+
+  const handleSidebarResizeStart = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const initialClientX = event.clientX;
+    const initialWidth = sidebarWidth;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - initialClientX;
+      const next = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, initialWidth + delta));
+      setSidebarWidth(next);
+    };
+
+    const handleUp = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+    } catch { /* ignore unavailable storage */ }
+  }, [sidebarWidth]);
+
+  const setDesktopSidebarClosed = useCallback((closed: boolean) => {
+    setSidebarClosed(closed);
+    try {
+      window.localStorage.setItem(SIDEBAR_CLOSED_STORAGE_KEY, closed ? '1' : '0');
+    } catch { /* ignore unavailable storage */ }
+  }, []);
 
   return (
     <div className="h-full flex flex-col bg-[var(--gs-bg)] overflow-hidden">
@@ -555,32 +615,66 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
       {/* ── Sidebar + Main ── */}
       <div className="flex-1 flex min-h-0 relative">
         {/* Desktop sidebar (≥640px) */}
-        <div className="hidden sm:flex w-[240px] flex-shrink-0 border-r border-[var(--gs-border-muted)] bg-[var(--gs-sidebar-bg)] overflow-y-auto px-2 py-3 flex-col">
-          <SidebarContent
-            detailModel={detailModel}
-            workspace={workspace}
-            workspaceSessions={workspaceSessions}
-            attachedSessionId={attachedSessionId}
-            attachedAgentSessionId={attachedAgentSessionId}
-            onAttachSession={onAttachSession}
-            onStopAgentTurn={onStopAgentTurn}
-            onCloseAgentSession={onCloseAgentSession}
-            onArchiveAgentSession={onArchiveAgentSession}
-            onRestoreAgentSession={onRestoreAgentSession}
-            onCreateAgentSession={onCreateAgentSession}
-            onStopProcess={onStopProcess}
-              onDeleteSession={onDeleteSession}
-              onDeleteWorkspace={onDeleteWorkspace}
-            onOpenGitHubPullRequest={onOpenGitHubPullRequest}
-            onOpenReview={onOpenReview}
-            onRequestStatusChange={onRequestStatusChange}
-            onOpenNotes={onOpenNotes}
-            onOpenEvents={onOpenEvents}
-            agentSessionCount={agentSessionCount}
-            pendingPermissions={pendingPermissions}
-            pullRequest={pullRequest}
-          />
-        </div>
+        {!sidebarClosed ? (
+          <>
+            <div
+              className="hidden sm:flex flex-shrink-0 bg-[var(--gs-sidebar-bg)] overflow-y-auto px-2 py-3 flex-col"
+              style={{ width: sidebarWidth }}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)] font-medium">Workspace Panel</span>
+                <button
+                  type="button"
+                  onClick={() => setDesktopSidebarClosed(true)}
+                  className="rounded px-1.5 py-0.5 text-xs text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
+                  title="Close workspace panel"
+                >
+                  ×
+                </button>
+              </div>
+              <SidebarContent
+                detailModel={detailModel}
+                workspace={workspace}
+                workspaceSessions={workspaceSessions}
+                attachedSessionId={attachedSessionId}
+                attachedAgentSessionId={attachedAgentSessionId}
+                onAttachSession={onAttachSession}
+                onStopAgentTurn={onStopAgentTurn}
+                onCloseAgentSession={onCloseAgentSession}
+                onArchiveAgentSession={onArchiveAgentSession}
+                onRestoreAgentSession={onRestoreAgentSession}
+                onCreateAgentSession={onCreateAgentSession}
+                onStopProcess={onStopProcess}
+                onDeleteSession={onDeleteSession}
+                onDeleteWorkspace={onDeleteWorkspace}
+                onOpenGitHubPullRequest={onOpenGitHubPullRequest}
+                onOpenReview={onOpenReview}
+                onRequestStatusChange={onRequestStatusChange}
+                onOpenNotes={onOpenNotes}
+                onOpenEvents={onOpenEvents}
+                agentSessionCount={agentSessionCount}
+                pendingPermissions={pendingPermissions}
+                pullRequest={pullRequest}
+              />
+            </div>
+            <div
+              className="hidden sm:block w-1.5 flex-shrink-0 cursor-col-resize border-l border-r border-[var(--gs-border-muted)] bg-[var(--gs-bg)] hover:bg-[var(--gs-bg-active)]"
+              onMouseDown={handleSidebarResizeStart}
+              title="Resize workspace panel"
+            />
+          </>
+        ) : (
+          <div className="hidden sm:flex w-10 flex-shrink-0 items-start justify-center border-r border-[var(--gs-border-muted)] bg-[var(--gs-sidebar-bg)] py-3">
+            <button
+              type="button"
+              onClick={() => setDesktopSidebarClosed(false)}
+              className="rounded px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
+              title="Open workspace panel"
+            >
+              ☰
+            </button>
+          </div>
+        )}
 
         {/* Main area: terminal outlet */}
         <div className="flex-1 flex flex-col min-w-0">

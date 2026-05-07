@@ -23,6 +23,10 @@ function DockPanel(props: IDockviewPanelProps<PanelParams>) {
 function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {
   const title = props.api.title;
   const onClose = props.params.onClose;
+  const stopTabEvent = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
   return (
     <div className="flex items-center gap-2 min-w-0 max-w-full px-1">
       <span className="truncate">{title}</span>
@@ -30,12 +34,15 @@ function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {
         <button
           type="button"
           className="text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] leading-none px-1"
+          onMouseDown={stopTabEvent}
+          onPointerDown={stopTabEvent}
           onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            void onClose();
+            stopTabEvent(event);
+            props.api.close();
+            void Promise.resolve(onClose()).catch(() => undefined);
           }}
           aria-label={`Close ${title}`}
+          title={`Close ${title}`}
         >
           ×
         </button>
@@ -64,6 +71,7 @@ export function DockviewWorkspaceShell({
   onApiChange,
 }: DockviewWorkspaceShellProps) {
   const apiRef = useRef<DockviewReadyEvent['api'] | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const disposablesRef = useRef<Array<{ dispose: () => void }>>([]);
   const restoredLayoutRef = useRef(false);
   const restoringLayoutRef = useRef(false);
@@ -122,6 +130,25 @@ export function DockviewWorkspaceShell({
     }
   }, []);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const relayout = () => {
+      const api = apiRef.current;
+      if (!api) return;
+      const rect = container.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        api.layout(rect.width, rect.height);
+      }
+    };
+    const observer = new ResizeObserver(() => {
+      requestAnimationFrame(relayout);
+    });
+    observer.observe(container);
+    requestAnimationFrame(relayout);
+    return () => observer.disconnect();
+  }, []);
+
   const onReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api;
     onApiChangeRef.current?.(event.api);
@@ -169,7 +196,7 @@ export function DockviewWorkspaceShell({
   }, [saveLayout]);
 
   return (
-    <div data-backend-key={backendKey} data-workspace-id={workspaceId} className="h-full w-full min-h-0 dockview-theme-dark bg-[var(--gs-bg)]">
+    <div ref={containerRef} data-backend-key={backendKey} data-workspace-id={workspaceId} className="h-full w-full min-h-0 dockview-theme-dark bg-[var(--gs-bg)]">
       <DockviewReact
         className="dockview-theme-dark"
         components={{ panel: DockPanel }}
