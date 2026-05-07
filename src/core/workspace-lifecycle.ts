@@ -17,6 +17,7 @@ import {
   runWorkspaceScripts,
   rerunWorkspaceBundleScripts,
   type RunWorkspaceScriptsResult,
+  type WorkspaceScriptRunSelection,
   type ScriptPhase,
 } from '../utils/run-workspace-scripts.js';
 
@@ -44,6 +45,8 @@ export interface PrepareWorkspaceForSessionOptions {
   onOutput?: (data: Buffer) => void;
   /** Called when script phase starts. */
   onPhaseStart?: (phase: ScriptPhase) => void;
+  /** Script selection for explicit reruns. */
+  selection?: WorkspaceScriptRunSelection;
   /** Script execution policy for attach attempts. */
   scriptPolicy?: 'auto' | 'skip';
   /** Optional cancellation signal for in-flight script execution. */
@@ -153,6 +156,7 @@ export async function rerunWorkspaceScriptsForSession(
     onOutput,
     onPhaseStart,
     signal,
+    selection = 'setup-select',
   } = options;
 
   return rerunWorkspaceBundleScripts({
@@ -164,6 +168,7 @@ export async function rerunWorkspaceScriptsForSession(
     onOutput,
     onPhaseStart,
     signal,
+    selection,
   });
 }
 

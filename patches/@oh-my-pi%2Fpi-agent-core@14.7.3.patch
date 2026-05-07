@@ -1,0 +1,31 @@
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -589,6 +589,28 @@
+ 	popLastFollowUp(): AgentMessage | undefined {
+ 		return this.#followUpQueue.pop();
+ 	}
++
++	/**
++	 * Remove and return a steering message by queue index.
++	 */
++	removeSteer(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#steeringQueue.length) {
++			return undefined;
++		}
++		const [removed] = this.#steeringQueue.splice(index, 1);
++		return removed;
++	}
++
++	/**
++	 * Remove and return a follow-up message by queue index.
++	 */
++	removeFollowUp(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#followUpQueue.length) {
++			return undefined;
++		}
++		const [removed] = this.#followUpQueue.splice(index, 1);
++		return removed;
++	}
+ 
+ 	clearMessages() {
+ 		this.#state.messages = [];

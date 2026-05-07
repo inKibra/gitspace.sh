@@ -384,6 +384,7 @@ export type Command =
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; cols?: number; rows?: number }
   | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[]; streamingBehavior?: 'steer' | 'followUp' }
+  | { type: 'agent-queue-remove'; target: AgentWorkspaceTargetPayload; agentSessionId: string; kind: 'steering' | 'followUp'; index: number }
   | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
   | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
@@ -459,6 +460,7 @@ export type Response =
   | { type: 'machine-watch-started' }
   | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
   | { type: 'agent-bool'; ok: boolean }
+  | { type: 'agent-queued-message'; message: string | null }
   | { type: 'agent-staged'; stagedPath: string }
   | { type: 'agent-commands'; commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }

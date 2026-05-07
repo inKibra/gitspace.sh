@@ -371,6 +371,18 @@ export class PiCoordinator {
       });
   }
 
+  async removeQueuedAgentMessage(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    kind: 'steering' | 'followUp',
+    index: number,
+  ): Promise<string | null> {
+    const session = await this.ensureActiveSession(target, agentSessionId);
+    const removed = session.removeQueuedMessage?.(kind, index);
+    this.emitQueuedMessages(target, agentSessionId, session);
+    return typeof removed === 'string' ? removed : null;
+  }
+
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {
     upsertArchivedSession({
       workspaceId: target.workspaceId,

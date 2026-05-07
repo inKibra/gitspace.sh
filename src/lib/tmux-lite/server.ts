@@ -59,6 +59,7 @@ import {
   getKnownAgentSessions,
   listLiveAgentSessions,
   promptAgentSession,
+  removeQueuedAgentMessage,
   stageUploadFile,
   rebindPiTerminalSessionOwnership,
   releasePiTerminalSessionOwnership,
@@ -2653,6 +2654,17 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-queue-remove':
+            try {
+              await getAgentControlReady();
+              const message = await removeQueuedAgentMessage(cmd.target, cmd.agentSessionId, cmd.kind, cmd.index);
+              res = { type: 'agent-queued-message', message };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to remove queued agent message: ${errMsg}` };
             }
             break;
 

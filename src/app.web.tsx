@@ -209,12 +209,19 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   useEffect(() => {
     if (scriptState) {
       const isRemove = scriptState.phase === 'remove';
+      const phaseLabel = scriptState.phase === 'setup'
+        ? 'setup'
+        : scriptState.phase === 'select'
+          ? 'select'
+          : scriptState.phase === 'pre'
+            ? 'prepare'
+            : 'workspace';
       workspaceRemovalTasks.updatePhase(
         scriptState.workspaceId,
         scriptState.phase,
         scriptState.isRunning
-          ? isRemove ? 'Running cleanup scripts...' : 'Running workspace scripts...'
-          : isRemove ? 'Cleanup scripts finished' : 'Workspace scripts finished',
+          ? isRemove ? 'Running cleanup scripts...' : `Running ${phaseLabel} scripts...`
+          : isRemove ? 'Cleanup scripts finished' : `${phaseLabel[0]?.toUpperCase() ?? 'Workspace'}${phaseLabel.slice(1)} scripts finished`,
       );
       if (scriptState.error) {
         const taskId = scriptState.phase === 'remove' ? activeDeleteTaskIdRef.current : activeScriptTaskIdRef.current;
@@ -1398,7 +1405,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   // ─── Command palette ───────────────────────────────────────────────────────
   const runWorkspaceBundleScripts = useCallback(async (
     workspace: WorkspaceInfo & { selectionKey?: string },
-    options?: { announceSuccess?: boolean }
+    options?: { announceSuccess?: boolean; mode?: 'open' | 'rerun'; selection?: 'setup' | 'select' | 'setup-select' }
   ): Promise<boolean> => {
     if (!workspace.selectionKey) {
       toast.error('Workspace selection is unavailable.');
@@ -1410,20 +1417,44 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     }
     const backendKey = backendKeyFromSelectionKey(selectionKey);
     const backend = multi.getBackend(backendKey);
-    if (!backend?.rerunWorkspaceScripts) {
-      toast.error('Rerun bundle scripts is not supported for this backend.');
+    if (!backend) {
+      toast.error(options?.mode === 'rerun' ? 'This backend does not support workspace script commands.' : 'Workspace open scripts are not supported for this backend.');
+      return false;
+    }
+    const selection = options?.selection ?? 'setup-select';
+    const canRunSelectedRerun = options?.mode !== 'rerun'
+      || (selection === 'setup-select' ? Boolean(backend.rerunWorkspaceScripts) : Boolean(backend.runWorkspaceScriptSelection));
+    const canRunOpen = options?.mode === 'rerun' || Boolean(backend.runWorkspaceOpenScripts ?? backend.rerunWorkspaceScripts);
+    if (!canRunSelectedRerun || !canRunOpen) {
+      toast.error(options?.mode === 'rerun' ? 'This backend does not support the selected workspace script command.' : 'Workspace open scripts are not supported for this backend.');
       return false;
     }
     scriptRunInFlightRef.current.add(selectionKey);
     const ref = { backendKey, workspaceId: workspace.id };
-    const taskId = workspaceRemovalTasks.startLifecycleTask({ ref, workspaceName: workspace.name }, 'setup');
+    const taskId = workspaceRemovalTasks.startLifecycleTask({ ref, workspaceName: workspace.name }, options?.mode === 'rerun' ? (options.selection === 'select' ? 'select' : 'setup') : 'select');
     activeScriptTaskIdRef.current = taskId;
     activeScriptWorkspaceIdRef.current = workspace.id;
     try {
-      await backend.rerunWorkspaceScripts(workspace.projectName, workspace.id);
+      if (options?.mode === 'rerun') {
+        if (selection === 'setup-select') {
+          await backend.rerunWorkspaceScripts?.(workspace.projectName, workspace.id);
+        } else {
+          await backend.runWorkspaceScriptSelection?.(workspace.projectName, workspace.id, selection);
+        }
+      } else if (backend.runWorkspaceOpenScripts) {
+        await backend.runWorkspaceOpenScripts(workspace.projectName, workspace.id);
+      } else {
+        await backend.rerunWorkspaceScripts?.(workspace.projectName, workspace.id);
+      }
+      if (activeScriptTaskIdRef.current === taskId) {
+        workspaceRemovalTasks.completeSuccess(taskId, 'Workspace scripts complete');
+        activeScriptTaskIdRef.current = null;
+        activeScriptWorkspaceIdRef.current = null;
+      }
       await multi.listWorkspaces();
       if (options?.announceSuccess !== false) {
-        toast.success(`Reran bundle scripts for ${workspace.name}.`);
+        const ranLabel = selection === 'setup' ? 'setup scripts' : selection === 'select' ? 'select scripts' : 'setup and select scripts';
+        toast.success(`Ran ${ranLabel} for ${workspace.name}.`);
       }
       return true;
     } catch (error) {
@@ -1440,8 +1471,19 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, [backendKeyFromSelectionKey, multi, workspaceRemovalTasks]);
 
   const handleRerunBundleScripts = useCallback(async (workspace: WorkspaceInfo & { selectionKey?: string }) => {
-    await runWorkspaceBundleScripts(workspace, { announceSuccess: true });
-  }, [runWorkspaceBundleScripts]);
+    flow.showSelect<'setup' | 'select' | 'setup-select'>({
+      title: 'Run Workspace Scripts',
+      options: [
+        { label: 'Setup scripts', description: 'Explicitly rerun setup only.', value: 'setup' },
+        { label: 'Select scripts', description: 'Run the scripts used whenever this workspace is opened.', value: 'select' },
+        { label: 'Setup, then select', description: 'Rerun the full setup/select sequence.', value: 'setup-select' },
+      ],
+      onSelect: async (selection) => {
+        flow.close();
+        await runWorkspaceBundleScripts(workspace, { announceSuccess: true, mode: 'rerun', selection });
+      },
+    });
+  }, [flow, runWorkspaceBundleScripts]);
 
   useEffect(() => {
     const visibleSelectionKey = showBoardWhileDetailMounted ? null : currentDetailWorkspace?.selectionKey ?? null;
@@ -1452,7 +1494,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     if (!visibleSelectionKey || !currentDetailWorkspace || terminalStatus !== 'connected') {
       return;
     }
-    void runWorkspaceBundleScripts(currentDetailWorkspace, { announceSuccess: false });
+    void runWorkspaceBundleScripts(currentDetailWorkspace, { announceSuccess: false, mode: 'open' });
   }, [currentDetailWorkspace, runWorkspaceBundleScripts, showBoardWhileDetailMounted, terminalStatus]);
 
 
@@ -1961,10 +2003,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       <>
         <FlowWeb flow={flow} />
         <Toaster theme="dark" position="top-right" richColors />
-        <WorkspaceRemovalTaskBar
-          tasks={workspaceRemovalTasks.tasks}
-          onDismiss={workspaceRemovalTasks.dismissTask}
-        />
+
         {commandPalette.isOpen && (
           <div
             className="gs-overlay-root"
@@ -2210,6 +2249,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onClose={() => {
                   void handleBackToBoard();
                 }}
+                bottomContent={isActive ? (
+                  <WorkspaceRemovalTaskBar
+                    tasks={workspaceRemovalTasks.tasks}
+                    onDismiss={workspaceRemovalTasks.dismissTask}
+                    placement="inline"
+                  />
+                ) : null}
               >
                 {terminalPanelsForWorkspace.length > 0 ? (
                   <DockviewWorkspaceShell

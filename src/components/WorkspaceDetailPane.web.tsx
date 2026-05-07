@@ -386,6 +386,8 @@ function SidebarContent(props: {
 export interface WorkspaceDetailPaneWebProps extends WorkspaceDetailPaneProps {
   /** Terminal outlet rendered in the main area when a session/agent is attached. */
   children?: ReactNode;
+  /** Layout-owned footer rendered below the sidebar/main split. */
+  bottomContent?: ReactNode;
 }
 
 export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
@@ -424,6 +426,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     onSelectWorkspace,
     onClose,
     children,
+    bottomContent,
     pendingAgentAttach = false,
   } = props;
 
@@ -600,8 +603,10 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             )}
           </div>
         </div>
+      </div>
+      {bottomContent}
 
-        {/* Mobile bottom sheet sidebar */}
+      {/* Mobile bottom sheet sidebar */}
         {showMobileSidebar && (
           <div className="sm:hidden fixed inset-0 z-50 flex flex-col">
             {/* Backdrop */}
@@ -655,6 +660,5 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
           </div>
         )}
       </div>
-    </div>
   );
 }

@@ -7,6 +7,7 @@ import type { ScriptPhase } from './ScriptTerminalPanel.web.js';
 interface Props {
   tasks: WorkspaceRemovalTask[];
   onDismiss: (taskId: string) => void;
+  placement?: 'fixed' | 'inline';
 }
 
 function formatElapsed(task: WorkspaceRemovalTask): string {
@@ -42,7 +43,7 @@ function getEmptyLogLabel(task: WorkspaceRemovalTask): string {
     : 'No workspace script output yet.';
 }
 
-export function WorkspaceRemovalTaskBar({ tasks, onDismiss }: Props) {
+export function WorkspaceRemovalTaskBar({ tasks, onDismiss, placement = 'fixed' }: Props) {
   const [expanded, setExpanded] = useState(false);
   const activeTask = useMemo(
     () => tasks.find((task) => task.status === 'running' || task.status === 'queued') ?? tasks[0] ?? null,
@@ -51,8 +52,12 @@ export function WorkspaceRemovalTaskBar({ tasks, onDismiss }: Props) {
 
   if (!activeTask) return null;
 
+  const containerClass = placement === 'fixed'
+    ? 'fixed inset-x-0 bottom-0 z-40 border-t border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl'
+    : 'flex-shrink-0 border-t border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]';
+
   return (
-    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl">
+    <div className={containerClass}>
       {expanded && (
         <div className="grid max-h-[45vh] grid-cols-1 gap-0 border-b border-[var(--gs-border)] md:grid-cols-[260px_1fr]">
           <div className="max-h-[45vh] overflow-y-auto border-b border-[var(--gs-border)] md:border-b-0 md:border-r">

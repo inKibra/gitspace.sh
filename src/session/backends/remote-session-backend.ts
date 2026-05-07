@@ -884,6 +884,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error(`Unexpected prompt response: ${response.type}`);
   }
 
+  async removeAgentQueuedMessage(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTypedCommand({
+      type: 'remove_agent_queued_message',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      kind,
+      index,
+    });
+    if (response.type === 'agent-queued-message') return response.message;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error(`Unexpected queued message response: ${response.type}`);
+  }
+
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
     await this.waitForInitialSnapshot();
     const response = await this.sendTypedCommand({ type: 'stage_agent_upload', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), fileName, data, mimeType });
@@ -1061,6 +1076,26 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected rerun workspace scripts response');
+  }
+
+  async runWorkspaceOpenScripts(projectName: string, workspaceId: string): Promise<void> {
+    const response = await this.sendTypedCommand({ type: 'run_workspace_open_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected run workspace open scripts response');
+  }
+
+  async runWorkspaceScriptSelection(projectName: string, workspaceId: string, selection: 'setup' | 'select' | 'setup-select'): Promise<void> {
+    const response = await this.sendTypedCommand({ type: 'run_workspace_script_selection', requestId: crypto.randomUUID(), projectName, workspaceId, selection });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected run workspace script selection response');
   }
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
     const response = await this.sendTypedCommand({ type: 'get_bundle_refresh_plan', requestId: crypto.randomUUID(), projectName, workspaceId });

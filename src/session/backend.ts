@@ -152,6 +152,8 @@ export interface SessionBackend {
   updateWorkspaceNote?(projectName: string, workspaceName: string, noteId: string, body: string): Promise<import('../types/workspace.js').WorkspaceNote>;
   removeWorkspaceNote?(projectName: string, workspaceName: string, noteId: string): Promise<void>;
   rerunWorkspaceScripts?(projectName: string, workspaceId: string): Promise<void>;
+  runWorkspaceScriptSelection?(projectName: string, workspaceId: string, selection: 'setup' | 'select' | 'setup-select'): Promise<void>;
+  runWorkspaceOpenScripts?(projectName: string, workspaceId: string): Promise<void>;
 
   getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan>;
   applyBundleRefresh(
@@ -240,6 +242,7 @@ export interface SessionBackend {
   restoreAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string }): Promise<void>;
   promptAgentSession?(workspaceId: string, agentSessionId: string, text: string, images?: import('../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void>;
+  removeAgentQueuedMessage?(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null>;
   stageUpload?(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }>;
   /** Send a dialog response back to the server for a pending host UI dialog. */
   sendDialogResponse?(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void>;

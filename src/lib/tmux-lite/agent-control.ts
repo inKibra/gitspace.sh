@@ -261,6 +261,17 @@ export async function promptAgentSession(target: AgentWorkspaceTarget, agentSess
   await defaultPiCoordinator.promptAgentSession(target, agentSessionId, text, images, options);
 }
 
+export async function removeQueuedAgentMessage(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  kind: 'steering' | 'followUp',
+  index: number,
+): Promise<string | null> {
+  await ensureAgentControlInitialized();
+  defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
+  return defaultPiCoordinator.removeQueuedAgentMessage(target, agentSessionId, kind, index);
+}
+
 export async function stageUploadFile(
   target: AgentWorkspaceTarget,
   fileName: string,

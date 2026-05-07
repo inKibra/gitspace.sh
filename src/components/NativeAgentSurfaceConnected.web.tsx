@@ -9,9 +9,10 @@ interface NativeAgentSurfaceConnectedProps {
   backendKey?: string | null;
   workspaceId?: string | null;
   agentSessionId?: string | null;
+  paneId?: string | null;
 }
 
-export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSessionId }: NativeAgentSurfaceConnectedProps = {}) {
+export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSessionId, paneId }: NativeAgentSurfaceConnectedProps = {}) {
   const { engine, state: multiState } = useGitSpace();
   const resolvedBackendKey = backendKey ?? multiState.activeBackendKey;
 
@@ -27,9 +28,14 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
     [activeBackend?.snapshot, resolvedAgentSessionId],
   );
   const agentBusy = attachedAgentState?.state === 'running' || attachedAgentState?.state === 'retrying';
+  const queuedMessages = attachedAgentState?.queuedMessages ?? { steering: [], followUp: [] };
+  const draftStorageKey = resolvedBackendKey && resolvedWorkspaceId && resolvedAgentSessionId
+    ? `gssh:agent-composer-draft:${resolvedBackendKey}:${resolvedWorkspaceId}:${resolvedAgentSessionId}:${paneId ?? 'default'}`
+    : null;
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [draftStorageVersion, setDraftStorageVersion] = useState(0);
 
-  const handleSubmit = useCallback(async (text: string, rawImages: Array<{ dataUrl: string; name: string }>, rawFiles: Array<{ name: string; dataUrl: string }>) => {
+  const handleSubmit = useCallback(async (text: string, rawImages: Array<{ dataUrl: string; name: string }>, rawFiles: Array<{ name: string; dataUrl: string }>, mode: 'send' | 'steer' | 'followUp') => {
     if (!resolvedBackendKey || !resolvedAgentSessionId || !resolvedWorkspaceId || isSubmitting) return;
     setIsSubmitting(true);
     try {
@@ -99,6 +105,7 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
         { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
         augmentedText,
         images.length > 0 ? images : undefined,
+        mode === 'send' ? undefined : { streamingBehavior: mode },
       );
 
       if (isCompactCommand) {
@@ -148,6 +155,37 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
     }
   }, [engine, resolvedBackendKey, resolvedWorkspaceId]);
 
+  const removeQueuedMessage = useCallback(async (
+    kind: 'steering' | 'followUp',
+    index: number,
+    options?: { restoreToDraft?: boolean; fallbackMessage?: string },
+  ) => {
+    if (!resolvedBackendKey || !resolvedAgentSessionId || !resolvedWorkspaceId) return;
+    try {
+      const message = await engine.removeAgentQueuedMessage(
+        { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
+        kind,
+        index,
+      );
+      const draftMessage = message ?? options?.fallbackMessage;
+      if (options?.restoreToDraft && draftMessage && draftStorageKey) {
+        localStorage.setItem(draftStorageKey, draftMessage);
+        setDraftStorageVersion((value) => value + 1);
+      }
+    } catch (error) {
+      console.error('Failed to remove queued agent message', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to update queued message');
+    }
+  }, [draftStorageKey, engine, resolvedBackendKey, resolvedAgentSessionId, resolvedWorkspaceId]);
+
+  const handleCancelQueuedMessage = useCallback((kind: 'steering' | 'followUp', index: number) => {
+    void removeQueuedMessage(kind, index);
+  }, [removeQueuedMessage]);
+
+  const handleEditQueuedMessage = useCallback((kind: 'steering' | 'followUp', index: number, message: string) => {
+    void removeQueuedMessage(kind, index, { restoreToDraft: true, fallbackMessage: message });
+  }, [removeQueuedMessage]);
+
   return (
     <NativeAgentSurface
       agentAttached={agentAttached}
@@ -158,6 +196,11 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
       onAbort={handleStop}
       onDialogResponse={handleDialogResponse}
       isSubmitting={isSubmitting}
+      queuedMessages={queuedMessages}
+      draftStorageKey={draftStorageKey}
+      draftStorageVersion={draftStorageVersion}
+      onCancelQueuedMessage={handleCancelQueuedMessage}
+      onEditQueuedMessage={handleEditQueuedMessage}
       onRequestCommands={handleRequestCommands}
       onRequestFileSuggestions={handleRequestFileSuggestions}
     />

@@ -527,6 +527,12 @@ export class GitSpaceEngine {
     );
   }
 
+  removeAgentQueuedMessage(ref: BackendScopedAgentSessionRef, kind: 'steering' | 'followUp', index: number): Promise<string | null> {
+    return this.withRefBackend(ref, (b) =>
+      b.removeAgentQueuedMessage?.(ref.workspaceId, ref.agentSessionId, kind, index) ?? Promise.resolve(null)
+    );
+  }
+
   stageUpload(ref: BackendScopedWorkspaceRef, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
     return this.withRefBackend(ref, (b) => {
       if (!b.stageUpload) return Promise.reject(new Error('File staging unavailable'));

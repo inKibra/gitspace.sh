@@ -21,13 +21,17 @@ import React, {
 // Public types
 // ---------------------------------------------------------------------------
 
+export type NativeComposerSubmitMode = 'send' | 'steer' | 'followUp';
+
 export interface NativeComposerWebProps {
-  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>) => void;
+  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>, mode: NativeComposerSubmitMode) => void;
   onAbort?: () => void;
   isBusy?: boolean;
   isSubmitting?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  draftStorageKey?: string | null;
+  draftStorageVersion?: number;
   onRequestCommands?: () => Promise<Array<{ name: string; description: string; kind: string }>>;
   onRequestFileSuggestions?: (prefix: string) => Promise<Array<{ path: string; isDirectory: boolean }>>;
 }
@@ -225,10 +229,13 @@ export function NativeComposer({
   isSubmitting = false,
   disabled = false,
   placeholder = 'Message...',
+  draftStorageKey = null,
+  draftStorageVersion = 0,
   onRequestCommands,
   onRequestFileSuggestions,
 }: NativeComposerWebProps): React.ReactElement {
   const [text, setText] = useState('');
+  const [busySubmitMode, setBusySubmitMode] = useState<Extract<NativeComposerSubmitMode, 'steer' | 'followUp'>>('steer');
   const [images, setImages] = useState<AttachedImage[]>([]);
   const [files, setFiles] = useState<AttachedFile[]>([]);
   const [autocomplete, setAutocomplete] = useState<AutocompleteState>({
@@ -245,12 +252,24 @@ export function NativeComposer({
   // isBusy does not disable input — it shows the abort button instead of send.
   const isDisabled = disabled || isSubmitting;
   const hasContent = text.trim().length > 0 || images.some(i => !i.loading) || files.some(f => !f.loading);
-  const canSend = !isDisabled && !isBusy && hasContent;
-
+  const canSend = !isDisabled && hasContent;
+  const activeSubmitMode: NativeComposerSubmitMode = isBusy ? busySubmitMode : 'send';
   // Auto-focus on mount
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    if (!draftStorageKey) {
+      setText('');
+      return;
+    }
+    try {
+      setText(localStorage.getItem(draftStorageKey) ?? '');
+    } catch {
+      setText('');
+    }
+  }, [draftStorageKey, draftStorageVersion]);
 
   // Auto-grow: reset to auto then clamp to MAX_TEXTAREA_HEIGHT
   useEffect(() => {
@@ -264,20 +283,23 @@ export function NativeComposer({
 
   // ── Submit helper — clears state after sending ───────────────────────────
   const submitAndClear = useCallback(
-    (currentText: string, currentImages: AttachedImage[], currentFiles: AttachedFile[]) => {
+    (currentText: string, currentImages: AttachedImage[], currentFiles: AttachedFile[], mode: NativeComposerSubmitMode) => {
       const readyImages = currentImages
         .filter(img => !img.loading)
         .map(({ dataUrl, name }) => ({ dataUrl, name }));
       const readyFiles = currentFiles
         .filter(f => !f.loading && f.dataUrl)
         .map(({ name, dataUrl }) => ({ name, dataUrl }));
-      onSubmit(currentText.trim(), readyImages, readyFiles);
+      onSubmit(currentText.trim(), readyImages, readyFiles, mode);
       setText('');
+      if (draftStorageKey) {
+        try { localStorage.removeItem(draftStorageKey); } catch { /* ignore unavailable storage */ }
+      }
       setImages([]);
       setFiles([]);
       setAutocomplete({ mode: null, items: [], selectedIndex: 0, loading: false, triggerPos: 0 });
     },
-    [onSubmit]
+    [onSubmit, draftStorageKey]
   );
 
   // ── Autocomplete helpers ──────────────────────────────────────────────────────────
@@ -348,7 +370,15 @@ export function NativeComposer({
     const newText = e.target.value;
     const cursorPos = e.target.selectionStart ?? newText.length;
     setText(newText);
-
+    if (draftStorageKey) {
+      try {
+        if (newText.length > 0) {
+          localStorage.setItem(draftStorageKey, newText);
+        } else {
+          localStorage.removeItem(draftStorageKey);
+        }
+      } catch { /* ignore unavailable storage */ }
+    }
     // Detect autocomplete triggers
     // Slash command: text starts with / and cursor is in the first token
     const hasSpace = newText.includes(' ');
@@ -381,7 +411,7 @@ export function NativeComposer({
 
     // No trigger — close autocomplete
     closeAutocomplete();
-  }, [fetchCommands, fetchFileSuggestions, closeAutocomplete]);
+  }, [fetchCommands, fetchFileSuggestions, closeAutocomplete, draftStorageKey]);
 
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -415,21 +445,24 @@ export function NativeComposer({
         }
       }
 
-      // Normal Enter-to-submit (without Shift)
+      // Enter submits. While busy, Enter steers and Ctrl/Cmd+Enter queues a follow-up.
       if (e.key === 'Enter' && !e.shiftKey) {
-        if (!isDisabled && !isBusy && text.trim().length > 0) {
+        if (!isDisabled && text.trim().length > 0) {
           e.preventDefault();
-          submitAndClear(text, images, files);
+          const mode: NativeComposerSubmitMode = isBusy
+            ? ((e.metaKey || e.ctrlKey) ? 'followUp' : 'steer')
+            : 'send';
+          submitAndClear(text, images, files, mode);
         }
       }
     },
     [text, images, files, isDisabled, isBusy, submitAndClear, autocomplete, acceptAutocomplete, closeAutocomplete]
   );
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback((mode: NativeComposerSubmitMode = activeSubmitMode) => {
     if (!canSend) return;
-    submitAndClear(text, images, files);
-  }, [canSend, text, images, files, submitAndClear]);
+    submitAndClear(text, images, files, mode);
+  }, [activeSubmitMode, canSend, text, images, files, submitAndClear]);
 
   // ── Clipboard paste — intercept image data ───────────────────────────────
   const handlePaste = useCallback(
@@ -785,16 +818,18 @@ export function NativeComposer({
           />
         </div>
 
-        {/* Send / Abort button — right side */}
-        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, paddingRight: 4 }}>
-          {isBusy ? (
+        {/* Send / Abort controls — right side */}
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, paddingRight: 4, gap: 4 }}>
+          {isBusy && (
             <button
               type="button"
               onClick={onAbort}
               disabled={!onAbort}
-              title="Abort"
+              title="Abort current turn"
               style={{
                 ...ACTION_BUTTON_BASE,
+                width: 34,
+                height: 34,
                 background: 'var(--gs-danger)',
                 color: 'white',
                 opacity: onAbort ? 1 : 0.4,
@@ -803,23 +838,51 @@ export function NativeComposer({
             >
               <IconStop />
             </button>
-          ) : (
+          )}
+          {isBusy && (
             <button
               type="button"
-              onClick={handleSend}
-              disabled={!canSend}
-              title="Send"
+              onClick={() => setBusySubmitMode((mode) => mode === 'steer' ? 'followUp' : 'steer')}
+              title={busySubmitMode === 'steer' ? 'Switch to Queue follow-up mode' : 'Switch to Steer current turn mode'}
               style={{
-                ...ACTION_BUTTON_BASE,
-                background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
-                color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
-                cursor: canSend ? 'pointer' : 'default',
+                height: 34,
+                padding: '0 10px',
+                border: '1px solid var(--gs-border)',
+                borderRadius: 10,
+                background: 'var(--gs-bg-elevated)',
+                color: 'var(--gs-text-muted)',
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+                minWidth: 150,
               }}
             >
-              {isSubmitting ? <Spinner /> : <IconPaperPlane />}
+              {busySubmitMode === 'steer' ? 'Steer current turn ▾' : 'Queue follow-up ▾'}
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => handleSend(activeSubmitMode)}
+            disabled={!canSend}
+            title={isBusy
+              ? (activeSubmitMode === 'followUp' ? 'Send follow-up (Ctrl/Cmd+Enter)' : 'Send steering message (Enter)')
+              : 'Send (Enter)'}
+            style={{
+              ...ACTION_BUTTON_BASE,
+              background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
+              color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
+              cursor: canSend ? 'pointer' : 'default',
+            }}
+          >
+            {isSubmitting ? <Spinner /> : <IconPaperPlane />}
+          </button>
         </div>
+      </div>
+
+      <div style={{ padding: '3px 10px 0 10px', color: 'var(--gs-text-dim)', fontSize: 11 }}>
+        {isBusy
+          ? 'Enter steers current turn · Ctrl/Cmd+Enter queues follow-up · use the mode button to switch Send'
+          : 'Enter sends · Shift+Enter adds a newline'}
       </div>
 
       {/* Hidden file inputs */}

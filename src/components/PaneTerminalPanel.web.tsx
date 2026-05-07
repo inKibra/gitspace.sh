@@ -131,6 +131,7 @@ export function PaneTerminalPanel({
             backendKey={backendKey}
             workspaceId={pane.workspaceId}
             agentSessionId={pane.agentSessionId}
+            paneId={pane.paneId}
           />
         </div>
       ) : null}

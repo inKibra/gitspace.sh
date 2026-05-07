@@ -235,8 +235,12 @@ export async function runWorkspaceScripts(
   }
 }
 
+export type WorkspaceScriptRunSelection = 'setup' | 'select' | 'setup-select';
+
 export async function rerunWorkspaceBundleScripts(
-  options: Omit<RunWorkspaceScriptsOptions, 'noSetup' | 'scriptPolicy'>
+  options: Omit<RunWorkspaceScriptsOptions, 'noSetup' | 'scriptPolicy'> & {
+    selection?: WorkspaceScriptRunSelection;
+  }
 ): Promise<RunWorkspaceScriptsResult> {
   const {
     projectName,
@@ -247,6 +251,7 @@ export async function rerunWorkspaceBundleScripts(
     onOutput,
     onPhaseStart,
     signal,
+    selection = 'setup-select',
   } = options;
 
   const changes = detectBundleChanges(projectName, workspacePath);
@@ -276,29 +281,34 @@ export async function rerunWorkspaceBundleScripts(
 
   const lockState = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
 
-  try {
-    onPhaseStart?.('setup');
-    const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup');
-    await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
-    lockState.setup = {
-      ...lockState.setup,
-      status: 'success',
-      ranAt: new Date().toISOString(),
-      error: undefined,
-    };
-    writeWorkspaceLockState(workspacePath, lockState);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    lockState.setup = {
-      ...lockState.setup,
-      status: 'failed',
-      ranAt: new Date().toISOString(),
-      error: message,
-    };
-    writeWorkspaceLockState(workspacePath, lockState);
-    return { success: false, phase: 'setup', error: message, cancelled: isScriptExecutionCancelledError(error) };
+  if (selection === 'setup' || selection === 'setup-select') {
+    try {
+      onPhaseStart?.('setup');
+      const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup');
+      await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
+      lockState.setup = {
+        ...lockState.setup,
+        status: 'success',
+        ranAt: new Date().toISOString(),
+        error: undefined,
+      };
+      writeWorkspaceLockState(workspacePath, lockState);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lockState.setup = {
+        ...lockState.setup,
+        status: 'failed',
+        ranAt: new Date().toISOString(),
+        error: message,
+      };
+      writeWorkspaceLockState(workspacePath, lockState);
+      return { success: false, phase: 'setup', error: message, cancelled: isScriptExecutionCancelledError(error) };
+    }
   }
 
+  if (selection === 'setup') {
+    return { success: true };
+  }
   try {
     onPhaseStart?.('select');
     const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select');

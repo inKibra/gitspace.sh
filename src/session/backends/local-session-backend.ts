@@ -875,6 +875,70 @@ export class LocalSessionBackend implements SessionBackend {
           workspaceId: workspaceRef.id,
         });
       },
+      selection: 'setup-select',
+    });
+    if (!result.success) {
+      this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
+      throw new Error(result.error);
+    }
+    this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(0), done: true, workspaceId: workspaceRef.id });
+  }
+
+  async runWorkspaceScriptSelection(projectName: string, workspaceId: string, selection: 'setup' | 'select' | 'setup-select'): Promise<void> {
+    const workspaceRef = await this.resolveWorkspace(projectName, workspaceId);
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = selection === 'select' ? 'select' : 'setup';
+    const result = await this.deps.rerunWorkspaceScriptsForSession({
+      projectName,
+      workspacePath: workspaceRef.path,
+      workspaceName: workspaceRef.id,
+      repository: readProjectConfig(projectName).repository,
+      interactiveScripts: false,
+      onOutput: (data) => {
+        this.attachLifecycle.pushScriptData(data);
+        this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(data), workspaceId: workspaceRef.id });
+      },
+      onPhaseStart: (phase) => {
+        currentPhase = phase;
+        this.emit({
+          type: 'script_output',
+          phase,
+          data: new Uint8Array(0),
+          done: false,
+          workspaceId: workspaceRef.id,
+        });
+      },
+      selection,
+    });
+    if (!result.success) {
+      this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
+      throw new Error(result.error);
+    }
+    this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(0), done: true, workspaceId: workspaceRef.id });
+  }
+
+  async runWorkspaceOpenScripts(projectName: string, workspaceId: string): Promise<void> {
+    const workspaceRef = await this.resolveWorkspace(projectName, workspaceId);
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'select';
+    const result = await this.deps.prepareWorkspaceForSession({
+      projectName,
+      workspacePath: workspaceRef.path,
+      workspaceName: workspaceRef.id,
+      repository: readProjectConfig(projectName).repository,
+      interactiveScripts: false,
+      onOutput: (data) => {
+        this.attachLifecycle.pushScriptData(data);
+        this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(data), workspaceId: workspaceRef.id });
+      },
+      onPhaseStart: (phase) => {
+        currentPhase = phase;
+        this.emit({
+          type: 'script_output',
+          phase,
+          data: new Uint8Array(0),
+          done: false,
+          workspaceId: workspaceRef.id,
+        });
+      },
     });
     if (!result.success) {
       this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
@@ -1532,6 +1596,17 @@ export class LocalSessionBackend implements SessionBackend {
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error(`Unexpected prompt response: ${response.type}`);
+  }
+
+  async removeAgentQueuedMessage(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-queue-remove', target, agentSessionId, kind, index });
+    if (response.type === 'agent-queued-message') {
+      await this.refreshMachineSnapshotState();
+      return response.message;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error(`Unexpected queued message response: ${response.type}`);
   }
 
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {

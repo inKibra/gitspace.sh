@@ -43,6 +43,11 @@ function phaseLabel(phase: WorkspaceLifecycleScriptPhase): string {
   return 'Prepare';
 }
 
+function progressLabelForPhase(phase: WorkspaceLifecycleScriptPhase): string {
+  if (phase === 'remove') return 'Running cleanup scripts...';
+  return `Running ${phaseLabel(phase).toLowerCase()} scripts...`;
+}
+
 function appendLogLines(existing: string[], chunk: Uint8Array): string[] {
   if (chunk.length === 0) return existing;
   const text = new TextDecoder().decode(chunk);
@@ -115,7 +120,7 @@ export function useWorkspaceRemovalTasks() {
       status: 'running',
       phase,
       startedAt: Date.now(),
-      progressLabel: 'Running workspace scripts...',
+      progressLabel: progressLabelForPhase(phase),
       logLines: [],
     };
     setTasks((current) => [task, ...current.filter((item) => item.workspaceId !== task.workspaceId)].slice(0, 8));

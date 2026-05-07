@@ -22,7 +22,40 @@
  			pwd = stripDisplayRoot(pwd);
 --- a/src/session/agent-session.ts
 +++ b/src/session/agent-session.ts
-@@ -6207,6 +6207,7 @@
+@@ -3339,6 +3339,10 @@
+ 	 */
+ 	async #queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+ 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
++		if (this.#steeringMessages.length > 0) {
++			this.#steeringMessages = [];
++			this.agent.clearSteeringQueue();
++		}
+ 		this.#steeringMessages.push(displayText);
+ 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+ 		if (images && images.length > 0) {
+@@ -3630,6 +3634,21 @@
+ 		}
+ 		return undefined;
+ 	}
++
++	/** Remove a queued message by visible kind and index. */
++	removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined {
++		const queue = kind === "steering" ? this.#steeringMessages : this.#followUpMessages;
++		if (!Number.isInteger(index) || index < 0 || index >= queue.length) {
++			return undefined;
++		}
++		const [message] = queue.splice(index, 1);
++		if (kind === "steering") {
++			(this.agent as any).removeSteer?.(index) ?? this.agent.popLastSteer();
++		} else {
++			(this.agent as any).removeFollowUp?.(index) ?? this.agent.popLastFollowUp();
++		}
++		return message;
++	}
+ 
+ 	get skillsSettings(): SkillsSettings | undefined {
+ 		return this.#skillsSettings;
+@@ -6207,6 +6226,7 @@
  			const result = await executeBashCommand(command, {
  				onChunk,
  				signal: abortController.signal,

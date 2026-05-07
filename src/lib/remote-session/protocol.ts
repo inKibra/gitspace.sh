@@ -223,6 +223,21 @@ export interface RerunWorkspaceScriptsRequest {
   workspaceId: string;
 }
 
+export interface RunWorkspaceOpenScriptsRequest {
+  type: 'run_workspace_open_scripts';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+}
+
+export interface RunWorkspaceScriptSelectionRequest {
+  type: 'run_workspace_script_selection';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+  selection: 'setup' | 'select' | 'setup-select';
+}
+
 export interface SetWorkspacePhaseRequest {
   type: 'set_workspace_phase';
   requestId: string;
@@ -399,6 +414,15 @@ export interface PromptAgentSessionRequest {
   text: string;
   images?: import('../tmux-lite/protocol.js').AgentPromptImage[];
   streamingBehavior?: 'steer' | 'followUp';
+}
+
+export interface RemoveAgentQueuedMessageRequest {
+  type: 'remove_agent_queued_message';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  kind: 'steering' | 'followUp';
+  index: number;
 }
 
 export interface StageAgentUploadRequest {
@@ -702,6 +726,8 @@ export type ClientToMachineMessage =
   | UpdateWorkspaceNoteRequest
   | RemoveWorkspaceNoteRequest
   | RerunWorkspaceScriptsRequest
+  | RunWorkspaceOpenScriptsRequest
+  | RunWorkspaceScriptSelectionRequest
   | SetWorkspacePhaseRequest
   | KillSessionRequest
   // Process management
@@ -730,6 +756,7 @@ export type ClientToMachineMessage =
   | RestoreAgentSessionRequest
   | AttachAgentSessionRequest
   | PromptAgentSessionRequest
+  | RemoveAgentQueuedMessageRequest
   | StageAgentUploadRequest
   | RespondAgentDialogRequest
   | RespondAgentPermissionRequest
@@ -821,6 +848,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'workspace_note_update',
     'workspace_note_remove',
     'rerun_workspace_scripts',
+    'run_workspace_open_scripts',
+    'run_workspace_script_selection',
     'set_workspace_phase',
     'kill_session',
     'start_process',
@@ -845,6 +874,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'restore_agent_session',
     'attach_agent_session',
     'prompt_agent_session',
+    'remove_agent_queued_message',
     'stage_agent_upload',
     'respond_agent_dialog',
     'respond_agent_permission',

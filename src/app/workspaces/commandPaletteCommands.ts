@@ -12,7 +12,7 @@ export const COMMAND_PALETTE_COMMAND_DEFS = [
   { id: 'delete-workspace-skip-scripts', label: 'Delete Workspace (Skip Scripts)', shortcut: '' },
   { id: 'edit-bundle-config', label: 'Edit Bundle Config', shortcut: '' },
   { id: 'refresh-bundle', label: 'Refresh Bundle', shortcut: '' },
-  { id: 'rerun-bundle-scripts', label: 'Rerun Bundle Scripts', shortcut: '' },
+  { id: 'rerun-bundle-scripts', label: 'Run Workspace Scripts...', shortcut: '' },
   { id: 'add-note', label: 'Add Note', shortcut: '' },
   { id: 'list-notes', label: 'List Notes', shortcut: '' },
   { id: 'edit-process-config', label: 'Edit Process Config', shortcut: '' },
