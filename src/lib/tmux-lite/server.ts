@@ -74,7 +74,7 @@ import {
 } from './agent-control.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
-import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
+import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, setWorkspaceStatus, updateWorkspaceNote } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
 import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
@@ -2853,6 +2853,45 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'workspace-notes-list':
+            try {
+              res = { type: 'workspace-notes', notes: listWorkspaceNotes(cmd.projectName, cmd.workspaceName) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-note-add':
+            try {
+              res = { type: 'workspace-note', note: addWorkspaceNote(cmd.projectName, cmd.workspaceName, { body: cmd.body, kind: 'note' }) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-note-update':
+            try {
+              res = { type: 'workspace-note', note: updateWorkspaceNote(cmd.projectName, cmd.workspaceName, cmd.noteId, { body: cmd.body, kind: 'note' }) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-note-remove':
+            try {
+              const removed = removeWorkspaceNote(cmd.projectName, cmd.workspaceName, cmd.noteId);
+              if (!removed) {
+                res = { type: 'error', message: `Workspace note not found: ${cmd.noteId}` };
+                break;
+              }
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'ok' };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
           case 'bundle-refresh-plan':
             try {
               const workspaceRef = resolveWorkspaceRef(cmd.workspaceId.includes(':') ? cmd.workspaceId : cmd.workspaceId);

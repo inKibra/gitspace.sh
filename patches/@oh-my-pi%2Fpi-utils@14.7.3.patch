@@ -1,0 +1,11 @@
+--- a/src/ptree.ts
++++ b/src/ptree.ts
+@@ -247,7 +247,7 @@
+ 	}
+ 
+ 	async bytes(): Promise<Uint8Array> {
+-		return new Response(this.stdout).bytes();
++		return (new Response(this.stdout) as any).bytes();
+ 	}
+ 
+ 	// ── Wait ─────────────────────────────────────────────────────────────

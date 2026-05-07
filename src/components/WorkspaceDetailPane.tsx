@@ -36,6 +36,7 @@ export interface WorkspaceDetailPaneProps {
   onOpenGitHubPullRequest?: (workspaceId: string) => void | Promise<void>;
   onLaunchCommit?: (workspaceId: string) => void | Promise<void>;
   onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
+  onOpenNotes?: (workspaceId: string) => void;
   onOpenEvents: (workspaceId: string) => void;
   onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;

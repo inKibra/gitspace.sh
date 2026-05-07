@@ -1016,6 +1016,52 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+  async listWorkspaceNotes(projectName: string, workspaceName: string): Promise<import('../../types/workspace.js').WorkspaceNote[]> {
+    const response = await this.sendTypedCommand({ type: 'workspace_notes_list', requestId: crypto.randomUUID(), projectName, workspaceName });
+    if (response.type === 'workspace-notes') return response.notes;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace notes response');
+  }
+
+  async addWorkspaceNote(projectName: string, workspaceName: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
+    const response = await this.sendTypedCommand({ type: 'workspace_note_add', requestId: crypto.randomUUID(), projectName, workspaceName, body });
+    if (response.type === 'workspace-note') {
+      await this.listWorkspaces();
+      return response.note;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note add response');
+  }
+
+  async updateWorkspaceNote(projectName: string, workspaceName: string, noteId: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
+    const response = await this.sendTypedCommand({ type: 'workspace_note_update', requestId: crypto.randomUUID(), projectName, workspaceName, noteId, body });
+    if (response.type === 'workspace-note') {
+      await this.listWorkspaces();
+      return response.note;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note update response');
+  }
+
+  async removeWorkspaceNote(projectName: string, workspaceName: string, noteId: string): Promise<void> {
+    const response = await this.sendTypedCommand({ type: 'workspace_note_remove', requestId: crypto.randomUUID(), projectName, workspaceName, noteId });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note remove response');
+  }
+
+  async rerunWorkspaceScripts(projectName: string, workspaceId: string): Promise<void> {
+    const response = await this.sendTypedCommand({ type: 'rerun_workspace_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected rerun workspace scripts response');
+  }
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
     const response = await this.sendTypedCommand({ type: 'get_bundle_refresh_plan', requestId: crypto.randomUUID(), projectName, workspaceId });
     if (response.type === 'bundle-refresh-plan') return response.plan;

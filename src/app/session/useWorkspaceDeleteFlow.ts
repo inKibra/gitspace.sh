@@ -34,6 +34,7 @@ export interface UseWorkspaceDeleteFlowOptions {
 
 export interface UseWorkspaceDeleteFlowResult {
   deleteWorkspaceWithPrompt: (target: WorkspaceDeleteTarget) => Promise<boolean>;
+  deleteWorkspaceSkipScriptsWithPrompt: (target: WorkspaceDeleteTarget) => Promise<boolean>;
 }
 
 function getErrorCode(error: unknown): string | undefined {
@@ -163,7 +164,12 @@ export function useWorkspaceDeleteFlow(
     return executeDelete(target, { scriptPolicy: 'auto' }, false);
   }, [executeDelete]);
 
+  const deleteWorkspaceSkipScriptsWithPrompt = useCallback(async (target: WorkspaceDeleteTarget): Promise<boolean> => {
+    return executeDelete(target, { scriptPolicy: 'skip' }, false);
+  }, [executeDelete]);
+
   return {
     deleteWorkspaceWithPrompt,
+    deleteWorkspaceSkipScriptsWithPrompt,
   };
 }

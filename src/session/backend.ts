@@ -147,6 +147,12 @@ export interface SessionBackend {
     params?: DeleteWorkspaceParams
   ): Promise<void>;
 
+  listWorkspaceNotes?(projectName: string, workspaceName: string): Promise<import('../types/workspace.js').WorkspaceNote[]>;
+  addWorkspaceNote?(projectName: string, workspaceName: string, body: string): Promise<import('../types/workspace.js').WorkspaceNote>;
+  updateWorkspaceNote?(projectName: string, workspaceName: string, noteId: string, body: string): Promise<import('../types/workspace.js').WorkspaceNote>;
+  removeWorkspaceNote?(projectName: string, workspaceName: string, noteId: string): Promise<void>;
+  rerunWorkspaceScripts?(projectName: string, workspaceId: string): Promise<void>;
+
   getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan>;
   applyBundleRefresh(
     projectName: string,

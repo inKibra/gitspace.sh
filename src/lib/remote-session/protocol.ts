@@ -185,6 +185,44 @@ export interface CreateWorkspaceRequest {
   linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
 }
 
+export interface ListWorkspaceNotesRequest {
+  type: 'workspace_notes_list';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+}
+
+export interface AddWorkspaceNoteRequest {
+  type: 'workspace_note_add';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  body: string;
+}
+
+export interface UpdateWorkspaceNoteRequest {
+  type: 'workspace_note_update';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  noteId: string;
+  body: string;
+}
+
+export interface RemoveWorkspaceNoteRequest {
+  type: 'workspace_note_remove';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  noteId: string;
+}
+export interface RerunWorkspaceScriptsRequest {
+  type: 'rerun_workspace_scripts';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+}
+
 export interface SetWorkspacePhaseRequest {
   type: 'set_workspace_phase';
   requestId: string;
@@ -548,6 +586,16 @@ export interface WorkspaceDeletedResponse {
   workspaceId: string;
 }
 
+export interface WorkspaceNotesResponse {
+  type: 'workspace_notes';
+  notes: import('../../types/workspace.js').WorkspaceNote[];
+}
+
+export interface WorkspaceNoteResponse {
+  type: 'workspace_note';
+  note: import('../../types/workspace.js').WorkspaceNote;
+}
+
 /** Script output during attach_session (streams lifecycle script output) */
 export interface ScriptOutputResponse {
   type: "script_output";
@@ -649,6 +697,11 @@ export type ClientToMachineMessage =
   | DeleteProjectRequest
   // Workspace CRUD
   | CreateWorkspaceRequest
+  | ListWorkspaceNotesRequest
+  | AddWorkspaceNoteRequest
+  | UpdateWorkspaceNoteRequest
+  | RemoveWorkspaceNoteRequest
+  | RerunWorkspaceScriptsRequest
   | SetWorkspacePhaseRequest
   | KillSessionRequest
   // Process management
@@ -697,6 +750,8 @@ export type MachineToClientMessage =
   | SessionExitedResponse
   | ErrorResponse
   | WorkspaceDeletedResponse
+  | WorkspaceNotesResponse
+  | WorkspaceNoteResponse
   | ScriptOutputResponse
   | CommandResponse
   | AgentStateSnapshotPush
@@ -761,6 +816,11 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'cancel_project_creation',
     'delete_project',
     'create_workspace',
+    'workspace_notes_list',
+    'workspace_note_add',
+    'workspace_note_update',
+    'workspace_note_remove',
+    'rerun_workspace_scripts',
     'set_workspace_phase',
     'kill_session',
     'start_process',

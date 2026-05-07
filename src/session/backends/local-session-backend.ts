@@ -46,9 +46,10 @@ import {
   FrameType,
 } from '../../lib/tmux-lite/protocol.js';
 import { listProjectSummaries } from '../../core/project-catalog.js';
+import { readProjectConfig } from '../../core/config.js';
 import { scanWorkspaces } from '../../lib/remote-session/workspace-scanner.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
-import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
+import { prepareWorkspaceForSession, rerunWorkspaceScriptsForSession } from '../../core/workspace-lifecycle.js';
 import { getWorkspaceRoot } from '../../core/paths.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { AttachLifecycle } from './attach-lifecycle.js';
@@ -113,6 +114,7 @@ export interface LocalSessionBackendDependencies {
   scanWorkspaces: typeof scanWorkspaces;
   deleteWorkspaceCore: typeof deleteWorkspaceCore;
   prepareWorkspaceForSession: typeof prepareWorkspaceForSession;
+  rerunWorkspaceScriptsForSession: typeof rerunWorkspaceScriptsForSession;
   connectSessionSocket: (
     socketPath: string,
     handlers: LocalSessionSocketHandlers
@@ -374,6 +376,7 @@ function buildDeps(
     scanWorkspaces,
     deleteWorkspaceCore,
     prepareWorkspaceForSession,
+    rerunWorkspaceScriptsForSession,
     connectSessionSocket,
     ...overrides,
   };
@@ -847,6 +850,73 @@ export class LocalSessionBackend implements SessionBackend {
       }
       throw error;
     }
+  }
+
+  async rerunWorkspaceScripts(projectName: string, workspaceId: string): Promise<void> {
+    const workspaceRef = await this.resolveWorkspace(projectName, workspaceId);
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'setup';
+    const result = await this.deps.rerunWorkspaceScriptsForSession({
+      projectName,
+      workspacePath: workspaceRef.path,
+      workspaceName: workspaceRef.id,
+      repository: readProjectConfig(projectName).repository,
+      interactiveScripts: false,
+      onOutput: (data) => {
+        this.attachLifecycle.pushScriptData(data);
+        this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(data), workspaceId: workspaceRef.id });
+      },
+      onPhaseStart: (phase) => {
+        currentPhase = phase;
+        this.emit({
+          type: 'script_output',
+          phase,
+          data: new Uint8Array(0),
+          done: false,
+          workspaceId: workspaceRef.id,
+        });
+      },
+    });
+    if (!result.success) {
+      this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
+      throw new Error(result.error);
+    }
+    this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(0), done: true, workspaceId: workspaceRef.id });
+  }
+  async listWorkspaceNotes(projectName: string, workspaceName: string): Promise<import('../../types/workspace.js').WorkspaceNote[]> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-notes-list', projectName, workspaceName });
+    if (response.type === 'workspace-notes') return response.notes;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace notes response');
+  }
+
+  async addWorkspaceNote(projectName: string, workspaceName: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-note-add', projectName, workspaceName, body });
+    if (response.type === 'workspace-note') {
+      await this.listWorkspaces();
+      return response.note;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note add response');
+  }
+
+  async updateWorkspaceNote(projectName: string, workspaceName: string, noteId: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-note-update', projectName, workspaceName, noteId, body });
+    if (response.type === 'workspace-note') {
+      await this.listWorkspaces();
+      return response.note;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note update response');
+  }
+
+  async removeWorkspaceNote(projectName: string, workspaceName: string, noteId: string): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-note-remove', projectName, workspaceName, noteId });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note remove response');
   }
 
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {

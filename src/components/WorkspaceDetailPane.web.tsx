@@ -150,6 +150,7 @@ function SidebarContent(props: {
   onOpenGitHubPullRequest?: WorkspaceDetailPaneProps['onOpenGitHubPullRequest'];
   onOpenReview?: WorkspaceDetailPaneProps['onOpenReview'];
   onRequestStatusChange?: WorkspaceDetailPaneProps['onRequestStatusChange'];
+  onOpenNotes?: WorkspaceDetailPaneProps['onOpenNotes'];
   onOpenEvents: WorkspaceDetailPaneProps['onOpenEvents'];
   agentSessionCount: number;
   pendingPermissions: number;
@@ -160,12 +161,12 @@ function SidebarContent(props: {
     detailModel, workspace, workspaceSessions, attachedSessionId, attachedAgentSessionId,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
-    onRequestStatusChange, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
+    onRequestStatusChange, onOpenNotes, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
   } = props;
   const {
     workspaceReplays, activeAgentSessions, archivedAgentSessions, showArchivedAgents, toggleArchivedAgents,
     agentRows, agentTodoPhases, sessionRows, visibleReplayRows, hasMoreReplayRows, seeAllReplayLabel,
-    notesSummary, visibleTodoRows, visibleRecentNoteRows, serviceRows, pmRows, footerActions,
+    notesSummary, visibleRecentNoteRows, serviceRows, pmRows, footerActions,
     actions: detailActions,
   } = detailModel;
   const shellSessions = workspaceSessions.filter((s) => !s.processName);
@@ -339,10 +340,7 @@ function SidebarContent(props: {
 
       {/* NOTES */}
       {(notesSummary?.total ?? 0) > 0 && (
-        <SidebarSection title="Notes" extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{notesSummary?.openTodoCount ?? 0} todo</span>}>
-          {visibleTodoRows.map((note) => (
-            <SidebarItem key={note.id} dotColor={note.priority === 'high' ? 'text-[var(--gs-danger-hover)]' : note.priority === 'medium' ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-info)]'} label={note.label} rightLabel={note.priority} />
-          ))}
+        <SidebarSection title="Notes" extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{notesSummary?.total ?? 0} note{(notesSummary?.total ?? 0) === 1 ? '' : 's'}</span>}>
           {visibleRecentNoteRows.map((note) => (
             <SidebarItem key={note.id} dotColor="text-[var(--gs-text-ghost)]" label={note.label} rightLabel="note" />
           ))}
@@ -375,6 +373,7 @@ function SidebarContent(props: {
           const onClick = () => void detailActions.footerAction(action.id);
           return <SidebarItem key={action.id} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
         })}
+        <SidebarItem label="Notes" rightLabel={notesSummary?.total ? `${notesSummary.total}` : 'open'} onClick={() => act(() => onOpenNotes?.(workspace.id))} />
         {onDeleteWorkspace && (
           <SidebarItem label="Delete Workspace" rightLabel="danger" onClick={() => onDeleteWorkspace(workspace)} />
         )}
@@ -407,6 +406,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     onOpenReview,
     onOpenGitHubPullRequest,
     onRequestStatusChange,
+    onOpenNotes,
     onOpenEvents,
     onOpenAgentSession,
     onCreateAgentSession,
@@ -571,6 +571,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             onOpenGitHubPullRequest={onOpenGitHubPullRequest}
             onOpenReview={onOpenReview}
             onRequestStatusChange={onRequestStatusChange}
+            onOpenNotes={onOpenNotes}
             onOpenEvents={onOpenEvents}
             agentSessionCount={agentSessionCount}
             pendingPermissions={pendingPermissions}
@@ -642,6 +643,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   onOpenGitHubPullRequest={onOpenGitHubPullRequest}
                   onOpenReview={onOpenReview}
                   onRequestStatusChange={onRequestStatusChange}
+                  onOpenNotes={onOpenNotes}
                   onOpenEvents={onOpenEvents}
                   agentSessionCount={agentSessionCount}
                   pendingPermissions={pendingPermissions}

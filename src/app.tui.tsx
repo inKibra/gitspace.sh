@@ -1250,6 +1250,9 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
       flow.close();
     },
     onDeleteWorkspace: handleDeleteWorkspace,
+    onDeleteWorkspaceSkipScripts: async () => {
+      flow.showMessage({ title: 'Skip Scripts Delete Unsupported', message: 'Deleting a workspace without scripts is not implemented in the TUI yet.', variant: 'info' });
+    },
     onEditBundleConfig: async (workspace) => {
       await handleManageBundleConfig({ workspaceId: workspace.id });
     },
@@ -1262,6 +1265,15 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
         multi.listWorkspaces();
         multi.listSessions();
       }
+    },
+    onRerunBundleScripts: async () => {
+      flow.showMessage({ title: 'Rerun Bundle Scripts Unsupported', message: 'Rerunning bundle scripts is not implemented in the TUI yet.', variant: 'info' });
+    },
+    onAddNote: async () => {
+      flow.showMessage({ title: 'Notes Unsupported', message: 'Workspace notes editing is not implemented in the TUI yet.', variant: 'info' });
+    },
+    onListNotes: async () => {
+      flow.showMessage({ title: 'Notes Unsupported', message: 'Workspace notes editing is not implemented in the TUI yet.', variant: 'info' });
     },
     onEditProcessConfig: async (workspace) => {
       await handleEditProcesses({ workspaceId: workspace.id });

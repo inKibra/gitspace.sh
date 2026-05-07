@@ -399,6 +399,10 @@ export type Command =
   | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }
   | { type: 'project-delete'; projectName: string }
   | { type: 'workspace-delete'; requestId: string; projectName: string; workspaceId: string; scriptPolicy?: 'auto' | 'skip' }
+  | { type: 'workspace-notes-list'; projectName: string; workspaceName: string }
+  | { type: 'workspace-note-add'; projectName: string; workspaceName: string; body: string }
+  | { type: 'workspace-note-update'; projectName: string; workspaceName: string; noteId: string; body: string }
+  | { type: 'workspace-note-remove'; projectName: string; workspaceName: string; noteId: string }
   | { type: 'bundle-refresh-plan'; projectName: string; workspaceId: string }
   | { type: 'bundle-refresh-apply'; projectName: string; workspaceId: string; submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission }
   | { type: 'bundle-config-state'; projectName: string; workspaceId: string }
@@ -480,6 +484,8 @@ export type Response =
   | { type: 'project-deleted'; projectName: string }
   | { type: 'workspace-delete-output'; requestId: string; data: string; done?: boolean; error?: string }
   | { type: 'workspace-deleted'; requestId: string; workspaceId: string }
+  | { type: 'workspace-notes'; notes: import('../../types/workspace.js').WorkspaceNote[] }
+  | { type: 'workspace-note'; note: import('../../types/workspace.js').WorkspaceNote }
   | { type: 'bundle-refresh-plan'; plan: import('../../types/bundle-refresh.js').BundleRefreshPlan }
   | { type: 'bundle-refresh-applied'; projectName: string; workspaceId: string }
   | { type: 'bundle-config-state'; state: import('../../types/bundle-config.js').BundleConfigState }

@@ -235,6 +235,93 @@ export async function runWorkspaceScripts(
   }
 }
 
+export async function rerunWorkspaceBundleScripts(
+  options: Omit<RunWorkspaceScriptsOptions, 'noSetup' | 'scriptPolicy'>
+): Promise<RunWorkspaceScriptsResult> {
+  const {
+    projectName,
+    workspacePath,
+    workspaceName,
+    repository,
+    interactive = false,
+    onOutput,
+    onPhaseStart,
+    signal,
+  } = options;
+
+  const changes = detectBundleChanges(projectName, workspacePath);
+  if (changes.parseError) {
+    return { success: false, phase: 'setup', error: changes.parseError };
+  }
+
+  const currentBundle = changes.currentBundle;
+  const config = readProjectConfig(projectName);
+  const bundleSecretKeys = new Set(config.bundleSecretKeys || []);
+  for (const step of currentBundle?.onboarding || []) {
+    if (step.type === 'secret') {
+      bundleSecretKeys.add(step.configKey);
+    }
+  }
+  const bundleSecrets = bundleSecretKeys.size > 0
+    ? await getProjectSecrets(projectName, [...bundleSecretKeys])
+    : {};
+
+  const scriptOptions: RunScriptsOptions = {
+    bundleValues: config.bundleValues,
+    bundleSecrets,
+    nonInteractive: !interactive,
+    onOutput,
+    signal,
+  };
+
+  const lockState = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
+
+  try {
+    onPhaseStart?.('setup');
+    const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup');
+    await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
+    lockState.setup = {
+      ...lockState.setup,
+      status: 'success',
+      ranAt: new Date().toISOString(),
+      error: undefined,
+    };
+    writeWorkspaceLockState(workspacePath, lockState);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    lockState.setup = {
+      ...lockState.setup,
+      status: 'failed',
+      ranAt: new Date().toISOString(),
+      error: message,
+    };
+    writeWorkspaceLockState(workspacePath, lockState);
+    return { success: false, phase: 'setup', error: message, cancelled: isScriptExecutionCancelledError(error) };
+  }
+
+  try {
+    onPhaseStart?.('select');
+    const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select');
+    await runScriptsInTerminal(selectScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
+    lockState.select = {
+      status: 'success',
+      ranAt: new Date().toISOString(),
+    };
+    writeWorkspaceLockState(workspacePath, lockState);
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    lockState.select = {
+      ...lockState.select,
+      status: 'failed',
+      ranAt: new Date().toISOString(),
+      error: message,
+    };
+    writeWorkspaceLockState(workspacePath, lockState);
+    return { success: false, phase: 'select', error: message, cancelled: isScriptExecutionCancelledError(error) };
+  }
+}
+
 function resolveCurrentConfirmResults(
   bundle: SpacesBundle | undefined,
   stepFingerprints: Record<string, string>,

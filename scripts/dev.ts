@@ -481,6 +481,7 @@ async function main(): Promise<void> {
   log('dev', 'Starting Vite...');
   spawnChild('web', ['bunx', 'vite', '--port', String(vitePort), '--host'], {
     RELAY_PORT: String(relayPort),
+    VITE_RELAY_URL: relayUrl,
     DEV_IDENTITY_PATH: devIdentityPath,
     DEV_ENROLL_TOKEN: enrollToken,
   }, WEB_DIR);

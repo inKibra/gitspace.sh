@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitSpace Background Task Bar UX Draft</title>
+  <style>
+    :root {
+      --bg: #070807;
+      --panel: #0d100e;
+      --panel-2: #141813;
+      --ink: #ece7d8;
+      --muted: #9c9788;
+      --dim: #676357;
+      --line: #282d24;
+      --line-strong: #3a4334;
+      --green: #9bff69;
+      --amber: #ffcc66;
+      --red: #ff6b5f;
+      --blue: #7dd3fc;
+      --shadow: rgba(0, 0, 0, .55);
+      --mono: "Berkeley Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      --serif: Georgia, "Times New Roman", serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(155, 255, 105, .10), transparent 28%),
+        radial-gradient(circle at 84% 14%, rgba(125, 211, 252, .08), transparent 24%),
+        linear-gradient(180deg, #090b08 0%, var(--bg) 52%, #050605 100%);
+      color: var(--ink);
+      font-family: var(--mono);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+      background-size: 36px 36px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent 80%);
+    }
+
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 48px 1fr auto;
+      position: relative;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10, 12, 9, .78);
+      backdrop-filter: blur(16px);
+    }
+
+    .brand {
+      font-family: var(--serif);
+      font-size: 21px;
+      letter-spacing: .02em;
+    }
+
+    .crumb {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .16em;
+    }
+
+    .top-actions { margin-left: auto; display: flex; gap: 8px; }
+    .pill {
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      padding: 6px 10px;
+      font-size: 11px;
+      background: #0e120d;
+    }
+
+    .main {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 0;
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: rgba(11, 13, 10, .78);
+      padding: 14px 12px;
+      overflow: auto;
+    }
+
+    .section-title {
+      color: var(--dim);
+      font-size: 10px;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+      margin: 18px 0 8px;
+    }
+
+    .workspace {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 8px;
+      color: var(--muted);
+      border: 1px solid transparent;
+      font-size: 12px;
+    }
+    .workspace.active {
+      color: var(--ink);
+      background: rgba(155, 255, 105, .06);
+      border-color: rgba(155, 255, 105, .22);
+    }
+    .dot { width: 7px; height: 7px; background: var(--green); display: inline-block; border-radius: 50%; box-shadow: 0 0 14px rgba(155,255,105,.55); }
+    .dot.amber { background: var(--amber); box-shadow: 0 0 14px rgba(255,204,102,.5); }
+
+    .content {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 54px 1fr;
+      background: rgba(7, 8, 7, .65);
+    }
+
+    .workspace-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(13, 16, 14, .72);
+    }
+    .workspace-header h1 {
+      font-size: 16px;
+      font-weight: 500;
+      margin: 0;
+    }
+    .status-chip { color: var(--blue); border: 1px solid rgba(125,211,252,.25); padding: 3px 7px; font-size: 10px; text-transform: uppercase; letter-spacing: .12em; }
+
+    .terminal-area {
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--dim);
+      position: relative;
+    }
+    .terminal-card {
+      width: min(880px, calc(100% - 64px));
+      border: 1px solid var(--line);
+      background: #090b08;
+      box-shadow: 0 24px 80px var(--shadow);
+    }
+    .terminal-card .head {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .terminal-card pre {
+      margin: 0;
+      padding: 18px;
+      height: 270px;
+      overflow: hidden;
+      color: #a7b39d;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .taskbar {
+      border-top: 1px solid var(--line-strong);
+      background: rgba(9, 11, 8, .92);
+      backdrop-filter: blur(18px);
+      box-shadow: 0 -20px 60px rgba(0,0,0,.36);
+    }
+
+    .taskbar-strip {
+      height: 42px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 14px;
+      padding: 0 14px;
+      cursor: pointer;
+    }
+
+    .task-summary {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .chevron { color: var(--muted); transition: transform .2s ease; }
+    .taskbar.expanded .chevron { transform: rotate(180deg); }
+    .spinner {
+      width: 13px;
+      height: 13px;
+      border: 2px solid rgba(155,255,105,.18);
+      border-top-color: var(--green);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .task-title {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 12px;
+    }
+    .task-title strong { color: var(--ink); font-weight: 600; }
+    .task-title span { color: var(--muted); }
+
+    .progress-track {
+      height: 4px;
+      background: #171b15;
+      border: 1px solid #20261d;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 64%;
+      background: linear-gradient(90deg, var(--green), var(--blue));
+      box-shadow: 0 0 18px rgba(155,255,105,.45);
+      animation: breathe 1.8s ease-in-out infinite;
+    }
+    @keyframes breathe { 50% { filter: brightness(1.25); } }
+
+    .task-actions { display: flex; align-items: center; gap: 8px; }
+    button {
+      font: inherit;
+      border: 1px solid var(--line-strong);
+      background: #10140f;
+      color: var(--ink);
+      padding: 6px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    button:hover { border-color: rgba(155,255,105,.45); color: var(--green); }
+    .ghost { color: var(--muted); }
+
+    .task-details {
+      height: 0;
+      overflow: hidden;
+      border-top: 1px solid transparent;
+      transition: height .22s ease, border-color .22s ease;
+    }
+    .taskbar.expanded .task-details {
+      height: 292px;
+      border-top-color: var(--line);
+    }
+
+    .details-grid {
+      height: 292px;
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      min-height: 0;
+    }
+    .task-list {
+      border-right: 1px solid var(--line);
+      padding: 12px;
+      overflow: auto;
+    }
+    .task-row {
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      gap: 8px;
+      align-items: start;
+      padding: 10px 8px;
+      border: 1px solid transparent;
+      margin-bottom: 6px;
+      background: rgba(255,255,255,.015);
+    }
+    .task-row.active { border-color: rgba(155,255,105,.22); background: rgba(155,255,105,.045); }
+    .task-row.done .state { color: var(--green); }
+    .task-row.warn .state { color: var(--amber); }
+    .task-row.fail .state { color: var(--red); }
+    .task-row .name { font-size: 12px; color: var(--ink); }
+    .task-row .sub { font-size: 10px; color: var(--muted); margin-top: 3px; line-height: 1.4; }
+    .task-row .time { color: var(--dim); font-size: 10px; }
+
+    .log-panel {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 38px 1fr 42px;
+    }
+    .log-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .13em;
+    }
+    .log {
+      margin: 0;
+      padding: 12px 14px;
+      overflow: auto;
+      font-size: 11px;
+      line-height: 1.55;
+      color: #b2bea8;
+      background: #060806;
+    }
+    .log .ok { color: var(--green); }
+    .log .warn { color: var(--amber); }
+    .log .muted { color: var(--dim); }
+    .resolution {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      background: #0b0d0a;
+    }
+    .resolution strong { color: var(--amber); font-weight: 600; }
+
+    .callout {
+      position: absolute;
+      right: 24px;
+      bottom: 70px;
+      width: 270px;
+      border: 1px solid rgba(255,204,102,.3);
+      background: rgba(16, 13, 7, .92);
+      color: var(--amber);
+      padding: 12px;
+      font-size: 11px;
+      line-height: 1.5;
+      box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    }
+    .callout b { color: var(--ink); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">GitSpace</div>
+      <div class="crumb">workspace detail · background cleanup draft</div>
+      <div class="top-actions">
+        <div class="pill">2 background tasks</div>
+        <div class="pill">connected</div>
+      </div>
+    </header>
+
+    <main class="main">
+      <aside class="sidebar">
+        <div class="section-title">Workspaces</div>
+        <div class="workspace active"><span class="dot"></span> posthog-logging</div>
+        <div class="workspace"><span class="dot amber"></span> feature-zerbly</div>
+        <div class="workspace"><span class="dot"></span> payments-v2</div>
+
+        <div class="section-title">AI Agents</div>
+        <div class="workspace"><span class="dot"></span> plan</div>
+        <div class="workspace"><span class="dot amber"></span> second tab</div>
+
+        <div class="section-title">Terminals</div>
+        <div class="workspace">+ New session</div>
+      </aside>
+
+      <section class="content">
+        <div class="workspace-header">
+          <h1>posthog-logging</h1>
+          <span class="status-chip">code</span>
+          <span class="crumb">delete starts instantly; cleanup moves below</span>
+        </div>
+        <div class="terminal-area">
+          <div class="terminal-card">
+            <div class="head"><span class="dot"></span> Terminal · remains usable while cleanup runs</div>
+            <pre>$ gssh workspace remove posthog-logging
+queued background task: remove workspace
+
+$ git status --short
+ M src/components/TaskStatusBar.web.tsx
+
+# User can continue working here. The cleanup task streams below only when expanded.</pre>
+          </div>
+          <div class="callout"><b>Behavior draft:</b> deletion no longer hijacks the main terminal. Script output is a background task with explicit success/failure/leftover states.</div>
+        </div>
+      </section>
+    </main>
+
+    <section class="taskbar expanded" id="taskbar" aria-label="Background tasks">
+      <div class="taskbar-strip" onclick="document.getElementById('taskbar').classList.toggle('expanded')">
+        <div class="task-summary">
+          <span class="chevron">⌃</span>
+          <span class="spinner"></span>
+          <div class="task-title"><strong>Removing posthog-logging</strong> <span>· running remove scripts · 01:42</span></div>
+        </div>
+        <div class="progress-track"><div class="progress-fill"></div></div>
+        <div class="task-actions" onclick="event.stopPropagation()">
+          <button class="ghost">Hide</button>
+          <button>Open logs</button>
+        </div>
+      </div>
+
+      <div class="task-details">
+        <div class="details-grid">
+          <div class="task-list">
+            <div class="task-row active">
+              <div class="state">●</div>
+              <div><div class="name">Remove posthog-logging</div><div class="sub">Running .gitspace/scripts/remove/cleanup-db.sh</div></div>
+              <div class="time">01:42</div>
+            </div>
+            <div class="task-row done">
+              <div class="state">✓</div>
+              <div><div class="name">Archive agent logs</div><div class="sub">Saved transcript before workspace deletion</div></div>
+              <div class="time">00:09</div>
+            </div>
+            <div class="task-row warn">
+              <div class="state">!</div>
+              <div><div class="name">Preserved untracked files</div><div class="sub">3 files remain; deletion not reported as complete</div></div>
+              <div class="time">now</div>
+            </div>
+            <div class="task-row fail">
+              <div class="state">×</div>
+              <div><div class="name">Previous remove attempt</div><div class="sub">Script exited 1; logs retained</div></div>
+              <div class="time">12m</div>
+            </div>
+          </div>
+
+          <div class="log-panel">
+            <div class="log-head">
+              <span>remove workspace · live output</span>
+              <span>expandable script terminal</span>
+            </div>
+            <pre class="log"><span class="muted">[00:00]</span> resolve workspace path: ~/gitspace/core/workspaces/posthog-logging
+<span class="ok">[00:02]</span> detach 2 terminal panes
+<span class="ok">[00:05]</span> run remove/pre: archive-agent-state.sh
+<span class="muted">[00:31]</span> run remove/main: cleanup-db.sh
+<span class="warn">[01:39]</span> preserved untracked files:
+         .env.local
+         tmp/posthog-debug.json
+         node_modules/.vite/deps/_metadata.json
+<span class="muted">[01:42]</span> waiting for cleanup-db.sh to finish…</pre>
+            <div class="resolution"><strong>Not done yet:</strong> final state will be Removed, Failed, or Preserved leftovers — never silent.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

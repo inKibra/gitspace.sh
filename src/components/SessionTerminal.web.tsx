@@ -6,6 +6,8 @@ import {
 } from './session-terminal-page-navigation.js';
 import { isIOSDevice } from '../utils/device.web.js';
 
+
+const WEB_TERMINAL_SCROLLBACK = 50_000;
 interface Props {
   onData: (data: Uint8Array) => void;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
@@ -216,6 +218,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         const v = (name: string) => cs.getPropertyValue(name).trim();
 
         const term = new GhosttyTerminal({
+          scrollback: WEB_TERMINAL_SCROLLBACK,
           fontSize: 14,
           fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
           theme: {

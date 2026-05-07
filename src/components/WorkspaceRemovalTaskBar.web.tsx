@@ -36,6 +36,12 @@ function getScriptPhase(task: WorkspaceRemovalTask): ScriptPhase {
   return 'remove';
 }
 
+function getEmptyLogLabel(task: WorkspaceRemovalTask): string {
+  return task.phase === 'remove'
+    ? 'No cleanup script output yet.'
+    : 'No workspace script output yet.';
+}
+
 export function WorkspaceRemovalTaskBar({ tasks, onDismiss }: Props) {
   const [expanded, setExpanded] = useState(false);
   const activeTask = useMemo(
@@ -90,7 +96,7 @@ export function WorkspaceRemovalTaskBar({ tasks, onDismiss }: Props) {
               error={activeTask.result?.status === 'failed' ? activeTask.result.message : undefined}
               exitCode={activeTask.result?.status === 'failed' ? activeTask.result.exitCode : undefined}
               logLines={activeTask.logLines}
-              emptyLogLabel="No cleanup script output yet."
+              emptyLogLabel={getEmptyLogLabel(activeTask)}
               className="h-full"
             />
             {activeTask.result?.status === 'preserved_leftovers' && (

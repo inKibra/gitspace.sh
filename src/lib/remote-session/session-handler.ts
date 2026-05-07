@@ -31,6 +31,15 @@ import {
   watchMachineEvents,
   type Session,
 } from "../tmux-lite/cli";
+import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
+
+// Import project loading / workspace operations
+import { listProjectSummaries } from "../../core/project-catalog";
+import { deleteWorkspaceCore } from "../../core/workspace";
+import { prepareWorkspaceForSession, rerunWorkspaceScriptsForSession } from "../../core/workspace-lifecycle";
+import { readProjectConfig } from '../../core/config.js';
+import { matchesWorkspaceId } from '../../utils/workspace-id.js';
+
 import {
   listReplaysOffline,
   getReplayFrameOffline,
@@ -40,14 +49,6 @@ import {
 } from '../tmux-lite/replay/service.js';
 import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
-
-// Import project loading
-import { listProjectSummaries } from "../../core/project-catalog";
-
-// Import workspace operations
-import { deleteWorkspaceCore } from "../../core/workspace";
-import { prepareWorkspaceForSession } from "../../core/workspace-lifecycle";
-
 // Process imports
 import { getProcessSpecs } from "../processes/manager.js";
 
@@ -502,6 +503,118 @@ export class RemoteSessionHandler {
           workspaceName: msg.workspaceName,
           phase: msg.phase,
         }, sendResponse);
+        break;
+      case 'workspace_notes_list':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.sendMessage(session, sendResponse, {
+          type: 'command_response',
+          requestId: msg.requestId,
+          response: { type: 'workspace-notes', notes: listWorkspaceNotes(msg.projectName, msg.workspaceName) },
+        });
+        break;
+
+      case 'workspace_note_add':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.sendMessage(session, sendResponse, {
+          type: 'command_response',
+          requestId: msg.requestId,
+          response: { type: 'workspace-note', note: addWorkspaceNote(msg.projectName, msg.workspaceName, { body: msg.body, kind: 'note' }) },
+        });
+        break;
+
+      case 'workspace_note_update':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.sendMessage(session, sendResponse, {
+          type: 'command_response',
+          requestId: msg.requestId,
+          response: { type: 'workspace-note', note: updateWorkspaceNote(msg.projectName, msg.workspaceName, msg.noteId, { body: msg.body, kind: 'note' }) },
+        });
+        break;
+      case 'rerun_workspace_scripts':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        try {
+          const workspaces = await scanWorkspaces();
+          const workspace = workspaces.find(
+            (item) =>
+              item.projectName === msg.projectName &&
+              matchesWorkspaceId(item, msg.workspaceId)
+          );
+          if (!workspace) {
+            await this.sendError(session, sendResponse, 'WORKSPACE_NOT_FOUND', `Workspace not found: ${msg.workspaceId}`, { requestId: msg.requestId });
+            return;
+          }
+          let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'setup';
+          const result = await rerunWorkspaceScriptsForSession({
+            projectName: msg.projectName,
+            workspacePath: workspace.path,
+            workspaceName: workspace.id,
+            repository: readProjectConfig(msg.projectName).repository,
+            interactiveScripts: false,
+            onOutput: (data) => {
+              void this.sendMessage(session, sendResponse, {
+                type: 'script_output',
+                phase: currentPhase,
+                data: data.toString('base64'),
+                workspaceId: `${msg.projectName}:${workspace.id}`,
+              }).catch(() => undefined);
+            },
+            onPhaseStart: (phase) => {
+              currentPhase = phase;
+              void this.sendMessage(session, sendResponse, {
+                type: 'script_output',
+                phase,
+                data: '',
+                workspaceId: `${msg.projectName}:${workspace.id}`,
+              }).catch(() => undefined);
+            },
+          });
+          if (!result.success) {
+            await this.sendError(session, sendResponse, `${result.phase.toUpperCase()}_SCRIPT_FAILED`, result.error, { requestId: msg.requestId, workspaceId: `${msg.projectName}:${workspace.id}` });
+            return;
+          }
+          await this.sendMessage(session, sendResponse, {
+            type: 'script_output',
+            phase: currentPhase,
+            data: '',
+            done: true,
+            workspaceId: `${msg.projectName}:${workspace.id}`,
+          });
+          await this.sendMessage(session, sendResponse, {
+            type: 'command_response',
+            requestId: msg.requestId,
+            response: { type: 'ok' },
+          });
+        } catch (error) {
+          await this.sendError(session, sendResponse, 'RERUN_SCRIPTS_FAILED', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
+        }
+        break;
+
+      case 'workspace_note_remove':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        if (!removeWorkspaceNote(msg.projectName, msg.workspaceName, msg.noteId)) {
+          await this.sendError(session, sendResponse, 'NOTE_NOT_FOUND', `Workspace note not found: ${msg.noteId}`, { requestId: msg.requestId });
+          return;
+        }
+        await this.sendMessage(session, sendResponse, {
+          type: 'command_response',
+          requestId: msg.requestId,
+          response: { type: 'ok' },
+        });
         break;
 
       case 'kill_session':

@@ -26,8 +26,12 @@ interface ExecuteCommandPaletteActionArgs<T extends WorkspaceInfo & CommandPalet
   onAddWorkspace: () => void;
   onSetStatus: (workspace: T) => void;
   onDeleteWorkspace: (workspace: T) => void;
+  onDeleteWorkspaceSkipScripts: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
   onRefreshBundle: (workspace: T) => void | Promise<void>;
+  onRerunBundleScripts: (workspace: T) => void | Promise<void>;
+  onAddNote: (workspace: T) => void | Promise<void>;
+  onListNotes: (workspace: T) => void | Promise<void>;
   onEditProcessConfig: (workspace: T) => void | Promise<void>;
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
@@ -48,14 +52,18 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     onAddWorkspace,
     onSetStatus,
     onDeleteWorkspace,
+    onDeleteWorkspaceSkipScripts,
     onEditBundleConfig,
     onRefreshBundle,
+    onRerunBundleScripts,
+    onAddNote,
+    onListNotes,
     onEditProcessConfig,
     onDeleteRepo,
     onOpenGitHubPr,
     onOpenReview,
-  } = args;
 
+  } = args;
   if (commandId === 'open-github-pr') {
     if (workspace && onOpenGitHubPr) {
       void onOpenGitHubPr(workspace);
@@ -96,11 +104,23 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     case 'delete-workspace':
       onDeleteWorkspace(sharedCommand.workspace);
       return;
+    case 'delete-workspace-skip-scripts':
+      onDeleteWorkspaceSkipScripts(sharedCommand.workspace);
+      return;
     case 'edit-bundle-config':
       void onEditBundleConfig(sharedCommand.workspace);
       return;
     case 'refresh-bundle':
       void onRefreshBundle(sharedCommand.workspace);
+      return;
+    case 'rerun-bundle-scripts':
+      void onRerunBundleScripts(sharedCommand.workspace);
+      return;
+    case 'add-note':
+      void onAddNote(sharedCommand.workspace);
+      return;
+    case 'list-notes':
+      void onListNotes(sharedCommand.workspace);
       return;
     case 'edit-process-config':
       void onEditProcessConfig(sharedCommand.workspace);

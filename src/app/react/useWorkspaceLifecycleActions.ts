@@ -21,6 +21,7 @@ export interface UseWorkspaceLifecycleActionsOptions {
 export interface UseWorkspaceLifecycleActionsResult {
   setStatus: (workspaceRef: BackendScopedWorkspaceRef, phase: WorkspacePhase) => Promise<boolean>;
   deleteWorkspaceWithPrompt: (target: { ref: BackendScopedWorkspaceRef; workspaceName: string }) => Promise<boolean>;
+  deleteWorkspaceSkipScriptsWithPrompt: (target: { ref: BackendScopedWorkspaceRef; workspaceName: string }) => Promise<boolean>;
 }
 
 function formatLifecycleError(action: 'set-status' | 'delete', error: AgentSessionCommandError): string {
@@ -46,7 +47,7 @@ export function useWorkspaceLifecycleActions(options: UseWorkspaceLifecycleActio
     return true;
   }, [client, reportError]);
 
-  const { deleteWorkspaceWithPrompt } = useWorkspaceDeleteFlow({
+  const { deleteWorkspaceWithPrompt, deleteWorkspaceSkipScriptsWithPrompt } = useWorkspaceDeleteFlow({
     flow: options.flow,
     deleteWorkspace: async (ref, params?: DeleteWorkspaceParams) => {
       const result = await client.workspaceLifecycle.deleteWorkspace(ref, params);
@@ -65,5 +66,6 @@ export function useWorkspaceLifecycleActions(options: UseWorkspaceLifecycleActio
   return {
     setStatus,
     deleteWorkspaceWithPrompt,
+    deleteWorkspaceSkipScriptsWithPrompt,
   };
 }

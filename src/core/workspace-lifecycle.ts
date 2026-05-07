@@ -15,6 +15,7 @@ import { preloadProjectSecrets } from '../utils/secrets.js';
 import { shouldSkipSecretDependentScripts } from './secret-runtime.js';
 import {
   runWorkspaceScripts,
+  rerunWorkspaceBundleScripts,
   type RunWorkspaceScriptsResult,
   type ScriptPhase,
 } from '../utils/run-workspace-scripts.js';
@@ -136,6 +137,32 @@ export async function prepareWorkspaceForSession(
     onOutput,
     onPhaseStart,
     scriptPolicy,
+    signal,
+  });
+}
+
+export async function rerunWorkspaceScriptsForSession(
+  options: PrepareWorkspaceForSessionOptions
+): Promise<RunWorkspaceScriptsResult> {
+  const {
+    projectName,
+    workspacePath,
+    workspaceName,
+    repository,
+    interactiveScripts = false,
+    onOutput,
+    onPhaseStart,
+    signal,
+  } = options;
+
+  return rerunWorkspaceBundleScripts({
+    projectName,
+    workspacePath,
+    workspaceName,
+    repository: repository || readProjectConfig(projectName).repository,
+    interactive: interactiveScripts,
+    onOutput,
+    onPhaseStart,
     signal,
   });
 }

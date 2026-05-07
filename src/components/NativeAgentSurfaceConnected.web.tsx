@@ -86,11 +86,27 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
         return;
       }
 
+      const trimmed = augmentedText.trim();
+      const isCompactCommand = trimmed === '/compact' || trimmed.startsWith('/compact ');
+      if (isCompactCommand) {
+        const compactInstructions = trimmed.startsWith('/compact ') ? trimmed.slice('/compact '.length).trim() : '';
+        toast.info(compactInstructions
+          ? 'Compacting session with instructions...'
+          : 'Compacting session...');
+      }
+
       await engine.promptAgentSession(
         { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
         augmentedText,
         images.length > 0 ? images : undefined,
       );
+
+      if (isCompactCommand) {
+        toast.success('Compaction requested.');
+      }
+    } catch (error) {
+      console.error('Failed to submit agent prompt', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to send command');
     } finally {
       setIsSubmitting(false);
     }

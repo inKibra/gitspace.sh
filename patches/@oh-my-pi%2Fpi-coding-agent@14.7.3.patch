@@ -1,0 +1,43 @@
+--- a/src/modes/components/footer.ts
++++ b/src/modes/components/footer.ts
+@@ -139,7 +139,7 @@
+ 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+ 
+ 		// Replace home directory with ~
+-		let pwd = shortenPath(getProjectDir());
++		let pwd = shortenPath(this.session.sessionManager.getCwd());
+ 
+ 		// Add git branch if available
+ 		const branch = this.#getCurrentBranch();
+--- a/src/modes/components/status-line/segments.ts
++++ b/src/modes/components/status-line/segments.ts
+@@ -102,7 +102,7 @@
+ 	render(ctx) {
+ 		const opts = ctx.options.path ?? {};
+ 
+-		let pwd = getProjectDir();
++		let pwd = ctx.session.sessionManager.getCwd();
+ 
+ 		if (opts.stripWorkPrefix !== false) {
+ 			pwd = stripDisplayRoot(pwd);
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -6207,6 +6207,7 @@
+ 			const result = await executeBashCommand(command, {
+ 				onChunk,
+ 				signal: abortController.signal,
++				cwd,
+ 				sessionKey: this.sessionId,
+ 				timeout: clampTimeout("bash") * 1000,
+ 				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
+--- a/src/tools/image-gen.ts
++++ b/src/tools/image-gen.ts
+@@ -397,7 +397,7 @@
+ 	if (!contentType?.startsWith("image/")) {
+ 		throw new Error(`Unsupported image type from URL: ${imageUrl}`);
+ 	}
+-	const buffer = await response.bytes();
++	const buffer = await (response as any).bytes();
+ 	return { data: buffer.toBase64(), mimeType: contentType };
+ }
+ 

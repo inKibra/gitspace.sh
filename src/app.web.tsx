@@ -13,8 +13,10 @@ import { AttachedTerminalPaneWeb } from './components/AttachedTerminalPane.web.j
 import { getAgentSessionDisplayTitle } from './agents/session-display.js';
 import { DockviewWorkspaceShell } from './components/DockviewWorkspaceShell.web.js';
 import { PaneTerminalPanel } from './components/PaneTerminalPanel.web.js';
+import { WorkspaceNotesModal } from './components/WorkspaceNotesModal.web.js';
 import { IdentityGate } from "./components/IdentityGate.web";
 import type { Identity } from "./types/identity";
+import type { WorkspaceNote } from './types/workspace.js';
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
@@ -136,10 +138,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const lastScriptWorkspaceRef = useRef<BackendScopedWorkspaceRef | null>(null);
   const suppressDeleteScriptFailureModalRef = useRef(false);
   const activeDeleteTaskIdRef = useRef<string | null>(null);
+  const activeScriptWorkspaceIdRef = useRef<string | null>(null);
   const activeScriptTaskIdRef = useRef<string | null>(null);
   const dockviewLayoutsRef = useRef<Record<string, unknown>>({});
   const cachedTerminalPanelsRef = useRef<Record<string, Array<{ id: string; title: string; render: () => ReactNode }>>>({});
   const dockviewApiByWorkspaceRef = useRef<Record<string, { toJSON: () => unknown } | null>>({});
+  const scriptRunInFlightRef = useRef<Set<string>>(new Set());
 
   // Review workspace/project state
   const [showBoardWhileDetailMounted, setShowBoardWhileDetailMounted] = useState(false);
@@ -150,6 +154,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     workspaceLabel?: string;
   } | null>(null);
 
+
+  const [notesModalState, setNotesModalState] = useState<{
+    backendKey: BackendKey;
+    projectName: string;
+    workspaceName: string;
+    workspaceSelectionKey: string;
+    notes: WorkspaceNote[];
+    selectedNoteId: string | null;
+    draftBody: string;
+    loading: boolean;
+    saving: boolean;
+  } | null>(null);
   const { engine: multi, state: multiMachineState } = useGitSpace();
 
   const keyboardVisible = useVisualViewport();
@@ -204,8 +220,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         const taskId = scriptState.phase === 'remove' ? activeDeleteTaskIdRef.current : activeScriptTaskIdRef.current;
         if (taskId) workspaceRemovalTasks.completeFailure(taskId, scriptState.error, scriptState.exitCode);
       }
+      return;
     }
-  }, [scriptState, workspaceRemovalTasks.updatePhase, workspaceRemovalTasks.completeFailure]);
+    if (activeScriptTaskIdRef.current && activeScriptWorkspaceIdRef.current) {
+      workspaceRemovalTasks.completeSuccess(activeScriptTaskIdRef.current, 'Workspace scripts finished');
+      activeScriptTaskIdRef.current = null;
+      activeScriptWorkspaceIdRef.current = null;
+    }
+  }, [scriptState, workspaceRemovalTasks.updatePhase, workspaceRemovalTasks.completeFailure, workspaceRemovalTasks.completeSuccess]);
 
   const buildScriptOutputHandler = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     if (!fn && !workspaceRemovalTasks.activeTask) return null;
@@ -510,6 +532,135 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return entries;
   }, [allWorkspaceEntries]);
 
+  const backendKeyFromSelectionKey = useCallback((selectionKey: string): BackendKey => {
+    return JSON.parse(selectionKey)[0] as BackendKey;
+  }, []);
+
+  const openWorkspaceNotes = useCallback(async (workspace: WorkspaceInfo, mode: 'list' | 'create' = 'list') => {
+    const selectionKey = workspace.selectionKey;
+    if (!selectionKey) {
+      toast.error('Workspace selection is unavailable.');
+      return;
+    }
+    const backendKey = backendKeyFromSelectionKey(selectionKey);
+    const backend = multi.getBackend(backendKey);
+    setNotesModalState({
+      backendKey,
+      projectName: workspace.projectName,
+      workspaceName: workspace.name,
+      workspaceSelectionKey: selectionKey,
+      notes: [],
+      selectedNoteId: null,
+      draftBody: '',
+      loading: true,
+      saving: false,
+    });
+    if (!backend?.listWorkspaceNotes || !backend?.addWorkspaceNote || !backend?.updateWorkspaceNote || !backend?.removeWorkspaceNote) {
+      toast.error('Workspace notes are not supported for this backend.');
+      return;
+    }
+    try {
+      let notes = await backend.listWorkspaceNotes(workspace.projectName, workspace.name);
+      let selectedNoteId = notes[0]?.id ?? null;
+      let draftBody = notes[0]?.body ?? '';
+      if (mode === 'create') {
+        const created = await backend.addWorkspaceNote(workspace.projectName, workspace.name, '# New Note\n\nWrite markdown here.');
+        await multi.listWorkspaces();
+        notes = await backend.listWorkspaceNotes(workspace.projectName, workspace.name);
+        selectedNoteId = created.id;
+        draftBody = created.body;
+      }
+      setNotesModalState({
+        backendKey,
+        projectName: workspace.projectName,
+        workspaceName: workspace.name,
+        workspaceSelectionKey: selectionKey,
+        notes,
+        selectedNoteId,
+        draftBody,
+        loading: false,
+        saving: false,
+      });
+    } catch (error) {
+      setNotesModalState((state) => state ? { ...state, loading: false, saving: false } : state);
+      toast.error(error instanceof Error ? error.message : 'Failed to load workspace notes');
+    }
+  }, [backendKeyFromSelectionKey, multi]);
+
+  const selectWorkspaceNote = useCallback((noteId: string) => {
+    setNotesModalState((current) => {
+      if (!current) return current;
+      const note = current.notes.find((entry) => entry.id === noteId);
+      return note ? { ...current, selectedNoteId: noteId, draftBody: note.body } : current;
+    });
+  }, []);
+
+  const changeWorkspaceNoteDraft = useCallback((body: string) => {
+    setNotesModalState((current) => current ? { ...current, draftBody: body } : current);
+  }, []);
+
+  const saveWorkspaceNote = useCallback(async () => {
+    const current = notesModalState;
+    if (!current?.selectedNoteId) return;
+    const backend = multi.getBackend(current.backendKey);
+    if (!backend?.updateWorkspaceNote) {
+      toast.error('Workspace notes are not supported for this backend.');
+      return;
+    }
+    setNotesModalState((state) => state ? { ...state, saving: true } : state);
+    try {
+      const updated = await backend.updateWorkspaceNote(current.projectName, current.workspaceName, current.selectedNoteId, current.draftBody);
+      const notes = await backend.listWorkspaceNotes!(current.projectName, current.workspaceName);
+      await multi.listWorkspaces();
+      setNotesModalState((state) => state ? { ...state, notes, selectedNoteId: updated.id, draftBody: updated.body, saving: false } : state);
+      toast.success('Note saved.');
+    } catch (error) {
+      setNotesModalState((state) => state ? { ...state, saving: false } : state);
+      toast.error(error instanceof Error ? error.message : 'Failed to save note');
+    }
+  }, [multi, notesModalState]);
+
+  const deleteWorkspaceNote = useCallback(async () => {
+    const current = notesModalState;
+    if (!current?.selectedNoteId) return;
+    const backend = multi.getBackend(current.backendKey);
+    if (!backend?.removeWorkspaceNote || !backend?.listWorkspaceNotes) {
+      toast.error('Workspace notes are not supported for this backend.');
+      return;
+    }
+    setNotesModalState((state) => state ? { ...state, saving: true } : state);
+    try {
+      await backend.removeWorkspaceNote(current.projectName, current.workspaceName, current.selectedNoteId);
+      const notes = await backend.listWorkspaceNotes(current.projectName, current.workspaceName);
+      await multi.listWorkspaces();
+      setNotesModalState((state) => state ? { ...state, notes, selectedNoteId: notes[0]?.id ?? null, draftBody: notes[0]?.body ?? '', saving: false } : state);
+      toast.success('Note deleted.');
+    } catch (error) {
+      setNotesModalState((state) => state ? { ...state, saving: false } : state);
+      toast.error(error instanceof Error ? error.message : 'Failed to delete note');
+    }
+  }, [multi, notesModalState]);
+
+  const createWorkspaceNote = useCallback(async () => {
+    const current = notesModalState;
+    if (!current) return;
+    const backend = multi.getBackend(current.backendKey);
+    if (!backend?.addWorkspaceNote || !backend?.listWorkspaceNotes) {
+      toast.error('Workspace notes are not supported for this backend.');
+      return;
+    }
+    setNotesModalState((state) => state ? { ...state, saving: true } : state);
+    try {
+      const created = await backend.addWorkspaceNote(current.projectName, current.workspaceName, '# New Note\n\nWrite markdown here.');
+      const notes = await backend.listWorkspaceNotes(current.projectName, current.workspaceName);
+      await multi.listWorkspaces();
+      setNotesModalState((state) => state ? { ...state, notes, selectedNoteId: created.id, draftBody: created.body, saving: false } : state);
+    } catch (error) {
+      setNotesModalState((state) => state ? { ...state, saving: false } : state);
+      toast.error(error instanceof Error ? error.message : 'Failed to create note');
+    }
+  }, [multi, notesModalState]);
+
 
   const attachedWorkspaceForDetail = useMemo(
     () => attachedWorkspaceSelectionKey ? (workspaceBySelectionKey.get(attachedWorkspaceSelectionKey) ?? null) : null,
@@ -517,6 +668,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   );
 
   const currentDetailWorkspace = selectedWorkspaceForDetail ?? attachedWorkspaceForDetail;
+  const lastVisibleDetailSelectionKeyRef = useRef<string | null>(null);
   useEffect(() => {
     setDetailWorkspaceCacheKeys((current) => current.filter((key) => workspaceBySelectionKey.has(key)).slice(0, DETAIL_VIEW_CACHE_LIMIT));
   }, [workspaceBySelectionKey]);
@@ -798,13 +950,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     },
   });
 
-  const { deleteWorkspaceWithPrompt } = useWorkspaceLifecycleActions({
+  const { deleteWorkspaceWithPrompt, deleteWorkspaceSkipScriptsWithPrompt } = useWorkspaceLifecycleActions({
     client: workspaceLifecycleClient,
     flow,
-    onBeforeDelete: ({ target }) => {
+    onBeforeDelete: ({ target, params }) => {
       suppressDeleteScriptFailureModalRef.current = true;
       activeDeleteTaskIdRef.current = workspaceRemovalTasks.startTask(target);
-      workspaceRemovalTasks.updatePhase(target.ref.workspaceId, 'remove', 'Running cleanup scripts...');
+      workspaceRemovalTasks.updatePhase(
+        target.ref.workspaceId,
+        params.scriptPolicy === 'skip' ? 'git-worktree-remove' : 'remove',
+        params.scriptPolicy === 'skip' ? 'Removing workspace directory without cleanup scripts...' : 'Running cleanup scripts...'
+      );
       if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
@@ -1199,6 +1355,21 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     });
   }, [deleteWorkspaceWithPrompt, flow, getWorkspaceRef]);
 
+  const handleDeleteWorkspaceSkipScripts = useCallback((workspace: WorkspaceInfo) => {
+    const sessionCount = workspace.sessionCount || 0;
+    flow.showConfirmTyped({
+      title: 'Delete Workspace (Skip Scripts)',
+      message: `Delete workspace \"${workspace.name}\" without running cleanup scripts?`,
+      confirmText: workspace.name,
+      warning: sessionCount > 0
+        ? `This will kill ${sessionCount} active session(s) and skip cleanup scripts.`
+        : 'This skips cleanup scripts.',
+      onConfirm: async () => {
+        const ref = getWorkspaceRef(workspace.id);
+        await deleteWorkspaceSkipScriptsWithPrompt({ ref, workspaceName: workspace.name });
+      },
+    });
+  }, [deleteWorkspaceSkipScriptsWithPrompt, flow, getWorkspaceRef]);
   const handleOpenReview = useCallback((workspaceId: string) => {
     const workspace = filteredWorkspaces.find((item) => item.id === workspaceId);
     if (!workspace) {
@@ -1225,6 +1396,66 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, [filteredWorkspaces]);
 
   // ─── Command palette ───────────────────────────────────────────────────────
+  const runWorkspaceBundleScripts = useCallback(async (
+    workspace: WorkspaceInfo & { selectionKey?: string },
+    options?: { announceSuccess?: boolean }
+  ): Promise<boolean> => {
+    if (!workspace.selectionKey) {
+      toast.error('Workspace selection is unavailable.');
+      return false;
+    }
+    const selectionKey = workspace.selectionKey;
+    if (scriptRunInFlightRef.current.has(selectionKey)) {
+      return false;
+    }
+    const backendKey = backendKeyFromSelectionKey(selectionKey);
+    const backend = multi.getBackend(backendKey);
+    if (!backend?.rerunWorkspaceScripts) {
+      toast.error('Rerun bundle scripts is not supported for this backend.');
+      return false;
+    }
+    scriptRunInFlightRef.current.add(selectionKey);
+    const ref = { backendKey, workspaceId: workspace.id };
+    const taskId = workspaceRemovalTasks.startLifecycleTask({ ref, workspaceName: workspace.name }, 'setup');
+    activeScriptTaskIdRef.current = taskId;
+    activeScriptWorkspaceIdRef.current = workspace.id;
+    try {
+      await backend.rerunWorkspaceScripts(workspace.projectName, workspace.id);
+      await multi.listWorkspaces();
+      if (options?.announceSuccess !== false) {
+        toast.success(`Reran bundle scripts for ${workspace.name}.`);
+      }
+      return true;
+    } catch (error) {
+      if (activeScriptTaskIdRef.current === taskId) {
+        workspaceRemovalTasks.completeFromError(taskId, error instanceof Error ? error.message : String(error));
+        activeScriptTaskIdRef.current = null;
+        activeScriptWorkspaceIdRef.current = null;
+      }
+      toast.error(error instanceof Error ? error.message : 'Failed to rerun bundle scripts');
+      return false;
+    } finally {
+      scriptRunInFlightRef.current.delete(selectionKey);
+    }
+  }, [backendKeyFromSelectionKey, multi, workspaceRemovalTasks]);
+
+  const handleRerunBundleScripts = useCallback(async (workspace: WorkspaceInfo & { selectionKey?: string }) => {
+    await runWorkspaceBundleScripts(workspace, { announceSuccess: true });
+  }, [runWorkspaceBundleScripts]);
+
+  useEffect(() => {
+    const visibleSelectionKey = showBoardWhileDetailMounted ? null : currentDetailWorkspace?.selectionKey ?? null;
+    if (visibleSelectionKey === lastVisibleDetailSelectionKeyRef.current) {
+      return;
+    }
+    lastVisibleDetailSelectionKeyRef.current = visibleSelectionKey;
+    if (!visibleSelectionKey || !currentDetailWorkspace || terminalStatus !== 'connected') {
+      return;
+    }
+    void runWorkspaceBundleScripts(currentDetailWorkspace, { announceSuccess: false });
+  }, [currentDetailWorkspace, runWorkspaceBundleScripts, showBoardWhileDetailMounted, terminalStatus]);
+
+
   const { commandPalette } = useCommandPaletteOrchestration({
     selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
     selectedDetailWorkspaceId: selectedRef?.workspaceId ?? selectedWorkspaceForDetail?.id ?? null,
@@ -1247,6 +1478,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       flow.close();
     },
     onDeleteWorkspace: handleDeleteWorkspace,
+    onDeleteWorkspaceSkipScripts: handleDeleteWorkspaceSkipScripts,
     onEditBundleConfig: async (workspace) => {
       await handleManageBundleConfig({ workspaceId: workspace.id });
     },
@@ -1257,6 +1489,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         multi.listWorkspaces();
         multi.listSessions();
       }
+    },
+    onRerunBundleScripts: handleRerunBundleScripts,
+    onAddNote: async (workspace) => {
+      await openWorkspaceNotes(workspace, 'create');
+    },
+    onListNotes: async (workspace) => {
+      await openWorkspaceNotes(workspace, 'list');
     },
     onEditProcessConfig: async (workspace) => {
       await handleEditProcesses({ workspaceId: workspace.id });
@@ -1273,9 +1512,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       toast.error(message);
     },
   });
-
-
-  // ─── Inbox ─────────────────────────────────────────────────────────────────
 
   const { inboxProps, handleInboxCommand } = useInboxPage({
     items: backendInbox,
@@ -1703,6 +1939,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       );
     }
 
+
+    const notesModal = notesModalState ? (
+      <WorkspaceNotesModal
+        workspaceName={notesModalState.workspaceName}
+        notes={notesModalState.notes}
+        selectedNoteId={notesModalState.selectedNoteId}
+        draftBody={notesModalState.draftBody}
+        loading={notesModalState.loading}
+        saving={notesModalState.saving}
+        onSelectNote={selectWorkspaceNote}
+        onChangeDraftBody={changeWorkspaceNoteDraft}
+        onAddNote={() => void createWorkspaceNote()}
+        onSaveNote={() => void saveWorkspaceNote()}
+        onDeleteNote={() => void deleteWorkspaceNote()}
+        onClose={() => setNotesModalState(null)}
+      />
+    ) : null;
     // Shared overlays (rendered in both board and detail views)
     const overlays = (
       <>
@@ -1761,6 +2014,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </div>
           </div>
         )}
+        {notesModal}
       </>
     );
 
@@ -1941,6 +2195,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                       flow.close();
                     },
                   });
+                }}
+                onOpenNotes={() => {
+                  void openWorkspaceNotes(workspace, 'list');
                 }}
                 onOpenEvents={(workspaceId) => {
                   setEventsWorkspacePath(workspace.path);
