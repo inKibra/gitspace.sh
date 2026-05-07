@@ -571,6 +571,7 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
       .description('Re-run bundle onboarding (keeps previous values as defaults)')
   )
     .option('--force', 'Force refresh even if no changes detected')
+    .option('--no-base-fallback', 'Only refresh a workspace-local .gitspace/bundle.json')
     .action(withErrorHandler(async (options) => {
       const ctx = useExplicitContext(options);
       const { bundleRefresh } = await import('../../commands/bundle.js');
@@ -581,6 +582,7 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
         project: ctx.project,
         workspace: ctx.workspace,
         force: options.force,
+        noBaseFallback: options.baseFallback === false,
       });
     }));
 

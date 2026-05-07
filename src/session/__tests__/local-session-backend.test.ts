@@ -863,7 +863,7 @@ describe('LocalSessionBackend', () => {
     socketHandlers?.onPtyData(new TextEncoder().encode('after-restore'));
 
     expect(callbackOneOutput).toEqual(['before-clear']);
-    expect(callbackTwoOutput).toEqual(['while-cleared', 'after-restore']);
+    expect(callbackTwoOutput).toEqual(['before-clearwhile-cleared', 'after-restore']);
   });
 
   it('handles attach/detach/reattach sequencing without losing attach snapshot output', async () => {

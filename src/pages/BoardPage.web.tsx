@@ -28,6 +28,8 @@ export interface BoardPageProps {
   onRefresh: () => void;
   onDisconnect: () => void;
   workspaceStatusById?: Record<string, WorkspaceStatusSummary>;
+	  deletingWorkspaceIds?: Record<string, { status: string; progressLabel?: string }>;
+	  creatingWorkspaceIds?: Record<string, { status: string; progressLabel?: string; workspaceName: string; phase: WorkspacePhase }>;
   /** True when backend is connected but workspaces haven't arrived yet. */
   loading?: boolean;
   loadingLabel?: string;
@@ -132,9 +134,11 @@ export function BoardPage({
   onOpenCommandPalette,
   onRefresh,
   onDisconnect,
-  workspaceStatusById = {},
-  loading = false,
-  loadingLabel = 'Loading worktrees...',
+	  workspaceStatusById = {},
+	  deletingWorkspaceIds = {},
+	  creatingWorkspaceIds = {},
+	  loading = false,
+	  loadingLabel = 'Loading worktrees...',
 }: BoardPageProps) {
   useEffect(() => {
     if (!onPhaseChange) {
@@ -246,6 +250,8 @@ export function BoardPage({
             selectedWorkspaceId={selectedWorkspaceId}
             onSelectWorkspace={onSelectWorkspace}
             workspaceStatusById={workspaceStatusById}
+            deletingWorkspaceIds={deletingWorkspaceIds}
+	            creatingWorkspaceIds={creatingWorkspaceIds}
             fullHeight
           />
         )}

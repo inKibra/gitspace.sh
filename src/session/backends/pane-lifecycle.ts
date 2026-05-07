@@ -12,6 +12,8 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
+const MAX_REPLAY_BYTES = 1024 * 1024;
+
 export interface ConfirmPaneAttachedOptions {
   sessionId: string;
   sessionName?: string | null;
@@ -35,6 +37,8 @@ export class PaneLifecycle {
   private outputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private replayChunks: Uint8Array[] = [];
+  private replayBytes = 0;
 
   constructor(options: {
     paneId: string;
@@ -54,13 +58,19 @@ export class PaneLifecycle {
 
   setOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
     this.outputHandler = handler;
-    if (!handler || this.pendingPtyChunks.length === 0) return;
+    if (!handler) return;
+    if (this.replayChunks.length > 0) {
+      this.replayToHandler();
+      return;
+    }
+    if (this.pendingPtyChunks.length === 0) return;
     const pending = concatUint8Array(this.pendingPtyChunks);
     this.pendingPtyChunks = [];
     this.pushPtyData(pending);
   }
 
   pushPtyData(data: Uint8Array): void {
+    this.appendReplayChunk(data);
     if (!this.outputHandler) {
       this.pendingPtyChunks.push(data);
       return;
@@ -110,6 +120,29 @@ export class PaneLifecycle {
     this.meta = null;
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
+    this.replayChunks = [];
+    this.replayBytes = 0;
     this.outputHandler = null;
+  }
+
+  private replayToHandler(): void {
+    if (!this.outputHandler || this.replayChunks.length === 0) return;
+    const replay = concatUint8Array(this.replayChunks);
+    this.pendingPtyChunks = [];
+    this.pendingUtf8Bytes = new Uint8Array(0);
+    const boundary = findUtf8Boundary(replay);
+    const chunk = replay.slice(0, boundary);
+    this.pendingUtf8Bytes = boundary < replay.length ? replay.slice(boundary) : new Uint8Array(0);
+    if (chunk.length > 0) this.outputHandler(chunk);
+  }
+
+  private appendReplayChunk(data: Uint8Array): void {
+    if (data.length === 0) return;
+    this.replayChunks.push(data);
+    this.replayBytes += data.length;
+    while (this.replayBytes > MAX_REPLAY_BYTES && this.replayChunks.length > 1) {
+      const dropped = this.replayChunks.shift();
+      this.replayBytes -= dropped?.length ?? 0;
+    }
   }
 }

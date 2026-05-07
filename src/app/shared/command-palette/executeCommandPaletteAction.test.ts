@@ -22,6 +22,7 @@ function createHandlers() {
     onSetStatus: mock(() => undefined),
     onDeleteWorkspace: mock(() => undefined),
     onEditBundleConfig: mock(() => undefined),
+    onRefreshBundle: mock(() => undefined),
     onEditProcessConfig: mock(() => undefined),
     onDeleteRepo: mock(() => undefined),
     onOpenGitHubPr: mock(() => undefined),
@@ -56,5 +57,19 @@ describe('executeCommandPaletteAction', () => {
     expect(handlers.showSelect).toHaveBeenCalledTimes(1);
     const firstCall = (handlers.showSelect as { mock: { calls: unknown[][] } }).mock.calls[0];
     expect(firstCall?.[0]).toMatchObject({ title: 'Demo web#1' });
+  });
+
+  it('runs refresh-bundle for selected workspace', () => {
+    const handlers = createHandlers();
+    const workspace = createWorkspace();
+
+    executeCommandPaletteAction({
+      commandId: 'refresh-bundle',
+      workspace,
+      projectName: 'proj',
+      ...handlers,
+    });
+
+    expect(handlers.onRefreshBundle).toHaveBeenCalledWith(workspace);
   });
 });

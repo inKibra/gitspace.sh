@@ -36,6 +36,7 @@ export interface AttachedTerminalPaneWebProps {
   modifiers: ModifierState;
   onModifiersChange: (next: ModifierState) => void;
   showFloatingControls: boolean;
+  showHeader?: boolean;
 }
 
 export function AttachedTerminalPaneWeb(props: AttachedTerminalPaneWebProps) {
@@ -70,44 +71,47 @@ export function AttachedTerminalPaneWeb(props: AttachedTerminalPaneWebProps) {
     modifiers,
     onModifiersChange,
     showFloatingControls,
+    showHeader = true,
   } = props;
 
   return (
     <div className={rootClassName}>
-      <div className={headerClassName}>
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          {leadingContent}
-          <div className="min-w-0 text-sm text-[var(--gs-text-muted)] truncate">
-            <span className="text-[var(--gs-success)]">●</span>{' '}
-            {showConnectedLabel && <span className="hidden sm:inline">Connected</span>}
-            {sessionName && (
-              <span className="text-[var(--gs-text)]">
-                <span className="hidden sm:inline text-[var(--gs-text-dim)] mx-1">/</span>
-                {sessionName.split(':').pop()}
-              </span>
+      {showHeader ? (
+        <div className={headerClassName}>
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {leadingContent}
+            <div className="min-w-0 text-sm text-[var(--gs-text-muted)] truncate">
+              <span className="text-[var(--gs-success)]">●</span>{' '}
+              {showConnectedLabel && <span className="hidden sm:inline">Connected</span>}
+              {sessionName && (
+                <span className="text-[var(--gs-text)]">
+                  <span className="hidden sm:inline text-[var(--gs-text-dim)] mx-1">/</span>
+                  {sessionName.split(':').pop()}
+                </span>
+              )}
+              {(processTitle || terminalTitle) && (
+                <span className="hidden md:inline text-[var(--gs-text-muted)] ml-2">
+                  {processTitle || terminalTitle}
+                </span>
+              )}
+              {lastAlertLabel && (
+                <span className="hidden lg:inline text-[var(--gs-warning-bright)] ml-2">{lastAlertLabel}</span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {showMobileControls && (
+              <button type="button" onClick={onToggleInputMode} className={inputButtonClassName}>
+                Input
+              </button>
             )}
-            {(processTitle || terminalTitle) && (
-              <span className="hidden md:inline text-[var(--gs-text-muted)] ml-2">
-                {processTitle || terminalTitle}
-              </span>
-            )}
-            {lastAlertLabel && (
-              <span className="hidden lg:inline text-[var(--gs-warning-bright)] ml-2">{lastAlertLabel}</span>
-            )}
+            {trailingContent}
+            <button type="button" onClick={() => void onDetach()} className={detachButtonClassName}>
+              Detach
+            </button>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          {showMobileControls && (
-            <button type="button" onClick={onToggleInputMode} className={inputButtonClassName}>
-              Input
-            </button>
-          )}
-          {trailingContent}
-          <button type="button" onClick={() => void onDetach()} className={detachButtonClassName}>
-            Detach
-          </button>
-        </div>
-      </div>
+      ) : null}
       <div className={terminalContainerClassName}>
         <SessionTerminal
           ref={terminalRef}

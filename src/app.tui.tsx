@@ -18,6 +18,7 @@ import { Toaster } from '@opentui-ui/toast/react';
 import { SessionTerminal } from './components/SessionTerminal.tui.js';
 
 import { ScriptTerminal } from './components/ScriptTerminal.tui.js';
+import { WorkspaceRemovalTaskBar } from './components/WorkspaceRemovalTaskBar.tui.js';
 import { ReplayTerminal } from './components/ReplayTerminal.tui.js';
 import {
   getReplayFrameOffline,
@@ -111,6 +112,7 @@ import {
   useUserActivity, buildEditProcessesCommand,
   useWorkspaceController,
 } from './app/react/index.js';
+import { useWorkspaceRemovalTasks } from './app/react/useWorkspaceRemovalTasks.js';
 import {
   agentNotificationToInboxItem, getAgentSessionDisplayTitle,
   readProjectConfig, getProjectBaseDir, projectExists,
@@ -266,6 +268,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const [activeReplay, setActiveReplay] = useState<ReplayInfo | null>(null);
   const [showDismissedReplays, setShowDismissedReplays] = useState(false);
   const activeReplayDismissedRef = useRef(false);
+  const activeDeleteTaskIdRef = useRef<string | null>(null);
   const [attachedAgentSession, setAttachedAgentSession] = useState<{
     workspaceId: string;
     sessionId: string;
@@ -279,6 +282,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
 
   // Multi-backend hook — manages local backend + auto-discovers remote machines via relay
   const { engine: multi, state: multiMachineState } = useGitSpace();
+  const workspaceRemovalTasks = useWorkspaceRemovalTasks();
   const workspaceLifecycleClient = useMemo(() => ({
     multi,
     workspaceRefs: [],
@@ -315,6 +319,13 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   const localBackendRef = useRef<LocalSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
   const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const buildLocalScriptOutputHandler = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    if (!fn && !workspaceRemovalTasks.activeTask) return null;
+    return (data: Uint8Array) => {
+      workspaceRemovalTasks.appendOutput(undefined, data);
+      fn?.(data);
+    };
+  }, [workspaceRemovalTasks.activeTask, workspaceRemovalTasks.appendOutput]);
   useEffect(() => { localBackendRef.current = localBackend; }, [localBackend]);
 
   const sendLocalPty = useCallback((data: Uint8Array) => {
@@ -331,8 +342,22 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
   }, []);
   const setLocalScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     scriptWriteCallbackRef.current = fn;
-    localBackendRef.current?.setScriptOutputHandler(fn);
-  }, []);
+    localBackendRef.current?.setScriptOutputHandler(buildLocalScriptOutputHandler(fn));
+  }, [buildLocalScriptOutputHandler]);
+
+  useEffect(() => {
+    localBackendRef.current?.setScriptOutputHandler(buildLocalScriptOutputHandler(scriptWriteCallbackRef.current));
+  }, [buildLocalScriptOutputHandler]);
+
+  useEffect(() => {
+    if (localScriptState?.phase === 'remove') {
+      workspaceRemovalTasks.updatePhase(localScriptState.workspaceId, 'remove', localScriptState.isRunning ? 'Running cleanup scripts...' : 'Cleanup scripts finished');
+      if (localScriptState.error) {
+        const taskId = activeDeleteTaskIdRef.current;
+        if (taskId) workspaceRemovalTasks.completeFailure(taskId, localScriptState.error, localScriptState.exitCode);
+      }
+    }
+  }, [localScriptState, workspaceRemovalTasks.updatePhase, workspaceRemovalTasks.completeFailure]);
 
   // Derive projects from the machine snapshot for the local backend
   const localProjects = useMemo(() => {
@@ -459,22 +484,28 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
     client: workspaceLifecycleClient,
     flow,
     onBeforeDelete: ({ target }) => {
-      setScriptWorkspaceName(target.workspaceName);
-      dispatch({ type: 'SET_VIEW', view: 'scripts' });
+      activeDeleteTaskIdRef.current = workspaceRemovalTasks.startTask(target);
+      workspaceRemovalTasks.updatePhase(target.ref.workspaceId, 'remove', 'Running cleanup scripts...');
     },
     onDeleteSuccess: async ({ target }) => {
+      const taskId = activeDeleteTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeSuccess(taskId);
+      activeDeleteTaskIdRef.current = null;
       if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
       workspaceController.clearSelectedRef();
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onDeleteCancelled: () => {
+      const taskId = activeDeleteTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeFailure(taskId, 'Workspace removal cancelled.');
+      activeDeleteTaskIdRef.current = null;
       lastScriptWorkspaceIdRef.current = null;
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
     },
     onDeleteError: async ({ message }) => {
-      dispatch({ type: 'SET_VIEW', view: 'projects' });
+      const taskId = activeDeleteTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeFromError(taskId, message);
+      activeDeleteTaskIdRef.current = null;
       flow.showMessage({
         title: 'Delete Failed',
         message,
@@ -1221,6 +1252,16 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
     onDeleteWorkspace: handleDeleteWorkspace,
     onEditBundleConfig: async (workspace) => {
       await handleManageBundleConfig({ workspaceId: workspace.id });
+    },
+    onRefreshBundle: async (workspace) => {
+      const refreshed = await bundleRefreshAttach.refreshBundle({
+        backendKey: LOCAL_BACKEND_KEY,
+        workspaceId: workspace.id,
+      });
+      if (refreshed) {
+        multi.listWorkspaces();
+        multi.listSessions();
+      }
     },
     onEditProcessConfig: async (workspace) => {
       await handleEditProcesses({ workspaceId: workspace.id });
@@ -2070,6 +2111,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
           onActivity={handleTerminalActivity}
           readOnly={isViewOnlySession}
         />
+        <WorkspaceRemovalTaskBar tasks={workspaceRemovalTasks.tasks} modalOpen={flow.isOpen} />
         <FlowTUI flow={flow} />
       </Fragment>
     );
@@ -2152,6 +2194,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
             onAttachAnyway: handleAttachLocalAnyway,
           }}
         />
+        <WorkspaceRemovalTaskBar tasks={workspaceRemovalTasks.tasks} modalOpen={flow.isOpen} />
         <FlowTUI flow={flow} />
       </Fragment>
     );
@@ -2213,6 +2256,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
         </box>
 
         {/* Status bar: hints left, daemon + notifications right */}
+        <WorkspaceRemovalTaskBar tasks={workspaceRemovalTasks.tasks} modalOpen={flow.isOpen || commandPalette.isOpen} />
         <StatusBar
           hint="[←→/Tab] Lanes  [↑↓] Select  [Shift+←/→] Move Phase  [Enter] Open  [Ctrl+Shift+P] Palette  [q] Quit"
           rightHint={daemonRightHint}

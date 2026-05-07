@@ -406,6 +406,7 @@ export interface GetAgentFileSuggestionsRequest {
 /** Delete a workspace */
 export interface DeleteWorkspaceRequest {
   type: "delete_workspace";
+  requestId?: string;
   workspaceId: string;
   projectName: string;  // Needed to locate workspace
   scriptPolicy?: 'auto' | 'skip';
@@ -543,6 +544,7 @@ export interface ErrorResponse {
 /** Workspace deleted response */
 export interface WorkspaceDeletedResponse {
   type: "workspace_deleted";
+  requestId?: string;
   workspaceId: string;
 }
 
@@ -559,6 +561,8 @@ export interface ScriptOutputResponse {
   exitCode?: number;
   /** Error message if scripts failed (only when done=true) */
   error?: string;
+  /** Workspace this script output belongs to. */
+  workspaceId?: string;
 }
 
 /**

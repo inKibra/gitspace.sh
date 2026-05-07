@@ -22,6 +22,7 @@ export interface UseCommandPaletteOrchestrationOptions<T extends WorkspaceInfo &
   onSetWorkspacePhase: (workspace: T, phase: WorkspacePhase) => void;
   onDeleteWorkspace: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
+  onRefreshBundle: (workspace: T) => void | Promise<void>;
   onEditProcessConfig: (workspace: T) => void | Promise<void>;
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
@@ -57,6 +58,7 @@ export function useCommandPaletteOrchestration<T extends WorkspaceInfo & Command
       },
       onDeleteWorkspace: options.onDeleteWorkspace,
       onEditBundleConfig: options.onEditBundleConfig,
+      onRefreshBundle: options.onRefreshBundle,
       onEditProcessConfig: options.onEditProcessConfig,
       onDeleteRepo: options.onDeleteRepo,
       onOpenGitHubPr: options.onOpenGitHubPr,

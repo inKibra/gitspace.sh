@@ -669,7 +669,9 @@ export async function deleteTmuxWorkspace(options: {
               if (response.type === 'error') {
                 settled = true;
                 cleanup();
-                reject(new Error(response.message));
+                const error = new Error(response.message) as Error & { code?: string };
+                error.code = response.code;
+                reject(error);
                 return;
               }
             }

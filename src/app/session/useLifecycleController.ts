@@ -49,9 +49,11 @@ export interface UseLifecycleControllerOptions {
   refreshProjects: () => void | Promise<void>;
   refreshWorkspaces: () => void | Promise<void>;
   refreshSessions?: () => void | Promise<void>;
-  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
-  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
-  showCreateWorkspaceSuccessMessage?: boolean;
+	  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreating?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreateFailed?: (details: WorkspaceCreatedDetails, error: unknown) => void | Promise<void>;
+	  showCreateWorkspaceSuccessMessage?: boolean;
 }
 
 export interface UseLifecycleControllerResult {
@@ -196,9 +198,11 @@ export function useLifecycleController(
     refreshProjects,
     refreshWorkspaces,
     refreshSessions,
-    onProjectCreated,
-    onWorkspaceCreated,
-    showCreateWorkspaceSuccessMessage = true,
+	    onProjectCreated,
+	    onWorkspaceCreating,
+	    onWorkspaceCreated,
+	    onWorkspaceCreateFailed,
+	    showCreateWorkspaceSuccessMessage = true,
   } = options;
 
   const refreshAll = useCallback(async () => {
@@ -209,49 +213,49 @@ export function useLifecycleController(
     }
   }, [refreshProjects, refreshSessions, refreshWorkspaces]);
 
-  const createWorkspaceWithFeedback = useCallback(async (
-    params: CreateWorkspaceParams,
-    workspaceSource?: WorkspaceSource
-  ) => {
-    flow.showLoading({
-      title: 'Creating Workspace',
-      message: `Creating ${params.workspaceName}...`,
-    });
+	  const createWorkspaceWithFeedback = useCallback(async (
+	    params: CreateWorkspaceParams,
+	    workspaceSource?: WorkspaceSource
+	  ) => {
+	    const details: WorkspaceCreatedDetails = {
+	      projectName: params.projectName,
+	      workspaceName: params.workspaceName,
+	      workspaceId: `${params.projectName}:${params.workspaceName}`,
+	      branchName: params.branchName,
+	      workspaceSource,
+	    };
+	    await onWorkspaceCreating?.(details);
+    flow.close();
 
-    try {
-      await createWorkspace(params);
-      await refreshAll();
-      await onWorkspaceCreated?.({
-        projectName: params.projectName,
-        workspaceName: params.workspaceName,
-        workspaceId: `${params.projectName}:${params.workspaceName}`,
-        branchName: params.branchName,
-        workspaceSource,
-      });
+	    try {
+	      await createWorkspace(params);
+	      await refreshAll();
+	      await onWorkspaceCreated?.(details);
 
-      if (showCreateWorkspaceSuccessMessage) {
-        flow.showMessage({
-          title: 'Workspace Created',
-          message: `Created workspace "${params.workspaceName}" in ${params.projectName}.`,
-          variant: 'success',
-        });
-      } else {
-        flow.close();
-      }
-    } catch (error) {
-      flow.showMessage({
-        title: 'Create Workspace Failed',
-        message: toErrorMessage(error, 'Failed to create workspace'),
-        variant: 'error',
-      });
-    }
-  }, [
-    createWorkspace,
-    flow,
-    onWorkspaceCreated,
-    refreshAll,
-    showCreateWorkspaceSuccessMessage,
-  ]);
+	      if (showCreateWorkspaceSuccessMessage) {
+	        flow.showMessage({
+	          title: 'Workspace Created',
+	          message: `Created workspace "${params.workspaceName}" in ${params.projectName}.`,
+	          variant: 'success',
+	        });
+	      }
+	    } catch (error) {
+	      await onWorkspaceCreateFailed?.(details, error);
+	      flow.showMessage({
+	        title: 'Create Workspace Failed',
+	        message: toErrorMessage(error, 'Failed to create workspace'),
+	        variant: 'error',
+	      });
+	    }
+	  }, [
+	    createWorkspace,
+	    flow,
+	    onWorkspaceCreating,
+	    onWorkspaceCreated,
+	    onWorkspaceCreateFailed,
+	    refreshAll,
+	    showCreateWorkspaceSuccessMessage,
+	  ]);
 
   const openCreateProjectFlow = useCallback(() => {
     const completeProjectCreation = async (projectName: string, repo: string) => {

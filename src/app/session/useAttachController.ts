@@ -251,6 +251,9 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       const attachParams: BundleRefreshAttachParams = {
         sessionId: selection.sessionId,
       }
+      if (selection.workspaceId !== undefined) {
+        attachParams.workspaceId = selection.workspaceId
+      }
       if (selection.viewOnly !== undefined) {
         attachParams.viewOnly = selection.viewOnly
       }

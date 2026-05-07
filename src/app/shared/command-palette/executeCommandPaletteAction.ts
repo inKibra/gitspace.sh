@@ -27,6 +27,7 @@ interface ExecuteCommandPaletteActionArgs<T extends WorkspaceInfo & CommandPalet
   onSetStatus: (workspace: T) => void;
   onDeleteWorkspace: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
+  onRefreshBundle: (workspace: T) => void | Promise<void>;
   onEditProcessConfig: (workspace: T) => void | Promise<void>;
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
@@ -48,6 +49,7 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     onSetStatus,
     onDeleteWorkspace,
     onEditBundleConfig,
+    onRefreshBundle,
     onEditProcessConfig,
     onDeleteRepo,
     onOpenGitHubPr,
@@ -96,6 +98,9 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
       return;
     case 'edit-bundle-config':
       void onEditBundleConfig(sharedCommand.workspace);
+      return;
+    case 'refresh-bundle':
+      void onRefreshBundle(sharedCommand.workspace);
       return;
     case 'edit-process-config':
       void onEditProcessConfig(sharedCommand.workspace);

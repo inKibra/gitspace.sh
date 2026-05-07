@@ -146,6 +146,7 @@ function SidebarContent(props: {
   onCreateAgentSession?: WorkspaceDetailPaneProps['onCreateAgentSession'];
   onStopProcess?: WorkspaceDetailPaneProps['onStopProcess'];
   onDeleteSession?: WorkspaceDetailPaneProps['onDeleteSession'];
+  onDeleteWorkspace?: WorkspaceDetailPaneProps['onDeleteWorkspace'];
   onOpenGitHubPullRequest?: WorkspaceDetailPaneProps['onOpenGitHubPullRequest'];
   onOpenReview?: WorkspaceDetailPaneProps['onOpenReview'];
   onRequestStatusChange?: WorkspaceDetailPaneProps['onRequestStatusChange'];
@@ -158,7 +159,7 @@ function SidebarContent(props: {
   const {
     detailModel, workspace, workspaceSessions, attachedSessionId, attachedAgentSessionId,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
-    onCreateAgentSession, onStopProcess, onDeleteSession, onOpenGitHubPullRequest, onOpenReview,
+    onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
     onRequestStatusChange, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
   } = props;
   const {
@@ -374,6 +375,9 @@ function SidebarContent(props: {
           const onClick = () => void detailActions.footerAction(action.id);
           return <SidebarItem key={action.id} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
         })}
+        {onDeleteWorkspace && (
+          <SidebarItem label="Delete Workspace" rightLabel="danger" onClick={() => onDeleteWorkspace(workspace)} />
+        )}
       </div>
     </>
   );
@@ -412,6 +416,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     onArchiveAgentSession,
     onRestoreAgentSession,
     onDeleteSession,
+    onDeleteWorkspace,
     allWorkspaces = [],
     workspaceStatusById = {},
     attachedSessionId = null,
@@ -561,7 +566,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             onRestoreAgentSession={onRestoreAgentSession}
             onCreateAgentSession={onCreateAgentSession}
             onStopProcess={onStopProcess}
-            onDeleteSession={onDeleteSession}
+              onDeleteSession={onDeleteSession}
+              onDeleteWorkspace={onDeleteWorkspace}
             onOpenGitHubPullRequest={onOpenGitHubPullRequest}
             onOpenReview={onOpenReview}
             onRequestStatusChange={onRequestStatusChange}
@@ -631,7 +637,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   onRestoreAgentSession={onRestoreAgentSession}
                   onCreateAgentSession={onCreateAgentSession}
                   onStopProcess={onStopProcess}
-                  onDeleteSession={onDeleteSession}
+            onDeleteSession={onDeleteSession}
+            onDeleteWorkspace={onDeleteWorkspace}
                   onOpenGitHubPullRequest={onOpenGitHubPullRequest}
                   onOpenReview={onOpenReview}
                   onRequestStatusChange={onRequestStatusChange}

@@ -78,7 +78,10 @@ export function createAppWorkspaceLifecycleClient(context: AppClientContext): Ap
 
       try {
         const projectName = workspaceRef.workspaceId.split(':')[0] ?? '';
-        await backend.deleteWorkspace(projectName, workspaceRef.workspaceId, params);
+        await backend.deleteWorkspace(projectName, workspaceRef.workspaceId, {
+          ...params,
+          timeoutMs: params.timeoutMs ?? 5 * 60 * 1000,
+        });
         await context.multi.listWorkspaces?.();
         await context.multi.listSessions?.();
         await context.multi.listReplays?.(undefined, false);

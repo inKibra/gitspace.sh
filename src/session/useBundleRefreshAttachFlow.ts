@@ -219,6 +219,24 @@ async function showNoChangeRetryPrompt(
   });
 }
 
+async function showExplicitRefreshPrompt(flow: UseBundleRefreshAttachFlowOptions['flow'], details: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    flow.showConfirm({
+      title: 'Refresh Bundle',
+      message: `${details}\n\nRefresh bundle configuration now?`,
+      variant: 'warning',
+      confirmLabel: 'Refresh now',
+      cancelLabel: 'Cancel',
+      onConfirm: () => {
+        resolve(true);
+      },
+      onCancel: () => {
+        resolve(false);
+      },
+    });
+  });
+}
+
 async function runRefreshWizard(
   flow: UseBundleRefreshAttachFlowOptions['flow'],
   plan: BundleRefreshPlan
@@ -277,6 +295,7 @@ function applyWizardValues(
 }
 
 export interface UseBundleRefreshAttachFlowResult {
+  refreshBundle: (ref: BackendScopedWorkspaceRef) => Promise<boolean>;
   attachSessionWithBundleRefresh: (
     ref: BackendScopedWorkspaceRef,
     params: BundleRefreshAttachParams
@@ -332,8 +351,9 @@ export function useBundleRefreshAttachFlow(
   }, [options]);
 
   const executeBundleRefresh = useCallback(
-    async (pending: PendingAttach): Promise<boolean> => {
+    async (pending: PendingAttach, mode: 'attach-retry' | 'refresh-only' = 'attach-retry'): Promise<boolean> => {
       const currentOptions = optionsRef.current;
+      const shouldAttachAfterRefresh = mode === 'attach-retry';
 
       if (!currentOptions.getBundleRefreshPlan || !currentOptions.applyBundleRefresh) {
         currentOptions.flow.showMessage({
@@ -341,7 +361,7 @@ export function useBundleRefreshAttachFlow(
           message: 'This backend does not support bundle refresh onboarding yet.',
           variant: 'error',
         });
-        setRecoverableParams(pending.params);
+        if (shouldAttachAfterRefresh) setRecoverableParams(pending.params);
         return false;
       }
 
@@ -369,6 +389,15 @@ export function useBundleRefreshAttachFlow(
         }
 
         if (!plan.hasChanged && plan.steps.length === 0) {
+          if (!shouldAttachAfterRefresh) {
+            currentOptions.flow.showMessage({
+              title: 'Bundle Up To Date',
+              message: plan.details,
+              variant: 'success',
+            });
+            return true;
+          }
+
           const retryAttach = await showNoChangeRetryPrompt(currentOptions.flow, plan.details);
           if (!retryAttach) {
             setRecoverableParams(pending.params);
@@ -382,9 +411,11 @@ export function useBundleRefreshAttachFlow(
           return true;
         }
 
-        const confirmed = await showRefreshPrompt(currentOptions.flow, plan.details);
+        const confirmed = shouldAttachAfterRefresh
+          ? await showRefreshPrompt(currentOptions.flow, plan.details)
+          : await showExplicitRefreshPrompt(currentOptions.flow, plan.details);
         if (!confirmed) {
-          setRecoverableParams(pending.params);
+          if (shouldAttachAfterRefresh) setRecoverableParams(pending.params);
           return false;
         }
 
@@ -393,7 +424,7 @@ export function useBundleRefreshAttachFlow(
         if (plan.steps.length > 0) {
           const values = await runRefreshWizard(currentOptions.flow, plan);
           if (!values) {
-            setRecoverableParams(pending.params);
+            if (shouldAttachAfterRefresh) setRecoverableParams(pending.params);
             return false;
           }
 
@@ -407,9 +438,18 @@ export function useBundleRefreshAttachFlow(
 
         await currentOptions.applyBundleRefresh(pending.ref, submission);
 
-        // Ensure lifecycle script output is visible in ScriptTerminal during retry.
         currentOptions.flow.close();
 
+        if (!shouldAttachAfterRefresh) {
+          currentOptions.flow.showMessage({
+            title: 'Bundle Refreshed',
+            message: 'Bundle configuration was refreshed successfully.',
+            variant: 'success',
+          });
+          return true;
+        }
+
+        // Ensure lifecycle script output is visible in ScriptTerminal during retry.
         await Promise.resolve(currentOptions.attachSession(pending.params));
         currentOptions.flow.close();
         return true;
@@ -421,7 +461,7 @@ export function useBundleRefreshAttachFlow(
           message: toErrorMessage(error, 'Failed to refresh bundle configuration.'),
           variant: 'error',
         });
-        setRecoverableParams(pending.params);
+        if (shouldAttachAfterRefresh) setRecoverableParams(pending.params);
         return false;
       } finally {
         lastHandledAttemptRef.current = pending.attemptId;
@@ -447,6 +487,17 @@ export function useBundleRefreshAttachFlow(
     },
     [clearPendingAttach]
   );
+
+  const refreshBundle = useCallback(async (ref: BackendScopedWorkspaceRef): Promise<boolean> => {
+    const pending: PendingAttach = {
+      ref,
+      params: { workspaceId: ref.workspaceId },
+      attemptId: ++attemptCounterRef.current,
+      createdAt: Date.now(),
+    };
+
+    return executeBundleRefresh(pending, 'refresh-only');
+  }, [executeBundleRefresh]);
 
   const attachSessionWithBundleRefresh = useCallback(
     async (
@@ -548,6 +599,7 @@ export function useBundleRefreshAttachFlow(
   }, []);
 
   return {
+    refreshBundle,
     attachSessionWithBundleRefresh,
     recoverableParams,
   };

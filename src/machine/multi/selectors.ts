@@ -15,6 +15,7 @@ export function toMultiMachineState(state: SessionEngineState | null): MultiMach
     byBackend[key] = {
       status: backend.status,
       snapshot: backend.machineSnapshot,
+      workspaces: backend.workspaces,
       lastError: backend.error,
       label: backend.descriptor.label,
       attachedAgentSessionId: backend.attachedAgentSessionId,
@@ -39,8 +40,51 @@ export function selectAllWorkspaces(state: MultiMachineState): Array<{ backendKe
   const result: Array<{ backendKey: BackendKey; workspace: MachineWorkspaceRecord }> = [];
   for (const backendKey of state.backendOrder) {
     const snapshot = state.byBackend[backendKey]?.snapshot;
-    if (!snapshot) continue;
-    for (const workspace of selectWorkspaces(snapshot)) {
+    const seen = new Set<string>();
+    if (snapshot) {
+      for (const workspace of selectWorkspaces(snapshot)) {
+        seen.add(workspace.id);
+        result.push({ backendKey, workspace });
+      }
+    }
+
+    for (const workspaceInfo of state.byBackend[backendKey]?.workspaces ?? []) {
+      const workspaceId = workspaceInfo.id.includes(':') ? workspaceInfo.id : `${workspaceInfo.projectName}:${workspaceInfo.id}`;
+      if (seen.has(workspaceId)) continue;
+      const workspace: MachineWorkspaceRecord = {
+        id: workspaceId,
+        name: workspaceInfo.name,
+        projectId: workspaceInfo.projectName,
+        projectName: workspaceInfo.projectName,
+        path: workspaceInfo.path,
+        branch: workspaceInfo.branch,
+        phase: workspaceInfo.status,
+        isStale: workspaceInfo.isStale,
+        serveDomain: workspaceInfo.serveDomain,
+        processes: workspaceInfo.processes,
+        processConfigError: workspaceInfo.processConfigError,
+        notesSummary: workspaceInfo.notesSummary,
+        terminalSessionIds: [],
+        agentSessionIds: [],
+        processIds: [],
+        replayIds: [],
+        summary: {
+          terminalCount: workspaceInfo.sessionCount ?? 0,
+          attachedTerminalCount: 0,
+          runningTerminalCount: workspaceInfo.sessionCount ?? 0,
+          failedTerminalCount: 0,
+          agentCount: 0,
+          runningAgentCount: 0,
+          waitingAgentCount: 0,
+          permissionAgentCount: 0,
+          retryingAgentCount: 0,
+          closedAgentCount: 0,
+          archivedAgentCount: 0,
+          configuredProcessCount: workspaceInfo.processes?.length ?? 0,
+          runningProcessCount: 0,
+          failedProcessCount: 0,
+        },
+      };
       result.push({ backendKey, workspace });
     }
   }

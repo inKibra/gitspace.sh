@@ -1046,7 +1046,7 @@ it('does not emit attached until the real attach event arrives and preserves pre
     await Bun.sleep(0);
 
     expect(callbackOneOutput).toEqual(['before-clear']);
-    expect(callbackTwoOutput).toEqual(['while-cleared', 'after-restore']);
+    expect(callbackTwoOutput).toEqual(['before-clearwhile-cleared', 'after-restore']);
   });
 
   it('emits workspace-scoped saved filters from tmux events response', async () => {
@@ -1323,17 +1323,19 @@ it('does not emit attached until the real attach event arrives and preserves pre
 
     const deletePromise = backend.deleteWorkspace('alpha', 'ws-1', { scriptPolicy: 'skip' });
     await Bun.sleep(0);
-    const deleteCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]);
-    expect(deleteCommand).toEqual({
+    const deleteCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]) as { requestId?: string } | null;
+    expect(deleteCommand).toMatchObject({
       type: 'delete_workspace',
       projectName: 'alpha',
       workspaceId: 'ws-1',
       scriptPolicy: 'skip',
     });
+    expect(typeof deleteCommand?.requestId).toBe('string');
 
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
         type: 'workspace_deleted',
+        requestId: deleteCommand?.requestId,
         workspaceId: 'ws-1',
       })
     );

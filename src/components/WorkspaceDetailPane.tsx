@@ -45,6 +45,7 @@ export interface WorkspaceDetailPaneProps {
   onArchiveAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onDeleteSession?: (sessionId: string, sessionName: string) => void;
+  onDeleteWorkspace?: (workspace: WorkspaceInfo) => void;
   /** Raw cross-project workspaces available for the header strip. */
   allWorkspaces?: WorkspaceDetailStripWorkspace[];
   /** Platform-neutral status map used to filter/sort the header strip. */

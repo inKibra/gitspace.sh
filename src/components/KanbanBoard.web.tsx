@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
 import { PHASE_LABELS } from '../app/shared/board/types.js';
+	import type { WorkspacePhase } from '../types/config.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 
@@ -56,9 +57,40 @@ export interface KanbanBoardWebProps {
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceKey: string | null) => void;
   workspaceStatusById?: Record<string, WorkspaceStatusSummary>;
+  deletingWorkspaceIds?: Record<string, { status: string; progressLabel?: string }>;
+	  creatingWorkspaceIds?: Record<string, { status: string; progressLabel?: string; workspaceName: string; phase: WorkspacePhase }>;
   /** When true, lanes stretch vertically to fill the container. */
   fullHeight?: boolean;
 }
+
+	function PendingWorkspaceCard({
+	  workspaceName,
+	  progressLabel,
+	}: {
+	  workspaceName: string;
+	  progressLabel?: string;
+	}) {
+	  return (
+	    <div className="relative w-full px-3 py-2.5 border-l-2 border-l-transparent bg-[var(--gs-bg-surface)] opacity-70 cursor-not-allowed text-left">
+	      <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden bg-[var(--gs-border)]">
+	        <div
+	          className="h-full w-1/2 bg-[var(--gs-info)]"
+	          style={{ animation: 'gs-delete-card-progress 1.1s ease-in-out infinite' }}
+	        />
+	      </div>
+	      <div className="flex items-center gap-2">
+	        <span className="flex-shrink-0 text-[10px] text-[var(--gs-text-ghost)]">●</span>
+	        <span className="font-medium text-[12px] truncate text-[var(--gs-text-dim)]">{workspaceName}</span>
+	        <span className="ml-auto text-[9px] uppercase tracking-wide text-[var(--gs-info)]">creating</span>
+	      </div>
+	      {progressLabel && (
+	        <div className="mt-1 pl-[18px] text-[10px] text-[var(--gs-info)] truncate">
+	          {progressLabel}
+	        </div>
+	      )}
+	    </div>
+	  );
+	}
 
 
 function WorkspaceCard({
@@ -66,15 +98,18 @@ function WorkspaceCard({
   isSelected,
   onSelect,
   status,
+  deletionTask,
 }: {
   entry: KanbanWorkspaceItem;
   isSelected: boolean;
   onSelect: () => void;
   status?: WorkspaceStatusSummary;
+  deletionTask?: { status: string; progressLabel?: string };
 }) {
   const name = getWorkspaceDisplayName(entry);
   const prChip = getPullRequestChip(entry);
   const linear = entry.linear;
+  const isDeleting = deletionTask?.status === 'running' || deletionTask?.status === 'queued';
 
   // Dot color: use the same primaryColor from WorkspaceStatusSummary
   // that the workspace detail strip bar uses
@@ -93,20 +128,37 @@ function WorkspaceCard({
   return (
     <button
       type="button"
-      onClick={onSelect}
+      onClick={isDeleting ? undefined : onSelect}
       aria-pressed={isSelected}
+      disabled={isDeleting}
       className={
-        'w-full cursor-pointer px-3 py-2.5 border-l-2 transition-colors text-left ' +
+        'relative w-full px-3 py-2.5 border-l-2 transition-colors text-left ' +
+        (isDeleting ? 'cursor-not-allowed opacity-55 grayscale ' : 'cursor-pointer ') +
         (isSelected
           ? 'border-l-[var(--gs-selected-border)] bg-[var(--gs-bg-selected)]'
           : 'border-l-transparent hover:bg-[var(--gs-bg-hover)]')
       }
     >
+      {isDeleting && (
+        <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden bg-[var(--gs-border)]">
+          <div
+            className="h-full w-1/2 bg-[var(--gs-warning)]"
+            style={{ animation: 'gs-delete-card-progress 1.1s ease-in-out infinite' }}
+          />
+        </div>
+      )}
       {/* Name + dot */}
       <div className="flex items-center gap-2">
         <span className={`flex-shrink-0 text-[10px] ${dotColor}`}>●</span>
         <span className="font-medium text-[12px] truncate">{name}</span>
+        {isDeleting && <span className="ml-auto text-[9px] uppercase tracking-wide text-[var(--gs-warning)]">deleting</span>}
       </div>
+
+      {isDeleting && (
+        <div className="mt-1 pl-[18px] text-[10px] text-[var(--gs-warning)] truncate">
+          {deletionTask.progressLabel ?? 'Deleting workspace...'}
+        </div>
+      )}
 
       {/* Branch */}
       {entry.branch && (
@@ -179,23 +231,28 @@ export function KanbanBoardWeb({
   groups,
   selectedWorkspaceId,
   onSelectWorkspace,
-  workspaceStatusById = {},
-  fullHeight = false,
+	  workspaceStatusById = {},
+	  deletingWorkspaceIds = {},
+	  creatingWorkspaceIds = {},
+	  fullHeight = false,
 }: KanbanBoardWebProps) {
   const [mobilePhaseIndex, setMobilePhaseIndex] = useState(0);
   const safeIndex = Math.min(mobilePhaseIndex, groups.length - 1);
   const mobileGroup = groups[safeIndex];
 
+	  const creatingForPhase = (phase: WorkspacePhase) =>
+	    Object.values(creatingWorkspaceIds).filter((task) => task.phase === phase && task.status === 'creating');
   return (
     <>
+      <style>{`@keyframes gs-delete-card-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(205%); } }`}</style>
       {/* ── Mobile: tab bar + single phase ── */}
       <div className={`flex flex-col sm:hidden ${fullHeight ? 'h-full' : 'flex-1'}`}>
         {/* Phase tab bar */}
         <div className="flex border-b border-[var(--gs-border)]">
           {groups.map((group, i) => {
-            const isActive = i === safeIndex;
-            const count = group.workspaces.length;
-            return (
+	            const isActive = i === safeIndex;
+	            const count = group.workspaces.length + creatingForPhase(group.phase).length;
+	            return (
               <button
                 key={group.phase}
                 type="button"
@@ -216,23 +273,31 @@ export function KanbanBoardWeb({
 
         {/* Cards for active phase */}
         <div className="flex-1 overflow-y-auto">
-          {mobileGroup && mobileGroup.workspaces.length > 0 ? (
-            <div className="flex flex-col">
-              {mobileGroup.workspaces.map((w) => (
-                <WorkspaceCard
-                  key={w.selectionKey}
-                  entry={w}
-                  isSelected={w.selectionKey === selectedWorkspaceId}
-                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
-                  status={workspaceStatusById[w.selectionKey]}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="flex items-center justify-center py-12 text-[var(--gs-text-ghost)] text-xs">
-              No workspaces in {PHASE_LABELS[mobileGroup?.phase] ?? 'this phase'}
-            </div>
-          )}
+	          {mobileGroup && (mobileGroup.workspaces.length > 0 || creatingForPhase(mobileGroup.phase).length > 0) ? (
+	            <div className="flex flex-col">
+	              {creatingForPhase(mobileGroup.phase).map((task) => (
+	                <PendingWorkspaceCard
+	                  key={`creating-${task.workspaceName}`}
+	                  workspaceName={task.workspaceName}
+	                  progressLabel={task.progressLabel}
+	                />
+	              ))}
+	              {mobileGroup.workspaces.map((w) => (
+	                <WorkspaceCard
+	                  key={w.selectionKey}
+	                  entry={w}
+	                  isSelected={w.selectionKey === selectedWorkspaceId}
+	                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
+	                  status={workspaceStatusById[w.selectionKey]}
+                  deletionTask={deletingWorkspaceIds[w.selectionKey]}
+	                />
+	              ))}
+	            </div>
+	          ) : (
+	            <div className="flex items-center justify-center py-12 text-[var(--gs-text-ghost)] text-xs">
+	              No workspaces in {PHASE_LABELS[mobileGroup?.phase] ?? 'this phase'}
+	            </div>
+	          )}
         </div>
       </div>
 
@@ -243,21 +308,29 @@ export function KanbanBoardWeb({
             key={group.phase}
             className={`flex min-w-[180px] flex-1 flex-col bg-[var(--gs-bg)] ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
           >
-            <div className="flex justify-between items-baseline px-3 py-2.5 text-[10px] tracking-[2px] uppercase text-[var(--gs-text-dim)]">
-              <span>{PHASE_LABELS[group.phase] ?? group.phase}</span>
-              <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length}</span>
-            </div>
-            <div className="flex flex-col gap-0">
-              {group.workspaces.map((w) => (
-                <WorkspaceCard
-                  key={w.selectionKey}
-                  entry={w}
-                  isSelected={w.selectionKey === selectedWorkspaceId}
-                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
-                  status={workspaceStatusById[w.selectionKey]}
-                />
-              ))}
-            </div>
+	            <div className="flex justify-between items-baseline px-3 py-2.5 text-[10px] tracking-[2px] uppercase text-[var(--gs-text-dim)]">
+	              <span>{PHASE_LABELS[group.phase] ?? group.phase}</span>
+	              <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length + creatingForPhase(group.phase).length}</span>
+	            </div>
+	            <div className="flex flex-col gap-0">
+	              {creatingForPhase(group.phase).map((task) => (
+	                <PendingWorkspaceCard
+	                  key={`creating-${task.workspaceName}`}
+	                  workspaceName={task.workspaceName}
+	                  progressLabel={task.progressLabel}
+	                />
+	              ))}
+	              {group.workspaces.map((w) => (
+	                <WorkspaceCard
+	                  key={w.selectionKey}
+	                  entry={w}
+	                  isSelected={w.selectionKey === selectedWorkspaceId}
+	                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
+	                  status={workspaceStatusById[w.selectionKey]}
+                  deletionTask={deletingWorkspaceIds[w.selectionKey]}
+	                />
+	              ))}
+	            </div>
           </div>
         ))}
       </div>

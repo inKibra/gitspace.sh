@@ -11,6 +11,7 @@ type SharedCommandResult<T extends CommandPaletteWorkspaceLike> =
   | { kind: 'set-status'; workspace: T }
   | { kind: 'delete-workspace'; workspace: T }
   | { kind: 'edit-bundle-config'; workspace: T }
+  | { kind: 'refresh-bundle'; workspace: T }
   | { kind: 'edit-process-config'; workspace: T }
   | { kind: 'open-service'; workspace: T };
 
@@ -32,6 +33,8 @@ export function resolveSharedCommand<T extends CommandPaletteWorkspaceLike>(
       return workspace ? { kind: 'delete-workspace', workspace } : { kind: 'missing-workspace' };
     case 'edit-bundle-config':
       return workspace ? { kind: 'edit-bundle-config', workspace } : { kind: 'missing-workspace' };
+    case 'refresh-bundle':
+      return workspace ? { kind: 'refresh-bundle', workspace } : { kind: 'missing-workspace' };
     case 'edit-process-config':
       return workspace ? { kind: 'edit-process-config', workspace } : { kind: 'missing-workspace' };
     case 'open-service':
@@ -47,6 +50,8 @@ export function getMissingSelectionTitle(commandId: CommandPaletteCommandId): st
       return 'Delete Workspace';
     case 'edit-bundle-config':
       return 'Edit Bundle Config';
+    case 'refresh-bundle':
+      return 'Refresh Bundle';
     case 'edit-process-config':
       return 'Edit Process Config';
     case 'delete-repo':

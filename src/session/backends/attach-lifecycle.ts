@@ -13,6 +13,8 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
+const MAX_REPLAY_BYTES = 1024 * 1024;
+
 export interface BeginAttachOptions {
   workspaceId?: string | null;
   viewOnly?: boolean;
@@ -40,6 +42,8 @@ export class AttachLifecycle {
   private outputHandler: ((data: Uint8Array) => void) | null = null;
   private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private replayChunks: Uint8Array[] = [];
+  private replayBytes = 0;
 
   // Script output flows on its own channel so script bytes never leak into
   // session terminals. Separate buffer + handler, separate UTF-8 boundary state.
@@ -78,7 +82,14 @@ export class AttachLifecycle {
 
   setOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
     this.outputHandler = handler;
-    if (!handler || this.pendingPtyChunks.length === 0) {
+    if (!handler) {
+      return;
+    }
+    if (this.replayChunks.length > 0) {
+      this.replayToHandler();
+      return;
+    }
+    if (this.pendingPtyChunks.length === 0) {
       return;
     }
 
@@ -156,9 +167,6 @@ export class AttachLifecycle {
     }
     this.clearPtyBuffer();
 
-    // Emit detached if we had a session the UI knew about (hadSession) or were
-    // fully attached. Pure attaching-with-no-sessionId is invisible to the UI
-    // so no detach event is needed.
     if ((options.emitDetached ?? false) && (hadSession || wasAttached)) {
       this.emit({ type: 'detached' });
     }
@@ -177,6 +185,7 @@ export class AttachLifecycle {
   }
 
   pushPtyData(data: Uint8Array): void {
+    this.appendReplayChunk(data);
     if (!this.outputHandler) {
       this.pendingPtyChunks.push(data);
       return;
@@ -234,10 +243,39 @@ export class AttachLifecycle {
   private clearPtyBuffer(): void {
     this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
+    this.replayChunks = [];
+    this.replayBytes = 0;
   }
 
   clearScriptBuffer(): void {
     this.pendingScriptChunks = [];
     this.pendingScriptUtf8Bytes = new Uint8Array(0);
+  }
+
+  private replayToHandler(): void {
+    if (!this.outputHandler || this.replayChunks.length === 0) {
+      return;
+    }
+    const replay = concatUint8Array(this.replayChunks);
+    this.pendingPtyChunks = [];
+    this.pendingUtf8Bytes = new Uint8Array(0);
+    const boundary = findUtf8Boundary(replay);
+    const chunk = replay.slice(0, boundary);
+    this.pendingUtf8Bytes = boundary < replay.length ? replay.slice(boundary) : new Uint8Array(0);
+    if (chunk.length > 0) {
+      this.outputHandler(chunk);
+    }
+  }
+
+  private appendReplayChunk(data: Uint8Array): void {
+    if (data.length === 0) {
+      return;
+    }
+    this.replayChunks.push(data);
+    this.replayBytes += data.length;
+    while (this.replayBytes > MAX_REPLAY_BYTES && this.replayChunks.length > 1) {
+      const dropped = this.replayChunks.shift();
+      this.replayBytes -= dropped?.length ?? 0;
+    }
   }
 }

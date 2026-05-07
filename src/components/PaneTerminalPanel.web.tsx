@@ -123,6 +123,7 @@ export function PaneTerminalPanel({
         modifiers={modifiers}
         onModifiersChange={onModifiersChange}
         showFloatingControls={showFloatingControls}
+        showHeader={false}
       />
       {pane.agentSessionId && pane.workspaceId ? (
         <div className="flex-shrink-0">

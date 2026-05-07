@@ -360,12 +360,13 @@ export class RemoteSessionHandler {
             sendResponse,
             "PERMISSION_DENIED",
             "Requires full access to delete workspaces",
-            { workspaceId: `${msg.projectName}:${normalizedWorkspaceId}` }
+            { workspaceId: `${msg.projectName}:${normalizedWorkspaceId}`, requestId: msg.requestId }
           );
           return;
         }
         await this.handleDeleteWorkspace(
           session,
+          msg.requestId,
           msg.projectName,
           msg.workspaceId,
           msg.scriptPolicy,
@@ -1224,6 +1225,7 @@ export class RemoteSessionHandler {
    */
   private async handleDeleteWorkspace(
     session: RemoteClientSession,
+    requestId: string | undefined,
     projectName: string,
     workspaceId: string,
     scriptPolicy: 'auto' | 'skip' | undefined,
@@ -1245,6 +1247,7 @@ export class RemoteSessionHandler {
             data: event.data,
             done: event.done,
             error: event.error,
+            workspaceId: canonicalWorkspaceId,
           }).catch((error) => {
             logger.debug(`[remote-session] Failed to stream remove script output: ${error instanceof Error ? error.message : String(error)}`);
           });
@@ -1253,6 +1256,7 @@ export class RemoteSessionHandler {
 
       await this.sendMessage(session, sendResponse, {
         type: "workspace_deleted",
+        requestId,
         workspaceId: canonicalWorkspaceId,
       });
     } catch (e) {
@@ -1261,6 +1265,7 @@ export class RemoteSessionHandler {
       const message = typedError?.message ?? String(e);
       await this.sendError(session, sendResponse, typedError?.code ?? "DELETE_FAILED", message, {
         workspaceId: canonicalWorkspaceId,
+        requestId,
       });
     }
   }

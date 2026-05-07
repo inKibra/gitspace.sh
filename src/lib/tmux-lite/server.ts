@@ -2840,7 +2840,7 @@ routerListener = Bun.listen({
               if (!result.success) {
                 const message = result.error ?? `Failed to delete workspace ${normalizedWorkspaceId}`;
                 writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: message });
-                res = { type: 'error', message };
+                res = { type: 'error', message, code: result.errorCode };
                 break;
               }
               writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true });

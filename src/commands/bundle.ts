@@ -26,6 +26,8 @@ import { promptPassword } from '../utils/prompts.js';
 export interface BundleRefreshCommandOptions {
   /** Force refresh even if no changes detected */
   force?: boolean;
+  /** Only inspect a workspace-local bundle instead of falling back to the project base bundle */
+  noBaseFallback?: boolean;
   /** Project name */
   project: string;
   /** Workspace name */
@@ -106,7 +108,7 @@ export async function bundleRefresh(options: BundleRefreshCommandOptions): Promi
 
   const refreshOptions: BundleRefreshOptions = {
     force: options.force,
-    allowBaseFallback: false,
+    allowBaseFallback: options.noBaseFallback !== true,
   };
 
   const result = await refreshBundle(projectName, workspacePath, refreshOptions);

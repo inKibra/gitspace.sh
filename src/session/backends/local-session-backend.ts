@@ -204,6 +204,7 @@ function toWorkspaceDeleteErrorCode(error: unknown): WorkspaceDeleteErrorCode | 
     code === 'REMOVE_SCRIPT_FAILED' ||
     code === 'WORKSPACE_NOT_FOUND' ||
     code === 'WORKTREE_REMOVE_FAILED' ||
+    code === 'PRESERVED_LEFTOVERS' ||
     code === 'DELETE_FAILED'
   ) {
     return code;

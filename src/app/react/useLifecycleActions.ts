@@ -23,9 +23,11 @@ export interface UseLifecycleActionsOptions {
   refreshProjects?: () => void | Promise<void>;
   refreshWorkspaces?: () => void | Promise<void>;
   refreshSessions?: () => void | Promise<void>;
-  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
-  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
-  showCreateWorkspaceSuccessMessage?: boolean;
+	  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreating?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreateFailed?: (details: WorkspaceCreatedDetails, error: unknown) => void | Promise<void>;
+	  showCreateWorkspaceSuccessMessage?: boolean;
 }
 
 export function useLifecycleActions(options: UseLifecycleActionsOptions): UseLifecycleControllerResult {
@@ -77,8 +79,10 @@ export function useLifecycleActions(options: UseLifecycleActionsOptions): UseLif
     refreshProjects: options.refreshProjects ?? (() => undefined),
     refreshWorkspaces: options.refreshWorkspaces ?? (() => undefined),
     refreshSessions: options.refreshSessions,
-    onProjectCreated: options.onProjectCreated,
-    onWorkspaceCreated: options.onWorkspaceCreated,
-    showCreateWorkspaceSuccessMessage: options.showCreateWorkspaceSuccessMessage,
+	    onProjectCreated: options.onProjectCreated,
+	    onWorkspaceCreating: options.onWorkspaceCreating,
+	    onWorkspaceCreated: options.onWorkspaceCreated,
+	    onWorkspaceCreateFailed: options.onWorkspaceCreateFailed,
+	    showCreateWorkspaceSuccessMessage: options.showCreateWorkspaceSuccessMessage,
   });
 }
