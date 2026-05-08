@@ -457,6 +457,14 @@ export interface ListAgentCommandsRequest {
   target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
 }
 
+
+export interface RunSpaceCommandRequest {
+  type: 'run_space_command';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  argsText: string;
+}
+
 export interface GetAgentFileSuggestionsRequest {
   type: 'get_agent_file_suggestions';
   requestId: string;
@@ -647,6 +655,13 @@ export interface CommandResponse {
   response: import('../tmux-lite/protocol.js').Response;
 }
 
+export interface RunSpaceCommandResponse {
+  type: 'run_space_command_response';
+  requestId: string;
+  output: string;
+}
+
+
 /**
  * Machine pushes a full snapshot of all workspace agent states on client connect.
  * This is an unsolicited push from the machine, not a response to a request.
@@ -762,6 +777,7 @@ export type ClientToMachineMessage =
   | RespondAgentPermissionRequest
   | ListAgentCommandsRequest
   | GetAgentFileSuggestionsRequest
+  | RunSpaceCommandRequest
   ;
 
 /** All messages from machine to client (browsing mode) */
@@ -781,6 +797,7 @@ export type MachineToClientMessage =
   | WorkspaceNoteResponse
   | ScriptOutputResponse
   | CommandResponse
+  | RunSpaceCommandResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
   | MachineSnapshotPush
@@ -880,6 +897,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'respond_agent_permission',
     'list_agent_commands',
     'get_agent_file_suggestions',
+    'run_space_command',
   ]);
   return BROWSE_TYPES.has(msg.type);
 }

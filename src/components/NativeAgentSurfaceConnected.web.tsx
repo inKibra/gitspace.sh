@@ -94,11 +94,26 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
 
       const trimmed = augmentedText.trim();
       const isCompactCommand = trimmed === '/compact' || trimmed.startsWith('/compact ');
+      const isSpaceCommand = trimmed === '/space' || trimmed.startsWith('/space ');
       if (isCompactCommand) {
         const compactInstructions = trimmed.startsWith('/compact ') ? trimmed.slice('/compact '.length).trim() : '';
         toast.info(compactInstructions
           ? 'Compacting session with instructions...'
           : 'Compacting session...');
+      } else if (isSpaceCommand) {
+        toast.info('Running workspace command...');
+        try {
+          await engine.promptAgentSession(
+            { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
+            trimmed,
+            undefined,
+            mode === 'send' ? undefined : { streamingBehavior: mode },
+          );
+          return;
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Failed to run workspace command');
+          return false;
+        }
       }
 
       await engine.promptAgentSession(
@@ -107,7 +122,6 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
         images.length > 0 ? images : undefined,
         mode === 'send' ? undefined : { streamingBehavior: mode },
       );
-
       if (isCompactCommand) {
         toast.success('Compaction requested.');
       }

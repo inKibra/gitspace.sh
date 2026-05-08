@@ -4,6 +4,8 @@ import {
   type AttachSessionRequest,
   type CancelPendingAttachRequest,
   type ClientToMachineMessage,
+  type CommandResponse,
+  type RunSpaceCommandResponse,
   type DeleteWorkspaceRequest,
   type GetReplayTimelineRequest,
   type ListReplaysRequest,
@@ -16,7 +18,6 @@ import {
   type GetReplayFrameRequest,
   type DismissReplayRequest,
   type UndismissReplayRequest,
-  type CommandResponse,
   type RemoteSessionControl,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
@@ -59,6 +60,7 @@ import {
   machineSnapshotToWorkspaces,
 } from '../../machine/state/selectors.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
+type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse;
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 
@@ -196,6 +198,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'process_started',
   'process_stopped',
   'command_response',
+  'run_space_command_response',
   'agent_state_snapshot',
   'agent_state_update',
   'machine_snapshot',
@@ -384,7 +387,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     | null = null;
   private pendingReplayFrameChunks = new Map<string, PendingReplayFrameChunk>();
   private pendingTypedCommands = new Map<string, {
-    resolve: (response: TmuxResponse) => void;
+    resolve: (response: TypedCommandResponse) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
@@ -923,6 +926,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (response.type === 'agent-commands') return response.commands;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected list commands response');
+  }
+
+  async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTypedCommand({
+      type: 'run_space_command',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      argsText,
+    });
+    if (response.type === 'run_space_command_response') return response.output;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected run space command response');
   }
 
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
@@ -1610,6 +1626,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'command_response':
         this.resolveTypedCommand(message as CommandResponse);
         return;
+      case 'run_space_command_response':
+        this.resolveRunSpaceCommandResponse(message as RunSpaceCommandResponse);
+        return;
       case 'error':
         if (message.requestId) {
           this.rejectPendingTypedCommand(message.requestId, message.message);
@@ -1998,9 +2017,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.emitDerivedMachineState();
   }
 
-  private async sendTypedCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TmuxResponse> {
+  private async sendTypedCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TypedCommandResponse> {
     const requestId = request.requestId;
-    return new Promise<TmuxResponse>((resolve, reject) => {
+    return new Promise<TypedCommandResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const pending = this.pendingTypedCommands.get(requestId);
         if (!pending) return;
@@ -2024,6 +2043,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     clearTimeout(pending.timeout);
     this.pendingTypedCommands.delete(message.requestId);
     pending.resolve(message.response);
+  }
+
+  private resolveRunSpaceCommandResponse(message: RunSpaceCommandResponse): void {
+    const pending = this.pendingTypedCommands.get(message.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingTypedCommands.delete(message.requestId);
+    pending.resolve(message);
   }
 
   private rejectPendingTypedCommand(requestId: string, message: string): void {

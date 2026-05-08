@@ -1,6 +1,14 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-858672146840525e b/.bun-tag-858672146840525e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-858ecee34aee60c7 b/.bun-tag-858ecee34aee60c7
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/modes/components/footer.ts b/src/modes/components/footer.ts
+index 1588afdd908354ddbd947602336fc20a6debb2a3..ecb88e9fbbd0cc5fa2561161f9f36a36675fb020 100644
 --- a/src/modes/components/footer.ts
 +++ b/src/modes/components/footer.ts
-@@ -139,7 +139,7 @@
+@@ -139,7 +139,7 @@ export class FooterComponent implements Component {
  		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
  
  		// Replace home directory with ~
@@ -9,9 +17,11 @@
  
  		// Add git branch if available
  		const branch = this.#getCurrentBranch();
+diff --git a/src/modes/components/status-line/segments.ts b/src/modes/components/status-line/segments.ts
+index 129ed79d86a7c14b1b9565e7a2c5bf3fd9e7b61f..27a2bdbbc1de729d3074f620950124bc1ffcdfdd 100644
 --- a/src/modes/components/status-line/segments.ts
 +++ b/src/modes/components/status-line/segments.ts
-@@ -102,7 +102,7 @@
+@@ -102,7 +102,7 @@ const pathSegment: StatusLineSegment = {
  	render(ctx) {
  		const opts = ctx.options.path ?? {};
  
@@ -20,42 +30,44 @@
  
  		if (opts.stripWorkPrefix !== false) {
  			pwd = stripDisplayRoot(pwd);
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index fa6189f88679bd71c7ad57a2bf264d193cc24199..d3b2b430a03c7b057d25c986f3e401cc20be384e 100644
 --- a/src/session/agent-session.ts
 +++ b/src/session/agent-session.ts
-@@ -3339,6 +3339,10 @@
+@@ -3339,6 +3339,10 @@ export class AgentSession {
+ 	 * Internal: Queue a steering message (already expanded, no extension command check).
  	 */
  	async #queueSteer(text: string, images?: ImageContent[]): Promise<void> {
- 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 +		if (this.#steeringMessages.length > 0) {
 +			this.#steeringMessages = [];
 +			this.agent.clearSteeringQueue();
 +		}
+ 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
  		this.#steeringMessages.push(displayText);
  		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
- 		if (images && images.length > 0) {
-@@ -3630,6 +3634,21 @@
- 		}
+@@ -3632,6 +3636,21 @@ export class AgentSession {
  		return undefined;
  	}
-+
+ 
 +	/** Remove a queued message by visible kind and index. */
-+	removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined {
++	removeQueuedMessage(kind, index) {
 +		const queue = kind === "steering" ? this.#steeringMessages : this.#followUpMessages;
 +		if (!Number.isInteger(index) || index < 0 || index >= queue.length) {
 +			return undefined;
 +		}
 +		const [message] = queue.splice(index, 1);
 +		if (kind === "steering") {
-+			(this.agent as any).removeSteer?.(index) ?? this.agent.popLastSteer();
++			this.agent.removeSteer?.(index) ?? this.agent.popLastSteer();
 +		} else {
-+			(this.agent as any).removeFollowUp?.(index) ?? this.agent.popLastFollowUp();
++			this.agent.removeFollowUp?.(index) ?? this.agent.popLastFollowUp();
 +		}
 +		return message;
 +	}
- 
++
  	get skillsSettings(): SkillsSettings | undefined {
  		return this.#skillsSettings;
-@@ -6207,6 +6226,7 @@
+ 	}
+@@ -6207,6 +6226,7 @@ export class AgentSession {
  			const result = await executeBashCommand(command, {
  				onChunk,
  				signal: abortController.signal,
@@ -63,9 +75,11 @@
  				sessionKey: this.sessionId,
  				timeout: clampTimeout("bash") * 1000,
  				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
+diff --git a/src/tools/image-gen.ts b/src/tools/image-gen.ts
+index c85bbb25b6df24b6b208abb5c6f6551a0d9d6707..b2f02c0df0766d08ce0b464f9d466d5247b68266 100644
 --- a/src/tools/image-gen.ts
 +++ b/src/tools/image-gen.ts
-@@ -397,7 +397,7 @@
+@@ -397,7 +397,7 @@ async function loadImageFromUrl(imageUrl: string, signal?: AbortSignal): Promise
  	if (!contentType?.startsWith("image/")) {
  		throw new Error(`Unsupported image type from URL: ${imageUrl}`);
  	}

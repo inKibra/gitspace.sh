@@ -570,6 +570,13 @@ export class GitSpaceEngine {
     });
   }
 
+  runSpaceCommand(ref: BackendScopedWorkspaceRef, argsText: string): Promise<string> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.runSpaceCommand) return Promise.reject(new Error('Space command execution unavailable'));
+      return b.runSpaceCommand(ref.workspaceId, argsText);
+    });
+  }
+
   getFileSuggestions(ref: BackendScopedWorkspaceRef, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
     return this.withRefBackend(ref, (b) => {
       if (!b.getFileSuggestions) return Promise.reject(new Error('File suggestions unavailable'));

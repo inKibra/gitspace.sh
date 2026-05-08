@@ -151,8 +151,52 @@ describe('events command directory resolution', () => {
     await listEvents({ project: 'my-project', workspace: 'ws-1' });
 
     expect(mockReadWideEvents).toHaveBeenCalledTimes(2);
-    expect(mockReadWideEvents).toHaveBeenCalledWith({ eventsDir: eventsDirA, filter: {} });
-    expect(mockReadWideEvents).toHaveBeenCalledWith({ eventsDir: eventsDirB, filter: {} });
+    expect(mockReadWideEvents).toHaveBeenCalledWith(expect.objectContaining({ eventsDir: eventsDirA, filter: {} }));
+    expect(mockReadWideEvents).toHaveBeenCalledWith(expect.objectContaining({ eventsDir: eventsDirB, filter: {} }));
+  });
+
+  it('combines repeatable and alias filters', async () => {
+    makeWorkspace('my-project', 'ws-1');
+    const eventsDir = makeTempDir('gssh-events-dir-');
+    mockGetProcessEventsDir.mockImplementation(() => eventsDir);
+
+    await listEvents({
+      project: 'my-project',
+      workspace: 'ws-1',
+      filter: ['level=warn', 'correlationId=req-1'],
+      process: 'web',
+      event: 'process.ready',
+      limit: 25,
+    });
+
+    expect(mockReadWideEvents).toHaveBeenCalledWith(expect.objectContaining({
+      eventsDir,
+      filter: {
+        level: 'warn',
+        correlationId: 'req-1',
+        processName: 'web',
+        eventName: 'process.ready',
+      },
+      limit: 25,
+    }));
+  });
+
+  it('passes since and head options through as ascending query', async () => {
+    makeWorkspace('my-project', 'ws-1');
+    const eventsDir = makeTempDir('gssh-events-dir-');
+    mockListProcessEventsDirs.mockImplementation(() => [eventsDir]);
+
+    await listEvents({
+      project: 'my-project',
+      workspace: 'ws-1',
+      since: '30m',
+      head: 20,
+    });
+
+    const call = mockReadWideEvents.mock.calls[0]?.[0] as { sinceMs?: number; order?: string; limit?: number };
+    expect(call.limit).toBe(20);
+    expect(call.order).toBe('asc');
+    expect(typeof call.sinceMs).toBe('number');
   });
 });
 
@@ -177,6 +221,20 @@ describe('showEvent validations', () => {
     }
   });
 });
+
+  it('accepts --event-id alias', async () => {
+    makeWorkspace('my-project', 'ws-1');
+    const eventsDir = makeTempDir('gssh-events-dir-');
+    mockListProcessEventsDirs.mockImplementation(() => [eventsDir]);
+    mockReadWideEvents.mockImplementation(() => []);
+
+    await showEvent({ project: 'my-project', workspace: 'ws-1', eventId: 'evt-1' });
+
+    expect(mockReadWideEvents).toHaveBeenCalledWith(expect.objectContaining({
+      filter: { eventId: 'evt-1' },
+      limit: 1,
+    }));
+  });
 
 describe('events command happy path', () => {
   it('listEvents succeeds when events dir exists', async () => {

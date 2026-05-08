@@ -6,6 +6,7 @@ import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
 import { resolveWorkspaceSessionLauncherArgs } from '../../../session/workspace-shell-hooks.js';
 import { escapeShellArg } from '../../../utils/shell-escape.js';
 import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
+import { getManagedSessionBootstrap } from './managed-defaults.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
 // signal handlers that call process.exit, provider registration) that conflict
@@ -133,7 +134,7 @@ export async function createPiSessionManager(cwd: string) {
  */
 export async function openPiSession(cwd: string, sessionFilePath: string) {
   const { SessionManager } = await importSessionManagerModule();
-  const { createAgentSession, discoverAuthStorage } = await importSdk();
+  const { createAgentSession, discoverAuthStorage, discoverSkills } = await importSdk();
   const { ModelRegistry } = await importModelRegistryModule();
   const { getBundledModel } = await importPiAi();
   const env = applyManagedPiEnvironment();
@@ -162,6 +163,8 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     }
   }
 
+  const managedBootstrap = await getManagedSessionBootstrap(cwd, env.PI_CODING_AGENT_DIR, discoverSkills);
+
   const result = await createAgentSession({
     agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager,
@@ -170,6 +173,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     modelRegistry,
     model: restoredModel,
     additionalExtensionPaths: getManagedPiExtensionPaths(),
+    skills: managedBootstrap.skills,
     hasUI: true,
   });
   const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;

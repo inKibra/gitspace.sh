@@ -102,6 +102,7 @@
     "@oh-my-pi/pi-coding-agent@14.7.3": "patches/@oh-my-pi%2Fpi-coding-agent@14.7.3.patch",
     "@oh-my-pi/pi-utils@14.7.3": "patches/@oh-my-pi%2Fpi-utils@14.7.3.patch",
     "markit-ai@0.5.3": "patches/markit-ai@0.5.3.patch",
-    "@oh-my-pi/pi-natives@14.7.3": "patches/@oh-my-pi%2Fpi-natives@14.7.3.patch"
+    "@oh-my-pi/pi-natives@14.7.3": "patches/@oh-my-pi%2Fpi-natives@14.7.3.patch",
+    "@oh-my-pi/pi-tui@14.7.3": "patches/@oh-my-pi%2Fpi-tui@14.7.3.patch"
   }
 }

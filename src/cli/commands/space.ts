@@ -61,6 +61,11 @@ function requireSessionContext(): { project: string; workspace: string } {
   };
 }
 
+function collectFilter(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+
 
 
 export function registerSpaceCommands(parent: Command): void {
@@ -388,33 +393,52 @@ function registerSpaceEventsCommands(space: Command): void {
   events
     .command('list')
     .description('List events (NDJSON)')
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
     .option('--limit <n>', 'Limit results', (v: string) => Number(v), 100)
+    .option('--process <name>', 'Filter by process name')
+    .option('--level <level>', 'Filter by event level')
+    .option('--event <name>', 'Filter by event name')
+    .option('--event-id <id>', 'Filter by event id')
+    .option('--correlation-id <id>', 'Filter by correlation id')
+    .option('--since <time>', 'Filter since duration (30m, 2h) or ISO timestamp')
+    .option('--until <time>', 'Filter until duration (30m, 2h) or ISO timestamp')
+    .option('--head [n]', 'Show oldest matching events', (v: string | undefined) => v === undefined ? 100 : Number(v))
+    .option('--tail [n]', 'Show newest matching events', (v: string | undefined) => v === undefined ? 100 : Number(v))
+    .option('--order <order>', 'Sort order: asc or desc')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { listEvents } = await import('../../commands/events.js');
-      await listEvents(options);
+      await listEvents({ ...options, ...ctx });
     }));
 
   events
     .command('show')
     .description('Show a single event by eventId')
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
+    .option('--event-id <id>', 'Event id')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { showEvent } = await import('../../commands/events.js');
-      await showEvent(options);
+      await showEvent({ ...options, ...ctx });
     }));
 
   events
     .command('tail')
-    .description('Tail recent events (no follow yet)')
-    .option('--filter <expr>', 'Filter in key=value format')
+    .description('Tail recent events')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
     .option('--limit <n>', 'Limit results', (v: string) => Number(v), 50)
+    .option('--process <name>', 'Filter by process name')
+    .option('--level <level>', 'Filter by event level')
+    .option('--event <name>', 'Filter by event name')
+    .option('--event-id <id>', 'Filter by event id')
+    .option('--correlation-id <id>', 'Filter by correlation id')
+    .option('--since <time>', 'Filter since duration (30m, 2h) or ISO timestamp')
+    .option('--until <time>', 'Filter until duration (30m, 2h) or ISO timestamp')
+    .option('--follow', 'Continue streaming new events')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { tailEvents } = await import('../../commands/events.js');
-      await tailEvents(options);
+      await tailEvents({ ...options, ...ctx });
     }));
 }
 

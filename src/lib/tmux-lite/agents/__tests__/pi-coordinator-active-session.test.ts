@@ -9,18 +9,39 @@ const AGENT_SESSION_ID = 'agent-session';
 let shouldFailOpenOnce = false;
 let openPiSessionCalls = 0;
 let promptCalls = 0;
+let compactCalls = 0;
 let subscribeCalls = 0;
 
+let blockCompact = false;
+
+let resolveCompact: (() => void) | null = null;
 function createSession() {
   return {
     sessionId: AGENT_SESSION_ID,
     prompt: mock(async () => {
       promptCalls += 1;
     }),
+    compact: mock(async () => {
+      compactCalls += 1;
+      if (blockCompact) {
+        await new Promise<void>((resolve) => {
+          resolveCompact = resolve;
+        });
+      }
+    }),
     subscribe: mock(() => {
       subscribeCalls += 1;
       return () => {};
     }),
+    skills: [
+      {
+        name: 'space-review',
+        description: 'Review GitSpace workspace changes with grounded evidence and focused verification.',
+        filePath: '/tmp/space-review/SKILL.md',
+        baseDir: '/tmp/space-review',
+        source: 'gitspace-managed:native',
+      },
+    ],
     extensionRunner: {
       getRegisteredCommands: mock(() => ([{ name: 'space', description: 'Run GitSpace workspace-scoped commands' }])),
     },
@@ -96,8 +117,11 @@ describe('PiCoordinator active session open serialization', () => {
   beforeEach(() => {
     openPiSessionCalls = 0;
     promptCalls = 0;
+    compactCalls = 0;
     subscribeCalls = 0;
     shouldFailOpenOnce = false;
+    blockCompact = false;
+    resolveCompact = null;
   });
 
   it('shares one in-flight open operation for concurrent callers', async () => {
@@ -128,7 +152,29 @@ describe('PiCoordinator active session open serialization', () => {
     expect(promptCalls).toBe(1);
   });
 
-  it('includes extension commands like /space in available command listings', async () => {
+  it('passes /space commands through to the Pi session extension handler', async () => {
+    const coordinator = new PiCoordinator(SESSIONS_DIR);
+
+    await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, '/space review list');
+
+    expect(openPiSessionCalls).toBe(1);
+    expect(promptCalls).toBe(1);
+  });
+
+  it('acknowledges /compact immediately without waiting for compaction to finish', async () => {
+    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    blockCompact = true;
+
+    await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, '/compact keep the summary');
+
+    expect(openPiSessionCalls).toBe(1);
+    expect(compactCalls).toBe(1);
+    expect(promptCalls).toBe(0);
+    resolveCompact?.();
+    blockCompact = false;
+  });
+
+  it('includes extension and skill commands in available command listings', async () => {
     const coordinator = new PiCoordinator(SESSIONS_DIR);
 
     await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, 'prime session');
@@ -137,6 +183,7 @@ describe('PiCoordinator active session open serialization', () => {
     expect(commands).toEqual(expect.arrayContaining([
       { name: 'compact', description: 'Compact the session context', kind: 'extension' },
       { name: 'space', description: 'Run GitSpace workspace-scoped commands', kind: 'extension' },
+      { name: 'skill:space-review', description: 'Review GitSpace workspace changes with grounded evidence and focused verification.', kind: 'extension' },
     ]));
   });
 });

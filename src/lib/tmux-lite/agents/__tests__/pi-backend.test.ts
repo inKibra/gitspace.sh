@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { PiBackend } from '../pi-backend.js';
 import { PiCoordinator } from '../pi-coordinator.js';
 import { getManagedPiBinDir, getManagedPiExtensionPaths, getPiAgentDir, setupPiEnvironment } from '../pi-runtime.js';
+import { getManagedSessionBootstrap, getManagedSkillPaths, loadManagedDefaultSkills, mergeManagedSkills } from '../managed-defaults.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -45,6 +46,66 @@ describe('pi-runtime', () => {
         process.env.PATH = originalPath;
       }
     }
+  });
+
+  it('loads managed GitSpace default skills', async () => {
+    const paths = getManagedSkillPaths();
+    expect(paths).toHaveLength(5);
+    expect(paths).toEqual([
+      expect.stringContaining('space-review/SKILL.md'),
+      expect.stringContaining('space-notes/SKILL.md'),
+      expect.stringContaining('space-process-config/SKILL.md'),
+      expect.stringContaining('space-run-process/SKILL.md'),
+      expect.stringContaining('space-event-logs/SKILL.md'),
+    ]);
+
+    const skills = await loadManagedDefaultSkills();
+    expect(skills.map((skill) => skill.name)).toEqual([
+      'space-review',
+      'space-notes',
+      'space-process-config',
+      'space-run-process',
+      'space-event-logs',
+    ]);
+    expect(skills.every((skill) => skill.description.length > 0)).toBe(true);
+  });
+
+  it('merges managed skills over discovered skills by name', async () => {
+    const managed = await loadManagedDefaultSkills();
+    const merged = mergeManagedSkills([
+      {
+        name: 'space-review',
+        description: 'User override that should lose',
+        filePath: '/tmp/user-space-review/SKILL.md',
+        baseDir: '/tmp/user-space-review',
+        source: 'user:test',
+      },
+      {
+        name: 'user-skill',
+        description: 'User skill that should remain',
+        filePath: '/tmp/user-skill/SKILL.md',
+        baseDir: '/tmp/user-skill',
+        source: 'user:test',
+      },
+    ], managed);
+
+    expect(merged.find((skill) => skill.name === 'space-review')?.source).toBe('gitspace-managed:native');
+    expect(merged.find((skill) => skill.name === 'user-skill')?.source).toBe('user:test');
+  });
+
+  it('builds managed session bootstrap from discovered and managed skills', async () => {
+    const bootstrap = await getManagedSessionBootstrap('/tmp/workspace', '/tmp/agent', async () => ({
+      skills: [{
+        name: 'user-skill',
+        description: 'User skill',
+        filePath: '/tmp/user-skill/SKILL.md',
+        baseDir: '/tmp/user-skill',
+        source: 'user:test',
+      }],
+    }));
+
+    expect(bootstrap.skills.some((skill) => skill.name === 'user-skill')).toBe(true);
+    expect(bootstrap.skills.some((skill) => skill.name === 'space-event-logs')).toBe(true);
   });
 });
 

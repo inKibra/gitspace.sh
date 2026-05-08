@@ -4,6 +4,9 @@
  * Handles the encrypted messages between client and machine after X3DH handshake.
  */
 
+import { executeSpaceCommand } from '../tmux-lite/agents/extensions/space-command.js';
+import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
+const importExecModule = () => import('@oh-my-pi/pi-coding-agent/exec/exec');
 import { createFrame, openFrame } from "../tmux-lite/crypto/frames";
 import { scanWorkspaces } from "./workspace-scanner";
 import {
@@ -1100,6 +1103,33 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+
+      case 'run_space_command':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        try {
+          const { execCommand } = await importExecModule();
+          const output = await executeSpaceCommand(
+            {
+              exec: async (command, commandArgs, options) => {
+                const result = await execCommand(command, commandArgs, options?.cwd ?? msg.target.workspacePath, options);
+                return { stdout: result.stdout, stderr: result.stderr, code: result.code };
+              },
+            },
+            { cwd: msg.target.workspacePath },
+            parseCommandArgs(msg.argsText),
+          );
+          await this.sendMessage(session, sendResponse, {
+            type: 'run_space_command_response',
+            requestId: msg.requestId,
+            output,
+          });
+        } catch (error) {
+          await this.sendError(session, sendResponse, 'COMMAND_ERROR', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
+        }
+        break;
       default: {
         // Exhaustiveness check - log unknown message types
         const unknownMsg = msg as { type: string };

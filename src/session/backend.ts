@@ -252,6 +252,7 @@ export interface SessionBackend {
   /** Persist the selected agent session ID for a workspace. */
   setAgentSessionPreference(workspaceId: string, sessionId: string): Promise<void>;
   listAgentCommands?(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>>;
+  runSpaceCommand?(workspaceId: string, argsText: string): Promise<string>;
   getFileSuggestions?(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>>;
 }
 

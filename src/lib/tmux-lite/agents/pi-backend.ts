@@ -14,6 +14,7 @@ import {
   getManagedPiExtensionPaths,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
+import { getManagedSessionBootstrap } from './managed-defaults.js';
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
 // handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
@@ -119,13 +120,15 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    const { createAgentSession } = await importSdk();
+    const { createAgentSession, discoverSkills } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(cwd);
+    const managedBootstrap = await getManagedSessionBootstrap(cwd, agentDir, discoverSkills);
     const result = await createAgentSession({
       agentDir,
       sessionManager,
       cwd,
       additionalExtensionPaths: getManagedPiExtensionPaths(),
+      skills: managedBootstrap.skills,
       hasUI: true,
     });
     const { session } = result;

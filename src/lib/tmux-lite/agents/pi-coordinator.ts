@@ -1,3 +1,5 @@
+import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
+
 import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
 import { HostUIBridgeState, type HostUIBridgeEmitter, type HostUIDialogResponse } from './host-ui-bridge.js';
 import {
@@ -13,10 +15,13 @@ import {
   openPiSession,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
+import { getManagedSessionBootstrap } from './managed-defaults.js';
+import { executeSpaceCommand } from './extensions/space-command.js';
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
 // handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSlashCommands = () => import('@oh-my-pi/pi-coding-agent/extensibility/slash-commands');
+const importExecModule = () => import('@oh-my-pi/pi-coding-agent/exec/exec');
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
@@ -244,13 +249,15 @@ export class PiCoordinator {
    * when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    const { createAgentSession: createPiAgentSessionSdk } = await importSdk();
+    const { createAgentSession: createPiAgentSessionSdk, discoverSkills } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
+    const managedBootstrap = await getManagedSessionBootstrap(target.workspacePath, agentDir, discoverSkills);
     const result = await createPiAgentSessionSdk({
       agentDir,
       sessionManager,
       cwd: target.workspacePath,
       additionalExtensionPaths: getManagedPiExtensionPaths(),
+      skills: managedBootstrap.skills,
       hasUI: true,
     });
     const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
@@ -346,12 +353,21 @@ export class PiCoordinator {
   async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string, images?: import('../protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     const session = await this.ensureActiveSession(target, agentSessionId);
 
-    // Intercept /compact — call session.compact() directly instead of prompt()
     const trimmed = text.trim();
+    // Intercept /compact — start compaction directly instead of routing through
+    // prompt(). Remote prompt_agent_session expects an immediate acceptance ack,
+    // so awaiting compaction here can exceed the transport command timeout.
     if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
       if (typeof session.compact === 'function') {
         const instructions = trimmed.startsWith('/compact ') ? trimmed.slice('/compact '.length).trim() : undefined;
-        await session.compact(instructions || undefined);
+        session.compact(instructions || undefined)
+          .catch((err: unknown) => {
+            const error = err instanceof Error ? err.message : String(err);
+            console.error(`[pi-coordinator] compact failed for session ${agentSessionId}:`, err);
+            if (this.eventHandler) {
+              this.eventHandler(target, { type: 'error', sessionId: agentSessionId, error });
+            }
+          });
         return;
       }
     }
@@ -922,18 +938,45 @@ export class PiCoordinator {
     }
     return undefined;
   }
+
+  async runSpaceCommand(target: PiWorkspaceTarget, argsText: string): Promise<string> {
+    const { execCommand } = await importExecModule();
+    const args = parseCommandArgs(argsText);
+    return executeSpaceCommand(
+      {
+        exec: async (command, commandArgs, options) => {
+          const result = await execCommand(command, commandArgs, options?.cwd ?? target.workspacePath, options);
+          return { stdout: result.stdout, stderr: result.stderr, code: result.code };
+        },
+      },
+      { cwd: target.workspacePath },
+      args,
+    );
+  }
   async listAvailableCommands(target: PiWorkspaceTarget): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
     const commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> = [];
 
     // 0. Built-in commands supported through the web surface
     commands.push({ name: 'compact', description: 'Compact the session context', kind: 'extension' });
 
-    // 1. Collect extension/custom commands from the active session for the requested workspace
+    // 1. Collect extension/custom/skill commands from the active session for the requested workspace
     //    (commands are workspace-scoped; skip any session belonging to a different workspace).
     for (const [sessionId, session] of this.activeSessions) {
       if (this.sessionWorkspaceIds.get(sessionId) !== target.workspaceId) continue;
       try {
         const reserved = new Set(commands.map((command) => command.name));
+        const skillCommands = session.skills?.map((skill) => ({
+          name: `skill:${skill.name}`,
+          description: skill.description ?? '',
+          kind: 'extension' as const,
+        })) ?? [];
+        for (const cmd of skillCommands) {
+          if (cmd.name && !commands.some((command) => command.name === cmd.name)) {
+            commands.push(cmd);
+            reserved.add(cmd.name);
+          }
+        }
+
         const extensionCommands = session.extensionRunner?.getRegisteredCommands(reserved) ?? [];
         for (const cmd of extensionCommands) {
           if (cmd?.name && !commands.some((command) => command.name === cmd.name)) {

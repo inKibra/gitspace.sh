@@ -1,3 +1,5 @@
+import type { Skill } from '@oh-my-pi/pi-coding-agent/extensibility/skills';
+
 export interface OmpAgentSession {
   sessionId: string;
   model?: unknown;
@@ -20,6 +22,7 @@ export interface OmpAgentSession {
     getRegisteredCommands(reserved?: Set<string>): Array<{ name: string; description?: string }>;
   };
   dispose(): void;
+  skills?: readonly Skill[];
 }
 
 export interface OmpAgentEvent {
@@ -118,6 +121,7 @@ export interface OmpModule {
     modelRegistry?: unknown;
     model?: unknown;
     additionalExtensionPaths?: string[];
+    skills?: Skill[];
     hasUI?: boolean;
   }): Promise<OmpCreateSessionResult>;
 }

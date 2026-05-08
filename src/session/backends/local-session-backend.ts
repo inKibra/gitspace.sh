@@ -1677,6 +1677,11 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected list commands response');
   }
 
+  async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return this.agentCoordinator.runSpaceCommand(target, argsText);
+  }
+
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const response = await this.sendTmuxCommand({ type: 'agent-file-suggestions', target, prefix, limit });

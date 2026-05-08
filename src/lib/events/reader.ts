@@ -14,6 +14,7 @@ export interface WideEventQueryParams {
   limit?: number;
   sinceMs?: number;
   untilMs?: number;
+  order?: 'asc' | 'desc';
 }
 
 export function readWideEvents(params: WideEventQueryParams): WideEvent[] {
@@ -24,7 +25,7 @@ export function readWideEvents(params: WideEventQueryParams): WideEvent[] {
     sinceMs: params.sinceMs,
     untilMs: params.untilMs,
   });
-  const sorted = [...selected].sort((a, b) => b.maxTs - a.maxTs);
+  const sorted = [...selected].sort((a, b) => params.order === 'asc' ? a.minTs - b.minTs : b.maxTs - a.maxTs);
   const results = queryEvents(
     params.eventsDir,
     sorted,
@@ -33,9 +34,10 @@ export function readWideEvents(params: WideEventQueryParams): WideEvent[] {
       limit: params.limit,
       sinceMs: params.sinceMs,
       untilMs: params.untilMs,
+      order: params.order,
     }
   );
-  return results.reverse();
+  return params.order === 'asc' ? results : results.reverse();
 
 }
 

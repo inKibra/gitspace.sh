@@ -16,6 +16,7 @@ import React, {
   type KeyboardEvent as ReactKeyboardEvent,
   type CSSProperties,
 } from 'react';
+import { getSpaceCommandArgumentCompletions } from '../lib/tmux-lite/agents/extensions/space-command-autocomplete.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -24,7 +25,7 @@ import React, {
 export type NativeComposerSubmitMode = 'send' | 'steer' | 'followUp';
 
 export interface NativeComposerWebProps {
-  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>, mode: NativeComposerSubmitMode) => void;
+  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>, mode: NativeComposerSubmitMode) => void | boolean | string | Promise<void | boolean | string>;
   onAbort?: () => void;
   isBusy?: boolean;
   isSubmitting?: boolean;
@@ -56,10 +57,10 @@ interface AttachedFile {
 
 interface AutocompleteState {
   mode: 'slash' | 'at' | null;
-  items: Array<{ label: string; description?: string; kind?: string }>;
+  items: Array<{ label: string; description?: string; kind?: string; insertText?: string }>;
   selectedIndex: number;
   loading: boolean;
-  /** The trigger position in the text (index of / or @) */
+  /** The trigger position in the text (index of / or @, or active replacement span for slash args) */
   triggerPos: number;
 }
 // ---------------------------------------------------------------------------
@@ -281,16 +282,26 @@ export function NativeComposer({
     ta.style.overflowY = natural > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
   }, [text]);
 
-  // ── Submit helper — clears state after sending ───────────────────────────
+  // ── Submit helper — clears state after sending unless the submitter preserves the composer ───────────────────────────
   const submitAndClear = useCallback(
-    (currentText: string, currentImages: AttachedImage[], currentFiles: AttachedFile[], mode: NativeComposerSubmitMode) => {
+    async (currentText: string, currentImages: AttachedImage[], currentFiles: AttachedFile[], mode: NativeComposerSubmitMode) => {
       const readyImages = currentImages
         .filter(img => !img.loading)
         .map(({ dataUrl, name }) => ({ dataUrl, name }));
       const readyFiles = currentFiles
         .filter(f => !f.loading && f.dataUrl)
         .map(({ name, dataUrl }) => ({ name, dataUrl }));
-      onSubmit(currentText.trim(), readyImages, readyFiles, mode);
+      const submitResult = await onSubmit(currentText.trim(), readyImages, readyFiles, mode);
+      if (submitResult === false) {
+        return;
+      }
+      if (typeof submitResult === 'string') {
+        setText(submitResult);
+        if (draftStorageKey) {
+          try { localStorage.setItem(draftStorageKey, submitResult); } catch { /* ignore unavailable storage */ }
+        }
+        return;
+      }
       setText('');
       if (draftStorageKey) {
         try { localStorage.removeItem(draftStorageKey); } catch { /* ignore unavailable storage */ }
@@ -315,31 +326,32 @@ export function NativeComposer({
   const acceptAutocomplete = useCallback((index: number) => {
     const item = autocomplete.items[index];
     if (!item) return;
+    const cursorPos = textareaRef.current?.selectionStart ?? text.length;
     const before = text.slice(0, autocomplete.triggerPos);
-    const after = text.slice(textareaRef.current?.selectionStart ?? text.length);
-    if (autocomplete.mode === 'slash') {
-      setText(`${before}/${item.label} ${after}`);
-    } else if (autocomplete.mode === 'at') {
-      const suffix = item.kind === 'directory' ? '/' : ' ';
-      setText(`${before}@${item.label}${suffix}${after}`);
-    }
+    const after = text.slice(cursorPos);
+    const insertText = item.insertText
+      ?? (autocomplete.mode === 'slash'
+        ? `/${item.label} `
+        : `${item.kind === 'directory' ? `@${item.label}/` : `@${item.label} `}`);
+    setText(`${before}${insertText}${after}`);
     closeAutocomplete();
-    // Re-focus textarea after accepting
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, [autocomplete, text, closeAutocomplete]);
 
-  const fetchCommands = useCallback(async (filter: string) => {
+  const fetchCommands = useCallback(async (filter: string, triggerPos = 0, insertPrefix = '/') => {
     if (!onRequestCommands) return;
     if (!commandsCacheRef.current) {
       try {
         const cmds = await onRequestCommands();
-        commandsCacheRef.current = cmds.map(c => ({ label: c.name, description: c.description, kind: c.kind }));
+        commandsCacheRef.current = cmds.map(c => ({ label: c.name, description: c.description, kind: c.kind, insertText: `${insertPrefix}${c.name} ` }));
       } catch {
         commandsCacheRef.current = [];
       }
     }
-    const items = commandsCacheRef.current.filter(c => c.label.toLowerCase().startsWith(filter.toLowerCase()));
-    setAutocomplete(prev => ({ ...prev, items, selectedIndex: 0, loading: false }));
+    const items = commandsCacheRef.current
+      .filter(c => c.label.toLowerCase().startsWith(filter.toLowerCase()))
+      .map(item => ({ ...item, insertText: `${insertPrefix}${item.label} ` }));
+    setAutocomplete(prev => ({ ...prev, items, selectedIndex: 0, loading: false, triggerPos }));
   }, [onRequestCommands]);
 
   const fetchFileSuggestions = useCallback((prefix: string) => {
@@ -380,14 +392,33 @@ export function NativeComposer({
       } catch { /* ignore unavailable storage */ }
     }
     // Detect autocomplete triggers
-    // Slash command: text starts with / and cursor is in the first token
-    const hasSpace = newText.includes(' ');
-    const isSlashTrigger = newText.startsWith('/') && (!hasSpace || cursorPos <= newText.indexOf(' ', 1));
-    if (isSlashTrigger) {
-      const token = newText.slice(1, cursorPos);
-      setAutocomplete({ mode: 'slash', items: [], selectedIndex: 0, loading: true, triggerPos: 0 });
-      fetchCommands(token);
-      return;
+    // Slash command: support root command completion and command-specific argument completion.
+    if (newText.startsWith('/')) {
+      const slashText = newText.slice(1, cursorPos);
+      const firstSpace = slashText.indexOf(' ');
+      if (firstSpace === -1) {
+        setAutocomplete({ mode: 'slash', items: [], selectedIndex: 0, loading: true, triggerPos: 0 });
+        fetchCommands(slashText, 0, '/');
+        return;
+      }
+
+      const commandName = slashText.slice(0, firstSpace);
+      const argsPrefix = slashText.slice(firstSpace + 1);
+      if (commandName === 'space') {
+        const items = getSpaceCommandArgumentCompletions(argsPrefix)?.map((item) => ({
+          label: item.label,
+          description: item.description,
+          insertText: item.value,
+        })) ?? [];
+        setAutocomplete({
+          mode: 'slash',
+          items,
+          selectedIndex: 0,
+          loading: false,
+          triggerPos: cursorPos - argsPrefix.length,
+        });
+        return;
+      }
     }
 
     // @ mention: find the last @ before cursor that is at start-of-word
@@ -433,7 +464,7 @@ export function NativeComposer({
           }));
           return;
         }
-        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && autocomplete.mode !== 'slash')) {
           e.preventDefault();
           acceptAutocomplete(autocomplete.selectedIndex);
           return;
@@ -452,7 +483,7 @@ export function NativeComposer({
           const mode: NativeComposerSubmitMode = isBusy
             ? ((e.metaKey || e.ctrlKey) ? 'followUp' : 'steer')
             : 'send';
-          submitAndClear(text, images, files, mode);
+          void submitAndClear(text, images, files, mode);
         }
       }
     },
@@ -461,7 +492,7 @@ export function NativeComposer({
 
   const handleSend = useCallback((mode: NativeComposerSubmitMode = activeSubmitMode) => {
     if (!canSend) return;
-    submitAndClear(text, images, files, mode);
+    void submitAndClear(text, images, files, mode);
   }, [activeSubmitMode, canSend, text, images, files, submitAndClear]);
 
   // ── Clipboard paste — intercept image data ───────────────────────────────
@@ -775,7 +806,9 @@ export function NativeComposer({
                   }}
                 >
                   <span style={{ fontFamily: 'monospace' }}>
-                    {autocomplete.mode === 'slash' ? '/' : '@'}{item.label}
+                    {autocomplete.mode === 'slash'
+                      ? (autocomplete.triggerPos === 0 ? `/${item.label}` : item.label)
+                      : `@${item.label}`}
                   </span>
                   {item.description && (
                     <span style={{ color: 'var(--gs-text-dim)', fontSize: 12, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
