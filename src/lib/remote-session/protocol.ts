@@ -457,6 +457,20 @@ export interface ListAgentCommandsRequest {
   target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
 }
 
+export interface ListWorkspaceEditorsRequest {
+  type: 'list_workspace_editors';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
+export interface OpenWorkspaceEditorRequest {
+  type: 'open_workspace_editor';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  editorId: import('../../utils/open-editor.js').WorkspaceEditorId;
+}
+
+
 
 export interface RunSpaceCommandRequest {
   type: 'run_space_command';
@@ -661,6 +675,13 @@ export interface RunSpaceCommandResponse {
   output: string;
 }
 
+export interface WorkspaceEditorsResponse {
+  type: 'workspace-editors';
+  requestId: string;
+  editors: import('../../utils/open-editor.js').WorkspaceEditorOption[];
+}
+
+
 
 /**
  * Machine pushes a full snapshot of all workspace agent states on client connect.
@@ -776,6 +797,8 @@ export type ClientToMachineMessage =
   | RespondAgentDialogRequest
   | RespondAgentPermissionRequest
   | ListAgentCommandsRequest
+  | ListWorkspaceEditorsRequest
+  | OpenWorkspaceEditorRequest
   | GetAgentFileSuggestionsRequest
   | RunSpaceCommandRequest
   ;
@@ -798,6 +821,7 @@ export type MachineToClientMessage =
   | ScriptOutputResponse
   | CommandResponse
   | RunSpaceCommandResponse
+  | WorkspaceEditorsResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
   | MachineSnapshotPush
@@ -896,6 +920,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'respond_agent_dialog',
     'respond_agent_permission',
     'list_agent_commands',
+    'list_workspace_editors',
+    'open_workspace_editor',
     'get_agent_file_suggestions',
     'run_space_command',
   ]);

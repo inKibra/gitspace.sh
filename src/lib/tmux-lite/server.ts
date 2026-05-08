@@ -73,6 +73,7 @@ import {
   listAgentCommands,
   getFileSuggestions,
 } from './agent-control.js';
+import { listAvailableEditors, openWorkspaceInEditor } from '../../utils/open-editor.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, setWorkspaceStatus, updateWorkspaceNote } from '../../core/workspace-metadata.js';
@@ -3173,7 +3174,27 @@ routerListener = Bun.listen({
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to list commands: ${errMsg}` };
             }
+
+          case 'workspace-editors-list':
+            try {
+              const editors = await listAvailableEditors();
+              res = { type: 'workspace-editors', editors };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list editors: ${errMsg}` };
+            }
             break;
+
+          case 'workspace-editor-open':
+            try {
+              const result = await openWorkspaceInEditor(cmd.editorId, cmd.target.workspacePath);
+              res = result.ok ? { type: 'ok' } : { type: 'error', message: result.message };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to open editor: ${errMsg}` };
+            }
+            break;
+
 
           case 'agent-file-suggestions':
             try {

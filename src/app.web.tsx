@@ -47,6 +47,7 @@ import {
 } from "./notifications/index.js";
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
 import { useCommandPaletteOrchestration } from './app/react/index.js';
+import { showWorkspaceEditorSelect } from './app/shared/command-palette/showWorkspaceEditorSelect.js';
 import { showReplayHistorySelect } from './app/shared/workspace-detail/showReplayHistorySelect.js';
 import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
 import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/types.js';
@@ -1545,6 +1546,24 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     onDeleteRepo: handleDeleteProject,
     onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
     onOpenReview: (workspace) => handleOpenReview(workspace.id),
+    onOpenEditor: async (workspace) => {
+      const ref = getWorkspaceRef(workspace.id);
+      await showWorkspaceEditorSelect({
+        workspace,
+        showSelect: (config) => flow.showSelect<string>(config),
+        showMessage: ({ message, variant }) => {
+          if (variant === 'error') toast.error(message);
+          else if (variant === 'warning') toast.warning(message);
+          else if (variant === 'success') toast.success(message);
+          else toast.info(message);
+        },
+        listAvailableEditors: () => multi.listAvailableEditors(ref),
+        openInEditor: async (editorId) => {
+          await multi.openWorkspaceInEditor(ref, editorId);
+          toast.success(`Opening ${workspace.name} in editor...`);
+        },
+      });
+    },
   });
 
   const inboxActions = useInboxActions({

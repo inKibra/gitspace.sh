@@ -1088,7 +1088,30 @@ export class RemoteSessionHandler {
           type: 'agent-list-commands',
           target: msg.target,
         }, sendResponse);
+
+      case 'list_workspace_editors':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'workspace-editors-list',
+          target: msg.target,
+        }, sendResponse);
         break;
+
+      case 'open_workspace_editor':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'workspace-editor-open',
+          target: msg.target,
+          editorId: msg.editorId,
+        }, sendResponse);
+        break;
+
 
       case 'get_agent_file_suggestions':
         if (!canManage(session.accessType)) {

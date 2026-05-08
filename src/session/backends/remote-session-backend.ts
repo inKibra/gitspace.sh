@@ -1,3 +1,4 @@
+import type { WorkspaceEditorId, WorkspaceEditorOption } from '../../utils/open-editor.js';
 import type { Identity, SessionKeys } from '../../types/identity.js';
 import {
   parseRemoteMessage,
@@ -927,6 +928,32 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected list commands response');
   }
+
+  async listAvailableEditors(workspaceId: string): Promise<WorkspaceEditorOption[]> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTypedCommand({
+      type: 'list_workspace_editors',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+    });
+    if (response.type === 'workspace-editors') return response.editors;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected editor listing response');
+  }
+
+  async openWorkspaceInEditor(workspaceId: string, editorId: WorkspaceEditorId): Promise<void> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTypedCommand({
+      type: 'open_workspace_editor',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      editorId,
+    });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected open editor response');
+  }
+
 
   async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
     await this.waitForInitialSnapshot();

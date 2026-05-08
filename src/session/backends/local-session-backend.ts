@@ -1,3 +1,4 @@
+import type { WorkspaceEditorId, WorkspaceEditorOption } from '../../utils/open-editor.js';
 import type {
   Session as TmuxSession,
   InboxItem,
@@ -1675,6 +1676,22 @@ export class LocalSessionBackend implements SessionBackend {
     if (response.type === 'agent-commands') return response.commands;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected list commands response');
+  }
+
+  async listAvailableEditors(workspaceId: string): Promise<WorkspaceEditorOption[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'workspace-editors-list', target });
+    if (response.type === 'workspace-editors') return response.editors;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected editor listing response');
+  }
+
+  async openWorkspaceInEditor(workspaceId: string, editorId: WorkspaceEditorId): Promise<void> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'workspace-editor-open', target, editorId });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected open editor response');
   }
 
   async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {

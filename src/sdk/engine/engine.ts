@@ -570,6 +570,20 @@ export class GitSpaceEngine {
     });
   }
 
+  listAvailableEditors(ref: BackendScopedWorkspaceRef): Promise<import('../../utils/open-editor.js').WorkspaceEditorOption[]> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.listAvailableEditors) return Promise.reject(new Error('Editor detection unavailable'));
+      return b.listAvailableEditors(ref.workspaceId);
+    });
+  }
+
+  openWorkspaceInEditor(ref: BackendScopedWorkspaceRef, editorId: import('../../utils/open-editor.js').WorkspaceEditorId): Promise<void> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.openWorkspaceInEditor) return Promise.reject(new Error('Open in editor unavailable'));
+      return b.openWorkspaceInEditor(ref.workspaceId, editorId);
+    });
+  }
+
   runSpaceCommand(ref: BackendScopedWorkspaceRef, argsText: string): Promise<string> {
     return this.withRefBackend(ref, (b) => {
       if (!b.runSpaceCommand) return Promise.reject(new Error('Space command execution unavailable'));

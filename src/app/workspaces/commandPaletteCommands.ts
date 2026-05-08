@@ -18,6 +18,7 @@ export const COMMAND_PALETTE_COMMAND_DEFS = [
   { id: 'edit-process-config', label: 'Edit Process Config', shortcut: '' },
   { id: 'open-github-pr', label: 'Open GitHub PR', shortcut: '' },
   { id: 'open-review', label: 'Open Review', shortcut: '' },
+  { id: 'open-editor', label: 'Open in Editor…', shortcut: '' },
   { id: 'open-service', label: 'Open Service in Browser', shortcut: '' },
 ] as const;
 

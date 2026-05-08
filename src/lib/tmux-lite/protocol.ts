@@ -387,6 +387,8 @@ export type Command =
   | { type: 'agent-queue-remove'; target: AgentWorkspaceTargetPayload; agentSessionId: string; kind: 'steering' | 'followUp'; index: number }
   | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
   | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }
+  | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
+  | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
@@ -463,6 +465,7 @@ export type Response =
   | { type: 'agent-queued-message'; message: string | null }
   | { type: 'agent-staged'; stagedPath: string }
   | { type: 'agent-commands'; commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> }
+  | { type: 'workspace-editors'; editors: import('../../utils/open-editor.js').WorkspaceEditorOption[] }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }
   | {
       type: 'agent-dialog-request';

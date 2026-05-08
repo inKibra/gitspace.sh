@@ -36,6 +36,7 @@ interface ExecuteCommandPaletteActionArgs<T extends WorkspaceInfo & CommandPalet
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
   onOpenReview?: (workspace: T) => void | Promise<void>;
+  onOpenEditor?: (workspace: T) => void | Promise<void>;
 }
 
 export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPaletteWorkspaceLike>(
@@ -62,8 +63,9 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     onDeleteRepo,
     onOpenGitHubPr,
     onOpenReview,
-
+    onOpenEditor,
   } = args;
+
   if (commandId === 'open-github-pr') {
     if (workspace && onOpenGitHubPr) {
       void onOpenGitHubPr(workspace);
@@ -80,6 +82,19 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
   if (commandId === 'open-review') {
     if (workspace && onOpenReview) {
       void onOpenReview(workspace);
+    } else {
+      showMessage({
+        title: getMissingSelectionTitle(commandId),
+        message: 'Select a workspace on the board or in the list first.',
+        variant: 'info',
+      });
+    }
+    return;
+  }
+
+  if (commandId === 'open-editor') {
+    if (workspace && onOpenEditor) {
+      void onOpenEditor(workspace);
     } else {
       showMessage({
         title: getMissingSelectionTitle(commandId),

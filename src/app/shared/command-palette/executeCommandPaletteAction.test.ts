@@ -31,6 +31,7 @@ function createHandlers() {
     onDeleteRepo: mock(() => undefined),
     onOpenGitHubPr: mock(() => undefined),
     onOpenReview: mock(() => undefined),
+    onOpenEditor: mock(() => undefined),
   };
 }
 
@@ -75,5 +76,19 @@ describe('executeCommandPaletteAction', () => {
     });
 
     expect(handlers.onRefreshBundle).toHaveBeenCalledWith(workspace);
+  });
+
+  it('runs open-editor for selected workspace', () => {
+    const handlers = createHandlers();
+    const workspace = createWorkspace();
+
+    executeCommandPaletteAction({
+      commandId: 'open-editor',
+      workspace,
+      projectName: 'proj',
+      ...handlers,
+    });
+
+    expect(handlers.onOpenEditor).toHaveBeenCalledWith(workspace);
   });
 });

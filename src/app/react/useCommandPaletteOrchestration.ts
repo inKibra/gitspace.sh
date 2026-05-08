@@ -31,6 +31,7 @@ export interface UseCommandPaletteOrchestrationOptions<T extends WorkspaceInfo &
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
   onOpenReview?: (workspace: T) => void | Promise<void>;
+  onOpenEditor?: (workspace: T) => void | Promise<void>;
 }
 
 export function useCommandPaletteOrchestration<T extends WorkspaceInfo & CommandPaletteWorkspaceLike>(options: UseCommandPaletteOrchestrationOptions<T>) {
@@ -71,6 +72,7 @@ export function useCommandPaletteOrchestration<T extends WorkspaceInfo & Command
       onDeleteRepo: options.onDeleteRepo,
       onOpenGitHubPr: options.onOpenGitHubPr,
       onOpenReview: options.onOpenReview,
+      onOpenEditor: options.onOpenEditor,
     });
   }, [options, selectedProjectName, selectedWorkspace]);
 

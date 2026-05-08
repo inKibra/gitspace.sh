@@ -1,4 +1,5 @@
 import type { NotificationConfig } from '../notifications/types.js';
+import type { WorkspaceEditorId, WorkspaceEditorOption } from '../utils/open-editor.js';
 import type { BackendEvent } from './events.js';
 import type {
   ReplayFrame,
@@ -243,6 +244,8 @@ export interface SessionBackend {
   attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string }): Promise<void>;
   promptAgentSession?(workspaceId: string, agentSessionId: string, text: string, images?: import('../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void>;
   removeAgentQueuedMessage?(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null>;
+  listAvailableEditors?(workspaceId: string): Promise<WorkspaceEditorOption[]>;
+  openWorkspaceInEditor?(workspaceId: string, editorId: WorkspaceEditorId): Promise<void>;
   stageUpload?(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }>;
   /** Send a dialog response back to the server for a pending host UI dialog. */
   sendDialogResponse?(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void>;

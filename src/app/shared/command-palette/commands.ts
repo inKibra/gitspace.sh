@@ -17,6 +17,7 @@ type SharedCommandResult<T extends CommandPaletteWorkspaceLike> =
   | { kind: 'add-note'; workspace: T }
   | { kind: 'list-notes'; workspace: T }
   | { kind: 'edit-process-config'; workspace: T }
+  | { kind: 'open-editor'; workspace: T }
   | { kind: 'open-service'; workspace: T };
 
 export function resolveSharedCommand<T extends CommandPaletteWorkspaceLike>(
@@ -49,6 +50,8 @@ export function resolveSharedCommand<T extends CommandPaletteWorkspaceLike>(
       return workspace ? { kind: 'list-notes', workspace } : { kind: 'missing-workspace' };
     case 'edit-process-config':
       return workspace ? { kind: 'edit-process-config', workspace } : { kind: 'missing-workspace' };
+    case 'open-editor':
+      return workspace ? { kind: 'open-editor', workspace } : { kind: 'missing-workspace' };
     case 'open-service':
       return workspace ? { kind: 'open-service', workspace } : { kind: 'missing-workspace' };
     default:
@@ -72,6 +75,8 @@ export function getMissingSelectionTitle(commandId: CommandPaletteCommandId): st
       return 'Open GitHub PR';
     case 'open-review':
       return 'Open Review';
+    case 'open-editor':
+      return 'Open in Editor';
     case 'open-service':
       return 'Open Service';
     case 'set-status':

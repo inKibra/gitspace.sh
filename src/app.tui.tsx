@@ -104,6 +104,7 @@ import type { AgentSessionInfo as BrowserAgentSessionInfo } from './machine/api/
 import { useCommandPaletteOrchestration } from './app/react/index.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
 import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
+import { showWorkspaceEditorSelect } from './app/shared/command-palette/showWorkspaceEditorSelect.js';
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
 import {
   useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions,
@@ -1284,6 +1285,18 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
     },
     onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
     onOpenReview: (workspace) => handleOpenReview(workspace.id),
+    onOpenEditor: async (workspace) => {
+      await showWorkspaceEditorSelect({
+        workspace,
+        showSelect: (config) => flow.showSelect<string>(config),
+        showMessage: (config) => flow.showMessage(config),
+        listAvailableEditors: () => multi.listAvailableEditors({ backendKey: LOCAL_BACKEND_KEY, workspaceId: workspace.id }),
+        openInEditor: async (editorId) => {
+          await multi.openWorkspaceInEditor({ backendKey: LOCAL_BACKEND_KEY, workspaceId: workspace.id }, editorId);
+          flow.showMessage({ title: 'Open in Editor', message: `Opening ${workspace.name} in editor...`, variant: 'success' });
+        },
+      });
+    },
   });
 
   // Inbox hook
