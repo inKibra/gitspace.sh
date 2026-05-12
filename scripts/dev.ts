@@ -17,6 +17,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from '
 import { createServer, type AddressInfo } from 'net';
 import { tmpdir } from 'os';
 
+import { clearSandboxBootstrapMetadata, validateSandboxBootstrap } from './dev-bootstrap.js';
 import { createRootInviteToken } from '../src/lib/tmux-lite/crypto/root-invites.js';
 import { mnemonicToUserIdentity } from '../src/lib/tmux-lite/crypto/user-identity.js';
 
@@ -125,59 +126,6 @@ function deriveSandboxName(): string {
   return worktreeName.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+/, 'dev-');
 }
 
-interface SandboxBootstrapPaths {
-  keypairPath: string;
-  secretsPath: string;
-  devIdentityPath: string;
-}
-
-interface SandboxBootstrapValidation {
-  valid: boolean;
-  reason?: string;
-}
-
-/**
- * Check that all interdependent bootstrap artifacts exist and parse. The
- * identity keypair, the test secrets file (with USER_ROOT_IDENTITY), and the
- * browser identity are written together on first run. If any is missing or
- * malformed, the sandbox is considered incomplete and the caller should
- * regenerate the full set — partial repair risks pairing mismatched identities.
- */
-function validateSandboxBootstrap(paths: SandboxBootstrapPaths): SandboxBootstrapValidation {
-  if (!existsSync(paths.keypairPath)) {
-    return { valid: false, reason: `missing ${basename(paths.keypairPath)}` };
-  }
-  if (!existsSync(paths.secretsPath)) {
-    return { valid: false, reason: `missing ${basename(paths.secretsPath)}` };
-  }
-  if (!existsSync(paths.devIdentityPath)) {
-    return { valid: false, reason: `missing ${basename(paths.devIdentityPath)}` };
-  }
-  try {
-    JSON.parse(readFileSync(paths.keypairPath, 'utf-8'));
-  } catch {
-    return { valid: false, reason: `malformed ${basename(paths.keypairPath)}` };
-  }
-  try {
-    JSON.parse(readFileSync(paths.devIdentityPath, 'utf-8'));
-  } catch {
-    return { valid: false, reason: `malformed ${basename(paths.devIdentityPath)}` };
-  }
-  try {
-    const outer = JSON.parse(readFileSync(paths.secretsPath, 'utf-8')) as {
-      entries?: Record<string, string>;
-    };
-    const blob = outer.entries?.['com.gitspace:secrets'];
-    if (!blob) return { valid: false, reason: 'secrets.json missing com.gitspace:secrets entry' };
-    const parsed = JSON.parse(blob) as { global?: Record<string, string> };
-    if (!parsed.global?.USER_ROOT_IDENTITY) {
-      return { valid: false, reason: 'secrets.json missing USER_ROOT_IDENTITY' };
-    }
-  } catch {
-    return { valid: false, reason: `malformed ${basename(paths.secretsPath)}` };
-  }
-  return { valid: true };
-}
 
 // ─── Process management ──────────────────────────────────────────────────────
 
@@ -324,18 +272,27 @@ async function main(): Promise<void> {
   const controlDir = join(sandboxDir, 'relay-control');
   const relayDir = join(sandboxDir, 'relay');
   const serveDaemonDir = join(sandboxDir, 'serve');
+  const traceLogPath = join(sandboxDir, 'gitspace-runtime-trace.jsonl');
   for (const dir of [identityDir, controlDir, relayDir, serveDaemonDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
   // Validate all required bootstrap artifacts before reuse. If any are
-  // missing or malformed, regenerate the full identity set — identity,
-  // secrets, and browser identity are interdependent so partial repair is
-  // unsafe.
+  // missing, malformed, or bound to a stale machine id, regenerate the full
+  // sandbox identity set — identity, secrets, browser identity, and persisted
+  // machine metadata are interdependent so partial repair is unsafe.
   const keypairPath = join(identityDir, 'keypair.json');
   const secretsPath = join(sandboxDir, 'secrets.json');
   const devIdentityPath = join(sandboxDir, 'dev-browser-identity.json');
-  const bootstrapValidation = validateSandboxBootstrap({ keypairPath, secretsPath, devIdentityPath });
+  const machineIdentityPath = join(identityDir, 'machine.json');
+  const relayConfigPath = join(identityDir, 'relay.json');
+  const bootstrapValidation = validateSandboxBootstrap({
+    keypairPath,
+    secretsPath,
+    devIdentityPath,
+    machineIdentityPath,
+    relayConfigPath,
+  });
   const isFirstRun = !bootstrapValidation.valid;
 
   log('dev', `Sandbox: ${sandboxName}${isFirstRun ? ' (regenerating identity)' : ''}`);
@@ -351,6 +308,13 @@ async function main(): Promise<void> {
   // stable and bundle secrets persist. 
 
   if (isFirstRun) {
+    clearSandboxBootstrapMetadata({
+      keypairPath,
+      secretsPath,
+      devIdentityPath,
+      machineIdentityPath,
+      relayConfigPath,
+    });
     log('dev', 'Generating sandbox identity...');
     const identityScript = join(import.meta.dir, 'dev-identity.ts');
     const genProc = spawn(['bun', identityScript], {
@@ -394,6 +358,8 @@ async function main(): Promise<void> {
   // Workspace scanning stays on the real ~/gitspace tree so dev reflects the
   // same project/workspace metadata as the TUI.
   const sandboxEnv = {
+    GITSPACE_TRACE_FILE: traceLogPath,
+    GITSPACE_TRACE: process.env.GITSPACE_TRACE?.trim() || '1',
     GITSPACE_IDENTITY_DIR: identityDir,
     GITSPACE_RELAY_DIR: relayDir,
     GSSH_TEST_RUNTIME: '1',
@@ -422,6 +388,7 @@ async function main(): Promise<void> {
     label: 'Dev Sandbox Machine',
   });
 
+  log('dev', `Trace log: ${traceLogPath}`);
 
   // Phase 1: Start relay
   log('dev', 'Starting relay...');

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { deriveWorkspaceStatusSummary } from '../workspace-status.js';
+import { deriveWorkspacePrimaryColorFromMachineSummary, deriveWorkspaceStatusSummary } from '../workspace-status.js';
 import type { WorkspaceStatusInput } from '../workspace-status.js';
 import type { AgentSessionInfo, SessionInfo } from '../../../machine/api/list-types.js';
 
@@ -145,5 +145,78 @@ describe('deriveWorkspaceStatusSummary', () => {
     expect(summary.agents.green).toBe(1);
     expect(summary.agents.blue).toBe(1);
     expect(summary.primaryColor).toBe('green');
+  });
+  it('prefers idle agent blue over running service green', () => {
+    const workspace = makeWorkspace();
+    const sessions: SessionInfo[] = [
+      {
+        id: 'proc-1',
+        name: 'proj:ws:web#1',
+        workspaceId: 'proj:ws',
+        attached: false,
+        createdAt: 1,
+        processName: 'web',
+        processInstance: 1,
+      },
+    ];
+    const summary = deriveWorkspaceStatusSummary(workspace, sessions, [
+      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', status: { type: 'idle' } },
+    ]);
+
+    expect(summary.services.green).toBe(1);
+    expect(summary.agents.blue).toBe(1);
+    expect(summary.primaryColor).toBe('blue');
+  });
+
+  it('keeps service-only and terminal-only activity dim', () => {
+    const workspace = makeWorkspace();
+    const serviceOnly = deriveWorkspaceStatusSummary(workspace, [
+      {
+        id: 'proc-1',
+        name: 'proj:ws:web#1',
+        workspaceId: 'proj:ws',
+        attached: false,
+        createdAt: 1,
+        processName: 'web',
+        processInstance: 1,
+      },
+    ], []);
+    const terminalOnly = deriveWorkspaceStatusSummary(makeWorkspace({ processes: [] }), [
+      {
+        id: 'shell-1',
+        name: 'proj:ws:shell',
+        workspaceId: 'proj:ws',
+        attached: true,
+        createdAt: 1,
+      },
+    ], []);
+
+    expect(serviceOnly.services.green).toBe(1);
+    expect(serviceOnly.primaryColor).toBe('dim');
+    expect(terminalOnly.terminals.green).toBe(1);
+    expect(terminalOnly.primaryColor).toBe('dim');
+  });
+
+  it('prefers idle agent blue over running process in machine summary', () => {
+    expect(deriveWorkspacePrimaryColorFromMachineSummary({
+      permissionAgentCount: 0,
+      retryingAgentCount: 0,
+      failedProcessCount: 0,
+      failedTerminalCount: 0,
+      waitingAgentCount: 1,
+      runningAgentCount: 0,
+      runningProcessCount: 1,
+    })).toBe('blue');
+  });
+  it('keeps running-process-only machine summary dim', () => {
+    expect(deriveWorkspacePrimaryColorFromMachineSummary({
+      permissionAgentCount: 0,
+      retryingAgentCount: 0,
+      failedProcessCount: 0,
+      failedTerminalCount: 0,
+      waitingAgentCount: 0,
+      runningAgentCount: 0,
+      runningProcessCount: 1,
+    })).toBe('dim');
   });
 });

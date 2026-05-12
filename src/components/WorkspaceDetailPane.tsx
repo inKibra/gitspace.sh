@@ -54,6 +54,8 @@ export interface WorkspaceDetailPaneProps {
   runtime?: WorkspaceRuntimeEntry | null;
   attachedSessionId?: string | null;
   attachedAgentSessionId?: string | null;
+  attachedSessionIds?: readonly string[];
+  attachedAgentSessionIds?: readonly string[];
   pendingAgentAttach?: boolean;
   /** Called when user clicks a workspace in the header strip to switch to it. */
   onSelectWorkspace?: (workspaceSelectionKey: string) => void | Promise<void>;

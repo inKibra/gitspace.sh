@@ -129,7 +129,7 @@ export function deriveWorkspaceStatusSummary(
   let primaryColor: WorkspaceStatusColor = 'dim';
   if (agents.orange > 0) {
     primaryColor = 'orange';
-  } else if (agents.green > 0 || services.green > 0) {
+  } else if (agents.green > 0) {
     primaryColor = 'green';
   } else if (agents.blue > 0) {
     primaryColor = 'blue';
@@ -175,7 +175,7 @@ export function deriveWorkspacePrimaryColorFromMachineSummary(
   if (summary.permissionAgentCount > 0) {
     return 'orange';
   }
-  if (summary.runningAgentCount > 0 || summary.runningProcessCount > 0) {
+  if (summary.runningAgentCount > 0) {
     return 'green';
   }
   if (summary.waitingAgentCount > 0) {

@@ -56,6 +56,7 @@ import { readReplayManifest } from '../tmux-lite/replay/store.js';
 import { getProcessSpecs } from "../processes/manager.js";
 
 import { logger } from "../../utils/logger.js";
+import { writeTraceLog } from '../../utils/trace-log.js';
 import type { Command as TmuxCommand, Response as TmuxResponse } from '../tmux-lite/protocol.js';
 
 /**
@@ -1167,16 +1168,40 @@ export class RemoteSessionHandler {
     tmuxCommand: TmuxCommand,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
+    const traceStartMs = Date.now();
+    writeTraceLog('machine-command-start', {
+      requestId,
+      commandType: tmuxCommand.type,
+      clientId: session.clientId,
+    });
     try {
       await ensureServer();
       const response = await sendTmuxCommand(tmuxCommand);
+      writeTraceLog('machine-command-tmux-response', {
+        requestId,
+        commandType: tmuxCommand.type,
+        responseType: response.type,
+        durationMs: Date.now() - traceStartMs,
+      });
       await this.sendMessage(session, sendResponse, {
         type: 'command_response',
         requestId,
         response,
       });
+      writeTraceLog('machine-command-response-sent', {
+        requestId,
+        commandType: tmuxCommand.type,
+        responseType: response.type,
+        durationMs: Date.now() - traceStartMs,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      writeTraceLog('machine-command-error', {
+        requestId,
+        commandType: tmuxCommand.type,
+        durationMs: Date.now() - traceStartMs,
+        error: message,
+      });
       await this.sendMessage(session, sendResponse, {
         type: 'command_response',
         requestId,

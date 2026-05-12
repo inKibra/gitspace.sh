@@ -12,6 +12,7 @@ import type { AgentPromptImage } from './protocol.js';
 import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
+import { writeTraceLog } from '../../utils/trace-log.js';
 
 export type AgentWorkspaceTarget = PiWorkspaceTarget;
 export type AgentSessionSummary = PiAgentSessionSummary;
@@ -62,6 +63,14 @@ export function ensureAgentControlInitialized(): Promise<void> {
       // Seed sessions from Pi's session files on disk and mirror live Pi
       // events into the shared snapshot model.
       defaultPiCoordinator.setEventHandler((target, event) => {
+        writeTraceLog('agent-control-event', {
+          workspaceId: target.workspaceId,
+          sessionId: 'sessionId' in event ? event.sessionId : undefined,
+          eventType: event.type,
+          payloadType: event.type === 'status' && event.payload && typeof event.payload === 'object'
+            ? (event.payload as { type?: unknown }).type
+            : undefined,
+        });
         switch (event.type) {
           case 'status': {
             const payload = event.payload as { type?: string; [key: string]: unknown } | undefined;

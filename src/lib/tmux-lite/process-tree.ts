@@ -22,22 +22,27 @@ export function signalProcessTree(
   readProcessGroupIdImpl: (pid: number) => number | null = readProcessGroupId,
 ): boolean {
   const processGroupId = readProcessGroupIdImpl(pid);
-  if (processGroupId) {
+  const currentProcessGroupId = processGroupId ? readProcessGroupIdImpl(process.pid) : null;
+  if (processGroupId && processGroupId !== currentProcessGroupId) {
     try {
       process.kill(-processGroupId, signal);
       return true;
     } catch {}
   }
 
-  try {
-    process.kill(-pid, signal);
-    return true;
-  } catch {}
+  if (pid !== currentProcessGroupId) {
+    try {
+      process.kill(-pid, signal);
+      return true;
+    } catch {}
+  }
 
-  try {
-    process.kill(pid, signal);
-    return true;
-  } catch {}
+  if (pid !== process.pid) {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {}
+  }
 
   return false;
 }

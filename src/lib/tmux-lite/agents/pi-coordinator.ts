@@ -36,6 +36,7 @@ import type {
   Permission,
   QuestionInfo,
 } from '../../../agents/agent-runtime-types.js';
+import { writeTraceLog } from '../../../utils/trace-log.js';
 
 export const PI_AGENT_TMUX_SESSION_KIND = 'agent';
 
@@ -351,7 +352,16 @@ export class PiCoordinator {
   }
 
   async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string, images?: import('../protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
+    const traceStartMs = Date.now();
     const session = await this.ensureActiveSession(target, agentSessionId);
+    writeTraceLog('agent-prompt-session-ready', {
+      workspaceId: target.workspaceId,
+      agentSessionId,
+      durationMs: Date.now() - traceStartMs,
+      textLength: text.length,
+      imageCount: images?.length ?? 0,
+      streamingBehavior: options?.streamingBehavior,
+    });
 
     const trimmed = text.trim();
     // Intercept /compact — start compaction directly instead of routing through
@@ -360,6 +370,11 @@ export class PiCoordinator {
     if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
       if (typeof session.compact === 'function') {
         const instructions = trimmed.startsWith('/compact ') ? trimmed.slice('/compact '.length).trim() : undefined;
+        writeTraceLog('agent-compact-dispatched', {
+          workspaceId: target.workspaceId,
+          agentSessionId,
+          durationMs: Date.now() - traceStartMs,
+        });
         session.compact(instructions || undefined)
           .catch((err: unknown) => {
             const error = err instanceof Error ? err.message : String(err);
@@ -376,9 +391,28 @@ export class PiCoordinator {
       ? { images: images.map(img => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) }
       : undefined;
     // Turn accepted: ok responds immediately. Turn progress and completion flow through existing agent/machine events.
+    writeTraceLog('agent-prompt-dispatch', {
+      workspaceId: target.workspaceId,
+      agentSessionId,
+      durationMs: Date.now() - traceStartMs,
+      textLength: text.length,
+    });
     session.prompt(text, { ...piImages, streamingBehavior: options?.streamingBehavior })
-      .then(() => { this.emitQueuedMessages(target, agentSessionId, session); })
+      .then(() => {
+        writeTraceLog('agent-prompt-complete', {
+          workspaceId: target.workspaceId,
+          agentSessionId,
+          durationMs: Date.now() - traceStartMs,
+        });
+        this.emitQueuedMessages(target, agentSessionId, session);
+      })
       .catch((err: unknown) => {
+        writeTraceLog('agent-prompt-error', {
+          workspaceId: target.workspaceId,
+          agentSessionId,
+          durationMs: Date.now() - traceStartMs,
+          error: err instanceof Error ? err.message : String(err),
+        });
         const error = err instanceof Error ? err.message : String(err);
         console.error(`[pi-coordinator] prompt failed for session ${agentSessionId}:`, err);
         if (this.eventHandler) {

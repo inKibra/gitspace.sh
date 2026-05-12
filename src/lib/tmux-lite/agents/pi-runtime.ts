@@ -1,5 +1,6 @@
 import { delimiter, join } from 'node:path';
-import { chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { YAML } from 'bun';
 import { fileURLToPath } from 'node:url';
 import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
@@ -49,6 +50,43 @@ function prependPathEntry(pathEntry: string, currentPath: string | undefined): s
     : pathEntry;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function ensureManagedPiConfigDefaults(agentDir: string): void {
+  const configPath = join(agentDir, 'config.yml');
+  let settings: Record<string, unknown> = {};
+
+  if (existsSync(configPath)) {
+    try {
+      const parsed = YAML.parse(readFileSync(configPath, 'utf8'));
+      if (!isRecord(parsed)) {
+        return;
+      }
+      settings = parsed;
+    } catch (error) {
+      console.warn(`[pi-runtime] Failed to read managed Pi config defaults from ${configPath}:`, error);
+      return;
+    }
+  }
+
+  const contextPromotion = isRecord(settings.contextPromotion)
+    ? { ...settings.contextPromotion }
+    : {};
+  if (typeof contextPromotion.enabled === 'boolean') {
+    return;
+  }
+
+  contextPromotion.enabled = false;
+  settings.contextPromotion = contextPromotion;
+  try {
+    writeFileSync(configPath, YAML.stringify(settings, null, 2), { mode: 0o600 });
+  } catch (error) {
+    console.warn(`[pi-runtime] Failed to write managed Pi config defaults to ${configPath}:`, error);
+  }
+}
+
 function ensureManagedPiBinScripts(): string {
   const binDir = getManagedPiBinDir();
   if (!existsSync(binDir)) {
@@ -65,6 +103,7 @@ function ensureManagedPiBinScripts(): string {
 
 function buildManagedPiEnvironment(): Record<string, string> {
   const agentDir = ensurePiAgentDir();
+  ensureManagedPiConfigDefaults(agentDir);
   const binDir = ensureManagedPiBinScripts();
   return {
     PI_CODING_AGENT_DIR: agentDir,

@@ -532,6 +532,94 @@ describe('RemoteSessionBackend', () => {
     await tabAttachPromise;
   });
 
+
+  it('applies agent state deltas to the local machine snapshot cache', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+
+    await connectAndHandshake(backend, socket);
+
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'agent_state_snapshot',
+      workspaces: [{
+        workspaceId: 'alpha:ws-1',
+        sessions: [{ id: 'agent-1', title: 'Agent One' }],
+        statuses: {},
+        pendingPermissions: {},
+        pendingQuestions: {},
+        lastMessages: {},
+        errorMessages: {},
+        todoPhases: {},
+        modelInfo: {},
+        queuedMessages: {},
+      }],
+    }));
+    await Bun.sleep(0);
+
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'agent_state_update',
+      delta: {
+        type: 'agent_todo_update',
+        workspaceId: 'alpha:ws-1',
+        sessionId: 'agent-1',
+        phases: [{ name: 'Phase', tasks: [{ content: 'Fix the bug', status: 'in_progress' }] }],
+      },
+    }));
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'agent_state_update',
+      delta: {
+        type: 'agent_session_error',
+        workspaceId: 'alpha:ws-1',
+        sessionId: 'agent-1',
+        errorMessage: 'boom',
+      },
+    }));
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'agent_state_update',
+      delta: {
+        type: 'agent_question_added',
+        workspaceId: 'alpha:ws-1',
+        sessionId: 'agent-1',
+        question: { id: 'q1', sessionId: 'agent-1', prompt: 'Continue?', options: [] },
+      },
+    }));
+    await Bun.sleep(0);
+
+    const state = backend.getAgentStateSnapshot()['alpha:ws-1']!;
+    expect(state.todoPhases['agent-1']?.[0]?.tasks[0]?.content).toBe('Fix the bug');
+    expect(state.errorMessages['agent-1']).toBe('boom');
+    expect(state.pendingQuestions['agent-1']?.[0]?.id).toBe('q1');
+
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'agent_state_update',
+      delta: {
+        type: 'agent_question_removed',
+        workspaceId: 'alpha:ws-1',
+        sessionId: 'agent-1',
+        requestId: 'q1',
+      },
+    }));
+    await Bun.sleep(0);
+
+    expect(backend.getAgentStateSnapshot()['alpha:ws-1']!.pendingQuestions['agent-1']).toEqual([]);
+  });
+
   it('resolves agent session list responses from machine messages', async () => {
     const socket = createFakeSocket();
     const backend = new RemoteSessionBackend({

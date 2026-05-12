@@ -49,6 +49,107 @@ const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
 const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before sending scroll
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 
+
+const MAX_TERMINAL_WRITE_BYTES = 16_384;
+const MAX_TERMINAL_DRAIN_BYTES = 64 * 1024;
+const MAX_TERMINAL_DRAIN_MS = 8;
+
+function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): number {
+  let end = maxEnd;
+  if (end < chunk.length) {
+    let safeEnd = end;
+    while (safeEnd > offset && (chunk[safeEnd]! & 0xC0) === 0x80) {
+      safeEnd--;
+    }
+    if (safeEnd > offset) {
+      end = safeEnd;
+    }
+  }
+  return end;
+}
+
+function createTerminalWritePump(term: GhosttyTerminal): {
+  enqueue(data: Uint8Array): void;
+  dispose(): void;
+} {
+  const queue: Uint8Array[] = [];
+  let scheduled = false;
+  let disposed = false;
+  let frameId: number | null = null;
+
+  const schedule = () => {
+    if (scheduled || disposed) return;
+    scheduled = true;
+    frameId = requestAnimationFrame(drain);
+  };
+
+  const drain = () => {
+    frameId = null;
+    scheduled = false;
+    if (disposed) return;
+
+    const startedAt = performance.now();
+    let bytesWritten = 0;
+
+    while (queue.length > 0) {
+      const chunk = queue[0]!;
+      let offset = 0;
+
+      while (offset < chunk.length) {
+        const budgetRemaining = Math.max(1, MAX_TERMINAL_DRAIN_BYTES - bytesWritten);
+        const maxEnd = Math.min(offset + MAX_TERMINAL_WRITE_BYTES, offset + budgetRemaining, chunk.length);
+        const end = findUtf8SafeEnd(chunk, offset, maxEnd);
+
+        try {
+          term.write(chunk.subarray(offset, end));
+        } catch (error) {
+          console.error('[session-terminal:web] term.write failed', {
+            sliceLength: end - offset,
+            totalLength: chunk.length,
+            offset,
+            viewportY: term.viewportY,
+            cols: term.cols,
+            rows: term.rows,
+            error,
+          });
+          throw error;
+        }
+
+        bytesWritten += end - offset;
+        offset = end;
+
+        if (bytesWritten >= MAX_TERMINAL_DRAIN_BYTES || performance.now() - startedAt >= MAX_TERMINAL_DRAIN_MS) {
+          if (offset < chunk.length) {
+            queue[0] = chunk.subarray(offset);
+          } else {
+            queue.shift();
+          }
+          schedule();
+          return;
+        }
+      }
+
+      queue.shift();
+    }
+  };
+
+  return {
+    enqueue(data: Uint8Array) {
+      if (disposed || data.byteLength === 0) return;
+      queue.push(new Uint8Array(data));
+      schedule();
+    },
+    dispose() {
+      disposed = true;
+      queue.length = 0;
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+        frameId = null;
+      }
+    },
+  };
+}
+
 function configureMobileHelperTextarea(textarea: HTMLTextAreaElement): void {
   textarea.setAttribute('autocorrect', 'on');
   textarea.setAttribute('autocomplete', 'on');
@@ -518,48 +619,9 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           syncFollowOutputState();
         });
 
+        const writePump = createTerminalWritePump(term);
         setWriteCallbackRef.current((data: Uint8Array) => {
-          const chunk = new Uint8Array(data);
-
-          if (chunk.byteLength === 0) {
-            return;
-          }
-
-          // Feed large payloads in bounded slices. A single >100KB write can
-          // exceed the WASM linear memory budget allocated for the render
-          // viewport, causing an out-of-bounds trap.
-          const MAX_WRITE_BYTES = 16384;
-          let offset = 0;
-
-          while (offset < chunk.length) {
-            let end = Math.min(offset + MAX_WRITE_BYTES, chunk.length);
-            if (end < chunk.length) {
-              let safeEnd = end;
-              while (safeEnd > offset && (chunk[safeEnd]! & 0xC0) === 0x80) {
-                safeEnd--;
-              }
-              if (safeEnd > offset) {
-                end = safeEnd;
-              }
-            }
-
-            try {
-              term.write(chunk.subarray(offset, end));
-            } catch (error) {
-              console.error('[session-terminal:web] term.write failed', {
-                sliceLength: end - offset,
-                totalLength: chunk.length,
-                offset,
-                viewportY: term.viewportY,
-                cols: term.cols,
-                rows: term.rows,
-                error,
-              });
-              throw error;
-            }
-
-            offset = end;
-          }
+          writePump.enqueue(data);
         });
 
         const handleResize = () => {
@@ -598,6 +660,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           container.removeEventListener('touchend', handleTouchEnd);
           container.removeEventListener('wheel', handleWheel);
           document.removeEventListener('wheel', handleWheelCapture, { capture: true });
+          writePump.dispose();
           scrollDisposable.dispose();
           observer.disconnect();
           term.dispose();

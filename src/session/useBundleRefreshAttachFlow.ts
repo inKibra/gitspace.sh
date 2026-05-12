@@ -79,7 +79,7 @@ function buildSafeValidationRegex(pattern?: string): RegExp | null {
 export interface UseBundleRefreshAttachFlowOptions {
   flow: Pick<
     UseFlowReturn,
-    'showLoading' | 'showMessage' | 'showConfirm' | 'showWizard' | 'close'
+    'showLoading' | 'showMessage' | 'showConfirm' | 'showSelect' | 'showWizard' | 'close'
   >;
   commandError: BundleRefreshCommandError | null;
   attachSession: (params: BundleRefreshAttachParams) => Promise<void> | void;
@@ -179,19 +179,39 @@ function createBaseSubmission(plan: BundleRefreshPlan): BundleRefreshSubmission 
   };
 }
 
-async function showRefreshPrompt(flow: UseBundleRefreshAttachFlowOptions['flow'], details: string): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    flow.showConfirm({
+type RefreshPromptAction = 'refresh' | 'attach-anyway' | 'cancel';
+
+
+async function showRefreshPrompt(
+  flow: UseBundleRefreshAttachFlowOptions['flow'],
+  details: string
+): Promise<RefreshPromptAction> {
+  return new Promise<RefreshPromptAction>((resolve) => {
+    flow.showSelect<RefreshPromptAction>({
       title: 'Bundle Refresh Required',
-      message: `${details}\n\nRefresh now and retry session attach?`,
-      variant: 'warning',
-      confirmLabel: 'Refresh now',
-      cancelLabel: 'Cancel',
-      onConfirm: () => {
-        resolve(true);
+      message: `${details}\n\nChoose how to continue session attach.`,
+      options: [
+        {
+          label: 'Refresh now',
+          description: 'Update bundle configuration, then retry session attach.',
+          value: 'refresh',
+        },
+        {
+          label: 'Attach anyway',
+          description: 'Skip bundle refresh and workspace scripts for this attach.',
+          value: 'attach-anyway',
+        },
+        {
+          label: 'Cancel',
+          description: 'Do not attach a terminal session.',
+          value: 'cancel',
+        },
+      ],
+      onSelect: (value) => {
+        resolve(value);
       },
       onCancel: () => {
-        resolve(false);
+        resolve('cancel');
       },
     });
   });
@@ -411,12 +431,19 @@ export function useBundleRefreshAttachFlow(
           return true;
         }
 
-        const confirmed = shouldAttachAfterRefresh
+        const refreshAction = shouldAttachAfterRefresh
           ? await showRefreshPrompt(currentOptions.flow, plan.details)
-          : await showExplicitRefreshPrompt(currentOptions.flow, plan.details);
-        if (!confirmed) {
+          : ((await showExplicitRefreshPrompt(currentOptions.flow, plan.details)) ? 'refresh' : 'cancel');
+        if (refreshAction === 'cancel') {
           if (shouldAttachAfterRefresh) setRecoverableParams(pending.params);
           return false;
+        }
+
+        if (refreshAction === 'attach-anyway') {
+          currentOptions.flow.close();
+          await Promise.resolve(currentOptions.attachSession({ ...pending.params, scriptPolicy: 'skip' }));
+          currentOptions.flow.close();
+          return true;
         }
 
         let submission = createBaseSubmission(plan);

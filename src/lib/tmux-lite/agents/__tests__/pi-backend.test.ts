@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { PiBackend } from '../pi-backend.js';
 import { PiCoordinator } from '../pi-coordinator.js';
 import { getManagedPiBinDir, getManagedPiExtensionPaths, getPiAgentDir, setupPiEnvironment } from '../pi-runtime.js';
@@ -44,6 +44,47 @@ describe('pi-runtime', () => {
         delete process.env.PATH;
       } else {
         process.env.PATH = originalPath;
+      }
+    }
+  });
+
+  it('disables context promotion by default in managed Pi config', () => {
+    const originalGitspaceHome = process.env.GITSPACE_HOME;
+    const tempRoot = mkdtempSync(join(tmpdir(), 'pi-context-promotion-'));
+    process.env.GITSPACE_HOME = tempRoot;
+
+    try {
+      setupPiEnvironment({ workspaceId: 'test:ws' });
+      const configPath = join(getPiAgentDir(), 'config.yml');
+
+      expect(readFileSync(configPath, 'utf8')).toContain('enabled: false');
+    } finally {
+      if (originalGitspaceHome === undefined) {
+        delete process.env.GITSPACE_HOME;
+      } else {
+        process.env.GITSPACE_HOME = originalGitspaceHome;
+      }
+    }
+  });
+
+  it('preserves an explicit managed Pi context promotion setting', () => {
+    const originalGitspaceHome = process.env.GITSPACE_HOME;
+    const tempRoot = mkdtempSync(join(tmpdir(), 'pi-context-promotion-explicit-'));
+    process.env.GITSPACE_HOME = tempRoot;
+
+    try {
+      const agentDir = getPiAgentDir();
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.yml'), 'contextPromotion:\n  enabled: true\n');
+
+      setupPiEnvironment({ workspaceId: 'test:ws' });
+
+      expect(readFileSync(join(agentDir, 'config.yml'), 'utf8')).toContain('enabled: true');
+    } finally {
+      if (originalGitspaceHome === undefined) {
+        delete process.env.GITSPACE_HOME;
+      } else {
+        process.env.GITSPACE_HOME = originalGitspaceHome;
       }
     }
   });

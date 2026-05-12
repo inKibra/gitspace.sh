@@ -216,7 +216,8 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
           ? 0
           : Math.max(0, Math.min(state.selectedIndex, filteredOptions.length - 1));
         const maxHeight = getModalMaxHeight();
-        const chromeHeight = state.searchable ? 11 : 8;
+        const messageLineCount = state.message ? 1 : 0;
+        const chromeHeight = state.searchable ? 11 + messageLineCount : 8 + messageLineCount;
         const maxVisibleOptions = Math.max(1, Math.floor((maxHeight - chromeHeight) / 3));
         const visibleCount = Math.max(1, Math.min(filteredOptions.length || 1, maxVisibleOptions));
         const modalHeight = Math.min(maxHeight, chromeHeight + (visibleCount * 3));
@@ -231,6 +232,11 @@ function renderModal(state: FlowState, flow: UseFlowReturn) {
 
         return (
           <Modal title={state.title} width={modalWidth} height={modalHeight}>
+            {state.message && (
+              <text fg={COLORS.textDim} marginBottom={1}>
+                {truncateLine(state.message.replace(/\s+/g, ' '), maxContentWidth)}
+              </text>
+            )}
             {state.searchable && (
               <>
                 <text fg={COLORS.textDim} marginBottom={1}>Search</text>

@@ -13,6 +13,8 @@ import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
 import { VirtualTerminal } from './agents/virtual-terminal.js';
 import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-session-registry.js';
+import { forwardVirtualTerminalOutput } from './virtual-output-forwarder.js';
+import { writeTraceLog } from '../../utils/trace-log.js';
 import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
@@ -290,6 +292,17 @@ interface RouterSocketState {
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
 const agentStateWatchers = new Set<object>();
 const machineStateWatchers = new Set<object>();
+let traceLastTick = Date.now();
+if (process.env.GITSPACE_TRACE?.trim()) {
+  setInterval(() => {
+    const now = Date.now();
+    const lagMs = now - traceLastTick - 1000;
+    traceLastTick = now;
+    if (lagMs > 100) {
+      writeTraceLog('event-loop-lag', { lagMs });
+    }
+  }, 1000).unref?.();
+}
 const agentSessionWatchOwners = new Map<string, object>();
 const agentDialogOwners = new Map<string, object>();
 
@@ -365,6 +378,11 @@ function clampTerminalSize(
 }
 
 function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
+  writeTraceLog('agent-delta-broadcast', {
+    deltaType: delta.type,
+    agentWatchers: agentStateWatchers.size,
+    machineWatchers: machineStateWatchers.size,
+  });
   for (const socket of agentStateWatchers) {
     try {
       sendRouterResponse(socket, { type: 'agent-state-update', delta });
@@ -374,7 +392,16 @@ function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').Agen
   }
 }
 
+function shouldBroadcastMachineSnapshotForAgentDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): boolean {
+  return delta.type === 'agent_state_snapshot'
+    || delta.type === 'agent_session_created'
+    || delta.type === 'agent_session_updated'
+    || delta.type === 'agent_session_deleted';
+}
+
+
 async function buildCurrentMachineSnapshot(options: { bumpNonce?: boolean } = {}): Promise<MachineSnapshot> {
+  const traceStartMs = Date.now();
   await syncKnownWorkspaces();
   try {
     await getAgentControlReady();
@@ -385,21 +412,41 @@ async function buildCurrentMachineSnapshot(options: { bumpNonce?: boolean } = {}
   if (options.bumpNonce || machineSnapshotNonce === 0) {
     machineSnapshotNonce += 1;
   }
+  writeTraceLog('machine-snapshot-build-start', {
+    bumpNonce: options.bumpNonce === true,
+    nextNonce: machineSnapshotNonce,
+    sessions: sessions.size,
+    machineWatchers: machineStateWatchers.size,
+  });
   const workspaceSnapshot = await getWorkspaceRuntimeSnapshot({
     sessions: Array.from(sessions.values()).map(getSessionInfo),
     agentStateByWorkspaceId: getAgentControlSnapshot(),
   });
-  return buildMachineSnapshot({
+  const snapshot = buildMachineSnapshot({
     snapshotNonce: machineSnapshotNonce,
     terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
     workspaces: workspaceSnapshot,
     agentStateByWorkspaceId: getAgentControlSnapshot(),
   });
+  writeTraceLog('machine-snapshot-build-end', {
+    snapshotNonce: snapshot.snapshotNonce,
+    durationMs: Date.now() - traceStartMs,
+    sessions: sessions.size,
+    workspaceCount: snapshot.workspaceOrder.length,
+    machineWatchers: machineStateWatchers.size,
+  });
+  return snapshot;
 }
 
 async function broadcastMachineSnapshotReplacement(): Promise<void> {
+  const traceStartMs = Date.now();
   if (machineStateWatchers.size === 0) return;
   const snapshot = await buildCurrentMachineSnapshot({ bumpNonce: true });
+  writeTraceLog('machine-snapshot-broadcast-start', {
+    snapshotNonce: snapshot.snapshotNonce,
+    buildAndQueueDelayMs: Date.now() - traceStartMs,
+    watchers: machineStateWatchers.size,
+  });
   for (const socket of machineStateWatchers) {
     try {
       sendRouterResponse(socket, {
@@ -414,6 +461,11 @@ async function broadcastMachineSnapshotReplacement(): Promise<void> {
       machineStateWatchers.delete(socket);
     }
   }
+  writeTraceLog('machine-snapshot-broadcast-end', {
+    snapshotNonce: snapshot.snapshotNonce,
+    durationMs: Date.now() - traceStartMs,
+    watchers: machineStateWatchers.size,
+  });
 }
 
 let agentControlSubscribed = false;
@@ -424,9 +476,11 @@ async function getAgentControlReady(): Promise<void> {
   if (!agentControlSubscribed) {
     subscribeAgentControl((delta) => {
       broadcastAgentStateDelta(delta);
-      void broadcastMachineSnapshotReplacement().catch(() => {
-        // non-fatal
-      });
+      if (shouldBroadcastMachineSnapshotForAgentDelta(delta)) {
+        void broadcastMachineSnapshotReplacement().catch(() => {
+          // non-fatal
+        });
+      }
     });
     agentControlSubscribed = true;
 
@@ -1998,10 +2052,13 @@ function createSession(
     ...(options?.env ?? {}),
   };
 
+  const isolateProcessGroup = options?.metadata?.role === 'process';
+
   const proc = Bun.spawn(spawnCmd, {
     terminal: ptyTerminal,
     cwd,
     env: spawnEnv,
+    detached: isolateProcessGroup,
   });
 
   const shellInitScript = getShellInitScript(shell, hooks);
@@ -2139,15 +2196,12 @@ function createVirtualSession(
     const session = sessions.get(id);
     if (!session) return;
 
-    session.pendingWrites++;
-    xterm.write(data, () => {
-      session.pendingWrites--;
-      if (session.attaching) {
-        session.attachDirty = true;
-        return;
-      }
-      writeChunkedPtyToClient(session, data);
-    });
+    forwardVirtualTerminalOutput(
+      session,
+      (chunk, callback) => xterm.write(chunk, callback),
+      (chunk) => { writeChunkedPtyToClient(session, chunk); },
+      data,
+    );
   });
 
   registerVirtualTerminal(id, virtualTerminal);
@@ -2350,6 +2404,11 @@ routerListener = Bun.listen({
 
       for (const message of decoded.messages) {
         const cmd = message as Command;
+        const commandTraceStartMs = Date.now();
+        writeTraceLog('tmux-command-start', {
+          commandType: cmd.type,
+          requestId: 'requestId' in cmd ? cmd.requestId : undefined,
+        });
         let res: Response;
         const writeResponse = (response: Response) => {
           if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
@@ -2646,17 +2705,41 @@ routerListener = Bun.listen({
             break;
 
 
-          case 'agent-prompt':
+          case 'agent-prompt': {
+            const traceStartMs = Date.now();
+            writeTraceLog('tmux-agent-prompt-start', {
+              agentSessionId: cmd.agentSessionId,
+              workspaceId: cmd.target.workspaceId,
+              textLength: cmd.text.length,
+              imageCount: cmd.images?.length ?? 0,
+            });
             try {
               await getAgentControlReady();
+              writeTraceLog('tmux-agent-prompt-control-ready', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+              });
               // ok here means the turn was accepted. Turn progress and completion are surfaced via existing agent events, not via this response.
               await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
+              writeTraceLog('tmux-agent-prompt-accepted', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+              });
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+              writeTraceLog('tmux-agent-prompt-error', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+                error: errMsg,
+              });
             }
             break;
+          }
 
           case 'agent-queue-remove':
             try {
@@ -3288,6 +3371,12 @@ routerListener = Bun.listen({
         }
 
         sendRouterResponse(socket, res);
+        writeTraceLog('tmux-command-response', {
+          commandType: cmd.type,
+          requestId: 'requestId' in cmd ? cmd.requestId : undefined,
+          responseType: res.type,
+          durationMs: Date.now() - commandTraceStartMs,
+        });
         if (res.type === 'agent-watch-started') {
           try {
             sendRouterResponse(socket, { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) });

@@ -69,6 +69,11 @@ export class PaneLifecycle {
     this.pushPtyData(pending);
   }
 
+  hasOutputHandler(): boolean {
+    return this.outputHandler !== null;
+  }
+
+
   pushPtyData(data: Uint8Array): void {
     this.appendReplayChunk(data);
     if (!this.outputHandler) {

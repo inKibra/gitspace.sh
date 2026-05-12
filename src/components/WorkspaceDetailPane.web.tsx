@@ -163,6 +163,8 @@ function SidebarContent(props: {
   workspaceSessions: ReturnType<typeof useWorkspaceDetailModel>['workspaceSessions'];
   attachedSessionId: string | null;
   attachedAgentSessionId: string | null;
+  attachedSessionIds: readonly string[];
+  attachedAgentSessionIds: readonly string[];
   onAttachSession: WorkspaceDetailPaneProps['onAttachSession'];
   onStopAgentTurn?: WorkspaceDetailPaneProps['onStopAgentTurn'];
   onCloseAgentSession?: WorkspaceDetailPaneProps['onCloseAgentSession'];
@@ -184,6 +186,7 @@ function SidebarContent(props: {
 }) {
   const {
     detailModel, workspace, workspaceSessions, attachedSessionId, attachedAgentSessionId,
+    attachedSessionIds, attachedAgentSessionIds,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
     onRequestStatusChange, onOpenNotes, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
@@ -232,7 +235,7 @@ function SidebarContent(props: {
                   label={row.title}
                   subtitle={row.modelLabel}
                   rightLabel={row.lastActiveLabel ?? undefined}
-                  active={row.id === attachedAgentSessionId}
+                  active={attachedAgentSessionIds.includes(row.id) || row.id === attachedAgentSessionId}
                   onClick={() => act(() => void detailActions.openAgentSession(row.id))}
                 />
                 {onStopAgentTurn && agentState === 'running' && (
@@ -294,7 +297,7 @@ function SidebarContent(props: {
           sessionRows.map((row) => {
             const s = workspaceSessions.find((session) => session.id === row.id)!;
             if (s.processName) return null;
-            const isOpen = attachedSessionId === row.id;
+            const isOpen = attachedSessionIds.includes(row.id) || attachedSessionId === row.id;
             return (
               <div key={row.id} className="flex items-center gap-1">
                 <SidebarItem
@@ -448,6 +451,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     workspaceStatusById = {},
     attachedSessionId = null,
     attachedAgentSessionId = null,
+    attachedSessionIds = attachedSessionId ? [attachedSessionId] : [],
+    attachedAgentSessionIds = attachedAgentSessionId ? [attachedAgentSessionId] : [],
     onSelectWorkspace,
     onClose,
     children,
@@ -638,6 +643,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 workspaceSessions={workspaceSessions}
                 attachedSessionId={attachedSessionId}
                 attachedAgentSessionId={attachedAgentSessionId}
+                attachedSessionIds={attachedSessionIds}
+                attachedAgentSessionIds={attachedAgentSessionIds}
                 onAttachSession={onAttachSession}
                 onStopAgentTurn={onStopAgentTurn}
                 onCloseAgentSession={onCloseAgentSession}
@@ -730,6 +737,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   workspaceSessions={workspaceSessions}
                   attachedSessionId={attachedSessionId}
                   attachedAgentSessionId={attachedAgentSessionId}
+                  attachedSessionIds={attachedSessionIds}
+                  attachedAgentSessionIds={attachedAgentSessionIds}
                   onAttachSession={onAttachSession}
                   onStopAgentTurn={onStopAgentTurn}
                   onCloseAgentSession={onCloseAgentSession}

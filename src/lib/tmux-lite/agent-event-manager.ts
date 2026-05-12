@@ -66,6 +66,11 @@ export type AgentStateUpdateDelta =
 
 const LAST_MESSAGE_MAX_CHARS = 120;
 
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+
 export class AgentEventManager {
   private readonly workspaceStates = new Map<string, WorkspaceAgentState>();
   private readonly handlers = new Set<(delta: AgentStateUpdateDelta) => void>();
@@ -201,6 +206,7 @@ export class AgentEventManager {
   setExternalStatus(workspaceId: string, sessionId: string, status: SessionStatus): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
+    if (jsonEqual(state.statuses[sessionId], status)) return;
     state.statuses[sessionId] = status;
     // Only clear error messages when transitioning to a non-error status.
     // Retry status carries an error message that must survive.
@@ -217,6 +223,7 @@ export class AgentEventManager {
     const trimmed = preview.trim();
     if (!trimmed) return;
     const normalized = trimmed.slice(-LAST_MESSAGE_MAX_CHARS);
+    if (state.lastMessages[sessionId] === normalized) return;
     state.lastMessages[sessionId] = normalized;
     delete state.errorMessages[sessionId];
     this.emit({ type: 'agent_last_message', workspaceId, sessionId, preview: normalized });
@@ -225,6 +232,7 @@ export class AgentEventManager {
   setExternalError(workspaceId: string, sessionId: string, errorMessage: string): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
+    if (state.errorMessages[sessionId] === errorMessage) return;
     state.errorMessages[sessionId] = errorMessage;
     this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage });
   }
@@ -232,6 +240,7 @@ export class AgentEventManager {
   setExternalTodoPhases(workspaceId: string, sessionId: string, phases: TodoPhase[]): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
+    if (jsonEqual(state.todoPhases[sessionId], phases)) return;
     state.todoPhases[sessionId] = phases;
     this.emit({ type: 'agent_todo_update', workspaceId, sessionId, phases });
   }
@@ -239,6 +248,7 @@ export class AgentEventManager {
   setExternalModelInfo(workspaceId: string, sessionId: string, modelInfo: AgentModelInfo): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
+    if (jsonEqual(state.modelInfo[sessionId], modelInfo)) return;
     state.modelInfo[sessionId] = modelInfo;
     this.emit({ type: 'agent_model_update', workspaceId, sessionId, modelInfo });
   }
@@ -246,6 +256,7 @@ export class AgentEventManager {
   setExternalQueuedMessages(workspaceId: string, sessionId: string, queued: { steering: readonly string[]; followUp: readonly string[] }): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
+    const previousQueued = state.queuedMessages[sessionId];
     if (queued.steering.length === 0 && queued.followUp.length === 0) {
       delete state.queuedMessages[sessionId];
     } else {
@@ -254,6 +265,7 @@ export class AgentEventManager {
         followUp: [...queued.followUp],
       };
     }
+    if (jsonEqual(previousQueued, state.queuedMessages[sessionId])) return;
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 

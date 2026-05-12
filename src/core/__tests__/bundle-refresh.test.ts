@@ -571,6 +571,62 @@ describe('bundle-refresh', () => {
       expect(plan.details).toContain('Missing required secrets: PULUMI_ACCESS_TOKEN.');
     });
 
+    it('does not prompt for added secrets that already exist project-wide', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const workspacePath = join(testDir, 'workspaces', 'feature-existing-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      const previousBundle = {
+        version: '1.0' as const,
+        name: 'Previous Bundle',
+        onboarding: [],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(previousBundle));
+
+      const { detectBundleChanges, getBundleRefreshPlan } = await import('../bundle-refresh');
+      const firstDetect = detectBundleChanges('test-project', workspacePath);
+      expect(firstDetect.currentHash).toBeDefined();
+
+      savedSecrets.API_TOKEN = 'existing-secret';
+      mockProjectConfig.bundleSecretKeys = ['API_TOKEN'];
+      mockProjectConfig.bundleWorkspaceState = {
+        'feature-existing-secret': {
+          scope: 'feature-existing-secret',
+          bundleHash: firstDetect.currentHash!,
+          requiredInputKeys: [],
+          requiredSecretKeys: [],
+          confirmFingerprints: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      const nextBundle = {
+        version: '1.0' as const,
+        name: 'Next Bundle',
+        onboarding: [
+          {
+            id: 'token',
+            type: 'secret' as const,
+            title: 'API token',
+            description: 'Secret token',
+            configKey: 'API_TOKEN',
+            required: true,
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(nextBundle));
+
+      const plan = await getBundleRefreshPlan(
+        'test-project',
+        workspacePath,
+        'test-project:feature-existing-secret'
+      );
+
+      expect(plan.hasChanged).toBe(true);
+      expect(plan.steps.map((step) => step.id)).not.toContain('token');
+      expect(plan.details).not.toContain('Missing required secrets: API_TOKEN.');
+    });
     it('allows clearing persisted bundle secret values via empty submission value', async () => {
       const bundleDir = join(testBaseDir, '.gitspace');
       mkdirSync(bundleDir, { recursive: true });

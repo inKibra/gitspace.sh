@@ -610,11 +610,15 @@ function shouldIncludeSecretStep(
     return true;
   }
 
+  if (Object.prototype.hasOwnProperty.call(existingSecrets, key)) {
+    return false;
+  }
+
   if (diff?.secretsAdded.includes(key)) {
     return true;
   }
 
-  return !Object.prototype.hasOwnProperty.call(existingSecrets, key);
+  return true;
 }
 
 function makeStepDescription(step: OnboardingStep): string {

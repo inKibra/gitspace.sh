@@ -64,6 +64,7 @@ import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
 type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse;
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
+import { writeTraceLog } from '../../utils/trace-log.js';
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_PANE_STREAM_ID = 2;
@@ -391,6 +392,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     resolve: (response: TypedCommandResponse) => void;
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
+    startedAtMs: number;
   }>();
   private pendingDetachTransition: {
     resolve: () => void;
@@ -1484,7 +1486,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (opened.streamId > (this.crypto.controlStreamId ?? DEFAULT_CONTROL_STREAM_ID)) {
       const pane = this.findPaneByStreamId(opened.streamId);
       pane?.pushPtyData(opened.data);
-      if (pane?.paneId === DEFAULT_PANE_ID) {
+      if (pane?.paneId === DEFAULT_PANE_ID && !pane.hasOutputHandler()) {
         this.emitPtyData(opened.data);
       }
       return;
@@ -2046,18 +2048,36 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private async sendTypedCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TypedCommandResponse> {
     const requestId = request.requestId;
+    const startedAtMs = Date.now();
     return new Promise<TypedCommandResponse>((resolve, reject) => {
+      writeTraceLog('remote-command-send', {
+        requestId,
+        commandType: request.type,
+        pendingCount: this.pendingTypedCommands.size,
+      });
       const timeout = setTimeout(() => {
         const pending = this.pendingTypedCommands.get(requestId);
         if (!pending) return;
         this.pendingTypedCommands.delete(requestId);
+        writeTraceLog('remote-command-timeout', {
+          requestId,
+          commandType: request.type,
+          durationMs: Date.now() - pending.startedAtMs,
+          pendingCount: this.pendingTypedCommands.size,
+        });
         reject(new Error(`Timed out waiting for command response (${request.type})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingTypedCommands.set(requestId, { resolve, reject, timeout });
+      this.pendingTypedCommands.set(requestId, { resolve, reject, timeout, startedAtMs });
       void this.sendCommand(request).catch((error) => {
         const pending = this.pendingTypedCommands.get(requestId);
         if (!pending) return;
         clearTimeout(pending.timeout);
+        writeTraceLog('remote-command-send-error', {
+          requestId,
+          commandType: request.type,
+          durationMs: Date.now() - pending.startedAtMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
         this.pendingTypedCommands.delete(requestId);
         pending.reject(error instanceof Error ? error : new Error(String(error)));
       });
@@ -2067,6 +2087,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private resolveTypedCommand(message: CommandResponse): void {
     const pending = this.pendingTypedCommands.get(message.requestId);
     if (!pending) return;
+    writeTraceLog('remote-command-resolve', {
+      requestId: message.requestId,
+      responseType: message.response.type,
+      durationMs: Date.now() - pending.startedAtMs,
+      pendingCount: this.pendingTypedCommands.size,
+    });
     clearTimeout(pending.timeout);
     this.pendingTypedCommands.delete(message.requestId);
     pending.resolve(message.response);
@@ -2321,9 +2347,26 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           case 'agent_session_status':
             state.statuses[delta.sessionId] = delta.status;
             break;
+          case 'agent_session_error':
+            state.errorMessages[delta.sessionId] = delta.errorMessage;
+            break;
           case 'agent_permission_added':
             if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
             state.pendingPermissions[delta.sessionId].push(delta.permission);
+            break;
+          case 'agent_question_added':
+            if (!state.pendingQuestions[delta.sessionId]) state.pendingQuestions[delta.sessionId] = [];
+            state.pendingQuestions[delta.sessionId] = [
+              ...state.pendingQuestions[delta.sessionId].filter((q) => q.id !== delta.question.id),
+              delta.question,
+            ];
+            break;
+          case 'agent_question_removed':
+            if (state.pendingQuestions[delta.sessionId]) {
+              state.pendingQuestions[delta.sessionId] = state.pendingQuestions[delta.sessionId].filter(
+                (q) => q.id !== delta.requestId,
+              );
+            }
             break;
           case 'agent_permission_removed':
             if (state.pendingPermissions[delta.sessionId]) {
@@ -2334,6 +2377,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
             break;
           case 'agent_last_message':
             state.lastMessages[delta.sessionId] = delta.preview;
+            break;
+          case 'agent_todo_update':
+            state.todoPhases[delta.sessionId] = delta.phases;
+            break;
+          case 'agent_model_update':
+            state.modelInfo[delta.sessionId] = delta.modelInfo;
             break;
           case 'agent_session_created':
             if (!state.sessions.some((s) => s.id === delta.sessionId)) {
@@ -2347,6 +2396,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           }
           case 'agent_session_deleted':
             state.sessions = state.sessions.filter((s) => s.id !== delta.sessionId);
+            delete state.statuses[delta.sessionId];
+            delete state.pendingPermissions[delta.sessionId];
+            delete state.pendingQuestions[delta.sessionId];
+            delete state.lastMessages[delta.sessionId];
+            delete state.errorMessages[delta.sessionId];
+            delete state.todoPhases[delta.sessionId];
+            delete state.modelInfo[delta.sessionId];
+            delete state.queuedMessages[delta.sessionId];
             break;
         }
       }

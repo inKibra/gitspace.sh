@@ -455,7 +455,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const selectedRef = workspaceController.selectedRef;
   const backendAttachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
   const attachedPaneWorkspaceId = Object.values(attachedBackendState?.attachedPanes ?? {}).find((pane) => pane.workspaceId)?.workspaceId ?? null;
-  const effectiveAttachedWorkspaceId = backendAttachedWorkspaceId ?? attachedPaneWorkspaceId;
+  const effectiveAttachedWorkspaceId = attachedPaneWorkspaceId ?? backendAttachedWorkspaceId;
   const attachedWorkspaceSelectionKey = attachedBackendKey && effectiveAttachedWorkspaceId
     ? toBackendScopedWorkspaceKey({ backendKey: attachedBackendKey, workspaceId: effectiveAttachedWorkspaceId })
     : null;
@@ -806,7 +806,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const handleCreateAgentSession = useCallback((workspaceId: string) => {
     createAgentSessionAction(workspaceId, {
-      attachOptions: getWebAgentAttachSize(),
+      attachOptions: { ...getWebAgentAttachSize(), paneId: allocatePaneId('agent') },
       beforeOpen: () => {
         setIsViewOnlySession(false);
         attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
@@ -827,7 +827,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         setPendingAgentAttachTarget(null);
       },
     });
-  }, [createAgentSessionAction, getWebAgentAttachSize]);
+  }, [createAgentSessionAction, getWebAgentAttachSize, allocatePaneId]);
 
   const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await archiveAgentSessionAction(workspaceId, agentSessionId);
@@ -2204,8 +2204,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           const terminalPanelsForWorkspace = livePanelsForWorkspace.length > 0
             ? livePanelsForWorkspace
             : (cachedTerminalPanelsRef.current[selectionKey] ?? []);
+          const workspaceAttachedPanes = Object.values(attachedBackendState?.attachedPanes ?? {})
+            .filter((pane) => pane.workspaceId === workspace.id || (!pane.workspaceId && attachedWorkspaceSelectionKey === selectionKey));
+          const workspaceAttachedSessionIds = workspaceAttachedPanes.map((pane) => pane.sessionId);
+          const workspaceAttachedAgentSessionIds = workspaceAttachedPanes
+            .map((pane) => pane.agentSessionId)
+            .filter((id): id is string => Boolean(id));
           const isActive = visibleSelectionKey === selectionKey;
-          const attachedHere = attachedWorkspaceSelectionKey === selectionKey;
+          const attachedHere = workspaceAttachedPanes.length > 0 || attachedWorkspaceSelectionKey === selectionKey;
           const workspaceBackendKey = backendKeyFromSelectionKey(selectionKey);
 
           return (
@@ -2221,8 +2227,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 agentSessions={runtime?.agentSessions ?? []}
                 agentSessionCount={runtime?.agentSessionCount ?? 0}
                 pendingPermissions={runtime?.pendingPermissionCount ?? 0}
-                attachedSessionId={attachedHere ? backendAttachedSessionId : null}
-                attachedAgentSessionId={attachedHere ? (attachedBackendState?.attachedAgentSessionId ?? null) : null}
+                attachedSessionId={workspaceAttachedSessionIds[0] ?? (attachedHere ? backendAttachedSessionId : null)}
+                attachedAgentSessionId={workspaceAttachedAgentSessionIds[0] ?? (attachedHere ? (attachedBackendState?.attachedAgentSessionId ?? null) : null)}
+                attachedSessionIds={workspaceAttachedSessionIds}
+                attachedAgentSessionIds={workspaceAttachedAgentSessionIds}
                 pendingAgentAttach={agentAttachPending && pendingAgentAttachTarget?.workspaceId === workspace.id}
                 allWorkspaces={allWorkspaceEntries}
                 workspaceStatusById={workspaceStatusById}
