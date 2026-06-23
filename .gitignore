@@ -61,3 +61,5 @@ gitspace.lock
 
 .gitspace/.processes/
 .gitspace/dev/
+playwright-report/
+test-results/

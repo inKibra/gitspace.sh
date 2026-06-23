@@ -449,7 +449,7 @@ async function main(): Promise<void> {
   log('dev', 'Serve started');
 
   // Phase 3: Start Vite dev server with enrollment token
-  const enrollToken = crypto.randomUUID();
+  const enrollToken = process.env.DEV_ENROLL_TOKEN ?? crypto.randomUUID();
   log('dev', 'Starting Vite...');
   spawnChild('web', ['bunx', 'vite', '--port', String(vitePort), '--host'], {
     RELAY_PORT: String(relayPort),
