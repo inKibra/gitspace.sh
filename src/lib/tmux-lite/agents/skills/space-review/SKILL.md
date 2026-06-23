@@ -29,3 +29,12 @@ Use this skill when asked to review a workspace, prepare a review summary, or as
 4. When implementation is explicitly requested, add or adjust the smallest focused tests that cover changed behavior.
 5. Report actionable findings with severity, reproduction conditions, and evidence.
 6. If no actionable issue is found, say what was inspected and what verification was not run.
+
+## Hooks into goal validation
+
+When the active workspace has a goal with declared requirements, your review feeds the validation contract — it does not replace it.
+
+- If your review is the gate for a human-judged requirement, record the decision there: `space goal review record --requirement "<title>" --decision pass|changes|fail --body "<review note>"`.
+- If a finding requires more evidence (e.g. a missing screenshot, a failing focused test), report it as a finding in the review AND surface the relevant requirement title so the implementer knows which contract to refulfill.
+- A passing diff review does not satisfy a requirement whose `judgment.kind` is `command` or `llm`. Run `space goal review run --requirement "<title>"` for those.
+- Use `space goal status` to see whether your review unblocks readiness or whether other requirements still gate the goal.

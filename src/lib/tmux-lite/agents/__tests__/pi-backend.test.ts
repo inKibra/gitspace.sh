@@ -122,8 +122,10 @@ describe('pi-runtime', () => {
 
   it('loads managed GitSpace default skills', async () => {
     const paths = getManagedSkillPaths();
-    expect(paths).toHaveLength(5);
+    expect(paths).toHaveLength(7);
     expect(paths).toEqual([
+      expect.stringContaining('space-goal/SKILL.md'),
+      expect.stringContaining('space-chain/SKILL.md'),
       expect.stringContaining('space-review/SKILL.md'),
       expect.stringContaining('space-notes/SKILL.md'),
       expect.stringContaining('space-process-config/SKILL.md'),
@@ -133,6 +135,8 @@ describe('pi-runtime', () => {
 
     const skills = await loadManagedDefaultSkills();
     expect(skills.map((skill) => skill.name)).toEqual([
+      'space-goal',
+      'space-chain',
       'space-review',
       'space-notes',
       'space-process-config',

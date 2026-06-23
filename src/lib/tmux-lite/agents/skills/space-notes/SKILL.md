@@ -43,3 +43,11 @@ Use this skill when asked to create, inspect, update, or apply workspace notes.
 - Reason: GitSpace defaults should be present without removing user extensibility.
 - Follow-up: Verify dedupe behavior when skill names collide.
 ```
+
+## Hooks into goal validation
+
+Notes complement the goal validation contract; they do not replace it.
+
+- Use a note to draft rubric acceptance criteria *before* declaring a requirement. Once the requirement is declared, the rubric is the source of truth — keep the note as a decision trail, not a duplicate spec.
+- For `note`-kind requirements, the inline body is the evidence. Attach it via `space goal artifact attach --requirement "<title>" --body "<note body>"`. Do not create a workspace note as a side channel for evidence.
+- When a note records a follow-up decision that affects readiness, link the note to the requirement explicitly: include the requirement title in the note body. Use `space goal status` (not workspace notes) to determine whether the goal is ready.

@@ -46,3 +46,12 @@ Outside a workspace, use the `gssh workspace service ... --project <p> --workspa
 4. Watch service attachment/logs and recent events until ready, failed, or timed out.
 5. If ready, verify the advertised URL or health check.
 6. If failed, report the exact failed command, exit status, and relevant logs/events.
+
+## Hooks into goal validation
+
+Process output is often the evidence a goal requirement is asking for. Don't capture it separately from the validation contract:
+
+- For `test-output` requirements with command generation, the rubric command is the process command. Wire it via `space goal requirement add --gen command --gen-command "<test command>" --judge command --judge-command "<test command>" --expect exit-zero`, then call `space goal artifact run --requirement "<title>"`. The run captures stdout/stderr/exit and auto-judges on exit-zero.
+- For requirements that depend on process readiness (e.g. "API responds at /healthz"), prefer a command judgment that exits zero when readiness is observed (`curl --fail -sS http://127.0.0.1:$PORT/healthz`). Wire it as `--judge command --judge-command "<probe>" --expect exit-zero`.
+- When attaching saved process logs as evidence, scope to a requirement: `space goal artifact attach --requirement "<title>" --path <log-path>`.
+- A process being `ready` does not mark a goal requirement `accepted`. The mapping is explicit: a successful command judgment writes the review.
