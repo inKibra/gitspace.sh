@@ -753,9 +753,9 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
           if (localAttachedSessionId === sessionId) {
             await multi.detachSession({ backendKey: LOCAL_BACKEND_KEY, workspaceId: '' });
           }
-          await multi.killSession({ backendKey: LOCAL_BACKEND_KEY, sessionId });
+          await multi.terminateSession({ backendKey: LOCAL_BACKEND_KEY, sessionId });
         } catch (err) {
-          dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to kill session' });
+          dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Failed to terminate session' });
         }
       },
     });
@@ -1245,7 +1245,7 @@ function AppInner({ onQuit, keyboardMode }: AppInnerProps) {
       }
     },
     onAddRepo: () => lifecycleController.openCreateProjectFlow(),
-    onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+    onAddWorkspace: () => lifecycleController.openCreateMenu(),
     onSetWorkspacePhase: (workspace, phase) => {
       workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
       flow.close();

@@ -174,6 +174,17 @@ describe('PiCoordinator active session open serialization', () => {
     blockCompact = false;
   });
 
+
+  it('includes built-in commands before a session is active', async () => {
+    const coordinator = new PiCoordinator(SESSIONS_DIR);
+
+    const commands = await coordinator.listAvailableCommands(sessionTarget);
+
+    expect(commands).toEqual(expect.arrayContaining([
+      { name: 'compact', description: 'Compact the session context', kind: 'extension' },
+      { name: 'space', description: 'Run GitSpace workspace-scoped commands', kind: 'extension' },
+    ]));
+  });
   it('includes extension and skill commands in available command listings', async () => {
     const coordinator = new PiCoordinator(SESSIONS_DIR);
 

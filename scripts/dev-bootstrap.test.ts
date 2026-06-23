@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { clearSandboxBootstrapMetadata, validateSandboxBootstrap, type SandboxBootstrapPaths } from './dev-bootstrap.js';
+import {
+  clearSandboxBootstrapMetadata,
+  createSandboxSecretsStore,
+  validateSandboxBootstrap,
+  writeSandboxSecretsFile,
+  type SandboxBootstrapPaths,
+} from './dev-bootstrap.js';
 
 const tempDirs: string[] = [];
 
@@ -33,6 +39,14 @@ function createSandboxPaths(machineId = 'machine-current'): SandboxBootstrapPath
   writeFileSync(paths.devIdentityPath, JSON.stringify({ id: 'browser-device' }));
 
   return paths;
+}
+
+function readUnifiedSecrets(secretsPath: string): {
+  global: Record<string, string>;
+  projects: Record<string, Record<string, string>>;
+} {
+  const store = JSON.parse(readFileSync(secretsPath, 'utf-8')) as { entries: Record<string, string> };
+  return JSON.parse(store.entries['com.gitspace:secrets']);
 }
 
 afterEach(() => {
@@ -81,5 +95,43 @@ describe('clearSandboxBootstrapMetadata', () => {
 
     expect(existsSync(paths.machineIdentityPath)).toBe(false);
     expect(existsSync(paths.relayConfigPath)).toBe(false);
+  });
+});
+
+describe('createSandboxSecretsStore', () => {
+  test('preserves project and non-identity global secrets while replacing repaired identity', () => {
+    const paths = createSandboxPaths('machine-current');
+    writeFileSync(paths.secretsPath, JSON.stringify({
+      entries: {
+        'com.gitspace:secrets': JSON.stringify({
+          global: {
+            USER_ROOT_IDENTITY: JSON.stringify({ mnemonic: 'stale mnemonic' }),
+            GITSPACE_TOKEN: 'token-1',
+          },
+          projects: {
+            projectA: { API_KEY: 'project-secret' },
+          },
+          metadata: { schemaVersion: 2, legacyMigrationComplete: true, legacyEntriesRetained: false },
+        }),
+      },
+    }));
+
+    writeSandboxSecretsFile(paths.secretsPath, createSandboxSecretsStore(paths.secretsPath, { mnemonic: 'fresh mnemonic' }));
+
+    const unified = readUnifiedSecrets(paths.secretsPath);
+    expect(JSON.parse(unified.global.USER_ROOT_IDENTITY)).toEqual({ mnemonic: 'fresh mnemonic' });
+    expect(unified.global.GITSPACE_TOKEN).toBe('token-1');
+    expect(unified.projects).toEqual({ projectA: { API_KEY: 'project-secret' } });
+  });
+
+  test('falls back to a fresh identity blob when stale secrets are malformed', () => {
+    const paths = createSandboxPaths('machine-current');
+    writeFileSync(paths.secretsPath, '{not-json');
+
+    writeSandboxSecretsFile(paths.secretsPath, createSandboxSecretsStore(paths.secretsPath, { mnemonic: 'fresh mnemonic' }));
+
+    const unified = readUnifiedSecrets(paths.secretsPath);
+    expect(JSON.parse(unified.global.USER_ROOT_IDENTITY)).toEqual({ mnemonic: 'fresh mnemonic' });
+    expect(unified.projects).toEqual({});
   });
 });

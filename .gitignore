@@ -60,3 +60,4 @@ gitspace.lock
 .gitspace/workspace/
 
 .gitspace/.processes/
+.gitspace/dev/

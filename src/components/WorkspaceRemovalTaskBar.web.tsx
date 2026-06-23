@@ -6,7 +6,9 @@ import type { ScriptPhase } from './ScriptTerminalPanel.web.js';
 
 interface Props {
   tasks: WorkspaceRemovalTask[];
-  onDismiss: (taskId: string) => void;
+  selectedTaskId?: string | null;
+  onSelectTask?: (taskId: string) => void;
+  onDismiss: (taskId: string) => void | Promise<void>;
   placement?: 'fixed' | 'inline';
 }
 
@@ -18,7 +20,9 @@ function formatElapsed(task: WorkspaceRemovalTask): string {
 }
 
 function getStatusLabel(task: WorkspaceRemovalTask): string {
-  if (task.status === 'succeeded') return 'removed';
+  if (task.status === 'succeeded') {
+    return task.operationKind === 'workspace.delete' || task.result?.status === 'removed' ? 'removed' : 'complete';
+  }
   if (task.status === 'needs_attention') return 'needs attention';
   return task.status;
 }
@@ -43,11 +47,15 @@ function getEmptyLogLabel(task: WorkspaceRemovalTask): string {
     : 'No workspace script output yet.';
 }
 
-export function WorkspaceRemovalTaskBar({ tasks, onDismiss, placement = 'fixed' }: Props) {
+function getFallbackTask(tasks: WorkspaceRemovalTask[]): WorkspaceRemovalTask | null {
+  return tasks.find((task) => task.status === 'running' || task.status === 'queued') ?? tasks[0] ?? null;
+}
+
+export function WorkspaceRemovalTaskBar({ tasks, selectedTaskId, onSelectTask, onDismiss, placement = 'fixed' }: Props) {
   const [expanded, setExpanded] = useState(false);
   const activeTask = useMemo(
-    () => tasks.find((task) => task.status === 'running' || task.status === 'queued') ?? tasks[0] ?? null,
-    [tasks],
+    () => tasks.find((task) => task.id === selectedTaskId) ?? getFallbackTask(tasks),
+    [tasks, selectedTaskId],
   );
 
   if (!activeTask) return null;
@@ -65,7 +73,9 @@ export function WorkspaceRemovalTaskBar({ tasks, onDismiss, placement = 'fixed' 
               <button
                 key={task.id}
                 type="button"
-                className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-[var(--gs-bg-surface)]"
+                onClick={() => onSelectTask?.(task.id)}
+                aria-pressed={task.id === activeTask.id}
+                className={`flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-[var(--gs-bg-surface)] ${task.id === activeTask.id ? 'bg-[var(--gs-bg-surface)]' : ''}`}
               >
                 <span className="min-w-0">
                   <span className="block truncate text-sm text-[var(--gs-text)]">{task.label}</span>
@@ -82,6 +92,7 @@ export function WorkspaceRemovalTaskBar({ tasks, onDismiss, placement = 'fixed' 
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault();
+                        event.stopPropagation();
                         onDismiss(task.id);
                       }
                     }}

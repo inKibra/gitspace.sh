@@ -26,6 +26,12 @@ function makePlan(overrides: Partial<BundleRefreshPlan> = {}): BundleRefreshPlan
   }
 }
 
+
+function makeBundleRefreshRequiredError(): Error & { code?: string } {
+  const error = new Error('refresh required') as Error & { code?: string }
+  error.code = 'BUNDLE_REFRESH_REQUIRED'
+  return error
+}
 describe('useBundleRefreshAttachFlow', () => {
   it('does not silently retry attach when plan reports no changes', async () => {
     const confirmCalls: Array<any> = []
@@ -78,6 +84,41 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(result.current.recoverableParams).toMatchObject({
       workspaceId: TEST_REF.workspaceId,
     })
+  })
+
+  it('bypasses bundle refresh prompts for existing session attaches with workspace scope', async () => {
+    const attachSession = mock(async () => {
+      throw makeBundleRefreshRequiredError()
+    })
+    const getPlan = mock(async () => makePlan())
+    const showSelect = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: () => {},
+          showSelect,
+          showWizard: () => {},
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+        getBundleRefreshPlan: getPlan,
+        applyBundleRefresh: async () => {},
+      })
+    )
+
+    await expect(result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      sessionId: 'existing-session',
+      workspaceId: TEST_REF.workspaceId,
+    })).rejects.toThrow('refresh required')
+
+    expect(attachSession).toHaveBeenCalledTimes(1)
+    expect(getPlan).not.toHaveBeenCalled()
+    expect(showSelect).not.toHaveBeenCalled()
+    expect(result.current.recoverableParams).toBeNull()
   })
 
   it('applies refresh plan and retries attach after confirmation', async () => {

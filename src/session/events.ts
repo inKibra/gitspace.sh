@@ -3,6 +3,8 @@ import type {
   ProjectInfo,
   SessionInfo,
   ScriptOutputResponse,
+  RemoteOperationRecord,
+  RemoteOperationEvent,
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
@@ -42,6 +44,9 @@ export type BackendEvent =
   | { type: 'error'; message: string }
   | { type: 'events'; events: WideEvent[]; liveEventIds: string[]; savedEventFilters?: SavedEventFilter[] }
   | { type: 'machine_snapshot'; snapshot: MachineSnapshot }
+  | { type: 'operation_snapshot'; operations: RemoteOperationRecord[] }
+  | { type: 'operation_event'; event: RemoteOperationEvent }
+  | { type: 'operation_dismissed'; operationId: string }
   | { type: 'process_started'; workspaceId: string; processName: string; sessionId?: string; sessionIds?: string[] }
   | { type: 'process_stopped'; workspaceId: string; processName: string }
   | { type: 'host_ui_dialog_request'; request: HostUIDialogRequest }

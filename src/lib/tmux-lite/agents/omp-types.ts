@@ -13,7 +13,7 @@ export interface OmpAgentSession {
    *
    * NOTE: This is the Pi SDK's `AgentSession.abort()`. Do not confuse with
    * GitSpace's `abortAgentSession()` which KILLS the tmux session entirely.
-   * GitSpace naming: interrupt = stop current turn, abort = kill session.
+   * GitSpace naming: interrupt = stop current turn, abort = terminate session.
    */
   abort(): Promise<void>;
   getQueuedMessages?(): { steering: readonly string[]; followUp: readonly string[] };

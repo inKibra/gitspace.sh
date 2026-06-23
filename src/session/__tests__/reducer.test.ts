@@ -56,6 +56,35 @@ describe('sessionEngineReducer', () => {
     expect(withProjects.backends['remote:relay:machine-a'].projects).toHaveLength(1);
   });
 
+  it('removes dismissed operation records', () => {
+    const registered = sessionEngineReducer(createInitialSessionEngineState(), {
+      type: 'REGISTER_BACKEND',
+      descriptor: { key: 'remote:relay:machine-a', kind: 'remote', label: 'Machine A' },
+    });
+    const withOperations = sessionEngineReducer(registered, {
+      type: 'SET_OPERATIONS',
+      backendKey: 'remote:relay:machine-a',
+      operations: [
+        {
+          operationId: 'operation-1',
+          kind: 'workspace.delete',
+          scope: { projectName: 'project', workspaceId: 'project:ws', workspaceName: 'ws' },
+          state: 'succeeded',
+          startedAt: 1,
+          updatedAt: 2,
+        },
+      ],
+    });
+
+    const dismissed = sessionEngineReducer(withOperations, {
+      type: 'DISMISS_OPERATION',
+      backendKey: 'remote:relay:machine-a',
+      operationId: 'operation-1',
+    });
+
+    expect(dismissed.backends['remote:relay:machine-a'].operations).toEqual({});
+  });
+
   it('switches active backend and preserves each backend state', () => {
     const state = sessionEngineReducer(
       sessionEngineReducer(createInitialSessionEngineState(), {
@@ -136,4 +165,33 @@ it('clears attached session context on normal detach', () => {
   expect(detached.backends.local.attachedSessionName).toBeNull();
   expect(detached.backends.local.attachedWorkspaceId).toBeNull();
   expect(detached.backends.local.attachedSessionMeta).toBeNull();
+});
+
+it('keeps default attached fields consistent when adding the default pane', () => {
+  const registered = sessionEngineReducer(createInitialSessionEngineState(), {
+    type: 'REGISTER_BACKEND',
+    descriptor: { key: 'local', kind: 'local', label: 'Local' },
+  });
+
+  const next = sessionEngineReducer(registered, {
+    type: 'ADD_PANE',
+    backendKey: 'local',
+    pane: {
+      paneId: 'default',
+      streamId: 2,
+      sessionId: 'session-1',
+      sessionName: 'acme:ws-1:1',
+      meta: { sessionName: 'acme:ws-1:1' },
+      workspaceId: 'acme:ws-1',
+      agentSessionId: null,
+      viewOnly: true,
+    },
+  });
+
+  expect(next.backends.local.mode).toBe('attached');
+  expect(next.backends.local.attachedSessionId).toBe('session-1');
+  expect(next.backends.local.attachedSessionName).toBe('acme:ws-1:1');
+  expect(next.backends.local.attachedWorkspaceId).toBe('acme:ws-1');
+  expect(next.backends.local.attachedSessionMeta).toEqual({ sessionName: 'acme:ws-1:1' });
+  expect(next.backends.local.attachedPanes.default?.workspaceId).toBe('acme:ws-1');
 });

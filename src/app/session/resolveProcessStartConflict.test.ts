@@ -1,40 +1,23 @@
 import { describe, expect, it, mock } from 'bun:test';
-
-const mockResolvePortConflict = mock(() => Promise.resolve());
-
-class MockPortConflictError extends Error {
-  code = 'PORT_CONFLICT' as const;
-  conflicts;
-  constructor() {
-    super('port conflict');
-    this.name = 'PortConflictError';
-    this.conflicts = [{ port: 3000, protocol: 'http' as const, pid: 1234, command: 'node' }];
-  }
-}
-
-const realPorts = await import('../../lib/processes/ports.js');
-mock.module('../../lib/processes/ports.js', () => ({
-  ...realPorts,
-  PortConflictError: MockPortConflictError,
-  resolvePortConflict: mockResolvePortConflict,
-}));
-
-const { ProcessStartCancelledError, promptToResolveProcessStartConflict } = await import('./resolveProcessStartConflict.js');
+import { PortConflictError } from '../../lib/processes/port-conflicts.js';
+import { ProcessStartCancelledError, promptToResolveProcessStartConflict } from './resolveProcessStartConflict.js';
 
 describe('promptToResolveProcessStartConflict', () => {
   it('resolves the conflicting process when confirmed', async () => {
-    mockResolvePortConflict.mockReset();
+    const resolveConflict = mock(() => Promise.resolve());
     const showConfirm = mock(({ onConfirm }: { onConfirm: () => void | Promise<void> }) => {
       void onConfirm();
     });
+    const error = new PortConflictError('web', [{ port: 3000, protocol: 'http', pid: 1234, command: 'node' }]);
 
     const resolved = await promptToResolveProcessStartConflict({
-      error: new MockPortConflictError(),
+      error,
       showConfirm,
+      resolveConflict,
     });
 
     expect(resolved).toBe(true);
-    expect(mockResolvePortConflict).toHaveBeenCalledTimes(1);
+    expect(resolveConflict).toHaveBeenCalledTimes(1);
   });
 
   it('supports cancellation marker', () => {

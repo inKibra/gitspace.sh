@@ -118,7 +118,7 @@ function stubServerModules(): Plugin {
 // Gathered by tracing imports from the seven violations above.
 const stubExportNames = [
   // tmux-lite/cli.ts
-  'killSession', 'listSessionsFromRunningServer', 'isServerRunning',
+  'listSessionsFromRunningServer', 'isServerRunning',
   'listSessions', 'createSession', 'send', 'isProcessRunning',
   'ensureServer', 'getStatus', 'getAgentState', 'watchAgentState',
   'killServer', 'createVirtualSession',

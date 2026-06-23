@@ -22,6 +22,8 @@ export function toMultiMachineState(state: SessionEngineState | null): MultiMach
       attachedWorkspaceId: backend.attachedWorkspaceId,
       pendingDialogRequest: backend.pendingDialogRequest,
       agentWorkingMessage: backend.agentWorkingMessage,
+      pendingDialogByAgentSessionId: backend.pendingDialogByAgentSessionId,
+      workingMessageByAgentSessionId: backend.workingMessageByAgentSessionId,
       pendingAgentAttach: backend.pendingAgentAttach,
     };
   }

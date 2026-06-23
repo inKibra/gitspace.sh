@@ -23,7 +23,7 @@ import {
   killServer,
   listSessions,
   createSession,
-  killSession,
+  terminateSession,
   attach,
   isNested,
   getRouterSocket,
@@ -481,8 +481,8 @@ export async function killTmux(id: string, options: TmuxCommandOptions = {}): Pr
     return;
   }
 
-  await killSession(session.id);
-  logger.success(`Killed session: ${session.name} (id: ${session.id})`);
+  await terminateSession(session.id);
+  logger.success(`Terminated session: ${session.name} (id: ${session.id})`);
 }
 
 export function listTmuxReplays(options: TmuxCommandOptions & { all?: boolean } = {}): void {

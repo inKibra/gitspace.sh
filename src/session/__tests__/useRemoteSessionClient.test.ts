@@ -38,7 +38,7 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
   listReplaysCalls: Array<{ workspaceId?: string; includeDismissed?: boolean }> = []
   attachCalls: AttachSessionParams[] = []
   detachCalls = 0
-  killCalls: string[] = []
+  terminateCalls: string[] = []
   deleteCalls: Array<{ projectName: string; workspaceId: string }> = []
   inboxCalls = 0
   clearInboxCalls: Array<string | undefined> = []
@@ -139,8 +139,8 @@ class FakeRemoteBackend implements RemoteSessionPtyBackend {
     this.detachCalls += 1
   }
 
-  async killSession(sessionId: string): Promise<void> {
-    this.killCalls.push(sessionId)
+  async terminateSession(sessionId: string): Promise<void> {
+    this.terminateCalls.push(sessionId)
   }
 
   async deleteWorkspace(
@@ -489,7 +489,7 @@ describe('useRemoteSessionClient', () => {
       result.current.requestReplays('workspace-1', true)
       result.current.attachSession({ workspaceId: 'workspace-1', sessionName: 'debug' })
       result.current.detachSession()
-      result.current.killSession('session-1')
+      result.current.terminateSession('session-1')
       result.current.deleteWorkspace('alpha', 'workspace-1')
       result.current.requestInbox()
       result.current.clearInboxItem()
@@ -527,7 +527,7 @@ describe('useRemoteSessionClient', () => {
       { workspaceId: 'workspace-1', sessionName: 'debug' },
     ])
     expect(activeBackend.detachCalls).toBe(1)
-    expect(activeBackend.killCalls).toEqual(['session-1'])
+    expect(activeBackend.terminateCalls).toEqual(['session-1'])
     expect(activeBackend.deleteCalls).toEqual([{ projectName: 'alpha', workspaceId: 'workspace-1' }])
     expect(activeBackend.inboxCalls).toBe(1)
     expect(activeBackend.clearInboxCalls).toEqual([undefined, 'item-1'])

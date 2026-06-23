@@ -13,6 +13,8 @@ export interface BackendMachineState {
   attachedWorkspaceId?: string | null;
   pendingDialogRequest?: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest | null;
   agentWorkingMessage?: string;
+  pendingDialogByAgentSessionId?: Record<string, import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest>;
+  workingMessageByAgentSessionId?: Record<string, string>;
   pendingAgentAttach?: boolean;
 }
 export interface MultiMachineState {

@@ -13,6 +13,7 @@ import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
 import { toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
+import type { AgentEvent } from '../../agents/backend.js';
 
 export type AgentWorkspaceTarget = PiWorkspaceTarget;
 export type AgentSessionSummary = PiAgentSessionSummary;
@@ -45,6 +46,31 @@ function extractPiMessagePreview(payload: unknown): string | null {
   return null;
 }
 
+
+function traceAgentControlEvent(target: PiWorkspaceTarget, event: AgentEvent): void {
+  // Streaming message, queued-message, and todo reminder events can arrive
+  // frequently. Logging each one made dev traces grow by hundreds of MB and
+  // starved tmux-lite. State updates below still process them.
+  if (event.type === 'message' || event.type === 'queued_messages') {
+    return;
+  }
+  if (
+    event.type === 'status'
+    && event.payload
+    && typeof event.payload === 'object'
+    && (event.payload as { type?: unknown }).type === 'todo_update'
+  ) {
+    return;
+  }
+  writeTraceLog('agent-control-event', {
+    workspaceId: target.workspaceId,
+    sessionId: 'sessionId' in event ? event.sessionId : undefined,
+    eventType: event.type,
+    payloadType: event.type === 'status' && event.payload && typeof event.payload === 'object'
+      ? (event.payload as { type?: unknown }).type
+      : undefined,
+  });
+}
 export async function syncKnownWorkspaces(): Promise<void> {
   const workspaces = await scanWorkspaces();
   scanWorkspacesCache = workspaces;
@@ -63,14 +89,7 @@ export function ensureAgentControlInitialized(): Promise<void> {
       // Seed sessions from Pi's session files on disk and mirror live Pi
       // events into the shared snapshot model.
       defaultPiCoordinator.setEventHandler((target, event) => {
-        writeTraceLog('agent-control-event', {
-          workspaceId: target.workspaceId,
-          sessionId: 'sessionId' in event ? event.sessionId : undefined,
-          eventType: event.type,
-          payloadType: event.type === 'status' && event.payload && typeof event.payload === 'object'
-            ? (event.payload as { type?: unknown }).type
-            : undefined,
-        });
+        traceAgentControlEvent(target, event);
         switch (event.type) {
           case 'status': {
             const payload = event.payload as { type?: string; [key: string]: unknown } | undefined;

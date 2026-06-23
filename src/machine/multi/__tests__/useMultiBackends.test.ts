@@ -52,7 +52,7 @@ function makeMockBackend(label = 'test-local'): {
     deleteProject: async () => {},
     attachSession: async () => {},
     detachSession: async () => {},
-    killSession: async () => {},
+    terminateSession: async () => {},
     deleteWorkspace: async () => {},
     onEvent: (_handler: unknown) => () => {},
   } as unknown as SessionBackend;

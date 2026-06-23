@@ -107,7 +107,7 @@ describe('message union coverage', () => {
       { type: 'get_bundle_config_state', requestId: 'req-bundle-config-state', projectName: 'p1', workspaceId: 'w1' },
       { type: 'apply_bundle_config', requestId: 'req-bundle-config-apply', projectName: 'p1', workspaceId: 'w1', submission: { inputValues: {}, secretValues: {}, confirmResults: {} } },
       { type: 'set_workspace_phase', requestId: 'req-set-phase', projectName: 'p1', workspaceName: 'w1', phase: 'code' },
-      { type: 'kill_session', requestId: 'req-kill', sessionId: 's1' },
+      { type: 'terminate_session', requestId: 'req-kill', sessionId: 's1', mode: 'graceful', graceMs: 8000 },
       { type: 'get_inbox', requestId: 'req-inbox' },
       { type: 'clear_inbox', requestId: 'req-inbox-clear', id: 'i1' },
       { type: 'mark_inbox_read', requestId: 'req-inbox-read', id: 'i1' },

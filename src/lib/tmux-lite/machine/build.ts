@@ -235,7 +235,10 @@ export function buildMachineSnapshot(params: {
   for (const [workspaceId, workspace] of Object.entries(agentStateByWorkspaceId)) {
     const workspaceRecord = workspacesById[workspaceId];
     if (!workspaceRecord) continue;
+    const archivedSessions = getArchivedSessions(workspaceId);
+    const archivedSessionIds = new Set(archivedSessions.map((session) => session.sessionId));
     for (const session of workspace.sessions) {
+      if (archivedSessionIds.has(session.id) || session.archivedAt) continue;
       const pendingPermissionIds = (workspace.pendingPermissions[session.id] ?? []).map((permission) => permission.id);
       const pendingQuestionIds = (workspace.pendingQuestions[session.id] ?? []).map((q) => q.id);
       const linkedTerminal = Object.values(terminalSessionsById).find(
@@ -277,7 +280,7 @@ export function buildMachineSnapshot(params: {
       };
     }
 
-      for (const archived of getArchivedSessions(workspaceId)) {
+      for (const archived of archivedSessions) {
         if (agentSessionsById[archived.sessionId]) continue;
         const record: MachineAgentSessionRecord = {
           id: archived.sessionId,

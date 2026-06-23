@@ -488,12 +488,18 @@ export async function setTmuxWorkspacePhase(
   throw new Error('Unexpected response');
 }
 
-export async function killTmuxSession(id: string): Promise<void> {
-  const res = await send({ type: 'kill', id });
+export interface TerminateSessionOptions {
+  mode?: 'graceful' | 'force';
+  graceMs?: number;
+}
+
+export async function terminateTmuxSession(id: string, options: TerminateSessionOptions = {}): Promise<void> {
+  const res = await send({ type: 'terminate', id, mode: options.mode, graceMs: options.graceMs });
   if (res.type === 'ok') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
+
 
 export async function getTmuxInbox(): Promise<Extract<Response, { type: 'inbox' }>> {
   const res = await send({ type: 'inbox' });
@@ -844,11 +850,12 @@ export async function resizeVirtualSession(id: string, cols: number, rows: numbe
   if (res.type === 'error') throw new Error(res.message);
 }
 
-export async function killSession(id: string): Promise<void> {
+export async function terminateSession(id: string, options: TerminateSessionOptions = {}): Promise<void> {
   await ensureServer();
-  const res = await send({ type: "kill", id });
+  const res = await send({ type: "terminate", id, mode: options.mode, graceMs: options.graceMs });
   if (res.type === "error") throw new Error(res.message);
 }
+
 
 export async function getAgentState(): Promise<import('./agent-event-manager.js').WorkspaceAgentState[]> {
   await ensureServer();
@@ -1652,9 +1659,9 @@ async function main() {
         console.error("Usage: tl kill <id>");
         process.exit(1);
       }
-      const res = await send({ type: "kill", id });
+      const res = await send({ type: "terminate", id, mode: "force" });
       if (res.type === "ok") {
-        console.log(`Killed ${id}`);
+        console.log(`Terminated ${id}`);
       } else if (res.type === "error") {
         console.error("Error:", res.message);
       }

@@ -8,7 +8,11 @@ const tempHome = mkdtempSync(join(tmpdir(), 'pi-space-home-'));
 const workspacePath = join(tempHome, 'gitspace', 'test-project', 'workspaces', 'test-workspace');
 mkdirSync(workspacePath, { recursive: true });
 
-const mockExecCommand = mock(async () => ({ stdout: 'Project: test-project\nWorkspace: test-workspace', stderr: '', code: 0 }));
+const mockExecCommand = mock(async (_command: string, _args: string[], _cwd: string, _options?: unknown) => ({
+  stdout: 'Project: test-project\nWorkspace: test-workspace',
+  stderr: '',
+  code: 0,
+}));
 
 mock.module('@oh-my-pi/pi-coding-agent/exec/exec', () => ({
   execCommand: mockExecCommand,
@@ -33,7 +37,11 @@ afterAll(() => {
 describe('PiCoordinator runSpaceCommand', () => {
   it('executes workspace-scoped /space commands without sending them to the model', async () => {
     mockExecCommand.mockReset();
-    mockExecCommand.mockImplementation(async () => ({ stdout: 'Project: test-project\nWorkspace: test-workspace', stderr: '', code: 0 }));
+    mockExecCommand.mockImplementation(async (_command: string, _args: string[], _cwd: string, _options?: unknown) => ({
+      stdout: 'Project: test-project\nWorkspace: test-workspace',
+      stderr: '',
+      code: 0,
+    }));
 
     const coordinator = new PiCoordinator();
     const output = await coordinator.runSpaceCommand({

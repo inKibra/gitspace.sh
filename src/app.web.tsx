@@ -21,6 +21,7 @@ import { useVisualViewport } from "./hooks/useVisualViewport.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
 import { ReviewPage } from './pages/ReviewPage.web.js';
+import { terminalMemoryDebugGauge, terminalMemoryDebugIncrement } from './utils/terminal-memory-debug.js';
 
 // Shared components and hooks
 import {
@@ -64,8 +65,8 @@ import { selectBackendSnapshot } from './machine/multi/selectors.js';
 import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
-import { useWorkspaceRemovalTasks } from './app/react/useWorkspaceRemovalTasks.js';
-	import { useWorkspaceCreationTasks } from './app/react/useWorkspaceCreationTasks.js';
+import { useWorkspaceRemovalTasks, workspaceOperationsToRemovalTasks } from './app/react/useWorkspaceRemovalTasks.js';
+import { useWorkspaceCreationTasks, workspaceOperationsToCreationTasks } from './app/react/useWorkspaceCreationTasks.js';
 
 import { browserPlatform } from './sdk/platforms/browser.web.js';
 import type { RelayDescriptor } from './relay-client/index.js';
@@ -196,7 +197,105 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const commandErrorRef = useRef(commandError);
   commandErrorRef.current = commandError;
   const workspaceRemovalTasks = useWorkspaceRemovalTasks();
-	  const workspaceCreationTasks = useWorkspaceCreationTasks();
+  const workspaceCreationTasks = useWorkspaceCreationTasks();
+  const dismissedWorkspaceTaskStorageKey = 'gitspace.dismissedWorkspaceTaskIds';
+  const readDismissedWorkspaceTaskIds = (): Set<string> => {
+    try {
+      const raw = globalThis.localStorage?.getItem(dismissedWorkspaceTaskStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  };
+  const writeDismissedWorkspaceTaskIds = (ids: Set<string>): void => {
+    try {
+      globalThis.localStorage?.setItem(dismissedWorkspaceTaskStorageKey, JSON.stringify([...ids]));
+    } catch {
+      // Ignore storage failures; in-memory dismissal still applies.
+    }
+  };
+  const [dismissedWorkspaceTaskIds, setDismissedWorkspaceTaskIds] = useState<Set<string>>(readDismissedWorkspaceTaskIds);
+  const [selectedWorkspaceTaskId, setSelectedWorkspaceTaskId] = useState<string | null>(null);
+  const machineWorkspaceTasks = useMemo(() => {
+    const tasks: ReturnType<typeof workspaceOperationsToRemovalTasks> = [];
+    for (const backendKey of multiMachineState.backendOrder) {
+      const state = multi.getBackendState(backendKey);
+      tasks.push(...workspaceOperationsToRemovalTasks(state?.operations ?? {}, backendKey)
+        .filter((task) => !dismissedWorkspaceTaskIds.has(task.id)));
+    }
+    return tasks;
+  }, [multi, multiMachineState, dismissedWorkspaceTaskIds]);
+  const machineWorkspaceCreationTasks = useMemo(() => {
+    const tasks: ReturnType<typeof workspaceOperationsToCreationTasks> = [];
+    for (const backendKey of multiMachineState.backendOrder) {
+      const state = multi.getBackendState(backendKey);
+      tasks.push(...workspaceOperationsToCreationTasks(state?.operations ?? {}));
+    }
+    return tasks;
+  }, [multi, multiMachineState]);
+  const taskBarTasks = useMemo(() => {
+    const operationTaskIds = new Set(machineWorkspaceTasks.map((task) => task.id));
+    const operationWorkspaceKeys = new Set(machineWorkspaceTasks.map((task) => `${task.operationKind}:${toBackendScopedWorkspaceKey(task.ref)}`));
+    return [
+      ...machineWorkspaceTasks,
+      ...workspaceRemovalTasks.tasks.filter((task) => {
+        if (operationTaskIds.has(task.id)) return false;
+        const inferredKind = task.phase === 'remove' || task.phase === 'git-worktree-remove' || task.phase === 'cleanup-leftovers'
+          ? 'workspace.delete'
+          : 'workspace.scripts';
+        return !operationWorkspaceKeys.has(`${inferredKind}:${toBackendScopedWorkspaceKey(task.ref)}`);
+      }),
+    ];
+  }, [machineWorkspaceTasks, workspaceRemovalTasks.tasks]);
+  useEffect(() => {
+    setSelectedWorkspaceTaskId((current) => {
+      if (current && taskBarTasks.some((task) => task.id === current)) return current;
+      return taskBarTasks.find((task) => task.status === 'running' || task.status === 'queued')?.id ?? taskBarTasks[0]?.id ?? null;
+    });
+  }, [taskBarTasks]);
+  const handleDismissWorkspaceTask = useCallback((taskId: string) => {
+    const task = taskBarTasks.find((candidate) => candidate.id === taskId);
+    const backend = task?.operationKind ? multi.getBackend(task.ref.backendKey) : null;
+    if (backend?.dismissOperation) {
+      void backend.dismissOperation(taskId).catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'Failed to dismiss operation');
+      });
+    }
+    workspaceRemovalTasks.dismissTask(taskId);
+    setDismissedWorkspaceTaskIds((current) => {
+      if (current.has(taskId)) return current;
+      const next = new Set(current);
+      next.add(taskId);
+      writeDismissedWorkspaceTaskIds(next);
+      return next;
+    });
+    setSelectedWorkspaceTaskId((current) => {
+      if (current !== taskId) return current;
+      const remaining = taskBarTasks.filter((candidate) => candidate.id !== taskId);
+      return remaining.find((candidate) => candidate.status === 'running' || candidate.status === 'queued')?.id ?? remaining[0]?.id ?? null;
+    });
+  }, [multi, taskBarTasks, workspaceRemovalTasks.dismissTask]);
+  const deletingWorkspaceTasksByKey = useMemo(() => {
+    const result: Record<string, { status: string; progressLabel?: string }> = {};
+    for (const [key, task] of Object.entries(workspaceRemovalTasks.tasksByWorkspaceKey)) {
+      if (task.operationKind && task.operationKind !== 'workspace.delete') continue;
+      if (task.phase !== 'remove' && task.phase !== 'git-worktree-remove' && task.phase !== 'cleanup-leftovers') continue;
+      result[key] = { status: task.status, progressLabel: task.progressLabel };
+    }
+    for (const task of machineWorkspaceTasks) {
+      if (task.operationKind !== 'workspace.delete') continue;
+      result[toBackendScopedWorkspaceKey(task.ref)] = { status: task.status, progressLabel: task.progressLabel };
+    }
+    return result;
+  }, [machineWorkspaceTasks, workspaceRemovalTasks.tasksByWorkspaceKey]);
+  const creatingWorkspaceTasksById = useMemo(() => {
+    const result = { ...workspaceCreationTasks.tasksByWorkspaceId };
+    for (const task of machineWorkspaceCreationTasks) {
+      result[task.workspaceId] = task;
+    }
+    return result;
+  }, [machineWorkspaceCreationTasks, workspaceCreationTasks.tasksByWorkspaceId]);
   const scriptState = attachedBackendState?.scriptState ?? activeBackendState?.scriptState ?? null;
   const notificationConfig = activeBackendState?.notificationConfig ?? null;
 
@@ -1325,7 +1424,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, [flow, handleOpenReplay]);
 
   const handleOpenHelp = useCallback(() => flow.showHelp(getDefaultShortcuts()), [flow]);
-  const handleOpenCreateMenu = useCallback(() => lifecycleController.openCreateMenu(selectedWorkspaceProjectName), [lifecycleController, selectedWorkspaceProjectName]);
+  const handleOpenCreateMenu = useCallback(() => lifecycleController.openCreateMenu(), [lifecycleController]);
   const handleDeleteProject = useCallback((projectName: string) => {
     lifecycleController.openDeleteProjectFlow(projectName);
   }, [lifecycleController]);
@@ -1344,7 +1443,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         if (attachedBackendState?.attachedSessionId === sessionId && attachedBackendKey === sessionRef.backendKey) {
           void multi.detachSession({ backendKey: sessionRef.backendKey, workspaceId: '' });
         }
-        void multi.killSession(sessionRef);
+        void multi.terminateSession(sessionRef);
       },
     });
   }, [activeBackendKey, attachedBackendKey, attachedBackendState?.attachedSessionId, flow, getSessionRef, multi, selectedBackendKey]);
@@ -1515,7 +1614,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       window.open(url, '_blank', 'noopener,noreferrer');
     },
     onAddRepo: () => lifecycleController.openCreateProjectFlow(),
-    onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+    onAddWorkspace: () => lifecycleController.openCreateMenu(),
     onSetWorkspacePhase: (workspace, phase) => {
       workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
       flow.close();
@@ -2120,12 +2219,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     };
 
     const buildTerminalPanelsForWorkspace = (workspace: WorkspaceInfo) => {
+      terminalMemoryDebugIncrement('app.buildTerminalPanels');
       const workspacePaneEntries = Object.values(attachedBackendState?.attachedPanes ?? {})
         .filter((pane) =>
           pane.workspaceId
             ? pane.workspaceId === workspace.id
             : attachedWorkspaceSelectionKey === workspace.selectionKey,
         );
+      terminalMemoryDebugGauge('app.workspacePaneEntries', workspacePaneEntries.length);
       const runtime = workspace.selectionKey ? workspaceRuntime.runtimeByWorkspace[workspace.selectionKey] ?? null : null;
       const panels: import('./components/DockviewWorkspaceShell.web.js').DockviewTerminalPanel[] = workspacePaneEntries.map((pane) => {
         const shortSessionName = (pane.sessionName ?? pane.sessionId).split(':').pop() ?? pane.sessionId;
@@ -2137,9 +2238,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           : pane.agentSessionId
             ? 'Agent'
             : shortSessionName.slice(0, 18);
+        const panelVersion = [
+          pane.paneId,
+          pane.sessionId,
+          pane.sessionName ?? '',
+          pane.workspaceId ?? '',
+          pane.agentSessionId ?? '',
+          title,
+          String(showMobileControls),
+          inputMode,
+          String(keyboardVisible),
+          String(showInlineFloatingControls),
+        ].join('|');
+        terminalMemoryDebugIncrement('app.terminalPanelDescriptor.created');
         return {
           id: pane.paneId,
           title,
+          version: panelVersion,
           onClose: () => paneBackend?.detachPane?.(pane.paneId).catch(() => undefined),
           render: () => (
             <PaneTerminalPanel
@@ -2172,9 +2287,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         pendingAgentAttachTarget.workspaceId === workspace.id &&
         !panels.some((panel) => panel.id === `pending:${pendingAgentAttachTarget.agentSessionId}`)
       ) {
+        terminalMemoryDebugIncrement('app.terminalPanelDescriptor.pendingCreated');
         panels.push({
           id: `pending:${pendingAgentAttachTarget.agentSessionId}`,
           title: 'Attaching…',
+          version: `pending:${pendingAgentAttachTarget.agentSessionId}`,
           render: () => (
             <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
               <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
@@ -2184,6 +2301,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       }
       if (panels.length > 0) {
         cachedTerminalPanelsRef.current[workspace.selectionKey ?? workspace.id] = panels;
+        terminalMemoryDebugGauge('app.cachedTerminalPanelCount', panels.length);
       }
       return panels;
     };
@@ -2192,8 +2310,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       JSON.parse(selectionKey)[0] as BackendKey;
 
 
-    const renderDetailPages = (visibleSelectionKey: string | null) =>
-      detailWorkspaceCacheKeys
+    const renderDetailPages = (visibleSelectionKey: string | null) => {
+      terminalMemoryDebugIncrement('app.renderDetailPages');
+      terminalMemoryDebugGauge('app.detailWorkspaceCacheKeys', detailWorkspaceCacheKeys.length);
+      return detailWorkspaceCacheKeys
         .map((selectionKey) => ({ selectionKey, workspace: workspaceBySelectionKey.get(selectionKey) }))
         .filter((entry): entry is { selectionKey: string; workspace: WorkspaceInfo } => Boolean(entry.workspace))
         .map(({ selectionKey, workspace }) => {
@@ -2278,8 +2398,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 }}
                 bottomContent={isActive ? (
                   <WorkspaceRemovalTaskBar
-                    tasks={workspaceRemovalTasks.tasks}
-                    onDismiss={workspaceRemovalTasks.dismissTask}
+                    tasks={taskBarTasks}
+                    selectedTaskId={selectedWorkspaceTaskId}
+                    onSelectTask={setSelectedWorkspaceTaskId}
+                    onDismiss={handleDismissWorkspaceTask}
                     placement="inline"
                   />
                 ) : null}
@@ -2305,6 +2427,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </div>
           );
         });
+    };
 
     // ── Workspace detail page cache (active page + hidden keep-alive pages) ─────
     if (currentDetailWorkspace && !showBoardWhileDetailMounted) {
@@ -2333,8 +2456,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onOpenCommandPalette={() => commandPalette.toggle()}
           onRefresh={() => { multi.listWorkspaces(); multi.listProjects(); }}
           onDisconnect={() => window.location.reload()}
-          deletingWorkspaceIds={workspaceRemovalTasks.tasksByWorkspaceKey}
-	          creatingWorkspaceIds={workspaceCreationTasks.tasksByWorkspaceId}
+          deletingWorkspaceIds={deletingWorkspaceTasksByKey}
+          creatingWorkspaceIds={creatingWorkspaceTasksById}
           loading={boardLoading}
           loadingLabel="Loading worktrees..."
         />

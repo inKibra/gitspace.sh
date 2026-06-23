@@ -371,6 +371,103 @@ describe('bundle-refresh', () => {
       expect(capturedOnboardingSteps).toHaveLength(1);
       expect(capturedOnboardingSteps[0].id).toBe('check-pulumi');
     });
+    it('refreshes unchanged bundles when required secrets are missing', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const bundle = {
+        version: '1.0' as const,
+        name: 'Unchanged Missing Secret Bundle',
+        onboarding: [
+          {
+            id: 'pulumi-token',
+            type: 'secret' as const,
+            title: 'Pulumi Access Token',
+            description: 'Required for Pulumi login',
+            configKey: 'PULUMI_ACCESS_TOKEN',
+            required: true,
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(bundle));
+
+      const workspacePath = join(testDir, 'workspaces', 'unchanged-missing-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      const { checkAndRefreshBundle, detectBundleChanges } = await import('../bundle-refresh');
+      const firstDetect = detectBundleChanges('test-project', workspacePath);
+      expect(firstDetect.currentHash).toBeDefined();
+
+      mockProjectConfig.bundleWorkspaceState = {
+        'unchanged-missing-secret': {
+          scope: 'unchanged-missing-secret',
+          bundleHash: firstDetect.currentHash,
+          requiredInputKeys: [],
+          requiredSecretKeys: ['PULUMI_ACCESS_TOKEN'],
+          confirmFingerprints: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      mockOnboardingResult = {
+        completed: true,
+        inputValues: {},
+        secretValues: { PULUMI_ACCESS_TOKEN: 'new-pulumi-token' },
+        confirmResults: {},
+      };
+
+      const ready = await checkAndRefreshBundle('test-project', workspacePath);
+
+      expect(ready).toBe(true);
+      expect(capturedOnboardingSteps.map((step) => step.id)).toEqual(['pulumi-token']);
+      expect(savedSecrets.PULUMI_ACCESS_TOKEN).toBe('new-pulumi-token');
+      expect(mockProjectConfig.bundleSecretKeys).toContain('PULUMI_ACCESS_TOKEN');
+    });
+
+    it('treats unchanged bundles as ready when required secrets are present', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const bundle = {
+        version: '1.0' as const,
+        name: 'Unchanged Ready Bundle',
+        onboarding: [
+          {
+            id: 'pulumi-token',
+            type: 'secret' as const,
+            title: 'Pulumi Access Token',
+            description: 'Required for Pulumi login',
+            configKey: 'PULUMI_ACCESS_TOKEN',
+            required: true,
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(bundle));
+
+      const workspacePath = join(testDir, 'workspaces', 'unchanged-ready-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      const { checkAndRefreshBundle, detectBundleChanges } = await import('../bundle-refresh');
+      const firstDetect = detectBundleChanges('test-project', workspacePath);
+      expect(firstDetect.currentHash).toBeDefined();
+
+      savedSecrets.PULUMI_ACCESS_TOKEN = 'existing-pulumi-token';
+      mockProjectConfig.bundleSecretKeys = ['PULUMI_ACCESS_TOKEN'];
+      mockProjectConfig.bundleWorkspaceState = {
+        'unchanged-ready-secret': {
+          scope: 'unchanged-ready-secret',
+          bundleHash: firstDetect.currentHash,
+          requiredInputKeys: [],
+          requiredSecretKeys: ['PULUMI_ACCESS_TOKEN'],
+          confirmFingerprints: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      const ready = await checkAndRefreshBundle('test-project', workspacePath);
+
+      expect(ready).toBe(true);
+      expect(capturedOnboardingSteps).toEqual([]);
+      expect(savedSecrets.PULUMI_ACCESS_TOKEN).toBe('existing-pulumi-token');
+    });
+
   });
 
   describe('bundle refresh plan/apply', () => {

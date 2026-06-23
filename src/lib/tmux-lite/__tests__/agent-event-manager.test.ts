@@ -1,0 +1,119 @@
+import { describe, expect, it } from 'bun:test';
+
+import { AgentEventManager, type AgentStateUpdateDelta } from '../agent-event-manager.js';
+
+function createManager() {
+  let now = 1_000;
+  let nextHandle = 1;
+  const timers = new Map<number, () => void>();
+  const delays: number[] = [];
+  const manager = new AgentEventManager({
+    lastMessageEmitIntervalMs: 100,
+    now: () => now,
+    setTimeout: (callback, delay) => {
+      const handle = nextHandle++;
+      delays.push(delay);
+      timers.set(handle, callback);
+      return handle as unknown as ReturnType<typeof globalThis.setTimeout>;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as unknown as number);
+    },
+  });
+  return {
+    manager,
+    delays,
+    advance(ms: number) {
+      now += ms;
+    },
+    runNextTimer() {
+      const [handle, callback] = timers.entries().next().value ?? [];
+      if (handle === undefined || !callback) throw new Error('No pending timer');
+      timers.delete(handle);
+      callback();
+    },
+    get pendingTimerCount() {
+      return timers.size;
+    },
+  };
+}
+
+function collectDeltas(manager: AgentEventManager): AgentStateUpdateDelta[] {
+  const deltas: AgentStateUpdateDelta[] = [];
+  manager.subscribe((delta) => deltas.push(delta));
+  return deltas;
+}
+
+describe('AgentEventManager', () => {
+  it('coalesces streaming last-message deltas while keeping the latest preview', () => {
+    const harness = createManager();
+    const deltas = collectDeltas(harness.manager);
+    harness.manager.registerWorkspace('workspace-1', '/tmp/workspace-1');
+
+    harness.manager.setExternalLastMessage('workspace-1', 'session-1', 'first');
+    harness.manager.setExternalLastMessage('workspace-1', 'session-1', 'second');
+    harness.manager.setExternalLastMessage('workspace-1', 'session-1', 'third');
+
+    expect(deltas).toEqual([
+      { type: 'agent_state_snapshot', workspaces: harness.manager.getSnapshot() },
+      { type: 'agent_last_message', workspaceId: 'workspace-1', sessionId: 'session-1', preview: 'first' },
+    ]);
+    expect(harness.delays).toEqual([100]);
+    expect(harness.pendingTimerCount).toBe(1);
+
+    harness.advance(100);
+    harness.runNextTimer();
+
+    expect(deltas.at(-1)).toEqual({
+      type: 'agent_last_message',
+      workspaceId: 'workspace-1',
+      sessionId: 'session-1',
+      preview: 'third',
+    });
+    expect(harness.pendingTimerCount).toBe(0);
+  });
+
+  it('cancels pending last-message emissions when a session closes', () => {
+    const harness = createManager();
+    const deltas = collectDeltas(harness.manager);
+    harness.manager.registerWorkspace('workspace-1', '/tmp/workspace-1');
+
+    harness.manager.setExternalLastMessage('workspace-1', 'session-1', 'first');
+    harness.manager.setExternalLastMessage('workspace-1', 'session-1', 'second');
+    expect(harness.pendingTimerCount).toBe(1);
+
+    harness.manager.markSessionClosed('workspace-1', 'session-1');
+    expect(harness.pendingTimerCount).toBe(0);
+
+    harness.advance(100);
+    expect(() => harness.runNextTimer()).toThrow('No pending timer');
+    expect(deltas.filter((delta) => delta.type === 'agent_last_message')).toEqual([
+      { type: 'agent_last_message', workspaceId: 'workspace-1', sessionId: 'session-1', preview: 'first' },
+    ]);
+  });
+
+  it('does not reintroduce archived sessions during sync', () => {
+    const harness = createManager();
+    const deltas = collectDeltas(harness.manager);
+    harness.manager.registerWorkspace('workspace-1', '/tmp/workspace-1');
+
+    harness.manager.syncKnownSessions('workspace-1', [
+      { id: 'session-1', title: 'Active session', updatedAt: '2026-05-12T00:00:00.000Z' },
+    ]);
+    expect(harness.manager.getSnapshot()['workspace-1']?.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    harness.manager.markSessionArchived('workspace-1', 'session-1');
+    harness.manager.syncKnownSessions('workspace-1', [
+      { id: 'session-1', title: 'Active session', updatedAt: '2026-05-12T00:00:01.000Z' },
+    ]);
+
+    expect(harness.manager.getSnapshot()['workspace-1']?.sessions).toEqual([]);
+    expect(deltas.at(-1)).toEqual({ type: 'agent_state_snapshot', workspaces: harness.manager.getSnapshot() });
+  });
+
+  it('rejects invalid last-message coalescing intervals', () => {
+    expect(() => new AgentEventManager({ lastMessageEmitIntervalMs: Number.NaN })).toThrow(
+      'lastMessageEmitIntervalMs must be a non-negative finite number',
+    );
+  });
+});

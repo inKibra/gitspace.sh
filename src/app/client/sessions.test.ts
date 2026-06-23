@@ -25,7 +25,7 @@ function makeBackend(overrides: Partial<SessionBackend>): SessionBackend {
     deleteProject: async () => undefined,
     attachSession: async () => undefined,
     detachSession: async () => undefined,
-    killSession: async () => undefined,
+    terminateSession: async () => undefined,
     deleteWorkspace: async () => undefined,
     getBundleRefreshPlan: async () => { throw new Error('unused'); },
     applyBundleRefresh: async () => undefined,

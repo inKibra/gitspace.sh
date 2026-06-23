@@ -1,11 +1,15 @@
 import type { WorkspaceEditorId, WorkspaceEditorOption } from '../../utils/open-editor.js';
 import type { Identity, SessionKeys } from '../../types/identity.js';
+import type { PortConflictInfo } from '../../lib/processes/port-conflicts.js';
 import {
   parseRemoteMessage,
   type AttachSessionRequest,
   type CancelPendingAttachRequest,
   type ClientToMachineMessage,
   type CommandResponse,
+  type OperationAcceptedResponse,
+  type OperationEventResponse,
+  type OperationSnapshotResponse,
   type RunSpaceCommandResponse,
   type DeleteWorkspaceRequest,
   type GetReplayTimelineRequest,
@@ -19,7 +23,10 @@ import {
   type GetReplayFrameRequest,
   type DismissReplayRequest,
   type UndismissReplayRequest,
+  type DismissOperationRequest,
   type RemoteSessionControl,
+  type RemoteOperationRecord,
+  type OperationDismissedResponse,
 } from '../../lib/remote-session/protocol.js';
 import type { BundleRefreshPlan, BundleRefreshSubmission } from '../../types/bundle-refresh.js';
 import type { BundleConfigState, BundleConfigSubmission } from '../../types/bundle-config.js';
@@ -48,10 +55,12 @@ import type {
   DeleteProjectParams,
   DeleteWorkspaceParams,
   SessionBackend,
+  TerminateSessionOptions,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
+import { applyAgentDeltaToAgentState } from '../../lib/tmux-lite/agent-state-reducer.js';
 import { MachineStateClient } from '../../machine/state/client.js';
 import {
   machineSnapshotToAgentState,
@@ -61,20 +70,61 @@ import {
   machineSnapshotToWorkspaces,
 } from '../../machine/state/selectors.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
-type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse;
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
+import { terminalMemoryDebugIncrement } from '../../utils/terminal-memory-debug.js';
+type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse;
+
+type PendingOperationCompletion = {
+  resolve: (operation: RemoteOperationRecord) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
 
 const DEFAULT_CONTROL_STREAM_ID = 1;
 const DEFAULT_PANE_STREAM_ID = 2;
 const DEFAULT_PANE_ID = 'default';
-const DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS = 5 * 60 * 1000;
-const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10000;
+const DEFAULT_LIFECYCLE_TIMEOUT_MS = 12_000;
+const DEFAULT_INITIAL_SNAPSHOT_TIMEOUT_MS = 15_000;
+const OPERATION_COMMAND_TYPES = new Set<string>([
+  'create_project',
+  'prepare_project_creation',
+  'finalize_project_creation',
+  'delete_project',
+  'create_workspace',
+  'rerun_workspace_scripts',
+  'run_workspace_open_scripts',
+  'run_workspace_script_selection',
+  'run_space_command',
+  'delete_workspace',
+  'request_review',
+  'open_workspace_editor',
+]);
+
+function operationCompletionTimeoutMs(operation: RemoteOperationRecord | undefined): number {
+  switch (operation?.kind) {
+    case 'workspace.editor.open':
+      return 2 * 60 * 1000;
+    case 'space.command':
+    case 'review.github':
+      return 10 * 60 * 1000;
+    case 'project.create':
+    case 'project.prepare':
+    case 'project.finalize':
+    case 'project.delete':
+    case 'workspace.create':
+    case 'workspace.delete':
+    case 'workspace.scripts':
+    default:
+      return 30 * 60 * 1000;
+  }
+}
 
 interface RelayDataMessage {
   type: 'data';
   data: string;
+  priority?: 'control' | 'bulk';
 }
 
 type RelayConnectMessage =
@@ -200,6 +250,10 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'process_started',
   'process_stopped',
   'command_response',
+  'operation_accepted',
+  'operation_snapshot',
+  'operation_event',
+  'operation_dismissed',
   'run_space_command_response',
   'agent_state_snapshot',
   'agent_state_update',
@@ -277,6 +331,19 @@ function workspaceIdsMatch(expected: string, actual: string | undefined): boolea
   }
 
   return false;
+}
+
+function getTerminalSessionWorkspaceId(
+  snapshot: ReturnType<MachineStateClient['getSnapshot']>,
+  sessionId: string | undefined,
+): string | undefined {
+  if (!sessionId) {
+    return undefined;
+  }
+
+  const session = snapshot.terminalSessionsById[sessionId];
+  const workspaceId = session?.workspaceId ?? session?.metadata?.workspaceId;
+  return typeof workspaceId === 'string' && workspaceId.length > 0 ? workspaceId : undefined;
 }
 
 function toWorkspaceDeleteErrorCode(code: string | undefined): WorkspaceDeleteErrorCode {
@@ -394,6 +461,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     timeout: ReturnType<typeof setTimeout>;
     startedAtMs: number;
   }>();
+  private pendingOperationStarts = new Map<string, {
+    resolve: (operation: RemoteOperationRecord) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+    startedAtMs: number;
+  }>();
+  private pendingOperationCompletions = new Map<string, PendingOperationCompletion>();
+  private operations = new Map<string, RemoteOperationRecord>();
   private pendingDetachTransition: {
     resolve: () => void;
     reject: (error: Error) => void;
@@ -423,10 +498,15 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   setPtyOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
+    terminalMemoryDebugIncrement(handler ? 'backend.ptyOutputHandler.set' : 'backend.ptyOutputHandler.clear');
     this.attachLifecycle.setOutputHandler(handler);
   }
 
   setPaneOutputHandler(paneId: string, handler: ((data: Uint8Array) => void) | null): void {
+    terminalMemoryDebugIncrement(handler ? 'backend.paneOutputHandler.set' : 'backend.paneOutputHandler.clear');
+    if (!this.panes.has(paneId)) {
+      terminalMemoryDebugIncrement('backend.paneOutputHandler.missingPane');
+    }
     this.panes.get(paneId)?.setOutputHandler(handler);
   }
 
@@ -484,21 +564,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listGithubRepos(org?: string): Promise<string[]> {
-    const response = await this.sendTypedCommand({ type: 'list_github_repos', requestId: crypto.randomUUID(), org });
+    const response = await this.sendRpcCommand({ type: 'list_github_repos', requestId: crypto.randomUUID(), org });
     if (response.type === 'github-repos') return response.repos;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected GitHub repo response');
   }
 
   async listRemoteBranches(projectName: string): Promise<string[]> {
-    const response = await this.sendTypedCommand({ type: 'list_remote_branches', requestId: crypto.randomUUID(), projectName });
+    const response = await this.sendRpcCommand({ type: 'list_remote_branches', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'remote-branches') return response.branches;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected remote branches response');
   }
 
   async listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]> {
-    const response = await this.sendTypedCommand({ type: 'list_linear_issues', requestId: crypto.randomUUID(), projectName });
+    const response = await this.sendRpcCommand({ type: 'list_linear_issues', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'linear-issues') return response.issues;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected linear issues response');
@@ -514,7 +594,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceName: string,
     phase: import('../../types/config.js').WorkspacePhase
   ): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'set_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
+    const response = await this.sendRpcCommand({ type: 'set_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
     if (response.type === 'ok') {
       await this.listWorkspaces();
       return;
@@ -685,46 +765,51 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+  async dismissOperation(operationId: string): Promise<void> {
+    const command: DismissOperationRequest = { type: 'dismiss_operation', operationId };
+    await this.sendCommand(command);
+  }
+
   async createProject(params: CreateProjectParams): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'create_project', requestId: crypto.randomUUID(), ...params });
-    if (response.type === 'project-created') return;
-    if (response.type === 'error') throw new Error(response.message);
+    const operation = await this.startOperationCommand({ type: 'create_project', requestId: crypto.randomUUID(), ...params });
+    const response = (await this.waitForOperation(operation.operationId)).result as TmuxResponse | undefined;
+    if (response?.type === 'project-created') return;
     throw new Error('Unexpected project create response');
   }
 
   async prepareProjectCreation(params: CreateProjectParams): Promise<PreparedProjectResult> {
-    const response = await this.sendTypedCommand({ type: 'prepare_project_creation', requestId: crypto.randomUUID(), ...params });
-    if (response.type === 'project-prepared') return response.result;
-    if (response.type === 'error') throw new Error(response.message);
+    const operation = await this.startOperationCommand({ type: 'prepare_project_creation', requestId: crypto.randomUUID(), ...params });
+    const response = (await this.waitForOperation(operation.operationId)).result as TmuxResponse | undefined;
+    if (response?.type === 'project-prepared') return response.result;
     throw new Error('Unexpected project prepare response');
   }
 
   async finalizeProjectCreation(params: FinalizeProjectParams): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'finalize_project_creation', requestId: crypto.randomUUID(), ...params });
-    if (response.type === 'project-created') return;
-    if (response.type === 'error') throw new Error(response.message);
+    const operation = await this.startOperationCommand({ type: 'finalize_project_creation', requestId: crypto.randomUUID(), ...params });
+    const response = (await this.waitForOperation(operation.operationId)).result as TmuxResponse | undefined;
+    if (response?.type === 'project-created') return;
     throw new Error('Unexpected project finalize response');
   }
 
   async cancelProjectCreation(projectName: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'cancel_project_creation', requestId: crypto.randomUUID(), projectName });
+    const response = await this.sendRpcCommand({ type: 'cancel_project_creation', requestId: crypto.randomUUID(), projectName });
     if (response.type === 'project-cancelled') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected project cancel response');
   }
 
   async createWorkspace(params: CreateWorkspaceParams): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'create_workspace', requestId: crypto.randomUUID(), ...params });
-    if (response.type === 'workspace-created') return;
-    if (response.type === 'error') throw new Error(response.message);
+    const operation = await this.startOperationCommand({ type: 'create_workspace', requestId: crypto.randomUUID(), ...params });
+    const response = (await this.waitForOperation(operation.operationId)).result as TmuxResponse | undefined;
+    if (response?.type === 'workspace-created') return;
     throw new Error('Unexpected workspace create response');
   }
 
   async deleteProject(projectName: string, params: DeleteProjectParams = {}): Promise<void> {
     void params;
-    const response = await this.sendTypedCommand({ type: 'delete_project', requestId: crypto.randomUUID(), projectName });
-    if (response.type === 'project-deleted') return;
-    if (response.type === 'error') throw new Error(response.message);
+    const operation = await this.startOperationCommand({ type: 'delete_project', requestId: crypto.randomUUID(), projectName });
+    const response = (await this.waitForOperation(operation.operationId)).result as TmuxResponse | undefined;
+    if (response?.type === 'project-deleted') return;
     throw new Error('Unexpected project delete response');
   }
 
@@ -733,6 +818,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async attachPane(params: AttachPaneParams): Promise<void> {
+    const resolvedWorkspaceId =
+      params.workspaceId ?? getTerminalSessionWorkspaceId(this.machineStateClient.getSnapshot(), params.sessionId);
     const existingPane = this.panes.get(params.paneId);
     if (existingPane) {
       this.panes.delete(params.paneId);
@@ -753,7 +840,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       paneId: params.paneId,
       streamId,
       sessionId: params.sessionId ?? null,
-      workspaceId: params.workspaceId ?? null,
+      workspaceId: resolvedWorkspaceId ?? null,
       agentSessionId: params.agentSessionId ?? null,
       viewOnly: params.viewOnly ?? false,
     });
@@ -761,7 +848,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
     if (params.paneId === DEFAULT_PANE_ID) {
       this.attachLifecycle.beginAttach({
-        workspaceId: params.workspaceId ?? null,
+        workspaceId: resolvedWorkspaceId ?? null,
         viewOnly: params.viewOnly ?? false,
       });
     }
@@ -770,7 +857,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       type: 'attach_session',
       streamId,
       sessionId: params.sessionId,
-      workspaceId: params.workspaceId,
+      workspaceId: resolvedWorkspaceId,
       sessionName: params.sessionName,
       cols: params.cols ?? 80,
       rows: params.rows ?? 24,
@@ -790,7 +877,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async listAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'list_agent_sessions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), mode: 'live' });
+    const response = await this.sendRpcCommand({ type: 'list_agent_sessions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), mode: 'live' });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent sessions response');
@@ -798,7 +885,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async createAgentSession(workspaceId: string, title?: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'create_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), title });
+    const response = await this.sendRpcCommand({ type: 'create_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), title });
     if (response.type === 'agent-sessions') return response.sessions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent create response');
@@ -806,7 +893,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async abortAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'abort_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendRpcCommand({ type: 'abort_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-bool') {
       if (response.ok) {
         this.applyOptimisticAgentState(agentSessionId, { state: 'closed' });
@@ -819,7 +906,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async interruptAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'interrupt_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendRpcCommand({ type: 'interrupt_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-bool') return response.ok;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected agent interrupt response');
@@ -827,7 +914,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async closeAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'close_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendRpcCommand({ type: 'close_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-sessions') {
       this.applyOptimisticAgentState(agentSessionId, { state: 'closed', closedAt: new Date().toISOString() });
       return response.sessions;
@@ -838,7 +925,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async archiveAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'archive_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendRpcCommand({ type: 'archive_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-sessions') {
       this.applyOptimisticAgentState(agentSessionId, { state: 'archived', archivedAt: new Date().toISOString() });
       return response.sessions;
@@ -849,7 +936,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async restoreAgentSession(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'restore_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    const response = await this.sendRpcCommand({ type: 'restore_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
     if (response.type === 'agent-sessions') {
       this.applyOptimisticAgentState(agentSessionId, { state: 'closed', archivedAt: undefined });
       return response.sessions;
@@ -858,16 +945,54 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected agent restore response');
   }
 
+
+  private findExistingAgentTerminalSession(workspaceId: string, agentSessionId: string): string | null {
+    const snapshot = this.machineStateClient.getSnapshot();
+    for (const session of Object.values(snapshot.terminalSessionsById)) {
+      if (session.exitCode !== undefined || session.kind !== 'agent') continue;
+      const linkedAgentSessionId = session.linkedAgentSessionId ?? session.metadata?.agentSessionId;
+      const linkedWorkspaceId = session.workspaceId ?? session.metadata?.workspaceId;
+      if (linkedAgentSessionId === agentSessionId && linkedWorkspaceId === workspaceId) {
+        return session.id;
+      }
+    }
+    return null;
+  }
+
   async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string } = {}): Promise<void> {
     await this.waitForInitialSnapshot();
+    const existingTerminalSessionId = this.findExistingAgentTerminalSession(workspaceId, agentSessionId);
+    const paneId = options.paneId ?? DEFAULT_PANE_ID;
+    if (existingTerminalSessionId) {
+      if (paneId === DEFAULT_PANE_ID) {
+        this.pendingAttachedAgentSession = {
+          agentSessionId,
+          sessionId: existingTerminalSessionId,
+        };
+      }
+      try {
+        await this.attachPane({
+          paneId,
+          sessionId: existingTerminalSessionId,
+          workspaceId,
+          agentSessionId,
+          viewOnly: options.viewOnly,
+          cols: options.cols,
+          rows: options.rows,
+        });
+      } catch (error) {
+        this.pendingAttachedAgentSession = null;
+        throw error;
+      }
+      return;
+    }
     // attachSession() handles detaching from the prior tmux-lite session via
     // its own fire-and-forget detach path; no need for an extra round-trip here.
-    const response = await this.sendTypedCommand({ type: 'attach_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
+    const response = await this.sendRpcCommand({ type: 'attach_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
     if (response.type !== 'session') {
       if (response.type === 'error') throw new Error(response.message);
       throw new Error('Unexpected agent attach response');
     }
-    const paneId = options.paneId ?? DEFAULT_PANE_ID;
     if (paneId === DEFAULT_PANE_ID) {
       this.pendingAttachedAgentSession = {
         agentSessionId,
@@ -884,7 +1009,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'prompt_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, text, images, streamingBehavior: options?.streamingBehavior });
+    const response = await this.sendRpcCommand({ type: 'prompt_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, text, images, streamingBehavior: options?.streamingBehavior });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error(`Unexpected prompt response: ${response.type}`);
@@ -892,7 +1017,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async removeAgentQueuedMessage(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({
+    const response = await this.sendRpcCommand({
       type: 'remove_agent_queued_message',
       requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),
@@ -907,14 +1032,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'stage_agent_upload', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), fileName, data, mimeType });
+    const response = await this.sendRpcCommand({ type: 'stage_agent_upload', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), fileName, data, mimeType });
     if (response.type === 'agent-staged') return { stagedPath: response.stagedPath };
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected stage upload response');
   }
 
   async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'respond_agent_dialog', requestId: crypto.randomUUID(), dialogId, dialogType, value });
+    const response = await this.sendRpcCommand({ type: 'respond_agent_dialog', requestId: crypto.randomUUID(), dialogId, dialogType, value });
     if (response.type === 'agent-bool') {
       if (response.ok) return;
       throw new Error(`Dialog is no longer pending: ${dialogId}`);
@@ -925,7 +1050,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async listAgentCommands(workspaceId: string): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'list_agent_commands', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId) });
+    const response = await this.sendRpcCommand({ type: 'list_agent_commands', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId) });
     if (response.type === 'agent-commands') return response.commands;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected list commands response');
@@ -933,7 +1058,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async listAvailableEditors(workspaceId: string): Promise<WorkspaceEditorOption[]> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({
+    const response = await this.sendRpcCommand({
       type: 'list_workspace_editors',
       requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),
@@ -945,34 +1070,34 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async openWorkspaceInEditor(workspaceId: string, editorId: WorkspaceEditorId): Promise<void> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({
+    const operation = await this.startOperationCommand({
       type: 'open_workspace_editor',
       requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),
       editorId,
     });
-    if (response.type === 'ok') return;
-    if (response.type === 'error') throw new Error(response.message);
+    const response = (await this.waitForOperation(operation.operationId)).result as TmuxResponse | undefined;
+    if (response?.type === 'ok') return;
     throw new Error('Unexpected open editor response');
   }
 
 
   async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({
+    const operation = await this.startOperationCommand({
       type: 'run_space_command',
       requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),
       argsText,
     });
-    if (response.type === 'run_space_command_response') return response.output;
-    if (response.type === 'error') throw new Error(response.message);
+    const response = (await this.waitForOperation(operation.operationId)).result as RunSpaceCommandResponse | undefined;
+    if (response?.type === 'run_space_command_response') return response.output;
     throw new Error('Unexpected run space command response');
   }
 
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'get_agent_file_suggestions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), prefix, limit });
+    const response = await this.sendRpcCommand({ type: 'get_agent_file_suggestions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), prefix, limit });
     if (response.type === 'agent-file-suggestions') return response.suggestions;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected file suggestions response');
@@ -1010,11 +1135,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     await this.sendCommand(command);
   }
 
-  async killSession(sessionId: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'kill_session', requestId: crypto.randomUUID(), sessionId });
+  async terminateSession(sessionId: string, options: TerminateSessionOptions = {}): Promise<void> {
+    const response = await this.sendRpcCommand({ type: 'terminate_session', requestId: crypto.randomUUID(), sessionId, mode: options.mode, graceMs: options.graceMs });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
-    throw new Error('Unexpected kill session response');
+    throw new Error('Unexpected terminate session response');
   }
 
   async deleteWorkspace(
@@ -1022,69 +1147,44 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     params: DeleteWorkspaceParams = {}
   ): Promise<void> {
-    if (this.pendingDeleteWorkspace) {
-      throw new Error('Workspace delete request already in progress');
-    }
-
     const requestId = crypto.randomUUID();
-    const command: DeleteWorkspaceRequest = {
+    const command: DeleteWorkspaceRequest & { requestId: string } = {
       type: 'delete_workspace',
       requestId,
       projectName,
       workspaceId,
       scriptPolicy: params.scriptPolicy,
     };
-    const timeoutMs =
-      typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
-        ? params.timeoutMs
-        : DEFAULT_DELETE_WORKSPACE_TIMEOUT_MS;
 
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pendingDeleteWorkspace;
-        if (!pending || !workspaceIdsMatch(pending.workspaceId, workspaceId)) {
-          return;
-        }
-
-        this.pendingDeleteWorkspace = null;
-        pending.reject(
-          new WorkspaceDeleteError(
-            `Timed out waiting for workspace deletion response (${workspaceId})`,
-            'DELETE_TIMEOUT'
-          )
-        );
-      }, timeoutMs);
-
-      this.pendingDeleteWorkspace = {
-        requestId,
-        workspaceId,
-        resolve,
-        reject,
-        timeout,
-      };
-
-      void this.sendCommand(command).catch((error) => {
-        const pending = this.pendingDeleteWorkspace;
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timeout);
-        this.pendingDeleteWorkspace = null;
-        const message = error instanceof Error ? error.message : String(error);
-        pending.reject(new WorkspaceDeleteError(message, 'DELETE_FAILED'));
-      });
-    });
+    try {
+      const operation = await this.startOperationCommand(command);
+      const response = (await this.waitForOperation(operation.operationId)).result as { type?: string; workspaceId?: string } | undefined;
+      if (response?.type === 'workspace_deleted') {
+        await this.listWorkspaces();
+        return;
+      }
+      throw new WorkspaceDeleteError(
+        `Unexpected workspace deletion response (${workspaceId})`,
+        'DELETE_FAILED',
+      );
+    } catch (error) {
+      if (error instanceof WorkspaceDeleteError) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new WorkspaceDeleteError(message, toWorkspaceDeleteErrorCode((error as Error & { code?: string }).code));
+    }
   }
 
   async listWorkspaceNotes(projectName: string, workspaceName: string): Promise<import('../../types/workspace.js').WorkspaceNote[]> {
-    const response = await this.sendTypedCommand({ type: 'workspace_notes_list', requestId: crypto.randomUUID(), projectName, workspaceName });
+    const response = await this.sendRpcCommand({ type: 'workspace_notes_list', requestId: crypto.randomUUID(), projectName, workspaceName });
     if (response.type === 'workspace-notes') return response.notes;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected workspace notes response');
   }
 
   async addWorkspaceNote(projectName: string, workspaceName: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
-    const response = await this.sendTypedCommand({ type: 'workspace_note_add', requestId: crypto.randomUUID(), projectName, workspaceName, body });
+    const response = await this.sendRpcCommand({ type: 'workspace_note_add', requestId: crypto.randomUUID(), projectName, workspaceName, body });
     if (response.type === 'workspace-note') {
       await this.listWorkspaces();
       return response.note;
@@ -1094,7 +1194,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async updateWorkspaceNote(projectName: string, workspaceName: string, noteId: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
-    const response = await this.sendTypedCommand({ type: 'workspace_note_update', requestId: crypto.randomUUID(), projectName, workspaceName, noteId, body });
+    const response = await this.sendRpcCommand({ type: 'workspace_note_update', requestId: crypto.randomUUID(), projectName, workspaceName, noteId, body });
     if (response.type === 'workspace-note') {
       await this.listWorkspaces();
       return response.note;
@@ -1104,7 +1204,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async removeWorkspaceNote(projectName: string, workspaceName: string, noteId: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'workspace_note_remove', requestId: crypto.randomUUID(), projectName, workspaceName, noteId });
+    const response = await this.sendRpcCommand({ type: 'workspace_note_remove', requestId: crypto.randomUUID(), projectName, workspaceName, noteId });
     if (response.type === 'ok') {
       await this.listWorkspaces();
       return;
@@ -1114,36 +1214,27 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async rerunWorkspaceScripts(projectName: string, workspaceId: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'rerun_workspace_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
-    if (response.type === 'ok') {
-      await this.listWorkspaces();
-      return;
-    }
-    if (response.type === 'error') throw new Error(response.message);
-    throw new Error('Unexpected rerun workspace scripts response');
+    const operation = await this.startOperationCommand({ type: 'rerun_workspace_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
+    await this.waitForOperation(operation.operationId);
+    await this.listWorkspaces();
+    return;
   }
 
   async runWorkspaceOpenScripts(projectName: string, workspaceId: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'run_workspace_open_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
-    if (response.type === 'ok') {
-      await this.listWorkspaces();
-      return;
-    }
-    if (response.type === 'error') throw new Error(response.message);
-    throw new Error('Unexpected run workspace open scripts response');
+    const operation = await this.startOperationCommand({ type: 'run_workspace_open_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
+    await this.waitForOperation(operation.operationId);
+    await this.listWorkspaces();
+    return;
   }
 
   async runWorkspaceScriptSelection(projectName: string, workspaceId: string, selection: 'setup' | 'select' | 'setup-select'): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'run_workspace_script_selection', requestId: crypto.randomUUID(), projectName, workspaceId, selection });
-    if (response.type === 'ok') {
-      await this.listWorkspaces();
-      return;
-    }
-    if (response.type === 'error') throw new Error(response.message);
-    throw new Error('Unexpected run workspace script selection response');
+    const operation = await this.startOperationCommand({ type: 'run_workspace_script_selection', requestId: crypto.randomUUID(), projectName, workspaceId, selection });
+    await this.waitForOperation(operation.operationId);
+    await this.listWorkspaces();
+    return;
   }
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
-    const response = await this.sendTypedCommand({ type: 'get_bundle_refresh_plan', requestId: crypto.randomUUID(), projectName, workspaceId });
+    const response = await this.sendRpcCommand({ type: 'get_bundle_refresh_plan', requestId: crypto.randomUUID(), projectName, workspaceId });
     if (response.type === 'bundle-refresh-plan') return response.plan;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle refresh plan response');
@@ -1154,14 +1245,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     submission: BundleRefreshSubmission
   ): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'apply_bundle_refresh', requestId: crypto.randomUUID(), projectName, workspaceId, submission });
+    const response = await this.sendRpcCommand({ type: 'apply_bundle_refresh', requestId: crypto.randomUUID(), projectName, workspaceId, submission });
     if (response.type === 'bundle-refresh-applied') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle refresh apply response');
   }
 
   async getBundleConfigState(projectName: string, workspaceId: string): Promise<BundleConfigState> {
-    const response = await this.sendTypedCommand({ type: 'get_bundle_config_state', requestId: crypto.randomUUID(), projectName, workspaceId });
+    const response = await this.sendRpcCommand({ type: 'get_bundle_config_state', requestId: crypto.randomUUID(), projectName, workspaceId });
     if (response.type === 'bundle-config-state') return response.state;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle config state response');
@@ -1172,7 +1263,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceId: string,
     submission: BundleConfigSubmission
   ): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'apply_bundle_config', requestId: crypto.randomUUID(), projectName, workspaceId, submission });
+    const response = await this.sendRpcCommand({ type: 'apply_bundle_config', requestId: crypto.randomUUID(), projectName, workspaceId, submission });
     if (response.type === 'bundle-config-applied') return;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected bundle config apply response');
@@ -1180,7 +1271,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   async requestInbox(): Promise<void> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'get_inbox', requestId: crypto.randomUUID() });
+    const response = await this.sendRpcCommand({ type: 'get_inbox', requestId: crypto.randomUUID() });
     if (response.type === 'inbox') {
       const sessions = machineSnapshotToSessions(this.machineStateClient.getSnapshot());
       const activeSessionIds = new Set(sessions.map((session) => session.id));
@@ -1193,7 +1284,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async clearInbox(id?: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'clear_inbox', requestId: crypto.randomUUID(), id });
+    const response = await this.sendRpcCommand({ type: 'clear_inbox', requestId: crypto.randomUUID(), id });
     if (response.type === 'ok') {
       await this.requestInbox();
       return;
@@ -1203,7 +1294,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async markInboxRead(id: string): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'mark_inbox_read', requestId: crypto.randomUUID(), id });
+    const response = await this.sendRpcCommand({ type: 'mark_inbox_read', requestId: crypto.randomUUID(), id });
     if (response.type === 'ok') {
       await this.requestInbox();
       return;
@@ -1213,7 +1304,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async getNotificationConfig(): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'get_notification_config', requestId: crypto.randomUUID() });
+    const response = await this.sendRpcCommand({ type: 'get_notification_config', requestId: crypto.randomUUID() });
     if (response.type === 'notification-config') {
       this.emit({ type: 'notification_config', config: response.config });
       return;
@@ -1223,7 +1314,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async updateNotificationConfig(config: NotificationConfig): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'update_notification_config', requestId: crypto.randomUUID(), config });
+    const response = await this.sendRpcCommand({ type: 'update_notification_config', requestId: crypto.randomUUID(), config });
     if (response.type === 'notification-config') {
       this.emit({ type: 'notification_config', config: response.config });
       return;
@@ -1238,30 +1329,28 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       op: operation.op,
       requestId,
     });
-    const response = await this.sendTypedCommand({ type: 'request_review', requestId, operation });
+    const operationRecord = await this.startOperationCommand({ type: 'request_review', requestId, operation });
+    const response = (await this.waitForOperation(operationRecord.operationId)).result as TmuxResponse | undefined;
     console.debug('[review-debug] remote backend sendReviewRequest response', {
       op: operation.op,
       requestId,
-      responseType: response.type,
-      reviewRequestId: response.type === 'review-response' ? response.requestId : undefined,
+      responseType: response?.type,
+      reviewRequestId: response?.type === 'review-response' ? response.requestId : undefined,
     });
-    if (response.type === 'review-response') {
+    if (response?.type === 'review-response') {
       if (response.error) {
         throw new ReviewRequestError(response.error.message, response.error.code, { op: operation.op, requestId: response.requestId });
       }
       if (!response.result) {
-        throw new ReviewRequestError('Review response missing result', 'REVIEW_MISSING_RESULT', { op: operation.op, requestId: response.requestId });
+        throw new ReviewRequestError('Review response missing result', 'REVIEW_FAILED', { op: operation.op, requestId: response.requestId });
       }
       return response.result;
-    }
-    if (response.type === 'error') {
-      throw new ReviewRequestError(response.message, 'REVIEW_FAILED', { op: operation.op });
     }
     throw new ReviewRequestError('Unexpected review response', 'REVIEW_FAILED', { op: operation.op });
   }
 
   async startProcess(workspaceId: string, processName: string, instance?: number): Promise<void> {
-    const response = await this.sendTypedCommand({
+    const response = await this.sendRpcCommand({
       type: 'start_process',
       requestId: crypto.randomUUID(),
       workspaceId,
@@ -1284,8 +1373,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected tmux service start response');
   }
 
+  async resolvePortConflict(conflict: PortConflictInfo): Promise<void> {
+    const response = await this.sendRpcCommand({
+      type: 'resolve_port_conflict',
+      requestId: crypto.randomUUID(),
+      workspaceId: conflict.managedWorkspaceId ?? '',
+      conflict,
+    });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected port conflict resolution response');
+  }
+
   async stopProcess(workspaceId: string, processName: string): Promise<void> {
-    const response = await this.sendTypedCommand({
+    const response = await this.sendRpcCommand({
       type: 'stop_process',
       requestId: crypto.randomUUID(),
       workspaceId,
@@ -1311,7 +1412,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     limit?: number,
     sinceMs?: number,
   ): Promise<void> {
-    const response = await this.sendTypedCommand({ type: 'request_events', requestId: crypto.randomUUID(), workspacePath, filter, limit, sinceMs });
+    const response = await this.sendRpcCommand({ type: 'request_events', requestId: crypto.randomUUID(), workspacePath, filter, limit, sinceMs });
     if (response.type === 'events-list') {
       this.emit({ type: 'events', events: response.events, liveEventIds: response.liveEventIds, savedEventFilters: response.savedEventFilters ?? [] });
       return;
@@ -1338,7 +1439,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
     const frame = await this.crypto.createFrame(pane.streamId, data, key.sendKey);
     const encoded = this.crypto.encodeBase64(frame);
-    const message: RelayDataMessage = { type: 'data', data: encoded };
+    const message: RelayDataMessage = { type: 'data', data: encoded, priority: 'bulk' };
     this.socketAdapter.send(this.socket, JSON.stringify(message));
   }
 
@@ -1627,6 +1728,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'workspace_deleted':
         this.resolveWorkspaceDelete(message.workspaceId, message.requestId);
         return;
+      case 'operation_accepted':
+        this.resolveOperationAccepted(message as OperationAcceptedResponse);
+        return;
+      case 'operation_snapshot':
+        this.handleOperationSnapshot(message as OperationSnapshotResponse);
+        return;
+      case 'operation_event':
+        this.handleOperationEvent(message as OperationEventResponse);
+        return;
+      case 'operation_dismissed':
+        this.handleOperationDismissed(message as OperationDismissedResponse);
+        return;
       case 'script_output':
         this.handleScriptOutput(message);
         return;
@@ -1638,8 +1751,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         return;
       case 'machine_snapshot':
         this.machineStateClient.replaceSnapshot(message.snapshot);
+        if (Object.keys(this.agentStateCache).length === 0) {
+          this.agentStateCache = machineSnapshotToAgentState(message.snapshot);
+        }
+        this.syncAgentStateCacheIntoMachineSnapshot();
         this.emitDerivedMachineState();
-        this.agentStateCache = machineSnapshotToAgentState(message.snapshot);
         this.resolveInitialSnapshot();
         for (const pane of [...this.panes.values()]) {
           if (pane.sessionId && !(pane.sessionId in message.snapshot.terminalSessionsById)) {
@@ -1661,6 +1777,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'error':
         if (message.requestId) {
           this.rejectPendingTypedCommand(message.requestId, message.message);
+          this.rejectPendingOperationStart(message.requestId, message.message, message.code);
         }
         this.rejectPendingReplayFrame(message.message, { requestId: message.requestId, force: !message.requestId });
         this.rejectPendingReplayTimeline(message.message, undefined, true);
@@ -2003,7 +2120,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const payload = new TextEncoder().encode(JSON.stringify(message));
     const frame = await this.crypto.createFrame(streamId, payload, keys.sendKey);
     const encoded = this.crypto.encodeBase64(frame);
-    const relayMessage: RelayDataMessage = { type: 'data', data: encoded };
+    const relayMessage: RelayDataMessage = { type: 'data', data: encoded, priority: 'control' };
     this.socketAdapter.send(this.socket, JSON.stringify(relayMessage));
   }
 
@@ -2038,6 +2155,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const snapshot = this.machineStateClient.getSnapshot();
     const agent = snapshot.agentSessionsById[agentSessionId];
     if (!agent) return;
+    this.applyOptimisticAgentStateCache(agent, patch);
     this.machineStateClient.applyEvent({
       type: 'agent-session-upserted',
       snapshotNonce: snapshot.snapshotNonce,
@@ -2046,7 +2164,47 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.emitDerivedMachineState();
   }
 
-  private async sendTypedCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TypedCommandResponse> {
+  private applyOptimisticAgentStateCache(agent: MachineAgentSessionRecord, patch: Partial<MachineAgentSessionRecord>): void {
+    const workspace = this.agentStateCache[agent.workspaceId];
+    if (!workspace) return;
+    const sessionIndex = workspace.sessions.findIndex((session) => session.id === agent.id);
+    if (sessionIndex === -1) return;
+    const session = workspace.sessions[sessionIndex]!;
+    const nextSession = {
+      ...session,
+      closedAt: patch.closedAt !== undefined ? patch.closedAt : session.closedAt,
+      archivedAt: patch.archivedAt !== undefined ? patch.archivedAt : session.archivedAt,
+    };
+    if (patch.state === 'closed' && !nextSession.closedAt) {
+      nextSession.closedAt = new Date().toISOString();
+    }
+    if (patch.state === 'archived' && !nextSession.archivedAt) {
+      nextSession.archivedAt = new Date().toISOString();
+    }
+    if (patch.state !== 'archived') {
+      nextSession.archivedAt = undefined;
+    }
+    workspace.sessions = [
+      ...workspace.sessions.slice(0, sessionIndex),
+      nextSession,
+      ...workspace.sessions.slice(sessionIndex + 1),
+    ];
+    if (patch.state === 'closed' || patch.state === 'archived') {
+      delete workspace.statuses[agent.id];
+      delete workspace.pendingPermissions[agent.id];
+      delete workspace.pendingQuestions[agent.id];
+      delete workspace.lastMessages[agent.id];
+      delete workspace.errorMessages[agent.id];
+      delete workspace.todoPhases[agent.id];
+      delete workspace.modelInfo[agent.id];
+      delete workspace.queuedMessages[agent.id];
+    }
+  }
+
+  private async sendRpcCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TypedCommandResponse> {
+    if (OPERATION_COMMAND_TYPES.has(request.type)) {
+      throw new Error(`Command ${request.type} must use startOperation(), not sendRpcCommand()`);
+    }
     const requestId = request.requestId;
     const startedAtMs = Date.now();
     return new Promise<TypedCommandResponse>((resolve, reject) => {
@@ -2084,6 +2242,36 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+
+  private async startOperationCommand(request: ClientToMachineMessage & { requestId: string }): Promise<RemoteOperationRecord> {
+    const requestId = request.requestId;
+    if (!OPERATION_COMMAND_TYPES.has(request.type)) {
+      throw new Error(`Command ${request.type} must use sendRpcCommand(), not startOperation()`);
+    }
+    const startedAtMs = Date.now();
+    return new Promise<RemoteOperationRecord>((resolve, reject) => {
+      writeTraceLog('remote-operation-send', {
+        requestId,
+        commandType: request.type,
+        pendingCount: this.pendingOperationStarts.size,
+      });
+      const timeout = setTimeout(() => {
+        const pending = this.pendingOperationStarts.get(requestId);
+        if (!pending) return;
+        this.pendingOperationStarts.delete(requestId);
+        reject(new Error(`Timed out waiting for operation acceptance (${request.type})`));
+      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      this.pendingOperationStarts.set(requestId, { resolve, reject, timeout, startedAtMs });
+      void this.sendCommand(request).catch((error) => {
+        const pending = this.pendingOperationStarts.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingOperationStarts.delete(requestId);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
   private resolveTypedCommand(message: CommandResponse): void {
     const pending = this.pendingTypedCommands.get(message.requestId);
     if (!pending) return;
@@ -2096,6 +2284,80 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     clearTimeout(pending.timeout);
     this.pendingTypedCommands.delete(message.requestId);
     pending.resolve(message.response);
+  }
+
+  private resolveOperationAccepted(message: OperationAcceptedResponse): void {
+    this.operations.set(message.operation.operationId, message.operation);
+    this.emit({ type: 'operation_event', event: { type: 'operation_started', operation: message.operation } });
+    const pending = this.pendingOperationStarts.get(message.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingOperationStarts.delete(message.requestId);
+    pending.resolve(message.operation);
+  }
+
+  private rejectPendingOperationStart(requestId: string, message: string, code?: string): void {
+    const pending = this.pendingOperationStarts.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingOperationStarts.delete(requestId);
+    const error = new Error(message);
+    if (code) (error as Error & { code?: string }).code = code;
+    pending.reject(error);
+  }
+
+  private handleOperationSnapshot(message: OperationSnapshotResponse): void {
+    this.operations = new Map(message.operations.map((operation) => [operation.operationId, operation]));
+    this.emit({ type: 'operation_snapshot', operations: message.operations });
+    for (const operation of message.operations) {
+      this.settleOperationCompletion(operation);
+    }
+  }
+
+  private handleOperationEvent(message: OperationEventResponse): void {
+    const operation = message.event.operation;
+    this.operations.set(operation.operationId, operation);
+    this.emit({ type: 'operation_event', event: message.event });
+    this.settleOperationCompletion(operation);
+  }
+
+  private handleOperationDismissed(message: OperationDismissedResponse): void {
+    this.operations.delete(message.operationId);
+    this.emit({ type: 'operation_dismissed', operationId: message.operationId });
+  }
+
+  private settleOperationCompletion(operation: RemoteOperationRecord): void {
+    if (operation.state === 'running') return;
+    const pending = this.pendingOperationCompletions.get(operation.operationId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingOperationCompletions.delete(operation.operationId);
+    if (operation.state === 'succeeded') {
+      pending.resolve(operation);
+      return;
+    }
+    const error = new Error(operation.error?.message ?? operation.message ?? `Operation ${operation.state}`);
+    if (operation.error?.code) (error as Error & { code?: string }).code = operation.error.code;
+    pending.reject(error);
+  }
+
+  private waitForOperation(operationId: string): Promise<RemoteOperationRecord> {
+    const current = this.operations.get(operationId);
+    if (current && current.state !== 'running') {
+      return current.state === 'succeeded'
+        ? Promise.resolve(current)
+        : Promise.reject(Object.assign(new Error(current.error?.message ?? current.message ?? `Operation ${current.state}`), current.error?.code ? { code: current.error.code } : {}));
+    }
+    return new Promise<RemoteOperationRecord>((resolve, reject) => {
+      const operation = this.operations.get(operationId);
+      const timeout = setTimeout(() => {
+        const pending = this.pendingOperationCompletions.get(operationId);
+        if (!pending) return;
+        this.pendingOperationCompletions.delete(operationId);
+        pending.reject(new Error(`Timed out waiting for operation completion (${operationId})`));
+      }, operationCompletionTimeoutMs(operation));
+      this.pendingOperationCompletions.set(operationId, { resolve, reject, timeout });
+    });
   }
 
   private resolveRunSpaceCommandResponse(message: RunSpaceCommandResponse): void {
@@ -2169,6 +2431,16 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       pending.reject(new Error('Remote session disconnected'));
     }
     this.pendingTypedCommands.clear();
+    for (const pending of this.pendingOperationStarts.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Remote session disconnected'));
+    }
+    this.pendingOperationStarts.clear();
+    for (const pending of this.pendingOperationCompletions.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Remote session disconnected'));
+    }
+    this.pendingOperationCompletions.clear();
     this.rejectInitialSnapshot(new Error('Remote session disconnected'));
     this.machineStateClient.replaceSnapshot(createEmptyMachineSnapshot());
     this.connectPromise = null;
@@ -2211,7 +2483,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (this.initialSnapshotReceived || !this.initialSnapshotPromise) {
       return;
     }
-    await this.initialSnapshotPromise;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.initialSnapshotPromise,
+        new Promise<void>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(new Error(`Timed out waiting for initial machine snapshot from ${this.machineId}`));
+          }, DEFAULT_INITIAL_SNAPSHOT_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   private rejectInitialSnapshot(error: Error): void {
@@ -2276,6 +2560,47 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     };
   }
 
+  private refreshWorkspaceAgentSummary(workspaceId: string): boolean {
+    const snapshot = this.machineStateClient.getSnapshot();
+    const workspace = snapshot.workspacesById[workspaceId];
+    if (!workspace) return false;
+    const agentIds = snapshot.agentSessionIdsByWorkspaceId[workspaceId] ?? [];
+    const agents = agentIds
+      .map((id) => snapshot.agentSessionsById[id])
+      .filter((agent): agent is MachineAgentSessionRecord => Boolean(agent));
+    const nextSummary = {
+      ...workspace.summary,
+      agentCount: agents.length,
+      runningAgentCount: agents.filter((agent) => agent.state === 'running').length,
+      waitingAgentCount: agents.filter((agent) => agent.state === 'waiting').length,
+      permissionAgentCount: agents.filter((agent) => agent.state === 'permission-needed').length,
+      retryingAgentCount: agents.filter((agent) => agent.state === 'retrying').length,
+      closedAgentCount: agents.filter((agent) => agent.state === 'closed').length,
+      archivedAgentCount: agents.filter((agent) => agent.state === 'archived').length,
+    };
+    const agentIdsChanged = workspace.agentSessionIds.length !== agentIds.length
+      || workspace.agentSessionIds.some((id, index) => id !== agentIds[index]);
+    const summaryChanged = workspace.summary.agentCount !== nextSummary.agentCount
+      || workspace.summary.runningAgentCount !== nextSummary.runningAgentCount
+      || workspace.summary.waitingAgentCount !== nextSummary.waitingAgentCount
+      || workspace.summary.permissionAgentCount !== nextSummary.permissionAgentCount
+      || workspace.summary.retryingAgentCount !== nextSummary.retryingAgentCount
+      || workspace.summary.closedAgentCount !== nextSummary.closedAgentCount
+      || workspace.summary.archivedAgentCount !== nextSummary.archivedAgentCount;
+    if (!agentIdsChanged && !summaryChanged) return false;
+    this.machineStateClient.applyEvent({
+      type: 'workspace-upserted',
+      snapshotNonce: snapshot.snapshotNonce,
+      workspace: {
+        ...workspace,
+        agentSessionIds: agentIds,
+        summary: nextSummary,
+      },
+    });
+    return true;
+  }
+
+
   private syncAgentWorkspaceIntoMachineSnapshot(workspace: WorkspaceAgentState): boolean {
     const snapshot = this.machineStateClient.getSnapshot();
     if (!snapshot.workspacesById[workspace.workspaceId]) {
@@ -2308,6 +2633,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       changed = true;
     }
 
+    changed = this.refreshWorkspaceAgentSummary(workspace.workspaceId) || changed;
     return changed;
   }
 
@@ -2339,75 +2665,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private handleAgentStateUpdate(msg: AgentStateUpdatePush): void {
     const delta = msg.delta;
-    // Apply delta to local cache
-    if ('workspaceId' in delta && 'sessionId' in delta) {
-      const state = this.agentStateCache[delta.workspaceId];
-      if (state) {
-        switch (delta.type) {
-          case 'agent_session_status':
-            state.statuses[delta.sessionId] = delta.status;
-            break;
-          case 'agent_session_error':
-            state.errorMessages[delta.sessionId] = delta.errorMessage;
-            break;
-          case 'agent_permission_added':
-            if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
-            state.pendingPermissions[delta.sessionId].push(delta.permission);
-            break;
-          case 'agent_question_added':
-            if (!state.pendingQuestions[delta.sessionId]) state.pendingQuestions[delta.sessionId] = [];
-            state.pendingQuestions[delta.sessionId] = [
-              ...state.pendingQuestions[delta.sessionId].filter((q) => q.id !== delta.question.id),
-              delta.question,
-            ];
-            break;
-          case 'agent_question_removed':
-            if (state.pendingQuestions[delta.sessionId]) {
-              state.pendingQuestions[delta.sessionId] = state.pendingQuestions[delta.sessionId].filter(
-                (q) => q.id !== delta.requestId,
-              );
-            }
-            break;
-          case 'agent_permission_removed':
-            if (state.pendingPermissions[delta.sessionId]) {
-              state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
-                (p) => p.id !== delta.permissionId,
-              );
-            }
-            break;
-          case 'agent_last_message':
-            state.lastMessages[delta.sessionId] = delta.preview;
-            break;
-          case 'agent_todo_update':
-            state.todoPhases[delta.sessionId] = delta.phases;
-            break;
-          case 'agent_model_update':
-            state.modelInfo[delta.sessionId] = delta.modelInfo;
-            break;
-          case 'agent_session_created':
-            if (!state.sessions.some((s) => s.id === delta.sessionId)) {
-              state.sessions.push({ id: delta.sessionId, title: delta.title });
-            }
-            break;
-          case 'agent_session_updated': {
-            const idx = state.sessions.findIndex((s) => s.id === delta.sessionId);
-            if (idx !== -1) state.sessions[idx] = { id: delta.sessionId, title: delta.title };
-            break;
-          }
-          case 'agent_session_deleted':
-            state.sessions = state.sessions.filter((s) => s.id !== delta.sessionId);
-            delete state.statuses[delta.sessionId];
-            delete state.pendingPermissions[delta.sessionId];
-            delete state.pendingQuestions[delta.sessionId];
-            delete state.lastMessages[delta.sessionId];
-            delete state.errorMessages[delta.sessionId];
-            delete state.todoPhases[delta.sessionId];
-            delete state.modelInfo[delta.sessionId];
-            delete state.queuedMessages[delta.sessionId];
-            break;
-        }
-      }
-    }
+    this.agentStateCache = applyAgentDeltaToAgentState(this.agentStateCache, delta);
     this.syncAgentStateCacheIntoMachineSnapshot();
     for (const handler of this.agentStateHandlers) {
       try { handler(delta); } catch { /* non-fatal */ }
@@ -2430,7 +2688,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     response: 'allow' | 'deny',
   ): Promise<boolean> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendTypedCommand({
+    const tmuxResponse = await this.sendRpcCommand({
       type: 'respond_agent_permission',
       requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),

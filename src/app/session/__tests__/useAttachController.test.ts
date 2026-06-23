@@ -142,6 +142,46 @@ describe('useAttachController', () => {
     )
   })
 
+  it('keeps existing session attaches classified as sessions when scoped to a workspace', async () => {
+    const attachSessionWithBundleRefresh = mock(async () => true)
+    const onBeforeAttach = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useAttachController({
+        flow: {
+          showInput: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        attachSessionWithBundleRefresh,
+        resolveWorkspaceRef: (workspaceId) => ({ backendKey: 'remote:machine-1', workspaceId }),
+        onBeforeAttach,
+      })
+    )
+
+    await result.current.attachFromSelection({
+      sessionId: 'session-view',
+      workspaceId: 'my-project:my-workspace',
+      viewOnly: true,
+    })
+
+    expect(onBeforeAttach).toHaveBeenCalledWith(expect.objectContaining({
+      target: 'session',
+      workspaceRef: undefined,
+    }))
+    expect(attachSessionWithBundleRefresh).toHaveBeenCalledWith(
+      {
+        backendKey: 'remote:machine-1',
+        workspaceId: 'my-project:my-workspace',
+      },
+      {
+        sessionId: 'session-view',
+        workspaceId: 'my-project:my-workspace',
+        viewOnly: true,
+      }
+    )
+  })
+
   it('resolves workspace attaches against the owning backend', async () => {
     const close = mock(() => {})
     const showInputCalls: Array<{

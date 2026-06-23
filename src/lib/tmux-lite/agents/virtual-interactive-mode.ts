@@ -30,6 +30,59 @@ export interface VirtualInteractiveModeHandle {
   readonly running: boolean;
 }
 
+export const CANCELLED_INPUT_BACKOFF_MS = 50;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface VirtualInteractiveInputLoopController {
+  isRunning: () => boolean;
+  stop: () => void;
+}
+
+export interface RunVirtualInteractiveInputLoopOptions {
+  controller: VirtualInteractiveInputLoopController;
+  onCrash: (error: unknown) => void;
+  sleep?: (ms: number) => Promise<void>;
+  cancelledInputBackoffMs?: number;
+}
+
+function resolveCancelledInputBackoffMs(value: number | undefined): number {
+  if (value === undefined) return CANCELLED_INPUT_BACKOFF_MS;
+  if (!Number.isFinite(value) || value < 1) {
+    throw new Error('cancelledInputBackoffMs must be a positive finite number');
+  }
+  return Math.floor(value);
+}
+
+export async function runVirtualInteractiveInputLoop(
+  mode: InteractiveModeInstance,
+  session: OmpAgentSession,
+  submitInteractiveInput: SubmitInteractiveInputFn,
+  options: RunVirtualInteractiveInputLoopOptions,
+): Promise<void> {
+  const sleep = options.sleep ?? sleepMs;
+  const cancelledInputBackoffMs = resolveCancelledInputBackoffMs(options.cancelledInputBackoffMs);
+
+  try {
+    while (options.controller.isRunning() && mode.isInitialized) {
+      const input = await mode.getUserInput();
+      if (!options.controller.isRunning()) break;
+      if (input.cancelled) {
+        await sleep(cancelledInputBackoffMs);
+        continue;
+      }
+      await submitInteractiveInput(mode, session, input);
+    }
+  } catch (error) {
+    if (options.controller.isRunning()) {
+      options.controller.stop();
+      options.onCrash(error);
+    }
+  }
+}
+
 export async function startVirtualInteractiveMode(
   session: OmpAgentSession,
   virtualTerminal: VirtualTerminal,
@@ -87,21 +140,22 @@ export async function startVirtualInteractiveMode(
   }
 
   let running = true;
-  const loopPromise = (async () => {
-    try {
-      while (running && mode.isInitialized) {
-        const input = await mode.getUserInput();
-        if (!running) break;
-        if (input.cancelled) continue;
-        await (submitInteractiveInput as any)(mode, session, input);
-      }
-    } catch (error) {
-      if (running) {
-        running = false;
+  const loopPromise = runVirtualInteractiveInputLoop(
+    mode,
+    session,
+    submitInteractiveInput as any,
+    {
+      controller: {
+        isRunning: () => running,
+        stop: () => {
+          running = false;
+        },
+      },
+      onCrash: (error) => {
         console.error('[virtual-interactive-mode] Input loop crashed:', error);
-      }
-    }
-  })();
+      },
+    },
+  );
 
   return {
     mode,

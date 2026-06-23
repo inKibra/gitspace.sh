@@ -66,6 +66,7 @@ import {
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
 import { getAgentState, watchAgentState } from '../lib/tmux-lite/cli.js';
+import { applyAgentDeltaToAgentState } from '../lib/tmux-lite/agent-state-reducer.js';
 import { fetchRelayIdentity } from './connect.js';
 import {
   discoverRelayCandidates as discoverRelayCandidatesBase,
@@ -1086,62 +1087,7 @@ export async function serveStart(options: {
   }
 
   const applyAgentDelta = (delta: import('../lib/tmux-lite/agent-event-manager.js').AgentStateUpdateDelta): void => {
-    if (delta.type === 'agent_state_snapshot') {
-      currentAgentSnapshot = { ...delta.workspaces };
-      return;
-    }
-    if (!('workspaceId' in delta)) {
-      return;
-    }
-    const state = currentAgentSnapshot[delta.workspaceId] ?? {
-      workspaceId: delta.workspaceId,
-      sessions: [],
-      statuses: {},
-      pendingPermissions: {},
-      lastMessages: {},
-    };
-    currentAgentSnapshot[delta.workspaceId] = state;
-    switch (delta.type) {
-      case 'agent_session_status':
-        state.statuses[delta.sessionId] = delta.status;
-        break;
-      case 'agent_permission_added':
-        if (!state.pendingPermissions[delta.sessionId]) state.pendingPermissions[delta.sessionId] = [];
-        state.pendingPermissions[delta.sessionId].push(delta.permission);
-        break;
-      case 'agent_permission_removed':
-        if (state.pendingPermissions[delta.sessionId]) {
-          state.pendingPermissions[delta.sessionId] = state.pendingPermissions[delta.sessionId].filter(
-            (permission) => permission.id !== delta.permissionId,
-          );
-        }
-        break;
-      case 'agent_session_error':
-        break;
-      case 'agent_last_message':
-        state.lastMessages[delta.sessionId] = delta.preview;
-        break;
-      case 'agent_session_created':
-        if (!state.sessions.some((session) => session.id === delta.sessionId)) {
-          state.sessions.push({ id: delta.sessionId, title: delta.title });
-        }
-        break;
-      case 'agent_session_updated': {
-        const index = state.sessions.findIndex((session) => session.id === delta.sessionId);
-        if (index === -1) {
-          state.sessions.push({ id: delta.sessionId, title: delta.title });
-        } else {
-          state.sessions[index] = { id: delta.sessionId, title: delta.title };
-        }
-        break;
-      }
-      case 'agent_session_deleted':
-        state.sessions = state.sessions.filter((session) => session.id !== delta.sessionId);
-        delete state.statuses[delta.sessionId];
-        delete state.pendingPermissions[delta.sessionId];
-        delete state.lastMessages[delta.sessionId];
-        break;
-    }
+    currentAgentSnapshot = applyAgentDeltaToAgentState(currentAgentSnapshot, delta);
   };
 
   let currentAgentSnapshot: Record<string, import('../lib/tmux-lite/agent-event-manager.js').WorkspaceAgentState> = {};

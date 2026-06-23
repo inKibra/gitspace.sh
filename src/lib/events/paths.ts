@@ -8,6 +8,7 @@ import { getWorkspaceDir, getWorkspaceRoot } from '../../core/paths.js';
 import { encodeProcessNameForPath } from '../processes/names.js';
 
 const DEFAULT_INSTANCE = 1;
+const EVENTS_STORAGE_DIR = join('.gitspace', 'events', 'processes');
 
 export interface WorkspaceRef {
   projectName: string;
@@ -46,7 +47,7 @@ export function getProcessEventsDir(
   processInstance?: number
 ): string {
   const instance = processInstance ?? DEFAULT_INSTANCE;
-  return join(workspacePath, '.events', 'processes', `${encodeProcessNameForPath(processName)}-${instance}`);
+  return join(workspacePath, EVENTS_STORAGE_DIR, `${encodeProcessNameForPath(processName)}-${instance}`);
 }
 
 export function getProcessSnapshotsPath(
@@ -61,7 +62,7 @@ export function getProcessSnapshotsPath(
  * Get all process events directories for a workspace
  */
 export function listProcessEventsDirs(workspacePath: string): string[] {
-  const base = join(workspacePath, '.events', 'processes');
+  const base = join(workspacePath, EVENTS_STORAGE_DIR);
   if (!existsSync(base)) return [];
   return readdirSync(base)
     .filter((entry: string) => !entry.startsWith('.'))

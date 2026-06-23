@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
-const mockKillSession = mock(async () => undefined);
+const mockTerminateSession = mock(async () => undefined);
 const mockCreateSession = mock(async () => ({ id: 'sess-1', name: 'proc:test:web:1' }));
 const mockIsProcessRunning = mock(() => false);
 const mockIsServerRunning = mock(async () => true);
@@ -11,7 +11,8 @@ const mockListSessionsFromRunningServer = mock(async () => [] as Array<{
 }>);
 
 mock.module('../tmux-lite/cli.js', () => ({
-  killSession: mockKillSession,
+  terminateSession: mockTerminateSession,
+  killServer: mock(async () => undefined),
   createSession: mockCreateSession,
   isProcessRunning: mockIsProcessRunning,
   isServerRunning: mockIsServerRunning,
@@ -23,7 +24,7 @@ const { resolveManagedSession } = await import('./ports.js');
 
 describe('resolveManagedSession', () => {
   beforeEach(() => {
-    mockKillSession.mockReset();
+    mockTerminateSession.mockReset();
     mockCreateSession.mockReset();
     mockIsProcessRunning.mockReset();
     mockIsServerRunning.mockReset();

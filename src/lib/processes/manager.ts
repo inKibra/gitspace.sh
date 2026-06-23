@@ -3,7 +3,7 @@
  */
 
 import { join } from 'path';
-import { listSessions, createSession, killSession } from '../tmux-lite/cli.js';
+import { listSessions, createSession, terminateSession } from '../tmux-lite/cli.js';
 import type { ProcessInstanceSpec, ProcessDefinition, ProcessesConfig } from '../../types/processes.js';
 import { getProcessInstances, loadProcessesConfig } from './config.js';
 import { buildProcessSessionName, parseProcessSessionName } from './names.js';
@@ -127,7 +127,7 @@ export async function stopProcessInstance(
   if (!target) return;
   disableProcessRestart(workspacePath, spec.name, spec.instance);
   clearProcessExit(workspacePath, spec.name, spec.instance);
-  await killSession(target.sessionId);
+  await terminateSession(target.sessionId);
 }
 
 export function getRestartConfig(definition: ProcessDefinition) {

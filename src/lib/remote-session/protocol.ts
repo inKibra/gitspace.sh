@@ -1,14 +1,15 @@
 /**
  * Remote transport protocol for encrypted client<->machine communication.
  *
- * Each operation has an explicit request type. The server responds with a
- * CommandResponse wrapping the tmux-lite Response for request/response
- * correlation. Unsolicited pushes (machine_snapshot, agent_state_*, etc.)
- * are sent without a request.
+ * Bounded operations use request/response correlation. Long-running work is
+ * accepted quickly and then reported through machine-owned operation events.
+ * Unsolicited pushes (machine_snapshot, operation_snapshot, operation_event,
+ * agent_state_*, etc.) are sent without a request.
  */
 
 // Re-export InboxItem from tmux-lite protocol
 export type { InboxItem } from "../tmux-lite/protocol.js";
+import type { PortConflictInfo } from '../processes/port-conflicts.js';
 
 // Re-export agent state types from AgentEventManager
 export type {
@@ -37,6 +38,54 @@ export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline } from 
 
 // Re-export tmux-lite attach-init/event types used on the machine-local Unix socket.
 export type { SessionCtrl, SessionEvent } from "../tmux-lite/protocol.js";
+
+export type RemoteOperationKind =
+  | 'project.create'
+  | 'project.prepare'
+  | 'project.finalize'
+  | 'project.delete'
+  | 'workspace.create'
+  | 'workspace.delete'
+  | 'workspace.scripts'
+  | 'space.command'
+  | 'review.github'
+  | 'workspace.editor.open';
+
+export type RemoteOperationState = 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface RemoteOperationScope {
+  projectName?: string;
+  workspaceId?: string;
+  workspaceName?: string;
+  sessionId?: string;
+}
+
+export interface RemoteOperationRecord {
+  operationId: string;
+  kind: RemoteOperationKind;
+  scope: RemoteOperationScope;
+  state: RemoteOperationState;
+  startedAt: number;
+  updatedAt: number;
+  phase?: string;
+  message?: string;
+  outputBase64?: string;
+  result?: unknown;
+  error?: { code?: string; message: string };
+}
+
+export type RemoteOperationEventType =
+  | 'operation_started'
+  | 'operation_progress'
+  | 'operation_output'
+  | 'operation_succeeded'
+  | 'operation_failed'
+  | 'operation_cancelled';
+
+export interface RemoteOperationEvent {
+  type: RemoteOperationEventType;
+  operation: RemoteOperationRecord;
+}
 
 export type RemoteSessionControl =
   | { type: 'resize'; streamId: number; cols: number; rows: number }
@@ -79,6 +128,11 @@ export interface DismissReplayRequest {
 export interface UndismissReplayRequest {
   type: 'undismiss_replay';
   replayId: string;
+}
+
+export interface DismissOperationRequest {
+  type: 'dismiss_operation';
+  operationId: string;
 }
 
 /** Attach to a session (existing or new) */
@@ -246,10 +300,12 @@ export interface SetWorkspacePhaseRequest {
   phase: import('../../types/config.js').WorkspacePhase;
 }
 
-export interface KillSessionRequest {
-  type: 'kill_session';
+export interface TerminateSessionRequest {
+  type: 'terminate_session';
   requestId: string;
   sessionId: string;
+  mode?: 'graceful' | 'force';
+  graceMs?: number;
 }
 
 // --- Process Management ---
@@ -261,6 +317,14 @@ export interface StartProcessRequest {
   processName: string;
   instance?: number;
 }
+
+export interface ResolvePortConflictRequest {
+  type: 'resolve_port_conflict';
+  requestId: string;
+  workspaceId: string;
+  conflict: PortConflictInfo;
+}
+
 
 export interface StopProcessRequest {
   type: 'stop_process';
@@ -669,6 +733,27 @@ export interface CommandResponse {
   response: import('../tmux-lite/protocol.js').Response;
 }
 
+export interface OperationAcceptedResponse {
+  type: 'operation_accepted';
+  requestId: string;
+  operation: RemoteOperationRecord;
+}
+
+export interface OperationSnapshotResponse {
+  type: 'operation_snapshot';
+  operations: RemoteOperationRecord[];
+}
+
+export interface OperationDismissedResponse {
+  type: 'operation_dismissed';
+  operationId: string;
+}
+
+export interface OperationEventResponse {
+  type: 'operation_event';
+  event: RemoteOperationEvent;
+}
+
 export interface RunSpaceCommandResponse {
   type: 'run_space_command_response';
   requestId: string;
@@ -742,6 +827,7 @@ export type ClientToMachineMessage =
   | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
+  | DismissOperationRequest
   | AttachSessionRequest
   | CancelPendingAttachRequest
   | DeleteWorkspaceRequest
@@ -764,8 +850,9 @@ export type ClientToMachineMessage =
   | RerunWorkspaceScriptsRequest
   | RunWorkspaceOpenScriptsRequest
   | RunWorkspaceScriptSelectionRequest
+  | ResolvePortConflictRequest
   | SetWorkspacePhaseRequest
-  | KillSessionRequest
+  | TerminateSessionRequest
   // Process management
   | StartProcessRequest
   | StopProcessRequest
@@ -820,6 +907,10 @@ export type MachineToClientMessage =
   | WorkspaceNoteResponse
   | ScriptOutputResponse
   | CommandResponse
+  | OperationAcceptedResponse
+  | OperationSnapshotResponse
+  | OperationEventResponse
+  | OperationDismissedResponse
   | RunSpaceCommandResponse
   | WorkspaceEditorsResponse
   | AgentStateSnapshotPush
@@ -871,6 +962,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_replay_timeline',
     'dismiss_replay',
     'undismiss_replay',
+    'dismiss_operation',
     'attach_session',
     'cancel_pending_attach',
     'delete_workspace',
@@ -892,9 +984,10 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'run_workspace_open_scripts',
     'run_workspace_script_selection',
     'set_workspace_phase',
-    'kill_session',
+    'terminate_session',
     'start_process',
     'stop_process',
+    'resolve_port_conflict',
     'request_events',
     'get_bundle_refresh_plan',
     'apply_bundle_refresh',

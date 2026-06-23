@@ -62,7 +62,7 @@ function setupModuleMocks(): void {
   mock.module('../../lib/tmux-lite/cli', () => ({
     isServerRunning: async () => false,
     listSessions: async () => [],
-    killSession: async () => {},
+    terminateSession: async () => {},
   }));
 
   mock.module('../secrets', () => ({

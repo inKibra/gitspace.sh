@@ -196,7 +196,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   const attachSession = useCallback((ref: BackendScopedWorkspaceRef, params: AttachSessionParams) => engine.attachSession(ref, params), [engine]);
   const detachSession = useCallback((ref: BackendScopedWorkspaceRef | BackendScopedSessionRef) => engine.detachSession(ref), [engine]);
   const cancelPendingScripts = useCallback((ref: BackendScopedWorkspaceRef) => engine.cancelPendingScripts(ref), [engine]);
-  const killSession = useCallback((ref: BackendScopedSessionRef) => engine.killSession(ref), [engine]);
+  const terminateSession = useCallback((ref: BackendScopedSessionRef) => engine.terminateSession(ref), [engine]);
   const deleteWorkspace = useCallback((ref: BackendScopedWorkspaceRef, params?: DeleteWorkspaceParams) => engine.deleteWorkspace(ref, params), [engine]);
   const setWorkspaceStatus = useCallback((ref: BackendScopedWorkspaceRef, phase: WorkspacePhase) => engine.setWorkspaceStatus(ref, phase), [engine]);
   const startProcess = useCallback((ref: BackendScopedWorkspaceRef, processName: string, instance?: number) => engine.startProcess(ref, processName, instance), [engine]);
@@ -262,7 +262,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     attachSession,
     detachSession,
     cancelPendingScripts,
-    killSession,
+    terminateSession,
     deleteWorkspace,
     setWorkspaceStatus,
     startProcess,

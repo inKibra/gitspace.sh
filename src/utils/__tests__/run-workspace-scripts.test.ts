@@ -20,11 +20,17 @@ let mockProjectConfig: {
   bundleConfirmHistory: Record<string, unknown>;
 };
 
+let mockSecretStore: Record<string, string>;
+let mockClearSecretsCacheCalls: number;
+let mockRequireClearBeforeSecretRead: boolean;
+
 type RunWorkspaceScriptsFn = typeof import('../run-workspace-scripts').runWorkspaceScripts;
+type RerunWorkspaceBundleScriptsFn = typeof import('../run-workspace-scripts').rerunWorkspaceBundleScripts;
 
 function setupModuleMocks(): void {
-  const secretStore: Record<string, string> = {};
-
+  mockSecretStore = {};
+  mockClearSecretsCacheCalls = 0;
+  mockRequireClearBeforeSecretRead = false;
   mock.module('../../core/config', () => ({
     readProjectConfig: () => mockProjectConfig,
     updateProjectConfig: () => {},
@@ -36,25 +42,30 @@ function setupModuleMocks(): void {
   }));
 
   mock.module('../secrets', () => ({
-    clearSecretsCache: () => {},
+    clearSecretsCache: () => {
+      mockClearSecretsCacheCalls += 1;
+    },
     setProjectSecret: async (_projectName: string, key: string, value: string) => {
-      secretStore[key] = value;
+      mockSecretStore[key] = value;
     },
     getProjectSecret: async (_projectName: string, key: string) => {
-      return key in secretStore ? secretStore[key] : null;
+      return key in mockSecretStore ? mockSecretStore[key] : null;
     },
     deleteProjectSecret: async (_projectName: string, key: string) => {
-      if (!(key in secretStore)) {
+      if (!(key in mockSecretStore)) {
         return false;
       }
-      delete secretStore[key];
+      delete mockSecretStore[key];
       return true;
     },
     getProjectSecrets: async (_projectName: string, keys: string[]) => {
       const out: Record<string, string> = {};
+      if (mockRequireClearBeforeSecretRead && mockClearSecretsCacheCalls === 0) {
+        return {};
+      }
       for (const key of keys) {
-        if (key in secretStore) {
-          out[key] = secretStore[key];
+        if (key in mockSecretStore) {
+          out[key] = mockSecretStore[key];
         }
       }
       return out;
@@ -62,33 +73,33 @@ function setupModuleMocks(): void {
     preloadProjectSecrets: async (_projectName: string, keys: string[]) => {
       const out: Record<string, string> = {};
       for (const key of keys) {
-        if (key in secretStore) {
-          out[key] = secretStore[key];
+        if (key in mockSecretStore) {
+          out[key] = mockSecretStore[key];
         }
       }
       return out;
     },
     deleteProjectSecrets: async (_projectName: string, keys: string[]) => {
       for (const key of keys) {
-        delete secretStore[key];
+        delete mockSecretStore[key];
       }
     },
     deleteAllProjectSecrets: async () => {
-      for (const key of Object.keys(secretStore)) {
-        delete secretStore[key];
+      for (const key of Object.keys(mockSecretStore)) {
+        delete mockSecretStore[key];
       }
     },
     setSecret: async (key: string, value: string) => {
-      secretStore[key] = value;
+      mockSecretStore[key] = value;
     },
     getSecret: async (key: string) => {
-      return key in secretStore ? secretStore[key] : null;
+      return key in mockSecretStore ? mockSecretStore[key] : null;
     },
     deleteSecret: async (key: string) => {
-      if (!(key in secretStore)) {
+      if (!(key in mockSecretStore)) {
         return false;
       }
-      delete secretStore[key];
+      delete mockSecretStore[key];
       return true;
     },
     migrateSecrets: async () => {},
@@ -112,10 +123,16 @@ function setupModuleMocks(): void {
   }));
 }
 
-async function loadRunWorkspaceScriptsModule(): Promise<RunWorkspaceScriptsFn> {
+async function loadRunWorkspaceScriptsModule(): Promise<{
+  runWorkspaceScripts: RunWorkspaceScriptsFn;
+  rerunWorkspaceBundleScripts: RerunWorkspaceBundleScriptsFn;
+}> {
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const mod = await import(`../run-workspace-scripts.ts?cacheBust=${cacheBust}`);
-  return mod.runWorkspaceScripts;
+  return {
+    runWorkspaceScripts: mod.runWorkspaceScripts,
+    rerunWorkspaceBundleScripts: mod.rerunWorkspaceBundleScripts,
+  };
 }
 
 describe('runWorkspaceScripts', () => {
@@ -125,6 +142,7 @@ describe('runWorkspaceScripts', () => {
   let setupScriptsDir: string;
   let selectScriptsDir: string;
   let runWorkspaceScripts: RunWorkspaceScriptsFn;
+  let rerunWorkspaceBundleScripts: RerunWorkspaceBundleScriptsFn;
 
   beforeEach(async () => {
     mockProjectConfig = {
@@ -136,7 +154,7 @@ describe('runWorkspaceScripts', () => {
     };
 
     setupModuleMocks();
-    runWorkspaceScripts = await loadRunWorkspaceScriptsModule();
+    ({ runWorkspaceScripts, rerunWorkspaceBundleScripts } = await loadRunWorkspaceScriptsModule());
 
     testDir = join(tmpdir(), `workspace-scripts-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     workspacePath = join(testDir, 'workspace');
@@ -430,6 +448,53 @@ describe('runWorkspaceScripts', () => {
         expect(result.phase).toBe('select');
         expect(result.error).toContain('exit code 1');
       }
+    });
+  });
+
+  describe('bundle script secrets', () => {
+    it('refreshes secrets before constructing setup script environment', async () => {
+      mockProjectConfig.bundleSecretKeys = ['secureDelegateApiKey'];
+      mockSecretStore.secureDelegateApiKey = 'fresh-secret';
+      mockRequireClearBeforeSecretRead = true;
+
+      const outputFile = join(testDir, 'secret-output.txt');
+      const setupScript = join(setupScriptsDir, '01-secret.sh');
+      writeFileSync(setupScript, `#!/bin/bash\necho "$SECURE_DELEGATE_API_KEY" > "${outputFile}"`);
+      chmodSync(setupScript, 0o755);
+
+      const result = await runWorkspaceScripts({
+        projectName: 'test-project',
+        workspacePath,
+        workspaceName: 'test-workspace',
+        repository: 'owner/repo',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockClearSecretsCacheCalls).toBeGreaterThan(0);
+      expect((await Bun.file(outputFile).text()).trim()).toBe('fresh-secret');
+    });
+
+    it('refreshes secrets before rerun workspace scripts', async () => {
+      mockProjectConfig.bundleSecretKeys = ['secureDelegateApiKey'];
+      mockSecretStore.secureDelegateApiKey = 'fresh-rerun-secret';
+      mockRequireClearBeforeSecretRead = true;
+
+      const outputFile = join(testDir, 'rerun-secret-output.txt');
+      const setupScript = join(setupScriptsDir, '01-secret.sh');
+      writeFileSync(setupScript, `#!/bin/bash\necho "$SECURE_DELEGATE_API_KEY" > "${outputFile}"`);
+      chmodSync(setupScript, 0o755);
+
+      const result = await rerunWorkspaceBundleScripts({
+        projectName: 'test-project',
+        workspacePath,
+        workspaceName: 'test-workspace',
+        repository: 'owner/repo',
+        selection: 'setup',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockClearSecretsCacheCalls).toBeGreaterThan(0);
+      expect((await Bun.file(outputFile).text()).trim()).toBe('fresh-rerun-secret');
     });
   });
 

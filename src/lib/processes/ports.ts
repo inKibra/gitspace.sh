@@ -1,47 +1,7 @@
-import { killSession, listSessionsFromRunningServer, isServerRunning } from '../tmux-lite/cli.js';
+import { terminateSession, listSessionsFromRunningServer, isServerRunning } from '../tmux-lite/cli.js';
 import { parseProcessSessionName } from './names.js';
-import type { ProcessPortProtocol, ResolvedProcessPort } from '../../types/processes.js';
-
-export interface PortConflictInfo {
-  port: number;
-  protocol: ProcessPortProtocol;
-  pid: number;
-  command?: string;
-  user?: string;
-  address?: string;
-  managedSessionId?: string;
-  managedSessionName?: string;
-  managedWorkspaceId?: string;
-  managedProcessName?: string;
-  managedInstance?: number;
-}
-
-export class PortConflictError extends Error {
-  readonly code = 'PORT_CONFLICT';
-  readonly conflicts: PortConflictInfo[];
-
-  constructor(processName: string, conflicts: PortConflictInfo[]) {
-    super(buildConflictMessage(processName, conflicts));
-    this.name = 'PortConflictError';
-    this.conflicts = conflicts;
-  }
-}
-
-function buildConflictMessage(processName: string, conflicts: PortConflictInfo[]): string {
-  const summary = conflicts
-    .map((conflict) => {
-      const owner = conflict.managedSessionId
-        ? `${conflict.managedProcessName ?? 'service'}#${conflict.managedInstance ?? 1} (${conflict.managedWorkspaceId ?? 'managed'})`
-        : `${conflict.command ?? 'unknown process'} (pid ${conflict.pid})`;
-      return `:${conflict.port} -> ${owner}`;
-    })
-    .join(', ');
-  return `Cannot start ${processName}; port already in use: ${summary}`;
-}
-
-export function normalizeProcessPortProtocol(protocol?: ProcessPortProtocol): ProcessPortProtocol {
-  return protocol === 'tcp' ? 'tcp' : 'http';
-}
+import type { ResolvedProcessPort } from '../../types/processes.js';
+import { normalizeProcessPortProtocol, PortConflictError, type PortConflictInfo } from './port-conflicts.js';
 
 export function inspectListeningProcess(port: number): Array<{ pid: number; command?: string; user?: string; address?: string }> {
   const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn']);
@@ -168,7 +128,7 @@ export async function ensurePortsAvailable(args: { processName: string; ports?: 
 
 export async function resolvePortConflict(conflict: PortConflictInfo): Promise<void> {
   if (conflict.managedSessionId) {
-    await killSession(conflict.managedSessionId);
+    await terminateSession(conflict.managedSessionId);
   } else {
     process.kill(conflict.pid, 'SIGTERM');
   }

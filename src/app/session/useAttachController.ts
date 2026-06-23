@@ -145,7 +145,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     backendKeyOverride?: BackendKey,
   ): Promise<boolean> => {
     const attachParams = withAttachSize(params)
-    const target: AttachTarget = attachParams.workspaceId ? 'workspace' : 'session'
+    const target: AttachTarget = attachParams.sessionId || !attachParams.workspaceId ? 'session' : 'workspace'
     const projectName = attachParams.workspaceId
       ? resolveProjectName?.(attachParams.workspaceId) ??
         parseProjectNameFromWorkspaceId(attachParams.workspaceId) ??
@@ -167,7 +167,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
           workspaceId: '',
         }
     const attachParamsWithBackend: WorkspaceScopedBundleRefreshAttachParams =
-      attachParams.workspaceId
+      attachParams.workspaceId && !attachParams.sessionId
         ? {
             ...attachParams,
             backendKey: ref.backendKey,
@@ -178,7 +178,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       target,
       params: attachParams,
       projectName,
-      workspaceRef: attachParams.workspaceId ? ref : undefined,
+      workspaceRef: target === 'workspace' && attachParams.workspaceId ? ref : undefined,
     }
 
     await onBeforeAttach?.(context)

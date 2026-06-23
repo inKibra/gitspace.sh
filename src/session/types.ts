@@ -3,6 +3,7 @@ import type {
   ProjectInfo,
   SessionInfo,
   ScriptOutputResponse,
+  RemoteOperationRecord,
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
@@ -53,6 +54,7 @@ export interface BackendSessionState {
   sessions: SessionInfo[];
   replays: ReplayInfo[];
   machineSnapshot: MachineSnapshot | null;
+  operations: Record<string, RemoteOperationRecord>;
 
   inbox: InboxItem[];
   inboxUnreadCount: number;
@@ -78,6 +80,8 @@ export interface BackendSessionState {
 
   pendingDialogRequest: import('../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest | null;
   agentWorkingMessage: string | undefined;
+  pendingDialogByAgentSessionId: Record<string, import('../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogRequest>;
+  workingMessageByAgentSessionId: Record<string, string>;
 }
 
 export interface SessionEngineState {
@@ -116,6 +120,21 @@ export type SessionEngineAction =
       type: 'SET_SCRIPT_STATE';
       backendKey: BackendKey;
       scriptState: ScriptRuntimeState | null;
+    }
+  | {
+      type: 'SET_OPERATIONS';
+      backendKey: BackendKey;
+      operations: RemoteOperationRecord[];
+    }
+  | {
+      type: 'APPLY_OPERATION_EVENT';
+      backendKey: BackendKey;
+      operation: RemoteOperationRecord;
+    }
+  | {
+      type: 'DISMISS_OPERATION';
+      backendKey: BackendKey;
+      operationId: string;
     }
   | {
       type: 'SET_ATTACHED_SESSION';
@@ -164,6 +183,7 @@ export type SessionEngineAction =
   | {
       type: 'SET_HOST_UI_WORKING_MESSAGE';
       backendKey: BackendKey;
+      sessionId: string;
       message: string | undefined;
     }
   | { type: 'CLEAR_HOST_UI_DIALOG'; backendKey: BackendKey }

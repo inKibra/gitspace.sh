@@ -1,4 +1,4 @@
-import { PortConflictError } from '../../lib/processes/ports.js';
+import { PortConflictError } from '../../lib/processes/port-conflicts.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
 
 type TmuxErrorResponse = Extract<TmuxResponse, { type: 'error' }>;

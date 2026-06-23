@@ -25,7 +25,7 @@ import { shouldSkipSecretDependentScripts } from './secret-runtime.js';
 import { logger } from '../utils/logger.js';
 import {
   listSessions,
-  killSession,
+  terminateSession,
   isServerRunning,
 } from '../lib/tmux-lite/cli.js';
 import {
@@ -141,11 +141,11 @@ export async function deleteWorkspaceCore(
       }
       for (const session of workspaceSessions) {
         try {
-          await killSession(session.id);
+          await terminateSession(session.id);
           result.sessionsKilled++;
-          logger.debug(`Killed session ${session.name} (${session.id})`);
+          logger.debug(`Terminated session ${session.name} (${session.id})`);
         } catch (e) {
-          logger.debug(`Failed to kill session ${session.id}: ${e}`);
+          logger.debug(`Failed to terminate session ${session.id}: ${e}`);
         }
       }
     }

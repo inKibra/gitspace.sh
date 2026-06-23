@@ -15,9 +15,9 @@ import { spawn, type Subprocess } from 'bun';
 import { join, basename } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { createServer, type AddressInfo } from 'net';
-import { tmpdir } from 'os';
 
-import { clearSandboxBootstrapMetadata, validateSandboxBootstrap } from './dev-bootstrap.js';
+
+import { clearSandboxBootstrapMetadata, createSandboxSecretsStore, validateSandboxBootstrap, writeSandboxSecretsFile } from './dev-bootstrap.js';
 import { createRootInviteToken } from '../src/lib/tmux-lite/crypto/root-invites.js';
 import { mnemonicToUserIdentity } from '../src/lib/tmux-lite/crypto/user-identity.js';
 
@@ -124,6 +124,14 @@ function deriveSandboxName(): string {
   const worktreeName = basename(ROOT);
   // Sanitize to alphanumeric + dash/underscore (TMUX_LITE_SANDBOX requirement)
   return worktreeName.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+/, 'dev-');
+}
+
+function deriveDevStateDir(): string {
+  return join(ROOT, '.gitspace', 'dev');
+}
+
+function deriveDevRuntimeDir(): string {
+  return join(deriveDevStateDir(), 'runtime');
 }
 
 
@@ -265,15 +273,17 @@ async function main(): Promise<void> {
     findFreePort(DEFAULT_DEV_WEB_PORT),
   ]);
 
-  // Persistent sandbox directory tree — survives across dev:web restarts so
-  // bundle secrets, identity, and relay config don't need to be re-entered.
-  const sandboxDir = join(tmpdir(), `gssh-dev-${sandboxName}`);
-  const identityDir = join(sandboxDir, 'identity');
-  const controlDir = join(sandboxDir, 'relay-control');
-  const relayDir = join(sandboxDir, 'relay');
-  const serveDaemonDir = join(sandboxDir, 'serve');
-  const traceLogPath = join(sandboxDir, 'gitspace-runtime-trace.jsonl');
-  for (const dir of [identityDir, controlDir, relayDir, serveDaemonDir]) {
+  // Persistent per-worktree dev directory — survives dev:web restarts and
+  // system temp cleanup so bundle secrets, identity, and relay config don't
+  // need to be re-entered.
+  const devStateDir = deriveDevStateDir();
+  const runtimeDir = deriveDevRuntimeDir();
+  const identityDir = join(devStateDir, 'identity');
+  const controlDir = join(devStateDir, 'relay-control');
+  const relayDir = join(devStateDir, 'relay');
+  const serveDaemonDir = join(runtimeDir, 'serve');
+  const traceLogPath = join(runtimeDir, 'gitspace-runtime-trace.jsonl');
+  for (const dir of [identityDir, controlDir, relayDir, serveDaemonDir, runtimeDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
@@ -282,8 +292,8 @@ async function main(): Promise<void> {
   // sandbox identity set — identity, secrets, browser identity, and persisted
   // machine metadata are interdependent so partial repair is unsafe.
   const keypairPath = join(identityDir, 'keypair.json');
-  const secretsPath = join(sandboxDir, 'secrets.json');
-  const devIdentityPath = join(sandboxDir, 'dev-browser-identity.json');
+  const secretsPath = join(devStateDir, 'secrets.json');
+  const devIdentityPath = join(devStateDir, 'dev-browser-identity.json');
   const machineIdentityPath = join(identityDir, 'machine.json');
   const relayConfigPath = join(identityDir, 'relay.json');
   const bootstrapValidation = validateSandboxBootstrap({
@@ -293,6 +303,7 @@ async function main(): Promise<void> {
     machineIdentityPath,
     relayConfigPath,
   });
+  log('dev', `Dev state: ${devStateDir}`);
   const isFirstRun = !bootstrapValidation.valid;
 
   log('dev', `Sandbox: ${sandboxName}${isFirstRun ? ' (regenerating identity)' : ''}`);
@@ -337,14 +348,8 @@ async function main(): Promise<void> {
     writeFileSync(keypairPath, JSON.stringify(genOutput.keypairStorage, null, 2), { mode: 0o600 });
 
     // Seed test secrets file with user root identity (bypasses system keychain)
-    const unifiedBlob = {
-      global: { USER_ROOT_IDENTITY: JSON.stringify(genOutput.userRootStored) },
-      projects: {},
-      metadata: { schemaVersion: 2, legacyMigrationComplete: true, legacyEntriesRetained: false },
-    };
-    writeFileSync(secretsPath, JSON.stringify({
-      entries: { 'com.gitspace:secrets': JSON.stringify(unifiedBlob) },
-    }), { mode: 0o600 });
+    const secretsStore = createSandboxSecretsStore(secretsPath, genOutput.userRootStored);
+    writeSandboxSecretsFile(secretsPath, secretsStore);
 
     // Write browser identity for the Vite dev endpoint
     writeFileSync(devIdentityPath, JSON.stringify(genOutput.browserIdentity));
@@ -467,7 +472,7 @@ async function main(): Promise<void> {
   log('dev', `  ${BOLD}Open:${RESET}  http://localhost:${vitePort}?enroll=${enrollToken}`);
   log('dev', '');
   log('dev', `  Relay:   ws://127.0.0.1:${relayPort}/ws`);
-  log('dev', `  Sandbox: ${sandboxDir}`);
+  log('dev', `  Dev state: ${devStateDir}`);
   log('dev', '');
   log('dev', `${DIM}The enrollment link auto-authenticates the browser.${RESET}`);
   log('dev', `${DIM}Press Ctrl+C to stop all services${RESET}`);

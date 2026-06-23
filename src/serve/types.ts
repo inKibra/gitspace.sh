@@ -24,7 +24,7 @@ export function canWrite(accessType: AccessType | undefined): boolean {
 /**
  * Check if an access type grants management permission
  *
- * Management includes: create/kill sessions, delete workspaces, etc.
+ * Management includes: create/terminate sessions, delete workspaces, etc.
  * Only 'full' access allows management operations.
  */
 export function canManage(accessType: AccessType | undefined): boolean {

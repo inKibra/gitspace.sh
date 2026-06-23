@@ -531,11 +531,16 @@ export function useBundleRefreshAttachFlow(
       ref: BackendScopedWorkspaceRef,
       params: BundleRefreshAttachParams
     ): Promise<boolean> => {
+      if (params.sessionId) {
+        setRecoverableParams(null);
+        await Promise.resolve(optionsRef.current.attachSession(params));
+        return true;
+      }
+
       // "Attach anyway" retries intentionally skip scripts and bundle refresh
       // handling. Run them directly so stale commandError state cannot reopen
       // the bundle-refresh prompt loop for this attempt.
       if (params.scriptPolicy === 'skip') {
-        console.debug('[bundle-refresh-attach] attach anyway retry', JSON.stringify(params));
         setRecoverableParams(null);
         await Promise.resolve(optionsRef.current.attachSession(params));
         return true;

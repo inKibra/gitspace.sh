@@ -16,6 +16,7 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
       sessions: [],
       replays: [],
       machineSnapshot: null,
+      operations: {},
       inbox: [],
       inboxUnreadCount: 0,
     notificationConfig: null,
@@ -33,6 +34,8 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
     savedEventFilters: [],
     pendingDialogRequest: null,
     agentWorkingMessage: undefined,
+    pendingDialogByAgentSessionId: {},
+    workingMessageByAgentSessionId: {},
   };
 }
 
@@ -271,6 +274,56 @@ export function sessionEngineReducer(
       };
     }
 
+    case 'SET_OPERATIONS': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            operations: Object.fromEntries(action.operations.map((operation) => [operation.operationId, operation])),
+          },
+        },
+      };
+    }
+
+    case 'APPLY_OPERATION_EVENT': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            operations: {
+              ...backend.operations,
+              [action.operation.operationId]: action.operation,
+            },
+          },
+        },
+      };
+    }
+
+    case 'DISMISS_OPERATION': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      const operations = { ...backend.operations };
+      delete operations[action.operationId];
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            operations,
+          },
+        },
+      };
+    }
+
     case 'SET_ATTACHED_SESSION': {
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
@@ -325,8 +378,8 @@ export function sessionEngineReducer(
             attachedWorkspaceId: nextWorkspaceId,
             attachedAgentSessionId: attached ? (action.agentSessionId ?? null) : null,
             attachedPanes: nextAttachedPanes,
-            pendingDialogRequest: attached ? backend.pendingDialogRequest : null,
-            agentWorkingMessage: attached ? backend.agentWorkingMessage : undefined,
+            pendingDialogRequest: attached && action.agentSessionId ? backend.pendingDialogByAgentSessionId[action.agentSessionId] ?? null : null,
+            agentWorkingMessage: attached && action.agentSessionId ? backend.workingMessageByAgentSessionId[action.agentSessionId] : undefined,
             pendingAgentAttach: false,
           },
         },
@@ -336,6 +389,15 @@ export function sessionEngineReducer(
     case 'ADD_PANE': {
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
+      const paneWorkspaceId = action.pane.workspaceId ?? backend.attachedWorkspaceId;
+      const paneSessionName = action.pane.sessionName ?? backend.attachedSessionName;
+      const paneMeta = action.pane.meta ?? backend.attachedSessionMeta;
+      const nextPane = {
+        ...action.pane,
+        sessionName: paneSessionName,
+        meta: paneMeta,
+        workspaceId: paneWorkspaceId,
+      };
       return {
         ...state,
         backends: {
@@ -343,7 +405,12 @@ export function sessionEngineReducer(
           [action.backendKey]: {
             ...backend,
             mode: 'attached',
-            attachedPanes: { ...backend.attachedPanes, [action.pane.paneId]: action.pane },
+            attachedSessionId: nextPane.paneId === 'default' ? nextPane.sessionId : backend.attachedSessionId,
+            attachedSessionName: nextPane.paneId === 'default' ? paneSessionName : backend.attachedSessionName,
+            attachedSessionMeta: nextPane.paneId === 'default' ? paneMeta : backend.attachedSessionMeta,
+            attachedWorkspaceId: nextPane.paneId === 'default' ? paneWorkspaceId : backend.attachedWorkspaceId,
+            attachedAgentSessionId: nextPane.paneId === 'default' ? nextPane.agentSessionId : backend.attachedAgentSessionId,
+            attachedPanes: { ...backend.attachedPanes, [nextPane.paneId]: nextPane },
             pendingAgentAttach: false,
           },
         },
@@ -454,13 +521,18 @@ export function sessionEngineReducer(
     case 'SET_HOST_UI_DIALOG': {
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
+      const pendingDialogByAgentSessionId = {
+        ...backend.pendingDialogByAgentSessionId,
+        [action.request.sessionId]: action.request,
+      };
       return {
         ...state,
         backends: {
           ...state.backends,
           [action.backendKey]: {
             ...backend,
-            pendingDialogRequest: action.request,
+            pendingDialogByAgentSessionId,
+            pendingDialogRequest: backend.attachedAgentSessionId === action.request.sessionId ? action.request : backend.pendingDialogRequest,
           },
         },
       };
@@ -469,13 +541,20 @@ export function sessionEngineReducer(
     case 'SET_HOST_UI_WORKING_MESSAGE': {
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
+      const workingMessageByAgentSessionId = { ...backend.workingMessageByAgentSessionId };
+      if (action.message) {
+        workingMessageByAgentSessionId[action.sessionId] = action.message;
+      } else {
+        delete workingMessageByAgentSessionId[action.sessionId];
+      }
       return {
         ...state,
         backends: {
           ...state.backends,
           [action.backendKey]: {
             ...backend,
-            agentWorkingMessage: action.message,
+            workingMessageByAgentSessionId,
+            agentWorkingMessage: backend.attachedAgentSessionId === action.sessionId ? action.message : backend.agentWorkingMessage,
           },
         },
       };
@@ -484,12 +563,17 @@ export function sessionEngineReducer(
     case 'CLEAR_HOST_UI_DIALOG': {
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
+      const pendingDialogByAgentSessionId = { ...backend.pendingDialogByAgentSessionId };
+      if (backend.pendingDialogRequest) {
+        delete pendingDialogByAgentSessionId[backend.pendingDialogRequest.sessionId];
+      }
       return {
         ...state,
         backends: {
           ...state.backends,
           [action.backendKey]: {
             ...backend,
+            pendingDialogByAgentSessionId,
             pendingDialogRequest: null,
           },
         },

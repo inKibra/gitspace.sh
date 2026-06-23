@@ -6,6 +6,12 @@ import {
 } from './session-terminal-page-navigation.js';
 import { isIOSDevice } from '../utils/device.web.js';
 
+import {
+  terminalMemoryDebugDecrement,
+  terminalMemoryDebugGauge,
+  terminalMemoryDebugIncrement,
+  terminalMemoryDebugMax,
+} from '../utils/terminal-memory-debug.js';
 
 const WEB_TERMINAL_SCROLLBACK = 50_000;
 interface Props {
@@ -53,6 +59,36 @@ const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
 const MAX_TERMINAL_WRITE_BYTES = 16_384;
 const MAX_TERMINAL_DRAIN_BYTES = 64 * 1024;
 const MAX_TERMINAL_DRAIN_MS = 8;
+const MIN_TERMINAL_WRITE_BYTES = 512;
+
+function writeTerminalSlice(term: GhosttyTerminal, slice: Uint8Array): boolean {
+  try {
+    term.write(slice);
+    return true;
+  } catch (error) {
+    terminalMemoryDebugIncrement('terminal.write.failed');
+    terminalMemoryDebugMax('terminal.write.failed.maxSliceBytes', slice.byteLength);
+    if (slice.byteLength > MIN_TERMINAL_WRITE_BYTES) {
+      const midpoint = findUtf8SafeEnd(slice, 0, Math.floor(slice.byteLength / 2));
+      if (midpoint > 0 && midpoint < slice.byteLength) {
+        terminalMemoryDebugIncrement('terminal.write.retrySplit');
+        const firstOk = writeTerminalSlice(term, slice.subarray(0, midpoint));
+        const secondOk = writeTerminalSlice(term, slice.subarray(midpoint));
+        return firstOk && secondOk;
+      }
+    }
+    console.error('[session-terminal:web] dropping terminal write slice after term.write failed', {
+      sliceLength: slice.byteLength,
+      viewportY: term.viewportY,
+      cols: term.cols,
+      rows: term.rows,
+      error,
+    });
+    terminalMemoryDebugIncrement('terminal.write.droppedSlice');
+    terminalMemoryDebugIncrement('terminal.write.droppedBytes', slice.byteLength);
+    return false;
+  }
+}
 
 function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): number {
   let end = maxEnd;
@@ -68,7 +104,7 @@ function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): num
   return end;
 }
 
-function createTerminalWritePump(term: GhosttyTerminal): {
+function createTerminalWritePump(term: GhosttyTerminal, onFatalWriteError: () => void): {
   enqueue(data: Uint8Array): void;
   dispose(): void;
 } {
@@ -77,6 +113,24 @@ function createTerminalWritePump(term: GhosttyTerminal): {
   let disposed = false;
   let frameId: number | null = null;
 
+  let queuedBytes = 0;
+  let fatal = false;
+
+  const markFatal = () => {
+    if (fatal) return;
+    fatal = true;
+    disposed = true;
+    queue.length = 0;
+    queuedBytes = 0;
+    terminalMemoryDebugIncrement('terminal.writePump.fatal');
+    terminalMemoryDebugGauge('terminal.writePump.queueChunks', 0);
+    terminalMemoryDebugGauge('terminal.writePump.queuedBytes', 0);
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+      frameId = null;
+    }
+    onFatalWriteError();
+  };
   const schedule = () => {
     if (scheduled || disposed) return;
     scheduled = true;
@@ -86,9 +140,11 @@ function createTerminalWritePump(term: GhosttyTerminal): {
   const drain = () => {
     frameId = null;
     scheduled = false;
-    if (disposed) return;
-
+    if (disposed || fatal) return;
     const startedAt = performance.now();
+    terminalMemoryDebugIncrement('terminal.writePump.drain');
+    terminalMemoryDebugGauge('terminal.writePump.queueChunks', queue.length);
+    terminalMemoryDebugGauge('terminal.writePump.queuedBytes', queuedBytes);
     let bytesWritten = 0;
 
     while (queue.length > 0) {
@@ -98,28 +154,23 @@ function createTerminalWritePump(term: GhosttyTerminal): {
       while (offset < chunk.length) {
         const budgetRemaining = Math.max(1, MAX_TERMINAL_DRAIN_BYTES - bytesWritten);
         const maxEnd = Math.min(offset + MAX_TERMINAL_WRITE_BYTES, offset + budgetRemaining, chunk.length);
-        const end = findUtf8SafeEnd(chunk, offset, maxEnd);
-
-        try {
-          term.write(chunk.subarray(offset, end));
-        } catch (error) {
-          console.error('[session-terminal:web] term.write failed', {
-            sliceLength: end - offset,
-            totalLength: chunk.length,
-            offset,
-            viewportY: term.viewportY,
-            cols: term.cols,
-            rows: term.rows,
-            error,
-          });
-          throw error;
+        let end = findUtf8SafeEnd(chunk, offset, maxEnd);
+        if (end <= offset) {
+          terminalMemoryDebugIncrement('terminal.writePump.invalidUtf8Boundary');
+          end = Math.min(offset + 1, chunk.length);
         }
 
+        const slice = chunk.subarray(offset, end);
+        if (!writeTerminalSlice(term, slice)) {
+          markFatal();
+          return;
+        }
         bytesWritten += end - offset;
         offset = end;
 
         if (bytesWritten >= MAX_TERMINAL_DRAIN_BYTES || performance.now() - startedAt >= MAX_TERMINAL_DRAIN_MS) {
           if (offset < chunk.length) {
+            queuedBytes -= offset;
             queue[0] = chunk.subarray(offset);
           } else {
             queue.shift();
@@ -130,18 +181,24 @@ function createTerminalWritePump(term: GhosttyTerminal): {
       }
 
       queue.shift();
+      queuedBytes -= chunk.length;
     }
   };
 
   return {
     enqueue(data: Uint8Array) {
-      if (disposed || data.byteLength === 0) return;
+      if (disposed || fatal || data.byteLength === 0) return;
       queue.push(new Uint8Array(data));
+      queuedBytes += data.byteLength;
+      terminalMemoryDebugIncrement('terminal.writePump.enqueue');
+      terminalMemoryDebugMax('terminal.writePump.maxQueuedBytes', queuedBytes);
+      terminalMemoryDebugMax('terminal.writePump.maxQueueChunks', queue.length);
       schedule();
     },
     dispose() {
       disposed = true;
       queue.length = 0;
+      queuedBytes = 0;
       if (frameId !== null) {
         cancelAnimationFrame(frameId);
         frameId = null;
@@ -302,6 +359,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   useEffect(() => {
     if (!containerRef.current || initializedRef.current) return;
     initializedRef.current = true;
+    terminalMemoryDebugIncrement('terminal.mountEffect');
     let disposed = false;
     let teardown: (() => void) | null = null;
 
@@ -318,6 +376,8 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         const cs = getComputedStyle(document.documentElement);
         const v = (name: string) => cs.getPropertyValue(name).trim();
 
+        terminalMemoryDebugIncrement('terminal.created');
+        terminalMemoryDebugIncrement('terminal.activeInstances');
         const term = new GhosttyTerminal({
           scrollback: WEB_TERMINAL_SCROLLBACK,
           fontSize: 14,
@@ -349,6 +409,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         });
 
         term.open(container);
+        terminalMemoryDebugIncrement('terminal.opened');
         terminalRef.current = term;
 
         const fitAddon = new FitAddon();
@@ -619,19 +680,26 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           syncFollowOutputState();
         });
 
-        const writePump = createTerminalWritePump(term);
+        const writePump = createTerminalWritePump(term, () => {
+          setWriteCallbackRef.current(null);
+          terminalMemoryDebugIncrement('terminal.writeCallback.clear.fatal');
+        });
+        terminalMemoryDebugIncrement('terminal.writeCallback.register');
         setWriteCallbackRef.current((data: Uint8Array) => {
           writePump.enqueue(data);
         });
 
         const handleResize = () => {
+        terminalMemoryDebugIncrement('terminal.resize');
           fitAddon.fit();
+          terminalMemoryDebugIncrement('terminal.fit');
           if (term.cols && term.rows && onResizeRef.current) {
             onResizeRef.current(term.cols, term.rows);
           }
         };
 
         const observer = new ResizeObserver(() => {
+          terminalMemoryDebugIncrement('terminal.resizeObserver');
           handleResize();
         });
         observer.observe(container);
@@ -647,6 +715,8 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         }
 
         teardown = () => {
+          terminalMemoryDebugIncrement('terminal.disposed');
+          terminalMemoryDebugDecrement('terminal.activeInstances');
           container.removeEventListener('keydown', handleKeyDown, true);
           if (helperTextarea) {
             helperTextarea.removeEventListener('focus', handleHelperFocus);
@@ -666,6 +736,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           term.dispose();
           terminalRef.current = null;
           setWriteCallbackRef.current(null);
+          terminalMemoryDebugIncrement('terminal.writeCallback.clear');
         };
       })
       .catch(() => {
@@ -680,6 +751,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         teardown();
       } else {
         setWriteCallbackRef.current(null);
+        terminalMemoryDebugIncrement('terminal.writeCallback.clear.beforeReady');
       }
     };
   }, [syncFollowOutputState, tryConsumePageNavigation]);

@@ -60,7 +60,7 @@ export interface UseLifecycleControllerResult {
   openCreateProjectFlow: () => void;
   openCreateWorkspaceFlow: (projectName?: string | null) => void;
   openDeleteProjectFlow: (projectName: string) => void;
-  openCreateMenu: (projectName?: string | null) => void;
+  openCreateMenu: () => void;
 }
 
 function toErrorMessage(error: unknown, fallback: string): string {
@@ -750,7 +750,7 @@ export function useLifecycleController(
     });
   }, [deleteProject, flow, refreshAll]);
 
-  const openCreateMenu = useCallback((projectName?: string | null) => {
+  const openCreateMenu = useCallback(() => {
     const projects = getProjectNames();
     if (projects.length === 0) {
       openCreateProjectFlow();
@@ -765,7 +765,7 @@ export function useLifecycleController(
       ],
       onSelect: (value) => {
         if (value === 'workspace') {
-          openCreateWorkspaceFlow(projectName);
+          openCreateWorkspaceFlow(null);
           return;
         }
         openCreateProjectFlow();

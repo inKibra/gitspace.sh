@@ -63,6 +63,12 @@ interface AutocompleteState {
   /** The trigger position in the text (index of / or @, or active replacement span for slash args) */
   triggerPos: number;
 }
+
+interface CommandAutocompleteItem {
+  label: string;
+  description?: string;
+  kind?: string;
+}
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -246,8 +252,12 @@ export function NativeComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const commandsCacheRef = useRef<Array<{ label: string; description?: string; kind?: string }> | null>(null);
+  const commandsCacheRef = useRef<CommandAutocompleteItem[] | null>(null);
   const fileSuggestionsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    commandsCacheRef.current = null;
+  }, [onRequestCommands]);
 
   // Controls are disabled while submitting or externally disabled.
   // isBusy does not disable input — it shows the abort button instead of send.
@@ -343,10 +353,14 @@ export function NativeComposer({
     if (!commandsCacheRef.current) {
       try {
         const cmds = await onRequestCommands();
-        commandsCacheRef.current = cmds.map(c => ({ label: c.name, description: c.description, kind: c.kind, insertText: `${insertPrefix}${c.name} ` }));
+        commandsCacheRef.current = cmds.map(c => ({ label: c.name, description: c.description, kind: c.kind }));
       } catch {
-        commandsCacheRef.current = [];
+        commandsCacheRef.current = null;
       }
+    }
+    if (!commandsCacheRef.current) {
+      setAutocomplete(prev => ({ ...prev, items: [], selectedIndex: 0, loading: false, triggerPos }));
+      return;
     }
     const items = commandsCacheRef.current
       .filter(c => c.label.toLowerCase().startsWith(filter.toLowerCase()))

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { toBackendScopedWorkspaceKey, type BackendScopedWorkspaceRef } from '../../machine/multi/types.js';
 import type { WorkspaceScriptPhase } from '../../types/script-phase.js';
+import type { RemoteOperationKind, RemoteOperationRecord } from '../../lib/remote-session/protocol.js';
 
 export type WorkspaceLifecycleScriptPhase = WorkspaceScriptPhase | 'remove';
 
@@ -12,6 +13,7 @@ export type WorkspaceRemoveResult =
 export interface WorkspaceRemovalTask {
   id: string;
   kind: 'workspace-lifecycle';
+  operationKind?: RemoteOperationKind;
   label: string;
   workspaceName: string;
   workspaceId: string;
@@ -62,6 +64,82 @@ function appendLogLines(existing: string[], chunk: Uint8Array): string[] {
 
 function isLeftoversMessage(message: string): boolean {
   return /leftover|preserved/i.test(message);
+}
+
+function decodeOperationOutput(outputBase64: string | undefined): string[] {
+  if (!outputBase64) return [];
+  try {
+    const binary = globalThis.atob(outputBase64);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return appendLogLines([], bytes);
+  } catch {
+    return [];
+  }
+}
+
+function workspaceNameFromOperation(operation: RemoteOperationRecord): string {
+  return operation.scope.workspaceName
+    ?? operation.scope.workspaceId?.split(':').slice(-1)[0]
+    ?? 'workspace';
+}
+
+function phaseFromOperation(operation: RemoteOperationRecord): WorkspaceRemovalTask['phase'] {
+  if (operation.kind === 'workspace.delete') {
+    return operation.state === 'succeeded' ? 'git-worktree-remove' : 'remove';
+  }
+  const phase = operation.phase;
+  if (phase === 'pre' || phase === 'setup' || phase === 'select' || phase === 'remove') {
+    return phase;
+  }
+  return operation.kind === 'workspace.scripts' ? 'setup' : undefined;
+}
+
+function statusFromOperation(operation: RemoteOperationRecord): WorkspaceRemovalTask['status'] {
+  if (operation.state === 'running') return 'running';
+  if (operation.state === 'succeeded') return 'succeeded';
+  return 'failed';
+}
+
+function labelFromOperation(operation: RemoteOperationRecord): string {
+  const workspaceName = workspaceNameFromOperation(operation);
+  if (operation.kind === 'workspace.delete') return `Remove ${workspaceName}`;
+  if (operation.kind === 'workspace.scripts') return `${phaseLabel(phaseFromOperation(operation) === 'select' ? 'select' : 'setup')} ${workspaceName}`;
+  return workspaceName;
+}
+
+export function workspaceOperationsToRemovalTasks(
+  operations: Record<string, RemoteOperationRecord>,
+  backendKey: string,
+): WorkspaceRemovalTask[] {
+  return Object.values(operations)
+    .filter((operation) => operation.kind === 'workspace.delete' || operation.kind === 'workspace.scripts')
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map((operation) => {
+      const workspaceName = workspaceNameFromOperation(operation);
+      const workspaceId = operation.scope.workspaceId ?? `${operation.scope.projectName ?? ''}:${workspaceName}`;
+      const status = statusFromOperation(operation);
+      const task: WorkspaceRemovalTask = {
+        id: operation.operationId,
+        kind: 'workspace-lifecycle',
+        operationKind: operation.kind,
+        label: labelFromOperation(operation),
+        workspaceName,
+        workspaceId,
+        ref: { backendKey, workspaceId },
+        status,
+        phase: phaseFromOperation(operation),
+        startedAt: operation.startedAt,
+        completedAt: status === 'running' ? undefined : operation.updatedAt,
+        progressLabel: operation.message,
+        logLines: decodeOperationOutput(operation.outputBase64),
+        result: operation.state === 'failed'
+          ? { status: 'failed', message: operation.error?.message ?? operation.message ?? 'Operation failed' }
+          : operation.kind === 'workspace.delete' && operation.state === 'succeeded'
+            ? { status: 'removed' }
+            : undefined,
+      };
+      return task;
+    });
 }
 
 export function useWorkspaceRemovalTasks() {

@@ -2,15 +2,18 @@
 
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { DockviewReact, type DockviewReadyEvent, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
+import { terminalMemoryDebugDecrement, terminalMemoryDebugGauge, terminalMemoryDebugIncrement } from '../utils/terminal-memory-debug.js';
 
 export interface DockviewTerminalPanel {
   id: string;
   title: string;
+  version?: string;
   render: () => ReactNode;
   onClose?: () => void;
 }
 
 type PanelParams = {
+  version?: string;
   render: () => ReactNode;
   onClose?: () => void;
 };
@@ -77,17 +80,31 @@ export function DockviewWorkspaceShell({
   const restoringLayoutRef = useRef(false);
   const onLayoutChangeRef = useRef(onLayoutChange);
   const isActiveRef = useRef(isActive);
+  const panelVersionsRef = useRef(new Map<string, { title: string; version?: string }>());
   onLayoutChangeRef.current = onLayoutChange;
   const onApiChangeRef = useRef(onApiChange);
   onApiChangeRef.current = onApiChange;
+
+
+  useEffect(() => {
+    terminalMemoryDebugIncrement('dockview.shell.mounted');
+    terminalMemoryDebugIncrement('dockview.shell.active', isActiveRef.current ? 1 : 0);
+    return () => {
+      terminalMemoryDebugIncrement('dockview.shell.unmounted');
+      terminalMemoryDebugDecrement('dockview.shell.active', isActiveRef.current ? 1 : 0);
+    };
+  }, []);
 
   const saveLayout = useCallback(() => {
     const api = apiRef.current;
     if (!api || restoringLayoutRef.current || !isActiveRef.current) return;
     onLayoutChangeRef.current?.(api.toJSON());
+    terminalMemoryDebugIncrement('dockview.toJSON.saveLayout');
   }, []);
 
   const syncPanels = useCallback((force = false) => {
+    terminalMemoryDebugIncrement(force ? 'dockview.syncPanels.forced' : 'dockview.syncPanels');
+    terminalMemoryDebugGauge('dockview.syncPanels.panelCount', panels.length);
     const api = apiRef.current;
     if (!api) return;
     if (!force && !isActiveRef.current) return;
@@ -96,17 +113,30 @@ export function DockviewWorkspaceShell({
     for (const existingPanel of [...api.panels]) {
       if (!nextPanelIds.has(existingPanel.id)) {
         api.removePanel(existingPanel);
+        terminalMemoryDebugIncrement('dockview.panel.remove');
+        panelVersionsRef.current.delete(existingPanel.id);
       }
     }
 
     for (const panel of panels) {
-      const params: PanelParams = { render: panel.render, onClose: panel.onClose };
+      const params: PanelParams = { version: panel.version, render: panel.render, onClose: panel.onClose };
       const existingPanel = api.getPanel(panel.id);
       if (existingPanel) {
-        existingPanel.setTitle(panel.title);
-        existingPanel.api.updateParameters(params);
+        const previous = panelVersionsRef.current.get(panel.id);
+        if (previous?.title !== panel.title) {
+          existingPanel.setTitle(panel.title);
+        }
+        if (force || previous?.version !== panel.version || previous?.title !== panel.title) {
+          terminalMemoryDebugIncrement('dockview.panel.updateParameters');
+          existingPanel.api.updateParameters(params);
+          panelVersionsRef.current.set(panel.id, { title: panel.title, version: panel.version });
+        } else {
+          terminalMemoryDebugIncrement('dockview.panel.updateParameters.skipped');
+        }
         continue;
       }
+      terminalMemoryDebugIncrement('dockview.panel.add');
+      panelVersionsRef.current.set(panel.id, { title: panel.title, version: panel.version });
       api.addPanel({
         id: panel.id,
         component: 'panel',
@@ -121,8 +151,10 @@ export function DockviewWorkspaceShell({
     const api = apiRef.current;
     if (!api || !layout) return;
     restoringLayoutRef.current = true;
+    terminalMemoryDebugIncrement('dockview.restoreLayout.attempt');
     try {
       api.fromJSON(layout as never, { reuseExistingPanels: true });
+      terminalMemoryDebugIncrement('dockview.fromJSON');
     } catch {
       // Keep current live layout if restore fails.
     } finally {
@@ -134,15 +166,23 @@ export function DockviewWorkspaceShell({
     const container = containerRef.current;
     if (!container) return;
     const relayout = () => {
+      terminalMemoryDebugIncrement('dockview.relayout.called');
+      if (!isActiveRef.current) {
+        terminalMemoryDebugIncrement('dockview.relayout.whileInactive');
+      }
       const api = apiRef.current;
       if (!api) return;
       const rect = container.getBoundingClientRect();
+      if (!isActiveRef.current) return;
       if (rect.width > 0 && rect.height > 0) {
         api.layout(rect.width, rect.height);
+        terminalMemoryDebugGauge('dockview.relayout.width', rect.width);
+        terminalMemoryDebugGauge('dockview.relayout.height', rect.height);
       }
     };
     const observer = new ResizeObserver(() => {
       requestAnimationFrame(relayout);
+      terminalMemoryDebugIncrement('dockview.resizeObserver');
     });
     observer.observe(container);
     requestAnimationFrame(relayout);
@@ -152,6 +192,7 @@ export function DockviewWorkspaceShell({
   const onReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api;
     onApiChangeRef.current?.(event.api);
+    terminalMemoryDebugIncrement('dockview.ready');
     disposablesRef.current.forEach((disposable) => disposable.dispose());
     disposablesRef.current = [
       event.api.onDidLayoutChange(saveLayout),
@@ -177,14 +218,27 @@ export function DockviewWorkspaceShell({
 
     if (!isActive && wasActive) {
       onLayoutChangeRef.current?.(api.toJSON());
+      terminalMemoryDebugIncrement('dockview.toJSON.deactivate');
       return;
     }
 
     if (isActive && !wasActive) {
-      restoreLayout(initialLayout);
-      syncPanels(true);
+      terminalMemoryDebugIncrement('dockview.activate');
+      syncPanels();
+      requestAnimationFrame(() => {
+        const container = containerRef.current;
+        const activeApi = apiRef.current;
+        if (!container || !activeApi || !isActiveRef.current) return;
+        const rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          activeApi.layout(rect.width, rect.height);
+          terminalMemoryDebugIncrement('dockview.relayout.onActivate');
+          terminalMemoryDebugGauge('dockview.relayout.width', rect.width);
+          terminalMemoryDebugGauge('dockview.relayout.height', rect.height);
+        }
+      });
     }
-  }, [initialLayout, isActive, restoreLayout, syncPanels]);
+  }, [isActive, syncPanels]);
 
   useEffect(() => {
     return () => {

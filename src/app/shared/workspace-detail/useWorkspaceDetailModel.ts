@@ -373,7 +373,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     selectWorkspace: (workspaceSelectionKey: string) => {
       void actions.onSelectWorkspace?.(workspaceSelectionKey);
     },
-    attachSession: (sessionId: string) => actions.onAttachSession?.({ sessionId }),
+    attachSession: (sessionId: string) => actions.onAttachSession?.({ sessionId, workspaceId: workspace.id }),
     createSession: () => actions.onAttachSession?.({ workspaceId: workspace.id }),
     deleteSession: (sessionId: string, sessionName: string) => {
       actions.onDeleteSession?.(sessionId, sessionName);

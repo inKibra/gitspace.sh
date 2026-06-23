@@ -173,6 +173,11 @@ export class ClientSessionManager {
     connectionId: string,
     data: Uint8Array
   ): Promise<Uint8Array | null> {
+    const session = this.sessions.get(connectionId);
+    if (session && session.state !== "handshaking") {
+      return this.handleMessageNow(connectionId, data);
+    }
+
     const previous = this.inboundMessageQueues.get(connectionId) ?? Promise.resolve<Uint8Array | null>(null);
     const next = previous
       .catch(() => null)

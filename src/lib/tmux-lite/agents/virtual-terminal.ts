@@ -93,6 +93,11 @@ export class VirtualTerminal implements Terminal {
     this.write(`\x1b]0;${title}\x07`);
   }
 
+  setProgress(_active: boolean): void {
+    // Virtual terminals render in-process for remote clients; there is no host
+    // terminal progress indicator to update.
+  }
+
   onAppearanceChange(callback: (appearance: TerminalAppearance) => void): void {
     this._appearanceCallbacks.push(callback);
   }

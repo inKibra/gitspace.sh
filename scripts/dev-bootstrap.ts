@@ -1,5 +1,5 @@
 import { basename } from 'path';
-import { existsSync, readFileSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 
 interface KeypairStorage {
   id?: string;
@@ -11,6 +11,20 @@ interface MachineIdentityLike {
 
 interface RelayConfigLike {
   machineId?: string;
+}
+
+interface UnifiedSecretsBlob {
+  global: Record<string, string>;
+  projects: Record<string, Record<string, string>>;
+  metadata: {
+    schemaVersion: 2;
+    legacyMigrationComplete: true;
+    legacyEntriesRetained: false;
+  };
+}
+
+interface TestSecretsStore {
+  entries: Record<string, string>;
 }
 
 export interface SandboxBootstrapPaths {
@@ -28,6 +42,74 @@ export interface SandboxBootstrapValidation {
 
 function parseJsonFile(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf-8'));
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+function parseSafeUnifiedSecrets(path: string): Partial<Pick<UnifiedSecretsBlob, 'global' | 'projects'>> {
+  if (!existsSync(path)) return {};
+
+  try {
+    const outer = parseJsonFile(path) as { entries?: Record<string, string> };
+    const rawBlob = outer.entries?.['com.gitspace:secrets'];
+    if (typeof rawBlob !== 'string') return {};
+
+    const parsed = JSON.parse(rawBlob) as { global?: unknown; projects?: unknown };
+    const preserved: Partial<Pick<UnifiedSecretsBlob, 'global' | 'projects'>> = {};
+    if (isStringRecord(parsed.global)) {
+      preserved.global = parsed.global;
+    }
+    if (
+      typeof parsed.projects === 'object'
+      && parsed.projects !== null
+      && !Array.isArray(parsed.projects)
+    ) {
+      preserved.projects = {};
+      for (const [projectName, projectSecrets] of Object.entries(parsed.projects)) {
+        if (isStringRecord(projectSecrets)) {
+          preserved.projects[projectName] = projectSecrets;
+        }
+      }
+    }
+    return preserved;
+  } catch {
+    return {};
+  }
+}
+
+export function createSandboxSecretsStore(
+  secretsPath: string,
+  userRootIdentity: unknown,
+): TestSecretsStore {
+  const preserved = parseSafeUnifiedSecrets(secretsPath);
+  const unifiedBlob: UnifiedSecretsBlob = {
+    global: {
+      ...(preserved.global ?? {}),
+      USER_ROOT_IDENTITY: JSON.stringify(userRootIdentity),
+    },
+    projects: preserved.projects ?? {},
+    metadata: { schemaVersion: 2, legacyMigrationComplete: true, legacyEntriesRetained: false },
+  };
+
+  return {
+    entries: { 'com.gitspace:secrets': JSON.stringify(unifiedBlob) },
+  };
+}
+
+export function writeSandboxSecretsFile(secretsPath: string, store: TestSecretsStore): void {
+  const tempPath = `${secretsPath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tempPath, JSON.stringify(store), { mode: 0o600 });
+  try {
+    renameSync(tempPath, secretsPath);
+  } catch (error) {
+    try { unlinkSync(tempPath); } catch {}
+    throw error;
+  }
 }
 
 function validateMachineBoundFile(args: {

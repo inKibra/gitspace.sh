@@ -8,7 +8,7 @@ import { killServer } from '../../lib/tmux-lite/cli.js';
 import { rmSync } from 'node:fs';
 import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import type { Session as TmuxSession, WorkspaceRuntimeRecord } from '../../lib/tmux-lite/protocol.js';
-import { PortConflictError } from '../../lib/processes/ports.js';
+import { PortConflictError } from '../../lib/processes/port-conflicts.js';
 const notificationConfig: NotificationConfig = {
   enabled: true,
   minCommandDurationMs: 1000,
@@ -449,7 +449,7 @@ describe('LocalSessionBackend', () => {
       ],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -652,7 +652,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -738,7 +738,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -819,7 +819,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -907,7 +907,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1008,7 +1008,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1095,7 +1095,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1167,7 +1167,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1228,7 +1228,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1300,7 +1300,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1359,7 +1359,7 @@ describe('LocalSessionBackend', () => {
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',

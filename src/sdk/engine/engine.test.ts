@@ -42,7 +42,7 @@ function createMockBackend(key = LOCAL_BACKEND_KEY) {
     deleteProject: async () => undefined,
     attachSession: async () => undefined,
     detachSession: async () => undefined,
-    killSession: async () => undefined,
+    terminateSession: async () => undefined,
     deleteWorkspace: async () => undefined,
 
     getBundleRefreshPlan: async () => { throw new Error('not used in these tests'); },

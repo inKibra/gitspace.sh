@@ -1,9 +1,11 @@
+diff --git a/src/agent.ts b/src/agent.ts
+index 0a03ef02807b89dee87b80033c1e23fe5f7c8a70..d31be969f722fb7c9923b52a0919f01509e6f62d 100644
 --- a/src/agent.ts
 +++ b/src/agent.ts
-@@ -589,6 +589,28 @@
- 	popLastFollowUp(): AgentMessage | undefined {
+@@ -758,6 +758,28 @@ export class Agent {
  		return this.#followUpQueue.pop();
  	}
+ 
 +
 +	/**
 +	 * Remove and return a steering message by queue index.
@@ -26,6 +28,6 @@
 +		const [removed] = this.#followUpQueue.splice(index, 1);
 +		return removed;
 +	}
- 
  	clearMessages() {
- 		this.#state.messages = [];
+ 		this.#state.messages.length = 0;
+ 	}

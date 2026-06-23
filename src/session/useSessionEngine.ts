@@ -47,129 +47,15 @@ import type {
 } from '../lib/tmux-lite/replay/index.js';
 import type { BackendEvent } from './events.js';
 import { SpacesError } from '../types/errors.js';
+import { backendEventToActions } from './backend-event-actions.js';
 
 function dispatchBackendEvent(
   dispatch: React.Dispatch<import('./types.js').SessionEngineAction>,
   backendKey: BackendKey,
   event: BackendEvent
 ): void {
-  switch (event.type) {
-    case 'status':
-      dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: event.status, error: event.error ?? null });
-      break;
-    case 'projects':
-      dispatch({ type: 'SET_PROJECTS', backendKey, projects: event.projects });
-      break;
-    case 'workspaces':
-      dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
-      if (event.savedEventFilters) {
-        dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      break;
-    case 'sessions':
-      dispatch({ type: 'SET_SESSIONS', backendKey, sessions: event.sessions });
-      break;
-    case 'replays':
-      dispatch({ type: 'SET_REPLAYS', backendKey, replays: event.replays });
-      break;
-    case 'inbox':
-      dispatch({ type: 'SET_INBOX', backendKey, items: event.items, unreadCount: event.unreadCount });
-      break;
-    case 'notification_config':
-      dispatch({ type: 'SET_NOTIFICATION_CONFIG', backendKey, config: event.config });
-      break;
-    case 'pane_attached':
-      dispatch({
-        type: 'ADD_PANE',
-        backendKey,
-        pane: {
-          paneId: event.paneId,
-          streamId: event.streamId,
-          sessionId: event.sessionId,
-          sessionName: event.sessionName ?? null,
-          meta: { sessionName: event.sessionName ?? null },
-          workspaceId: event.workspaceId ?? null,
-          agentSessionId: event.agentSessionId ?? null,
-          viewOnly: event.viewOnly ?? false,
-        },
-      });
-      break;
-    case 'pane_meta':
-      dispatch({ type: 'UPDATE_PANE_META', backendKey, paneId: event.paneId, meta: event.meta });
-      break;
-    case 'pane_detached':
-      dispatch({ type: 'REMOVE_PANE', backendKey, paneId: event.paneId });
-      break;
-    case 'pane_exited':
-      dispatch({ type: 'REMOVE_PANE', backendKey, paneId: event.paneId });
-      break;
-    case 'attached':
-      dispatch({
-        type: 'SET_ATTACHED_SESSION',
-        backendKey,
-        sessionId: event.sessionId,
-        sessionName: event.sessionName ?? null,
-        meta: {
-          sessionName: event.sessionName ?? null,
-        },
-        workspaceId: event.workspaceId ?? null,
-        agentSessionId: event.agentSessionId ?? null,
-      });
-      break;
-    case 'session_meta':
-      dispatch({ type: 'SET_ATTACHED_SESSION_META', backendKey, meta: event.meta });
-      break;
-    case 'detached':
-      dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
-      break;
-    case 'session_exited':
-      dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null, preserveContextOnExit: true });
-      break;
-    case 'command_error':
-      dispatch({ type: 'SET_COMMAND_ERROR', backendKey, commandError: { code: event.code, message: event.message } });
-      break;
-    case 'error':
-      dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'error', error: event.message });
-      break;
-    case 'script_output':
-      dispatch({
-        type: 'SET_SCRIPT_STATE',
-        backendKey,
-        scriptState: event.done && !event.error
-          ? null
-          : {
-              phase: event.phase,
-              isRunning: !event.done,
-              error: event.error,
-              exitCode: event.exitCode,
-              workspaceId: event.workspaceId,
-            },
-      });
-      break;
-    case 'events':
-      dispatch({ type: 'SET_EVENTS', backendKey, events: event.events, liveEventIds: event.liveEventIds });
-      if (event.savedEventFilters) {
-        dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      break;
-    case 'machine_snapshot':
-      dispatch({ type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: event.snapshot });
-      break;
-    case 'host_ui_dialog_request':
-      dispatch({ type: 'SET_HOST_UI_DIALOG', backendKey, request: event.request });
-      break;
-    case 'host_ui_event':
-      if (event.event.type === 'working-message') {
-        dispatch({ type: 'SET_HOST_UI_WORKING_MESSAGE', backendKey, message: event.event.payload.message });
-      }
-      break;
-    case 'process_started':
-      // Process events are reflected in machine_snapshot; no separate dispatch needed
-      break;
-    case 'process_stopped':
-      break;
-    default:
-      break;
+  for (const action of backendEventToActions(backendKey, event)) {
+    dispatch(action);
   }
 }
 
@@ -305,8 +191,8 @@ export function useSessionEngine() {
     managerRef.current?.get(backendKey)?.cancelPendingReplayRequests?.();
   }, []);
 
-  const killSession = useCallback((backendKey: BackendKey, sessionId: string) =>
-    withBackend(backendKey, (b) => b.killSession(sessionId)), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const terminateSession = useCallback((backendKey: BackendKey, sessionId: string) =>
+    withBackend(backendKey, (b) => b.terminateSession(sessionId)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deleteWorkspace = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string, params?: DeleteWorkspaceParams) =>
     withBackend(backendKey, (b) => b.deleteWorkspace(projectName, workspaceId, params)), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -423,7 +309,7 @@ export function useSessionEngine() {
     detachSession,
     cancelPendingScripts,
     cancelPendingReplayRequests,
-    killSession,
+    terminateSession,
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,

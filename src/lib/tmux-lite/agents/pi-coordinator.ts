@@ -3,7 +3,7 @@ import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
 import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
 import { HostUIBridgeState, type HostUIBridgeEmitter, type HostUIDialogResponse } from './host-ui-bridge.js';
 import {
-  killSession as killTmuxSession,
+  terminateSession as terminateTmuxSession,
   listSessions as listTmuxSessions,
   createVirtualSession as createTmuxVirtualSession,
   resizeVirtualSession as resizeTmuxVirtualSession,
@@ -68,6 +68,14 @@ function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSess
   return session.kind === PI_AGENT_TMUX_SESSION_KIND
     && session.metadata?.workspaceId === workspaceId
     && session.metadata?.agentSessionId === agentSessionId;
+}
+
+function isLikelyAgentTmuxSession(session: TmuxSession, target: PiWorkspaceTarget, agentSessionId: string): boolean {
+  return isAgentTmuxSession(session, target.workspaceId, agentSessionId)
+    || (
+      session.kind === PI_AGENT_TMUX_SESSION_KIND
+      && session.name === buildAgentTerminalSessionName(target, agentSessionId)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -301,12 +309,12 @@ export class PiCoordinator {
     let foundTerminalSessionId: string | null = null;
     try {
       const sessions = await listTmuxSessions();
-      const pty = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
+      const pty = sessions.find((s) => isLikelyAgentTmuxSession(s, target, agentSessionId))
         ?? this.findMappedTmuxSession(sessions, target.workspaceId, agentSessionId);
       if (pty) {
         foundTerminalSessionId = pty.id;
         try {
-          await killTmuxSession(pty.id);
+          await terminateTmuxSession(pty.id);
           killed = true;
         } catch {
           // Kill failed (session already dead?) — still release below
@@ -525,8 +533,16 @@ export class PiCoordinator {
     sessionFile?: PiSessionFileInfo,
     options?: { cols?: number; rows?: number },
   ): Promise<TmuxSession> {
+    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!match) {
+      throw new Error(
+        `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
+        `The session file may have been deleted or the ID is stale.`,
+      );
+    }
+
     const tmuxSessions = await listTmuxSessions();
-    const existing = tmuxSessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
+    const existing = tmuxSessions.find((s) => isLikelyAgentTmuxSession(s, target, agentSessionId))
       ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
     if (existing) {
       if (existing.exitCode === undefined) {
@@ -539,13 +555,11 @@ export class PiCoordinator {
       this.releaseTerminalSession(existing.id);
     }
 
-    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
-    if (!match) {
-      throw new Error(
-        `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
-        `The session file may have been deleted or the ID is stale.`,
-      );
+    const staleModeHandle = this.virtualModeHandles.get(agentSessionId);
+    if (staleModeHandle) {
+      await this.stopVirtualMode(agentSessionId);
     }
+
 
     return this.createVirtualAgentSession(target, agentSessionId, match, options);
   }
@@ -574,7 +588,7 @@ export class PiCoordinator {
 
     const virtualTerminal = getVirtualTerminal(tmuxSession.id);
     if (!virtualTerminal) {
-      await killTmuxSession(tmuxSession.id).catch(() => {});
+      await terminateTmuxSession(tmuxSession.id).catch(() => {});
       throw new Error('VirtualTerminal not found in registry after session creation');
     }
 
@@ -587,7 +601,7 @@ export class PiCoordinator {
       this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
       return tmuxSession;
     } catch (error) {
-      await killTmuxSession(tmuxSession.id).catch(() => {});
+      await terminateTmuxSession(tmuxSession.id).catch(() => {});
       throw error;
     }
   }
@@ -658,6 +672,13 @@ export class PiCoordinator {
     });
   }
 
+  private shouldEmitQueuedMessagesForEvent(piEvent: { type?: string; [key: string]: unknown }): boolean {
+    if (piEvent.type === 'message_start') {
+      return isRecord(piEvent.message) && piEvent.message.role === 'user';
+    }
+    return false;
+  }
+
 
   private bindSessionEvents(
     target: PiWorkspaceTarget,
@@ -676,8 +697,9 @@ export class PiCoordinator {
       session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
         if (!this.eventHandler || typeof piEvent.type !== 'string') return;
 
-        this.emitQueuedMessages(target, sessionId, session);
-
+        if (this.shouldEmitQueuedMessagesForEvent(piEvent)) {
+          this.emitQueuedMessages(target, sessionId, session);
+        }
         switch (piEvent.type) {
           case 'message_update':
             this.eventHandler(target, {
@@ -848,6 +870,21 @@ export class PiCoordinator {
     });
   }
 
+  private async stopVirtualMode(sessionId: string): Promise<void> {
+    const modeHandle = this.virtualModeHandles.get(sessionId);
+    if (!modeHandle) return;
+    this.virtualModeHandles.delete(sessionId);
+    try {
+      await Promise.race([
+        modeHandle.stop(),
+        new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    } catch {
+      // Shutdown failed or timed out — caller will continue cleanup/recreate.
+    }
+  }
+
+
   private async disposeActiveSession(sessionId: string): Promise<void> {
     const unsubscribe = this.sessionUnsubscribers.get(sessionId);
     unsubscribe?.();
@@ -855,18 +892,7 @@ export class PiCoordinator {
     this.sessionUIBinders.delete(sessionId);
     this.hostUIBridge.rejectAllForSession(sessionId, `Agent session disposed: ${sessionId}`);
 
-    const modeHandle = this.virtualModeHandles.get(sessionId);
-    if (modeHandle) {
-      this.virtualModeHandles.delete(sessionId);
-      try {
-        await Promise.race([
-          modeHandle.stop(),
-          new Promise<void>((resolve) => setTimeout(resolve, 5000)),
-        ]);
-      } catch {
-        // Shutdown failed or timed out — proceed with session dispose
-      }
-    }
+    await this.stopVirtualMode(sessionId);
 
     const session = this.activeSessions.get(sessionId);
     if (session) {
@@ -980,7 +1006,7 @@ export class PiCoordinator {
       {
         exec: async (command, commandArgs, options) => {
           const result = await execCommand(command, commandArgs, options?.cwd ?? target.workspacePath, options);
-          return { stdout: result.stdout, stderr: result.stderr, code: result.code };
+          return { stdout: result.stdout, stderr: result.stderr, code: result.code, killed: result.killed ?? false };
         },
       },
       { cwd: target.workspacePath },
@@ -990,9 +1016,13 @@ export class PiCoordinator {
   async listAvailableCommands(target: PiWorkspaceTarget): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
     const commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> = [];
 
-    // 0. Built-in commands supported through the web surface
-    commands.push({ name: 'compact', description: 'Compact the session context', kind: 'extension' });
-
+    // 0. Built-in commands supported through the web surface. `space` is
+    // installed as a managed extension for active sessions, but it must be
+    // discoverable before the first session has loaded its extension runner.
+    commands.push(
+      { name: 'compact', description: 'Compact the session context', kind: 'extension' },
+      { name: 'space', description: 'Run GitSpace workspace-scoped commands', kind: 'extension' },
+    );
     // 1. Collect extension/custom/skill commands from the active session for the requested workspace
     //    (commands are workspace-scoped; skip any session belonging to a different workspace).
     for (const [sessionId, session] of this.activeSessions) {

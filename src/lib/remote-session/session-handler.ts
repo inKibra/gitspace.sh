@@ -14,6 +14,9 @@ import {
   serializeRemoteMessage,
   type ClientToMachineMessage,
   type MachineToClientMessage,
+  type RemoteOperationKind,
+  type RemoteOperationRecord,
+  type RemoteOperationScope,
   type SessionInfo,
 } from "./protocol";
 import type { MachineSnapshot } from "../tmux-lite/machine/protocol.js";
@@ -23,7 +26,6 @@ import type { SessionKeys, AccessType } from "../../types/identity.js";
 // Import tmux-lite API for session management
 import {
   listSessions,
-  getMachineSnapshot,
   send as sendTmuxCommand,
   prepareAttachSession,
   cancelPrepareAttachSession,
@@ -59,6 +61,51 @@ import { logger } from "../../utils/logger.js";
 import { writeTraceLog } from '../../utils/trace-log.js';
 import type { Command as TmuxCommand, Response as TmuxResponse } from '../tmux-lite/protocol.js';
 
+const BOUNDED_RPC_TIMEOUT_MS = 15_000;
+
+
+
+const TERMINAL_OPERATION_RETENTION_LIMIT = 100;
+
+function isTerminalOperation(operation: RemoteOperationRecord): boolean {
+  return operation.state !== 'running';
+}
+
+function operationTimeoutMs(kind: RemoteOperationKind): number {
+  switch (kind) {
+    case 'workspace.editor.open':
+      return 2 * 60 * 1000;
+    case 'space.command':
+    case 'review.github':
+      return 10 * 60 * 1000;
+    case 'project.create':
+    case 'project.prepare':
+    case 'project.finalize':
+    case 'project.delete':
+    case 'workspace.create':
+    case 'workspace.delete':
+    case 'workspace.scripts':
+      return 30 * 60 * 1000;
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => {
+          const error = new Error(message) as Error & { code?: string };
+          error.code = 'OPERATION_TIMEOUT';
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 /**
  * Session state for a connected client
  */
@@ -160,14 +207,17 @@ export class RemoteSessionHandler {
   private tmuxLiteAvailable = false;
   private processSchedulers = new Map<string, NodeJS.Timer>();
   private pendingAttachRuns = new Map<string, string>();
+  private operations = new Map<string, RemoteOperationRecord>();
+  private dismissedOperationIdsByConnection = new Map<string, Set<string>>();
 
   // Machine snapshot push state
   private latestMachineSnapshot: MachineSnapshot | null = null;
   private machineWatchUnsubscribe: (() => void) | null = null;
   /** connectionId → async send function for unsolicited machine snapshot pushes */
   private machineSnapshotWatchers = new Map<string, (msg: MachineToClientMessage) => Promise<void>>();
-  /** Periodic timer that re-broadcasts the latest snapshot for client reconciliation */
+  /** Periodic timer that fetches fresh snapshots for client reconciliation */
   private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
+  private machineSnapshotRefreshInFlight: Promise<void> | null = null;
 
 
   /**
@@ -188,12 +238,10 @@ export class RemoteSessionHandler {
 
     if (this.tmuxLiteAvailable) {
       await this.startMachineWatch();
-      // Re-broadcast the current snapshot every 30 s so clients that missed
-      // an update can reconcile without needing an explicit poll.
+      // Fetch a fresh snapshot every 30 s so clients that missed an update can
+      // reconcile even if a previous post-operation refresh failed.
       this.reconciliationTimer = setInterval(() => {
-        if (this.latestMachineSnapshot) {
-          void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot: this.latestMachineSnapshot });
-        }
+        void this.refreshMachineSnapshot('periodic-reconciliation');
       }, 30000);
     }  // end if (this.tmuxLiteAvailable)
   }
@@ -257,6 +305,7 @@ export class RemoteSessionHandler {
         // Non-fatal — client may disconnect
       }
     }
+    await this.broadcastOperationSnapshot(connectionId);
   }
 
   /**
@@ -272,6 +321,400 @@ export class RemoteSessionHandler {
       promises.push(sendFn(msg).catch(() => undefined));
     }
     await Promise.allSettled(promises);
+  }
+
+  private async refreshMachineSnapshot(reason: string): Promise<void> {
+    if (this.machineSnapshotRefreshInFlight) {
+      await this.machineSnapshotRefreshInFlight;
+      return;
+    }
+
+    const refreshPromise = (async () => {
+      try {
+        const response = await withTimeout(
+          sendTmuxCommand({ type: 'machine-snapshot' }),
+          BOUNDED_RPC_TIMEOUT_MS,
+          `Timed out refreshing machine snapshot (${reason})`,
+        );
+        if (response.type !== 'machine-snapshot') {
+          throw new Error(response.type === 'error' ? response.message : `Unexpected machine snapshot response (${response.type})`);
+        }
+        const snapshot = response.snapshot;
+        this.latestMachineSnapshot = snapshot;
+        await this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot });
+      } catch (error) {
+        console.warn(`[remote-session] Failed to refresh machine snapshot (${reason}): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+
+    this.machineSnapshotRefreshInFlight = refreshPromise;
+    try {
+      await refreshPromise;
+    } finally {
+      if (this.machineSnapshotRefreshInFlight === refreshPromise) {
+        this.machineSnapshotRefreshInFlight = null;
+      }
+    }
+  }
+
+  private retainedOperationsForConnection(connectionId?: string): RemoteOperationRecord[] {
+    const dismissed = connectionId ? this.dismissedOperationIdsByConnection.get(connectionId) : undefined;
+    return [...this.operations.values()].filter((operation) => {
+      return !(dismissed?.has(operation.operationId) && isTerminalOperation(operation));
+    });
+  }
+
+  private async broadcastOperationSnapshot(connectionId?: string): Promise<void> {
+    const message: MachineToClientMessage = {
+      type: 'operation_snapshot',
+      operations: this.retainedOperationsForConnection(connectionId),
+    };
+    if (connectionId) {
+      const sendFn = this.machineSnapshotWatchers.get(connectionId);
+      if (sendFn) await sendFn(message).catch(() => undefined);
+      return;
+    }
+    const promises: Promise<void>[] = [];
+    for (const sendFn of this.machineSnapshotWatchers.values()) {
+      promises.push(sendFn(message).catch(() => undefined));
+    }
+    await Promise.allSettled(promises);
+  }
+
+  private async broadcastOperationEvent(operation: RemoteOperationRecord, type: import('./protocol.js').RemoteOperationEventType): Promise<void> {
+    const promises: Promise<void>[] = [];
+    for (const [connectionId, sendFn] of this.machineSnapshotWatchers.entries()) {
+      if (isTerminalOperation(operation) && this.dismissedOperationIdsByConnection.get(connectionId)?.has(operation.operationId)) {
+        continue;
+      }
+      const message: MachineToClientMessage = {
+        type: 'operation_event',
+        event: { type, operation },
+      };
+      promises.push(sendFn(message).catch(() => undefined));
+    }
+    await Promise.allSettled(promises);
+  }
+
+  private pruneTerminalOperations(): void {
+    const terminalOperations = [...this.operations.values()]
+      .filter(isTerminalOperation)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    for (const operation of terminalOperations.slice(TERMINAL_OPERATION_RETENTION_LIMIT)) {
+      this.operations.delete(operation.operationId);
+      for (const dismissed of this.dismissedOperationIdsByConnection.values()) {
+        dismissed.delete(operation.operationId);
+      }
+    }
+  }
+
+
+  private appendBase64Output(existing: string | undefined, chunk: string): string {
+    if (!existing) return chunk;
+    if (!chunk) return existing;
+    return Buffer.concat([Buffer.from(existing, 'base64'), Buffer.from(chunk, 'base64')]).toString('base64');
+  }
+
+  private async sendBoundedTmuxCommand(command: TmuxCommand): Promise<TmuxResponse> {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        sendTmuxCommand(command),
+        new Promise<TmuxResponse>((resolve) => {
+          timeout = setTimeout(() => {
+            resolve({ type: 'error', message: `Timed out waiting for command response (${command.type})` });
+          }, BOUNDED_RPC_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private startOperationWatchdog(operationId: string, kind: RemoteOperationKind): () => void {
+    const timeout = setTimeout(() => {
+      const current = this.operations.get(operationId);
+      if (!current || current.state !== 'running') return;
+      this.updateOperation(operationId, {
+        state: 'failed',
+        phase: 'timeout',
+        message: `Operation timed out (${kind})`,
+        error: { code: 'OPERATION_TIMEOUT', message: `Operation timed out (${kind})` },
+      }, 'operation_failed');
+    }, operationTimeoutMs(kind));
+    return () => clearTimeout(timeout);
+  }
+  private createOperation(params: {
+    operationId?: string;
+    kind: RemoteOperationKind;
+    scope: RemoteOperationScope;
+    phase?: string;
+    message?: string;
+  }): RemoteOperationRecord {
+    const now = Date.now();
+    const operation: RemoteOperationRecord = {
+      operationId: params.operationId ?? crypto.randomUUID(),
+      kind: params.kind,
+      scope: params.scope,
+      state: 'running',
+      phase: params.phase,
+      message: params.message,
+      startedAt: now,
+      updatedAt: now,
+    };
+    this.operations.set(operation.operationId, operation);
+    void this.broadcastOperationEvent(operation, 'operation_started');
+    return operation;
+  }
+
+  private updateOperation(operationId: string, patch: Partial<RemoteOperationRecord>, eventType: import('./protocol.js').RemoteOperationEventType = 'operation_progress'): RemoteOperationRecord | null {
+    const current = this.operations.get(operationId);
+    if (!current) return null;
+    if (current.state !== 'running') return current;
+    const next: RemoteOperationRecord = {
+      ...current,
+      ...patch,
+      scope: patch.scope ?? current.scope,
+      updatedAt: Date.now(),
+    };
+    this.operations.set(operationId, next);
+    void this.broadcastOperationEvent(next, eventType);
+    if (isTerminalOperation(next)) {
+      this.pruneTerminalOperations();
+    }
+    return next;
+  }
+
+  private async sendOperationAccepted(
+    session: RemoteClientSession,
+    sendResponse: (data: Uint8Array) => void,
+    requestId: string,
+    operation: RemoteOperationRecord,
+  ): Promise<void> {
+    await this.sendMessage(session, sendResponse, {
+      type: 'operation_accepted',
+      requestId,
+      operation,
+    });
+  }
+
+  private async handleDismissOperation(
+    session: RemoteClientSession,
+    operationId: string,
+    sendResponse: (data: Uint8Array) => void,
+  ): Promise<void> {
+    const current = this.operations.get(operationId);
+    if (!current || isTerminalOperation(current)) {
+      let dismissed = this.dismissedOperationIdsByConnection.get(session.connectionId);
+      if (!dismissed) {
+        dismissed = new Set<string>();
+        this.dismissedOperationIdsByConnection.set(session.connectionId, dismissed);
+      }
+      dismissed.add(operationId);
+    }
+    this.pruneTerminalOperations();
+
+    await this.sendMessage(session, sendResponse, {
+      type: 'operation_dismissed',
+      operationId,
+    });
+  }
+
+
+  private async startWorkspaceScriptOperation(
+    session: RemoteClientSession,
+    sendResponse: (data: Uint8Array) => void,
+    params: {
+      requestId: string;
+      projectName: string;
+      workspaceId: string;
+      selection: 'setup' | 'select' | 'setup-select';
+      mode: 'rerun' | 'open';
+    },
+  ): Promise<void> {
+    const workspaces = await scanWorkspaces();
+    const workspace = workspaces.find(
+      (item) =>
+        item.projectName === params.projectName &&
+        matchesWorkspaceId(item, params.workspaceId)
+    );
+    if (!workspace) {
+      await this.sendError(session, sendResponse, 'WORKSPACE_NOT_FOUND', `Workspace not found: ${params.workspaceId}`, { requestId: params.requestId });
+      return;
+    }
+
+    const workspaceId = `${params.projectName}:${workspace.id}`;
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase =
+      params.mode === 'open' || params.selection === 'select' ? 'select' : 'setup';
+    const operation = this.createOperation({
+      operationId: params.requestId,
+      kind: 'workspace.scripts',
+      scope: { projectName: params.projectName, workspaceId, workspaceName: workspace.id },
+      phase: currentPhase,
+      message: params.mode === 'open' ? 'Opening workspace...' : `Running ${params.selection} scripts...`,
+    });
+    await this.sendOperationAccepted(session, sendResponse, params.requestId, operation);
+    const stopWatchdog = this.startOperationWatchdog(operation.operationId, operation.kind);
+
+    void (async () => {
+      try {
+        const runOptions = {
+          projectName: params.projectName,
+          workspacePath: workspace.path,
+          workspaceName: workspace.id,
+          repository: readProjectConfig(params.projectName).repository,
+          interactiveScripts: false as const,
+          onOutput: (data: Uint8Array) => {
+            const outputBase64 = Buffer.from(data).toString('base64');
+            this.updateOperation(operation.operationId, {
+              phase: currentPhase,
+              message: `Running ${currentPhase} scripts...`,
+              outputBase64: this.appendBase64Output(this.operations.get(operation.operationId)?.outputBase64, outputBase64),
+            }, 'operation_output');
+            void this.sendMessage(session, sendResponse, {
+              type: 'script_output',
+              phase: currentPhase,
+              data: outputBase64,
+              workspaceId,
+            }).catch(() => undefined);
+          },
+          onPhaseStart: (phase: import('../../types/script-phase.js').WorkspaceScriptPhase) => {
+            currentPhase = phase;
+            this.updateOperation(operation.operationId, {
+              phase,
+              message: `Running ${phase} scripts...`,
+            });
+            void this.sendMessage(session, sendResponse, {
+              type: 'script_output',
+              phase,
+              data: '',
+              workspaceId,
+            }).catch(() => undefined);
+          },
+        };
+        const result = await withTimeout(
+          params.mode === 'open'
+            ? prepareWorkspaceForSession(runOptions)
+            : rerunWorkspaceScriptsForSession({ ...runOptions, selection: params.selection }),
+          operationTimeoutMs(operation.kind),
+          `Operation timed out (${operation.kind})`,
+        );
+        if (!result.success) {
+          const error = { code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error };
+          this.updateOperation(operation.operationId, {
+            state: 'failed',
+            phase: result.phase,
+            message: result.error,
+            error,
+          }, 'operation_failed');
+          await this.sendMessage(session, sendResponse, {
+            type: 'script_output',
+            phase: result.phase,
+            data: '',
+            done: true,
+            error: result.error,
+            workspaceId,
+          });
+          return;
+        }
+        this.updateOperation(operation.operationId, {
+          state: 'succeeded',
+          phase: currentPhase,
+          message: 'Workspace scripts complete',
+          result: { type: 'ok' },
+        }, 'operation_succeeded');
+        await this.sendMessage(session, sendResponse, {
+          type: 'script_output',
+          phase: currentPhase,
+          data: '',
+          done: true,
+          workspaceId,
+        });
+      } catch (error) {
+        const typedError = error instanceof Error ? error as Error & { code?: string } : undefined;
+        const message = typedError?.message ?? String(error);
+        this.updateOperation(operation.operationId, {
+          state: 'failed',
+          phase: currentPhase,
+          message,
+          error: { code: typedError?.code, message },
+        }, 'operation_failed');
+        await this.sendMessage(session, sendResponse, {
+          type: 'script_output',
+          phase: currentPhase,
+          data: '',
+          done: true,
+          error: message,
+          workspaceId,
+        }).catch(() => undefined);
+      } finally {
+        stopWatchdog();
+      }
+    })();
+  }
+
+  private async startTmuxCommandOperation(
+    session: RemoteClientSession,
+    sendResponse: (data: Uint8Array) => void,
+    params: {
+      requestId: string;
+      kind: RemoteOperationKind;
+      scope: RemoteOperationScope;
+      command: TmuxCommand;
+      phase?: string;
+      message?: string;
+      refreshMachineSnapshot?: boolean;
+    },
+  ): Promise<void> {
+    const operation = this.createOperation({
+      operationId: params.requestId,
+      kind: params.kind,
+      scope: params.scope,
+      phase: params.phase,
+      message: params.message,
+    });
+    await this.sendOperationAccepted(session, sendResponse, params.requestId, operation);
+    const stopWatchdog = this.startOperationWatchdog(operation.operationId, operation.kind);
+
+    void (async () => {
+      try {
+        // The handler already validated tmux-lite availability during initialize().
+        // Avoid ensureServer() here: it performs an unbounded agent-state RPC,
+        // which can wedge operation responses when tmux-lite is busy.
+        const response = await withTimeout(
+          sendTmuxCommand(params.command),
+          operationTimeoutMs(operation.kind),
+          `Operation timed out (${operation.kind})`,
+        );
+        if (response.type === 'error') {
+          this.updateOperation(operation.operationId, {
+            state: 'failed',
+            message: response.message,
+            error: { code: response.code, message: response.message },
+            result: response,
+          }, 'operation_failed');
+          return;
+        }
+        this.updateOperation(operation.operationId, {
+          state: 'succeeded',
+          message: params.message ? `${params.message} complete` : 'Operation complete',
+          result: response,
+        }, 'operation_succeeded');
+        if (params.refreshMachineSnapshot) {
+          await this.refreshMachineSnapshot(`${params.kind}:${operation.operationId}`);
+        }
+      } catch (error) {
+        const typedError = error instanceof Error ? error as Error & { code?: string } : undefined;
+        const message = typedError?.message ?? String(error);
+        this.updateOperation(operation.operationId, {
+          state: 'failed',
+          message,
+          error: { code: typedError?.code, message },
+        }, 'operation_failed');
+      } finally {
+        stopWatchdog();
+      }
+    })();
   }
 
   /**
@@ -338,6 +781,10 @@ export class RemoteSessionHandler {
 
       case 'undismiss_replay':
         await this.handleUndismissReplay(session, msg.replayId, sendResponse);
+        break;
+
+      case 'dismiss_operation':
+        await this.handleDismissOperation(session, msg.operationId, sendResponse);
         break;
 
       case "attach_session":
@@ -417,13 +864,20 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-create',
-          repository: msg.repository,
-          projectName: msg.projectName,
-          baseBranch: msg.baseBranch,
-          setCurrent: msg.setCurrent,
-        }, sendResponse);
+        await this.startTmuxCommandOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          kind: 'project.create',
+          scope: { projectName: msg.projectName },
+          command: {
+            type: 'project-create',
+            repository: msg.repository,
+            projectName: msg.projectName,
+            baseBranch: msg.baseBranch,
+            setCurrent: msg.setCurrent,
+          },
+          message: 'Creating project',
+          refreshMachineSnapshot: true,
+        });
         break;
 
       case 'prepare_project_creation':
@@ -431,13 +885,20 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-prepare',
-          repository: msg.repository,
-          projectName: msg.projectName,
-          baseBranch: msg.baseBranch,
-          setCurrent: msg.setCurrent,
-        }, sendResponse);
+        await this.startTmuxCommandOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          kind: 'project.prepare',
+          scope: { projectName: msg.projectName },
+          command: {
+            type: 'project-prepare',
+            repository: msg.repository,
+            projectName: msg.projectName,
+            baseBranch: msg.baseBranch,
+            setCurrent: msg.setCurrent,
+          },
+          message: 'Preparing project',
+          refreshMachineSnapshot: true,
+        });
         break;
 
       case 'finalize_project_creation':
@@ -445,17 +906,24 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-finalize',
-          projectName: msg.projectName,
-          repository: msg.repository,
-          baseBranch: msg.baseBranch,
-          bundle: msg.bundle,
-          inputValues: msg.inputValues,
-          secretValues: msg.secretValues,
-          confirmResults: msg.confirmResults,
-          setCurrent: msg.setCurrent,
-        }, sendResponse);
+        await this.startTmuxCommandOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          kind: 'project.finalize',
+          scope: { projectName: msg.projectName },
+          command: {
+            type: 'project-finalize',
+            projectName: msg.projectName,
+            repository: msg.repository,
+            baseBranch: msg.baseBranch,
+            bundle: msg.bundle,
+            inputValues: msg.inputValues,
+            secretValues: msg.secretValues,
+            confirmResults: msg.confirmResults,
+            setCurrent: msg.setCurrent,
+          },
+          message: 'Finalizing project',
+          refreshMachineSnapshot: true,
+        });
         break;
 
       case 'cancel_project_creation':
@@ -474,10 +942,17 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-delete',
-          projectName: msg.projectName,
-        }, sendResponse);
+        await this.startTmuxCommandOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          kind: 'project.delete',
+          scope: { projectName: msg.projectName },
+          command: {
+            type: 'project-delete',
+            projectName: msg.projectName,
+          },
+          message: 'Deleting project',
+          refreshMachineSnapshot: true,
+        });
         break;
 
       case 'create_workspace':
@@ -485,15 +960,22 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'workspace-create',
-          projectName: msg.projectName,
-          workspaceName: msg.workspaceName,
-          branchName: msg.branchName,
-          baseBranch: msg.baseBranch,
-          workspaceSource: msg.workspaceSource,
-          linearIssue: msg.linearIssue,
-        }, sendResponse);
+        await this.startTmuxCommandOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          kind: 'workspace.create',
+          scope: { projectName: msg.projectName, workspaceName: msg.workspaceName, workspaceId: `${msg.projectName}:${msg.workspaceName}` },
+          command: {
+            type: 'workspace-create',
+            projectName: msg.projectName,
+            workspaceName: msg.workspaceName,
+            branchName: msg.branchName,
+            baseBranch: msg.baseBranch,
+            workspaceSource: msg.workspaceSource,
+            linearIssue: msg.linearIssue,
+          },
+          message: 'Creating workspace',
+          refreshMachineSnapshot: true,
+        });
         break;
 
       case 'set_workspace_phase':
@@ -548,61 +1030,13 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        try {
-          const workspaces = await scanWorkspaces();
-          const workspace = workspaces.find(
-            (item) =>
-              item.projectName === msg.projectName &&
-              matchesWorkspaceId(item, msg.workspaceId)
-          );
-          if (!workspace) {
-            await this.sendError(session, sendResponse, 'WORKSPACE_NOT_FOUND', `Workspace not found: ${msg.workspaceId}`, { requestId: msg.requestId });
-            return;
-          }
-          let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'setup';
-          const result = await rerunWorkspaceScriptsForSession({
-            projectName: msg.projectName,
-            workspacePath: workspace.path,
-            workspaceName: workspace.id,
-            repository: readProjectConfig(msg.projectName).repository,
-            interactiveScripts: false,
-            onOutput: (data) => {
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase: currentPhase,
-                data: data.toString('base64'),
-                workspaceId: `${msg.projectName}:${workspace.id}`,
-              }).catch(() => undefined);
-            },
-            onPhaseStart: (phase) => {
-              currentPhase = phase;
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase,
-                data: '',
-                workspaceId: `${msg.projectName}:${workspace.id}`,
-              }).catch(() => undefined);
-            },
-          });
-          if (!result.success) {
-            await this.sendError(session, sendResponse, `${result.phase.toUpperCase()}_SCRIPT_FAILED`, result.error, { requestId: msg.requestId, workspaceId: `${msg.projectName}:${workspace.id}` });
-            return;
-          }
-          await this.sendMessage(session, sendResponse, {
-            type: 'script_output',
-            phase: currentPhase,
-            data: '',
-            done: true,
-            workspaceId: `${msg.projectName}:${workspace.id}`,
-          });
-          await this.sendMessage(session, sendResponse, {
-            type: 'command_response',
-            requestId: msg.requestId,
-            response: { type: 'ok' },
-          });
-        } catch (error) {
-          await this.sendError(session, sendResponse, 'RERUN_SCRIPTS_FAILED', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
-        }
+        await this.startWorkspaceScriptOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+          selection: 'setup-select',
+          mode: 'rerun',
+        });
         break;
 
       case 'run_workspace_open_scripts':
@@ -610,61 +1044,13 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        try {
-          const workspaces = await scanWorkspaces();
-          const workspace = workspaces.find(
-            (item) =>
-              item.projectName === msg.projectName &&
-              matchesWorkspaceId(item, msg.workspaceId)
-          );
-          if (!workspace) {
-            await this.sendError(session, sendResponse, 'WORKSPACE_NOT_FOUND', `Workspace not found: ${msg.workspaceId}`, { requestId: msg.requestId });
-            return;
-          }
-          let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'select';
-          const result = await prepareWorkspaceForSession({
-            projectName: msg.projectName,
-            workspacePath: workspace.path,
-            workspaceName: workspace.id,
-            repository: readProjectConfig(msg.projectName).repository,
-            interactiveScripts: false,
-            onOutput: (data) => {
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase: currentPhase,
-                data: data.toString('base64'),
-                workspaceId: `${msg.projectName}:${workspace.id}`,
-              }).catch(() => undefined);
-            },
-            onPhaseStart: (phase) => {
-              currentPhase = phase;
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase,
-                data: '',
-                workspaceId: `${msg.projectName}:${workspace.id}`,
-              }).catch(() => undefined);
-            },
-          });
-          if (!result.success) {
-            await this.sendError(session, sendResponse, `${result.phase.toUpperCase()}_SCRIPT_FAILED`, result.error, { requestId: msg.requestId, workspaceId: `${msg.projectName}:${workspace.id}` });
-            return;
-          }
-          await this.sendMessage(session, sendResponse, {
-            type: 'script_output',
-            phase: currentPhase,
-            data: '',
-            done: true,
-            workspaceId: `${msg.projectName}:${workspace.id}`,
-          });
-          await this.sendMessage(session, sendResponse, {
-            type: 'command_response',
-            requestId: msg.requestId,
-            response: { type: 'ok' },
-          });
-        } catch (error) {
-          await this.sendError(session, sendResponse, 'OPEN_SCRIPTS_FAILED', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
-        }
+        await this.startWorkspaceScriptOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+          selection: 'select',
+          mode: 'open',
+        });
         break;
 
       case 'run_workspace_script_selection':
@@ -672,62 +1058,13 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        try {
-          const workspaces = await scanWorkspaces();
-          const workspace = workspaces.find(
-            (item) =>
-              item.projectName === msg.projectName &&
-              matchesWorkspaceId(item, msg.workspaceId)
-          );
-          if (!workspace) {
-            await this.sendError(session, sendResponse, 'WORKSPACE_NOT_FOUND', `Workspace not found: ${msg.workspaceId}`, { requestId: msg.requestId });
-            return;
-          }
-          let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = msg.selection === 'select' ? 'select' : 'setup';
-          const result = await rerunWorkspaceScriptsForSession({
-            projectName: msg.projectName,
-            workspacePath: workspace.path,
-            workspaceName: workspace.id,
-            repository: readProjectConfig(msg.projectName).repository,
-            interactiveScripts: false,
-            selection: msg.selection,
-            onOutput: (data) => {
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase: currentPhase,
-                data: data.toString('base64'),
-                workspaceId: `${msg.projectName}:${workspace.id}`,
-              }).catch(() => undefined);
-            },
-            onPhaseStart: (phase) => {
-              currentPhase = phase;
-              void this.sendMessage(session, sendResponse, {
-                type: 'script_output',
-                phase,
-                data: '',
-                workspaceId: `${msg.projectName}:${workspace.id}`,
-              }).catch(() => undefined);
-            },
-          });
-          if (!result.success) {
-            await this.sendError(session, sendResponse, `${result.phase.toUpperCase()}_SCRIPT_FAILED`, result.error, { requestId: msg.requestId, workspaceId: `${msg.projectName}:${workspace.id}` });
-            return;
-          }
-          await this.sendMessage(session, sendResponse, {
-            type: 'script_output',
-            phase: currentPhase,
-            data: '',
-            done: true,
-            workspaceId: `${msg.projectName}:${workspace.id}`,
-          });
-          await this.sendMessage(session, sendResponse, {
-            type: 'command_response',
-            requestId: msg.requestId,
-            response: { type: 'ok' },
-          });
-        } catch (error) {
-          await this.sendError(session, sendResponse, 'RUN_SCRIPT_SELECTION_FAILED', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
-        }
+        await this.startWorkspaceScriptOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          projectName: msg.projectName,
+          workspaceId: msg.workspaceId,
+          selection: msg.selection,
+          mode: 'rerun',
+        });
         break;
 
       case 'workspace_note_remove':
@@ -746,14 +1083,16 @@ export class RemoteSessionHandler {
         });
         break;
 
-      case 'kill_session':
+      case 'terminate_session':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
         await this.handleTypedCommand(session, msg.requestId, {
-          type: 'kill',
+          type: 'terminate',
           id: msg.sessionId,
+          mode: msg.mode,
+          graceMs: msg.graceMs,
         }, sendResponse);
         break;
 
@@ -767,6 +1106,17 @@ export class RemoteSessionHandler {
           workspaceId: msg.workspaceId,
           processName: msg.processName,
           instance: msg.instance,
+        }, sendResponse);
+        break;
+
+      case 'resolve_port_conflict':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'service-resolve-port-conflict',
+          conflict: msg.conflict,
         }, sendResponse);
         break;
 
@@ -851,11 +1201,21 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'review-request',
+        await this.startTmuxCommandOperation(session, sendResponse, {
           requestId: msg.requestId,
-          operation: msg.operation,
-        }, sendResponse);
+          kind: 'review.github',
+          scope: {
+            projectName: msg.operation.projectName,
+            workspaceName: msg.operation.workspaceName,
+            workspaceId: `${msg.operation.projectName}:${msg.operation.workspaceName}`,
+          },
+          command: {
+            type: 'review-request',
+            requestId: msg.requestId,
+            operation: msg.operation,
+          },
+          message: `Review ${msg.operation.op}`,
+        });
         break;
 
       case 'get_inbox':
@@ -1090,6 +1450,7 @@ export class RemoteSessionHandler {
           target: msg.target,
         }, sendResponse);
 
+        break;
       case 'list_workspace_editors':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
@@ -1106,11 +1467,21 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'workspace-editor-open',
-          target: msg.target,
-          editorId: msg.editorId,
-        }, sendResponse);
+        await this.startTmuxCommandOperation(session, sendResponse, {
+          requestId: msg.requestId,
+          kind: 'workspace.editor.open',
+          scope: {
+            projectName: msg.target.projectName,
+            workspaceId: msg.target.workspaceId,
+            workspaceName: msg.target.workspaceName,
+          },
+          command: {
+            type: 'workspace-editor-open',
+            target: msg.target,
+            editorId: msg.editorId,
+          },
+          message: 'Opening workspace editor',
+        });
         break;
 
 
@@ -1133,25 +1504,60 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        try {
-          const { execCommand } = await importExecModule();
-          const output = await executeSpaceCommand(
-            {
-              exec: async (command, commandArgs, options) => {
-                const result = await execCommand(command, commandArgs, options?.cwd ?? msg.target.workspacePath, options);
-                return { stdout: result.stdout, stderr: result.stderr, code: result.code };
-              },
+        {
+          const operation = this.createOperation({
+            operationId: msg.requestId,
+            kind: 'space.command',
+            scope: {
+              projectName: msg.target.projectName,
+              workspaceId: msg.target.workspaceId,
+              workspaceName: msg.target.workspaceName,
             },
-            { cwd: msg.target.workspacePath },
-            parseCommandArgs(msg.argsText),
-          );
-          await this.sendMessage(session, sendResponse, {
-            type: 'run_space_command_response',
-            requestId: msg.requestId,
-            output,
+            phase: 'running',
+            message: 'Running space command',
           });
-        } catch (error) {
-          await this.sendError(session, sendResponse, 'COMMAND_ERROR', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
+          await this.sendOperationAccepted(session, sendResponse, msg.requestId, operation);
+          const stopWatchdog = this.startOperationWatchdog(operation.operationId, operation.kind);
+          void (async () => {
+            try {
+              const { execCommand } = await importExecModule();
+              const output = await withTimeout(
+                executeSpaceCommand(
+                  {
+                    exec: async (command, commandArgs, options) => {
+                      const result = await execCommand(command, commandArgs, options?.cwd ?? msg.target.workspacePath, options);
+                      return { stdout: result.stdout, stderr: result.stderr, code: result.code, killed: result.killed ?? false };
+                    },
+                  },
+                  { cwd: msg.target.workspacePath },
+                  parseCommandArgs(msg.argsText),
+                ),
+                operationTimeoutMs(operation.kind),
+                `Operation timed out (${operation.kind})`,
+              );
+              this.updateOperation(operation.operationId, {
+                state: 'succeeded',
+                phase: 'complete',
+                message: 'Space command complete',
+                result: {
+                  type: 'run_space_command_response',
+                  requestId: msg.requestId,
+                  output,
+                },
+              }, 'operation_succeeded');
+            } catch (error) {
+              const typedError = error instanceof Error ? error as Error & { code?: string } : undefined;
+              const message = typedError?.message ?? String(error);
+              this.updateOperation(operation.operationId, {
+                state: 'failed',
+                phase: 'failed',
+                message,
+                error: { code: typedError?.code ?? 'COMMAND_ERROR', message },
+              }, 'operation_failed');
+            } finally {
+              stopWatchdog();
+            }
+          })();
         }
         break;
       default: {
@@ -1172,11 +1578,12 @@ export class RemoteSessionHandler {
     writeTraceLog('machine-command-start', {
       requestId,
       commandType: tmuxCommand.type,
-      clientId: session.clientId,
     });
     try {
-      await ensureServer();
-      const response = await sendTmuxCommand(tmuxCommand);
+      // The handler already validated tmux-lite availability during initialize().
+      // Avoid ensureServer() here: it performs an unbounded agent-state RPC,
+      // which can wedge client responses when tmux-lite is busy.
+      const response = await this.sendBoundedTmuxCommand(tmuxCommand);
       writeTraceLog('machine-command-tmux-response', {
         requestId,
         commandType: tmuxCommand.type,
@@ -1565,39 +1972,73 @@ export class RemoteSessionHandler {
       ? workspaceId.slice(projectName.length + 1)
       : workspaceId;
     const canonicalWorkspaceId = `${projectName}:${normalizedWorkspaceId}`;
-    try {
-      await deleteTmuxWorkspace({
-        projectName,
-        workspaceId: normalizedWorkspaceId,
-        scriptPolicy,
-        onScriptOutput: (event) => {
-          void this.sendMessage(session, sendResponse, {
-            type: 'script_output',
-            phase: 'remove',
-            data: event.data,
-            done: event.done,
-            error: event.error,
-            workspaceId: canonicalWorkspaceId,
-          }).catch((error) => {
-            logger.debug(`[remote-session] Failed to stream remove script output: ${error instanceof Error ? error.message : String(error)}`);
-          });
-        },
-      });
+    const operationId = requestId ?? crypto.randomUUID();
+    const operation = this.createOperation({
+      operationId,
+      kind: 'workspace.delete',
+      scope: { projectName, workspaceId: canonicalWorkspaceId, workspaceName: normalizedWorkspaceId },
+      phase: 'remove',
+      message: 'Deleting workspace',
+    });
+    await this.sendOperationAccepted(session, sendResponse, operationId, operation);
+    const stopWatchdog = this.startOperationWatchdog(operation.operationId, operation.kind);
 
-      await this.sendMessage(session, sendResponse, {
-        type: "workspace_deleted",
-        requestId,
-        workspaceId: canonicalWorkspaceId,
-      });
-    } catch (e) {
-      console.error("[remote-session] Failed to delete workspace:", e);
-      const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
-      const message = typedError?.message ?? String(e);
-      await this.sendError(session, sendResponse, typedError?.code ?? "DELETE_FAILED", message, {
-        workspaceId: canonicalWorkspaceId,
-        requestId,
-      });
-    }
+    void (async () => {
+      try {
+        await withTimeout(
+          deleteTmuxWorkspace({
+            projectName,
+            workspaceId: normalizedWorkspaceId,
+            scriptPolicy,
+            onScriptOutput: (event) => {
+              this.updateOperation(operationId, {
+                phase: 'remove',
+                outputBase64: this.appendBase64Output(this.operations.get(operationId)?.outputBase64, event.data),
+                message: event.done
+                  ? event.error ? `Remove scripts failed: ${event.error}` : 'Remove scripts complete'
+                  : 'Running remove scripts',
+              }, event.done ? 'operation_progress' : 'operation_output');
+              void this.sendMessage(session, sendResponse, {
+                type: 'script_output',
+                phase: 'remove',
+                data: event.data,
+                done: event.done,
+                error: event.error,
+                workspaceId: canonicalWorkspaceId,
+              }).catch((error) => {
+                logger.debug(`[remote-session] Failed to stream remove script output: ${error instanceof Error ? error.message : String(error)}`);
+              });
+            },
+          }),
+          operationTimeoutMs(operation.kind),
+          `Operation timed out (${operation.kind})`,
+        );
+
+        this.updateOperation(operationId, {
+          state: 'succeeded',
+          phase: 'complete',
+          message: 'Workspace deleted',
+          result: {
+            type: 'workspace_deleted',
+            requestId: operationId,
+            workspaceId: canonicalWorkspaceId,
+          },
+        }, 'operation_succeeded');
+        await this.refreshMachineSnapshot(`workspace.delete:${operationId}`);
+      } catch (e) {
+        console.error("[remote-session] Failed to delete workspace:", e);
+        const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+        const message = typedError?.message ?? String(e);
+        this.updateOperation(operationId, {
+          state: 'failed',
+          phase: 'failed',
+          message,
+          error: { code: typedError?.code ?? "DELETE_FAILED", message },
+        }, 'operation_failed');
+      } finally {
+        stopWatchdog();
+      }
+    })();
   }
 
   // ============================================================================
@@ -1648,6 +2089,7 @@ export class RemoteSessionHandler {
       this.pendingAttachRuns.delete(connectionId);
     }
     this.onClientLeavesBrowsing(connectionId);
+    this.dismissedOperationIdsByConnection.delete(connectionId);
   }
 
   async cleanup(): Promise<void> {

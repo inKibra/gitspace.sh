@@ -86,7 +86,7 @@ import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
 import { signalSubprocessTree } from './process-tree.js';
-import { PortConflictError } from '../processes/ports.js';
+import { PortConflictError } from '../processes/port-conflicts.js';
 import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
 import { executeLocalReviewOperation } from '../../core/review-executor.js';
@@ -134,6 +134,18 @@ const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
 const REPLAY_CHECKPOINT_BYTE_INTERVAL = 128 * 1024;
 const REPLAY_CHECKPOINT_OUTPUT_EVENT_INTERVAL = 256;
 const pendingAttachControllers = new Map<string, AbortController>();
+const DEFAULT_TERMINATION_GRACE_MS = 5000;
+const MAX_TERMINATION_GRACE_MS = 8000;
+
+type TerminationMode = "graceful" | "force";
+
+interface TerminationState {
+  promise: Promise<void>;
+  resolve: () => void;
+  timer: ReturnType<typeof setTimeout> | null;
+  force: boolean;
+}
+
 
 // Load notification config (with fallback to defaults)
 let notificationConfig: NotificationConfig;
@@ -221,6 +233,8 @@ interface SessionData {
   lastAttached: number;  // Timestamp of last attach (for grace period)
   replay: ReplayRuntime | null;
   replayCheckpointPending: boolean;
+  cleanupComplete: boolean;
+  termination: TerminationState | null;
 }
 
 const sessions = new Map<string, SessionData>();
@@ -378,11 +392,13 @@ function clampTerminalSize(
 }
 
 function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
-  writeTraceLog('agent-delta-broadcast', {
-    deltaType: delta.type,
-    agentWatchers: agentStateWatchers.size,
-    machineWatchers: machineStateWatchers.size,
-  });
+  if (delta.type !== 'agent_last_message') {
+    writeTraceLog('agent-delta-broadcast', {
+      deltaType: delta.type,
+      agentWatchers: agentStateWatchers.size,
+      machineWatchers: machineStateWatchers.size,
+    });
+  }
   for (const socket of agentStateWatchers) {
     try {
       sendRouterResponse(socket, { type: 'agent-state-update', delta });
@@ -393,10 +409,7 @@ function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').Agen
 }
 
 function shouldBroadcastMachineSnapshotForAgentDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): boolean {
-  return delta.type === 'agent_state_snapshot'
-    || delta.type === 'agent_session_created'
-    || delta.type === 'agent_session_updated'
-    || delta.type === 'agent_session_deleted';
+  return delta.type !== 'agent_last_message';
 }
 
 
@@ -438,7 +451,11 @@ async function buildCurrentMachineSnapshot(options: { bumpNonce?: boolean } = {}
   return snapshot;
 }
 
-async function broadcastMachineSnapshotReplacement(): Promise<void> {
+let machineSnapshotBroadcastPromise: Promise<void> | null = null;
+let machineSnapshotBroadcastQueued = false;
+
+
+async function broadcastMachineSnapshotReplacementOnce(): Promise<void> {
   const traceStartMs = Date.now();
   if (machineStateWatchers.size === 0) return;
   const snapshot = await buildCurrentMachineSnapshot({ bumpNonce: true });
@@ -466,6 +483,25 @@ async function broadcastMachineSnapshotReplacement(): Promise<void> {
     durationMs: Date.now() - traceStartMs,
     watchers: machineStateWatchers.size,
   });
+}
+
+async function broadcastMachineSnapshotReplacement(): Promise<void> {
+  if (machineStateWatchers.size === 0) return;
+  if (machineSnapshotBroadcastPromise) {
+    machineSnapshotBroadcastQueued = true;
+    return machineSnapshotBroadcastPromise;
+  }
+  machineSnapshotBroadcastPromise = (async () => {
+    try {
+      do {
+        machineSnapshotBroadcastQueued = false;
+        await broadcastMachineSnapshotReplacementOnce();
+      } while (machineSnapshotBroadcastQueued && machineStateWatchers.size > 0);
+    } finally {
+      machineSnapshotBroadcastPromise = null;
+    }
+  })();
+  return machineSnapshotBroadcastPromise;
 }
 
 let agentControlSubscribed = false;
@@ -626,6 +662,12 @@ function clearIdleTimer(session: SessionData): void {
 }
 
 function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean; killed?: boolean } = {}): void {
+  if (session.cleanupComplete) {
+    return;
+  }
+  session.cleanupComplete = true;
+  resolveTermination(session.termination);
+  session.termination = null;
   clearIdleTimer(session);
   session.idleState.outputSinceIdle = 0;
   clearAttachTimer(session);
@@ -651,6 +693,100 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
     markAgentSessionIdle(workspaceId, agentSessionId);
   }
 }
+
+async function terminateSessionData(session: SessionData, mode: TerminationMode, graceMs: number): Promise<void> {
+  if (session.cleanupComplete) {
+    return;
+  }
+
+  if (mode === "force") {
+    resolveTermination(session.termination);
+    session.termination = null;
+    if (session.proc) {
+      signalSubprocessTree(session.proc, "SIGKILL");
+    }
+    if (session.virtualTerminal) {
+      session.virtualTerminal.stop();
+      removeVirtualTerminal(session.info.id);
+    }
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+
+  if (session.virtualTerminal) {
+    session.virtualTerminal.stop();
+    removeVirtualTerminal(session.info.id);
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+
+  if (!session.proc) {
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+
+  if (session.termination) {
+    return session.termination.promise;
+  }
+
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  const termination: TerminationState = {
+    promise,
+    resolve,
+    timer: null,
+    force: false,
+  };
+  session.termination = termination;
+
+  signalSubprocessTree(session.proc, "SIGTERM");
+  termination.timer = setTimeout(() => {
+    if (session.cleanupComplete) {
+      return;
+    }
+    termination.force = true;
+    if (session.proc) {
+      signalSubprocessTree(session.proc, "SIGKILL");
+    }
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+  }, graceMs);
+
+  return promise;
+}
+function resolveTerminationMode(mode: unknown): TerminationMode | null {
+  if (mode === undefined || mode === null) return "graceful";
+  return mode === "graceful" || mode === "force" ? mode : null;
+}
+
+function resolveTerminationGraceMs(value: unknown): number | null {
+  if (value === undefined || value === null) return DEFAULT_TERMINATION_GRACE_MS;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.min(Math.floor(value), MAX_TERMINATION_GRACE_MS);
+}
+
+function resolveTermination(state: TerminationState | null): void {
+  if (!state) return;
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
+  state.resolve();
+}
+
+function disposeSessionTerminal(session: SessionData): void {
+  try { session.xterm.dispose(); } catch {}
+}
+
 
 function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}): void {
   if (shuttingDown) {
@@ -2134,6 +2270,8 @@ function createSession(
     lastAttached: 0,
     replay,
     replayCheckpointPending: false,
+    cleanupComplete: false,
+    termination: null,
   });
 
   const session = sessions.get(id);
@@ -2250,7 +2388,6 @@ function createVirtualSession(
     data(socket: any, data: Buffer) {
       const session = sessions.get(id);
       if (!session) return;
-
       const applyResize = (cols: number, rows: number) => {
         const nextSize = clampTerminalSize(cols, rows, {
           cols: session.xterm.cols,
@@ -2367,6 +2504,8 @@ function createVirtualSession(
     lastAttached: 0,
     replay: null,
     replayCheckpointPending: false,
+    cleanupComplete: false,
+    termination: null,
   });
 
   console.log(`[${sessionName}] virtual session created`);
@@ -2639,22 +2778,21 @@ routerListener = Bun.listen({
             break;
           }
 
-          case "kill": {
+          case "terminate": {
             const s = sessions.get(cmd.id);
             if (!s) {
               res = { type: "error", message: `Session ${cmd.id} not found` };
             } else {
-              if (s.proc) {
-                signalSubprocessTree(s.proc, 'SIGKILL');
+              const mode = resolveTerminationMode(cmd.mode);
+              const graceMs = resolveTerminationGraceMs(cmd.graceMs);
+              if (!mode) {
+                res = { type: "error", message: "Invalid terminate mode" };
+              } else if (graceMs === null) {
+                res = { type: "error", message: "Invalid terminate graceMs" };
+              } else {
+                await terminateSessionData(s, mode, graceMs);
+                res = { type: "ok" };
               }
-              if (s.virtualTerminal) {
-                s.virtualTerminal.stop();
-                removeVirtualTerminal(s.info.id);
-              }
-              cleanupSessionResources(s, { killed: true });
-              try { s.xterm.dispose(); } catch {}
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              res = { type: "ok" };
             }
             break;
           }
@@ -2817,6 +2955,17 @@ routerListener = Bun.listen({
               }
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to start service: ${errMsg}` };
+            }
+            break;
+
+          case 'service-resolve-port-conflict':
+            try {
+              const { resolvePortConflict } = await import('../processes/ports.js');
+              await resolvePortConflict(cmd.conflict);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resolve port conflict: ${errMsg}` };
             }
             break;
 
@@ -3202,7 +3351,6 @@ routerListener = Bun.listen({
             try {
               await getAgentControlReady();
               const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
-              deleteOwnedEntries(agentSessionWatchOwners, socket);
               agentSessionWatchOwners.set(cmd.agentSessionId, socket);
               res = { type: 'session', session };
               void broadcastMachineSnapshotReplacement().catch(() => {});

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useCallback, useMemo, useState } from 'react';
-import { toast } from 'sonner';
+import { toast } from '../lib/sonner.web.js';
 import { useGitSpace } from '../sdk/index.js';
 import { NativeAgentSurface } from './NativeAgentSurface.web.js';
 import type { HostUIDialogResponse } from '../lib/tmux-lite/agents/host-ui-bridge.js';
@@ -21,8 +21,12 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
   const resolvedAgentSessionId = agentSessionId ?? activeBackend?.attachedAgentSessionId ?? null;
   const resolvedWorkspaceId = workspaceId ?? activeBackend?.attachedWorkspaceId ?? null;
   const agentAttached = !!(resolvedAgentSessionId && resolvedWorkspaceId);
-  const pendingDialog = activeBackend?.pendingDialogRequest ?? null;
-  const workingMessage = activeBackend?.agentWorkingMessage;
+  const pendingDialog = resolvedAgentSessionId
+    ? activeBackend?.pendingDialogByAgentSessionId?.[resolvedAgentSessionId] ?? null
+    : activeBackend?.pendingDialogRequest ?? null;
+  const workingMessage = resolvedAgentSessionId
+    ? activeBackend?.workingMessageByAgentSessionId?.[resolvedAgentSessionId]
+    : activeBackend?.agentWorkingMessage;
   const attachedAgentState = useMemo(
     () => (resolvedAgentSessionId ? activeBackend?.snapshot?.agentSessionsById[resolvedAgentSessionId] ?? null : null),
     [activeBackend?.snapshot, resolvedAgentSessionId],

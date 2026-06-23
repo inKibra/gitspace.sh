@@ -14,7 +14,7 @@ import {
   ensureServer,
   getMachineSnapshot,
   createSession,
-  killSession,
+  terminateSession,
   createCheckpoint,
   getReplayMarkdown,
   send,
@@ -69,6 +69,7 @@ import type {
   DeleteProjectParams,
   DeleteWorkspaceParams,
   SessionBackend,
+  TerminateSessionOptions,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
@@ -78,6 +79,7 @@ import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
 import { parseProcessSessionName } from '../../lib/processes/names.js';
+import type { PortConflictInfo } from '../../lib/processes/port-conflicts.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
@@ -90,6 +92,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ReviewRequestError } from '../../types/errors.js';
 import { throwServiceStartError } from './service-start-error.js';
+import { executeSpaceCommand } from '../../lib/tmux-lite/agents/extensions/space-command.js';
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -97,7 +100,7 @@ export interface LocalSessionBackendDependencies {
   ensureServer: typeof ensureServer;
   sendTmuxCommand: (command: TmuxCommand) => Promise<TmuxResponse>;
   createSession: typeof createSession;
-  killSession: typeof killSession;
+  terminateSession: typeof terminateSession;
   createCheckpoint: typeof createCheckpoint;
   prepareAttachSession: typeof prepareAttachSession;
   cancelPrepareAttachSession: typeof cancelPrepareAttachSession;
@@ -359,7 +362,7 @@ function buildDeps(
       return send(command);
     },
     createSession,
-    killSession,
+    terminateSession,
     createCheckpoint,
     prepareAttachSession,
     cancelPrepareAttachSession,
@@ -818,11 +821,11 @@ export class LocalSessionBackend implements SessionBackend {
     socket.sendControl({ type: 'resize', cols, rows });
   }
 
-  async killSession(sessionId: string): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'kill', id: sessionId });
+  async terminateSession(sessionId: string, options: TerminateSessionOptions = {}): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'terminate', id: sessionId, mode: options.mode, graceMs: options.graceMs });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
-    throw new Error('Unexpected kill session response');
+    throw new Error('Unexpected terminate session response');
   }
 
   async deleteWorkspace(
@@ -1159,6 +1162,16 @@ export class LocalSessionBackend implements SessionBackend {
     }
     if (response.type === 'error') throwServiceStartError(response);
     throw new Error('Unexpected tmux service start response');
+  }
+
+  async resolvePortConflict(conflict: PortConflictInfo): Promise<void> {
+    const response = await this.sendTmuxCommand({
+      type: 'service-resolve-port-conflict',
+      conflict,
+    });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected port conflict resolution response');
   }
 
   async stopProcess(workspaceId: string, processName: string): Promise<void> {
@@ -1696,7 +1709,21 @@ export class LocalSessionBackend implements SessionBackend {
 
   async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    return this.agentCoordinator.runSpaceCommand(target, argsText);
+    const [{ parseCommandArgs }, { execCommand }] = await Promise.all([
+      import('@oh-my-pi/pi-coding-agent/utils/command-args'),
+      import('@oh-my-pi/pi-coding-agent/exec/exec'),
+    ]);
+    const args = parseCommandArgs(argsText);
+    return executeSpaceCommand(
+      {
+        exec: async (command, commandArgs, options) => {
+          const result = await execCommand(command, commandArgs, options?.cwd ?? target.workspacePath, options);
+          return { stdout: result.stdout, stderr: result.stderr, code: result.code, killed: result.killed ?? false };
+        },
+      },
+      { cwd: target.workspacePath },
+      args,
+    );
   }
 
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {

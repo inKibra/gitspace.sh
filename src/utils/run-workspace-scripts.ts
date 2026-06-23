@@ -24,7 +24,7 @@ import {
 } from './workspace-state';
 import { readProjectConfig } from '../core/config';
 import { detectBundleChanges } from '../core/bundle-refresh';
-import { getProjectSecrets } from './secrets';
+import { clearSecretsCache, getProjectSecrets } from './secrets';
 import { logger } from './logger';
 import type { ConfirmStepResult, OnboardingStep, SpacesBundle } from '../types/bundle.js';
 import type { WorkspaceScriptPhase } from '../types/script-phase';
@@ -104,6 +104,12 @@ export async function runWorkspaceScripts(
       bundleSecretKeys.add(step.configKey);
     }
   }
+
+  // Bundle config updates can be applied by the tmux-lite server while
+  // workspace script operations run in the machine daemon. The secrets module
+  // has a process-local cache, so refresh before script env construction or
+  // scripts can miss secrets that were just saved from another process.
+  clearSecretsCache();
 
   const bundleSecrets = bundleSecretKeys.size > 0
     ? await getProjectSecrets(projectName, [...bundleSecretKeys])
@@ -267,6 +273,12 @@ export async function rerunWorkspaceBundleScripts(
       bundleSecretKeys.add(step.configKey);
     }
   }
+  // Bundle config updates can be applied by the tmux-lite server while
+  // workspace script operations run in the machine daemon. The secrets module
+  // has a process-local cache, so refresh before script env construction or
+  // scripts can miss secrets that were just saved from another process.
+  clearSecretsCache();
+
   const bundleSecrets = bundleSecretKeys.size > 0
     ? await getProjectSecrets(projectName, [...bundleSecretKeys])
     : {};

@@ -30,6 +30,7 @@ import type {
   SessionBackend,
 } from '../../session/backend.js';
 import type { BackendManagerEvent } from '../../session/backend-manager.js';
+import { backendEventToActions } from '../../session/backend-event-actions.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
@@ -65,107 +66,7 @@ export const LOCAL_BACKEND_KEY: BackendKey = 'local';
 
 export type GitSpaceEngineListener = (state: MultiMachineState) => void;
 
-/**
- * Dispatches a BackendManagerEvent into the session engine reducer.
- * Mirrors the `dispatchBackendEvent` helper from useMultiBackends.
- */
-function dispatchBackendEvent(
-  event: BackendManagerEvent
-): SessionEngineAction | null {
-  const { backendKey, event: evt } = event;
-  switch (evt.type) {
-    case 'status':
-      return { type: 'SET_BACKEND_STATUS', backendKey, status: evt.status, error: evt.error ?? null };
-    case 'projects':
-      return { type: 'SET_PROJECTS', backendKey, projects: evt.projects };
-    case 'workspaces':
-      // workspaces event may carry savedEventFilters — handle below
-      return null; // handled specially
-    case 'sessions':
-      return { type: 'SET_SESSIONS', backendKey, sessions: evt.sessions };
-    case 'replays':
-      return { type: 'SET_REPLAYS', backendKey, replays: evt.replays };
-    case 'inbox':
-      return { type: 'SET_INBOX', backendKey, items: evt.items, unreadCount: evt.unreadCount };
-    case 'notification_config':
-      return { type: 'SET_NOTIFICATION_CONFIG', backendKey, config: evt.config };
-    case 'pane_attached':
-      return {
-        type: 'ADD_PANE',
-        backendKey,
-        pane: {
-          paneId: evt.paneId,
-          streamId: evt.streamId,
-          sessionId: evt.sessionId,
-          sessionName: evt.sessionName ?? null,
-          meta: { sessionName: evt.sessionName ?? null },
-          workspaceId: evt.workspaceId ?? null,
-          agentSessionId: evt.agentSessionId ?? null,
-          viewOnly: evt.viewOnly ?? false,
-        },
-      };
-    case 'pane_meta':
-      return { type: 'UPDATE_PANE_META', backendKey, paneId: evt.paneId, meta: evt.meta };
-    case 'pane_detached':
-    case 'pane_exited':
-      return { type: 'REMOVE_PANE', backendKey, paneId: evt.paneId };
-    case 'attached':
-      return {
-        type: 'SET_ATTACHED_SESSION',
-        backendKey,
-        sessionId: evt.sessionId,
-        sessionName: evt.sessionName ?? null,
-        meta: { sessionName: evt.sessionName ?? null },
-        workspaceId: evt.workspaceId ?? null,
-        agentSessionId: evt.agentSessionId ?? null,
-      };
-    case 'session_meta':
-      return { type: 'SET_ATTACHED_SESSION_META', backendKey, meta: evt.meta };
-    case 'detached':
-    case 'session_exited':
-      return { type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null };
-    case 'command_error':
-      return {
-        type: 'SET_COMMAND_ERROR',
-        backendKey,
-        commandError: { code: evt.code, message: evt.message },
-      };
-    case 'error':
-      return { type: 'SET_BACKEND_STATUS', backendKey, status: 'error', error: evt.message };
-    case 'script_output':
-      return {
-        type: 'SET_SCRIPT_STATE',
-        backendKey,
-        scriptState:
-          evt.done && !evt.error
-            ? null
-            : {
-                phase: evt.phase,
-                isRunning: !evt.done,
-                error: evt.error,
-                exitCode: evt.exitCode,
-              },
-      };
-    case 'events':
-      // events may carry savedEventFilters — handled specially
-      return null;
-    case 'machine_snapshot':
-      return { type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: evt.snapshot };
-    case 'host_ui_dialog_request':
-      return { type: 'SET_HOST_UI_DIALOG', backendKey, request: evt.request };
-    case 'host_ui_event':
-      if (evt.event.type === 'working-message') {
-        return {
-          type: 'SET_HOST_UI_WORKING_MESSAGE',
-          backendKey,
-          message: evt.event.payload.message,
-        };
-      }
-      return null;
-    default:
-      return null;
-  }
-}
+
 
 export class GitSpaceEngine {
   private manager: BackendManager;
@@ -372,8 +273,8 @@ export class GitSpaceEngine {
     return this.withRefBackend(ref, (b) => b.cancelPendingScripts?.() ?? Promise.resolve());
   }
 
-  killSession(ref: BackendScopedSessionRef): Promise<void> {
-    return this.withRefBackend(ref, (b) => b.killSession(ref.sessionId));
+  terminateSession(ref: BackendScopedSessionRef): Promise<void> {
+    return this.withRefBackend(ref, (b) => b.terminateSession(ref.sessionId));
   }
 
   deleteWorkspace(ref: BackendScopedWorkspaceRef, params?: DeleteWorkspaceParams): Promise<void> {
@@ -749,26 +650,9 @@ export class GitSpaceEngine {
   }
 
   private handleBackendEvent(evt: BackendManagerEvent): void {
-    const { backendKey, event } = evt;
-
-    // Special cases that produce multiple dispatches
-    if (event.type === 'workspaces') {
-      this.dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
-      if (event.savedEventFilters) {
-        this.dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      return;
+    for (const action of backendEventToActions(evt.backendKey, evt.event)) {
+      this.dispatch(action);
     }
-    if (event.type === 'events') {
-      this.dispatch({ type: 'SET_EVENTS', backendKey, events: event.events, liveEventIds: event.liveEventIds });
-      if (event.savedEventFilters) {
-        this.dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      return;
-    }
-
-    const action = dispatchBackendEvent(evt);
-    if (action) this.dispatch(action);
   }
 
   // ─── Internal: backend routing ────────────────────────────────────────────

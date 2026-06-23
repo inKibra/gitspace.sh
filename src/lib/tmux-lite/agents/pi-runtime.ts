@@ -1,5 +1,5 @@
 import { delimiter, join } from 'node:path';
-import { chmodSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { YAML } from 'bun';
 import { fileURLToPath } from 'node:url';
 import { getWorkspaceRoot } from '../../../core/paths.js';
@@ -87,16 +87,26 @@ function ensureManagedPiConfigDefaults(agentDir: string): void {
   }
 }
 
-function ensureManagedPiBinScripts(): string {
+export function ensureManagedPiBinScripts(launcherArgs: string[] = resolveWorkspaceSessionLauncherArgs()): string {
   const binDir = getManagedPiBinDir();
   if (!existsSync(binDir)) {
     mkdirSync(binDir, { recursive: true, mode: 0o700 });
   }
 
-  const launcherCommand = buildShellCommand([...resolveWorkspaceSessionLauncherArgs(), 'space']);
+  const spaceLauncherCommand = buildShellCommand([...launcherArgs, 'space']);
   const spaceScriptPath = join(binDir, 'space');
-  writeFileSync(spaceScriptPath, `#!/bin/sh\nexec ${launcherCommand} "$@"\n`, { mode: 0o755 });
+  writeFileSync(spaceScriptPath, `#!/bin/sh\nexec ${spaceLauncherCommand} "$@"\n`, { mode: 0o755 });
   chmodSync(spaceScriptPath, 0o755);
+
+  const gsshScriptPath = join(binDir, 'gssh');
+  const isSourceLauncher = launcherArgs.length >= 2 && launcherArgs[1]?.endsWith('/src/index.ts');
+  if (isSourceLauncher) {
+    const gsshLauncherCommand = buildShellCommand(launcherArgs);
+    writeFileSync(gsshScriptPath, `#!/bin/sh\nexec ${gsshLauncherCommand} "$@"\n`, { mode: 0o755 });
+    chmodSync(gsshScriptPath, 0o755);
+  } else if (existsSync(gsshScriptPath)) {
+    unlinkSync(gsshScriptPath);
+  }
 
   return binDir;
 }

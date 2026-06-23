@@ -6,7 +6,12 @@ import type { WorkspaceNote, WorkspaceNotePriority, WorkspaceNotesSummary } from
 import { generateId } from '../utils/id.js';
 
 const WORKSPACE_STORAGE_DIR = join('.gitspace', 'workspace');
-const WORKSPACE_STORAGE_GITIGNORE_ENTRY = '.gitspace/workspace/';
+const WORKSPACE_STORAGE_GITIGNORE_ENTRIES = [
+  '.gitspace/workspace/',
+  '.gitspace/.processes/',
+  '.gitspace/uploads/',
+  '.gitspace/events/',
+];
 const WORKSPACE_STORAGE_GITIGNORE_MARKER = '# gssh workspace local state';
 
 export interface WorkspaceMetadata {
@@ -41,14 +46,19 @@ export function getWorkspaceReviewPath(workspacePath: string, workspaceName: str
 
 export function ensureWorkspaceStorageIgnored(workspacePath: string): void {
   const gitignorePath = join(workspacePath, '.gitignore');
-  const alreadyIgnored =
-    existsSync(gitignorePath) && readFileSync(gitignorePath, 'utf-8').includes(WORKSPACE_STORAGE_GITIGNORE_ENTRY);
-  if (alreadyIgnored) {
+  const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+  const existingEntries = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+  const missingEntries = WORKSPACE_STORAGE_GITIGNORE_ENTRIES.filter((entry) => !existingEntries.has(entry));
+  if (missingEntries.length === 0) {
     return;
   }
+
+  const needsMarker = !existingEntries.has(WORKSPACE_STORAGE_GITIGNORE_MARKER);
+  const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+  const marker = needsMarker ? `${existing.length > 0 ? '\n' : ''}${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n` : '';
   appendFileSync(
     gitignorePath,
-    `\n${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n${WORKSPACE_STORAGE_GITIGNORE_ENTRY}\n`,
+    `${separator}${marker}${missingEntries.join('\n')}\n`,
     'utf-8',
   );
 }

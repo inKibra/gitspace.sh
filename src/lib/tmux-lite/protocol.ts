@@ -364,7 +364,7 @@ export type Command =
     }
   | { type: 'attach-cancel'; requestId: string }
   | { type: "attach"; id: string; force?: boolean }
-  | { type: "kill"; id: string }
+  | { type: "terminate"; id: string; mode?: "graceful" | "force"; graceMs?: number }
   | { type: 'agent-state' }
   | { type: 'agent-watch' }
   | { type: 'machine-snapshot' } // legacy tmux router alias for getMachineSnapshot
@@ -392,6 +392,7 @@ export type Command =
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
+  | { type: 'service-resolve-port-conflict'; conflict: import('../processes/port-conflicts.js').PortConflictInfo }
   | { type: 'github-repos'; org?: string }
   | { type: 'remote-branches'; projectName: string }
   | { type: 'linear-issues'; projectName: string }
@@ -504,7 +505,7 @@ export type Response =
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }
-  | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/ports.js').PortConflictInfo[] }
+  | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/port-conflicts.js').PortConflictInfo[] }
   | { type: "inbox"; items: InboxItem[] }
   | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
   | { type: "version"; version: string; protocol: number }

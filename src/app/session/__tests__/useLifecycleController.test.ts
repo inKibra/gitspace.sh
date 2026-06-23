@@ -346,6 +346,47 @@ describe('useLifecycleController workspace source flow', () => {
     }
   }
 
+  it('asks for a project when creating a workspace from the generic create menu', async () => {
+    const showSelectCalls: Array<SelectCall<string>> = []
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading: () => {},
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              onSelect: opts.onSelect as (value: string) => void | Promise<void>,
+              searchable: opts.searchable,
+            })
+          },
+          showWizard: () => {},
+          showInput: () => {},
+          showConfirmTyped: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => [],
+        listLinearIssues: async () => [],
+        createProject: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        getProjectNames: () => ['acme', 'web'],
+        refreshProjects: async () => {},
+        refreshWorkspaces: async () => {},
+      })
+    )
+
+    result.current.openCreateMenu()
+    expect(showSelectCalls[0]?.title).toBe('Create')
+
+    await showSelectCalls[0]!.onSelect('workspace')
+
+    expect(showSelectCalls[1]?.title).toBe('Select Project')
+    expect(showSelectCalls[1]?.searchable).toBeUndefined()
+  })
+
   it('opens searchable branch picker for workspace creation', async () => {
     const showSelectCalls: Array<SelectCall<string>> = []
     const showLoading = mock(() => {})

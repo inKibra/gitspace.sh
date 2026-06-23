@@ -65,7 +65,30 @@ export type AgentStateUpdateDelta =
 
 
 const LAST_MESSAGE_MAX_CHARS = 120;
+const LAST_MESSAGE_EMIT_INTERVAL_MS = 250;
 
+type LastMessageDelta = Extract<AgentStateUpdateDelta, { type: 'agent_last_message' }>;
+type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
+
+export interface AgentEventManagerOptions {
+  /**
+   * Minimum interval for streaming last-message deltas. The state is updated
+   * synchronously; only watcher notifications are coalesced.
+   */
+  lastMessageEmitIntervalMs?: number;
+  now?: () => number;
+  setTimeout?: (callback: () => void, delay: number) => TimerHandle;
+  clearTimeout?: (handle: TimerHandle) => void;
+}
+
+
+function resolveLastMessageEmitIntervalMs(value: number | undefined): number {
+  if (value === undefined) return LAST_MESSAGE_EMIT_INTERVAL_MS;
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error('lastMessageEmitIntervalMs must be a non-negative finite number');
+  }
+  return Math.floor(value);
+}
 function jsonEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -78,6 +101,20 @@ export class AgentEventManager {
   private readonly workspacePaths = new Map<string, string>();
   private readonly archivedSessionIds = new Map<string, Set<string>>();
   private readonly suppressedSessionIds = new Map<string, Set<string>>();
+  private readonly lastMessageEmitIntervalMs: number;
+  private readonly now: () => number;
+  private readonly scheduleTimeout: (callback: () => void, delay: number) => TimerHandle;
+  private readonly cancelTimeout: (handle: TimerHandle) => void;
+  private readonly lastMessageEmitTimes = new Map<string, number>();
+  private readonly pendingLastMessageDeltas = new Map<string, LastMessageDelta>();
+  private readonly pendingLastMessageTimers = new Map<string, TimerHandle>();
+
+  constructor(options: AgentEventManagerOptions = {}) {
+    this.lastMessageEmitIntervalMs = resolveLastMessageEmitIntervalMs(options.lastMessageEmitIntervalMs);
+    this.now = options.now ?? (() => Date.now());
+    this.scheduleTimeout = options.setTimeout ?? ((callback, delay) => globalThis.setTimeout(callback, delay));
+    this.cancelTimeout = options.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
+  }
 
   async initialize(): Promise<void> {
     // No external runtime bootstrap remains. Pi session discovery and in-process
@@ -105,8 +142,29 @@ export class AgentEventManager {
     const state = this.getOrCreateState(workspaceId);
     let changed = false;
 
+    const archivedIds = this.archivedSessionIds.get(workspaceId);
+    const archivedSessionsRemoved = archivedIds
+      ? state.sessions.filter((session) => archivedIds.has(session.id)).map((session) => session.id)
+      : [];
+    if (archivedSessionsRemoved.length > 0) {
+      state.sessions = state.sessions.filter((session) => !archivedIds?.has(session.id));
+      for (const sessionId of archivedSessionsRemoved) {
+        delete state.statuses[sessionId];
+        delete state.pendingPermissions[sessionId];
+        delete state.pendingQuestions[sessionId];
+        delete state.lastMessages[sessionId];
+        delete state.errorMessages[sessionId];
+        delete state.todoPhases[sessionId];
+        delete state.modelInfo[sessionId];
+        delete state.queuedMessages[sessionId];
+        this.clearLastMessageThrottle(workspaceId, sessionId);
+        this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
+      }
+      changed = true;
+    }
+
     for (const session of sessions) {
-      if (!shouldDisplayAgentSession(session) || this.suppressedSessionIds.get(workspaceId)?.has(session.id)) {
+      if (!shouldDisplayAgentSession(session) || archivedIds?.has(session.id) || this.suppressedSessionIds.get(workspaceId)?.has(session.id)) {
         continue;
       }
 
@@ -179,6 +237,7 @@ export class AgentEventManager {
     delete state.todoPhases[sessionId];
     delete state.modelInfo[sessionId];
     delete state.queuedMessages[sessionId];
+    this.clearLastMessageThrottle(workspaceId, sessionId);
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
@@ -226,7 +285,7 @@ export class AgentEventManager {
     if (state.lastMessages[sessionId] === normalized) return;
     state.lastMessages[sessionId] = normalized;
     delete state.errorMessages[sessionId];
-    this.emit({ type: 'agent_last_message', workspaceId, sessionId, preview: normalized });
+    this.emitLastMessage({ type: 'agent_last_message', workspaceId, sessionId, preview: normalized });
   }
 
   setExternalError(workspaceId: string, sessionId: string, errorMessage: string): void {
@@ -352,6 +411,7 @@ export class AgentEventManager {
     delete state.todoPhases[sessionId];
     delete state.modelInfo[sessionId];
     delete state.queuedMessages[sessionId];
+    this.clearLastMessageThrottle(workspaceId, sessionId);
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.suppressedSessionIds.get(workspaceId)?.delete(sessionId);
     let archived = this.archivedSessionIds.get(workspaceId);
@@ -377,6 +437,52 @@ export class AgentEventManager {
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
+
+  private emitLastMessage(delta: LastMessageDelta): void {
+    if (this.lastMessageEmitIntervalMs === 0) {
+      this.emit(delta);
+      return;
+    }
+
+    const key = `${delta.workspaceId}:${delta.sessionId}`;
+    const now = this.now();
+    const previousEmit = this.lastMessageEmitTimes.get(key);
+    if (previousEmit === undefined || now - previousEmit >= this.lastMessageEmitIntervalMs) {
+      this.clearPendingLastMessage(key);
+      this.lastMessageEmitTimes.set(key, now);
+      this.emit(delta);
+      return;
+    }
+
+    this.pendingLastMessageDeltas.set(key, delta);
+    if (this.pendingLastMessageTimers.has(key)) return;
+
+    const delay = Math.max(1, this.lastMessageEmitIntervalMs - (now - previousEmit));
+    const timer = this.scheduleTimeout(() => {
+      this.pendingLastMessageTimers.delete(key);
+      const pending = this.pendingLastMessageDeltas.get(key);
+      if (!pending) return;
+      this.pendingLastMessageDeltas.delete(key);
+      this.lastMessageEmitTimes.set(key, this.now());
+      this.emit(pending);
+    }, delay);
+    this.pendingLastMessageTimers.set(key, timer);
+  }
+
+  private clearPendingLastMessage(key: string): void {
+    const timer = this.pendingLastMessageTimers.get(key);
+    if (timer) {
+      this.cancelTimeout(timer);
+      this.pendingLastMessageTimers.delete(key);
+    }
+    this.pendingLastMessageDeltas.delete(key);
+  }
+
+  private clearLastMessageThrottle(workspaceId: string, sessionId: string): void {
+    const key = `${workspaceId}:${sessionId}`;
+    this.clearPendingLastMessage(key);
+    this.lastMessageEmitTimes.delete(key);
+  }
   private emit(delta: AgentStateUpdateDelta): void {
     for (const handler of this.handlers) {
       try {

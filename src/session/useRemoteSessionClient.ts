@@ -108,7 +108,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   setPaneOutputHandler: (paneId: string, fn: ((data: Uint8Array) => void) | null) => void;
   selectProject: (projectName: string | null) => void;
 
-  killSession: (sessionId: string) => void;
+  terminateSession: (sessionId: string) => void;
   deleteWorkspace: (
     projectName: string,
     workspaceId: string,
@@ -431,8 +431,8 @@ export function useRemoteSessionClient<ConnectParams>(
     }
   }, [activeBackendState?.projects, selectProject, selectedProjectName]);
 
-  const killSession = useCallback((sessionId: string) => {
-    void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
+  const terminateSession = useCallback((sessionId: string) => {
+    void withActiveBackend((backendKey) => engine.terminateSession(backendKey, sessionId));
   }, [engine, withActiveBackend]);
 
   const deleteWorkspace = useCallback(async (
@@ -701,7 +701,7 @@ export function useRemoteSessionClient<ConnectParams>(
     cancelPendingReplayRequests,
     selectProject,
 
-    killSession,
+    terminateSession,
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
@@ -771,7 +771,7 @@ export function useRemoteSessionClient<ConnectParams>(
     cancelPendingScripts,
     cancelPendingReplayRequests,
     selectProject,
-    killSession,
+    terminateSession,
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,

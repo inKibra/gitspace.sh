@@ -1,5 +1,6 @@
 import type { AttachedSessionMeta } from '../types.js';
 import { findUtf8Boundary } from '../../utils/utf8.js';
+import { terminalMemoryDebugGauge, terminalMemoryDebugIncrement, terminalMemoryDebugMax } from '../../utils/terminal-memory-debug.js';
 
 function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
@@ -12,7 +13,7 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
-const MAX_REPLAY_BYTES = 1024 * 1024;
+const MAX_REPLAY_BYTES = 256 * 1024;
 
 export interface ConfirmPaneAttachedOptions {
   sessionId: string;
@@ -58,6 +59,7 @@ export class PaneLifecycle {
 
   setOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
     this.outputHandler = handler;
+    terminalMemoryDebugIncrement(handler ? 'pane.outputHandler.set' : 'pane.outputHandler.clear');
     if (!handler) return;
     if (this.replayChunks.length > 0) {
       this.replayToHandler();
@@ -65,6 +67,7 @@ export class PaneLifecycle {
     }
     if (this.pendingPtyChunks.length === 0) return;
     const pending = concatUint8Array(this.pendingPtyChunks);
+    terminalMemoryDebugIncrement('pane.pendingPtyChunks.flush');
     this.pendingPtyChunks = [];
     this.pushPtyData(pending);
   }
@@ -78,6 +81,8 @@ export class PaneLifecycle {
     this.appendReplayChunk(data);
     if (!this.outputHandler) {
       this.pendingPtyChunks.push(data);
+      terminalMemoryDebugIncrement('pane.pendingPtyChunks.add');
+      terminalMemoryDebugGauge('pane.pendingPtyChunks.count', this.pendingPtyChunks.length);
       return;
     }
 
@@ -90,7 +95,10 @@ export class PaneLifecycle {
       : new Uint8Array(0);
 
     const chunk = combined.slice(0, boundary);
-    if (chunk.length > 0) this.outputHandler(chunk);
+    if (chunk.length > 0) {
+      terminalMemoryDebugIncrement('pane.outputHandler.write');
+      this.outputHandler(chunk);
+    }
   }
 
   confirmAttached(options: ConfirmPaneAttachedOptions): void {
@@ -138,16 +146,36 @@ export class PaneLifecycle {
     const boundary = findUtf8Boundary(replay);
     const chunk = replay.slice(0, boundary);
     this.pendingUtf8Bytes = boundary < replay.length ? replay.slice(boundary) : new Uint8Array(0);
-    if (chunk.length > 0) this.outputHandler(chunk);
+    if (chunk.length > 0) {
+      terminalMemoryDebugIncrement('pane.replay.flush');
+      this.outputHandler(chunk);
+    }
   }
 
   private appendReplayChunk(data: Uint8Array): void {
     if (data.length === 0) return;
-    this.replayChunks.push(data);
-    this.replayBytes += data.length;
-    while (this.replayBytes > MAX_REPLAY_BYTES && this.replayChunks.length > 1) {
-      const dropped = this.replayChunks.shift();
-      this.replayBytes -= dropped?.length ?? 0;
+    let chunk = data;
+    if (chunk.length > MAX_REPLAY_BYTES) {
+      chunk = chunk.slice(chunk.length - MAX_REPLAY_BYTES);
+      terminalMemoryDebugIncrement('pane.replayChunks.truncateLargeChunk');
+    }
+    this.replayChunks.push(chunk);
+    this.replayBytes += chunk.length;
+    terminalMemoryDebugGauge('pane.replayBytes', this.replayBytes);
+    terminalMemoryDebugMax('pane.replayBytes.max', this.replayBytes);
+    while (this.replayBytes > MAX_REPLAY_BYTES && this.replayChunks.length > 0) {
+      const overflow = this.replayBytes - MAX_REPLAY_BYTES;
+      const first = this.replayChunks[0]!;
+      if (first.length <= overflow) {
+        const dropped = this.replayChunks.shift();
+        this.replayBytes -= dropped?.length ?? 0;
+        terminalMemoryDebugIncrement('pane.replayChunks.drop');
+        continue;
+      }
+      this.replayChunks[0] = first.slice(overflow);
+      this.replayBytes -= overflow;
+      terminalMemoryDebugIncrement('pane.replayChunks.trim');
+      break;
     }
   }
 }

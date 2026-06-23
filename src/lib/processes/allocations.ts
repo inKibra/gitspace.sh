@@ -11,7 +11,8 @@ import type {
 import { resolveWorkspaceRef } from '../events/paths.js';
 import { normalizeProcessInstanceCount } from './instances.js';
 import { getProcessControlDir } from './control.js';
-import { inspectListeningProcess, normalizeProcessPortProtocol, resolveManagedSession } from './ports.js';
+import { inspectListeningProcess, resolveManagedSession } from './ports.js';
+import { normalizeProcessPortProtocol } from './port-conflicts.js';
 
 const PORT_ALLOCATION_VERSION = 1;
 const MIN_ALLOCATED_PORT = 17000;

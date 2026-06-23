@@ -152,7 +152,7 @@ export async function removeWorkspace(
 	logger.success(`Removed worktree: ${workspaceName}`)
 
 	if (result.sessionsKilled > 0) {
-		logger.info(`Killed ${result.sessionsKilled} active session(s)`)
+		logger.info(`Terminated ${result.sessionsKilled} active session(s)`)
 	}
 
 	if ((result.replaysDeleted ?? 0) > 0) {
@@ -270,7 +270,7 @@ export async function removeProject(
 	logger.success(`Removed project: ${projectName}`)
 
 	if (result.sessionsKilled > 0) {
-		logger.info(`Killed ${result.sessionsKilled} active session(s)`)
+		logger.info(`Terminated ${result.sessionsKilled} active session(s)`)
 	}
 
 	if ((result.replaysDeleted ?? 0) > 0) {

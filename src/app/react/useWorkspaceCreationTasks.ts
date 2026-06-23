@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { WorkspacePhase } from '../../types/config.js';
+import type { RemoteOperationRecord } from '../../lib/remote-session/protocol.js';
 
 export interface WorkspaceCreationTask {
   id: string;
@@ -13,6 +14,30 @@ export interface WorkspaceCreationTask {
 }
 
 const MAX_TASKS = 8;
+
+export function workspaceOperationsToCreationTasks(
+  operations: Record<string, RemoteOperationRecord>,
+): WorkspaceCreationTask[] {
+  return Object.values(operations)
+    .filter((operation) => operation.kind === 'workspace.create' && (operation.state === 'running' || operation.state === 'failed'))
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map((operation) => {
+      const workspaceName = operation.scope.workspaceName
+        ?? operation.scope.workspaceId?.split(':').slice(-1)[0]
+        ?? 'workspace';
+      const projectName = operation.scope.projectName ?? '';
+      return {
+        id: operation.operationId,
+        workspaceId: operation.scope.workspaceId ?? `${projectName}:${workspaceName}`,
+        workspaceName,
+        projectName,
+        phase: 'code',
+        status: operation.state === 'running' ? 'creating' : 'failed',
+        progressLabel: operation.error?.message ?? operation.message ?? 'Creating workspace...',
+        startedAt: operation.startedAt,
+      };
+    });
+}
 
 export interface UseWorkspaceCreationTasksReturn {
   tasks: WorkspaceCreationTask[];

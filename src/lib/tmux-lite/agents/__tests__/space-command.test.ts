@@ -93,7 +93,14 @@ describe('gitSpaceSpaceCommandExtension', () => {
     const workspacePath = join(tempHomeDir, 'gitspace', 'demo', 'workspaces', 'ws-1');
     mkdirSync(workspacePath, { recursive: true });
 
-    const sendMessage = mock(() => {});
+    type TranscriptMessage = {
+      customType: string;
+      content: string;
+      display: boolean;
+      attribution: string;
+    };
+    
+    const sendMessage = mock((_message: TranscriptMessage) => {});
     const setEditorText = mock(() => {});
     const commandHandlers = new Map<string, (argsText: string, ctx: any) => Promise<void>>();
     const pi = {

@@ -22,7 +22,7 @@ mock.module('../../lib/tmux-lite/cli.js', () => ({
   listSessions: mockListSessions,
   listSessionsFromRunningServer: mockListSessions,
   createSession: mock(() => Promise.resolve({ id: 'sess-1', name: 'test' })),
-  killSession: mock(() => Promise.resolve()),
+  terminateSession: mock(() => Promise.resolve()),
   isProcessRunning: mock(() => false),
   isServerRunning: mock(() => Promise.resolve(true)),
 }));

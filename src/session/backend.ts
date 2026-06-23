@@ -12,6 +12,7 @@ import type {
   BundleRefreshPlan,
   BundleRefreshSubmission,
 } from '../types/bundle-refresh.js';
+import type { PortConflictInfo } from '../lib/processes/port-conflicts.js';
 import type {
   BundleConfigState,
   BundleConfigSubmission,
@@ -108,6 +109,11 @@ export interface DeleteProjectParams {
   timeoutMs?: number;
 }
 
+export interface TerminateSessionOptions {
+  mode?: 'graceful' | 'force';
+  graceMs?: number;
+}
+
 /**
  * Canonical backend contract used by shared session engine.
  */
@@ -126,7 +132,6 @@ export interface SessionBackend {
   setWorkspaceStatus?(projectName: string, workspaceName: string, phase: import('../types/config.js').WorkspacePhase): Promise<void>;
   listSessions(workspaceId?: string): Promise<void>;
   listReplays?(workspaceId?: string, includeDismissed?: boolean): Promise<void>;
-
   createProject(params: CreateProjectParams): Promise<void>;
   prepareProjectCreation?(params: CreateProjectParams): Promise<PreparedProjectResult>;
   finalizeProjectCreation?(params: FinalizeProjectParams): Promise<void>;
@@ -141,7 +146,7 @@ export interface SessionBackend {
   detachSession(): Promise<void>;
   cancelPendingScripts?(): Promise<void>;
 
-  killSession(sessionId: string): Promise<void>;
+  terminateSession(sessionId: string, options?: TerminateSessionOptions): Promise<void>;
   deleteWorkspace(
     projectName: string,
     workspaceId: string,
@@ -179,6 +184,7 @@ export interface SessionBackend {
   sendReviewRequest(operation: ReviewOperation): Promise<ReviewResult>;
   startProcess?(workspaceId: string, processName: string, instance?: number): Promise<void>;
   stopProcess?(workspaceId: string, processName: string): Promise<void>;
+  resolvePortConflict?(conflict: PortConflictInfo): Promise<void>;
   requestEvents?(workspacePath: string, filter?: WideEventFilter, limit?: number, sinceMs?: number): Promise<void>;
 
   writePaneData?(paneId: string, data: Uint8Array): Promise<void>;
@@ -207,6 +213,7 @@ export interface SessionBackend {
   cancelPendingReplayRequests?(): void;
   dismissReplay?(replayId: string): Promise<void>;
   undismissReplay?(replayId: string): Promise<void>;
+  dismissOperation?(operationId: string): Promise<void>;
 
   onEvent(handler: (event: BackendEvent) => void): () => void;
 
