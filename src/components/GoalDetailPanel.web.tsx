@@ -15,6 +15,7 @@ import type {
 import type { AddRequirementInput, AttachEvidenceInput, HumanReviewDecision, UpdateRequirementInput } from '../core/goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { MarkdownEditor } from './MarkdownEditor.web.js';
+import { btnDanger, btnGhost, btnPrimary, btnSecondary, chipClass, type ChipTone, R_CARD, R_CHIP, R_INPUT } from './ui/control.js';
 
 type Tab = 'glance' | 'doc' | 'requirements' | 'timeline';
 
@@ -67,23 +68,23 @@ function nextActionLabel(requirement: Requirement): string {
 }
 
 function eventToneClass(tone: TimelineEvent['tone']): string {
-  if (tone === 'green') return 'border-emerald-400 bg-emerald-400/10 text-emerald-200';
-  if (tone === 'amber') return 'border-amber-400 bg-amber-400/10 text-amber-200';
-  if (tone === 'red') return 'border-rose-400 bg-rose-400/10 text-rose-200';
-  if (tone === 'blue') return 'border-sky-400 bg-sky-400/10 text-sky-200';
-  return 'border-violet-400 bg-violet-400/10 text-violet-200';
+  if (tone === 'green') return 'border-[var(--gs-success)] bg-[var(--gs-chip-green-bg)] text-[var(--gs-success)]';
+  if (tone === 'amber') return 'border-[var(--gs-warning)] bg-[var(--gs-chip-amber-bg)] text-[var(--gs-warning)]';
+  if (tone === 'red') return 'border-[var(--gs-danger)] bg-[var(--gs-chip-red-bg)] text-[var(--gs-danger)]';
+  if (tone === 'blue') return 'border-[var(--gs-info)] bg-[var(--gs-chip-blue-bg)] text-[var(--gs-info)]';
+  return 'border-[var(--gs-purple)] bg-[var(--gs-bg-elevated)] text-[var(--gs-purple)]';
 }
 
 function statusToneClass(status: Requirement['status']): string {
-  if (status === 'accepted') return 'text-emerald-400';
-  if (status === 'review') return 'text-amber-400';
-  return 'text-rose-400';
+  if (status === 'accepted') return 'text-[var(--gs-success)]';
+  if (status === 'review') return 'text-[var(--gs-warning)]';
+  return 'text-[var(--gs-danger)]';
 }
 
 function statusDotClass(status: Requirement['status']): string {
-  if (status === 'accepted') return 'bg-emerald-400';
-  if (status === 'review') return 'bg-amber-400';
-  return 'bg-rose-400';
+  if (status === 'accepted') return 'bg-[var(--gs-success)]';
+  if (status === 'review') return 'bg-[var(--gs-warning)]';
+  return 'bg-[var(--gs-danger)]';
 }
 
 function reviewToneLabel(tone: Review['tone']): string {
@@ -91,7 +92,7 @@ function reviewToneLabel(tone: Review['tone']): string {
 }
 
 function reviewToneClass(tone: Review['tone']): string {
-  return tone === 'green' ? 'text-emerald-400' : tone === 'amber' ? 'text-amber-400' : 'text-rose-400';
+  return tone === 'green' ? 'text-[var(--gs-success)]' : tone === 'amber' ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-danger)]';
 }
 
 function defaultDocBody(title: string): string {
@@ -237,6 +238,12 @@ export function GoalDetailPanel(props: GoalDetailPanelProps) {
   const [timelineFilter, setTimelineFilter] = useState<'all' | TimelineEvent['kind']>('all');
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
 
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    const id = setTimeout(() => setEntered(true), 0);
+    return () => clearTimeout(id);
+  }, []);
+
   // Reset draft when goal switches.
   useEffect(() => {
     setDocDraft(props.goal.doc?.bodyMarkdown ?? defaultDocBody(props.goal.title));
@@ -250,10 +257,10 @@ export function GoalDetailPanel(props: GoalDetailPanelProps) {
   const counts = readiness.totals;
 
   return (
-    <aside className="fixed right-0 top-0 bottom-0 z-40 flex w-full max-w-[1180px] flex-col border-l border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl">
+    <aside className={`fixed right-0 top-0 bottom-0 z-40 flex w-full max-w-[1180px] flex-col border-l border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl will-change-transform transition-[transform,opacity] duration-200 ease-out ${entered ? 'translate-x-0 opacity-100' : 'translate-x-4 opacity-0'}`}>
       <header className="flex items-start gap-3 border-b border-[var(--gs-border)] p-4">
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--gs-text-dim)]">
+          <div className="text-[10px] uppercase tracking-[0.18em] tabular-nums text-[var(--gs-text-dim)]">
             Goal {props.goal.chainPosition}/{props.goal.chainLength} · {props.goal.phase} · {props.goal.status}
           </div>
           <h2 className="mt-1 truncate text-lg font-semibold text-[var(--gs-text)]">{props.goal.title}</h2>
@@ -261,7 +268,7 @@ export function GoalDetailPanel(props: GoalDetailPanelProps) {
             {props.goal.workspaceName ?? props.goal.plannedWorkspaceName ?? 'No workspace yet'}
           </div>
         </div>
-        <button type="button" onClick={props.onClose} className="rounded px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]">
+        <button type="button" onClick={props.onClose} className={btnGhost()}>
           Close
         </button>
       </header>
@@ -385,9 +392,9 @@ function Sidebar(props: {
   stackStatus?: ChainStackStatus | null;
 }) {
   const summaryColor =
-    props.readinessTone === 'ready' ? 'text-emerald-400'
-    : props.readinessTone === 'awaiting-review' ? 'text-amber-400'
-    : 'text-rose-400';
+    props.readinessTone === 'ready' ? 'text-[var(--gs-success)]'
+    : props.readinessTone === 'awaiting-review' ? 'text-[var(--gs-warning)]'
+    : 'text-[var(--gs-danger)]';
 
   const tabs: Array<{ key: Tab; label: string; count?: string }> = [
     { key: 'glance', label: 'At a glance', count: `${props.openCount} open` },
@@ -409,10 +416,10 @@ function Sidebar(props: {
             key={tab.key}
             type="button"
             onClick={() => props.onTabChange(tab.key)}
-            className={`flex items-center justify-between rounded px-2 py-1.5 text-xs ${props.activeTab === tab.key ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]'}`}
+            className={`flex items-center justify-between ${R_CHIP} px-2 py-1.5 text-xs transition-[background-color,color] duration-150 ${props.activeTab === tab.key ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]'}`}
           >
             <span>{tab.label}</span>
-            {tab.count && <span className="text-[10px] text-[var(--gs-text-dim)]">{tab.count}</span>}
+            {tab.count && <span className="text-[10px] tabular-nums text-[var(--gs-text-dim)]">{tab.count}</span>}
           </button>
         ))}
       </nav>
@@ -420,11 +427,11 @@ function Sidebar(props: {
       <div className="mt-auto border-t border-[var(--gs-border)] pt-3">
         <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Workspace</div>
         {props.canCreateWorkspace && (
-          <button type="button" onClick={props.onCreateWorkspace} className="mb-2 w-full rounded bg-[var(--gs-accent)] px-2 py-1.5 text-xs text-[var(--gs-text-on-accent)]">
+          <button type="button" onClick={props.onCreateWorkspace} className={btnPrimary('mb-2 w-full')}>
             Create workspace
           </button>
         )}
-        <button type="button" onClick={props.onRefreshStack} className="w-full rounded border border-[var(--gs-border)] px-2 py-1.5 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]">
+        <button type="button" onClick={props.onRefreshStack} className={btnSecondary('w-full')}>
           Run stack status
         </button>
         {props.stackStatus && (
@@ -450,19 +457,19 @@ function GlanceTab(props: {
   const visible = props.requirements.filter((r) => props.filter === 'all' || r.status === props.filter);
   const stats: Array<{ key: 'all' | Requirement['status']; label: string; v: number; cls: string }> = [
     { key: 'all', label: 'total', v: props.counts.total, cls: '' },
-    { key: 'missing', label: 'missing', v: props.counts.missing, cls: 'text-rose-400' },
-    { key: 'review', label: 'needs review', v: props.counts.review, cls: 'text-amber-400' },
-    { key: 'accepted', label: 'accepted', v: props.counts.accepted, cls: 'text-emerald-400' },
+    { key: 'missing', label: 'missing', v: props.counts.missing, cls: 'text-[var(--gs-danger)]' },
+    { key: 'review', label: 'needs review', v: props.counts.review, cls: 'text-[var(--gs-warning)]' },
+    { key: 'accepted', label: 'accepted', v: props.counts.accepted, cls: 'text-[var(--gs-success)]' },
   ];
 
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-[var(--gs-text)]">At a glance</h2>
-          <p className="mt-1 text-xs text-[var(--gs-text-muted)]">Every requirement in one scan: what it is, how it&apos;s produced, how it&apos;s judged, where it stands.</p>
+          <h2 className="text-base font-semibold text-balance text-[var(--gs-text)]">At a glance</h2>
+          <p className="mt-1 text-xs text-pretty text-[var(--gs-text-muted)]">Every requirement in one scan: what it is, how it&apos;s produced, how it&apos;s judged, where it stands.</p>
         </div>
-        <button type="button" onClick={props.onContinueAtBlocker} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs font-medium text-[var(--gs-text-on-accent)]">
+        <button type="button" onClick={props.onContinueAtBlocker} className={btnPrimary('flex-shrink-0')}>
           Continue at blocker
         </button>
       </div>
@@ -473,20 +480,20 @@ function GlanceTab(props: {
             key={stat.key}
             type="button"
             onClick={() => props.onFilterChange(stat.key)}
-            className={`rounded border px-3 py-2 text-left ${props.filter === stat.key ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)]' : 'border-[var(--gs-border)] bg-[var(--gs-bg)]'}`}
+            className={`${R_CARD} border px-3 py-2 text-left transition-[background-color,border-color,scale] duration-150 active:scale-[0.98] ${props.filter === stat.key ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)]' : 'border-[var(--gs-border)] bg-[var(--gs-bg)] hover:bg-[var(--gs-bg-active)]'}`}
           >
-            <div className={`text-xl font-semibold ${stat.cls || 'text-[var(--gs-text)]'}`}>{stat.v}</div>
+            <div className={`text-xl font-semibold tabular-nums ${stat.cls || 'text-[var(--gs-text)]'}`}>{stat.v}</div>
             <div className="text-[10px] text-[var(--gs-text-muted)]">{stat.label}</div>
           </button>
         ))}
       </div>
 
       {visible.length === 0 ? (
-        <div className="rounded border border-dashed border-[var(--gs-border)] p-6 text-center text-xs text-[var(--gs-text-muted)]">
+        <div className={`${R_CARD} border border-dashed border-[var(--gs-border)] p-6 text-center text-xs text-[var(--gs-text-muted)]`}>
           No requirements match this filter.
         </div>
       ) : (
-        <div className="overflow-hidden rounded border border-[var(--gs-border)]">
+        <div className={`overflow-hidden ${R_CARD} border border-[var(--gs-border)]`}>
           <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr] border-b border-[var(--gs-border)] bg-[var(--gs-bg)] text-[10px] uppercase tracking-wide text-[var(--gs-text-muted)]">
             <div className="border-r border-[var(--gs-border)] p-2">Requirement</div>
             <div className="border-r border-[var(--gs-border)] p-2">Produced by</div>
@@ -531,8 +538,8 @@ function DocTab(props: {
   return (
     <div className="flex h-full flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold text-[var(--gs-text)]">Goal doc</h2>
-        <p className="mt-1 text-xs text-[var(--gs-text-muted)]">The implementer&apos;s brief. Describe intent; link the specific requirements that prove it.</p>
+        <h2 className="text-base font-semibold text-balance text-[var(--gs-text)]">Goal doc</h2>
+        <p className="mt-1 text-xs text-pretty text-[var(--gs-text-muted)]">The implementer&apos;s brief. Describe intent; link the specific requirements that prove it.</p>
       </div>
       <MarkdownEditor
         body={props.body}
@@ -599,10 +606,10 @@ function RequirementsTab(props: {
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-[var(--gs-text)]">Requirements</h2>
-          <p className="mt-1 text-xs text-[var(--gs-text-muted)]">The contract. Each row owns its rubric, its generation strategy, and its judgment strategy.</p>
+          <h2 className="text-base font-semibold text-balance text-[var(--gs-text)]">Requirements</h2>
+          <p className="mt-1 text-xs text-pretty text-[var(--gs-text-muted)]">The contract. Each row owns its rubric, its generation strategy, and its judgment strategy.</p>
         </div>
-        <button type="button" onClick={props.onStartAdd} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs font-medium text-[var(--gs-text-on-accent)]">
+        <button type="button" onClick={props.onStartAdd} className={btnPrimary('flex-shrink-0')}>
           Add requirement
         </button>
       </div>
@@ -611,7 +618,7 @@ function RequirementsTab(props: {
         <div className="flex items-center gap-3">
           <div className="flex gap-1">
             {filters.map((f) => (
-              <button key={f.k} type="button" onClick={() => props.onFilterChange(f.k)} className={`rounded-full border px-3 py-1 text-[11px] ${props.filter === f.k ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'border-[var(--gs-border)] text-[var(--gs-text-muted)]'}`}>
+              <button key={f.k} type="button" onClick={() => props.onFilterChange(f.k)} className={`${R_CHIP} border px-3 py-1 text-[11px] transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.96] ${props.filter === f.k ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'}`}>
                 {f.label}
               </button>
             ))}
@@ -621,37 +628,37 @@ function RequirementsTab(props: {
             placeholder="Search requirements"
             value={props.search}
             onChange={(e) => props.onSearchChange(e.target.value)}
-            className="flex-1 rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-3 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-selected-border)]"
+            className={`flex-1 ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-3 py-1.5 text-xs text-[var(--gs-text)] outline-none transition-[border-color] duration-150 focus:border-[var(--gs-input-focus-border)]`}
           />
         </div>
       )}
 
       {isEmpty && (
-        <div className="rounded border border-dashed border-[var(--gs-border)] p-8 text-center">
-          <h3 className="text-sm font-semibold text-[var(--gs-text)]">No requirements yet</h3>
+        <div className={`${R_CARD} border border-dashed border-[var(--gs-border)] p-8 text-center`}>
+          <h3 className="text-sm font-semibold text-balance text-[var(--gs-text)]">No requirements yet</h3>
           <p className="mt-1 text-xs text-[var(--gs-text-muted)]">Define what makes this goal done. Use Add to create the first one.</p>
-          <button type="button" onClick={props.onStartAdd} className="mt-3 rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs font-medium text-[var(--gs-text-on-accent)]">
+          <button type="button" onClick={props.onStartAdd} className={btnPrimary('mt-3')}>
             Add the first requirement
           </button>
         </div>
       )}
 
       {filteredOut && (
-        <div className="rounded border border-dashed border-[var(--gs-border)] p-6 text-center text-xs text-[var(--gs-text-muted)]">
+        <div className={`${R_CARD} border border-dashed border-[var(--gs-border)] p-6 text-center text-xs text-[var(--gs-text-muted)]`}>
           No requirements match the current filter.
         </div>
       )}
 
       {!isEmpty && !filteredOut && (
-        <div className="rounded border border-[var(--gs-border)]">
+        <div className={`overflow-hidden ${R_CARD} border border-[var(--gs-border)]`}>
           {filtered.map((r) => (
             <button
               key={r.id}
               type="button"
               onClick={() => props.onSelect(r.id)}
-              className={`flex w-full items-start gap-3 border-b border-[var(--gs-border)] p-3 text-left last:border-b-0 ${focusedId === r.id ? 'bg-[var(--gs-bg-active)]' : 'hover:bg-[var(--gs-bg-active)]'}`}
+              className={`flex w-full items-start gap-3 border-b border-[var(--gs-border)] p-3 text-left transition-[background-color] duration-150 last:border-b-0 ${focusedId === r.id ? 'bg-[var(--gs-bg-active)]' : 'hover:bg-[var(--gs-bg-active)]'}`}
             >
-              <div className={`mt-1 h-3 w-1 rounded ${statusDotClass(r.status)}`} />
+              <div className={`mt-1 h-3.5 w-1 ${statusDotClass(r.status)}`} />
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium text-[var(--gs-text)]">{r.title}</div>
                 <div className="mt-1 text-xs text-[var(--gs-text-muted)] line-clamp-2">{r.rubric}</div>
@@ -660,8 +667,8 @@ function RequirementsTab(props: {
                     <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(r.status)}`} /> {statusLabel(r.status)}
                   </span>
                   <span>{kindLabel(r.kind)} · {r.required ? 'required' : 'optional'}</span>
-                  <MechChip label={describeGenerationShort(r.generation)} tone="violet" />
-                  <MechChip label={describeJudgmentShort(r.judgment)} tone={r.judgment.kind === 'human' ? 'blue' : r.judgment.kind === 'llm' ? 'amber' : 'violet'} />
+                  <MechChip label={describeGenerationShort(r.generation)} tone={r.generation.kind === 'command' ? 'blue' : 'dim'} />
+                  <MechChip label={describeJudgmentShort(r.judgment)} tone={r.judgment.kind === 'human' ? 'blue' : r.judgment.kind === 'llm' ? 'amber' : 'green'} />
                   {r.evidence.length > 0 && <span>{r.evidence.length} evidence</span>}
                   {r.reviews.length > 0 && <span>{r.reviews.length} review{r.reviews.length === 1 ? '' : 's'}</span>}
                 </div>
@@ -700,13 +707,8 @@ function RequirementsTab(props: {
   );
 }
 
-function MechChip(props: { label: string; tone: 'violet' | 'blue' | 'amber' | 'muted' }) {
-  const cls =
-    props.tone === 'violet' ? 'border-violet-400/40 bg-violet-400/10 text-violet-200'
-    : props.tone === 'blue' ? 'border-sky-400/40 bg-sky-400/10 text-sky-200'
-    : props.tone === 'amber' ? 'border-amber-400/40 bg-amber-400/10 text-amber-200'
-    : 'border-[var(--gs-border)] text-[var(--gs-text-muted)]';
-  return <span className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${cls}`}>{props.label}</span>;
+function MechChip(props: { label: string; tone: ChipTone }) {
+  return <span className={chipClass(props.tone)}>{props.label}</span>;
 }
 
 // ─── Requirement detail ───────────────────────────────────────────────────
@@ -732,9 +734,11 @@ function RequirementDetail(props: {
   const isMissing = r.status === 'missing';
   const isReview = r.status === 'review';
   const isAccepted = r.status === 'accepted';
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  useEffect(() => setConfirmRemove(false), [r.id]);
 
   return (
-    <div className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] p-4">
+    <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-4`}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-[11px]">
@@ -747,10 +751,10 @@ function RequirementDetail(props: {
           <p className="mt-1 text-xs text-[var(--gs-text-muted)]">{r.rubric}</p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Produced</span>
-            <MechChip label={describeGenerationShort(r.generation)} tone="violet" />
-            {r.generation.kind === 'command' && <code className="rounded bg-[var(--gs-bg-elevated)] px-1.5 py-0.5 text-[10px] text-[var(--gs-text)]">{r.generation.command}</code>}
+            <MechChip label={describeGenerationShort(r.generation)} tone={r.generation.kind === 'command' ? 'blue' : 'dim'} />
+            {r.generation.kind === 'command' && <code className={`${R_CHIP} bg-[var(--gs-bg-elevated)] px-1.5 py-0.5 text-[10px] text-[var(--gs-text)]`}>{r.generation.command}</code>}
             <span className="ml-2 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Judged</span>
-            <MechChip label={describeJudgmentShort(r.judgment)} tone={r.judgment.kind === 'human' ? 'blue' : r.judgment.kind === 'llm' ? 'amber' : 'violet'} />
+            <MechChip label={describeJudgmentShort(r.judgment)} tone={r.judgment.kind === 'human' ? 'blue' : r.judgment.kind === 'llm' ? 'amber' : 'green'} />
             {r.judgment.kind === 'command' && (
               <span className="text-[10px] text-[var(--gs-text-muted)]">expect: <code className="text-[var(--gs-text)]">{expectLabel(r.judgment.expect)}</code></span>
             )}
@@ -760,10 +764,17 @@ function RequirementDetail(props: {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <button type="button" onClick={props.onMoveUp} disabled={!canUp} className="rounded border border-[var(--gs-border)] p-1 text-xs text-[var(--gs-text-muted)] disabled:opacity-30">↑</button>
-          <button type="button" onClick={props.onMoveDown} disabled={!canDown} className="rounded border border-[var(--gs-border)] p-1 text-xs text-[var(--gs-text-muted)] disabled:opacity-30">↓</button>
-          <button type="button" onClick={props.onEdit} className="rounded border border-[var(--gs-border)] px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">Edit</button>
-          <button type="button" onClick={props.onRemove} className="rounded border border-rose-400/40 bg-rose-400/10 px-2 py-1 text-xs text-rose-300 hover:bg-rose-400/20">Remove</button>
+          <button type="button" onClick={props.onMoveUp} disabled={!canUp} aria-label="Move requirement up" className="inline-flex h-9 w-9 items-center justify-center rounded-[var(--gs-btn-radius)] border border-[var(--gs-border)] text-xs text-[var(--gs-text-muted)] transition-[background-color,color,scale] duration-150 ease-out hover:text-[var(--gs-text)] active:scale-[0.96] disabled:opacity-30">↑</button>
+          <button type="button" onClick={props.onMoveDown} disabled={!canDown} aria-label="Move requirement down" className="inline-flex h-9 w-9 items-center justify-center rounded-[var(--gs-btn-radius)] border border-[var(--gs-border)] text-xs text-[var(--gs-text-muted)] transition-[background-color,color,scale] duration-150 ease-out hover:text-[var(--gs-text)] active:scale-[0.96] disabled:opacity-30">↓</button>
+          <button type="button" onClick={props.onEdit} className={btnSecondary()}>Edit</button>
+          {confirmRemove ? (
+            <>
+              <button type="button" onClick={() => setConfirmRemove(false)} className={btnGhost()}>Cancel</button>
+              <button type="button" onClick={props.onRemove} className={btnDanger()}>Confirm remove</button>
+            </>
+          ) : (
+            <button type="button" onClick={() => setConfirmRemove(true)} className={btnDanger()}>Remove</button>
+          )}
         </div>
       </div>
 
@@ -792,7 +803,7 @@ function EvidenceSection(props: {
   }, [r.id, r.title]);
 
   return (
-    <div className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3">
+    <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3`}>
       <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Evidence</div>
       {r.evidence.length > 0 ? (
         <div className="mt-2 flex flex-col gap-1">
@@ -804,12 +815,12 @@ function EvidenceSection(props: {
 
       {props.showAttachAction && r.generation.kind === 'command' && (
         <div className="mt-3 space-y-2">
-          <div className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2">
+          <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2`}>
             <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Generation command</div>
             <div className="mt-1 font-mono text-[11px] text-[var(--gs-text)]">{r.generation.command}</div>
           </div>
           <div className="flex justify-end">
-            <button type="button" disabled={props.saving} onClick={props.onRunGeneration} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-40">
+            <button type="button" disabled={props.saving} onClick={props.onRunGeneration} className={btnPrimary()}>
               Run command to produce evidence
             </button>
           </div>
@@ -830,25 +841,25 @@ function EvidenceSection(props: {
         >
           <label className="text-[11px] text-[var(--gs-text-muted)]">
             Evidence label
-            <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
           </label>
           {r.kind === 'url' && (
             <label className="text-[11px] text-[var(--gs-text-muted)]">URL
-              <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/evidence" className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+              <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/evidence" className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
             </label>
           )}
           {(r.kind === 'screenshot' || r.kind === 'video' || r.kind === 'file') && (
             <label className="text-[11px] text-[var(--gs-text-muted)]">Local path
-              <input type="text" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/abs/path/to/file" className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+              <input type="text" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/abs/path/to/file" className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
             </label>
           )}
           {(r.kind === 'note' || r.kind === 'test-output') && (
             <label className="text-[11px] text-[var(--gs-text-muted)]">Note body
-              <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste or describe the evidence" className="mt-1 min-h-[80px] w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 font-mono text-xs text-[var(--gs-text)]" />
+              <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste or describe the evidence" className={`mt-1 min-h-[80px] w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 font-mono text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
             </label>
           )}
           <div className="flex justify-end">
-            <button type="submit" disabled={props.saving} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-40">
+            <button type="submit" disabled={props.saving} className={btnPrimary()}>
               Attach evidence
             </button>
           </div>
@@ -861,7 +872,7 @@ function EvidenceSection(props: {
 function EvidenceChip(props: { evidence: Evidence }) {
   const e = props.evidence;
   return (
-    <div className="flex items-center gap-2 rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1.5 text-xs">
+    <div className={`flex items-center gap-2 ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1.5 text-xs`}>
       <strong className="text-[var(--gs-text)]">{e.name}</strong>
       <span className="text-[var(--gs-text-muted)]">— {e.meta}</span>
       <span className="ml-auto text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">via {e.source}</span>
@@ -885,7 +896,7 @@ function ReviewsSection(props: {
   useEffect(() => { setNote(''); setError(null); }, [r.id]);
 
   return (
-    <div className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3">
+    <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3`}>
       <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Reviews</div>
       {r.reviews.length > 0 ? (
         <div className="mt-2 flex flex-col gap-1">
@@ -908,38 +919,17 @@ function ReviewsSection(props: {
       {props.showJudgmentAction && r.judgment.kind === 'human' && (
         <div className="mt-3 space-y-2">
           <label className="text-[11px] text-[var(--gs-text-muted)]">Review note <span className="text-[var(--gs-text-dim)]">(required for fail / needs changes)</span>
-            <textarea value={note} onChange={(e) => { setNote(e.target.value); setError(null); }} className="mt-1 min-h-[72px] w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+            <textarea value={note} onChange={(e) => { setNote(e.target.value); setError(null); }} className={`mt-1 min-h-[72px] w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
           </label>
-          {error && <div className="text-[11px] text-rose-400">{error}</div>}
+          {error && <div className="text-[11px] text-[var(--gs-danger)]">{error}</div>}
           <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              disabled={props.saving}
-              onClick={() => {
-                if (!note.trim()) { setError('A note is required to fail this requirement.'); return; }
-                props.onRecordHuman('fail', note);
-              }}
-              className="rounded border border-rose-400/40 bg-rose-400/10 px-3 py-1.5 text-xs text-rose-300"
-            >
+            <button type="button" disabled={props.saving} onClick={() => { if (!note.trim()) { setError('A note is required to fail this requirement.'); return; } props.onRecordHuman('fail', note); }} className={btnDanger()}>
               Fail
             </button>
-            <button
-              type="button"
-              disabled={props.saving}
-              onClick={() => {
-                if (!note.trim()) { setError('A note is required to request changes.'); return; }
-                props.onRecordHuman('changes', note);
-              }}
-              className="rounded border border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-xs text-amber-200"
-            >
+            <button type="button" disabled={props.saving} onClick={() => { if (!note.trim()) { setError('A note is required to request changes.'); return; } props.onRecordHuman('changes', note); }} className="inline-flex items-center justify-center gap-1.5 rounded-[var(--gs-btn-radius)] border border-[var(--gs-warning)] bg-[var(--gs-chip-amber-bg)] px-3 py-1.5 text-xs font-medium text-[var(--gs-warning)] transition-[background-color,color,scale] duration-150 ease-out active:scale-[0.96] disabled:opacity-40">
               Needs changes
             </button>
-            <button
-              type="button"
-              disabled={props.saving}
-              onClick={() => props.onRecordHuman('pass', note)}
-              className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)]"
-            >
+            <button type="button" disabled={props.saving} onClick={() => props.onRecordHuman('pass', note)} className={btnPrimary()}>
               Pass
             </button>
           </div>
@@ -948,12 +938,12 @@ function ReviewsSection(props: {
 
       {props.showJudgmentAction && r.judgment.kind === 'llm' && (
         <div className="mt-3 space-y-2">
-          <div className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2">
+          <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2`}>
             <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">LLM judge</div>
             <div className="mt-1 text-xs text-[var(--gs-text-muted)]">{r.judgment.modelHint || 'runner default'}</div>
           </div>
           <div className="flex justify-end">
-            <button type="button" disabled={props.saving} onClick={props.onRunJudgment} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-40">
+            <button type="button" disabled={props.saving} onClick={props.onRunJudgment} className={btnPrimary()}>
               Run LLM judgment
             </button>
           </div>
@@ -962,13 +952,13 @@ function ReviewsSection(props: {
 
       {props.showJudgmentAction && r.judgment.kind === 'command' && (
         <div className="mt-3 space-y-2">
-          <div className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2">
+          <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2`}>
             <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Check command</div>
             <div className="mt-1 font-mono text-[11px] text-[var(--gs-text)]">{r.judgment.command}</div>
             <div className="mt-1 text-[10px] text-[var(--gs-text-muted)]">Expect: <code className="text-[var(--gs-text)]">{expectLabel(r.judgment.expect)}</code></div>
           </div>
           <div className="flex justify-end">
-            <button type="button" disabled={props.saving} onClick={props.onRunJudgment} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-40">
+            <button type="button" disabled={props.saving} onClick={props.onRunJudgment} className={btnPrimary()}>
               Run check
             </button>
           </div>
@@ -977,7 +967,7 @@ function ReviewsSection(props: {
 
       {props.showReopenAction && (
         <div className="mt-3 flex justify-end">
-          <button type="button" onClick={props.onReopen} className="rounded border border-[var(--gs-border)] px-3 py-1.5 text-xs text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">
+          <button type="button" onClick={props.onReopen} className={btnSecondary()}>
             Reopen for review
           </button>
         </div>
@@ -1009,15 +999,15 @@ function RequirementForm(props: {
   };
 
   return (
-    <form className="rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] p-4" onSubmit={handleSubmit}>
+    <form className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-4`} onSubmit={handleSubmit}>
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-[var(--gs-text)]">{props.mode === 'add' ? 'Add requirement' : 'Edit requirement'}</h3>
           <p className="mt-1 text-xs text-[var(--gs-text-muted)]">Three questions: what is it, how is it produced, how is it judged.</p>
         </div>
         <div className="flex gap-2">
-          <button type="button" onClick={props.onCancel} className="rounded border border-[var(--gs-border)] px-2 py-1 text-xs text-[var(--gs-text-muted)]">Cancel</button>
-          <button type="submit" disabled={props.saving} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-40">
+          <button type="button" onClick={props.onCancel} className={btnSecondary()}>Cancel</button>
+          <button type="submit" disabled={props.saving} className={btnPrimary()}>
             {props.mode === 'add' ? 'Add' : 'Save'}
           </button>
         </div>
@@ -1026,18 +1016,18 @@ function RequirementForm(props: {
       <FormSection number={1} title="What is it?">
         <label className="block text-[11px] text-[var(--gs-text-muted)]">
           Title
-          <input type="text" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="Screenshot showing simplified hierarchy" className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+          <input type="text" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="Screenshot showing simplified hierarchy" className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
         </label>
         <div className="mt-2 grid grid-cols-2 gap-2">
           <label className="block text-[11px] text-[var(--gs-text-muted)]">
             Evidence kind
-            <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as ArtifactKind })} className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]">
+            <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as ArtifactKind })} className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`}>
               {KIND_OPTIONS.map((k) => <option key={k} value={k}>{kindLabel(k)}</option>)}
             </select>
           </label>
           <label className="block text-[11px] text-[var(--gs-text-muted)]">
             Required?
-            <select value={draft.required ? 'true' : 'false'} onChange={(e) => setDraft({ ...draft, required: e.target.value === 'true' })} className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]">
+            <select value={draft.required ? 'true' : 'false'} onChange={(e) => setDraft({ ...draft, required: e.target.value === 'true' })} className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`}>
               <option value="true">required</option>
               <option value="false">optional</option>
             </select>
@@ -1045,7 +1035,7 @@ function RequirementForm(props: {
         </div>
         <label className="mt-2 block text-[11px] text-[var(--gs-text-muted)]">
           Rubric
-          <textarea value={draft.rubric} onChange={(e) => setDraft({ ...draft, rubric: e.target.value })} placeholder="What makes this evidence acceptable? Implementer reads it to know what to produce; judge applies it." className="mt-1 min-h-[80px] w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+          <textarea value={draft.rubric} onChange={(e) => setDraft({ ...draft, rubric: e.target.value })} placeholder="What makes this evidence acceptable? Implementer reads it to know what to produce; judge applies it." className={`mt-1 min-h-[80px] w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
         </label>
       </FormSection>
 
@@ -1054,7 +1044,7 @@ function RequirementForm(props: {
         {draft.generationKind === 'command' && (
           <label className="mt-2 block text-[11px] text-[var(--gs-text-muted)]">
             Command
-            <input type="text" value={draft.generationCommand} onChange={(e) => setDraft({ ...draft, generationCommand: e.target.value })} placeholder="scripts/capture.sh hover-state" className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-mono text-xs text-[var(--gs-text)]" />
+            <input type="text" value={draft.generationCommand} onChange={(e) => setDraft({ ...draft, generationCommand: e.target.value })} placeholder="scripts/capture.sh hover-state" className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-mono text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
           </label>
         )}
         {draft.generationKind === 'manual' && <div className="mt-2 text-[11px] text-[var(--gs-text-muted)]">A human or agent attaches the artifact directly. The UI shows an attach form on the requirement.</div>}
@@ -1066,47 +1056,47 @@ function RequirementForm(props: {
         {draft.judgmentKind === 'llm' && (
           <label className="mt-2 block text-[11px] text-[var(--gs-text-muted)]">
             Model hint <span className="text-[var(--gs-text-dim)]">(optional — runner picks a default otherwise)</span>
-            <input type="text" value={draft.judgmentModelHint} onChange={(e) => setDraft({ ...draft, judgmentModelHint: e.target.value })} placeholder="claude-3.5-sonnet" className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+            <input type="text" value={draft.judgmentModelHint} onChange={(e) => setDraft({ ...draft, judgmentModelHint: e.target.value })} placeholder="claude-3.5-sonnet" className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
           </label>
         )}
         {draft.judgmentKind === 'command' && (
           <div className="mt-2 grid gap-2">
             <label className="block text-[11px] text-[var(--gs-text-muted)]">
               Command
-              <input type="text" value={draft.judgmentCommand} onChange={(e) => setDraft({ ...draft, judgmentCommand: e.target.value })} placeholder="bun test src/components/__tests__/GoalDetailPanel.web.test.tsx" className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-mono text-xs text-[var(--gs-text)]" />
+              <input type="text" value={draft.judgmentCommand} onChange={(e) => setDraft({ ...draft, judgmentCommand: e.target.value })} placeholder="bun test src/components/__tests__/GoalDetailPanel.web.test.tsx" className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-mono text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
             </label>
             <label className="block text-[11px] text-[var(--gs-text-muted)]">
               Expect
-              <select value={draft.judgmentExpect} onChange={(e) => setDraft({ ...draft, judgmentExpect: e.target.value as CommandExpectation['kind'] })} className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]">
+              <select value={draft.judgmentExpect} onChange={(e) => setDraft({ ...draft, judgmentExpect: e.target.value as CommandExpectation['kind'] })} className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`}>
                 {EXPECT_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
               </select>
             </label>
             {draft.judgmentExpect === 'stdout-contains' && (
               <label className="block text-[11px] text-[var(--gs-text-muted)]">
                 Required substring
-                <input type="text" value={draft.judgmentExpectNeedle} onChange={(e) => setDraft({ ...draft, judgmentExpectNeedle: e.target.value })} className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)]" />
+                <input type="text" value={draft.judgmentExpectNeedle} onChange={(e) => setDraft({ ...draft, judgmentExpectNeedle: e.target.value })} className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
               </label>
             )}
             {draft.judgmentExpect === 'output-matches' && (
               <label className="block text-[11px] text-[var(--gs-text-muted)]">
                 Required regex
-                <input type="text" value={draft.judgmentExpectPattern} onChange={(e) => setDraft({ ...draft, judgmentExpectPattern: e.target.value })} className="mt-1 w-full rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-mono text-xs text-[var(--gs-text)]" />
+                <input type="text" value={draft.judgmentExpectPattern} onChange={(e) => setDraft({ ...draft, judgmentExpectPattern: e.target.value })} className={`mt-1 w-full ${R_INPUT} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-mono text-xs text-[var(--gs-text)] outline-none focus:border-[var(--gs-input-focus-border)]`} />
               </label>
             )}
           </div>
         )}
       </FormSection>
 
-      {error && <div className="mt-3 text-xs text-rose-400">{error}</div>}
+      {error && <div className="mt-3 text-xs text-[var(--gs-danger)]">{error}</div>}
     </form>
   );
 }
 
 function FormSection(props: { number: number; title: string; children: React.ReactNode }) {
   return (
-    <div className="mt-3 rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3">
+    <div className={`mt-3 ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3`}>
       <h4 className="mb-2 flex items-center gap-2 text-xs font-semibold text-[var(--gs-text)]">
-        <span className="rounded bg-[var(--gs-bg-active)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--gs-text-dim)]">{props.number}</span>
+        <span className={`${R_CHIP} bg-[var(--gs-bg-active)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--gs-text-dim)]`}>{props.number}</span>
         {props.title}
       </h4>
       {props.children}
@@ -1122,7 +1112,7 @@ function RadioRow(props: { value: string; options: Array<{ k: string; label: str
           key={o.k}
           type="button"
           onClick={() => props.onChange(o.k)}
-          className={`rounded border px-2 py-1 text-xs ${props.value === o.k ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'border-[var(--gs-border)] text-[var(--gs-text-muted)]'}`}
+          className={`${R_CHIP} border px-2 py-1 text-xs transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.96] ${props.value === o.k ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'}`}
         >
           {o.label}
         </button>
@@ -1155,22 +1145,22 @@ function TimelineTab(props: {
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-[var(--gs-text)]">Timeline</h2>
-          <p className="mt-1 text-xs text-[var(--gs-text-muted)]">How this goal got to its current state.</p>
+          <h2 className="text-base font-semibold text-balance text-[var(--gs-text)]">Timeline</h2>
+          <p className="mt-1 text-xs text-pretty text-[var(--gs-text-muted)]">How this goal got to its current state.</p>
         </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-1">
         {filters.map((f) => (
-          <button key={f.k} type="button" onClick={() => props.onFilterChange(f.k)} className={`rounded-full border px-3 py-1 text-[11px] ${props.filter === f.k ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'border-[var(--gs-border)] text-[var(--gs-text-muted)]'}`}>
+          <button key={f.k} type="button" onClick={() => props.onFilterChange(f.k)} className={`${R_CHIP} border px-3 py-1 text-[11px] transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.96] ${props.filter === f.k ? 'border-[var(--gs-selected-border)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'}`}>
             {f.label}
           </button>
         ))}
-        <span className="ml-auto text-[11px] text-[var(--gs-text-muted)]">{visible.length} of {props.events.length} events</span>
+        <span className="ml-auto text-[11px] tabular-nums text-[var(--gs-text-muted)]">{visible.length} of {props.events.length} events</span>
       </div>
 
       {visible.length === 0 ? (
-        <div className="rounded border border-dashed border-[var(--gs-border)] p-6 text-center text-xs text-[var(--gs-text-muted)]">
+        <div className={`${R_CARD} border border-dashed border-[var(--gs-border)] p-6 text-center text-xs text-[var(--gs-text-muted)]`}>
           No events recorded yet.
         </div>
       ) : (
@@ -1181,22 +1171,22 @@ function TimelineTab(props: {
                 key={e.id}
                 type="button"
                 onClick={() => props.onSelectEvent(e.id)}
-                className={`grid w-full gap-1 rounded border-l-2 p-3 text-left text-xs ${eventToneClass(e.tone)} ${selected?.id === e.id ? 'bg-[var(--gs-bg-active)]' : ''}`}
+                className={`grid w-full gap-1 border-l-2 p-3 text-left text-xs transition-[background-color] duration-150 ${eventToneClass(e.tone)} ${selected?.id === e.id ? 'bg-[var(--gs-bg-active)]' : ''}`}
               >
-                <span className="font-mono text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{formatRelativeTime(e.createdAt)}</span>
+                <span className="font-mono text-[10px] uppercase tracking-wide tabular-nums text-[var(--gs-text-dim)]">{formatRelativeTime(e.createdAt)}</span>
                 <span className="font-medium text-[var(--gs-text)]">{e.title}</span>
                 <span className="text-[var(--gs-text-muted)]">{e.body}</span>
               </button>
             ))}
           </div>
           {selected && (
-            <div className="sticky top-0 self-start rounded border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-4">
+            <div className={`sticky top-0 self-start ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-4`}>
               <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{selected.kind} event</div>
               <h3 className="mt-1 text-sm font-semibold text-[var(--gs-text)]">{selected.title}</h3>
               <p className="mt-1 text-xs text-[var(--gs-text-muted)]">{selected.body}</p>
-              <pre className="mt-3 overflow-auto rounded border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2 font-mono text-[10px] text-[var(--gs-text-muted)]">{selected.payload}</pre>
+              <pre className={`mt-3 overflow-auto ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2 font-mono text-[10px] text-[var(--gs-text-muted)]`}>{selected.payload}</pre>
               {selected.requirementId && (
-                <button type="button" onClick={() => props.onJumpToRequirement(selected.requirementId!)} className="mt-3 rounded border border-[var(--gs-border)] px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">
+                <button type="button" onClick={() => props.onJumpToRequirement(selected.requirementId!)} className={btnSecondary('mt-3')}>
                   Open requirement
                 </button>
               )}

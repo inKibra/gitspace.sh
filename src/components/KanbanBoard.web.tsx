@@ -11,6 +11,7 @@ import { canShiftGoalInChainOrder } from '../app/shared/board/chain-order.js';
 	import type { WorkspacePhase } from '../types/config.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
+import { btnGhost, btnPrimary, R_CHIP, R_MODAL } from './ui/control.js';
 
 function PmChip({ label, tone = 'dim', className = '' }: { label: string; tone?: 'green' | 'blue' | 'amber' | 'red' | 'dim'; className?: string }) {
   const toneClass =
@@ -265,7 +266,7 @@ function ChainHandle({ goal, related }: { goal: KanbanGoalItem; related?: boolea
     <span
       data-chain-anchor="true"
       title={`Goal chain position ${goal.chainPosition} of ${goal.chainLength}`}
-      className={`relative ml-auto inline-flex h-5 min-w-8 flex-shrink-0 items-center justify-center border px-1 text-[12px] leading-none transition ${chainHoverClass(related)}`}
+      className={`relative ml-auto inline-flex h-5 min-w-8 flex-shrink-0 items-center justify-center ${R_CHIP} border px-1 text-[12px] leading-none transition-opacity duration-150 ${chainHoverClass(related)}`}
       style={{ color: palette.fg, borderColor: palette.border, backgroundColor: palette.bg }}
     >
       ⛓
@@ -288,7 +289,7 @@ function RearrangeHandle({ onOpenOrder }: { onOpenOrder?: () => void }) {
         event.stopPropagation();
         onOpenOrder?.();
       }}
-      className="inline-grid h-5 w-6 flex-shrink-0 translate-x-1 place-items-center border border-[rgba(255,204,102,0.24)] bg-[rgba(255,204,102,0.06)] text-[12px] leading-none text-[var(--gs-chip-amber-text)] opacity-0 transition group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100"
+      className={`inline-grid h-6 w-7 flex-shrink-0 translate-x-1 place-items-center ${R_CHIP} border border-[rgba(255,204,102,0.24)] bg-[rgba(255,204,102,0.06)] text-[12px] leading-none text-[var(--gs-chip-amber-text)] opacity-0 transition-[opacity,transform,scale] duration-150 ease-out group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100 active:scale-[0.9]`}
     >
       ⇅
     </button>
@@ -393,7 +394,7 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
           handleClick();
         }
       }}
-      className={`group relative w-full px-3 py-2.5 border-l-2 bg-[var(--gs-bg-surface)] text-left transition hover:bg-[var(--gs-bg-hover)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
+      className={`group relative w-full px-3 py-2.5 border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
       style={{ borderLeftColor: related ? getChainPalette(goal.chainId).fg : 'transparent', ...(related ? { ['--tw-ring-color' as string]: getChainPalette(goal.chainId).fg } : {}) }}
       title={goal.blockedReason ?? `Create workspace for planned goal in ${goal.chainTitle}`}
     >
@@ -784,7 +785,7 @@ export function KanbanBoardWeb({
               onMouseEnter={() => setActiveChainId(chain.chainId)}
               onFocus={() => setActiveChainId(chain.chainId)}
               onClick={() => openOrderEditor(chain.chainId)}
-              className="rounded border px-2 py-1 transition hover:brightness-125 focus:brightness-125"
+              className={`${R_CHIP} border px-2 py-1 transition-[filter,scale] duration-150 ease-out hover:brightness-125 focus:brightness-125 active:scale-[0.96]`}
               style={{ color: chain.palette.fg, borderColor: chain.palette.border, backgroundColor: chain.palette.bg }}
               title={`Click to rearrange this chain. Order: ${chain.goals.map((goal) => `${goal.chainPosition}. ${goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}`).join(' → ')}`}
             >
@@ -848,7 +849,7 @@ export function KanbanBoardWeb({
         </svg>
       )}
       {orderEditorGoals.length > 0 && (
-        <div className="fixed right-4 top-16 z-30 w-[360px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl">
+        <div className={`fixed right-4 top-16 z-30 w-[360px] ${R_MODAL} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl`}>
           <div className="flex items-start justify-between border-b border-[var(--gs-border)] p-3">
             <div>
               <div className="text-sm font-semibold text-[var(--gs-text)]">Edit chain order</div>
@@ -857,8 +858,8 @@ export function KanbanBoardWeb({
               </div>
             </div>
             <div className="flex gap-2">
-              <button type="button" onClick={resetDraftOrder} disabled={!orderDirty} className="rounded px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] disabled:opacity-30">Cancel</button>
-              <button type="button" onClick={() => setOrderEditorChainId(null)} className="rounded px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)]">Close</button>
+              <button type="button" onClick={resetDraftOrder} disabled={!orderDirty} className={btnGhost()}>Cancel</button>
+              <button type="button" onClick={() => setOrderEditorChainId(null)} className={btnGhost()}>Close</button>
             </div>
           </div>
           <div className="divide-y divide-[var(--gs-border)]">
@@ -880,21 +881,21 @@ export function KanbanBoardWeb({
                       if (canShiftGoalInChainOrder(activeRenderedGoals, index, 1)) shiftDraftGoal(goal.selectionKey, 1);
                     }
                   }}
-                  className="min-w-0 text-left"
+                  className="min-w-0 rounded-[var(--gs-btn-radius)] px-1 py-0.5 text-left transition-[background-color] duration-150 hover:bg-[var(--gs-bg-hover)]"
                 >
                   <div className="truncate text-[var(--gs-text)]">{goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}</div>
                   <div className="truncate text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{displayGoalPhase(goal)} · {goal.status}</div>
                 </button>
                 <div className="flex gap-1">
-                  <button type="button" disabled={!canShiftGoalInChainOrder(activeRenderedGoals, index, -1)} onClick={() => shiftDraftGoal(goal.selectionKey, -1)} className="rounded px-2 py-1 text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] disabled:opacity-30">↑</button>
-                  <button type="button" disabled={!canShiftGoalInChainOrder(activeRenderedGoals, index, 1)} onClick={() => shiftDraftGoal(goal.selectionKey, 1)} className="rounded px-2 py-1 text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] disabled:opacity-30">↓</button>
+                  <button type="button" disabled={!canShiftGoalInChainOrder(activeRenderedGoals, index, -1)} onClick={() => shiftDraftGoal(goal.selectionKey, -1)} className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--gs-btn-radius)] text-[var(--gs-text-muted)] transition-[background-color,scale] duration-150 ease-out hover:bg-[var(--gs-bg-active)] active:scale-[0.96] disabled:opacity-30">↑</button>
+                  <button type="button" disabled={!canShiftGoalInChainOrder(activeRenderedGoals, index, 1)} onClick={() => shiftDraftGoal(goal.selectionKey, 1)} className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--gs-btn-radius)] text-[var(--gs-text-muted)] transition-[background-color,scale] duration-150 ease-out hover:bg-[var(--gs-bg-active)] active:scale-[0.96] disabled:opacity-30">↓</button>
                 </div>
               </div>
             ))}
           </div>
           <div className="flex items-center justify-between border-t border-[var(--gs-border)] p-3">
             <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Save updates planning order only.</div>
-            <button type="button" disabled={!orderDirty || orderSaving || !onSaveChainOrder} onClick={() => void saveDraftOrder()} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-30">
+            <button type="button" disabled={!orderDirty || orderSaving || !onSaveChainOrder} onClick={() => void saveDraftOrder()} className={btnPrimary()}>
               {orderSaving ? 'Saving…' : 'Save order'}
             </button>
           </div>

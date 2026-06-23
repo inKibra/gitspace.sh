@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { WorkspaceNote } from '../types/workspace.js';
 import { MarkdownEditor, type MarkdownEditorMode } from './MarkdownEditor.web.js';
+import { btnDanger, btnGhost, R_CARD, R_CHIP } from './ui/control.js';
 
 export interface WorkspaceNotesModalProps {
   workspaceName: string;
@@ -31,12 +32,9 @@ function toPreview(body: string): string {
 }
 
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
 
@@ -56,6 +54,16 @@ export function WorkspaceNotesModal({
 }: WorkspaceNotesModalProps) {
   const [query, setQuery] = useState('');
   const [viewMode, setViewMode] = useState<MarkdownEditorMode>('split');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  const selectedNote = useMemo(
+    () => notes.find((note) => note.id === selectedNoteId) ?? null,
+    [notes, selectedNoteId],
+  );
+
+  const dirty = selectedNote ? draftBody !== selectedNote.body : draftBody.trim().length > 0;
+
+  useEffect(() => { setConfirmingDelete(false); }, [selectedNoteId]);
 
   const filteredNotes = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -66,13 +74,16 @@ export function WorkspaceNotesModal({
     );
   }, [notes, query]);
 
-  const selectedNote = useMemo(
-    () => notes.find((note) => note.id === selectedNoteId) ?? null,
-    [notes, selectedNoteId],
-  );
+  const guard = (): boolean => !dirty || window.confirm('Discard unsaved changes to this note?');
+
+  const selectNote = (noteId: string) => {
+    if (noteId === selectedNoteId || guard()) onSelectNote(noteId);
+  };
+  const addNote = () => { if (guard()) onAddNote(); };
+  const close = () => { if (guard()) onClose(); };
 
   return (
-    <div className="gs-overlay-root" role="dialog" aria-label="Workspace notes" onClick={onClose}>
+    <div className="gs-overlay-root" role="dialog" aria-label="Workspace notes" onClick={close}>
       <div className="absolute inset-0 gs-overlay-backdrop" />
       <div
         className="gs-shell-card gs-shell-card--wide"
@@ -80,84 +91,97 @@ export function WorkspaceNotesModal({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="gs-shell-header">
-          <div>
+          <div className="min-w-0">
             <div className="gs-shell-kicker">Workspace notes</div>
-            <div className="gs-shell-title">Notes for {workspaceName}</div>
+            <div className="gs-shell-title truncate">Notes for {workspaceName}</div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="text-xs text-[var(--gs-text-dim)]">
+            <div className="text-xs tabular-nums text-[var(--gs-text-dim)]">
               {loading ? 'Loading notes…' : `${notes.length} note${notes.length === 1 ? '' : 's'}`}
             </div>
-            <button type="button" className="gs-chip-button" onClick={onClose}>Close</button>
+            <button type="button" className="gs-chip-button" onClick={close}>Close</button>
           </div>
         </div>
         <div className="gs-shell-body p-0" style={{ minHeight: 560, display: 'grid', gridTemplateColumns: '320px 1fr' }}>
-          <div className="border-r border-[var(--gs-border)] bg-[rgba(255,255,255,0.02)] min-h-0 overflow-auto">
-            <div className="p-3 border-b border-[rgba(255,255,255,0.04)] space-y-3 sticky top-0 bg-[rgba(13,16,14,0.96)] backdrop-blur">
+          <div className="flex min-h-0 flex-col border-r border-[var(--gs-border)] bg-[var(--gs-bg)]">
+            <div className="sticky top-0 z-10 space-y-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg)] p-3">
               <input
                 className="gs-field"
-                placeholder="Search notes..."
+                placeholder="Search notes…"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
               <button
                 type="button"
-                className="w-full rounded-lg border border-[rgba(125,211,252,0.25)] bg-[rgba(125,211,252,0.08)] px-3 py-2 text-left text-sm text-[var(--gs-text)] hover:bg-[rgba(125,211,252,0.12)]"
-                onClick={onAddNote}
+                onClick={addNote}
                 disabled={saving}
+                className={`flex w-full items-center justify-center gap-1.5 ${R_CHIP} border border-[var(--gs-accent)] bg-[var(--gs-accent-subtle)] px-3 py-2 text-sm font-medium text-[var(--gs-accent)] transition-[background-color,scale] duration-150 ease-out hover:bg-[var(--gs-highlight-bg)] active:scale-[0.98] disabled:opacity-40`}
               >
                 + New note
               </button>
             </div>
-            <div className="p-2 space-y-1">
-              {filteredNotes.map((note) => (
-                <button
-                  key={note.id}
-                  type="button"
-                  onClick={() => onSelectNote(note.id)}
-                  className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${note.id === selectedNoteId ? 'border-[rgba(155,255,105,0.28)] bg-[rgba(155,255,105,0.08)] text-[var(--gs-text)] shadow-[inset_0_0_0_1px_rgba(155,255,105,0.08)]' : 'border-transparent text-[var(--gs-text-muted)] hover:text-[var(--gs-text)] hover:bg-[rgba(255,255,255,0.03)]'}`}
-                >
-                  <div className="text-sm text-[var(--gs-text)]">{deriveNoteLabel(note.body)}</div>
-                  <div className="mt-1 text-xs text-[var(--gs-text-dim)] line-clamp-2">{toPreview(note.body).slice(0, 120) || 'Empty note'}</div>
-                  <div className="mt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Updated {formatDate(note.updatedAt)}</div>
-                </button>
-              ))}
-              {filteredNotes.length === 0 ? (
-                <div className="px-3 py-6 text-xs text-[var(--gs-text-ghost)]">
-                  {loading ? 'Loading notes…' : 'No notes match this filter.'}
+            <div className="min-h-0 flex-1 space-y-1 overflow-auto p-2">
+              {filteredNotes.map((note) => {
+                const active = note.id === selectedNoteId;
+                return (
+                  <button
+                    key={note.id}
+                    type="button"
+                    onClick={() => selectNote(note.id)}
+                    className={`w-full ${R_CARD} px-3 py-3 text-left transition-[background-color,box-shadow,color] duration-150 ${active ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_3px_0_0_var(--gs-selected-border)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="truncate text-sm text-[var(--gs-text)]">{deriveNoteLabel(note.body)}</div>
+                      {active && dirty && <span className="ml-auto flex-shrink-0 text-[var(--gs-warning)]" title="Unsaved changes">●</span>}
+                    </div>
+                    <div className="mt-1 line-clamp-2 text-xs text-[var(--gs-text-dim)]">{toPreview(note.body).slice(0, 120) || 'Empty note'}</div>
+                    <div className="mt-2 text-[10px] uppercase tracking-[0.12em] tabular-nums text-[var(--gs-text-dim)]">Updated {formatDate(note.updatedAt)}</div>
+                  </button>
+                );
+              })}
+              {filteredNotes.length === 0 && (
+                <div className="px-3 py-8 text-center text-xs text-[var(--gs-text-ghost)]">
+                  {loading ? 'Loading notes…' : notes.length === 0 ? 'No notes yet. Create one to start.' : 'No notes match this search.'}
                 </div>
-              ) : null}
+              )}
             </div>
           </div>
-          <div className="min-h-0 flex flex-col">
-            <div className="px-4 py-3 border-b border-[var(--gs-border)] bg-[rgba(255,255,255,0.02)]">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0 flex-1 text-xs text-[var(--gs-text-dim)] truncate">
-                  {selectedNote ? `${deriveNoteLabel(selectedNote.body)} · Updated ${formatDate(selectedNote.updatedAt)}` : loading ? 'Loading notes…' : 'No note selected'}
-                </div>
-                <button
-                  type="button"
-                  className="gs-chip-button"
-                  style={{ color: 'var(--gs-danger-hover)', borderColor: 'rgba(255,107,95,0.25)', background: 'rgba(255,107,95,0.08)' }}
-                  onClick={onDeleteNote}
-                  disabled={!selectedNote || saving}
-                >
-                  Delete
-                </button>
+          <div className="flex min-h-0 flex-col">
+            <div className="border-b border-[var(--gs-border)] bg-[var(--gs-bg)] px-4 py-3">
+              <div className="min-w-0 flex-1 truncate text-xs text-[var(--gs-text-dim)]">
+                {selectedNote ? `${deriveNoteLabel(selectedNote.body)} · Updated ${formatDate(selectedNote.updatedAt)}` : loading ? 'Loading notes…' : 'No note selected'}
               </div>
             </div>
-            <div className="flex-1 min-h-0 p-4">
-              <MarkdownEditor
-                body={draftBody}
-                mode={viewMode}
-                dirty={!!selectedNote}
-                saving={saving}
-                emptyPreviewHtml="<p><em>Empty note.</em></p>"
-                onChange={onChangeDraftBody}
-                onModeChange={setViewMode}
-                onSave={selectedNote ? () => void onSaveNote() : undefined}
-                minHeightPx={460}
-              />
+            <div className="min-h-0 flex-1 p-4">
+              {selectedNote || draftBody ? (
+                <MarkdownEditor
+                  body={draftBody}
+                  mode={viewMode}
+                  dirty={dirty}
+                  saving={saving}
+                  emptyPreviewHtml="<p><em>Empty note.</em></p>"
+                  onChange={onChangeDraftBody}
+                  onModeChange={setViewMode}
+                  onSave={selectedNote ? () => void onSaveNote() : undefined}
+                  onDiscard={selectedNote ? () => onChangeDraftBody(selectedNote.body) : undefined}
+                  minHeightPx={460}
+                  rightActions={selectedNote ? (
+                    confirmingDelete ? (
+                      <span className="inline-flex items-center gap-2">
+                        <span className="text-xs text-[var(--gs-text-muted)]">Delete note?</span>
+                        <button type="button" className={btnGhost()} onClick={() => setConfirmingDelete(false)}>Cancel</button>
+                        <button type="button" className={btnDanger()} disabled={saving} onClick={() => { setConfirmingDelete(false); void onDeleteNote(); }}>Confirm</button>
+                      </span>
+                    ) : (
+                      <button type="button" className={btnDanger()} disabled={saving} onClick={() => setConfirmingDelete(true)}>Delete</button>
+                    )
+                  ) : undefined}
+                />
+              ) : (
+                <div className={`flex h-full items-center justify-center ${R_CARD} border border-dashed border-[var(--gs-border)] text-center text-xs text-[var(--gs-text-muted)]`}>
+                  {loading ? 'Loading notes…' : 'Select a note on the left, or create a new one.'}
+                </div>
+              )}
             </div>
           </div>
         </div>

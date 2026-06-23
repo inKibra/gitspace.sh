@@ -24,7 +24,7 @@ describe('WorkspaceNotesModal markdown preview', () => {
       />,
     );
 
-    expect(view.container.innerHTML).toContain('<h1>Note title</h1>');
+    expect(view.container.innerHTML).toMatch(/<h1[^>]*>Note title<\/h1>/);
     expect(view.container.innerHTML).toContain('<strong>Ship it</strong>');
   });
 });
