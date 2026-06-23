@@ -545,6 +545,40 @@ export class GitSpaceEngine {
     });
   }
 
+  addGoalNearWorkspace(backendKey: BackendKey, projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalRecord> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.addGoalNearWorkspace) throw new Error('Goal creation unavailable');
+      const goal = await b.addGoalNearWorkspace(projectName, workspaceName, title, position);
+      await b.listWorkspaces();
+      return goal;
+    });
+  }
+
+  updateGoal(backendKey: BackendKey, projectName: string, goalId: string, updates: import('../../types/goals.js').GoalUpdateInput): Promise<import('../../types/goals.js').GoalRecord> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.updateGoal) throw new Error('Goal update unavailable');
+      const goal = await b.updateGoal(projectName, goalId, updates);
+      await b.listWorkspaces();
+      return goal;
+    });
+  }
+
+  moveGoalInChain(backendKey: BackendKey, projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.moveGoalInChain) throw new Error('Goal reorder unavailable');
+      const chain = await b.moveGoalInChain(projectName, sourceToken, targetToken, position);
+      await b.listWorkspaces();
+      return chain;
+    });
+  }
+
+  getGoalStackStatus(backendKey: BackendKey, projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.getGoalStackStatus) throw new Error('Goal stack status unavailable');
+      return b.getGoalStackStatus(projectName, workspaceName);
+    });
+  }
+
   deleteProject(backendKey: BackendKey, projectName: string, params?: DeleteProjectParams): Promise<void> {
     return this.withBackend(backendKey, async (b) => {
       await b.deleteProject(projectName, params);

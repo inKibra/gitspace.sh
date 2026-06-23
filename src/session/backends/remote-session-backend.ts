@@ -11,6 +11,7 @@ import {
   type OperationEventResponse,
   type OperationSnapshotResponse,
   type RunSpaceCommandResponse,
+  type RefreshMachineSnapshotResponse,
   type DeleteWorkspaceRequest,
   type GetReplayTimelineRequest,
   type ListReplaysRequest,
@@ -70,11 +71,12 @@ import {
   machineSnapshotToWorkspaces,
 } from '../../machine/state/selectors.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
+import type { AddRequirementInput, AttachEvidenceInput, HumanReviewDecision, UpdateRequirementInput } from '../../core/goal-validation.js';
+type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse | RefreshMachineSnapshotResponse;
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
 import { terminalMemoryDebugIncrement } from '../../utils/terminal-memory-debug.js';
-type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse;
 
 type PendingOperationCompletion = {
   resolve: (operation: RemoteOperationRecord) => void;
@@ -255,6 +257,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'operation_event',
   'operation_dismissed',
   'run_space_command_response',
+  'refresh_machine_snapshot',
   'agent_state_snapshot',
   'agent_state_update',
   'machine_snapshot',
@@ -559,9 +562,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listProjects(): Promise<void> {
-    await this.waitForInitialSnapshot();
+    await this.refreshMachineSnapshot();
     this.emit({ type: 'projects', projects: machineSnapshotToProjects(this.machineStateClient.getSnapshot()) });
   }
+
+  private async refreshMachineSnapshot(): Promise<void> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendTypedCommand({ type: 'refresh_machine_snapshot', requestId: crypto.randomUUID() });
+    if (response.type === 'refresh_machine_snapshot') {
+      this.machineStateClient.replaceSnapshot(response.snapshot);
+      this.emitDerivedMachineState();
+      this.agentStateCache = machineSnapshotToAgentState(response.snapshot);
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected refresh machine snapshot response');
+  }
+
 
   async listGithubRepos(org?: string): Promise<string[]> {
     const response = await this.sendRpcCommand({ type: 'list_github_repos', requestId: crypto.randomUUID(), org });
@@ -585,16 +602,33 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listWorkspaces(): Promise<void> {
-    await this.waitForInitialSnapshot();
+    await this.refreshMachineSnapshot();
     this.emit({ type: 'workspaces', workspaces: machineSnapshotToWorkspaces(this.machineStateClient.getSnapshot()) });
+  }
+
+
+  async previewWorkspaceStatusChange(
+    projectName: string,
+    workspaceName: string,
+    phase: import('../../types/config.js').WorkspacePhase
+  ): Promise<import('../../types/goals.js').WorkspacePhaseChangePreview> {
+    const response = await this.sendTypedCommand({ type: 'preview_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
+    if (response.type === 'workspace-phase-preview') {
+      return response.preview;
+    }
+    if (response.type === 'error') {
+      throw new Error(response.message);
+    }
+    throw new Error('Unexpected workspace phase preview response');
   }
 
   async setWorkspaceStatus(
     projectName: string,
     workspaceName: string,
-    phase: import('../../types/config.js').WorkspacePhase
+    phase: import('../../types/config.js').WorkspacePhase,
+    options?: { cascade?: boolean }
   ): Promise<void> {
-    const response = await this.sendRpcCommand({ type: 'set_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
+    const response = await this.sendRpcCommand({ type: 'set_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase, cascade: options?.cascade });
     if (response.type === 'ok') {
       await this.listWorkspaces();
       return;
@@ -606,7 +640,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listSessions(workspaceId?: string): Promise<void> {
-    await this.waitForInitialSnapshot();
+    await this.refreshMachineSnapshot();
     this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(this.machineStateClient.getSnapshot(), workspaceId) });
   }
 
@@ -1095,6 +1129,165 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected run space command response');
   }
 
+  private unwrapSpaceCommandOutput(output: string): string {
+    const trimmed = output.trim();
+    for (const token of ['\n{', '\n[', '{', '[']) {
+      const index = trimmed.lastIndexOf(token);
+      if (index >= 0) {
+        const candidate = token.startsWith('\n') ? trimmed.slice(index + 1).trim() : trimmed.slice(index).trim();
+        try {
+          JSON.parse(candidate);
+          return candidate;
+        } catch {}
+      }
+    }
+    if (trimmed.includes('exit code:')) {
+      throw new Error(output);
+    }
+    return trimmed;
+  }
+
+  private getWorkspaceIdForGoal(projectName: string, goalId: string): string {
+    const snapshot = this.machineStateClient.getSnapshot();
+    const persistedGoalId = goalId.includes(':') ? goalId.split(':').slice(-1)[0] : goalId;
+    const fullGoalId = `${projectName}:${persistedGoalId}`;
+    const goal = snapshot.goalsById[fullGoalId];
+    if (!goal) {
+      throw new Error(`Goal not found: ${goalId}`);
+    }
+    if (goal.workspaceName) {
+      const workspace = Object.values(snapshot.workspacesById).find((item) => item && item.projectName === projectName && item.name === goal.workspaceName);
+      if (workspace) return workspace.id;
+    }
+    const fallback = Object.values(snapshot.workspacesById).find((item) => item && item.projectName === projectName);
+    if (fallback) return fallback.id;
+    throw new Error(`No workspace is available to run goal command for ${goal.title}.`);
+  }
+
+  async addGoalRequirement(projectName: string, goalId: string, input: AddRequirementInput): Promise<import('../../types/goals.js').Requirement> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'requirement', 'add', '--goal', goalId, '--title', input.title, '--kind', input.kind, '--rubric', input.rubric, '--gen', input.generation.kind, '--judge', input.judgment.kind, '--json'];
+    if (input.generation.kind === 'command') parts.push('--gen-command', input.generation.command);
+    if (input.judgment.kind === 'command') {
+      parts.push('--judge-command', input.judgment.command);
+      parts.push('--expect', input.judgment.expect.kind);
+      if (input.judgment.expect.kind === 'stdout-contains') parts.push('--expect-needle', input.judgment.expect.needle);
+      if (input.judgment.expect.kind === 'output-matches') parts.push('--expect-pattern', input.judgment.expect.pattern);
+    }
+    if (input.judgment.kind === 'llm' && input.judgment.modelHint) parts.push('--model-hint', input.judgment.modelHint);
+    if (input.required === false) parts.push('--optional');
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirement: import('../../types/goals.js').Requirement };
+    await this.listWorkspaces();
+    return parsed.requirement;
+  }
+
+  async updateGoalRequirement(projectName: string, goalId: string, requirementId: string, patch: UpdateRequirementInput): Promise<import('../../types/goals.js').Requirement> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'requirement', 'update', '--goal', goalId, '--requirement', requirementId, '--json'];
+    if (patch.title !== undefined) parts.push('--title', patch.title);
+    if (patch.kind !== undefined) parts.push('--kind', patch.kind);
+    if (patch.rubric !== undefined) parts.push('--rubric', patch.rubric);
+    if (patch.required === true) parts.push('--required');
+    if (patch.required === false) parts.push('--optional');
+    if (patch.generation) {
+      parts.push('--gen', patch.generation.kind);
+      if (patch.generation.kind === 'command') parts.push('--gen-command', patch.generation.command);
+    }
+    if (patch.judgment) {
+      parts.push('--judge', patch.judgment.kind);
+      if (patch.judgment.kind === 'command') {
+        parts.push('--judge-command', patch.judgment.command);
+        parts.push('--expect', patch.judgment.expect.kind);
+        if (patch.judgment.expect.kind === 'stdout-contains') parts.push('--expect-needle', patch.judgment.expect.needle);
+        if (patch.judgment.expect.kind === 'output-matches') parts.push('--expect-pattern', patch.judgment.expect.pattern);
+      }
+      if (patch.judgment.kind === 'llm' && patch.judgment.modelHint) parts.push('--model-hint', patch.judgment.modelHint);
+    }
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirement: import('../../types/goals.js').Requirement };
+    await this.listWorkspaces();
+    return parsed.requirement;
+  }
+
+  async removeGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<void> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'requirement', 'remove', '--goal', goalId, '--requirement', requirementId, '--json'];
+    await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    await this.listWorkspaces();
+  }
+
+  async reorderGoalRequirement(projectName: string, goalId: string, requirementId: string, position: number): Promise<void> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'requirement', 'reorder', '--goal', goalId, '--requirement', requirementId, '--position', String(position), '--json'];
+    await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    await this.listWorkspaces();
+  }
+
+  async reopenGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<import('../../types/goals.js').Requirement> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'requirement', 'reopen', '--goal', goalId, '--requirement', requirementId, '--json'];
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; status: import('../../types/goals.js').RequirementStatus };
+    await this.listWorkspaces();
+    const goal = await this.refreshAndFetchGoal(projectName, goalId);
+    return goal.validation.requirements[requirementId];
+    void parsed;
+  }
+
+  async attachGoalEvidence(projectName: string, goalId: string, requirementId: string, input: AttachEvidenceInput): Promise<import('../../types/goals.js').Evidence> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'artifact', 'attach', '--goal', goalId, '--requirement', requirementId, '--json'];
+    if (input.name) parts.push('--name', input.name);
+    if (input.body) parts.push('--body', input.body);
+    if (input.path) parts.push('--path', input.path);
+    if (input.url) parts.push('--url', input.url);
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; evidence: import('../../types/goals.js').Evidence };
+    await this.listWorkspaces();
+    return parsed.evidence;
+  }
+
+  async runGoalGeneration(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; evidence: import('../../types/goals.js').Evidence; autoAccepted: boolean }> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'artifact', 'run', '--goal', goalId, '--requirement', requirementId, '--json'];
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; evidence: import('../../types/goals.js').Evidence; autoAccepted: boolean };
+    await this.listWorkspaces();
+    const goal = await this.refreshAndFetchGoal(projectName, goalId);
+    return { requirement: goal.validation.requirements[requirementId], evidence: parsed.evidence, autoAccepted: parsed.autoAccepted };
+  }
+
+  async runGoalJudgment(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; review: import('../../types/goals.js').Review }> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'review', 'run', '--goal', goalId, '--requirement', requirementId, '--json'];
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; review: import('../../types/goals.js').Review };
+    await this.listWorkspaces();
+    const goal = await this.refreshAndFetchGoal(projectName, goalId);
+    return { requirement: goal.validation.requirements[requirementId], review: parsed.review };
+  }
+
+  async recordGoalHumanReview(projectName: string, goalId: string, requirementId: string, decision: HumanReviewDecision, note: string, createdBy?: string): Promise<import('../../types/goals.js').Review> {
+    const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
+    const parts = ['goal', 'review', 'record', '--goal', goalId, '--requirement', requirementId, '--decision', decision, '--body', note, '--json'];
+    if (createdBy) parts.push('--created-by', createdBy);
+    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; review: import('../../types/goals.js').Review };
+    await this.listWorkspaces();
+    return parsed.review;
+  }
+
+  private async refreshAndFetchGoal(projectName: string, goalId: string): Promise<import('../../types/goals.js').GoalRecord> {
+    await this.listWorkspaces();
+    const snapshot = this.machineStateClient.getSnapshot();
+    const persistedGoalId = goalId.includes(':') ? goalId.split(':').slice(-1)[0] : goalId;
+    const fullGoalId = `${projectName}:${persistedGoalId}`;
+    const goal = snapshot.goalsById?.[fullGoalId];
+    if (!goal) throw new Error(`Goal not found in refreshed snapshot: ${goalId}`);
+    return goal as unknown as import('../../types/goals.js').GoalRecord;
+  }
+
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {
     await this.waitForInitialSnapshot();
     const response = await this.sendRpcCommand({ type: 'get_agent_file_suggestions', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), prefix, limit });
@@ -1211,6 +1404,43 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected workspace note remove response');
+  }
+
+  async addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTypedCommand({ type: 'goal_add_near_workspace', requestId: crypto.randomUUID(), projectName, workspaceName, title, position });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal add response');
+  }
+
+  async updateGoal(projectName: string, goalId: string, updates: import('../../types/goals.js').GoalUpdateInput): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTypedCommand({ type: 'goal_update', requestId: crypto.randomUUID(), projectName, goalId, updates });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal update response');
+  }
+
+  async moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
+    const response = await this.sendTypedCommand({ type: 'goal_reorder', requestId: crypto.randomUUID(), projectName, sourceToken, targetToken, position });
+    if (response.type === 'goal-chain') {
+      await this.listWorkspaces();
+      return response.chain;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal reorder response');
+  }
+
+  async getGoalStackStatus(projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
+    const response = await this.sendTypedCommand({ type: 'goal_stack_status', requestId: crypto.randomUUID(), projectName, workspaceName });
+    if (response.type === 'goal-stack-status') return response.status;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal stack status response');
   }
 
   async rerunWorkspaceScripts(projectName: string, workspaceId: string): Promise<void> {
@@ -1748,6 +1978,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         return;
       case 'agent_state_update':
         this.handleAgentStateUpdate(message as unknown as AgentStateUpdatePush);
+        return;
+      case 'refresh_machine_snapshot':
+        this.resolveRefreshMachineSnapshot(message as RefreshMachineSnapshotResponse);
         return;
       case 'machine_snapshot':
         this.machineStateClient.replaceSnapshot(message.snapshot);
@@ -2360,6 +2593,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     });
   }
 
+
+  private resolveRefreshMachineSnapshot(message: RefreshMachineSnapshotResponse): void {
+    const pending = this.pendingTypedCommands.get(message.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.pendingTypedCommands.delete(message.requestId);
+    pending.resolve(message);
+  }
   private resolveRunSpaceCommandResponse(message: RunSpaceCommandResponse): void {
     const pending = this.pendingTypedCommands.get(message.requestId);
     if (!pending) return;

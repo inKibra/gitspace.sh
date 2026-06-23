@@ -374,6 +374,7 @@ export type Command =
       projectName: string;
       workspaceName: string;
       phase: import('../../types/config.js').WorkspacePhase;
+      cascade?: boolean;
     }
   | { type: 'agent-sessions'; target: AgentWorkspaceTargetPayload; mode?: 'known' | 'live' }
   | { type: 'agent-create'; target: AgentWorkspaceTargetPayload; title?: string }
@@ -400,13 +401,18 @@ export type Command =
   | { type: 'project-prepare'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
   | { type: 'project-finalize'; projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }
   | { type: 'project-cancel'; projectName: string }
-  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }
+  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; parentWorkspaceName?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }
   | { type: 'project-delete'; projectName: string }
   | { type: 'workspace-delete'; requestId: string; projectName: string; workspaceId: string; scriptPolicy?: 'auto' | 'skip' }
+  | { type: 'workspace-phase-preview'; projectName: string; workspaceName: string; phase: import('../../types/config.js').WorkspacePhase }
   | { type: 'workspace-notes-list'; projectName: string; workspaceName: string }
   | { type: 'workspace-note-add'; projectName: string; workspaceName: string; body: string }
   | { type: 'workspace-note-update'; projectName: string; workspaceName: string; noteId: string; body: string }
   | { type: 'workspace-note-remove'; projectName: string; workspaceName: string; noteId: string }
+  | { type: 'goal-update'; projectName: string; goalId: string; updates: import('../../types/goals.js').GoalUpdateInput }
+  | { type: 'goal-add-near-workspace'; projectName: string; workspaceName: string; title: string; position: 'before' | 'after' }
+  | { type: 'goal-reorder'; projectName: string; sourceToken: string; targetToken: string; position: 'before' | 'after' }
+  | { type: 'goal-stack-status'; projectName: string; workspaceName: string }
   | { type: 'bundle-refresh-plan'; projectName: string; workspaceId: string }
   | { type: 'bundle-refresh-apply'; projectName: string; workspaceId: string; submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission }
   | { type: 'bundle-config-state'; projectName: string; workspaceId: string }
@@ -491,7 +497,11 @@ export type Response =
   | { type: 'workspace-delete-output'; requestId: string; data: string; done?: boolean; error?: string }
   | { type: 'workspace-deleted'; requestId: string; workspaceId: string }
   | { type: 'workspace-notes'; notes: import('../../types/workspace.js').WorkspaceNote[] }
+  | { type: 'workspace-phase-preview'; preview: import('../../types/goals.js').WorkspacePhaseChangePreview }
   | { type: 'workspace-note'; note: import('../../types/workspace.js').WorkspaceNote }
+  | { type: 'goal'; goal: import('../../types/goals.js').GoalRecord }
+  | { type: 'goal-chain'; chain: import('../../types/goals.js').GoalChain }
+  | { type: 'goal-stack-status'; status: import('../../types/goals.js').ChainStackStatus }
   | { type: 'bundle-refresh-plan'; plan: import('../../types/bundle-refresh.js').BundleRefreshPlan }
   | { type: 'bundle-refresh-applied'; projectName: string; workspaceId: string }
   | { type: 'bundle-config-state'; state: import('../../types/bundle-config.js').BundleConfigState }

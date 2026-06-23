@@ -1,6 +1,6 @@
 import type { SessionCreateHooks } from '../lib/tmux-lite/protocol.js';
+import { getWorkspaceRoot } from '../core/paths.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
-
 export function resolveWorkspaceSessionLauncherArgs(): string[] {
   const execPath = process.execPath;
 
@@ -27,6 +27,7 @@ export function buildWorkspaceSessionEnv(projectName: string, workspaceId: strin
     GSSH_SESSION_MODE: 'workspace',
     GSSH_SPACE_PROJECT: projectName,
     GSSH_SPACE_WORKSPACE: workspaceId,
+    GITSPACE_WORKSPACE_ROOT: getWorkspaceRoot(),
   };
 }
 

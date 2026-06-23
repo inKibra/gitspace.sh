@@ -4,21 +4,295 @@
  * Mobile (<640px): tab bar at top, one phase visible at a time.
  */
 
-import { useState } from 'react';
-import type { WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import type { KanbanGoalItem, WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
 import { PHASE_LABELS } from '../app/shared/board/types.js';
+import { canShiftGoalInChainOrder } from '../app/shared/board/chain-order.js';
 	import type { WorkspacePhase } from '../types/config.js';
 import { getWorkspaceDisplayName } from './KanbanBoard.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 
-function PmChip({ label, tone = 'dim' }: { label: string; tone?: 'green' | 'blue' | 'amber' | 'red' | 'dim' }) {
+function PmChip({ label, tone = 'dim', className = '' }: { label: string; tone?: 'green' | 'blue' | 'amber' | 'red' | 'dim'; className?: string }) {
   const toneClass =
     tone === 'green' ? 'text-[var(--gs-chip-green-text)] bg-[var(--gs-chip-green-bg)]'
     : tone === 'blue' ? 'text-[var(--gs-chip-blue-text)] bg-[var(--gs-chip-blue-bg)]'
     : tone === 'amber' ? 'text-[var(--gs-chip-amber-text)] bg-[var(--gs-chip-amber-bg)]'
     : tone === 'red' ? 'text-[var(--gs-chip-red-text)] bg-[var(--gs-chip-red-bg)]'
     : 'text-[var(--gs-chip-dim-text)] bg-[var(--gs-chip-dim-bg)]';
-  return <span className={`px-1.5 py-0.5 text-[9px] font-medium tracking-wide uppercase ${toneClass}`}>{label}</span>;
+  return <span className={`px-1.5 py-0.5 text-[9px] font-medium tracking-wide uppercase ${toneClass} ${className}`}>{label}</span>;
+}
+
+const CHAIN_PALETTE = [
+  { fg: '#7dd3fc', bg: 'rgba(125,211,252,0.08)', border: 'rgba(125,211,252,0.34)' },
+  { fg: '#a78bfa', bg: 'rgba(167,139,250,0.08)', border: 'rgba(167,139,250,0.34)' },
+  { fg: '#34d399', bg: 'rgba(52,211,153,0.08)', border: 'rgba(52,211,153,0.34)' },
+  { fg: '#fbbf24', bg: 'rgba(251,191,36,0.08)', border: 'rgba(251,191,36,0.34)' },
+  { fg: '#fb7185', bg: 'rgba(251,113,133,0.08)', border: 'rgba(251,113,133,0.34)' },
+  { fg: '#f472b6', bg: 'rgba(244,114,182,0.08)', border: 'rgba(244,114,182,0.34)' },
+];
+
+function getChainPalette(chainId: string) {
+  let hash = 0;
+  for (let index = 0; index < chainId.length; index += 1) {
+    hash = ((hash << 5) - hash + chainId.charCodeAt(index)) | 0;
+  }
+  return CHAIN_PALETTE[Math.abs(hash) % CHAIN_PALETTE.length] ?? CHAIN_PALETTE[0];
+}
+
+function chainHoverClass(related?: boolean): string {
+  return related ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100';
+}
+
+
+function compareChainOrder(
+  a: { goal?: Pick<KanbanGoalItem, 'chainId' | 'chainPosition' | 'title'>; name?: string },
+  b: { goal?: Pick<KanbanGoalItem, 'chainId' | 'chainPosition' | 'title'>; name?: string },
+): number {
+  if (a.goal && b.goal && a.goal.chainId === b.goal.chainId) {
+    return a.goal.chainPosition - b.goal.chainPosition;
+  }
+  return 0;
+}
+
+function displayGoalPhase(goal: Pick<KanbanGoalItem, 'phase' | 'status'>) {
+  return goal.status === 'planned' ? 'plan' : goal.phase;
+}
+
+function sortGoalsForLane(goals: KanbanGoalItem[]): KanbanGoalItem[] {
+  return [...goals].sort((a, b) => compareChainOrder({ goal: a }, { goal: b }));
+}
+
+function sortWorkspacesForLane(workspaces: KanbanWorkspaceItem[]): KanbanWorkspaceItem[] {
+  return [...workspaces].sort((a, b) => compareChainOrder({ goal: a.goal, name: a.name }, { goal: b.goal, name: b.name }));
+}
+
+function getGoalStatusChip(goal: Pick<KanbanGoalItem, 'blockedReason' | 'stackStatus'> | undefined): { label: string; tone: 'green' | 'amber' | 'red' | 'dim' } | null {
+  if (!goal?.blockedReason && !goal?.stackStatus) {
+    return null;
+  }
+  if (goal?.stackStatus === 'aligned') {
+    return { label: 'aligned', tone: 'green' };
+  }
+  if (goal?.stackStatus === 'needs-rebase') {
+    return { label: 'needs rebase', tone: 'amber' };
+  }
+  if (goal?.stackStatus === 'dirty-worktree') {
+    return { label: 'dirty worktree', tone: 'red' };
+  }
+  if (goal?.stackStatus === 'missing-branch') {
+    return { label: 'missing branch', tone: 'amber' };
+  }
+  if (goal?.stackStatus === 'missing-workspace') {
+    return { label: 'not created', tone: 'dim' };
+  }
+  return { label: 'blocked', tone: 'amber' };
+}
+
+type RectLike = Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom' | 'width' | 'height'>;
+type ConnectorPoint = { x: number; y: number };
+type ChainConnector = { points: string; from: ConnectorPoint; to: ConnectorPoint };
+
+interface ConnectorOptions {
+  fromYRatio?: number;
+  toYRatio?: number;
+  laneOffset?: number;
+}
+
+function formatPoints(points: ConnectorPoint[]): string {
+  const simplified = points.filter((point, index) => {
+    const previous = points[index - 1];
+    const next = points[index + 1];
+    if (previous && samePoint(previous, point)) return false;
+    if (!previous || !next) return true;
+    const horizontal = Math.abs(previous.y - point.y) < 0.01 && Math.abs(point.y - next.y) < 0.01;
+    const vertical = Math.abs(previous.x - point.x) < 0.01 && Math.abs(point.x - next.x) < 0.01;
+    return !horizontal && !vertical;
+  });
+  return simplified.map((point) => `${point.x},${point.y}`).join(' ');
+}
+
+function parsePoints(points: string): ConnectorPoint[] {
+  return points.split(' ').map((part) => {
+    const [x, y] = part.split(',').map(Number);
+    return { x: x ?? 0, y: y ?? 0 };
+  });
+}
+
+function samePoint(a: ConnectorPoint, b: ConnectorPoint): boolean {
+  return Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01;
+}
+
+
+function between(value: number, a: number, b: number): boolean {
+  return value >= Math.min(a, b) - 0.01 && value <= Math.max(a, b) + 0.01;
+}
+
+function segmentIntersection(a1: ConnectorPoint, a2: ConnectorPoint, b1: ConnectorPoint, b2: ConnectorPoint): ConnectorPoint | null {
+  const aVertical = Math.abs(a1.x - a2.x) < 0.01;
+  const bVertical = Math.abs(b1.x - b2.x) < 0.01;
+
+  if (aVertical === bVertical) {
+    const sameLine = aVertical ? Math.abs(a1.x - b1.x) < 0.01 : Math.abs(a1.y - b1.y) < 0.01;
+    if (!sameLine) return null;
+    const aStart = aVertical ? a1.y : a1.x;
+    const aEnd = aVertical ? a2.y : a2.x;
+    const bStart = aVertical ? b1.y : b1.x;
+    const bEnd = aVertical ? b2.y : b2.x;
+    const overlapStart = Math.max(Math.min(aStart, aEnd), Math.min(bStart, bEnd));
+    const overlapEnd = Math.min(Math.max(aStart, aEnd), Math.max(bStart, bEnd));
+    if (overlapEnd - overlapStart <= 0.01) return null;
+    return aVertical ? { x: a1.x, y: overlapStart } : { x: overlapStart, y: a1.y };
+  }
+
+  const verticalStart = aVertical ? a1 : b1;
+  const verticalEnd = aVertical ? a2 : b2;
+  const horizontalStart = aVertical ? b1 : a1;
+  const horizontalEnd = aVertical ? b2 : a2;
+  const point = { x: verticalStart.x, y: horizontalStart.y };
+  return between(point.y, verticalStart.y, verticalEnd.y) && between(point.x, horizontalStart.x, horizontalEnd.x)
+    ? point
+    : null;
+}
+
+export function countConnectorCrossings(connectors: ChainConnector[]): number {
+  let crossings = 0;
+  const segments = connectors.flatMap((connector, connectorIndex) => {
+    const points = parsePoints(connector.points);
+    return points.slice(0, -1).map((point, index) => ({
+      connectorIndex,
+      a: point,
+      b: points[index + 1]!,
+    }));
+  });
+
+  for (let i = 0; i < segments.length; i += 1) {
+    for (let j = i + 1; j < segments.length; j += 1) {
+      const first = segments[i]!;
+      const second = segments[j]!;
+      if (first.connectorIndex === second.connectorIndex) continue;
+      const intersection = segmentIntersection(first.a, first.b, second.a, second.b);
+      if (!intersection) continue;
+      const sharedEndpoint = [first.a, first.b].some((point) => samePoint(point, intersection))
+        && [second.a, second.b].some((point) => samePoint(point, intersection));
+      if (!sharedEndpoint) crossings += 1;
+    }
+  }
+
+  return crossings;
+}
+
+export function buildChainConnector(fromRect: RectLike, toRect: RectLike, options: ConnectorOptions = {}): ChainConnector {
+  const fromPortY = fromRect.top + fromRect.height * (options.fromYRatio ?? 0.32);
+  const toPortY = toRect.top + toRect.height * (options.toYRatio ?? 0.68);
+  const laneOffset = options.laneOffset ?? 18;
+  const fromIsLeftOfTarget = fromRect.right <= toRect.left;
+  const targetIsLeftOfFrom = toRect.right <= fromRect.left;
+  const horizontalOverlap = Math.min(fromRect.right, toRect.right) - Math.max(fromRect.left, toRect.left);
+  const sameLane = horizontalOverlap > Math.min(fromRect.width, toRect.width) * 0.55;
+
+  if (sameLane) {
+    const from = {
+      x: fromRect.right,
+      y: fromPortY,
+    };
+    const to = {
+      x: toRect.right,
+      y: toPortY,
+    };
+    return {
+      from,
+      to,
+      points: formatPoints([from, to]),
+    };
+  }
+
+  const from = {
+    x: fromIsLeftOfTarget ? fromRect.right : targetIsLeftOfFrom ? fromRect.left : fromRect.right,
+    y: fromPortY,
+  };
+  const topMiddlePort = { x: toRect.left + toRect.width / 2, y: toRect.top };
+  const bottomMiddlePort = { x: toRect.left + toRect.width / 2, y: toRect.bottom };
+  const nearestVerticalTargetPort = Math.abs(fromPortY - topMiddlePort.y) <= Math.abs(fromPortY - bottomMiddlePort.y)
+    ? topMiddlePort
+    : bottomMiddlePort;
+  const to = fromIsLeftOfTarget
+    ? nearestVerticalTargetPort
+    : {
+      x: targetIsLeftOfFrom ? toRect.right : toRect.right,
+      y: toPortY,
+    };
+
+  const elbow = fromIsLeftOfTarget || targetIsLeftOfFrom
+    ? { x: to.x, y: from.y }
+    : { x: Math.max(fromRect.right, toRect.right) + laneOffset, y: from.y };
+  const secondElbow = fromIsLeftOfTarget || targetIsLeftOfFrom
+    ? null
+    : { x: elbow.x, y: to.y };
+
+  return {
+    from,
+    to,
+    points: formatPoints(secondElbow ? [from, elbow, secondElbow, to] : [from, elbow, to]),
+  };
+}
+export function buildVisibleChainConnectors(rects: RectLike[]): ChainConnector[] {
+  const connectorPairs = rects.slice(0, -1).map((headRect, index) => ({
+    fromRect: rects[index + 1]!,
+    toRect: headRect,
+  }));
+  const laneOffsets = [18, 32, 48, 64, 84];
+  let best: ChainConnector[] = [];
+  let bestCrossings = Number.POSITIVE_INFINITY;
+
+  for (const laneOffset of laneOffsets) {
+    const connectors = connectorPairs.map(({ fromRect, toRect }) => (
+      buildChainConnector(fromRect, toRect, { laneOffset })
+    ));
+    const crossings = countConnectorCrossings(connectors);
+    if (crossings === 0) return connectors;
+    if (crossings < bestCrossings) {
+      best = connectors;
+      bestCrossings = crossings;
+    }
+  }
+
+  return best;
+}
+
+function ChainHandle({ goal, related }: { goal: KanbanGoalItem; related?: boolean }) {
+  const palette = getChainPalette(goal.chainId);
+  return (
+    <span
+      data-chain-anchor="true"
+      title={`Goal chain position ${goal.chainPosition} of ${goal.chainLength}`}
+      className={`relative ml-auto inline-flex h-5 min-w-8 flex-shrink-0 items-center justify-center border px-1 text-[12px] leading-none transition ${chainHoverClass(related)}`}
+      style={{ color: palette.fg, borderColor: palette.border, backgroundColor: palette.bg }}
+    >
+      ⛓
+      <span
+        className="absolute -right-2 -top-1 grid h-[17px] min-w-[28px] place-items-center rounded-full border bg-[var(--gs-bg-elevated)] px-[4px] text-[10px] font-semibold leading-none text-[var(--gs-text)]"
+        style={{ borderColor: palette.border }}
+      >
+        {goal.chainPosition}/{goal.chainLength}
+      </span>
+    </span>
+  );
+}
+
+function RearrangeHandle({ onOpenOrder }: { onOpenOrder?: () => void }) {
+  return (
+    <button
+      type="button"
+      title="Rearrange chain order"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpenOrder?.();
+      }}
+      className="inline-grid h-5 w-6 flex-shrink-0 translate-x-1 place-items-center border border-[rgba(255,204,102,0.24)] bg-[rgba(255,204,102,0.06)] text-[12px] leading-none text-[var(--gs-chip-amber-text)] opacity-0 transition group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100"
+    >
+      ⇅
+    </button>
+  );
 }
 
 
@@ -61,6 +335,10 @@ export interface KanbanBoardWebProps {
 	  creatingWorkspaceIds?: Record<string, { status: string; progressLabel?: string; workspaceName: string; phase: WorkspacePhase }>;
   /** When true, lanes stretch vertically to fill the container. */
   fullHeight?: boolean;
+  onCreatePlannedGoalWorkspace?: (goal: KanbanGoalItem) => void;
+  onSelectPlannedGoal?: (goal: KanbanGoalItem) => void;
+  onSaveChainOrder?: (goals: KanbanGoalItem[]) => void | Promise<void>;
+  boardMessage?: string | null;
 }
 
 	function PendingWorkspaceCard({
@@ -93,23 +371,73 @@ export interface KanbanBoardWebProps {
 	}
 
 
+
+function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, related }: { goal: KanbanGoalItem; onSelectGoal?: (goal: KanbanGoalItem) => void; onChainFocus?: (chainId: string | null) => void; onOpenOrder?: (chainId: string) => void; related?: boolean }) {
+  const handleClick = () => {
+    onSelectGoal?.(goal);
+  };
+
+  return (
+    <div
+      role="button"
+      data-goal-card-key={goal.selectionKey}
+      tabIndex={0}
+      onClick={handleClick}
+      onMouseEnter={() => onChainFocus?.(goal.chainId)}
+      onFocus={() => onChainFocus?.(goal.chainId)}
+      onMouseLeave={() => onChainFocus?.(null)}
+      onBlur={() => onChainFocus?.(null)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handleClick();
+        }
+      }}
+      className={`group relative w-full px-3 py-2.5 border-l-2 bg-[var(--gs-bg-surface)] text-left transition hover:bg-[var(--gs-bg-hover)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
+      style={{ borderLeftColor: related ? getChainPalette(goal.chainId).fg : 'transparent', ...(related ? { ['--tw-ring-color' as string]: getChainPalette(goal.chainId).fg } : {}) }}
+      title={goal.blockedReason ?? `Create workspace for planned goal in ${goal.chainTitle}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="flex-shrink-0 text-[10px] text-[var(--gs-info)]">○</span>
+        <span className="font-medium text-[12px] truncate">{goal.plannedWorkspaceName ?? goal.title}</span>
+        <ChainHandle goal={goal} related={related} />
+        <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />
+      </div>
+      <div className="mt-0.5 pl-[18px] text-[10px] text-[var(--gs-text-dim)] truncate">
+        {goal.title}
+      </div>
+      <div className="flex flex-wrap items-center gap-1 mt-1.5 pl-[18px]">
+        {getGoalStatusChip(goal)?.label !== 'not created' && getGoalStatusChip(goal) && <PmChip label={getGoalStatusChip(goal)!.label} tone={getGoalStatusChip(goal)!.tone} />}
+      </div>
+    </div>
+  );
+}
+
 function WorkspaceCard({
   entry,
   isSelected,
   onSelect,
   status,
   deletionTask,
+  onChainFocus,
+  related,
+  onOpenOrder,
 }: {
   entry: KanbanWorkspaceItem;
   isSelected: boolean;
   onSelect: () => void;
   status?: WorkspaceStatusSummary;
   deletionTask?: { status: string; progressLabel?: string };
+  onChainFocus?: (chainId: string | null) => void;
+  related?: boolean;
+  onOpenOrder?: (chainId: string) => void;
 }) {
   const name = getWorkspaceDisplayName(entry);
   const prChip = getPullRequestChip(entry);
   const linear = entry.linear;
+  const goal = entry.goal;
   const isDeleting = deletionTask?.status === 'running' || deletionTask?.status === 'queued';
+  const goalChip = getGoalStatusChip(goal);
 
   // Dot color: use the same primaryColor from WorkspaceStatusSummary
   // that the workspace detail strip bar uses
@@ -126,13 +454,26 @@ function WorkspaceCard({
   const serviceNames = entry.processes?.map(p => p.name) ?? [];
 
   return (
-    <button
-      type="button"
+    <div
+      data-goal-card-key={goal?.id ? `${entry.backendKey}:goal:${goal.id}` : undefined}
       onClick={isDeleting ? undefined : onSelect}
+      onMouseEnter={() => goal && onChainFocus?.(goal.chainId)}
+      onFocus={() => goal && onChainFocus?.(goal.chainId)}
+      onMouseLeave={() => goal && onChainFocus?.(null)}
+      onBlur={() => goal && onChainFocus?.(null)}
+      onKeyDown={(event) => {
+        if (!isDeleting && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      role="button"
+      tabIndex={isDeleting ? -1 : 0}
       aria-pressed={isSelected}
-      disabled={isDeleting}
+      aria-disabled={isDeleting}
       className={
-        'relative w-full px-3 py-2.5 border-l-2 transition-colors text-left ' +
+        'group relative w-full px-3 py-2.5 border-l-2 transition-colors text-left ' +
+        (related === false ? 'opacity-40 ' : related === true ? 'ring-1 ring-[var(--gs-info)] ' : '') +
         (isDeleting ? 'cursor-not-allowed opacity-55 grayscale ' : 'cursor-pointer ') +
         (isSelected
           ? 'border-l-[var(--gs-selected-border)] bg-[var(--gs-bg-selected)]'
@@ -151,6 +492,8 @@ function WorkspaceCard({
       <div className="flex items-center gap-2">
         <span className={`flex-shrink-0 text-[10px] ${dotColor}`}>●</span>
         <span className="font-medium text-[12px] truncate">{name}</span>
+        {goal && <ChainHandle goal={goal} related={related} />}
+        {goal && <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />}
         {isDeleting && <span className="ml-auto text-[9px] uppercase tracking-wide text-[var(--gs-warning)]">deleting</span>}
       </div>
 
@@ -205,9 +548,11 @@ function WorkspaceCard({
         </div>
       )}
 
-      {/* PR / Linear chips */}
-      {(prChip || linear?.syncState === 'ready' || linear?.syncState === 'unconfigured' || linear?.syncState === 'identifier_missing') && (
+      {/* Goal / PR / Linear chips */}
+      {(goal || prChip || linear?.syncState === 'ready' || linear?.syncState === 'unconfigured' || linear?.syncState === 'identifier_missing') && (
         <div className="flex flex-wrap items-center gap-1 mt-1 pl-[18px]">
+          {goal && <PmChip label={`chain ${goal.chainPosition}/${goal.chainLength}`} tone="blue" className={`transition ${chainHoverClass(related)}`} />}
+          {goalChip && <PmChip label={goalChip.label} tone={goalChip.tone} />}
           {prChip && <PmChip label={prChip.label} tone={prChip.tone} />}
           {linear?.syncState === 'ready' && linear.identifier && (
             <PmChip
@@ -223,7 +568,7 @@ function WorkspaceCard({
           )}
         </div>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -234,24 +579,145 @@ export function KanbanBoardWeb({
 	  workspaceStatusById = {},
 	  deletingWorkspaceIds = {},
 	  creatingWorkspaceIds = {},
+	  onSelectPlannedGoal,
+	  onSaveChainOrder,
+	  boardMessage = null,
 	  fullHeight = false,
 }: KanbanBoardWebProps) {
   const [mobilePhaseIndex, setMobilePhaseIndex] = useState(0);
   const safeIndex = Math.min(mobilePhaseIndex, groups.length - 1);
   const mobileGroup = groups[safeIndex];
+  const [activeChainId, setActiveChainId] = useState<string | null>(null);
+  const [chainDraft, setChainDraft] = useState<KanbanGoalItem[]>([]);
+  const [selectedChainGoalKey, setSelectedChainGoalKey] = useState<string | null>(null);
+  const [orderDirty, setOrderDirty] = useState(false);
+  const [orderSaving, setOrderSaving] = useState(false);
+  const [chainConnectors, setChainConnectors] = useState<Array<{ points: string; from: { x: number; y: number }; to: { x: number; y: number } }>>([]);
+  const [orderEditorChainId, setOrderEditorChainId] = useState<string | null>(null);
 
 	  const creatingForPhase = (phase: WorkspacePhase) =>
 	    Object.values(creatingWorkspaceIds).filter((task) => task.phase === phase && task.status === 'creating');
+	  const plannedGoalsForPhase = (phase: WorkspacePhase) =>
+	    sortGoalsForLane(groups.find((group) => group.phase === phase)?.plannedGoals ?? []);
+	  const allGoalItems = useMemo(() => groups.flatMap((group) => [
+	    ...(group.plannedGoals ?? []),
+	    ...group.workspaces.map((workspace) => workspace.goal ? {
+	      ...workspace.goal,
+	      selectionKey: `${workspace.backendKey}:goal:${workspace.goal.id}`,
+	      backendKey: workspace.backendKey,
+	      machineLabel: workspace.machineLabel,
+	      isRemote: workspace.isRemote,
+	    } : null).filter((goal): goal is KanbanGoalItem => Boolean(goal)),
+	  ]), [groups]);
+  const chainSummaries = useMemo(() => Array.from(
+    allGoalItems.reduce((map, goal) => {
+      const existing = map.get(goal.chainId);
+      const goals = [...(existing?.goals ?? []), goal].sort((a, b) => a.chainPosition - b.chainPosition);
+      map.set(goal.chainId, {
+        title: goal.chainTitle,
+        goals,
+      });
+      return map;
+    }, new Map<string, { title: string; goals: KanbanGoalItem[] }>()),
+    ([chainId, summary]) => ({
+      chainId,
+      title: summary.title,
+      count: summary.goals.length,
+      goals: summary.goals,
+      palette: getChainPalette(chainId),
+    }),
+  ), [allGoalItems]);
+  const activeChainGoals = useMemo(
+    () => activeChainId ? allGoalItems.filter((goal) => goal.chainId === activeChainId).sort((a, b) => a.chainPosition - b.chainPosition) : [],
+    [activeChainId, allGoalItems],
+  );
+  const activeChainPalette = activeChainId ? getChainPalette(activeChainId) : getChainPalette('');
+  const orderEditorGoals = useMemo(
+    () => orderEditorChainId ? allGoalItems.filter((goal) => goal.chainId === orderEditorChainId).sort((a, b) => a.chainPosition - b.chainPosition) : [],
+    [orderEditorChainId, allGoalItems],
+  );
+
+  const activeRenderedGoals = orderDirty ? chainDraft : orderEditorGoals;
+
+  useEffect(() => {
+    setChainDraft(orderEditorGoals);
+    setSelectedChainGoalKey(orderEditorGoals[0]?.selectionKey ?? null);
+    setOrderDirty(false);
+  }, [orderEditorChainId, orderEditorGoals]);
+
+  useLayoutEffect(() => {
+    if (!activeChainId || activeChainGoals.length < 2) {
+      setChainConnectors([]);
+      return;
+    }
+
+    const updateConnectors = () => {
+      const cards = Array.from(document.getElementsByTagName('*')).filter((element) => element.hasAttribute('data-goal-card-key')) as Element[];
+      const rects = activeChainGoals
+        .map((goal) => cards.find((item) => {
+          if (item.getAttribute('data-goal-card-key') !== goal.selectionKey) return false;
+          const rect = item.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })?.getBoundingClientRect() ?? null)
+        .filter((rect): rect is DOMRect => Boolean(rect));
+
+      setChainConnectors(buildVisibleChainConnectors(rects));
+    };
+
+    updateConnectors();
+    window.addEventListener('resize', updateConnectors);
+    window.addEventListener('scroll', updateConnectors, true);
+    return () => {
+      window.removeEventListener('resize', updateConnectors);
+      window.removeEventListener('scroll', updateConnectors, true);
+    };
+  }, [activeChainId, activeChainGoals]);
+
+  const shiftDraftGoal = (goalKey: string, direction: -1 | 1) => {
+    setChainDraft((current) => {
+      const index = current.findIndex((goal) => goal.selectionKey === goalKey);
+      const targetIndex = index + direction;
+      if (!canShiftGoalInChainOrder(current, index, direction)) return current;
+      const next = [...current];
+      const [moved] = next.splice(index, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+    setOrderDirty(true);
+    setSelectedChainGoalKey(goalKey);
+  };
+
+  const saveDraftOrder = async () => {
+    if (!orderDirty || !onSaveChainOrder) return;
+    setOrderSaving(true);
+    try {
+      await onSaveChainOrder(chainDraft);
+      setOrderDirty(false);
+    } finally {
+      setOrderSaving(false);
+    }
+  };
+
+  const resetDraftOrder = () => {
+    setChainDraft(orderEditorGoals);
+    setSelectedChainGoalKey(orderEditorGoals[0]?.selectionKey ?? null);
+    setOrderDirty(false);
+  };
+
+  const openOrderEditor = (chainId: string) => {
+    setActiveChainId(chainId);
+    setOrderEditorChainId(chainId);
+  };
   return (
     <>
-      <style>{`@keyframes gs-delete-card-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(205%); } }`}</style>
+      <style>{`@keyframes gs-delete-card-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(205%); } } @keyframes gs-chain-dot-flow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -24; } }`}</style>
       {/* ── Mobile: tab bar + single phase ── */}
       <div className={`flex flex-col sm:hidden ${fullHeight ? 'h-full' : 'flex-1'}`}>
         {/* Phase tab bar */}
         <div className="flex border-b border-[var(--gs-border)]">
           {groups.map((group, i) => {
 	            const isActive = i === safeIndex;
-	            const count = group.workspaces.length + creatingForPhase(group.phase).length;
+	            const count = group.workspaces.length + creatingForPhase(group.phase).length + plannedGoalsForPhase(group.phase).length;
 	            return (
               <button
                 key={group.phase}
@@ -273,7 +739,7 @@ export function KanbanBoardWeb({
 
         {/* Cards for active phase */}
         <div className="flex-1 overflow-y-auto">
-	          {mobileGroup && (mobileGroup.workspaces.length > 0 || creatingForPhase(mobileGroup.phase).length > 0) ? (
+	          {mobileGroup && (mobileGroup.workspaces.length > 0 || creatingForPhase(mobileGroup.phase).length > 0 || plannedGoalsForPhase(mobileGroup.phase).length > 0) ? (
 	            <div className="flex flex-col">
 	              {creatingForPhase(mobileGroup.phase).map((task) => (
 	                <PendingWorkspaceCard
@@ -282,7 +748,10 @@ export function KanbanBoardWeb({
 	                  progressLabel={task.progressLabel}
 	                />
 	              ))}
-	              {mobileGroup.workspaces.map((w) => (
+	              {plannedGoalsForPhase(mobileGroup.phase).map((goal) => (
+	                <PlannedGoalCard key={goal.selectionKey} goal={goal} onSelectGoal={onSelectPlannedGoal} onChainFocus={setActiveChainId} onOpenOrder={openOrderEditor} related={activeChainId ? goal.chainId === activeChainId : undefined} />
+	              ))}
+	              {sortWorkspacesForLane(mobileGroup.workspaces).map((w) => (
 	                <WorkspaceCard
 	                  key={w.selectionKey}
 	                  entry={w}
@@ -290,6 +759,9 @@ export function KanbanBoardWeb({
 	                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
 	                  status={workspaceStatusById[w.selectionKey]}
                   deletionTask={deletingWorkspaceIds[w.selectionKey]}
+                  onChainFocus={setActiveChainId}
+                  onOpenOrder={openOrderEditor}
+                  related={activeChainId && w.goal ? w.goal.chainId === activeChainId : undefined}
 	                />
 	              ))}
 	            </div>
@@ -302,6 +774,25 @@ export function KanbanBoardWeb({
       </div>
 
       {/* ── Desktop: side-by-side columns ── */}
+      {chainSummaries.length > 0 && (
+        <div className="hidden sm:flex items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2 text-xs text-[var(--gs-text-muted)] opacity-0 transition-opacity hover:opacity-100 focus-within:opacity-100" onMouseLeave={() => setActiveChainId(null)} onBlur={() => setActiveChainId(null)}>
+          <span className="font-semibold uppercase tracking-[0.14em] text-[var(--gs-text-dim)]">Goal Chains</span>
+          {chainSummaries.map((chain) => (
+            <button
+              key={chain.chainId}
+              type="button"
+              onMouseEnter={() => setActiveChainId(chain.chainId)}
+              onFocus={() => setActiveChainId(chain.chainId)}
+              onClick={() => openOrderEditor(chain.chainId)}
+              className="rounded border px-2 py-1 transition hover:brightness-125 focus:brightness-125"
+              style={{ color: chain.palette.fg, borderColor: chain.palette.border, backgroundColor: chain.palette.bg }}
+              title={`Click to rearrange this chain. Order: ${chain.goals.map((goal) => `${goal.chainPosition}. ${goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}`).join(' → ')}`}
+            >
+              ⛓ {chain.title} · 1-{chain.count}
+            </button>
+          ))}
+        </div>
+      )}
       <div className={`hidden sm:flex flex-1 gap-px overflow-x-auto bg-[var(--gs-gap)] ${fullHeight ? 'h-full' : ''}`}>
         {groups.map((group) => (
           <div
@@ -310,7 +801,7 @@ export function KanbanBoardWeb({
           >
 	            <div className="flex justify-between items-baseline px-3 py-2.5 text-[10px] tracking-[2px] uppercase text-[var(--gs-text-dim)]">
 	              <span>{PHASE_LABELS[group.phase] ?? group.phase}</span>
-	              <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length + creatingForPhase(group.phase).length}</span>
+	              <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length + creatingForPhase(group.phase).length + plannedGoalsForPhase(group.phase).length}</span>
 	            </div>
 	            <div className="flex flex-col gap-0">
 	              {creatingForPhase(group.phase).map((task) => (
@@ -320,7 +811,10 @@ export function KanbanBoardWeb({
 	                  progressLabel={task.progressLabel}
 	                />
 	              ))}
-	              {group.workspaces.map((w) => (
+	              {plannedGoalsForPhase(group.phase).map((goal) => (
+	                <PlannedGoalCard key={goal.selectionKey} goal={goal} onSelectGoal={onSelectPlannedGoal} onChainFocus={setActiveChainId} onOpenOrder={openOrderEditor} related={activeChainId ? goal.chainId === activeChainId : undefined} />
+	              ))}
+	              {sortWorkspacesForLane(group.workspaces).map((w) => (
 	                <WorkspaceCard
 	                  key={w.selectionKey}
 	                  entry={w}
@@ -328,12 +822,90 @@ export function KanbanBoardWeb({
 	                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
 	                  status={workspaceStatusById[w.selectionKey]}
                   deletionTask={deletingWorkspaceIds[w.selectionKey]}
+                  onChainFocus={setActiveChainId}
+                  onOpenOrder={openOrderEditor}
+                  related={activeChainId && w.goal ? w.goal.chainId === activeChainId : undefined}
 	                />
 	              ))}
 	            </div>
           </div>
         ))}
       </div>
+      {chainConnectors.length > 0 && (
+        <svg className="fixed inset-0 z-20 h-screen w-screen pointer-events-none opacity-90" aria-hidden="true">
+          {chainConnectors.map((connector, index) => {
+            const points = connector.points;
+            return (
+              <g key={`${connector.from.x}:${connector.from.y}:${connector.to.x}:${connector.to.y}:${index}`}>
+                <polyline points={points} fill="none" stroke="var(--gs-bg)" strokeOpacity="0.88" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                <polyline points={points} fill="none" stroke={activeChainPalette.fg} strokeOpacity={index === 0 ? 0.48 : 0.34} strokeWidth="1.5" strokeDasharray="6 6" strokeLinecap="round" strokeLinejoin="round" />
+                <polyline points={points} fill="none" stroke={activeChainPalette.fg} strokeOpacity={index === 0 ? 0.92 : 0.72} strokeWidth="3.5" strokeDasharray="1 11" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'gs-chain-dot-flow 850ms linear infinite' }} />
+                <circle cx={connector.from.x} cy={connector.from.y} r="4" fill={activeChainPalette.fg} opacity="0.78" />
+                <circle cx={connector.to.x} cy={connector.to.y} r="5" fill="var(--gs-bg)" stroke={activeChainPalette.fg} strokeWidth="1.75" opacity="0.9" />
+              </g>
+            );
+          })}
+        </svg>
+      )}
+      {orderEditorGoals.length > 0 && (
+        <div className="fixed right-4 top-16 z-30 w-[360px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-2xl">
+          <div className="flex items-start justify-between border-b border-[var(--gs-border)] p-3">
+            <div>
+              <div className="text-sm font-semibold text-[var(--gs-text)]">Edit chain order</div>
+              <div className="mt-1 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">
+                {orderDirty ? 'Unsaved order changes · git stack unchanged until save' : 'Keyboard/buttons MVP · git stack unchanged'}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={resetDraftOrder} disabled={!orderDirty} className="rounded px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] disabled:opacity-30">Cancel</button>
+              <button type="button" onClick={() => setOrderEditorChainId(null)} className="rounded px-2 py-1 text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)]">Close</button>
+            </div>
+          </div>
+          <div className="divide-y divide-[var(--gs-border)]">
+            {activeRenderedGoals.map((goal, index) => (
+              <div key={goal.selectionKey} className={`grid grid-cols-[38px_1fr_auto] items-center gap-2 p-2 text-xs ${selectedChainGoalKey === goal.selectionKey ? 'bg-[var(--gs-bg-selected)]' : ''}`}>
+                <span className="text-[10px] font-semibold text-[var(--gs-text-muted)]">{index + 1}/{activeRenderedGoals.length}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedChainGoalKey(goal.selectionKey);
+                    onSelectPlannedGoal?.(goal);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'ArrowUp') {
+                      event.preventDefault();
+                      if (canShiftGoalInChainOrder(activeRenderedGoals, index, -1)) shiftDraftGoal(goal.selectionKey, -1);
+                    } else if (event.key === 'ArrowDown') {
+                      event.preventDefault();
+                      if (canShiftGoalInChainOrder(activeRenderedGoals, index, 1)) shiftDraftGoal(goal.selectionKey, 1);
+                    }
+                  }}
+                  className="min-w-0 text-left"
+                >
+                  <div className="truncate text-[var(--gs-text)]">{goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}</div>
+                  <div className="truncate text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{displayGoalPhase(goal)} · {goal.status}</div>
+                </button>
+                <div className="flex gap-1">
+                  <button type="button" disabled={!canShiftGoalInChainOrder(activeRenderedGoals, index, -1)} onClick={() => shiftDraftGoal(goal.selectionKey, -1)} className="rounded px-2 py-1 text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] disabled:opacity-30">↑</button>
+                  <button type="button" disabled={!canShiftGoalInChainOrder(activeRenderedGoals, index, 1)} onClick={() => shiftDraftGoal(goal.selectionKey, 1)} className="rounded px-2 py-1 text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] disabled:opacity-30">↓</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center justify-between border-t border-[var(--gs-border)] p-3">
+            <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">Save updates planning order only.</div>
+            <button type="button" disabled={!orderDirty || orderSaving || !onSaveChainOrder} onClick={() => void saveDraftOrder()} className="rounded bg-[var(--gs-accent)] px-3 py-1.5 text-xs text-[var(--gs-text-on-accent)] disabled:opacity-30">
+              {orderSaving ? 'Saving…' : 'Save order'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {boardMessage && (
+        <div className="fixed bottom-4 right-4 z-20 max-w-[420px] border border-[var(--gs-chip-amber-text)] bg-[var(--gs-chip-amber-bg)] px-3 py-2 text-xs text-[var(--gs-chip-amber-text)] shadow-xl">
+          {boardMessage}
+        </div>
+      )}
     </>
   );
 }

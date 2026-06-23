@@ -235,6 +235,7 @@ export interface CreateWorkspaceRequest {
   workspaceName: string;
   branchName?: string;
   baseBranch?: string;
+  parentWorkspaceName?: string;
   workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource;
   linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
 }
@@ -246,6 +247,11 @@ export interface ListWorkspaceNotesRequest {
   workspaceName: string;
 }
 
+
+export interface RefreshMachineSnapshotRequest {
+  type: 'refresh_machine_snapshot';
+  requestId: string;
+}
 export interface AddWorkspaceNoteRequest {
   type: 'workspace_note_add';
   requestId: string;
@@ -269,6 +275,39 @@ export interface RemoveWorkspaceNoteRequest {
   projectName: string;
   workspaceName: string;
   noteId: string;
+}
+
+export interface UpdateGoalRequest {
+  type: 'goal_update';
+  requestId: string;
+  projectName: string;
+  goalId: string;
+  updates: import('../../types/goals.js').GoalUpdateInput;
+}
+
+export interface AddGoalNearWorkspaceRequest {
+  type: 'goal_add_near_workspace';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  title: string;
+  position: 'before' | 'after';
+}
+
+export interface ReorderGoalRequest {
+  type: 'goal_reorder';
+  requestId: string;
+  projectName: string;
+  sourceToken: string;
+  targetToken: string;
+  position: 'before' | 'after';
+}
+
+export interface GoalStackStatusRequest {
+  type: 'goal_stack_status';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
 }
 export interface RerunWorkspaceScriptsRequest {
   type: 'rerun_workspace_scripts';
@@ -294,6 +333,15 @@ export interface RunWorkspaceScriptSelectionRequest {
 
 export interface SetWorkspacePhaseRequest {
   type: 'set_workspace_phase';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  phase: import('../../types/config.js').WorkspacePhase;
+  cascade?: boolean;
+}
+
+export interface PreviewWorkspacePhaseRequest {
+  type: 'preview_workspace_phase';
   requestId: string;
   projectName: string;
   workspaceName: string;
@@ -706,6 +754,26 @@ export interface WorkspaceNoteResponse {
   note: import('../../types/workspace.js').WorkspaceNote;
 }
 
+export interface WorkspacePhasePreviewResponse {
+  type: 'workspace_phase_preview';
+  preview: import('../../types/goals.js').WorkspacePhaseChangePreview;
+}
+
+export interface GoalResponse {
+  type: 'goal';
+  goal: import('../../types/goals.js').GoalRecord;
+}
+
+export interface GoalChainResponse {
+  type: 'goal-chain';
+  chain: import('../../types/goals.js').GoalChain;
+}
+
+export interface GoalStackStatusResponse {
+  type: 'goal-stack-status';
+  status: import('../../types/goals.js').ChainStackStatus;
+}
+
 /** Script output during attach_session (streams lifecycle script output) */
 export interface ScriptOutputResponse {
   type: "script_output";
@@ -764,6 +832,12 @@ export interface WorkspaceEditorsResponse {
   type: 'workspace-editors';
   requestId: string;
   editors: import('../../utils/open-editor.js').WorkspaceEditorOption[];
+}
+
+export interface RefreshMachineSnapshotResponse {
+  type: 'refresh_machine_snapshot';
+  requestId: string;
+  snapshot: import('../tmux-lite/machine/protocol.js').MachineSnapshot;
 }
 
 
@@ -843,16 +917,23 @@ export type ClientToMachineMessage =
   | DeleteProjectRequest
   // Workspace CRUD
   | CreateWorkspaceRequest
+  | RefreshMachineSnapshotRequest
   | ListWorkspaceNotesRequest
   | AddWorkspaceNoteRequest
   | UpdateWorkspaceNoteRequest
   | RemoveWorkspaceNoteRequest
+  | AddGoalNearWorkspaceRequest
+  | UpdateGoalRequest
+  | ReorderGoalRequest
+  | GoalStackStatusRequest
   | RerunWorkspaceScriptsRequest
   | RunWorkspaceOpenScriptsRequest
   | RunWorkspaceScriptSelectionRequest
   | ResolvePortConflictRequest
   | SetWorkspacePhaseRequest
   | TerminateSessionRequest
+  | PreviewWorkspacePhaseRequest
+  | KillSessionRequest
   // Process management
   | StartProcessRequest
   | StopProcessRequest
@@ -904,7 +985,11 @@ export type MachineToClientMessage =
   | ErrorResponse
   | WorkspaceDeletedResponse
   | WorkspaceNotesResponse
+  | WorkspacePhasePreviewResponse
   | WorkspaceNoteResponse
+  | GoalResponse
+  | GoalChainResponse
+  | GoalStackStatusResponse
   | ScriptOutputResponse
   | CommandResponse
   | OperationAcceptedResponse
@@ -913,6 +998,7 @@ export type MachineToClientMessage =
   | OperationDismissedResponse
   | RunSpaceCommandResponse
   | WorkspaceEditorsResponse
+  | RefreshMachineSnapshotResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
   | MachineSnapshotPush
@@ -976,13 +1062,19 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'cancel_project_creation',
     'delete_project',
     'create_workspace',
+    'refresh_machine_snapshot',
     'workspace_notes_list',
     'workspace_note_add',
     'workspace_note_update',
     'workspace_note_remove',
+    'goal_add_near_workspace',
+    'goal_update',
+    'goal_reorder',
+    'goal_stack_status',
     'rerun_workspace_scripts',
     'run_workspace_open_scripts',
     'run_workspace_script_selection',
+    'preview_workspace_phase',
     'set_workspace_phase',
     'terminate_session',
     'start_process',

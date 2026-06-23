@@ -970,12 +970,45 @@ export class RemoteSessionHandler {
             workspaceName: msg.workspaceName,
             branchName: msg.branchName,
             baseBranch: msg.baseBranch,
+            parentWorkspaceName: msg.parentWorkspaceName,
             workspaceSource: msg.workspaceSource,
             linearIssue: msg.linearIssue,
           },
           message: 'Creating workspace',
           refreshMachineSnapshot: true,
         });
+        break;
+
+      case 'refresh_machine_snapshot':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        try {
+          const snapshot = await getMachineSnapshot();
+          this.latestMachineSnapshot = snapshot;
+          await this.sendMessage(session, sendResponse, {
+            type: 'refresh_machine_snapshot',
+            requestId: msg.requestId,
+            snapshot,
+          });
+          void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot });
+        } catch (error) {
+          await this.sendError(session, sendResponse, 'UNAVAILABLE', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
+        }
+        break;
+
+      case 'preview_workspace_phase':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'workspace-phase-preview',
+          projectName: msg.projectName,
+          workspaceName: msg.workspaceName,
+          phase: msg.phase,
+        }, sendResponse);
         break;
 
       case 'set_workspace_phase':
@@ -988,6 +1021,60 @@ export class RemoteSessionHandler {
           projectName: msg.projectName,
           workspaceName: msg.workspaceName,
           phase: msg.phase,
+          cascade: msg.cascade,
+        }, sendResponse);
+        break;
+
+
+      case 'goal_add_near_workspace':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-add-near-workspace',
+          projectName: msg.projectName,
+          workspaceName: msg.workspaceName,
+          title: msg.title,
+          position: msg.position,
+        }, sendResponse);
+        break;
+      case 'goal_update':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-update',
+          projectName: msg.projectName,
+          goalId: msg.goalId,
+          updates: msg.updates,
+        }, sendResponse);
+        break;
+
+      case 'goal_reorder':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-reorder',
+          projectName: msg.projectName,
+          sourceToken: msg.sourceToken,
+          targetToken: msg.targetToken,
+          position: msg.position,
+        }, sendResponse);
+        break;
+
+      case 'goal_stack_status':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-stack-status',
+          projectName: msg.projectName,
+          workspaceName: msg.workspaceName,
         }, sendResponse);
         break;
       case 'workspace_notes_list':

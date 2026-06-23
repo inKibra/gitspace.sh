@@ -48,9 +48,11 @@ import {
 } from '../../lib/tmux-lite/protocol.js';
 import { listProjectSummaries } from '../../core/project-catalog.js';
 import { readProjectConfig } from '../../core/config.js';
+import { findGoalRecord, writeGoalRecord } from '../../core/goal-chain.js';
 import { scanWorkspaces } from '../../lib/remote-session/workspace-scanner.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
 import { prepareWorkspaceForSession, rerunWorkspaceScriptsForSession } from '../../core/workspace-lifecycle.js';
+import { addRequirement, attachManualEvidence, recordHumanReview, removeRequirement, reopenRequirement, reorderRequirement, runGenerationCommand, runJudgmentCommand, runLlmJudgment, updateRequirement, type AddRequirementInput, type AttachEvidenceInput, type HumanReviewDecision, type UpdateRequirementInput } from '../../core/goal-validation.js';
 import { getWorkspaceRoot } from '../../core/paths.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { AttachLifecycle } from './attach-lifecycle.js';
@@ -93,6 +95,7 @@ import { join } from 'node:path';
 import { ReviewRequestError } from '../../types/errors.js';
 import { throwServiceStartError } from './service-start-error.js';
 import { executeSpaceCommand } from '../../lib/tmux-lite/agents/extensions/space-command.js';
+
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -497,7 +500,7 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listProjects(): Promise<void> {
-    const projects = machineSnapshotToProjects(this.machineStateClient.getSnapshot());
+    const projects = machineSnapshotToProjects(await this.refreshMachineSnapshotState());
     this.emit({ type: 'projects', projects });
   }
 
@@ -523,16 +526,25 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listWorkspaces(): Promise<void> {
-    const mappedWorkspaces = machineSnapshotToWorkspaces(this.machineStateClient.getSnapshot());
-
+    const mappedWorkspaces = machineSnapshotToWorkspaces(await this.refreshMachineSnapshotState());
     this.emit({
       type: 'workspaces',
       workspaces: mappedWorkspaces,
     });
   }
 
-  async setWorkspaceStatus(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'workspace-set-phase', projectName, workspaceName, phase });
+
+  async previewWorkspaceStatusChange(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase): Promise<import('../../types/goals.js').WorkspacePhaseChangePreview> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-phase-preview', projectName, workspaceName, phase });
+    if (response.type === 'workspace-phase-preview') {
+      return response.preview;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace phase preview response');
+  }
+
+  async setWorkspaceStatus(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase, options?: { cascade?: boolean }): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-set-phase', projectName, workspaceName, phase, cascade: options?.cascade });
     if (response.type === 'ok') {
       await this.listWorkspaces();
       return;
@@ -542,7 +554,7 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listSessions(workspaceId?: string): Promise<void> {
-    const filtered = machineSnapshotToSessions(this.machineStateClient.getSnapshot(), workspaceId);
+    const filtered = machineSnapshotToSessions(await this.refreshMachineSnapshotState(), workspaceId);
     this.emit({ type: 'sessions', sessions: filtered });
   }
 
@@ -987,6 +999,127 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected workspace note remove response');
   }
 
+  async addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-add-near-workspace', projectName, workspaceName, title, position });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal add response');
+  }
+
+  async updateGoal(projectName: string, goalId: string, updates: import('../../types/goals.js').GoalUpdateInput): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-update', projectName, goalId, updates });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal update response');
+  }
+
+  async moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
+    const response = await this.sendTmuxCommand({ type: 'goal-reorder', projectName, sourceToken, targetToken, position });
+    if (response.type === 'goal-chain') {
+      await this.listWorkspaces();
+      return response.chain;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal reorder response');
+  }
+
+  async getGoalStackStatus(projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
+    const response = await this.sendTmuxCommand({ type: 'goal-stack-status', projectName, workspaceName });
+    if (response.type === 'goal-stack-status') return response.status;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal stack status response');
+  }
+
+
+  async addGoalRequirement(projectName: string, goalId: string, input: AddRequirementInput): Promise<import('../../types/goals.js').Requirement> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const { validation, requirement } = addRequirement(goal.validation, input);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+    return requirement;
+  }
+
+  async updateGoalRequirement(projectName: string, goalId: string, requirementId: string, patch: UpdateRequirementInput): Promise<import('../../types/goals.js').Requirement> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const { validation, requirement } = updateRequirement(goal.validation, requirementId, patch);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+    return requirement;
+  }
+
+  async removeGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<void> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const validation = removeRequirement(goal.validation, requirementId);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+  }
+
+  async reorderGoalRequirement(projectName: string, goalId: string, requirementId: string, position: number): Promise<void> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const validation = reorderRequirement(goal.validation, requirementId, position);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+  }
+
+  async reopenGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<import('../../types/goals.js').Requirement> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = reopenRequirement(goal, requirementId);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return result.requirement;
+  }
+
+  async attachGoalEvidence(projectName: string, goalId: string, requirementId: string, input: AttachEvidenceInput): Promise<import('../../types/goals.js').Evidence> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = attachManualEvidence(projectName, goal, requirementId, input);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return result.evidence;
+  }
+
+  async runGoalGeneration(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; evidence: import('../../types/goals.js').Evidence; autoAccepted: boolean }> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = runGenerationCommand(projectName, goal, requirementId);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return { requirement: result.requirement, evidence: result.evidence, autoAccepted: result.autoAccepted };
+  }
+
+  async runGoalJudgment(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; review: import('../../types/goals.js').Review }> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const requirement = goal.validation.requirements[requirementId];
+    if (!requirement) throw new Error(`Unknown requirement: ${requirementId}`);
+    let result;
+    if (requirement.judgment.kind === 'command') result = runJudgmentCommand(projectName, goal, requirementId);
+    else if (requirement.judgment.kind === 'llm') result = runLlmJudgment(goal, requirementId);
+    else throw new Error('Human judgment is not run; use recordGoalHumanReview.');
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return { requirement: result.requirement, review: result.review };
+  }
+
+  async recordGoalHumanReview(projectName: string, goalId: string, requirementId: string, decision: HumanReviewDecision, note: string, createdBy?: string): Promise<import('../../types/goals.js').Review> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = recordHumanReview(goal, requirementId, decision, note, createdBy);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return result.review;
+  }
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
     const response = await this.sendTmuxCommand({ type: 'bundle-refresh-plan', projectName, workspaceId });
     if (response.type === 'bundle-refresh-plan') return response.plan;

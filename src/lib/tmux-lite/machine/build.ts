@@ -1,4 +1,5 @@
 import { listProjectSummaries } from '../../../core/project-catalog.js';
+import { listProjectGoalKanbanItems } from '../../../core/goal-chain.js';
 import { getArchivedSessions } from '../../../agents/agent-db.js';
 import type { WorkspaceAgentState } from '../agent-event-manager.js';
 import type { Session, WorkspaceRuntimeRecord } from '../protocol.js';
@@ -7,6 +8,7 @@ import type {
   MachineAgentSessionRecord,
   MachineProcessRecord,
   MachineProjectRecord,
+  MachineGoalRecord,
   MachineSnapshot,
   MachineTerminalSessionRecord,
   MachineWorkspaceRecord,
@@ -105,6 +107,45 @@ function cloneWorkspaceRecord(workspace: WorkspaceRuntimeRecord): MachineWorkspa
   };
 }
 
+function listGoalsForSnapshot(projectNames: string[]): {
+  goalsById: Record<string, MachineGoalRecord>;
+  goalOrder: string[];
+  goalIdsByProjectId: Record<string, string[]>;
+  goalByWorkspace: Map<string, MachineGoalRecord>;
+} {
+  const goalsById: Record<string, MachineGoalRecord> = {};
+  const goalOrder: string[] = [];
+  const goalIdsByProjectId: Record<string, string[]> = {};
+  const goalByWorkspace = new Map<string, MachineGoalRecord>();
+
+  for (const projectName of projectNames) {
+    goalIdsByProjectId[projectName] = [];
+    let goals: MachineGoalRecord[] = [];
+    try {
+      goals = listProjectGoalKanbanItems(projectName);
+    } catch {
+      goals = [];
+    }
+
+    for (const goal of goals) {
+      const machineGoal: MachineGoalRecord = {
+        ...goal,
+        id: `${projectName}:${goal.id}`,
+        previousGoalId: goal.previousGoalId ? `${projectName}:${goal.previousGoalId}` : undefined,
+      };
+      goalsById[machineGoal.id] = machineGoal;
+      goalOrder.push(machineGoal.id);
+      goalIdsByProjectId[projectName].push(machineGoal.id);
+      if (machineGoal.workspaceName) {
+        goalByWorkspace.set(`${projectName}:${machineGoal.workspaceName}`, machineGoal);
+      }
+    }
+  }
+
+  return { goalsById, goalOrder, goalIdsByProjectId, goalByWorkspace };
+}
+
+
 export function buildMachineSnapshot(params: {
   snapshotNonce: number;
   terminalSessions: Session[];
@@ -130,6 +171,14 @@ export function buildMachineSnapshot(params: {
     workspaceIdsByProjectId[project.name] = [];
   }
 
+  const {
+    goalsById,
+    goalOrder,
+    goalIdsByProjectId,
+    goalByWorkspace,
+  } = listGoalsForSnapshot(projectOrder);
+
+
   const workspacesById: Record<string, MachineWorkspaceRecord> = {};
   const workspaceOrder: string[] = [];
   const workspacePmSnapshot = getWorkspacePmSnapshot(workspaces);
@@ -140,6 +189,11 @@ export function buildMachineSnapshot(params: {
     if (pmState) {
       record.pullRequest = pmState.pullRequest;
       record.linear = pmState.linear;
+    }
+    const goal = goalByWorkspace.get(`${record.projectId}:${record.name}`);
+    if (goal) {
+      record.goal = goal;
+      record.phase = goal.phase;
     }
     workspacesById[record.id] = record;
     workspaceOrder.push(record.id);
@@ -360,6 +414,9 @@ export function buildMachineSnapshot(params: {
     workspacesById,
     workspaceOrder,
     workspaceIdsByProjectId,
+    goalsById,
+    goalOrder,
+    goalIdsByProjectId,
     terminalSessionsById,
     terminalSessionIdsByWorkspaceId,
     agentSessionsById,

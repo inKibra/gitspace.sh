@@ -29,12 +29,42 @@ export interface KanbanWorkspaceItem {
   phase: WorkspacePhase;
   pullRequest?: MachineWorkspacePullRequestRecord;
   linear?: MachineWorkspaceLinearRecord;
+  goal?: import('../../../lib/tmux-lite/machine/types.js').MachineGoalRecord;
   backendKey: string;
   machineLabel: string;
   isRemote: boolean;
 }
 
+export interface KanbanGoalItem {
+  id: string;
+  selectionKey: string;
+  chainId: string;
+  chainTitle: string;
+  title: string;
+  projectName: string;
+  phase: WorkspacePhase;
+  plannedWorkspaceName?: string;
+  workspaceName?: string;
+  status: 'planned' | 'workspace-backed';
+  chainPosition: number;
+  chainLength: number;
+  previousGoalId?: string;
+  previousWorkspaceName?: string;
+  blockedReason?: string;
+  doc?: import('../../../types/goals.js').GoalDoc;
+  validation?: import('../../../types/goals.js').GoalValidation;
+  sourceRefs?: import('../../../types/goals.js').SourceRef[];
+  updatedAt?: string;
+  stackStatus?: import('../../../types/goals.js').ChainStackEdgeStatus['status'];
+  stackStatusMessage?: string;
+  backendKey: string;
+  machineLabel: string;
+  isRemote: boolean;
+}
+
+
 export interface WorkspaceBoardGroup {
   phase: WorkspacePhase;
   workspaces: KanbanWorkspaceItem[];
+  plannedGoals?: KanbanGoalItem[];
 }

@@ -24,6 +24,7 @@ function makeClient(overrides: Partial<AppClient['workspaceLifecycle']> = {}): A
       restore: mock(async () => ({ ok: true as const, value: { workspaceRef: { backendKey: 'local', workspaceId: 'proj:ws-1' }, agentSessionRef: { backendKey: 'local', workspaceId: 'proj:ws-1', agentSessionId: 'agent-1' } } })),
     },
     workspaceLifecycle: {
+      previewStatus: mock(async () => ({ ok: true as const, value: { allowed: true, requiresCascade: false, requestedPhase: 'review' as const, affected: [], message: 'ok' } })),
       setStatus: mock(async () => ({ ok: true as const, value: { workspaceRef: { backendKey: 'local', workspaceId: 'proj:ws-1' }, phase: 'review' as const } })),
       deleteWorkspace: mock(async () => ({ ok: true as const, value: { workspaceRef: { backendKey: 'local', workspaceId: 'proj:ws-1' }, params: { scriptPolicy: 'auto' as const } } })),
       ...overrides,
@@ -71,7 +72,34 @@ describe('useWorkspaceLifecycleActions', () => {
     const ok = await result.current.setStatus({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'review');
 
     expect(ok).toBe(true);
-    expect(client.workspaceLifecycle.setStatus).toHaveBeenCalledWith({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'review');
+    expect(client.workspaceLifecycle.previewStatus).toHaveBeenCalledWith({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'review');
+    expect(client.workspaceLifecycle.setStatus).toHaveBeenCalledWith({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'review', { cascade: false });
+  });
+
+  it('confirms and applies cascade when descendants must move back', async () => {
+    const showConfirm = mock(({ onConfirm }: { onConfirm: () => void | Promise<void> }) => {
+      void onConfirm();
+    });
+    const client = makeClient({
+      previewStatus: mock(async () => ({
+        ok: true as const,
+        value: {
+          allowed: true,
+          requiresCascade: true,
+          requestedPhase: 'plan' as const,
+          affected: [{ workspaceName: 'child', goalId: 'goal-2', title: 'Child', from: 'code' as const, to: 'plan' as const }],
+          message: 'Moving \"parent\" to plan also requires moving 1 descendant workspace back.',
+        },
+      })),
+    });
+    const { result } = renderHook(() => useWorkspaceLifecycleActions({
+      client,
+      flow: { showLoading: () => undefined, showConfirm, showMessage: () => undefined, close: () => undefined },
+    }));
+    const ok = await result.current.setStatus({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'plan');
+    expect(ok).toBe(true);
+    expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(client.workspaceLifecycle.setStatus).toHaveBeenCalledWith({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'plan', { cascade: true });
   });
 
   it('runs delete flow through the client action', async () => {
@@ -120,5 +148,30 @@ describe('useWorkspaceLifecycleActions', () => {
     expect(ok).toBe(false);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0]?.[0]).toBe('Failed to update workspace status: Workspace status changes are unavailable');
+  });
+
+  it('shows a warning instead of applying blocked phase changes', async () => {
+    const showMessage = mock(() => undefined);
+    const client = makeClient({
+      previewStatus: mock(async () => ({
+        ok: true as const,
+        value: {
+          allowed: false,
+          requiresCascade: false,
+          requestedPhase: 'review' as const,
+          maxAllowedPhase: 'code' as const,
+          affected: [],
+          message: 'Cannot move \"child\" to review. Max allowed phase is code because an ancestor is only code.',
+        },
+      })),
+    });
+    const { result } = renderHook(() => useWorkspaceLifecycleActions({
+      client,
+      flow: { showLoading: () => undefined, showConfirm: () => undefined, showMessage, close: () => undefined },
+    }));
+    const ok = await result.current.setStatus({ backendKey: 'local', workspaceId: 'proj:ws-1' }, 'review');
+    expect(ok).toBe(false);
+    expect(showMessage).toHaveBeenCalledTimes(1);
+    expect(client.workspaceLifecycle.setStatus).not.toHaveBeenCalled();
   });
 });

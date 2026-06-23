@@ -1701,6 +1701,40 @@ describe('LocalSessionBackend', () => {
     });
   });
 
+  it('refreshes machine state before listing workspaces', async () => {
+    const events: BackendEvent[] = [];
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      branch: 'main',
+      sessionCount: 0,
+      isStale: false,
+    };
+    const staleSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [],
+      listSessions: async () => [],
+    });
+    const refreshedSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [],
+    });
+    const snapshots = [staleSnapshot, refreshedSnapshot];
+    const getMachineSnapshot = mock(async () => snapshots.shift() ?? refreshedSnapshot);
+    const backend = createBackend({
+      getMachineSnapshot,
+      watchMachineEvents: async () => () => {},
+    });
+    backend.onEvent((event) => events.push(event));
+    await backend.connect();
+    await backend.listWorkspaces();
+    expect(events).toContainEqual({
+      type: 'workspaces',
+      workspaces: [expect.objectContaining({ id: 'alpha:ws-1' })],
+    });
+  });
+
   it('refreshes machine state before attaching a newly created agent session terminal', async () => {
     const events: BackendEvent[] = [];
     const agentTerminalSession = {

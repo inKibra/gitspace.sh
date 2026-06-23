@@ -65,14 +65,17 @@ function makeContext(backendByKey: Record<string, SessionBackend | null>, multiO
 describe('app client workspace lifecycle', () => {
   it('sets workspace status through the resolved backend', async () => {
     const setWorkspaceStatus = mock(async () => undefined);
-    const backend = makeBackend({ setWorkspaceStatus });
+    const previewWorkspaceStatusChange = mock(async () => ({ allowed: true, requiresCascade: false, requestedPhase: 'review', affected: [], message: 'ok' }));
+    const backend = makeBackend({ previewWorkspaceStatusChange, setWorkspaceStatus });
     const workspaceRef = { backendKey: 'local', workspaceId: 'proj:ws-1' } satisfies BackendScopedWorkspaceRef;
 
     const client = createAppWorkspaceLifecycleClient(makeContext({ local: backend }));
+    const preview = await client.previewStatus(workspaceRef, 'review');
+    expect(preview.ok).toBe(true);
     const result = await client.setStatus(workspaceRef, 'review');
-
     expect(result.ok).toBe(true);
-    expect(setWorkspaceStatus).toHaveBeenCalledWith('proj', 'ws-1', 'review');
+    expect(previewWorkspaceStatusChange).toHaveBeenCalledWith('proj', 'ws-1', 'review');
+    expect(setWorkspaceStatus).toHaveBeenCalledWith('proj', 'ws-1', 'review', undefined);
   });
 
   it('deletes a workspace and refreshes list state', async () => {
@@ -90,7 +93,7 @@ describe('app client workspace lifecycle', () => {
     const result = await client.deleteWorkspace(workspaceRef, { scriptPolicy: 'skip' });
 
     expect(result.ok).toBe(true);
-    expect(deleteWorkspace).toHaveBeenCalledWith('proj', 'proj:ws-1', { scriptPolicy: 'skip' });
+    expect(deleteWorkspace).toHaveBeenCalledWith('proj', 'proj:ws-1', { scriptPolicy: 'skip', timeoutMs: 5 * 60 * 1000 });
     expect(listWorkspaces).toHaveBeenCalledTimes(1);
     expect(listSessions).toHaveBeenCalledTimes(1);
     expect(listReplays).toHaveBeenCalledWith(undefined, false);

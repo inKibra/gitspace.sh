@@ -10,6 +10,7 @@ type SelectCall<T> = {
   title: string
   onSelect: (value: T) => void | Promise<void>
   searchable?: boolean
+  options?: Array<{ label: string; value: T }>
 }
 
 type InputCall = {
@@ -21,6 +22,52 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve()
   await Promise.resolve()
 }
+
+
+describe('useLifecycleController create menu', () => {
+  it('shows goal creation when a goal flow is registered', () => {
+    const showSelectCalls: Array<SelectCall<'workspace' | 'goal' | 'project'>> = []
+    const openCreateGoalFlow = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading: () => {},
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              options: opts.options as Array<{ label: string; value: 'workspace' | 'goal' | 'project' }>,
+              onSelect: opts.onSelect as (value: 'workspace' | 'goal' | 'project') => void,
+            })
+          },
+          showInput: () => {},
+          showWizard: () => {},
+          showConfirmTyped: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => [],
+        listLinearIssues: async () => [],
+        createProject: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        openCreateGoalFlow,
+        getProjectNames: () => ['acme'],
+        refreshProjects: async () => {},
+        refreshWorkspaces: async () => {},
+      })
+    )
+
+    result.current.openCreateMenu('acme')
+
+    expect(showSelectCalls[0]?.title).toBe('Create')
+    expect(showSelectCalls[0]?.options?.map((option) => option.label)).toEqual(['Workspace', 'Goal', 'Project'])
+
+    showSelectCalls[0]!.onSelect('goal')
+    expect(openCreateGoalFlow).toHaveBeenCalledWith('acme')
+  })
+})
 
 describe('useLifecycleController project flow', () => {
   it('creates a project from manual git remote input', async () => {

@@ -45,6 +45,7 @@ export interface UseLifecycleControllerOptions {
   cancelProjectCreation?: (projectName: string) => Promise<void>;
   createWorkspace: (params: CreateWorkspaceParams) => Promise<void>;
   deleteProject: (projectName: string, params?: DeleteProjectParams) => Promise<void>;
+  openCreateGoalFlow?: (projectName?: string | null) => void;
   getProjectNames: () => string[];
   refreshProjects: () => void | Promise<void>;
   refreshWorkspaces: () => void | Promise<void>;
@@ -194,6 +195,7 @@ export function useLifecycleController(
     cancelProjectCreation,
     createWorkspace,
     deleteProject,
+    openCreateGoalFlow,
     getProjectNames,
     refreshProjects,
     refreshWorkspaces,
@@ -757,13 +759,22 @@ export function useLifecycleController(
       return;
     }
 
+    const options = [
+      { label: 'Workspace', description: 'Create a new workspace', value: 'workspace' as const },
+      ...(openCreateGoalFlow
+        ? [{ label: 'Goal', description: 'Add a planned goal to a workspace chain', value: 'goal' as const }]
+        : []),
+      { label: 'Project', description: 'Clone a git repository', value: 'project' as const },
+    ];
+
     flow.showSelect({
       title: 'Create',
-      options: [
-        { label: 'Workspace', description: 'Create a new workspace', value: 'workspace' as const },
-        { label: 'Project', description: 'Clone a git repository', value: 'project' as const },
-      ],
+      options,
       onSelect: (value) => {
+        if (value === 'goal') {
+          openCreateGoalFlow?.(projectName);
+          return;
+        }
         if (value === 'workspace') {
           openCreateWorkspaceFlow(null);
           return;
@@ -771,7 +782,7 @@ export function useLifecycleController(
         openCreateProjectFlow();
       },
     });
-  }, [flow, getProjectNames, openCreateProjectFlow, openCreateWorkspaceFlow]);
+  }, [flow, getProjectNames, openCreateGoalFlow, openCreateProjectFlow, openCreateWorkspaceFlow]);
 
   return {
     openCreateProjectFlow,

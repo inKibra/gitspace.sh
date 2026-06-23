@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { buildMachineSnapshot } from './build.js';
+import { bindGoalToWorkspace, upsertGoalChain, writePlannedGoal } from '../../../core/goal-chain.js';
+import { addRequirement, attachManualEvidence, defaultValidation, runGenerationCommand } from '../../../core/goal-validation.js';
 import type { WorkspaceRuntimeRecord } from '../protocol.js';
 import type { WorkspaceAgentState } from '../agent-event-manager.js';
 import type { Session } from '../protocol.js';
@@ -172,6 +177,92 @@ describe('buildMachineSnapshot', () => {
     expect(snapshot.agentSessionsById['agent-old']?.linkedTerminalSessionId).toBe('pty-a');
     expect(snapshot.agentSessionsById['agent-new']?.linkedTerminalSessionId).toBe('pty-b');
     expect(snapshot.workspacesById['demo:ws-1']?.agentSessionIds).toEqual(['agent-old', 'agent-new']);
+  });
+
+  it('projects planned and workspace-backed goals into the machine snapshot', () => {
+    const root = join(tmpdir(), `machine-goals-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const previousWorkspaceRoot = process.env.GITSPACE_WORKSPACE_ROOT;
+    process.env.GITSPACE_WORKSPACE_ROOT = root;
+
+    try {
+      mkdirSync(join(root, 'demo', 'workspaces', 'ws-1'), { recursive: true });
+      writeFileSync(join(root, 'demo', '.config.json'), JSON.stringify({
+        name: 'demo',
+        repository: 'owner/repo',
+        baseBranch: 'main',
+        createdAt: new Date(0).toISOString(),
+        lastAccessed: new Date(0).toISOString(),
+      }), 'utf-8');
+      upsertGoalChain('demo', {
+        id: 'billing',
+        title: 'Billing rollout',
+        projectName: 'demo',
+        goalIds: ['schema', 'api'],
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      });
+      writePlannedGoal('demo', {
+        version: 2,
+        id: 'schema',
+        chainId: 'billing',
+        title: 'Schema goal',
+        projectName: 'demo',
+        phase: 'plan',
+        plannedWorkspaceName: 'ws-1',
+        doc: { bodyMarkdown: '# Schema', updatedAt: new Date(0).toISOString() },
+        validation: defaultValidation(),
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      });
+      const apiValidation = addRequirement(defaultValidation(), {
+        title: 'Planned URL',
+        kind: 'url',
+        rubric: 'Reference URL must resolve.',
+        generation: { kind: 'manual' },
+        judgment: { kind: 'human' },
+      });
+      const plannedGoal = writePlannedGoal('demo', {
+        version: 2,
+        id: 'api',
+        chainId: 'billing',
+        title: 'API goal',
+        projectName: 'demo',
+        phase: 'code',
+        plannedWorkspaceName: 'ws-2',
+        doc: { bodyMarkdown: '# API', updatedAt: new Date(0).toISOString() },
+        validation: apiValidation.validation,
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      });
+      const apiAttached = attachManualEvidence('demo', plannedGoal, apiValidation.requirement.id, {
+        url: 'http://localhost:5173/planned-artifact',
+        name: 'Planned URL',
+      });
+      writePlannedGoal('demo', { ...plannedGoal, validation: apiAttached.goal.validation });
+      bindGoalToWorkspace('demo', 'schema', 'ws-1');
+
+      const snapshot = buildMachineSnapshot({
+        snapshotNonce: 1,
+        terminalSessions: [],
+        workspaces: [makeWorkspace()],
+        agentStateByWorkspaceId: {},
+      });
+
+      expect(snapshot.workspacesById['demo:ws-1']?.goal?.id).toBe('demo:schema');
+      expect(snapshot.workspacesById['demo:ws-1']?.phase).toBe('plan');
+      expect(snapshot.goalsById?.['demo:api']?.status).toBe('planned');
+      expect(snapshot.goalIdsByProjectId?.demo).toEqual(['demo:schema', 'demo:api']);
+      const apiGoal = snapshot.goalsById?.['demo:api'];
+      const apiReq = apiGoal?.validation?.requirements[apiValidation.requirement.id];
+      expect(apiReq?.evidence?.[0]).toMatchObject({ name: 'Planned URL', url: 'http://localhost:5173/planned-artifact' });
+    } finally {
+      if (previousWorkspaceRoot === undefined) {
+        delete process.env.GITSPACE_WORKSPACE_ROOT;
+      } else {
+        process.env.GITSPACE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
 });

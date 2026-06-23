@@ -32,6 +32,7 @@ function createHandlers() {
     onOpenGitHubPr: mock(() => undefined),
     onOpenReview: mock(() => undefined),
     onOpenEditor: mock(() => undefined),
+    onShowGoalChains: mock(() => undefined),
   };
 }
 
@@ -90,5 +91,18 @@ describe('executeCommandPaletteAction', () => {
     });
 
     expect(handlers.onOpenEditor).toHaveBeenCalledWith(workspace);
+  });
+
+  it('runs goal chain command without requiring a workspace selection', () => {
+    const handlers = createHandlers();
+
+    executeCommandPaletteAction({
+      commandId: 'show-goal-chains',
+      workspace: null,
+      projectName: 'proj',
+      ...handlers,
+    });
+
+    expect(handlers.onShowGoalChains).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,6 +8,7 @@ import type { AgentSessionInfo } from './SpacesBrowser.js';
 import type { WorkspaceStatusInput, WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 import type { WorkspaceDetailReplayRow } from '../app/shared/workspace-detail/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
+import type { KanbanGoalItem } from '../app/shared/board/types.js';
 
 export type WorkspaceDetailStripWorkspace = WorkspaceStatusInput & {
   name: string;
@@ -47,6 +48,8 @@ export interface WorkspaceDetailPaneProps {
   onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onDeleteSession?: (sessionId: string, sessionName: string) => void;
   onDeleteWorkspace?: (workspace: WorkspaceInfo) => void;
+  goal?: KanbanGoalItem | null;
+  onOpenGoalDetail?: (goal: KanbanGoalItem) => void | Promise<void>;
   /** Raw cross-project workspaces available for the header strip. */
   allWorkspaces?: WorkspaceDetailStripWorkspace[];
   /** Platform-neutral status map used to filter/sort the header strip. */

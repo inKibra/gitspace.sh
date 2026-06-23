@@ -241,6 +241,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   const dismissReplay = useCallback((backendKey: BackendKey, replayId: string) => engine.dismissReplay(backendKey, replayId), [engine]);
   const undismissReplay = useCallback((backendKey: BackendKey, replayId: string) => engine.undismissReplay(backendKey, replayId), [engine]);
   const cancelPendingReplayRequests = useCallback((backendKey: BackendKey) => engine.cancelPendingReplayRequests(backendKey), [engine]);
+  const runSpaceCommand = useCallback((backendKey: BackendKey, workspaceId: string, argsText: string): Promise<string> => engine.runSpaceCommand(backendKey, workspaceId, argsText), [engine]);
 
   return {
     state,
@@ -303,6 +304,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
+    runSpaceCommand,
     cancelPendingReplayRequests,
   };
 }

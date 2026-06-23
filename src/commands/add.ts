@@ -15,6 +15,7 @@ import {
   projectExists,
 } from '../core/config.js';
 import { setWorkspaceStatus } from '../core/workspace-metadata.js';
+import { bindPlannedGoalForWorkspace } from '../core/goal-chain.js';
 import { checkCommandExists, checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
@@ -456,7 +457,17 @@ export async function addWorkspace(
 
   const phase = options.status ?? 'code';
   setWorkspaceStatus(currentProject, workspaceName, phase);
-  logger.success(`Created worktree from ${baseBranch} (phase: ${phase})`);
+  let boundGoal: ReturnType<typeof bindPlannedGoalForWorkspace> = null;
+  try {
+    boundGoal = bindPlannedGoalForWorkspace(currentProject, workspaceName);
+  } catch (error) {
+    logger.warning(`Workspace created, but failed to bind planned goal: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (boundGoal) {
+    logger.success(`Created worktree from ${baseBranch} and bound goal '${boundGoal.title}' (phase: ${boundGoal.phase})`);
+  } else {
+    logger.success(`Created worktree from ${baseBranch} (phase: ${phase})`);
+  }
 
   // Register workspace bundle requirements in project-level metadata.
   const bundleSync = syncBundleWorkspaceState(currentProject, workspacePath);

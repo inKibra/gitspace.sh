@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
 import {
   createProject,
@@ -15,6 +16,7 @@ import { listAllRepos } from './github.js';
 import { fetchUnstartedIssues, getLinearConfig } from './linear.js';
 import { deleteProjectCore } from './workspace.js';
 import { syncBundleWorkspaceState } from './bundle-refresh.js';
+import { bindPlannedGoalForWorkspace } from './goal-chain.js';
 import { detectBundleInRepo, loadBundleFromPath } from './bundle.js';
 import { applyProjectBundleState } from './project-lifecycle.js';
 import { SpacesError } from '../types/errors.js';
@@ -64,6 +66,7 @@ export interface SessionCreateWorkspaceParams {
   workspaceSource?: WorkspaceSource;
   linearIssue?: SessionLinearIssueSummary;
   onProgress?: (message: string) => void;
+  parentWorkspaceName?: string;
 }
 
 export interface SessionCreateWorkspaceResult {
@@ -76,6 +79,37 @@ export interface SessionCreateWorkspaceResult {
 export interface SessionDeleteProjectParams {
   projectName: string;
   onProgress?: (message: string) => void;
+}
+
+function runGit(args: string[], cwd: string): string | null {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function createStackedWorktreeFromParent(projectName: string, parentWorkspaceName: string, workspacePath: string, branchName: string): boolean {
+  const parentPath = join(getProjectWorkspacesDir(projectName), parentWorkspaceName);
+  if (!existsSync(parentPath)) {
+    return false;
+  }
+  const parentBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], parentPath);
+  const parentRef = parentBranch && parentBranch !== 'HEAD'
+    ? parentBranch
+    : runGit(['rev-parse', 'HEAD'], parentPath);
+  if (!parentRef) {
+    return false;
+  }
+  try {
+    execFileSync('git', ['worktree', 'add', '-b', branchName, workspacePath, parentRef, '--no-track'], {
+      cwd: getProjectBaseDir(projectName),
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sanitizeProjectName(input: string): string {
@@ -399,13 +433,19 @@ export async function createWorkspaceForSession(
     throw new SpacesError(`Workspace "${workspaceName}" already exists.`, 'USER_ERROR', 1);
   }
 
-  const baseBranch = params.baseBranch?.trim() || config.baseBranch;
-  const existsRemotely = await checkRemoteBranch(baseDir, branchName);
+  const createdFromParent = params.parentWorkspaceName
+    ? createStackedWorktreeFromParent(projectName, params.parentWorkspaceName, workspacePath, branchName)
+    : false;
 
-  await createWorktree(baseDir, workspacePath, branchName, baseBranch, {
-    existsRemotely,
-    onProgress: params.onProgress,
-  });
+  if (!createdFromParent) {
+    const baseBranch = params.baseBranch?.trim() || config.baseBranch;
+    const existsRemotely = await checkRemoteBranch(baseDir, branchName);
+
+    await createWorktree(baseDir, workspacePath, branchName, baseBranch, {
+      existsRemotely,
+      onProgress: params.onProgress,
+    });
+  }
 
   if (params.workspaceSource === 'linear' && params.linearIssue) {
     const linearConfig = await getLinearConfig(projectName);
@@ -418,6 +458,7 @@ export async function createWorkspaceForSession(
     );
     writeFileSync(join(issueArtifactDir, 'issue.md'), markdown, 'utf-8');
   }
+  bindPlannedGoalForWorkspace(projectName, workspaceName);
 
   syncBundleWorkspaceState(projectName, workspacePath);
 

@@ -14,6 +14,7 @@ import { getAgentSessionDisplayTitle } from './agents/session-display.js';
 import { DockviewWorkspaceShell } from './components/DockviewWorkspaceShell.web.js';
 import { PaneTerminalPanel } from './components/PaneTerminalPanel.web.js';
 import { WorkspaceNotesModal } from './components/WorkspaceNotesModal.web.js';
+import { GoalDetailPanel } from './components/GoalDetailPanel.web.js';
 import { IdentityGate } from "./components/IdentityGate.web";
 import type { Identity } from "./types/identity";
 import type { WorkspaceNote } from './types/workspace.js';
@@ -40,6 +41,7 @@ import { useEvents, toWideEventItem, type WideEventItem } from "./components/Eve
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
 import type { WorkspacePhase } from './types/config.js';
+import type { ChainStackStatus, GoalValidation, Requirement } from './types/goals.js';
 import {
   useNotifications,
   type ToastNotification,
@@ -60,8 +62,10 @@ import {
   toBackendScopedWorkspaceKey,
 } from './machine/multi/types.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
+import { computeReadiness } from './app/shared/goal-validation/readiness.js';
 import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { selectBackendSnapshot } from './machine/multi/selectors.js';
+import type { KanbanGoalItem, WorkspaceBoardGroup } from './app/shared/board/types.js';
 import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
@@ -87,6 +91,10 @@ const DELETE_ERROR_CODES = new Set([
   'RESOURCE_NOT_FOUND',
   'NOT_FOUND',
 ]);
+
+function toGoalCacheKey(backendKey: string, projectName: string, goalId: string): string {
+  return `${backendKey}:${projectName}:${goalId}`;
+}
 
 const SCRIPT_ERROR_CODES = new Set([
   'SCRIPT_CANCELLED',
@@ -437,6 +445,79 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   });
   const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
 
+  const [goalEdgeStatusByKey, setGoalEdgeStatusByKey] = useState<Record<string, { status: ChainStackStatus['edges'][number]['status']; message?: string }>>({});
+  const applyGoalEdgeStatus = useCallback((goal: KanbanGoalItem): KanbanGoalItem => {
+    const persistedGoalId = goal.id.startsWith(`${goal.projectName}:`) ? goal.id.slice(goal.projectName.length + 1) : goal.id;
+    const edgeStatus = goalEdgeStatusByKey[toGoalCacheKey(goal.backendKey, goal.projectName, persistedGoalId)];
+    if (!edgeStatus) {
+      return goal;
+    }
+    return {
+      ...goal,
+      stackStatus: edgeStatus.status,
+      stackStatusMessage: edgeStatus.message,
+      blockedReason: edgeStatus.status === 'aligned' ? goal.blockedReason : (edgeStatus.message ?? edgeStatus.status),
+    };
+  }, [goalEdgeStatusByKey]);
+  const boardGroupsWithGoalStatus = useMemo<WorkspaceBoardGroup[]>(() => (
+    workspaceBoardState.groups.map((group) => ({
+      ...group,
+      plannedGoals: group.plannedGoals?.map(applyGoalEdgeStatus),
+      workspaces: group.workspaces.map((workspace) => {
+        if (!workspace.goal) {
+          return workspace;
+        }
+        return {
+          ...workspace,
+          goal: applyGoalEdgeStatus({
+            ...workspace.goal,
+            selectionKey: `${workspace.backendKey}:goal:${workspace.goal.id}`,
+            backendKey: workspace.backendKey,
+            machineLabel: workspace.machineLabel,
+            isRemote: workspace.isRemote,
+          }),
+        };
+      }),
+    }))
+  ), [applyGoalEdgeStatus, workspaceBoardState.groups]);
+  const allGoalItems = useMemo(() => {
+    const planned = boardGroupsWithGoalStatus.flatMap((group) => group.plannedGoals ?? []);
+    const backed = boardGroupsWithGoalStatus.flatMap((group) =>
+      group.workspaces
+        .map((workspace) => workspace.goal ? {
+          ...workspace.goal,
+          selectionKey: `${workspace.backendKey}:goal:${workspace.goal.id}`,
+          backendKey: workspace.backendKey,
+          machineLabel: workspace.machineLabel,
+          isRemote: workspace.isRemote,
+        } : null)
+        .filter((goal): goal is KanbanGoalItem => Boolean(goal)),
+    );
+    return [...planned, ...backed];
+  }, [boardGroupsWithGoalStatus]);
+  const [selectedGoalKey, setSelectedGoalKey] = useState<string | null>(null);
+  const [goalDetailMessage, setGoalDetailMessage] = useState<string | null>(null);
+  const [goalStackStatus, setGoalStackStatus] = useState<ChainStackStatus | null>(null);
+  const [goalSaving, setGoalSaving] = useState(false);
+  const [boardGoalOrderMessage, setBoardGoalOrderMessage] = useState<string | null>(null);
+  const mergeGoalValidation = useCallback((goal: KanbanGoalItem): KanbanGoalItem => {
+    if (!goal.validation) return goal;
+    return { ...goal, validation: { ...goal.validation, readiness: computeReadiness(goal.validation) } };
+  }, []);
+  const selectedGoal = useMemo(
+    () => selectedGoalKey ? (() => {
+      const goal = allGoalItems.find((item) => item.selectionKey === selectedGoalKey) ?? null;
+      return goal ? mergeGoalValidation(goal) : null;
+    })() : null,
+    [allGoalItems, mergeGoalValidation, selectedGoalKey],
+  );
+  const selectedGoalChainGoals = useMemo(
+    () => selectedGoal
+      ? allGoalItems.filter((goal) => goal.backendKey === selectedGoal.backendKey && goal.projectName === selectedGoal.projectName && goal.chainId === selectedGoal.chainId)
+      : [],
+    [allGoalItems, selectedGoal],
+  );
+
   const handleBoardSelectWorkspace = useCallback((workspaceKey: string | null) => {
     if (workspaceKey === null) {
       if (showBoardWhileDetailMounted && workspaceController.selectedRef) {
@@ -446,6 +527,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       rawHandleBoardSelectWorkspace(null);
       return;
     }
+    setSelectedGoalKey(null);
+    setGoalDetailMessage(null);
+    setGoalStackStatus(null);
     setShowBoardWhileDetailMounted(false);
     rawHandleBoardSelectWorkspace(workspaceKey);
   }, [rawHandleBoardSelectWorkspace, showBoardWhileDetailMounted, workspaceController.selectedRef]);
@@ -1098,6 +1182,61 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     },
   });
 
+
+  const openCreateGoalFlow = useCallback((projectName?: string | null) => {
+    const candidateWorkspaces = allWorkspaceEntries.filter((workspace) => !projectName || workspace.projectName === projectName);
+    if (candidateWorkspaces.length === 0) {
+      flow.showMessage({
+        title: 'Create Goal',
+        message: 'Create a workspace first, then add goals before or after it.',
+        variant: 'info',
+      });
+      return;
+    }
+
+    flow.showSelect<string>({
+      title: 'Anchor Goal To Workspace',
+      searchable: true,
+      options: candidateWorkspaces.map((workspace) => ({
+        label: workspace.name,
+        description: `${workspace.projectName} · ${workspace.branch ?? workspace.path}`,
+        value: workspace.selectionKey ?? workspace.id,
+      })),
+      onSelect: (workspaceKey) => {
+        const workspace = candidateWorkspaces.find((item) => (item.selectionKey ?? item.id) === workspaceKey);
+        if (!workspace) return;
+        flow.showInput({
+          title: 'Goal Title',
+          placeholder: 'e.g. Billing UI polish',
+          onSubmit: (title) => {
+            const trimmed = title.trim();
+            if (!trimmed) return;
+            flow.showSelect<'before' | 'after'>({
+              title: 'Goal Position',
+              options: [
+                { label: 'After workspace', description: `Add after ${workspace.name}`, value: 'after' },
+                { label: 'Before workspace', description: `Add before ${workspace.name}`, value: 'before' },
+              ],
+              onSelect: async (position) => {
+                try {
+                  await multi.addGoalNearWorkspace(workspace.backendKey as BackendKey, workspace.projectName, workspace.name, trimmed, position);
+                  flow.close();
+                  toast.success(`Added goal "${trimmed}"`);
+                } catch (error) {
+                  flow.showMessage({
+                    title: 'Create Goal Failed',
+                    message: error instanceof Error ? error.message : String(error),
+                    variant: 'error',
+                  });
+                }
+              },
+            });
+          },
+        });
+      },
+    });
+  }, [allWorkspaceEntries, flow, multi]);
+
   const lifecycleController = useLifecycleActions({
     client: sessionClient,
     backendKey: getTargetBackendKey(),
@@ -1106,6 +1245,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 	    refreshProjects: () => multi.listProjects(),
 	    refreshWorkspaces: () => multi.listWorkspaces(),
 	    refreshSessions: () => multi.listSessions(),
+	    openCreateGoalFlow,
 	    onProjectCreated: () => undefined,
 	    onWorkspaceCreating: ({ workspaceName, projectName }) => {
 	      workspaceCreationTasks.startTask({ projectName, workspaceName, phase: 'code', progressLabel: 'Creating workspace...' });
@@ -1117,6 +1257,375 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 	      workspaceCreationTasks.failTaskByWorkspaceId(workspaceId, 'Creation failed');
 	    },
   });
+
+  const handleCreatePlannedGoalWorkspace = useCallback(async (goal: KanbanGoalItem) => {
+    const workspaceName = goal.plannedWorkspaceName ?? goal.title;
+    const taskId = workspaceCreationTasks.startTask({
+      projectName: goal.projectName,
+      workspaceName,
+      phase: goal.phase,
+      progressLabel: goal.previousWorkspaceName
+        ? `Creating from ${goal.previousWorkspaceName}...`
+        : 'Creating workspace...',
+    });
+    try {
+      await multi.createWorkspace(goal.backendKey as BackendKey, {
+        projectName: goal.projectName,
+        workspaceName,
+        branchName: workspaceName,
+        parentWorkspaceName: goal.previousWorkspaceName,
+      });
+      await multi.listWorkspaces();
+      await multi.listSessions();
+      workspaceCreationTasks.completeTaskByWorkspaceId(`${goal.projectName}:${workspaceName}`);
+      toast.success(`Created workspace ${workspaceName}`);
+    } catch (error) {
+      workspaceCreationTasks.failTask(taskId, error instanceof Error ? error.message : String(error));
+      flow.showMessage({
+        title: 'Create Workspace Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    }
+  }, [flow, multi, workspaceCreationTasks]);
+
+  const getPersistedGoalId = useCallback((goal: KanbanGoalItem) => {
+    const prefix = `${goal.projectName}:`;
+    return goal.id.startsWith(prefix) ? goal.id.slice(prefix.length) : goal.id;
+  }, []);
+
+  const getGoalMoveToken = useCallback((goal: KanbanGoalItem) => (
+    goal.workspaceName ?? goal.plannedWorkspaceName ?? getPersistedGoalId(goal)
+  ), [getPersistedGoalId]);
+
+  const handleSelectPlannedGoal = useCallback((goal: KanbanGoalItem) => {
+    setSelectedGoalKey(goal.selectionKey);
+    setGoalDetailMessage(null);
+    setGoalStackStatus(null);
+  }, []);
+
+  const showGoalChainsCommand = useCallback(() => {
+    const chains = Array.from(
+      allGoalItems.reduce((map, goal) => {
+        const existing = map.get(goal.chainId);
+        const goals = [...(existing?.goals ?? []), goal].sort((a, b) => a.chainPosition - b.chainPosition);
+        map.set(goal.chainId, {
+          chainId: goal.chainId,
+          title: goal.chainTitle,
+          goals,
+        });
+        return map;
+      }, new Map<string, { chainId: string; title: string; goals: KanbanGoalItem[] }>()),
+      ([, value]) => value,
+    );
+
+    if (chains.length === 0) {
+      flow.showMessage({
+        title: 'Goal Chains',
+        message: 'No goal chains are planned in this project yet.',
+        variant: 'info',
+      });
+      return;
+    }
+
+    flow.showSelect<string>({
+      title: 'Goal Chains',
+      searchable: true,
+      options: chains.map((chain) => ({
+        label: chain.title,
+        description: `${chain.goals.length} goal${chain.goals.length === 1 ? '' : 's'} · ${chain.goals.map((goal) => goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title).join(' → ')}`,
+        value: chain.chainId,
+      })),
+      onSelect: (chainId) => {
+        const firstGoal = chains.find((chain) => chain.chainId === chainId)?.goals[0];
+        if (firstGoal) {
+          handleSelectPlannedGoal(firstGoal);
+        }
+        flow.close();
+      },
+    });
+  }, [allGoalItems, flow, handleSelectPlannedGoal]);
+
+  const resolveGoalCommandWorkspace = useCallback((goal: KanbanGoalItem) => {
+    if (goal.workspaceName) {
+      return allWorkspaceEntries.find((workspace) =>
+        workspace.backendKey === goal.backendKey &&
+        workspace.projectName === goal.projectName &&
+        workspace.name === goal.workspaceName,
+      ) ?? null;
+    }
+    if (selectedWorkspaceForDetail && selectedWorkspaceForDetail.backendKey === goal.backendKey && selectedWorkspaceForDetail.projectName === goal.projectName) {
+      return selectedWorkspaceForDetail;
+    }
+    return allWorkspaceEntries.find((workspace) =>
+      workspace.backendKey === goal.backendKey &&
+      workspace.projectName === goal.projectName,
+    ) ?? null;
+  }, [allWorkspaceEntries, selectedWorkspaceForDetail]);
+
+
+  const getGoalMutationBackend = useCallback((goal: KanbanGoalItem) => {
+    const workspace = resolveGoalCommandWorkspace(goal);
+    const backendKey =
+      (workspace?.backendKey as BackendKey | undefined) ??
+      (goal.backendKey as BackendKey | undefined) ??
+      activeBackendKey ??
+      multiMachineState.backendOrder[0] ??
+      multi.localBackendKey;
+    return { backend: multi.getBackend(backendKey), workspace };
+  }, [activeBackendKey, multi, multiMachineState.backendOrder, resolveGoalCommandWorkspace]);
+  const handleSaveGoalDoc = useCallback(async (goal: KanbanGoalItem, bodyMarkdown: string) => {
+    setGoalSaving(true);
+    try {
+      const updated = await multi.updateGoal(goal.backendKey as BackendKey, goal.projectName, getPersistedGoalId(goal), {
+        doc: {
+          ...(goal.doc ?? { updatedAt: new Date().toISOString(), bodyMarkdown: '' }),
+          bodyMarkdown,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      setGoalDetailMessage(`Saved goal doc: ${updated.title}`);
+      await multi.listWorkspaces();
+    } catch (error) {
+      flow.showMessage({
+        title: 'Save Goal Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getPersistedGoalId, multi]);
+  // Validation contract mutations
+
+  const handleAddGoalRequirement = useCallback(async (goal: KanbanGoalItem, input: Parameters<NonNullable<import('./session/backend.js').SessionBackend['addGoalRequirement']>>[2]) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.addGoalRequirement) throw new Error('This backend does not support declaring requirements.');
+      const requirement = await backend.addGoalRequirement(goal.projectName, getPersistedGoalId(goal), input);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Added requirement: ${requirement.title}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Add Requirement Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleUpdateGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string, patch: Parameters<NonNullable<import('./session/backend.js').SessionBackend['updateGoalRequirement']>>[3]) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.updateGoalRequirement) throw new Error('This backend does not support editing requirements.');
+      const requirement = await backend.updateGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId, patch);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Updated requirement: ${requirement.title}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Update Requirement Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleRemoveGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.removeGoalRequirement || !backend?.addGoalRequirement) {
+        throw new Error('This backend does not support removing requirements.');
+      }
+      const snapshot = goal.validation?.requirements?.[requirementId];
+      await backend.removeGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage('Requirement removed.');
+      if (snapshot) {
+        toast('Requirement removed', {
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void (async () => {
+                try {
+                  await backend.addGoalRequirement!(goal.projectName, getPersistedGoalId(goal), {
+                    title: snapshot.title,
+                    kind: snapshot.kind,
+                    rubric: snapshot.rubric,
+                    required: snapshot.required,
+                    generation: snapshot.generation,
+                    judgment: snapshot.judgment,
+                  });
+                  await multi.listWorkspaces();
+                  setGoalDetailMessage(`Restored requirement: ${snapshot.title}`);
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : String(error));
+                }
+              })();
+            },
+          },
+        });
+      }
+    } catch (error) {
+      flow.showMessage({ title: 'Remove Requirement Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleReorderGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string, position: number) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.reorderGoalRequirement) throw new Error('This backend does not support reordering requirements.');
+      await backend.reorderGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId, position);
+      await multi.listWorkspaces();
+    } catch (error) {
+      flow.showMessage({ title: 'Reorder Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleReopenGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.reopenGoalRequirement) throw new Error('This backend does not support reopening requirements.');
+      const requirement = await backend.reopenGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Reopened for review: ${requirement.title}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Reopen Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleAttachGoalEvidence = useCallback(async (goal: KanbanGoalItem, requirementId: string, input: Parameters<NonNullable<import('./session/backend.js').SessionBackend['attachGoalEvidence']>>[3]) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.attachGoalEvidence) throw new Error('This backend does not support attaching evidence.');
+      const evidence = await backend.attachGoalEvidence(goal.projectName, getPersistedGoalId(goal), requirementId, input);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Attached evidence: ${evidence.name}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Attach Evidence Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleRunGoalGeneration = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.runGoalGeneration) throw new Error('This backend does not support running generation commands.');
+      const result = await backend.runGoalGeneration(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Generation produced ${result.evidence.name}${result.autoAccepted ? ' (auto-accepted)' : ''}.`);
+    } catch (error) {
+      flow.showMessage({ title: 'Run Generation Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+
+
+  const handleSaveChainOrder = useCallback(async (draftGoals: KanbanGoalItem[]) => {
+    if (draftGoals.length < 2) return;
+    const backendKey = draftGoals[0].backendKey as BackendKey;
+    const projectName = draftGoals[0].projectName;
+    const currentGoals = allGoalItems
+      .filter((goal) => goal.backendKey === draftGoals[0].backendKey && goal.projectName === projectName && goal.chainId === draftGoals[0].chainId)
+      .sort((a, b) => a.chainPosition - b.chainPosition);
+    const currentOrder = currentGoals.map(getGoalMoveToken);
+    const desiredOrder = draftGoals.map(getGoalMoveToken);
+
+    try {
+      for (let index = 0; index < desiredOrder.length; index += 1) {
+        if (currentOrder[index] === desiredOrder[index]) continue;
+        const sourceToken = desiredOrder[index];
+        const sourceIndex = currentOrder.indexOf(sourceToken);
+        const targetToken = currentOrder[index];
+        if (sourceIndex < 0 || !targetToken) continue;
+        await multi.moveGoalInChain(backendKey, projectName, sourceToken, targetToken, 'before');
+        currentOrder.splice(sourceIndex, 1);
+        currentOrder.splice(index, 0, sourceToken);
+      }
+      setBoardGoalOrderMessage('Goal order saved; git stack unchanged. Run stack status when ready.');
+      setGoalDetailMessage('Goal order saved; git stack unchanged. Run stack status when ready.');
+      await multi.listWorkspaces();
+    } catch (error) {
+      flow.showMessage({
+        title: 'Save Goal Order Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      throw error;
+    }
+  }, [allGoalItems, flow, getGoalMoveToken, multi]);
+  const handleRunGoalJudgment = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.runGoalJudgment) throw new Error('This backend does not support running judgments.');
+      const result = await backend.runGoalJudgment(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Judgment recorded: ${result.review.tone === 'green' ? 'passed' : result.review.tone === 'amber' ? 'needs changes' : 'failed'}.`);
+    } catch (error) {
+      flow.showMessage({ title: 'Run Judgment Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleRecordGoalHumanReview = useCallback(async (goal: KanbanGoalItem, requirementId: string, decision: 'pass' | 'changes' | 'fail', note: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.recordGoalHumanReview) throw new Error('This backend does not support recording reviews.');
+      const review = await backend.recordGoalHumanReview(goal.projectName, getPersistedGoalId(goal), requirementId, decision, note);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Review recorded: ${review.tone === 'green' ? 'passed' : review.tone === 'amber' ? 'needs changes' : 'failed'}.`);
+    } catch (error) {
+      flow.showMessage({ title: 'Record Review Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+
+  const handleRefreshGoalStackStatus = useCallback(async (goal: KanbanGoalItem) => {
+    const workspaceName = goal.workspaceName ?? goal.plannedWorkspaceName;
+    if (!workspaceName) {
+      setGoalDetailMessage('Goal has no workspace name to validate.');
+      return;
+    }
+    try {
+      const status = await multi.getGoalStackStatus(goal.backendKey as BackendKey, goal.projectName, workspaceName);
+      setGoalStackStatus(status);
+      setGoalEdgeStatusByKey((current) => {
+        const next = { ...current };
+        for (const edge of status.edges) {
+          next[toGoalCacheKey(goal.backendKey, goal.projectName, edge.childGoalId)] = {
+            status: edge.status,
+            message: edge.message,
+          };
+        }
+        return next;
+      });
+      setGoalDetailMessage(null);
+    } catch (error) {
+      flow.showMessage({
+        title: 'Stack Status Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    }
+  }, [flow, multi]);
+
 
   // ─── Parse review deep-link on load ───────────────────────────────────────
 
@@ -1663,6 +2172,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         },
       });
     },
+    onShowGoalChains: showGoalChainsCommand,
   });
 
   const inboxActions = useInboxActions({
@@ -2172,6 +2682,29 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           </div>
         )}
         {notesModal}
+        {selectedGoal && (
+          <GoalDetailPanel
+            goal={selectedGoal}
+            chainGoals={selectedGoalChainGoals}
+            stackStatus={goalStackStatus}
+            message={goalDetailMessage}
+            saving={goalSaving}
+            onClose={() => setSelectedGoalKey(null)}
+            onSaveDoc={handleSaveGoalDoc}
+            onCreateWorkspace={handleCreatePlannedGoalWorkspace}
+            onSaveChainOrder={handleSaveChainOrder}
+            onRefreshStackStatus={handleRefreshGoalStackStatus}
+            onAddRequirement={handleAddGoalRequirement}
+            onUpdateRequirement={handleUpdateGoalRequirement}
+            onRemoveRequirement={handleRemoveGoalRequirement}
+            onReorderRequirement={handleReorderGoalRequirement}
+            onReopenRequirement={handleReopenGoalRequirement}
+            onAttachEvidence={handleAttachGoalEvidence}
+            onRunGeneration={handleRunGoalGeneration}
+            onRunJudgment={handleRunGoalJudgment}
+            onRecordHumanReview={handleRecordGoalHumanReview}
+          />
+        )}
       </>
     );
 
@@ -2333,6 +2866,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           const isActive = visibleSelectionKey === selectionKey;
           const attachedHere = workspaceAttachedPanes.length > 0 || attachedWorkspaceSelectionKey === selectionKey;
           const workspaceBackendKey = backendKeyFromSelectionKey(selectionKey);
+          const workspaceGoal = allGoalItems.find((goal) =>
+            goal.backendKey === workspaceBackendKey &&
+            goal.projectName === workspace.projectName &&
+            goal.workspaceName === workspace.name
+          ) ?? null;
 
           return (
             <div
@@ -2355,6 +2893,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 allWorkspaces={allWorkspaceEntries}
                 workspaceStatusById={workspaceStatusById}
                 runtime={runtime}
+                goal={workspaceGoal}
+                onOpenGoalDetail={handleSelectPlannedGoal}
                 onSelectWorkspace={handleSelectWorkspaceFromDetail}
                 onOpenAgentSession={handleOpenAgentSession}
                 onCreateAgentSession={handleCreateAgentSession}
@@ -2443,7 +2983,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return (
       <>
         <BoardPage
-          groups={workspaceBoardState.groups}
+          groups={boardGroupsWithGoalStatus}
           selectedWorkspaceId={workspaceBoardState.selectedWorkspaceId}
           onSelectWorkspace={handleBoardSelectWorkspace}
           onPhaseChange={workspaceBoardState.setPhase}
@@ -2458,10 +2998,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onDisconnect={() => window.location.reload()}
           deletingWorkspaceIds={deletingWorkspaceTasksByKey}
           creatingWorkspaceIds={creatingWorkspaceTasksById}
+          onCreatePlannedGoalWorkspace={handleCreatePlannedGoalWorkspace}
+          onSelectPlannedGoal={handleSelectPlannedGoal}
+          onSaveChainOrder={handleSaveChainOrder}
+          boardMessage={boardGoalOrderMessage}
           loading={boardLoading}
           loadingLabel="Loading worktrees..."
         />
         {renderDetailPages(null)}
+
         {overlays}
       </>
     );

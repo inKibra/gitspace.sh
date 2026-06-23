@@ -272,6 +272,13 @@ export function useSessionEngine() {
   const undismissReplay = useCallback((backendKey: BackendKey, replayId: string) =>
     withBackend(backendKey, (b) => b.undismissReplay?.(replayId) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const runSpaceCommand = useCallback((backendKey: BackendKey, workspaceId: string, argsText: string) =>
+    withBackend(backendKey, (b) => {
+      if (!b.runSpaceCommand) {
+        throw new SpacesError(`Backend does not support workspace-scoped commands: ${backendKey}`, 'SYSTEM_ERROR', 2);
+      }
+      return b.runSpaceCommand(workspaceId, argsText);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
   const activeBackendState = useMemo(() => {
     if (!state.activeBackendKey) return null;
     return state.backends[state.activeBackendKey] ?? null;
@@ -331,6 +338,7 @@ export function useSessionEngine() {
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
+    runSpaceCommand,
   };
 }
 

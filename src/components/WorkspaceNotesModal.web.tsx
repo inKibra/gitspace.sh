@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useMemo, useState } from 'react';
 import type { WorkspaceNote } from '../types/workspace.js';
+import { MarkdownEditor, type MarkdownEditorMode } from './MarkdownEditor.web.js';
 
 export interface WorkspaceNotesModalProps {
   workspaceName: string;
@@ -17,12 +18,6 @@ export interface WorkspaceNotesModalProps {
   onClose: () => void;
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
 
 function deriveNoteLabel(body: string): string {
   const lines = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -44,23 +39,6 @@ function formatDate(iso: string): string {
   });
 }
 
-function renderMarkdown(md: string): string {
-  let html = escapeHtml(md);
-  html = html.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
-  html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  html = html.replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>');
-  html = html.replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>');
-  html = html.split(/\n{2,}/).map((block) => {
-    if (block.startsWith('<h') || block.startsWith('<pre>') || block.startsWith('<ul>')) return block;
-    return `<p>${block.replace(/\n/g, '<br />')}</p>`;
-  }).join('');
-  return html || '<p><em>Empty note.</em></p>';
-}
 
 export function WorkspaceNotesModal({
   workspaceName,
@@ -77,7 +55,7 @@ export function WorkspaceNotesModal({
   onClose,
 }: WorkspaceNotesModalProps) {
   const [query, setQuery] = useState('');
-  const [viewMode, setViewMode] = useState<'split' | 'edit' | 'preview'>('split');
+  const [viewMode, setViewMode] = useState<MarkdownEditorMode>('split');
 
   const filteredNotes = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -151,17 +129,12 @@ export function WorkspaceNotesModal({
               ) : null}
             </div>
           </div>
-          <div className="min-h-0 grid" style={{ gridTemplateRows: '56px 1fr' }}>
-            <div className="flex items-center gap-3 px-4 border-b border-[var(--gs-border)] bg-[rgba(255,255,255,0.02)]">
-              <div className="inline-flex rounded-lg border border-[var(--gs-border)] bg-[rgba(255,255,255,0.02)] p-1">
-                <button type="button" className={`px-3 py-1.5 rounded-md text-xs ${viewMode === 'split' ? 'bg-[rgba(155,255,105,0.12)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`} onClick={() => setViewMode('split')}>Split</button>
-                <button type="button" className={`px-3 py-1.5 rounded-md text-xs ${viewMode === 'edit' ? 'bg-[rgba(155,255,105,0.12)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`} onClick={() => setViewMode('edit')}>Edit</button>
-                <button type="button" className={`px-3 py-1.5 rounded-md text-xs ${viewMode === 'preview' ? 'bg-[rgba(155,255,105,0.12)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`} onClick={() => setViewMode('preview')}>Preview</button>
-              </div>
-              <div className="min-w-0 flex-1 text-xs text-[var(--gs-text-dim)] truncate">
-                {selectedNote ? `${deriveNoteLabel(selectedNote.body)} · Updated ${formatDate(selectedNote.updatedAt)}` : loading ? 'Loading notes…' : 'No note selected'}
-              </div>
-              <div className="flex items-center gap-2">
+          <div className="min-h-0 flex flex-col">
+            <div className="px-4 py-3 border-b border-[var(--gs-border)] bg-[rgba(255,255,255,0.02)]">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1 text-xs text-[var(--gs-text-dim)] truncate">
+                  {selectedNote ? `${deriveNoteLabel(selectedNote.body)} · Updated ${formatDate(selectedNote.updatedAt)}` : loading ? 'Loading notes…' : 'No note selected'}
+                </div>
                 <button
                   type="button"
                   className="gs-chip-button"
@@ -171,28 +144,20 @@ export function WorkspaceNotesModal({
                 >
                   Delete
                 </button>
-                <button
-                  type="button"
-                  className="gs-chip-button"
-                  style={{ color: 'var(--gs-text)', borderColor: 'rgba(155,255,105,0.28)', background: 'rgba(155,255,105,0.10)' }}
-                  onClick={() => void onSaveNote()}
-                  disabled={!selectedNote || saving}
-                >
-                  {saving ? 'Saving…' : 'Save note'}
-                </button>
               </div>
             </div>
-            <div className={`grid min-h-0 ${viewMode === 'split' ? 'grid-cols-2' : viewMode === 'edit' ? 'grid-cols-[1fr_0]' : 'grid-cols-[0_1fr]'}`}>
-              <div className={`min-h-0 overflow-hidden ${viewMode === 'preview' ? 'border-r-0' : 'border-r border-[var(--gs-border)]'}`}>
-                <textarea
-                  className="w-full h-full resize-none border-0 outline-none bg-[#0a0c09] text-[var(--gs-text)] p-5 font-mono text-xs leading-6"
-                  value={draftBody}
-                  onChange={(event) => onChangeDraftBody(event.target.value)}
-                />
-              </div>
-              <div className="min-h-0 overflow-auto bg-[#0b0d0a] px-6 py-5 text-[var(--gs-text)] leading-7">
-                <div dangerouslySetInnerHTML={{ __html: renderMarkdown(draftBody) }} />
-              </div>
+            <div className="flex-1 min-h-0 p-4">
+              <MarkdownEditor
+                body={draftBody}
+                mode={viewMode}
+                dirty={!!selectedNote}
+                saving={saving}
+                emptyPreviewHtml="<p><em>Empty note.</em></p>"
+                onChange={onChangeDraftBody}
+                onModeChange={setViewMode}
+                onSave={selectedNote ? () => void onSaveNote() : undefined}
+                minHeightPx={460}
+              />
             </div>
           </div>
         </div>

@@ -23,6 +23,7 @@ import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecy
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
 
+import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
 
@@ -99,6 +100,7 @@ export interface CreateWorkspaceParams {
   baseBranch?: string;
   workspaceSource?: WorkspaceSource;
   linearIssue?: SessionLinearIssueSummary;
+  parentWorkspaceName?: string;
 }
 
 export interface DeleteProjectParams {
@@ -129,7 +131,21 @@ export interface SessionBackend {
   listLinearIssues(projectName: string): Promise<SessionLinearIssueSummary[]>;
   listWorkspaces(): Promise<void>;
   /** Set workspace kanban phase; then listWorkspaces is implied (local) or caller should refresh (remote). */
-  setWorkspaceStatus?(projectName: string, workspaceName: string, phase: import('../types/config.js').WorkspacePhase): Promise<void>;
+  setWorkspaceStatus?(projectName: string, workspaceName: string, phase: import('../types/config.js').WorkspacePhase, options?: { cascade?: boolean }): Promise<void>;
+  previewWorkspaceStatusChange?(projectName: string, workspaceName: string, phase: import('../types/config.js').WorkspacePhase): Promise<WorkspacePhaseChangePreview>;
+  addGoalNearWorkspace?(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<GoalRecord>;
+  updateGoal?(projectName: string, goalId: string, updates: GoalUpdateInput): Promise<GoalRecord>;
+  moveGoalInChain?(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<GoalChain>;
+  getGoalStackStatus?(projectName: string, workspaceName: string): Promise<ChainStackStatus>;
+  addGoalRequirement?(projectName: string, goalId: string, input: import('../core/goal-validation.js').AddRequirementInput): Promise<import('../types/goals.js').Requirement>;
+  updateGoalRequirement?(projectName: string, goalId: string, requirementId: string, patch: import('../core/goal-validation.js').UpdateRequirementInput): Promise<import('../types/goals.js').Requirement>;
+  removeGoalRequirement?(projectName: string, goalId: string, requirementId: string): Promise<void>;
+  reorderGoalRequirement?(projectName: string, goalId: string, requirementId: string, position: number): Promise<void>;
+  reopenGoalRequirement?(projectName: string, goalId: string, requirementId: string): Promise<import('../types/goals.js').Requirement>;
+  attachGoalEvidence?(projectName: string, goalId: string, requirementId: string, input: import('../core/goal-validation.js').AttachEvidenceInput): Promise<import('../types/goals.js').Evidence>;
+  runGoalGeneration?(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../types/goals.js').Requirement; evidence: import('../types/goals.js').Evidence; autoAccepted: boolean }>;
+  runGoalJudgment?(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../types/goals.js').Requirement; review: import('../types/goals.js').Review }>;
+  recordGoalHumanReview?(projectName: string, goalId: string, requirementId: string, decision: import('../core/goal-validation.js').HumanReviewDecision, note: string, createdBy?: string): Promise<import('../types/goals.js').Review>;
   listSessions(workspaceId?: string): Promise<void>;
   listReplays?(workspaceId?: string, includeDismissed?: boolean): Promise<void>;
   createProject(params: CreateProjectParams): Promise<void>;

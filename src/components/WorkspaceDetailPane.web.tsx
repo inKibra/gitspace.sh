@@ -174,6 +174,8 @@ function SidebarContent(props: {
   onStopProcess?: WorkspaceDetailPaneProps['onStopProcess'];
   onDeleteSession?: WorkspaceDetailPaneProps['onDeleteSession'];
   onDeleteWorkspace?: WorkspaceDetailPaneProps['onDeleteWorkspace'];
+  goal?: WorkspaceDetailPaneProps['goal'];
+  onOpenGoalDetail?: WorkspaceDetailPaneProps['onOpenGoalDetail'];
   onOpenGitHubPullRequest?: WorkspaceDetailPaneProps['onOpenGitHubPullRequest'];
   onOpenReview?: WorkspaceDetailPaneProps['onOpenReview'];
   onRequestStatusChange?: WorkspaceDetailPaneProps['onRequestStatusChange'];
@@ -190,6 +192,7 @@ function SidebarContent(props: {
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
     onRequestStatusChange, onOpenNotes, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
+    goal, onOpenGoalDetail,
   } = props;
   const {
     workspaceReplays, activeAgentSessions, archivedAgentSessions, showArchivedAgents, toggleArchivedAgents,
@@ -401,6 +404,9 @@ function SidebarContent(props: {
           const onClick = () => void detailActions.footerAction(action.id);
           return <SidebarItem key={action.id} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
         })}
+        {goal && onOpenGoalDetail && (
+          <SidebarItem label="Goal" rightLabel={`⛓ ${goal.chainPosition}/${goal.chainLength}`} onClick={() => act(() => onOpenGoalDetail(goal))} />
+        )}
         <SidebarItem label="Notes" rightLabel={notesSummary?.total ? `${notesSummary.total}` : 'open'} onClick={() => act(() => onOpenNotes?.(workspace.id))} />
         {onDeleteWorkspace && (
           <SidebarItem label="Delete Workspace" rightLabel="danger" onClick={() => onDeleteWorkspace(workspace)} />
@@ -438,6 +444,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     onRequestStatusChange,
     onOpenNotes,
     onOpenEvents,
+    goal,
+    onOpenGoalDetail,
     onOpenAgentSession,
     onCreateAgentSession,
     onKillAgentSession,
@@ -658,6 +666,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 onOpenReview={onOpenReview}
                 onRequestStatusChange={onRequestStatusChange}
                 onOpenNotes={onOpenNotes}
+                goal={goal}
+                onOpenGoalDetail={onOpenGoalDetail}
                 onOpenEvents={onOpenEvents}
                 agentSessionCount={agentSessionCount}
                 pendingPermissions={pendingPermissions}
@@ -752,6 +762,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   onOpenReview={onOpenReview}
                   onRequestStatusChange={onRequestStatusChange}
                   onOpenNotes={onOpenNotes}
+                  goal={goal}
+                  onOpenGoalDetail={onOpenGoalDetail}
                   onOpenEvents={onOpenEvents}
                   agentSessionCount={agentSessionCount}
                   pendingPermissions={pendingPermissions}

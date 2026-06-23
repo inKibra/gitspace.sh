@@ -20,6 +20,7 @@ export const COMMAND_PALETTE_COMMAND_DEFS = [
   { id: 'open-review', label: 'Open Review', shortcut: '' },
   { id: 'open-editor', label: 'Open in Editor…', shortcut: '' },
   { id: 'open-service', label: 'Open Service in Browser', shortcut: '' },
+  { id: 'show-goal-chains', label: 'Show Goal Chains', shortcut: '' },
 ] as const;
 
 export type CommandPaletteCommandId = (typeof COMMAND_PALETTE_COMMAND_DEFS)[number]['id'];

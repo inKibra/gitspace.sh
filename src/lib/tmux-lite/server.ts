@@ -79,7 +79,9 @@ import { listAvailableEditors, openWorkspaceInEditor } from '../../utils/open-ed
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setInProcessSessionSource } from '../processes/ports.js';
-import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, setWorkspaceStatus, updateWorkspaceNote } from '../../core/workspace-metadata.js';
+import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
+import { addGoalNearWorkspace, applyWorkspaceGoalPhaseChange, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
+import { getSpaceStackStatus } from '../../commands/space-goals.js';
 import { buildMachineSnapshot } from './machine/build.js';
 import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
@@ -2911,9 +2913,19 @@ routerListener = Bun.listen({
             break;
 
 
+
+          case 'workspace-phase-preview':
+            try {
+              res = { type: 'workspace-phase-preview', preview: previewWorkspaceGoalPhaseChange(cmd.projectName, cmd.workspaceName, cmd.phase) };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to preview workspace phase: ${errMsg}` };
+            }
+            break;
+
           case 'workspace-set-phase':
             try {
-              setWorkspaceStatus(cmd.projectName, cmd.workspaceName, cmd.phase);
+              applyWorkspaceGoalPhaseChange(cmd.projectName, cmd.workspaceName, cmd.phase, { cascade: cmd.cascade });
               void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'ok' };
             } catch (e) {
@@ -3141,6 +3153,41 @@ routerListener = Bun.listen({
               }
               void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'ok' };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-update':
+            try {
+              res = { type: 'goal', goal: updateGoalRecord(cmd.projectName, cmd.goalId, cmd.updates) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-add-near-workspace':
+            try {
+              res = { type: 'goal', goal: addGoalNearWorkspace(cmd.projectName, cmd.workspaceName, cmd.title, cmd.position) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-reorder':
+            try {
+              res = { type: 'goal-chain', chain: moveGoalInChain(cmd.projectName, cmd.sourceToken, cmd.targetToken, cmd.position) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-stack-status':
+            try {
+              res = { type: 'goal-stack-status', status: getSpaceStackStatus({ project: cmd.projectName, workspace: cmd.workspaceName }) };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }

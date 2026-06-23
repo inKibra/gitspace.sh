@@ -37,6 +37,7 @@ interface ExecuteCommandPaletteActionArgs<T extends WorkspaceInfo & CommandPalet
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
   onOpenReview?: (workspace: T) => void | Promise<void>;
   onOpenEditor?: (workspace: T) => void | Promise<void>;
+  onShowGoalChains?: () => void | Promise<void>;
 }
 
 export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPaletteWorkspaceLike>(
@@ -64,6 +65,7 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     onOpenGitHubPr,
     onOpenReview,
     onOpenEditor,
+    onShowGoalChains,
   } = args;
 
   if (commandId === 'open-github-pr') {
@@ -105,6 +107,19 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     return;
   }
 
+
+  if (commandId === 'show-goal-chains') {
+    if (onShowGoalChains) {
+      void onShowGoalChains();
+    } else {
+      showMessage({
+        title: 'Goal Chains',
+        message: 'Goal chains are not available in this view.',
+        variant: 'info',
+      });
+    }
+    return;
+  }
   const sharedCommand = resolveSharedCommand(commandId, { workspace, projectName });
   switch (sharedCommand.kind) {
     case 'add-repo':

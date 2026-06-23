@@ -1,5 +1,5 @@
 /**
- * gssh space [context|review|notes|service|hosting|events|bundle]
+ * gssh space [context|goal|chain|stack|review|notes|service|hosting|events|bundle]
  *
  * Hidden workspace-scoped command surface. Typical usage inside a workspace is
  * `space review list`, not `gssh space review list`.
@@ -14,6 +14,10 @@ import { withErrorHandler } from '../error.js';
 import { useSessionContext, getWorkspacePath } from '../workspace-context.js';
 import { logger } from '../../utils/logger.js';
 
+
+function collectRepeated(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
 function shouldRenderWorkspaceScopedUsage(): boolean {
   const ctx = useSessionContext();
   return !!(ctx?.project && ctx.workspace);
@@ -84,6 +88,9 @@ export function registerSpaceCommands(parent: Command): void {
     }));
 
   registerSpaceReviewCommands(cmd);
+  registerSpaceGoalCommands(cmd);
+  registerSpaceChainCommands(cmd);
+  registerSpaceStackCommands(cmd);
   registerSpaceNotesCommands(cmd);
   registerSpaceServiceCommands(cmd);
   registerSpaceHostingCommands(cmd);
@@ -92,6 +99,316 @@ export function registerSpaceCommands(parent: Command): void {
   configureSpaceHelpRecursively(cmd);
 }
 
+
+
+function registerSpaceGoalCommands(space: Command): void {
+  const goal = space
+    .command('goal')
+    .description('Author goal doc, declare validation contract, and judge requirements');
+
+  goal
+    .command('show')
+    .description('Show the current goal document')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceGoal } = await import('../../commands/space-goals.js');
+      showSpaceGoal(ctx, options);
+    }));
+
+  goal
+    .command('set')
+    .description('Replace the current goal document')
+    .option('--file <path>', 'Read goal markdown from file')
+    .option('--stdin', 'Read goal markdown from stdin')
+    .option('--body <text>', 'Goal markdown body')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { setSpaceGoal } = await import('../../commands/space-goals.js');
+      setSpaceGoal(ctx, options);
+    }));
+
+  goal
+    .command('edit')
+    .description('Edit the current goal document with EDITOR')
+    .option('--editor <command>', 'Editor command')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { editSpaceGoal } = await import('../../commands/space-goals.js');
+      editSpaceGoal(ctx, options);
+    }));
+
+  goal
+    .command('status')
+    .description('Show validation readiness for this goal')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceGoalStatus } = await import('../../commands/space-goals.js');
+      showSpaceGoalStatus(ctx, options);
+    }));
+
+  const requirement = goal
+    .command('requirement')
+    .description('Declare artifact requirements; each requirement owns its rubric, generation, and judgment');
+
+  requirement
+    .command('add')
+    .description('Declare an artifact requirement on the validation contract')
+    .requiredOption('--title <title>', 'Requirement title (e.g. "Screenshot showing the hover state")')
+    .requiredOption('--kind <kind>', 'Artifact kind: screenshot, video, test-output, note, file, url')
+    .requiredOption('--rubric <text>', 'Acceptance criteria: what makes this evidence acceptable')
+    .requiredOption('--gen <kind>', 'Generation: manual | command')
+    .option('--gen-command <command>', 'Command to run when --gen=command')
+    .requiredOption('--judge <kind>', 'Judgment: human | llm | command')
+    .option('--judge-command <command>', 'Judgment command when --judge=command')
+    .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches', 'exit-zero')
+    .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
+    .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
+    .option('--model-hint <name>', 'Preferred LLM model when --judge=llm')
+    .option('--optional', 'Mark the requirement optional (default: required)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      addSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('update')
+    .description('Update an existing requirement on the validation contract')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--title <title>', 'New requirement title')
+    .option('--kind <kind>', 'Artifact kind: screenshot, video, test-output, note, file, url')
+    .option('--rubric <text>', 'Acceptance criteria')
+    .option('--gen <kind>', 'Generation: manual | command')
+    .option('--gen-command <command>', 'Command to run when --gen=command')
+    .option('--judge <kind>', 'Judgment: human | llm | command')
+    .option('--judge-command <command>', 'Judgment command when --judge=command')
+    .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches')
+    .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
+    .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
+    .option('--model-hint <name>', 'Preferred LLM model when --judge=llm')
+    .option('--required', 'Mark the requirement required')
+    .option('--optional', 'Mark the requirement optional')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { updateSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      updateSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('remove')
+    .description('Remove an artifact requirement from this goal')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { removeSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      removeSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('list')
+    .description('List artifact requirements on this goal')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { listSpaceGoalRequirements } = await import('../../commands/space-goals.js');
+      listSpaceGoalRequirements(ctx, options);
+    }));
+
+  requirement
+    .command('reorder')
+    .description('Move an artifact requirement to a specific position (0-indexed)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .requiredOption('--position <index>', '0-indexed target position', (v) => parseInt(v, 10))
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { reorderSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      reorderSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('reopen')
+    .description('Reopen a requirement for re-review (sets status back to review)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { reopenSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      reopenSpaceGoalRequirement(ctx, options);
+    }));
+
+  const artifact = goal
+    .command('artifact')
+    .description('Attach or generate artifacts that fulfill a requirement');
+
+  artifact
+    .command('attach')
+    .description('Attach an artifact manually against a declared requirement')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title to fulfill')
+    .option('--name <label>', 'Display label for the attached artifact')
+    .option('--body <text>', 'Inline body (for note evidence)')
+    .option('--file <path>', 'Read body from file')
+    .option('--stdin', 'Read body from stdin')
+    .option('--path <path>', 'Local path to a file/screenshot/video')
+    .option('--url <url>', 'URL reference (for url requirements)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { attachSpaceGoalEvidence } = await import('../../commands/space-goals.js');
+      attachSpaceGoalEvidence(ctx, options);
+    }));
+
+  artifact
+    .command('run')
+    .description('Run the requirement\u2019s configured generation command to produce evidence')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { runSpaceGoalGeneration } = await import('../../commands/space-goals.js');
+      runSpaceGoalGeneration(ctx, options);
+    }));
+
+  const review = goal
+    .command('review')
+    .description('Judge a requirement against its rubric (record human review or run command/LLM judgment)');
+
+  review
+    .command('run')
+    .description('Run the requirement\u2019s configured judgment (command or LLM)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { runSpaceGoalJudgment } = await import('../../commands/space-goals.js');
+      runSpaceGoalJudgment(ctx, options);
+    }));
+
+  review
+    .command('record')
+    .description('Record a human review decision for a requirement')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .requiredOption('--decision <decision>', 'pass | changes | fail')
+    .option('--body <text>', 'Review note')
+    .option('--file <path>', 'Read note from file')
+    .option('--stdin', 'Read note from stdin')
+    .option('--created-by <name>', 'Reviewer identity label')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { recordSpaceGoalHumanReview } = await import('../../commands/space-goals.js');
+      recordSpaceGoalHumanReview(ctx, options);
+    }));
+}
+
+function registerSpaceChainCommands(space: Command): void {
+  const chain = space
+    .command('chain')
+    .description('Manage this space linear goal chain');
+
+  chain
+    .command('show')
+    .description('Show this goal chain')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceChain } = await import('../../commands/space-goals.js');
+      showSpaceChain(ctx, options);
+    }));
+
+  chain
+    .command('add-after')
+    .description('Add a planned goal after the current workspace goal')
+    .requiredOption('--title <title>', 'Goal title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceChainGoal } = await import('../../commands/space-goals.js');
+      addSpaceChainGoal(ctx, options.title, 'after', options);
+    }));
+
+  chain
+    .command('add-before')
+    .description('Add a planned goal before the current workspace goal')
+    .requiredOption('--title <title>', 'Goal title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceChainGoal } = await import('../../commands/space-goals.js');
+      addSpaceChainGoal(ctx, options.title, 'before', options);
+    }));
+
+  chain
+    .command('move-before')
+    .description('Move the current goal before another goal in the current project')
+    .argument('<target>', 'Goal id, workspace name, planned workspace name, or title to move before')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title to move (defaults to current workspace goal)')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (targetToken, options) => {
+      const ctx = requireSessionContext();
+      const { moveSpaceChainGoal } = await import('../../commands/space-goals.js');
+      moveSpaceChainGoal(ctx, options.goal ?? ctx.workspace, targetToken, 'before', options);
+    }));
+
+  chain
+    .command('move-after')
+    .description('Move the current goal after another goal in the current project')
+    .argument('<target>', 'Goal id, workspace name, planned workspace name, or title to move after')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title to move (defaults to current workspace goal)')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (targetToken, options) => {
+      const ctx = requireSessionContext();
+      const { moveSpaceChainGoal } = await import('../../commands/space-goals.js');
+      moveSpaceChainGoal(ctx, options.goal ?? ctx.workspace, targetToken, 'after', options);
+    }));
+
+  chain
+    .command('create-workspace')
+    .description('Create a workspace for a planned goal')
+    .option('--goal <goal>', 'Goal id, planned workspace name, or title (defaults to current goal)')
+    .option('--name <workspace>', 'Workspace name')
+    .option('--branch <branch>', 'Branch name')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { createSpaceChainWorkspace } = await import('../../commands/space-goals.js');
+      await createSpaceChainWorkspace(ctx, options);
+    }));
+}
+
+function registerSpaceStackCommands(space: Command): void {
+  const stack = space
+    .command('stack')
+    .description('Validate this space git stack');
+
+  stack
+    .command('status')
+    .description('Show adjacent goal workspace ancestry status')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceStackStatus } = await import('../../commands/space-goals.js');
+      showSpaceStackStatus(ctx, options);
+    }));
+}
 
 function registerSpaceNotesCommands(space: Command): void {
   const notes = space

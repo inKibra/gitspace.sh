@@ -8,7 +8,7 @@ import {
   type AgentSessionCommandResult,
 } from './errors.js';
 import type { BackendScopedWorkspaceRef } from '../../machine/multi/types.js';
-
+import type { WorkspacePhaseChangePreview } from '../../types/goals.js';
 export interface WorkspaceStatusChangeValue {
   workspaceRef: BackendScopedWorkspaceRef;
   phase: WorkspacePhase;
@@ -20,9 +20,14 @@ export interface WorkspaceDeleteValue {
 }
 
 export interface AppWorkspaceLifecycleClient {
+  previewStatus: (
+    workspaceRef: BackendScopedWorkspaceRef,
+    phase: WorkspacePhase,
+  ) => Promise<AgentSessionCommandResult<WorkspacePhaseChangePreview>>;
   setStatus: (
     workspaceRef: BackendScopedWorkspaceRef,
     phase: WorkspacePhase,
+    options?: { cascade?: boolean },
   ) => Promise<AgentSessionCommandResult<WorkspaceStatusChangeValue>>;
   deleteWorkspace: (
     workspaceRef: BackendScopedWorkspaceRef,
@@ -32,7 +37,38 @@ export interface AppWorkspaceLifecycleClient {
 
 export function createAppWorkspaceLifecycleClient(context: AppClientContext): AppWorkspaceLifecycleClient {
   return {
-    setStatus: async (workspaceRef, phase) => {
+    previewStatus: async (workspaceRef, phase) => {
+      const backend = context.multi.getBackend(workspaceRef.backendKey);
+      if (!backend) {
+        return agentSessionFailure({
+          code: 'backend-unavailable',
+          message: `Backend ${workspaceRef.backendKey} is not available`,
+          workspaceId: workspaceRef.workspaceId,
+          backendKey: workspaceRef.backendKey,
+        });
+      }
+      if (!backend.previewWorkspaceStatusChange) {
+        return agentSessionFailure({
+          code: 'operation-unavailable',
+          message: 'Workspace status preview is unavailable',
+          workspaceId: workspaceRef.workspaceId,
+          backendKey: workspaceRef.backendKey,
+        });
+      }
+      try {
+        const preview = await backend.previewWorkspaceStatusChange(workspaceRef.workspaceId.split(':')[0] ?? '', workspaceRef.workspaceId.split(':')[1] ?? workspaceRef.workspaceId, phase);
+        return agentSessionSuccess(preview);
+      } catch (error) {
+        return agentSessionFailure({
+          code: 'operation-unavailable',
+          message: describeAppClientError(error, 'Failed to preview workspace status'),
+          workspaceId: workspaceRef.workspaceId,
+          backendKey: workspaceRef.backendKey,
+          cause: error,
+        });
+      }
+    },
+    setStatus: async (workspaceRef, phase, options) => {
       const backend = context.multi.getBackend(workspaceRef.backendKey);
       if (!backend) {
         return agentSessionFailure({
@@ -53,7 +89,7 @@ export function createAppWorkspaceLifecycleClient(context: AppClientContext): Ap
       }
 
       try {
-        await backend.setWorkspaceStatus(workspaceRef.workspaceId.split(':')[0] ?? '', workspaceRef.workspaceId.split(':')[1] ?? workspaceRef.workspaceId, phase);
+        await backend.setWorkspaceStatus(workspaceRef.workspaceId.split(':')[0] ?? '', workspaceRef.workspaceId.split(':')[1] ?? workspaceRef.workspaceId, phase, options);
         return agentSessionSuccess({ workspaceRef, phase });
       } catch (error) {
         return agentSessionFailure({

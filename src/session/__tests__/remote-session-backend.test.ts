@@ -508,7 +508,6 @@ describe('RemoteSessionBackend', () => {
 
   it('times out API reads when the initial machine snapshot never arrives', async () => {
     const socket = createFakeSocket();
-
     const backend = new RemoteSessionBackend({
       descriptor: {
         key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
@@ -526,7 +525,6 @@ describe('RemoteSessionBackend', () => {
       crypto: cryptoAdapter,
       handshake: handshakeAdapter,
     });
-
     await connectAndHandshakeWithoutSnapshot(backend, socket);
 
     jest.useFakeTimers();
@@ -538,6 +536,112 @@ describe('RemoteSessionBackend', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('refreshes machine state before listing workspaces', async () => {
+    const socket = createFakeSocket();
+    const events: BackendEvent[] = [];
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+    backend.onEvent((event) => events.push(event));
+    const connectPromise = backend.connect();
+    socket.handlers?.onMessage(JSON.stringify({ type: 'connection_established' }));
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'handshake', phase: 'server_hello', data: { hello: true } }));
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'handshake', phase: 'server_auth', data: { auth: true } }));
+    await connectPromise;
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'machine_snapshot', snapshot: createEmptyMachineSnapshot() }));
+    await Bun.sleep(0);
+    const listPromise = backend.listWorkspaces();
+    await Bun.sleep(0);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent[socket.sent.length - 1]) as { type: string; requestId: string };
+    expect(command.type).toBe('refresh_machine_snapshot');
+    const refreshed = createEmptyMachineSnapshot();
+    refreshed.projectsById.alpha = { id: 'alpha', name: 'alpha', path: '/tmp/alpha', repository: 'org/alpha', workspaceIds: ['alpha:ws-1'], workspaceCount: 1 };
+    refreshed.projectOrder = ['alpha'];
+    refreshed.workspacesById['alpha:ws-1'] = { id: 'alpha:ws-1', name: 'ws-1', path: '/tmp/ws-1', projectName: 'alpha', branch: 'main', summary: { terminalCount: 0, agentCount: 0, permissionAgentCount: 0 }, isStale: false };
+    refreshed.workspaceOrder = ['alpha:ws-1'];
+    refreshed.workspaceIdsByProjectId = { alpha: ['alpha:ws-1'] };
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'refresh_machine_snapshot', requestId: command.requestId, snapshot: refreshed }));
+    await listPromise;
+    expect(events).toContainEqual({ type: 'workspaces', workspaces: [expect.objectContaining({ id: 'alpha:ws-1', name: 'ws-1' })] });
+  });
+
+  it('accepts workspace-phase-preview responses from the remote machine', async () => {
+    const socket = createFakeSocket();
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket,
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+    await connectAndHandshake(backend, socket);
+    const previewPromise = backend.previewWorkspaceStatusChange('alpha', 'ws-1', 'review');
+    await Bun.sleep(0);
+    const command = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { requestId: string; type: string };
+    expect(command.type).toBe('preview_workspace_phase');
+    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
+      type: 'command_response',
+      requestId: command.requestId,
+      response: {
+        type: 'workspace-phase-preview',
+        preview: {
+          allowed: true,
+          requiresCascade: false,
+          requestedPhase: 'review',
+          affected: [],
+          message: 'ok',
+        },
+      },
+    }));
+    await expect(previewPromise).resolves.toMatchObject({ allowed: true, requestedPhase: 'review' });
+  });
+
+  it('extracts JSON payloads even when artifact content mentions exit code', () => {
+    const backend = new RemoteSessionBackend({
+      descriptor: {
+        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
+        kind: 'remote',
+        label: 'Machine 1',
+        relayUrl: 'wss://relay.test/ws',
+        machineId: 'machine-1',
+      },
+      socket: createFakeSocket(),
+      socketAdapter,
+      identity,
+      machineId: 'machine-1',
+      deviceCertificate: 'test-device-cert',
+      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
+      crypto: cryptoAdapter,
+      handshake: handshakeAdapter,
+    });
+    const output = `Artifact saved\n{"body":"saw exit code: 7 in stderr","ok":true}`;
+    expect(((backend as unknown) as { unwrapSpaceCommandOutput(output: string): string }).unwrapSpaceCommandOutput(output)).toBe('{"body":"saw exit code: 7 in stderr","ok":true}');
   });
 
   it('projects pushed agent state snapshots into machine snapshot events', async () => {

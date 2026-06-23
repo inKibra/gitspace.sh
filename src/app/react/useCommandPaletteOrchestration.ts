@@ -32,6 +32,7 @@ export interface UseCommandPaletteOrchestrationOptions<T extends WorkspaceInfo &
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
   onOpenReview?: (workspace: T) => void | Promise<void>;
   onOpenEditor?: (workspace: T) => void | Promise<void>;
+  onShowGoalChains?: () => void | Promise<void>;
 }
 
 export function useCommandPaletteOrchestration<T extends WorkspaceInfo & CommandPaletteWorkspaceLike>(options: UseCommandPaletteOrchestrationOptions<T>) {
@@ -73,6 +74,7 @@ export function useCommandPaletteOrchestration<T extends WorkspaceInfo & Command
       onOpenGitHubPr: options.onOpenGitHubPr,
       onOpenReview: options.onOpenReview,
       onOpenEditor: options.onOpenEditor,
+      onShowGoalChains: options.onShowGoalChains,
     });
   }, [options, selectedProjectName, selectedWorkspace]);
 

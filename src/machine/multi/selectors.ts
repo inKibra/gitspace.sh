@@ -1,7 +1,7 @@
 import type { SessionEngineState } from '../../session/types.js';
 import type { BackendKey } from '../../session/backend.js';
 import { selectWorkspaceAgents, selectWorkspaces, selectWorkspaceTerminals } from '../state/client.js';
-import type { MachineAgentSessionRecord, MachineSnapshot, MachineWorkspaceRecord, MachineTerminalSessionRecord } from '../../lib/tmux-lite/machine/types.js';
+import type { MachineAgentSessionRecord, MachineGoalRecord, MachineSnapshot, MachineWorkspaceRecord, MachineTerminalSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 import type { BackendMachineState, BackendScopedWorkspaceRef, MultiMachineState } from './types.js';
 
 export function toMultiMachineState(state: SessionEngineState | null): MultiMachineState {
@@ -88,6 +88,21 @@ export function selectAllWorkspaces(state: MultiMachineState): Array<{ backendKe
         },
       };
       result.push({ backendKey, workspace });
+    }
+  }
+  return result;
+}
+
+export function selectAllGoals(state: MultiMachineState): Array<{ backendKey: BackendKey; goal: MachineGoalRecord }> {
+  const result: Array<{ backendKey: BackendKey; goal: MachineGoalRecord }> = [];
+  for (const backendKey of state.backendOrder) {
+    const snapshot = state.byBackend[backendKey]?.snapshot;
+    if (!snapshot?.goalOrder || !snapshot.goalsById) continue;
+    for (const goalId of snapshot.goalOrder) {
+      const goal = snapshot.goalsById[goalId];
+      if (goal) {
+        result.push({ backendKey, goal });
+      }
     }
   }
   return result;

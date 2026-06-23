@@ -28,6 +28,7 @@ export interface UseLifecycleActionsOptions {
 	  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
 	  onWorkspaceCreateFailed?: (details: WorkspaceCreatedDetails, error: unknown) => void | Promise<void>;
 	  showCreateWorkspaceSuccessMessage?: boolean;
+  openCreateGoalFlow?: (projectName?: string | null) => void;
 }
 
 export function useLifecycleActions(options: UseLifecycleActionsOptions): UseLifecycleControllerResult {
@@ -75,6 +76,7 @@ export function useLifecycleActions(options: UseLifecycleActionsOptions): UseLif
       const result = await client.lifecycle.deleteProject(options.backendKey, projectName, params);
       if (!result.ok) throw result.error.cause ?? new Error(result.error.message);
     },
+    openCreateGoalFlow: options.openCreateGoalFlow,
     getProjectNames: options.getProjectNames,
     refreshProjects: options.refreshProjects ?? (() => undefined),
     refreshWorkspaces: options.refreshWorkspaces ?? (() => undefined),

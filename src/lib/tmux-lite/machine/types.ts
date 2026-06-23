@@ -84,6 +84,30 @@ export interface MachineWorkspaceLinearRecord {
   stateName?: string;
 }
 
+export interface MachineGoalRecord {
+  id: string;
+  chainId: string;
+  chainTitle: string;
+  title: string;
+  projectName: string;
+  phase: WorkspacePhase;
+  plannedWorkspaceName?: string;
+  workspaceName?: string;
+  status: 'planned' | 'workspace-backed';
+  chainPosition: number;
+  chainLength: number;
+  previousGoalId?: string;
+  previousWorkspaceName?: string;
+  blockedReason?: string;
+  doc?: import('../../../types/goals.js').GoalDoc;
+  validation?: import('../../../types/goals.js').GoalValidation;
+  sourceRefs?: import('../../../types/goals.js').SourceRef[];
+  updatedAt?: string;
+  stackStatus?: import('../../../types/goals.js').ChainStackEdgeStatus['status'];
+  stackStatusMessage?: string;
+}
+
+
 export interface MachineWorkspaceRecord {
   id: string;
   name: string;
@@ -99,6 +123,7 @@ export interface MachineWorkspaceRecord {
   notesSummary?: WorkspaceNotesSummary;
   pullRequest?: MachineWorkspacePullRequestRecord;
   linear?: MachineWorkspaceLinearRecord;
+  goal?: MachineGoalRecord;
   terminalSessionIds: string[];
   agentSessionIds: string[];
   processIds: string[];
@@ -213,6 +238,9 @@ export interface MachineSnapshot {
   workspacesById: Record<string, MachineWorkspaceRecord>;
   workspaceOrder: string[];
   workspaceIdsByProjectId: Record<string, string[]>;
+  goalsById?: Record<string, MachineGoalRecord>;
+  goalOrder?: string[];
+  goalIdsByProjectId?: Record<string, string[]>;
   terminalSessionsById: Record<string, MachineTerminalSessionRecord>;
   terminalSessionIdsByWorkspaceId: Record<string, string[]>;
   agentSessionsById: Record<string, MachineAgentSessionRecord>;

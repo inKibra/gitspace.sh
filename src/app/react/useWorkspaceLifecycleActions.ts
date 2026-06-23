@@ -31,6 +31,14 @@ function formatLifecycleError(action: 'set-status' | 'delete', error: AgentSessi
   return `Failed to delete workspace: ${error.message}`;
 }
 
+
+function describeCascade(preview: import('../../types/goals.js').WorkspacePhaseChangePreview): string {
+  if (preview.affected.length === 0) {
+    return preview.message;
+  }
+  return `${preview.message}\n\nAlso move:\n${preview.affected.map((item) => `• ${item.workspaceName}: ${item.from} → ${item.to}`).join('\n')}`;
+}
+
 export function useWorkspaceLifecycleActions(options: UseWorkspaceLifecycleActionsOptions): UseWorkspaceLifecycleActionsResult {
   const client = useAppClient(options.client ?? null);
 
@@ -39,13 +47,48 @@ export function useWorkspaceLifecycleActions(options: UseWorkspaceLifecycleActio
   }, [options.onError]);
 
   const setStatus = useCallback(async (workspaceRef: BackendScopedWorkspaceRef, phase: WorkspacePhase): Promise<boolean> => {
-    const result = await client.workspaceLifecycle.setStatus(workspaceRef, phase);
-    if (!result.ok) {
-      reportError('set-status', result.error);
+    const previewResult = await client.workspaceLifecycle.previewStatus(workspaceRef, phase);
+    if (!previewResult.ok) {
+      reportError('set-status', previewResult.error);
       return false;
     }
-    return true;
-  }, [client, reportError]);
+
+    const apply = async (cascade: boolean): Promise<boolean> => {
+      const result = await client.workspaceLifecycle.setStatus(workspaceRef, phase, { cascade });
+      if (!result.ok) {
+        reportError('set-status', result.error);
+        return false;
+      }
+      return true;
+    };
+    const preview = previewResult.value;
+    if (!preview.allowed) {
+      options.flow.showMessage({
+        title: 'Phase Change Blocked',
+        message: preview.message,
+        variant: 'warning',
+      });
+      return false;
+    }
+    if (!preview.requiresCascade) {
+      return apply(false);
+    }
+    return new Promise<boolean>((resolve) => {
+      options.flow.showConfirm({
+        title: 'Move Descendants Back Too?',
+        message: describeCascade(preview),
+        variant: 'warning',
+        confirmLabel: 'Move all',
+        cancelLabel: 'Cancel',
+        onConfirm: async () => {
+          resolve(await apply(true));
+        },
+        onCancel: async () => {
+          resolve(false);
+        },
+      });
+    });
+  }, [client, options.flow, reportError]);
 
   const { deleteWorkspaceWithPrompt, deleteWorkspaceSkipScriptsWithPrompt } = useWorkspaceDeleteFlow({
     flow: options.flow,

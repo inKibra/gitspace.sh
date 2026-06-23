@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import { useTheme, THEMES } from '../lib/theme.web.js';
 import { KanbanBoardWeb } from '../components/KanbanBoard.web.js';
-import type { WorkspaceBoardGroup } from '../app/shared/board/types.js';
+import type { KanbanGoalItem, WorkspaceBoardGroup } from '../app/shared/board/types.js';
 import { getShiftArrowPhaseChange } from '../app/shared/board/phase-movement.js';
 import type { WorkspacePhase } from '../types/config.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
@@ -30,6 +30,10 @@ export interface BoardPageProps {
   workspaceStatusById?: Record<string, WorkspaceStatusSummary>;
 	  deletingWorkspaceIds?: Record<string, { status: string; progressLabel?: string }>;
 	  creatingWorkspaceIds?: Record<string, { status: string; progressLabel?: string; workspaceName: string; phase: WorkspacePhase }>;
+  onCreatePlannedGoalWorkspace?: (goal: KanbanGoalItem) => void;
+  onSelectPlannedGoal?: (goal: KanbanGoalItem) => void;
+  onSaveChainOrder?: (goals: KanbanGoalItem[]) => void | Promise<void>;
+  boardMessage?: string | null;
   /** True when backend is connected but workspaces haven't arrived yet. */
   loading?: boolean;
   loadingLabel?: string;
@@ -137,6 +141,10 @@ export function BoardPage({
 	  workspaceStatusById = {},
 	  deletingWorkspaceIds = {},
 	  creatingWorkspaceIds = {},
+	  onCreatePlannedGoalWorkspace,
+	  onSelectPlannedGoal,
+	  onSaveChainOrder,
+	  boardMessage,
 	  loading = false,
 	  loadingLabel = 'Loading worktrees...',
 }: BoardPageProps) {
@@ -253,6 +261,10 @@ export function BoardPage({
             deletingWorkspaceIds={deletingWorkspaceIds}
 	            creatingWorkspaceIds={creatingWorkspaceIds}
             fullHeight
+            onCreatePlannedGoalWorkspace={onCreatePlannedGoalWorkspace}
+            onSelectPlannedGoal={onSelectPlannedGoal}
+            onSaveChainOrder={onSaveChainOrder}
+            boardMessage={boardMessage}
           />
         )}
       </div>
