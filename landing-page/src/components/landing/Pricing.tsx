@@ -108,15 +108,16 @@ export function Pricing() {
               
               <CardFooter className="flex flex-col gap-4">
                 {plan.link ? (
-                  <a href={plan.link} target="_blank" rel="noopener noreferrer" className="w-full">
-                    <Button 
-                        variant={plan.variant as "default" | "outline"} 
-                        className={`w-full ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
-                    >
+                  <Button
+                      asChild
+                      variant={plan.variant as "default" | "outline"}
+                      className={`w-full ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
+                  >
+                    <a href={plan.link} target="_blank" rel="noopener noreferrer">
                       {plan.name === "Local" && <Github className="w-4 h-4 mr-2" />}
                       {plan.cta}
-                    </Button>
-                  </a>
+                    </a>
+                  </Button>
                 ) : (
                   <Button 
                       variant={plan.variant as "default" | "outline"} 

@@ -1,34 +1,16 @@
 import { Button } from "../../app/components/ui/button";
-import { Link } from "react-router-dom";
 import { ArrowRight, Play, Check, Activity, Clock, Laptop, Smartphone, Github } from "lucide-react";
 import { TerminalWindow } from "./TerminalWindow";
-import FaultyTerminal from "./FaultyTerminal";
 import { Badge } from "../../app/components/ui/badge";
 
 export function Hero() {
   return (
     <section className="relative pt-32 pb-32 overflow-hidden px-4">
       
-      <div className="absolute inset-0 w-full h-full z-0 opacity-15">
-        <FaultyTerminal
-            scale={2}
-            gridMul={[2, 1]}
-            digitSize={1.2}
-            timeScale={0.5}
-            pause={false}
-            scanlineIntensity={0.35}
-            glitchAmount={1}
-            flickerAmount={1}
-            noiseAmp={1}
-            chromaticAberration={0}
-            dither={1}
-            curvature={0}
-            tint="#22c55e"
-            mouseReact={true}
-            mouseStrength={0.5}
-            pageLoadAnimation={false}
-            brightness={0.4}
-        />
+      <div className="pointer-events-none absolute inset-0 z-0 opacity-25">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(34,197,94,0.16),transparent_58%)]" />
+        <div className="absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(34,197,94,0.16)_1px,transparent_1px),linear-gradient(90deg,rgba(34,197,94,0.16)_1px,transparent_1px)] [background-size:42px_42px]" />
+        <div className="absolute inset-0 bg-[linear-gradient(to_bottom,transparent,rgba(0,0,0,0.78)_72%,#000)]" />
       </div>
 
       <div className="container px-4 mx-auto text-center relative z-10">
@@ -42,17 +24,17 @@ export function Hero() {
         </p>
         
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-20">
-          <a href="https://github.com/inkibra/gitspace.sh" target="_blank" rel="noopener noreferrer">
-            <Button size="lg" className="bg-white text-black hover:bg-gray-200 h-12 px-8 text-base">
+          <Button asChild size="lg" className="bg-white text-black hover:bg-gray-200 h-12 px-8 text-base">
+            <a href="https://github.com/inkibra/gitspace.sh" target="_blank" rel="noopener noreferrer">
               <Github className="w-5 h-5 mr-2" />
               Star on GitHub
-            </Button>
-          </a>
-          <Link to="/docs">
-            <Button variant="outline" size="lg" className="h-12 px-8 text-base border-white/10 hover:bg-white/5">
+            </a>
+          </Button>
+          <Button asChild variant="outline" size="lg" className="h-12 px-8 text-base border-white/10 hover:bg-white/5">
+            <a href="/docs">
               Read the Docs <ArrowRight className="ml-2 w-4 h-4" />
-            </Button>
-          </Link>
+            </a>
+          </Button>
         </div>
 
         <div className="max-w-4xl mx-auto text-left relative group">

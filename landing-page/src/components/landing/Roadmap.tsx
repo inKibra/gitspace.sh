@@ -72,10 +72,13 @@ export function Roadmap() {
                 <h4 className="text-lg font-bold mb-2">Want to shape our roadmap?</h4>
                 <p className="text-sm text-zinc-400">Join our Discord to suggest features and test new builds.</p>
               </div>
-              <a href="https://discord.gg/kHRWYPnR" target="_blank" rel="noopener noreferrer">
-                <button className="px-6 py-2.5 rounded-full bg-white text-black font-medium hover:bg-zinc-200 transition-colors shrink-0">
-                  Join Discord
-                </button>
+              <a
+                href="https://discord.gg/kHRWYPnR"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-6 py-2.5 rounded-full bg-white text-black font-medium hover:bg-zinc-200 transition-colors shrink-0"
+              >
+                Join Discord
               </a>
             </div>
           </div>

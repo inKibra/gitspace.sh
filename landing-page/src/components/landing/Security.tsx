@@ -1,6 +1,5 @@
 import { Lock, Github, Server, FileCode, ShieldCheck, Eye, ArrowRight } from "lucide-react";
 import { Button } from "../../app/components/ui/button";
-import { Link } from "react-router-dom";
 
 export function Security() {
   return (
@@ -34,12 +33,12 @@ export function Security() {
                 </div>
 
                 <div className="mt-8 pt-8 border-t border-zinc-800">
-                    <a href="https://github.com/inkibra/gitspace.sh" target="_blank" rel="noopener noreferrer">
-                        <Button variant="outline" className="text-blue-400 border-blue-500/20 hover:bg-blue-500/10 hover:text-blue-300 w-full justify-between group">
+                    <Button asChild variant="outline" className="text-blue-400 border-blue-500/20 hover:bg-blue-500/10 hover:text-blue-300 w-full justify-between group">
+                        <a href="https://github.com/inkibra/gitspace.sh" target="_blank" rel="noopener noreferrer">
                             View on GitHub
                             <ArrowRight className="w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform" />
-                        </Button>
-                    </a>
+                        </a>
+                    </Button>
                 </div>
             </div>
 
@@ -65,12 +64,12 @@ export function Security() {
                 </div>
 
                 <div className="mt-8 pt-8 border-t border-zinc-800">
-                    <Link to="/docs?section=security-notes">
-                        <Button variant="outline" className="text-green-400 border-green-500/20 hover:bg-green-500/10 hover:text-green-300 w-full justify-between group">
+                    <Button asChild variant="outline" className="text-green-400 border-green-500/20 hover:bg-green-500/10 hover:text-green-300 w-full justify-between group">
+                        <a href="/docs?section=security-notes">
                             Read Security Docs
                             <ArrowRight className="w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform" />
-                        </Button>
-                    </Link>
+                        </a>
+                    </Button>
                 </div>
             </div>
 
