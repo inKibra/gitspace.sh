@@ -3,6 +3,7 @@ import LandingPage from "../pages/LandingPage";
 import Dashboard from "../pages/Dashboard";
 import TerminalView from "../pages/TerminalView";
 import DocsPage from "../pages/DocsPage";
+import BlogPost from "../pages/BlogPost";
 import { useEffect } from "react";
 import { useLocation } from "react-router-dom";
 
@@ -41,6 +42,8 @@ export default function App() {
       <ScrollToHash />
       <Routes>
         <Route path="/" element={<LandingPage />} />
+        <Route path="/blog/babysitting-agents-sucks" element={<BlogPost />} />
+        <Route path="/blog" element={<BlogPost />} />
         <Route path="/docs" element={<DocsPage />} />
         <Route path="/login" element={<Login />} />
         <Route path="/dashboard" element={<Dashboard />} />
