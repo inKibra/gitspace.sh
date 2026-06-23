@@ -1,7 +1,7 @@
 import type { Server } from 'bun';
 
 export interface MockUpstream {
-  server: Server<any>;
+  server: Server;
   githubApiBase: string;
   githubOauthBase: string;
   cloudflareApiBase: string;
@@ -33,6 +33,29 @@ interface CustomHostnameRecord {
   sslMethod: 'http' | 'txt' | 'email';
   wildcard: boolean;
   delegationSuffix: string;
+}
+
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function readJsonObject(request: Request): Promise<JsonObject> {
+  const body: unknown = await request.json();
+  return isJsonObject(body) ? body : {};
+}
+
+function stringField(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function isTunnelIngressRule(value: unknown): value is { hostname?: string; service: string } {
+  if (!isJsonObject(value) || typeof value.service !== 'string') {
+    return false;
+  }
+
+  return value.hostname === undefined || typeof value.hostname === 'string';
 }
 
 
@@ -97,8 +120,8 @@ export function startMockUpstream(): MockUpstream {
       const path = url.pathname;
 
       if (path === '/login/oauth/access_token' && request.method === 'POST') {
-        return request.json().then((body: any) => {
-          lastGithubOauthTokenRequest = body && typeof body === 'object' ? body : null;
+        return readJsonObject(request).then((body) => {
+          lastGithubOauthTokenRequest = body;
           return Response.json({ access_token: 'github-access-token' });
         });
       }
@@ -141,21 +164,21 @@ export function startMockUpstream(): MockUpstream {
       }
 
       if (path.endsWith('/cfd_tunnel') && request.method === 'POST') {
-        return request.json().then((body: any) => {
-          const name = body?.name ?? 'tunnel';
+        return readJsonObject(request).then((body) => {
+          const name = stringField(body.name, 'tunnel');
           const configuredFailure = failingTunnelCreates.get(name);
           if (configuredFailure) {
             failingTunnelCreates.delete(name);
             return new Response(configuredFailure.body, { status: configuredFailure.status });
           }
 
-          const configSource = body?.config_src === 'local' ? 'local' : 'cloudflare';
+          const configSource = body.config_src === 'local' ? 'local' : 'cloudflare';
           const tunnel = {
             id: crypto.randomUUID(),
             name,
             token: `token-${name}-${crypto.randomUUID()}`,
             configSource,
-            tunnelSecret: typeof body?.tunnel_secret === 'string' ? body.tunnel_secret : undefined,
+            tunnelSecret: typeof body.tunnel_secret === 'string' ? body.tunnel_secret : undefined,
           } satisfies TunnelRecord;
           tunnels.set(name, tunnel);
           return Response.json({
@@ -168,12 +191,13 @@ export function startMockUpstream(): MockUpstream {
       }
 
       if (path.includes('/cfd_tunnel/') && path.endsWith('/configurations') && request.method === 'PUT') {
-        return request.json().then((body: any) => {
+        return readJsonObject(request).then((body) => {
           const tunnelId = path.split('/').at(-2) ?? '';
-          const ingress = body?.config?.ingress;
+          const config = isJsonObject(body.config) ? body.config : {};
+          const ingress = config.ingress;
           tunnelConfigurations.set(tunnelId, {
             tunnelId,
-            ingress: Array.isArray(ingress) ? ingress : [],
+            ingress: Array.isArray(ingress) ? ingress.filter(isTunnelIngressRule) : [],
           });
           return Response.json({ success: true });
         });
@@ -199,11 +223,11 @@ export function startMockUpstream(): MockUpstream {
       }
 
       if (path.endsWith('/dns_records') && request.method === 'POST') {
-        return request.json().then((body: any) => {
+        return readJsonObject(request).then((body) => {
           const record = {
             id: crypto.randomUUID(),
-            name: normalizeDnsRecordName(body.name),
-            content: body.content,
+            name: normalizeDnsRecordName(stringField(body.name, '')),
+            content: stringField(body.content, ''),
           };
           dnsRecords.set(record.id, record);
           return Response.json({ success: true, result: { id: record.id } });
@@ -212,11 +236,11 @@ export function startMockUpstream(): MockUpstream {
 
       if (path.includes('/dns_records/') && request.method === 'PUT') {
         const recordId = path.split('/').at(-1) ?? '';
-        return request.json().then((body: any) => {
+        return readJsonObject(request).then((body) => {
           dnsRecords.set(recordId, {
             id: recordId,
-            name: normalizeDnsRecordName(body.name),
-            content: body.content,
+            name: normalizeDnsRecordName(stringField(body.name, '')),
+            content: stringField(body.content, ''),
           });
           return Response.json({ success: true, result: { id: recordId } });
         });
@@ -229,19 +253,21 @@ export function startMockUpstream(): MockUpstream {
       }
 
       if (path.endsWith('/custom_hostnames') && request.method === 'POST') {
-        return request.json().then((body: any) => {
-          const hostname = body.hostname ?? 'hostname.gitspace.sh';
+        return readJsonObject(request).then((body) => {
+          const hostname = stringField(body.hostname, 'hostname.gitspace.sh');
           const configuredFailure = failingCustomHostnameCreates.get(hostname);
           if (configuredFailure) {
             failingCustomHostnameCreates.delete(hostname);
             return new Response(configuredFailure.body, { status: configuredFailure.status });
           }
 
+          const ssl = isJsonObject(body.ssl) ? body.ssl : {};
+          const method = ssl.method === 'txt' || ssl.method === 'email' ? ssl.method : 'http';
           const record: CustomHostnameRecord = {
             id: crypto.randomUUID(),
             hostname,
-            sslMethod: body?.ssl?.method ?? 'http',
-            wildcard: Boolean(body?.ssl?.wildcard),
+            sslMethod: method,
+            wildcard: Boolean(ssl.wildcard),
             delegationSuffix: delegatedDcvSuffix,
           };
           customHostnames.set(record.id, record);

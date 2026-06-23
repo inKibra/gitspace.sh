@@ -11,7 +11,7 @@ const SCHEMA_PATH = join(WORKER_DIR, 'schema.sql');
 
 let bundlePathPromise: Promise<string> | null = null;
 
-async function applySchema(db: any): Promise<void> {
+async function applySchema(db: Pick<D1Database, 'prepare'>): Promise<void> {
   const sql = readFileSync(SCHEMA_PATH, 'utf8');
   const statements = sql
     .split('\n')
@@ -57,7 +57,7 @@ export interface WorkerHarness {
   mf: Miniflare;
   upstream: MockUpstream;
   dispose: () => Promise<void>;
-  request: (path: string, init?: RequestInit) => Promise<any>;
+  request: (path: string, init?: Parameters<Miniflare['dispatchFetch']>[1]) => Promise<Response>;
   createDeviceSession: (options?: {
     githubToken?: string;
     githubUser?: { id: number; login: string; name: string; email: string; avatar_url: string };
@@ -102,7 +102,7 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
   return {
     mf,
     upstream,
-    request: (path, init) => mf.dispatchFetch(`http://worker${path}`, init as any),
+    request: (path, init) => mf.dispatchFetch(`http://worker${path}`, init),
     createDeviceSession: async (options = {}) => {
       const githubToken = options.githubToken ?? 'github-access-token';
       if (options.githubUser) {
