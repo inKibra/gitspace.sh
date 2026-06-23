@@ -65,7 +65,7 @@ function makeContext(backendByKey: Record<string, SessionBackend | null>, multiO
 describe('app client workspace lifecycle', () => {
   it('sets workspace status through the resolved backend', async () => {
     const setWorkspaceStatus = mock(async () => undefined);
-    const previewWorkspaceStatusChange = mock(async () => ({ allowed: true, requiresCascade: false, requestedPhase: 'review', affected: [], message: 'ok' }));
+    const previewWorkspaceStatusChange = mock(async () => ({ allowed: true, requiresCascade: false, requestedPhase: 'review' as const, affected: [], message: 'ok' }));
     const backend = makeBackend({ previewWorkspaceStatusChange, setWorkspaceStatus });
     const workspaceRef = { backendKey: 'local', workspaceId: 'proj:ws-1' } satisfies BackendScopedWorkspaceRef;
 

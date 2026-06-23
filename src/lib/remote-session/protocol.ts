@@ -933,7 +933,6 @@ export type ClientToMachineMessage =
   | SetWorkspacePhaseRequest
   | TerminateSessionRequest
   | PreviewWorkspacePhaseRequest
-  | KillSessionRequest
   // Process management
   | StartProcessRequest
   | StopProcessRequest

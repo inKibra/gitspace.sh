@@ -59,7 +59,7 @@ describe('useLifecycleController create menu', () => {
       })
     )
 
-    result.current.openCreateMenu('acme')
+    result.current.openCreateMenu()
 
     expect(showSelectCalls[0]?.title).toBe('Create')
     expect(showSelectCalls[0]?.options?.map((option) => option.label)).toEqual(['Workspace', 'Goal', 'Project'])

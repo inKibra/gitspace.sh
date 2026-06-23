@@ -985,14 +985,17 @@ export class RemoteSessionHandler {
           return;
         }
         try {
-          const snapshot = await getMachineSnapshot();
-          this.latestMachineSnapshot = snapshot;
+          await this.refreshMachineSnapshot('client-request');
+          const snapshot = this.latestMachineSnapshot;
+          if (!snapshot) {
+            await this.sendError(session, sendResponse, 'UNAVAILABLE', 'Machine snapshot unavailable', { requestId: msg.requestId });
+            break;
+          }
           await this.sendMessage(session, sendResponse, {
             type: 'refresh_machine_snapshot',
             requestId: msg.requestId,
             snapshot,
           });
-          void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot });
         } catch (error) {
           await this.sendError(session, sendResponse, 'UNAVAILABLE', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
         }

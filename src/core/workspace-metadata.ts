@@ -79,16 +79,18 @@ function appendWorkspaceStorageExclude(workspacePath: string, gitDirCommand: '--
 
     const gitDir = rawGitDir.startsWith('/') ? rawGitDir : resolve(workspacePath, rawGitDir);
     const excludePath = join(gitDir, 'info', 'exclude');
-    const alreadyIgnored =
-      existsSync(excludePath) && readFileSync(excludePath, 'utf-8').includes(WORKSPACE_STORAGE_GITIGNORE_ENTRY);
-    if (alreadyIgnored) {
+    const existingExclude = existsSync(excludePath) ? readFileSync(excludePath, 'utf-8') : '';
+    const missing = WORKSPACE_STORAGE_GITIGNORE_ENTRIES.filter((entry) => !existingExclude.includes(entry));
+    if (missing.length === 0) {
       return true;
     }
 
     mkdirSync(dirname(excludePath), { recursive: true });
+    const needsMarker = !existingExclude.includes(WORKSPACE_STORAGE_GITIGNORE_MARKER);
+    const prefix = needsMarker ? `\n${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n` : '\n';
     appendFileSync(
       excludePath,
-      `\n${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n${WORKSPACE_STORAGE_GITIGNORE_ENTRY}\n`,
+      `${prefix}${missing.join('\n')}\n`,
       'utf-8',
     );
     return true;

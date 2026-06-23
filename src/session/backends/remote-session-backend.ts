@@ -562,13 +562,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listProjects(): Promise<void> {
-    await this.refreshMachineSnapshot();
+    await this.waitForInitialSnapshot();
     this.emit({ type: 'projects', projects: machineSnapshotToProjects(this.machineStateClient.getSnapshot()) });
   }
 
   private async refreshMachineSnapshot(): Promise<void> {
     await this.waitForInitialSnapshot();
-    const response = await this.sendTypedCommand({ type: 'refresh_machine_snapshot', requestId: crypto.randomUUID() });
+    const response = await this.sendRpcCommand({ type: 'refresh_machine_snapshot', requestId: crypto.randomUUID() });
     if (response.type === 'refresh_machine_snapshot') {
       this.machineStateClient.replaceSnapshot(response.snapshot);
       this.emitDerivedMachineState();
@@ -602,7 +602,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listWorkspaces(): Promise<void> {
-    await this.refreshMachineSnapshot();
+    await this.waitForInitialSnapshot();
     this.emit({ type: 'workspaces', workspaces: machineSnapshotToWorkspaces(this.machineStateClient.getSnapshot()) });
   }
 
@@ -612,7 +612,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     workspaceName: string,
     phase: import('../../types/config.js').WorkspacePhase
   ): Promise<import('../../types/goals.js').WorkspacePhaseChangePreview> {
-    const response = await this.sendTypedCommand({ type: 'preview_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
+    const response = await this.sendRpcCommand({ type: 'preview_workspace_phase', requestId: crypto.randomUUID(), projectName, workspaceName, phase });
     if (response.type === 'workspace-phase-preview') {
       return response.preview;
     }
@@ -640,7 +640,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async listSessions(workspaceId?: string): Promise<void> {
-    await this.refreshMachineSnapshot();
+    await this.waitForInitialSnapshot();
     this.emit({ type: 'sessions', sessions: machineSnapshotToSessions(this.machineStateClient.getSnapshot(), workspaceId) });
   }
 
@@ -1151,7 +1151,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const snapshot = this.machineStateClient.getSnapshot();
     const persistedGoalId = goalId.includes(':') ? goalId.split(':').slice(-1)[0] : goalId;
     const fullGoalId = `${projectName}:${persistedGoalId}`;
-    const goal = snapshot.goalsById[fullGoalId];
+    const goal = snapshot.goalsById?.[fullGoalId];
     if (!goal) {
       throw new Error(`Goal not found: ${goalId}`);
     }
@@ -1279,7 +1279,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private async refreshAndFetchGoal(projectName: string, goalId: string): Promise<import('../../types/goals.js').GoalRecord> {
-    await this.listWorkspaces();
+    await this.refreshMachineSnapshot();
     const snapshot = this.machineStateClient.getSnapshot();
     const persistedGoalId = goalId.includes(':') ? goalId.split(':').slice(-1)[0] : goalId;
     const fullGoalId = `${projectName}:${persistedGoalId}`;
@@ -1407,7 +1407,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalRecord> {
-    const response = await this.sendTypedCommand({ type: 'goal_add_near_workspace', requestId: crypto.randomUUID(), projectName, workspaceName, title, position });
+    const response = await this.sendRpcCommand({ type: 'goal_add_near_workspace', requestId: crypto.randomUUID(), projectName, workspaceName, title, position });
     if (response.type === 'goal') {
       await this.listWorkspaces();
       return response.goal;
@@ -1417,7 +1417,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async updateGoal(projectName: string, goalId: string, updates: import('../../types/goals.js').GoalUpdateInput): Promise<import('../../types/goals.js').GoalRecord> {
-    const response = await this.sendTypedCommand({ type: 'goal_update', requestId: crypto.randomUUID(), projectName, goalId, updates });
+    const response = await this.sendRpcCommand({ type: 'goal_update', requestId: crypto.randomUUID(), projectName, goalId, updates });
     if (response.type === 'goal') {
       await this.listWorkspaces();
       return response.goal;
@@ -1427,7 +1427,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
-    const response = await this.sendTypedCommand({ type: 'goal_reorder', requestId: crypto.randomUUID(), projectName, sourceToken, targetToken, position });
+    const response = await this.sendRpcCommand({ type: 'goal_reorder', requestId: crypto.randomUUID(), projectName, sourceToken, targetToken, position });
     if (response.type === 'goal-chain') {
       await this.listWorkspaces();
       return response.chain;
@@ -1437,7 +1437,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   async getGoalStackStatus(projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
-    const response = await this.sendTypedCommand({ type: 'goal_stack_status', requestId: crypto.randomUUID(), projectName, workspaceName });
+    const response = await this.sendRpcCommand({ type: 'goal_stack_status', requestId: crypto.randomUUID(), projectName, workspaceName });
     if (response.type === 'goal-stack-status') return response.status;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected goal stack status response');

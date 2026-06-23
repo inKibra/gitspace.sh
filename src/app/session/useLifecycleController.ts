@@ -772,7 +772,7 @@ export function useLifecycleController(
       options,
       onSelect: (value) => {
         if (value === 'goal') {
-          openCreateGoalFlow?.(projectName);
+          openCreateGoalFlow?.(projects.length === 1 ? projects[0] : null);
           return;
         }
         if (value === 'workspace') {
