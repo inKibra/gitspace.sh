@@ -15,7 +15,10 @@
       "ghostty-web": ["./node_modules/ghostty-web"],
       "sonner": ["./node_modules/sonner"],
       "@pierre/diffs/react": ["./node_modules/@pierre/diffs/dist/react/index.d.ts"],
-      "@pierre/diffs": ["./node_modules/@pierre/diffs/dist/index.d.ts"]
+      "@pierre/diffs": ["./node_modules/@pierre/diffs/dist/index.d.ts"],
+      "@pierre/trees/react": ["./node_modules/@pierre/trees/dist/react/index.d.ts"],
+      "@pierre/trees": ["./node_modules/@pierre/trees/dist/index.d.ts"],
+      "mermaid": ["./node_modules/mermaid/dist/mermaid.d.ts"]
     },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
