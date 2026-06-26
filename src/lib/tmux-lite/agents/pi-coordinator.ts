@@ -18,6 +18,8 @@ import {
 } from './pi-runtime.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
+import { LiveTurn } from '../../../blocks/agent/live-turn.js';
+import type { AgentEvent as SdkAgentEvent } from '@oh-my-pi/pi-agent-core';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 import { executeSpaceCommand } from './extensions/space-command.js';
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
@@ -187,6 +189,7 @@ interface TerminalSessionBinding {
 }
 
 export class PiCoordinator {
+  private readonly liveTurns = new Map<string, LiveTurn>();
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
   private readonly inflightActiveSessions = new Map<string, Promise<OmpAgentSession>>();
   private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
@@ -715,6 +718,18 @@ export class PiCoordinator {
     unsubscribers.push(
       session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
         if (!this.eventHandler || typeof piEvent.type !== 'string') return;
+
+        // Live transcript suffix: fold the SDK event stream into the in-progress
+        // turn's blocks and emit (re-rendered each update, committed on turn end).
+        let liveTurn = this.liveTurns.get(sessionId);
+        if (!liveTurn) {
+          liveTurn = new LiveTurn();
+          this.liveTurns.set(sessionId, liveTurn);
+        }
+        const live = liveTurn.apply(piEvent as unknown as SdkAgentEvent);
+        if (live) {
+          this.eventHandler(target, { type: 'transcript_live', sessionId, blocks: live.blocks, committed: live.committed });
+        }
 
         if (this.shouldEmitQueuedMessagesForEvent(piEvent)) {
           this.emitQueuedMessages(target, sessionId, session);

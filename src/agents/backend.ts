@@ -89,6 +89,12 @@ export type AgentEvent =
       type: 'error';
       sessionId: string;
       error: string;
+    }
+  | {
+      type: 'transcript_live';
+      sessionId: string;
+      blocks: import('../blocks/index.js').Block[];
+      committed: boolean;
     };
 
 export interface AgentSessionHandle {

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AttachedTerminalPaneWeb } from './AttachedTerminalPane.web.js';
 import { applyModifiersToInput, type ModifierState } from './TerminalControls.web.js';
 import type { SessionTerminalHandle } from './SessionTerminal.web.js';
@@ -116,55 +116,72 @@ export function PaneTerminalPanel({
     dispatch: () => {},
   }), [backend, wsId, agentSessionId]);
 
+  // Live transcript suffix: stream the in-progress turn from the agent-state
+  // deltas. On commit, clear it — the hook folds the finished turn into history.
+  const [liveBlocks, setLiveBlocks] = useState<Block[]>(NO_LIVE);
+  useEffect(() => {
+    if (!backend?.subscribeAgentState || !wsId || !agentSessionId) return;
+    const unsub = backend.subscribeAgentState((delta) => {
+      if (delta.type !== 'agent_transcript_live' || delta.workspaceId !== wsId || delta.sessionId !== agentSessionId) return;
+      setLiveBlocks(delta.committed ? NO_LIVE : delta.blocks);
+    });
+    return unsub;
+  }, [backend, wsId, agentSessionId]);
+
+  // Agent panes show the native block transcript (replacing the xterm view);
+  // shell panes keep the terminal.
+  const isAgentPane = !!(pane.agentSessionId && pane.workspaceId);
+
   return (
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
-      <AttachedTerminalPaneWeb
-        rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
-        headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
-        sessionName={pane.sessionName ?? pane.sessionId}
-        processTitle={pane.meta?.processTitle ?? null}
-        terminalTitle={pane.meta?.terminalTitle ?? null}
-        lastAlertLabel={pane.meta?.lastAlertKind
-          ? `${pane.meta.lastAlertKind}${pane.meta.unreadAlertCount ? ` (${pane.meta.unreadAlertCount})` : ''}`
-          : null}
-        showConnectedLabel={true}
-        showMobileControls={showMobileControls}
-        inputMode={inputMode}
-        keyboardVisible={keyboardVisible}
-        onToggleInputMode={onToggleInputMode}
-        inputButtonClassName={inputButtonClassName}
-        onDetach={handleDetach}
-        detachButtonClassName="px-2 py-1 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
-        terminalContainerClassName={terminalContainerClassName}
-        terminalRef={terminalRef}
-        onData={handleKeyboardData}
-        setWriteCallback={handleWriteCallback}
-        onResize={handleResize}
-        onActivity={onActivity}
-        readOnly={pane.viewOnly}
-        allowTapFocus={allowTapFocus}
-        allowTouchScroll={allowTouchScroll}
-        onSendData={handleSendData}
-        onFocusTerminal={handleFocus}
-        modifiers={modifiers}
-        onModifiersChange={onModifiersChange}
-        showFloatingControls={showFloatingControls}
-        showHeader={false}
-      />
+      {isAgentPane ? (
+        <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
+          <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} host={transcriptHost} pageSize={30} />
+        </div>
+      ) : (
+        <AttachedTerminalPaneWeb
+          rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
+          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
+          sessionName={pane.sessionName ?? pane.sessionId}
+          processTitle={pane.meta?.processTitle ?? null}
+          terminalTitle={pane.meta?.terminalTitle ?? null}
+          lastAlertLabel={pane.meta?.lastAlertKind
+            ? `${pane.meta.lastAlertKind}${pane.meta.unreadAlertCount ? ` (${pane.meta.unreadAlertCount})` : ''}`
+            : null}
+          showConnectedLabel={true}
+          showMobileControls={showMobileControls}
+          inputMode={inputMode}
+          keyboardVisible={keyboardVisible}
+          onToggleInputMode={onToggleInputMode}
+          inputButtonClassName={inputButtonClassName}
+          onDetach={handleDetach}
+          detachButtonClassName="px-2 py-1 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
+          terminalContainerClassName={terminalContainerClassName}
+          terminalRef={terminalRef}
+          onData={handleKeyboardData}
+          setWriteCallback={handleWriteCallback}
+          onResize={handleResize}
+          onActivity={onActivity}
+          readOnly={pane.viewOnly}
+          allowTapFocus={allowTapFocus}
+          allowTouchScroll={allowTouchScroll}
+          onSendData={handleSendData}
+          onFocusTerminal={handleFocus}
+          modifiers={modifiers}
+          onModifiersChange={onModifiersChange}
+          showFloatingControls={showFloatingControls}
+          showHeader={false}
+        />
+      )}
       {pane.agentSessionId && pane.workspaceId ? (
-        <>
-          <div className="flex-shrink-0 h-72 border-t border-[var(--gs-border)] bg-[var(--gs-bg)]">
-            <AgentTranscript fetchRange={fetchTranscriptRange} live={NO_LIVE} host={transcriptHost} pageSize={30} />
-          </div>
-          <div className="flex-shrink-0">
-            <NativeAgentSurfaceConnected
-              backendKey={backendKey}
-              workspaceId={pane.workspaceId}
-              agentSessionId={pane.agentSessionId}
-              paneId={pane.paneId}
-            />
-          </div>
-        </>
+        <div className="flex-shrink-0 border-t border-[var(--gs-border)]">
+          <NativeAgentSurfaceConnected
+            backendKey={backendKey}
+            workspaceId={pane.workspaceId}
+            agentSessionId={pane.agentSessionId}
+            paneId={pane.paneId}
+          />
+        </div>
       ) : null}
     </div>
   );

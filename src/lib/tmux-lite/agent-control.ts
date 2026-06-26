@@ -122,6 +122,9 @@ export function ensureAgentControlInitialized(): Promise<void> {
             }
             break;
           }
+          case 'transcript_live':
+            defaultAgentEventManager.emitTranscriptLive(target.workspaceId, event.sessionId, event.blocks, event.committed);
+            break;
           case 'queued_messages':
             defaultAgentEventManager.setExternalQueuedMessages(target.workspaceId, event.sessionId, event.queued);
             break;

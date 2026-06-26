@@ -132,6 +132,17 @@ export function useTranscript(opts: {
     liveLenRef.current = live.length;
   }, [live]);
 
+  // When the live turn ends (live empties after being non-empty), fold the
+  // finished turn into committed history — no refetch, no flicker.
+  const prevLiveRef = useRef<readonly Block[]>([]);
+  useEffect(() => {
+    const prev = prevLiveRef.current;
+    if (prev.length > 0 && live.length === 0) {
+      setCommitted((c) => [...c, ...prev]);
+    }
+    prevLiveRef.current = live;
+  }, [live]);
+
   const onScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
