@@ -397,6 +397,8 @@ export type Command =
   | { type: 'agent-set-api-key'; provider: string; key: string }
   | { type: 'agent-get-settings' }
   | { type: 'agent-set-setting'; path: string; value: string | boolean }
+  | { type: 'agent-oauth-login'; provider: string; flowId: string }
+  | { type: 'agent-oauth-respond'; flowId: string; value: string }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }

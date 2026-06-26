@@ -273,6 +273,10 @@ export interface SessionBackend {
   getAgentSettings?(): Promise<AgentSettingItem[]>;
   /** Write a single agent setting (machine-global). */
   setAgentSetting?(path: string, value: string | boolean): Promise<boolean>;
+  /** Start an OAuth sign-in flow (events arrive via subscribeAgentState). */
+  startAgentOAuthLogin?(provider: string, flowId: string): Promise<boolean>;
+  /** Provide the value an in-progress OAuth flow asked for. */
+  respondAgentOAuthPrompt?(flowId: string, value: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

@@ -19,7 +19,7 @@ import {
   openPiSessionManager,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
-import type { AgentControlInfo } from '../../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentOAuthEvent } from '../../../agents/agent-runtime-types.js';
 
 const THINKING_LEVELS = ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const APPROVAL_MODES = ['always-ask', 'write', 'yolo'];
@@ -218,6 +218,7 @@ interface TerminalSessionBinding {
 
 export class PiCoordinator {
   private readonly liveTurns = new Map<string, LiveTurn>();
+  private readonly oauthPrompts = new Map<string, (value: string) => void>();
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
   private readonly inflightActiveSessions = new Map<string, Promise<OmpAgentSession>>();
   private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
@@ -391,6 +392,35 @@ export class PiCoordinator {
   async setProviderApiKey(provider: string, key: string): Promise<boolean> {
     const auth = await createPiAuthStorage();
     await auth.set(provider, { type: 'api_key', key });
+    return true;
+  }
+
+  /** Start an OAuth sign-in flow; emits auth/prompt/done events via `emit`. */
+  async startOAuthLogin(provider: string, flowId: string, emit: (ev: AgentOAuthEvent) => void): Promise<void> {
+    const auth = await createPiAuthStorage();
+    try {
+      await auth.login(provider, {
+        onAuth: (info) => emit({ flowId, kind: 'auth', url: info.url, instructions: info.instructions }),
+        onPrompt: (prompt) =>
+          new Promise<string>((resolve) => {
+            this.oauthPrompts.set(flowId, resolve);
+            emit({ flowId, kind: 'prompt', message: prompt.message, placeholder: prompt.placeholder });
+          }),
+      });
+      emit({ flowId, kind: 'done', ok: true });
+    } catch (e) {
+      emit({ flowId, kind: 'done', ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      this.oauthPrompts.delete(flowId);
+    }
+  }
+
+  /** Provide the value an in-progress OAuth flow asked for (onPrompt). */
+  respondOAuthPrompt(flowId: string, value: string): boolean {
+    const resolve = this.oauthPrompts.get(flowId);
+    if (!resolve) return false;
+    resolve(value);
+    this.oauthPrompts.delete(flowId);
     return true;
   }
 

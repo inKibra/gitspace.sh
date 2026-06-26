@@ -80,6 +80,21 @@ export interface AgentAuthProvider {
   hasAuth: boolean;
 }
 
+/** An event in an in-progress OAuth provider sign-in flow. */
+export interface AgentOAuthEvent {
+  flowId: string;
+  kind: 'auth' | 'prompt' | 'done';
+  /** kind=auth: the URL to open to authorize. */
+  url?: string;
+  instructions?: string;
+  /** kind=prompt: a value to collect from the user (e.g. a device code). */
+  message?: string;
+  placeholder?: string;
+  /** kind=done */
+  ok?: boolean;
+  error?: string;
+}
+
 /** A single editable agent setting for the settings panel. */
 export interface AgentSettingItem {
   path: string;

@@ -3054,6 +3054,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected set-setting response');
   }
 
+  async startAgentOAuthLogin(provider: string, flowId: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'start_agent_oauth_login', requestId: crypto.randomUUID(), provider, flowId });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected oauth-login response');
+  }
+
+  async respondAgentOAuthPrompt(flowId: string, value: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'respond_agent_oauth_prompt', requestId: crypto.randomUUID(), flowId, value });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected oauth-respond response');
+  }
+
   // ============================================================================
   // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,

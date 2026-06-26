@@ -512,6 +512,18 @@ export async function setAgentProviderApiKey(provider: string, key: string): Pro
   return defaultPiCoordinator.setProviderApiKey(provider, key);
 }
 
+/** Start an OAuth sign-in flow; emits events via the agent-event-manager. */
+export async function startAgentOAuthLogin(provider: string, flowId: string): Promise<void> {
+  return defaultPiCoordinator.startOAuthLogin(provider, flowId, (event) => {
+    defaultAgentEventManager.emitOAuthEvent(event);
+  });
+}
+
+/** Provide the value an in-progress OAuth flow asked for. */
+export function respondAgentOAuthPrompt(flowId: string, value: string): boolean {
+  return defaultPiCoordinator.respondOAuthPrompt(flowId, value);
+}
+
 /** Read the curated settings catalog. */
 export async function getAgentSettings(): Promise<Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }>> {
   return defaultPiCoordinator.getSettings();

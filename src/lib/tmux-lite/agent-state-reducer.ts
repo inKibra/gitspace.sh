@@ -37,6 +37,9 @@ export function applyAgentDeltaToAgentState(
   if (delta.type === 'agent_state_snapshot') {
     return { ...delta.workspaces };
   }
+  if (delta.type === 'agent_oauth_event') {
+    return current; // transient flow event — not part of workspace state
+  }
   const state = current[delta.workspaceId] ?? createEmptyWorkspaceState(delta.workspaceId);
   const nextWorkspace = cloneWorkspaceState(state);
   const next: Record<string, WorkspaceAgentState> = {

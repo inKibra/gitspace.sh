@@ -63,6 +63,13 @@ export interface OmpAuthStorage {
   has(provider: string): boolean;
   hasAuth(provider: string): boolean;
   set(provider: string, credential: { type: 'api_key'; key: string }): Promise<void>;
+  login(
+    provider: string,
+    ctrl: {
+      onAuth: (info: { url: string; instructions?: string }) => void;
+      onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
+    },
+  ): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 /** @jsxImportSource react */
 import { useState, type ReactElement } from 'react';
-import type { AgentAuthProvider, AgentSettingItem } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentOAuthEvent, AgentSettingItem } from '../agents/agent-runtime-types.js';
+
+type ActiveOAuth = (AgentOAuthEvent & { provider: string }) | null;
 
 /**
  * Agent settings panel (opened from the chrome gear): curated settings
@@ -10,21 +12,28 @@ export function AgentSettingsPanel({
   settings,
   providers,
   loading,
+  oauth,
   onSetSetting,
   onSetApiKey,
+  onOAuthLogin,
+  onOAuthRespond,
   onClose,
 }: {
   settings: AgentSettingItem[];
   providers: AgentAuthProvider[];
   loading: boolean;
+  oauth: ActiveOAuth;
   onSetSetting: (path: string, value: string | boolean) => Promise<void>;
   onSetApiKey: (provider: string, key: string) => Promise<void>;
+  onOAuthLogin: (provider: string) => void;
+  onOAuthRespond: (value: string) => void;
   onClose: () => void;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [keyValue, setKeyValue] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [promptValue, setPromptValue] = useState('');
 
   const saveKey = async (provider: string) => {
     if (!keyValue.trim()) return;
@@ -96,6 +105,38 @@ export function AgentSettingsPanel({
           {/* Providers */}
           <div className="border-t border-[var(--gs-border)] px-2 py-2">
             <div className="mb-1 px-2 text-[10px] uppercase tracking-wide text-[var(--gs-text-ghost)]">Provider sign-in</div>
+
+            {oauth && oauth.kind !== 'done' && (
+              <div className="mx-2 mb-2 border border-[var(--gs-accent)] bg-[var(--gs-bg)] p-2">
+                <div className="text-[var(--gs-text)]">Signing in to <span className="font-[family-name:var(--gs-font-mono)]">{oauth.provider}</span>…</div>
+                {oauth.url && (
+                  <div className="mt-1">
+                    <a href={oauth.url} target="_blank" rel="noreferrer" className="break-all text-[var(--gs-accent)] underline">{oauth.url}</a>
+                    {oauth.instructions && <div className="mt-1 text-[var(--gs-text-dim)]">{oauth.instructions}</div>}
+                  </div>
+                )}
+                {oauth.kind === 'prompt' && (
+                  <div className="mt-2">
+                    <div className="text-[var(--gs-text-dim)]">{oauth.message}</div>
+                    <div className="mt-1 flex items-center gap-2">
+                      <input
+                        autoFocus
+                        value={promptValue}
+                        onChange={(e) => setPromptValue(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { onOAuthRespond(promptValue); setPromptValue(''); } }}
+                        placeholder={oauth.placeholder ?? 'enter value'}
+                        className="flex-1 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]"
+                      />
+                      <button type="button" onClick={() => { onOAuthRespond(promptValue); setPromptValue(''); }} className="border border-[var(--gs-accent)] px-2 py-1 text-[var(--gs-accent)]">submit</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {oauth && oauth.kind === 'done' && !oauth.ok && (
+              <div className="mx-2 mb-2 text-[var(--gs-danger)]">⚠ {oauth.provider} sign-in failed{oauth.error ? `: ${oauth.error}` : ''}</div>
+            )}
+
             {loading && providers.length === 0 ? (
               <div className="px-2 py-3 text-center text-[var(--gs-text-dim)]">Loading providers…</div>
             ) : (
@@ -106,8 +147,15 @@ export function AgentSettingsPanel({
                     {p.hasAuth ? <span className="text-[var(--gs-success)]">✓ signed in</span> : <span className="text-[var(--gs-text-dim)]">not signed in</span>}
                     <button
                       type="button"
-                      onClick={() => { setEditing(editing === p.provider ? null : p.provider); setKeyValue(''); setError(null); }}
+                      onClick={() => onOAuthLogin(p.provider)}
                       className="ml-auto text-[var(--gs-accent)] hover:underline"
+                    >
+                      sign in
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setEditing(editing === p.provider ? null : p.provider); setKeyValue(''); setError(null); }}
+                      className="text-[var(--gs-accent)] hover:underline"
                     >
                       {p.hasAuth ? 'update key' : 'add key'}
                     </button>

@@ -1719,6 +1719,20 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected set-setting response');
   }
 
+  async startAgentOAuthLogin(provider: string, flowId: string): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-oauth-login', provider, flowId });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected oauth-login response');
+  }
+
+  async respondAgentOAuthPrompt(flowId: string, value: string): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-oauth-respond', flowId, value });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected oauth-respond response');
+  }
+
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }

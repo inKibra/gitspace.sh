@@ -10,7 +10,7 @@ import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentModelInfo, AgentSettingItem, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentModelInfo, AgentOAuthEvent, AgentSettingItem, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -229,6 +229,37 @@ export function PaneTerminalPanel({
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
 
+  // OAuth sign-in flow (events arrive via the agent-state delta channel)
+  const [oauthFlow, setOauthFlow] = useState<(AgentOAuthEvent & { provider: string }) | null>(null);
+  const oauthFlowIdRef = useRef<string | null>(null);
+  const oauthProviderRef = useRef<string>('');
+  useEffect(() => {
+    if (!backend?.subscribeAgentState) return;
+    return backend.subscribeAgentState((delta) => {
+      if (delta.type !== 'agent_oauth_event' || delta.event.flowId !== oauthFlowIdRef.current) return;
+      // Merge so the auth URL persists when a later prompt event arrives.
+      setOauthFlow((prev) => ({ ...(prev ?? {}), ...delta.event, provider: oauthProviderRef.current }));
+      if (delta.event.kind === 'done') { loadSettingsPanel(); refreshControl(); }
+    });
+  }, [backend, loadSettingsPanel, refreshControl]);
+  const handleOAuthLogin = useCallback((provider: string) => {
+    const fn = backend?.startAgentOAuthLogin;
+    if (!fn) return;
+    const flowId = crypto.randomUUID();
+    oauthFlowIdRef.current = flowId;
+    oauthProviderRef.current = provider;
+    setOauthFlow({ flowId, kind: 'auth', provider });
+    void fn.call(backend, provider, flowId).catch((e) =>
+      setOauthFlow({ flowId, kind: 'done', ok: false, error: e instanceof Error ? e.message : 'Failed to start', provider }),
+    );
+  }, [backend]);
+  const handleOAuthRespond = useCallback((value: string) => {
+    const fn = backend?.respondAgentOAuthPrompt;
+    const flowId = oauthFlowIdRef.current;
+    if (!fn || !flowId) return;
+    void fn.call(backend, flowId, value).catch(() => undefined);
+  }, [backend]);
+
   // Agent panes show the native block transcript (replacing the xterm view);
   // shell panes keep the terminal.
   const isAgentPane = !!(pane.agentSessionId && pane.workspaceId);
@@ -301,9 +332,12 @@ export function PaneTerminalPanel({
           settings={agentSettings}
           providers={authProviders}
           loading={settingsLoading}
+          oauth={oauthFlow}
           onSetSetting={handleSetSetting}
           onSetApiKey={handleSetApiKey}
-          onClose={() => setSettingsOpen(false)}
+          onOAuthLogin={handleOAuthLogin}
+          onOAuthRespond={handleOAuthRespond}
+          onClose={() => { setSettingsOpen(false); setOauthFlow(null); oauthFlowIdRef.current = null; }}
         />
       )}
     </div>

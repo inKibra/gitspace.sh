@@ -628,6 +628,20 @@ export interface SetAgentSettingRequest {
   value: string | boolean;
 }
 
+export interface StartAgentOAuthLoginRequest {
+  type: 'start_agent_oauth_login';
+  requestId: string;
+  provider: string;
+  flowId: string;
+}
+
+export interface RespondAgentOAuthPromptRequest {
+  type: 'respond_agent_oauth_prompt';
+  requestId: string;
+  flowId: string;
+  value: string;
+}
+
 export interface ListAgentCommandsRequest {
   type: 'list_agent_commands';
   requestId: string;
@@ -1037,6 +1051,8 @@ export type ClientToMachineMessage =
   | SetAgentProviderApiKeyRequest
   | GetAgentSettingsRequest
   | SetAgentSettingRequest
+  | StartAgentOAuthLoginRequest
+  | RespondAgentOAuthPromptRequest
   | ListAgentCommandsRequest
   | ListWorkspaceEditorsRequest
   | OpenWorkspaceEditorRequest
@@ -1186,6 +1202,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'set_agent_provider_api_key',
     'get_agent_settings',
     'set_agent_setting',
+    'start_agent_oauth_login',
+    'respond_agent_oauth_prompt',
     'list_agent_commands',
     'list_workspace_editors',
     'open_workspace_editor',

@@ -75,6 +75,8 @@ import {
   setAgentProviderApiKey,
   getAgentSettings,
   setAgentSetting,
+  startAgentOAuthLogin,
+  respondAgentOAuthPrompt,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
@@ -3536,6 +3538,29 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to set setting: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-oauth-login':
+            // Fire-and-forget: the flow's auth/prompt/done events arrive via
+            // agent-state deltas. Respond immediately that it started.
+            try {
+              await getAgentControlReady();
+              void startAgentOAuthLogin(cmd.provider, cmd.flowId);
+              res = { type: 'agent-bool', ok: true };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start sign-in: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-oauth-respond':
+            try {
+              const ok = respondAgentOAuthPrompt(cmd.flowId, cmd.value);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to respond: ${errMsg}` };
             }
             break;
 

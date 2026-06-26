@@ -62,7 +62,8 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string }
   | { type: 'agent_todo_update'; workspaceId: string; sessionId: string; phases: TodoPhase[] }
   | { type: 'agent_model_update'; workspaceId: string; sessionId: string; modelInfo: AgentModelInfo }
-  | { type: 'agent_transcript_live'; workspaceId: string; sessionId: string; blocks: import('../../blocks/index.js').Block[]; committed: boolean };
+  | { type: 'agent_transcript_live'; workspaceId: string; sessionId: string; blocks: import('../../blocks/index.js').Block[]; committed: boolean }
+  | { type: 'agent_oauth_event'; event: import('../../agents/agent-runtime-types.js').AgentOAuthEvent };
 
 
 const LAST_MESSAGE_MAX_CHARS = 120;
@@ -280,6 +281,11 @@ export class AgentEventManager {
   /** Broadcast the live transcript suffix for a session (transient — not stored). */
   emitTranscriptLive(workspaceId: string, sessionId: string, blocks: import('../../blocks/index.js').Block[], committed: boolean): void {
     this.emit({ type: 'agent_transcript_live', workspaceId, sessionId, blocks, committed });
+  }
+
+  /** Broadcast an OAuth sign-in flow event (transient). */
+  emitOAuthEvent(event: import('../../agents/agent-runtime-types.js').AgentOAuthEvent): void {
+    this.emit({ type: 'agent_oauth_event', event });
   }
 
   setExternalLastMessage(workspaceId: string, sessionId: string, preview: string): void {
