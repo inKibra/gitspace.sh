@@ -3022,6 +3022,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected set-approval-mode response');
   }
 
+  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_auth_providers', requestId: crypto.randomUUID() });
+    if (tmuxResponse.type === 'agent-auth-providers') return tmuxResponse.providers;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected auth-providers response');
+  }
+
+  async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'set_agent_provider_api_key', requestId: crypto.randomUUID(), provider, key });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-api-key response');
+  }
+
   // ============================================================================
   // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,

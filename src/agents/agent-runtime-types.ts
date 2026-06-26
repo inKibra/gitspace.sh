@@ -74,6 +74,12 @@ export interface AgentModelOption {
   contextWindow: number | null;
 }
 
+/** A provider and whether it currently has stored credentials. */
+export interface AgentAuthProvider {
+  provider: string;
+  hasAuth: boolean;
+}
+
 /** Current context-window usage for a session. */
 export interface AgentContextUsage {
   tokens: number | null;

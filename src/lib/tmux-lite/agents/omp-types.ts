@@ -58,6 +58,13 @@ export interface OmpModelRegistryConstructor {
   new(authStorage: unknown): OmpModelRegistry;
 }
 
+export interface OmpAuthStorage {
+  list(): string[];
+  has(provider: string): boolean;
+  hasAuth(provider: string): boolean;
+  set(provider: string, credential: { type: 'api_key'; key: string }): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // High-level host UI context — the subset of ExtensionUIContext that GitSpace
 // can satisfy natively (select/confirm/input/editor/notify/status/widget).

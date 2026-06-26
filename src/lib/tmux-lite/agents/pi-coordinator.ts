@@ -10,6 +10,7 @@ import {
 } from '../cli.js';
 import type { Session as TmuxSession } from '../protocol.js';
 import {
+  createPiAuthStorage,
   createPiModelRegistry,
   createPiSessionManager,
   getManagedPiExtensionPaths,
@@ -358,6 +359,28 @@ export class PiCoordinator {
     const settings = session.settings ?? (await getPiSettings());
     if (!settings) return false;
     settings.set('tools.approvalMode', mode);
+    return true;
+  }
+
+  /** List known providers (from the model registry) with their auth status. */
+  async getAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+    const [auth, registry] = await Promise.all([createPiAuthStorage(), createPiModelRegistry()]);
+    const providers = [...new Set(registry.getAll().map((m) => m.provider))].sort();
+    return providers.map((provider) => {
+      let hasAuth = false;
+      try {
+        hasAuth = auth.hasAuth(provider) || auth.has(provider);
+      } catch {
+        /* ignore */
+      }
+      return { provider, hasAuth };
+    });
+  }
+
+  /** Store an API key for a provider. */
+  async setProviderApiKey(provider: string, key: string): Promise<boolean> {
+    const auth = await createPiAuthStorage();
+    await auth.set(provider, { type: 'api_key', key });
     return true;
   }
 

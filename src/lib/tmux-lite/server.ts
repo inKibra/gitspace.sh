@@ -71,6 +71,8 @@ import {
   setAgentModel,
   setAgentThinkingLevel,
   setAgentApprovalMode,
+  getAgentAuthProviders,
+  setAgentProviderApiKey,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
@@ -3488,6 +3490,28 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to set approval mode: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-auth-providers':
+            try {
+              await getAgentControlReady();
+              const providers = await getAgentAuthProviders();
+              res = { type: 'agent-auth-providers', providers };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list providers: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-api-key':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentProviderApiKey(cmd.provider, cmd.key);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to save API key: ${errMsg}` };
             }
             break;
 

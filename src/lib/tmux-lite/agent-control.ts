@@ -502,6 +502,16 @@ export async function setAgentApprovalMode(
   return defaultPiCoordinator.setApprovalMode(target, agentSessionId, mode);
 }
 
+/** List providers + their auth status. */
+export async function getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+  return defaultPiCoordinator.getAuthProviders();
+}
+
+/** Store an API key for a provider. */
+export async function setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
+  return defaultPiCoordinator.setProviderApiKey(provider, key);
+}
+
 // ---------------------------------------------------------------------------
 // Host UI bridge wiring
 // ---------------------------------------------------------------------------

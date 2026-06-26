@@ -63,6 +63,7 @@ export function AgentPaneHeader({
   onSetModel,
   onSetThinkingLevel,
   onSetApprovalMode,
+  onOpenAuth,
   error,
 }: {
   model?: AgentModelInfo;
@@ -71,6 +72,7 @@ export function AgentPaneHeader({
   onSetModel?: (provider: string, modelId: string) => void;
   onSetThinkingLevel?: (level: string) => void;
   onSetApprovalMode?: (mode: string) => void;
+  onOpenAuth?: () => void;
   error?: string | null;
 }): ReactElement {
   const [menu, setMenu] = useState<MenuId | null>(null);
@@ -158,7 +160,10 @@ export function AgentPaneHeader({
       {usage && usage.cost > 0 ? <span className="text-[var(--gs-text-dim)]">· ${usage.cost.toFixed(2)}</span> : null}
 
       {error && <span className="max-w-[35%] truncate text-[var(--gs-danger)]" title={error}>⚠ {error}</span>}
-      <span className="ml-auto flex items-center gap-1.5">
+      <span className="ml-auto flex items-center gap-2">
+        {onOpenAuth && (
+          <button type="button" onClick={onOpenAuth} title="Provider sign-in" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">⚙</button>
+        )}
         <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
         <span className="text-[var(--gs-text-muted)]">{label}</span>
       </span>

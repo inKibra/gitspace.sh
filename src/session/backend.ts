@@ -265,6 +265,10 @@ export interface SessionBackend {
   setAgentThinkingLevel?(workspaceId: string, agentSessionId: string, level: string): Promise<boolean>;
   /** Set an agent session's tool-approval mode. */
   setAgentApprovalMode?(workspaceId: string, agentSessionId: string, mode: string): Promise<boolean>;
+  /** List providers + their auth status (machine-global). */
+  getAgentAuthProviders?(): Promise<Array<{ provider: string; hasAuth: boolean }>>;
+  /** Store an API key for a provider (machine-global). */
+  setAgentProviderApiKey?(provider: string, key: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

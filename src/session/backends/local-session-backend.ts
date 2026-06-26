@@ -1691,6 +1691,20 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected set-approval-mode response');
   }
 
+  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-auth-providers' });
+    if (tmuxResponse.type === 'agent-auth-providers') return tmuxResponse.providers;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected auth-providers response');
+  }
+
+  async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-api-key', provider, key });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-api-key response');
+  }
+
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }

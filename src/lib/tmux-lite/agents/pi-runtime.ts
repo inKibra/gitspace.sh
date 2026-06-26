@@ -6,7 +6,7 @@ import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
 import { resolveWorkspaceSessionLauncherArgs } from '../../../session/workspace-shell-hooks.js';
 import { escapeShellArg } from '../../../utils/shell-escape.js';
-import type { OmpAgentSession, OmpCreateSessionResult, OmpModelRegistry } from './omp-types.js';
+import type { OmpAgentSession, OmpAuthStorage, OmpCreateSessionResult, OmpModelRegistry } from './omp-types.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
@@ -200,6 +200,13 @@ export async function createPiModelRegistry(): Promise<OmpModelRegistry> {
   const registry = new ModelRegistry(authStorage) as unknown as OmpModelRegistry;
   await registry.refresh('online-if-uncached');
   return registry;
+}
+
+/** The auth storage for the managed agent dir — list/add provider credentials. */
+export async function createPiAuthStorage(): Promise<OmpAuthStorage> {
+  const { discoverAuthStorage } = await importSdk();
+  const env = applyManagedPiEnvironment();
+  return (await discoverAuthStorage(env.PI_CODING_AGENT_DIR)) as unknown as OmpAuthStorage;
 }
 
 /** The global settings singleton, or null if not yet initialized (no session created). */

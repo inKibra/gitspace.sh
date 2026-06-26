@@ -8,8 +8,9 @@ import { NativeAgentSurfaceConnected } from './NativeAgentSurfaceConnected.web.j
 import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
 import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
+import { AgentAuthPanel } from './AgentAuthPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentControlInfo, AgentModelInfo, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentModelInfo, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -201,6 +202,25 @@ export function PaneTerminalPanel({
       .catch((e) => setModelError(e instanceof Error ? e.message.replace(/^Failed to set approval mode:\s*/, '') : 'Failed to set approval mode'));
   }, [backend, wsId, agentSessionId, refreshControl]);
 
+  // Provider auth panel
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authProviders, setAuthProviders] = useState<AgentAuthProvider[]>([]);
+  const [authLoading, setAuthLoading] = useState(false);
+  const loadAuthProviders = useCallback(() => {
+    const fn = backend?.getAgentAuthProviders;
+    if (!fn) return;
+    setAuthLoading(true);
+    void fn.call(backend).then(setAuthProviders).catch(() => undefined).finally(() => setAuthLoading(false));
+  }, [backend]);
+  const openAuth = useCallback(() => { setAuthOpen(true); loadAuthProviders(); }, [loadAuthProviders]);
+  const handleSetApiKey = useCallback(async (provider: string, key: string) => {
+    const fn = backend?.setAgentProviderApiKey;
+    if (!fn) throw new Error('Not supported');
+    await fn.call(backend, provider, key);
+    loadAuthProviders();
+    refreshControl();
+  }, [backend, loadAuthProviders, refreshControl]);
+
   // Agent panes show the native block transcript (replacing the xterm view);
   // shell panes keep the terminal.
   const isAgentPane = !!(pane.agentSessionId && pane.workspaceId);
@@ -216,6 +236,7 @@ export function PaneTerminalPanel({
             onSetModel={handleSetModel}
             onSetThinkingLevel={handleSetThinkingLevel}
             onSetApprovalMode={handleSetApprovalMode}
+            onOpenAuth={openAuth}
             error={modelError}
           />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
@@ -267,6 +288,14 @@ export function PaneTerminalPanel({
           />
         </div>
       ) : null}
+      {authOpen && (
+        <AgentAuthPanel
+          providers={authProviders}
+          loading={authLoading}
+          onSetApiKey={handleSetApiKey}
+          onClose={() => setAuthOpen(false)}
+        />
+      )}
     </div>
   );
 }
