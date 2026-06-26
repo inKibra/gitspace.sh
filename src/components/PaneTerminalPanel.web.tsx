@@ -7,7 +7,9 @@ import type { SessionTerminalHandle } from './SessionTerminal.web.js';
 import { NativeAgentSurfaceConnected } from './NativeAgentSurfaceConnected.web.js';
 import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
 import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
+import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import type { Block } from '../blocks/index.js';
+import type { AgentModelInfo, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -140,6 +142,8 @@ export function PaneTerminalPanel({
   // Pending interactive blocks (permissions / questions / todos) from agent state,
   // shown at the foot of the transcript and resolved through the host.
   const [pendingBlocks, setPendingBlocks] = useState<Block[]>(NO_LIVE);
+  const [agentModel, setAgentModel] = useState<AgentModelInfo | undefined>(undefined);
+  const [agentStatus, setAgentStatus] = useState<SessionStatus | undefined>(undefined);
   useEffect(() => {
     if (!backend?.subscribeAgentState || !wsId || !agentSessionId) return;
     const recompute = () => {
@@ -152,6 +156,8 @@ export function PaneTerminalPanel({
             error: snap.errorMessages?.[agentSessionId] ?? null,
           })
         : NO_LIVE);
+      setAgentModel(snap?.modelInfo?.[agentSessionId]);
+      setAgentStatus(snap?.statuses?.[agentSessionId]);
     };
     recompute();
     const unsub = backend.subscribeAgentState(recompute);
@@ -165,9 +171,12 @@ export function PaneTerminalPanel({
   return (
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {isAgentPane ? (
-        <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
-          <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} />
-        </div>
+        <>
+          <AgentPaneHeader model={agentModel} status={agentStatus} />
+          <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
+            <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} />
+          </div>
+        </>
       ) : (
         <AttachedTerminalPaneWeb
           rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
