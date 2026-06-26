@@ -49,6 +49,14 @@ describe('LiveTurn accumulator', () => {
     expect(msgs.some((m) => m.role === 'assistant' && m.text.includes('on it'))).toBe(true);
   });
 
+  it('does not duplicate a message across message_start + message_update (regression)', () => {
+    const turn = new LiveTurn();
+    turn.apply(evt({ type: 'message_start', message: { role: 'user', content: 'ZQX9 do it' } }));
+    const u = turn.apply(evt({ type: 'message_update', message: { role: 'user', content: 'ZQX9 do it' }, assistantMessageEvent: {} }));
+    const userMsgs = u!.blocks.filter((b) => b.type === 'message' && (b.data as { role: string }).role === 'user');
+    expect(userMsgs).toHaveLength(1);
+  });
+
   it('streaming the same assistant message updates in place (single block)', () => {
     const turn = new LiveTurn();
     turn.apply(evt({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'hel' }], responseId: 'r1' }, assistantMessageEvent: {} }));

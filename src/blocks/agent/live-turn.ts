@@ -57,8 +57,13 @@ export class LiveTurn {
   apply(event: AgentEvent): LiveUpdate | null {
     switch (event.type) {
       case 'message_start':
+        // A new message begins — always a distinct entry (delimits messages,
+        // even consecutive same-role ones).
+        this.messages.push(event.message as Message);
+        return { blocks: this.render(), committed: false };
       case 'message_update':
       case 'message_end':
+        // Update the in-progress message (same logical message), else start one.
         this.upsert(event.message as Message);
         return { blocks: this.render(), committed: false };
       case 'tool_execution_end':
@@ -107,6 +112,9 @@ function sameMessage(a: Message, b: Message): boolean {
     const rb = (b as AssistantMessage).responseId;
     return ra && rb ? ra === rb : true; // streaming the same assistant message
   }
-  // distinct user / developer / toolResult messages are never merged
-  return false;
+  // Same non-assistant role (user/developer/toolResult): treat consecutive
+  // updates as the SAME in-progress message. New distinct messages are
+  // delimited by message_start (which always pushes), so this only merges the
+  // start+update(s) of one message — fixing the user message rendering twice.
+  return true;
 }
