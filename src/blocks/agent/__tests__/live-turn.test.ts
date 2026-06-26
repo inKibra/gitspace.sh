@@ -40,6 +40,32 @@ describe('LiveTurn accumulator', () => {
     expect(turn.apply(evt({ type: 'tool_execution_end', toolCallId: 'x', toolName: 'bash', result: '', isError: false }))).toBeNull();
   });
 
+  it('keeps the user message when the assistant reply streams in (regression: no replace)', () => {
+    const turn = new LiveTurn();
+    turn.apply(evt({ type: 'message_update', message: { role: 'user', content: 'run the tests' }, assistantMessageEvent: {} }));
+    const u = turn.apply(evt({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'on it' }], responseId: 'r1' }, assistantMessageEvent: {} }));
+    const msgs = u!.blocks.filter((b) => b.type === 'message').map((b) => b.data as { role: string; text: string });
+    expect(msgs.some((m) => m.role === 'user' && m.text.includes('run the tests'))).toBe(true);
+    expect(msgs.some((m) => m.role === 'assistant' && m.text.includes('on it'))).toBe(true);
+  });
+
+  it('streaming the same assistant message updates in place (single block)', () => {
+    const turn = new LiveTurn();
+    turn.apply(evt({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'hel' }], responseId: 'r1' }, assistantMessageEvent: {} }));
+    const u = turn.apply(evt({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'hello there' }], responseId: 'r1' }, assistantMessageEvent: {} }));
+    const msgs = u!.blocks.filter((b) => b.type === 'message');
+    expect(msgs).toHaveLength(1);
+    expect((msgs[0].data as { text: string }).text).toBe('hello there');
+  });
+
+  it('uses distinct block ids across turns (no key collision)', () => {
+    const turn = new LiveTurn();
+    const a = turn.apply(evt({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'one' }], responseId: 'r1' }, assistantMessageEvent: {} }));
+    turn.apply(evt({ type: 'turn_end', message: { role: 'assistant', content: [] }, toolResults: [] }));
+    const b = turn.apply(evt({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'two' }], responseId: 'r2' }, assistantMessageEvent: {} }));
+    expect(a!.blocks[0].id).not.toBe(b!.blocks[0].id);
+  });
+
   it('ignores unrelated events', () => {
     const turn = new LiveTurn();
     expect(turn.apply(evt({ type: 'turn_start' }))).toBeNull();

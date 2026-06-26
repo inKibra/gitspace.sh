@@ -6,17 +6,22 @@
  * (re-rendered on each update), then commits on turn end. This accumulator is
  * pure + stateful per session; the coordinator owns one per active session and
  * emits its output as a delta.
+ *
+ * It keeps the WHOLE turn's messages (a turn is user → assistant → tool results,
+ * possibly several), not just the latest — otherwise a later message would
+ * visually replace an earlier one (e.g. the assistant reply overwriting the
+ * user's own message) until a refresh.
  */
 import type { AgentEvent } from '@oh-my-pi/pi-agent-core';
-import type { Message, TextContent, ToolResultMessage } from '@oh-my-pi/pi-ai';
+import type { AssistantMessage, Message, TextContent, ToolResultMessage } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
-import { liveMessageToBlocks } from './message-blocks.js';
+import { messageToBlocks } from './message-blocks.js';
 
 export interface LiveUpdate {
   /** Blocks for the live suffix (empty when the turn has committed). */
   blocks: Block[];
-  /** True when the turn finished: the client should drop the live suffix and
-   *  refetch the tail (the turn is now in the committed session). */
+  /** True when the turn finished: the client drops the live suffix (the turn is
+   *  now folded into committed history). */
   committed: boolean;
 }
 
@@ -28,7 +33,6 @@ function safeJson(value: unknown): string {
   }
 }
 
-/** Convert a tool_execution_end result into a ToolResultMessage for rendering. */
 function toolResultFromEvent(event: Extract<AgentEvent, { type: 'tool_execution_end' }>): ToolResultMessage {
   const raw = event.result as { content?: unknown } | undefined;
   let content: TextContent[];
@@ -45,8 +49,9 @@ function toolResultFromEvent(event: Extract<AgentEvent, { type: 'tool_execution_
 }
 
 export class LiveTurn {
-  private message: Message | null = null;
+  private messages: Message[] = [];
   private readonly toolResults = new Map<string, ToolResultMessage>();
+  private turnSeq = 0; // bumps per turn so live block ids never collide across turns
 
   /** Fold one agent event; returns a live update, or null when nothing changed. */
   apply(event: AgentEvent): LiveUpdate | null {
@@ -54,12 +59,11 @@ export class LiveTurn {
       case 'message_start':
       case 'message_update':
       case 'message_end':
-        this.message = event.message as Message;
+        this.upsert(event.message as Message);
         return { blocks: this.render(), committed: false };
-      case 'tool_execution_end': {
+      case 'tool_execution_end':
         this.toolResults.set(event.toolCallId, toolResultFromEvent(event));
-        return this.message ? { blocks: this.render(), committed: false } : null;
-      }
+        return this.messages.length > 0 ? { blocks: this.render(), committed: false } : null;
       case 'turn_end':
       case 'agent_end':
         this.reset();
@@ -69,12 +73,40 @@ export class LiveTurn {
     }
   }
 
+  /** Update the in-progress message if it's the same one, else start a new one. */
+  private upsert(message: Message): void {
+    const last = this.messages[this.messages.length - 1];
+    if (last && sameMessage(last, message)) {
+      this.messages[this.messages.length - 1] = message;
+    } else {
+      this.messages.push(message);
+    }
+  }
+
   private render(): Block[] {
-    return this.message ? liveMessageToBlocks(this.message, [...this.toolResults.values()]) : [];
+    // Correlate tool results from both tool_execution_end and any toolResult messages.
+    const results = new Map(this.toolResults);
+    for (const m of this.messages) {
+      if (m.role === 'toolResult') results.set(m.toolCallId, m);
+    }
+    return this.messages.flatMap((m, i) => messageToBlocks(m, `live${this.turnSeq}.${i}`, results));
   }
 
   reset(): void {
-    this.message = null;
+    this.messages = [];
     this.toolResults.clear();
+    this.turnSeq += 1;
   }
+}
+
+/** Whether two messages are the same logical message (a streaming update) vs new. */
+function sameMessage(a: Message, b: Message): boolean {
+  if (a.role !== b.role) return false;
+  if (a.role === 'assistant' && b.role === 'assistant') {
+    const ra = (a as AssistantMessage).responseId;
+    const rb = (b as AssistantMessage).responseId;
+    return ra && rb ? ra === rb : true; // streaming the same assistant message
+  }
+  // distinct user / developer / toolResult messages are never merged
+  return false;
 }
