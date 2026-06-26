@@ -13,11 +13,26 @@ import {
   createPiModelRegistry,
   createPiSessionManager,
   getManagedPiExtensionPaths,
+  getPiSettings,
   openPiSession,
   openPiSessionManager,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
 import type { AgentControlInfo } from '../../../agents/agent-runtime-types.js';
+
+const THINKING_LEVELS = ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const APPROVAL_MODES = ['always-ask', 'write', 'yolo'];
+
+/** The control-seam accessors on a live session (cast loosely; the strict SDK
+ *  signatures aren't worth re-declaring on OmpAgentSession). */
+interface ControlSessionAccessors {
+  model?: { provider?: string; id?: string };
+  thinkingLevel?: string;
+  configuredThinkingLevel?(): string | undefined;
+  setThinkingLevel?(level: string, persist?: boolean): void;
+  getContextUsage?(options?: { contextWindow?: number }): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+  settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
+}
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { LiveTurn } from '../../../blocks/agent/live-turn.js';
@@ -291,7 +306,8 @@ export class PiCoordinator {
     }
     // Prefer the live model from the active session (reflects a just-applied
     // switch before it's persisted to the session context).
-    const liveModel = this.activeSessions.get(agentSessionId)?.model as { provider?: string; id?: string } | undefined;
+    const active = this.activeSessions.get(agentSessionId) as ControlSessionAccessors | undefined;
+    const liveModel = active?.model;
     if (liveModel?.provider && liveModel?.id) {
       currentModel = `${liveModel.provider}/${liveModel.id}`;
     }
@@ -302,7 +318,47 @@ export class PiCoordinator {
     } catch (err) {
       console.warn('[pi-coordinator] model list failed:', err);
     }
-    return { usage, currentModel, models };
+
+    // Session-level controls — thinking + context come from the active session;
+    // approval mode is a setting (global, or the active session's settings).
+    const thinkingLevel = active?.configuredThinkingLevel?.() ?? active?.thinkingLevel ?? null;
+    const context = active?.getContextUsage?.() ?? null;
+    let approvalMode: string | null = null;
+    try {
+      const settings = active?.settings ?? (await getPiSettings());
+      const m = settings?.get('tools.approvalMode');
+      if (typeof m === 'string') approvalMode = m;
+    } catch {
+      /* settings unavailable */
+    }
+
+    return {
+      usage,
+      currentModel,
+      models,
+      thinkingLevel,
+      thinkingLevels: THINKING_LEVELS,
+      approvalMode,
+      approvalModes: APPROVAL_MODES,
+      context: context ?? null,
+    };
+  }
+
+  /** Set the session's thinking/reasoning level (spins up the session if needed). */
+  async setThinkingLevel(target: PiWorkspaceTarget, agentSessionId: string, level: string): Promise<boolean> {
+    const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
+    if (!session.setThinkingLevel) return false;
+    session.setThinkingLevel(level, true);
+    return true;
+  }
+
+  /** Set the tool-approval mode (persisted to settings). */
+  async setApprovalMode(target: PiWorkspaceTarget, agentSessionId: string, mode: string): Promise<boolean> {
+    const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
+    const settings = session.settings ?? (await getPiSettings());
+    if (!settings) return false;
+    settings.set('tools.approvalMode', mode);
+    return true;
   }
 
   /** Switch the session's model. Spins up the session if needed. */

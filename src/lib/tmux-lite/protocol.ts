@@ -391,6 +391,8 @@ export type Command =
   | { type: 'agent-transcript-range'; target: AgentWorkspaceTargetPayload; agentSessionId: string; before?: string; limit: number }
   | { type: 'agent-control-info'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-set-model'; target: AgentWorkspaceTargetPayload; agentSessionId: string; provider: string; modelId: string }
+  | { type: 'agent-set-thinking-level'; target: AgentWorkspaceTargetPayload; agentSessionId: string; level: string }
+  | { type: 'agent-set-approval-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: string }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }

@@ -202,6 +202,16 @@ export async function createPiModelRegistry(): Promise<OmpModelRegistry> {
   return registry;
 }
 
+/** The global settings singleton, or null if not yet initialized (no session created). */
+export async function getPiSettings(): Promise<{ get(path: string): unknown; set(path: string, value: unknown): void } | null> {
+  const mod = (await import('@oh-my-pi/pi-coding-agent/config/settings')) as unknown as {
+    isSettingsInitialized?: () => boolean;
+    settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
+  };
+  if (mod.isSettingsInitialized && !mod.isSettingsInitialized()) return null;
+  return mod.settings ?? null;
+}
+
 /**
  * Re-open an existing Pi session file in-process so GitSpace can subscribe to live SDK events
  * again after a tmux-lite restart.

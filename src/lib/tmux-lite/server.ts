@@ -69,6 +69,8 @@ import {
   readAgentTranscriptRange,
   getAgentControlInfo,
   setAgentModel,
+  setAgentThinkingLevel,
+  setAgentApprovalMode,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
@@ -3464,6 +3466,28 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to set model: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-thinking-level':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentThinkingLevel(cmd.target, cmd.agentSessionId, cmd.level);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set thinking level: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-approval-mode':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentApprovalMode(cmd.target, cmd.agentSessionId, cmd.mode);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set approval mode: ${errMsg}` };
             }
             break;
 

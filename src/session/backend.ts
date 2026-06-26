@@ -261,6 +261,10 @@ export interface SessionBackend {
   getAgentControlInfo?(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo>;
   /** Switch an agent session's model. */
   setAgentModel?(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean>;
+  /** Set an agent session's thinking/reasoning level. */
+  setAgentThinkingLevel?(workspaceId: string, agentSessionId: string, level: string): Promise<boolean>;
+  /** Set an agent session's tool-approval mode. */
+  setAgentApprovalMode?(workspaceId: string, agentSessionId: string, mode: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

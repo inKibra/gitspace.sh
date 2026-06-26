@@ -2994,6 +2994,34 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected agent set-model response');
   }
 
+  async setAgentThinkingLevel(workspaceId: string, agentSessionId: string, level: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({
+      type: 'set_agent_thinking_level',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      level,
+    });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-thinking-level response');
+  }
+
+  async setAgentApprovalMode(workspaceId: string, agentSessionId: string, mode: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({
+      type: 'set_agent_approval_mode',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      mode,
+    });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-approval-mode response');
+  }
+
   // ============================================================================
   // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,

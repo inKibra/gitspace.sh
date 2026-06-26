@@ -484,6 +484,24 @@ export async function setAgentModel(
   return defaultPiCoordinator.setModel(target, agentSessionId, provider, modelId);
 }
 
+/** Set the session's thinking/reasoning level. */
+export async function setAgentThinkingLevel(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  level: string,
+): Promise<boolean> {
+  return defaultPiCoordinator.setThinkingLevel(target, agentSessionId, level);
+}
+
+/** Set the tool-approval mode. */
+export async function setAgentApprovalMode(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  mode: string,
+): Promise<boolean> {
+  return defaultPiCoordinator.setApprovalMode(target, agentSessionId, mode);
+}
+
 // ---------------------------------------------------------------------------
 // Host UI bridge wiring
 // ---------------------------------------------------------------------------

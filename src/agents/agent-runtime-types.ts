@@ -74,10 +74,26 @@ export interface AgentModelOption {
   contextWindow: number | null;
 }
 
-/** Control-surface snapshot for an agent session (usage + model switcher). */
+/** Current context-window usage for a session. */
+export interface AgentContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
+/** Control-surface snapshot for an agent session (usage + model + thinking + approval). */
 export interface AgentControlInfo {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; premiumRequests: number; cost: number } | null;
   /** Current model as "provider/id", or null if unset. */
   currentModel: string | null;
   models: AgentModelOption[];
+  /** Current thinking/reasoning level (e.g. "auto", "high"), or null if unknown. */
+  thinkingLevel: string | null;
+  /** Selectable thinking levels. */
+  thinkingLevels: string[];
+  /** Current tool-approval mode ("always-ask" | "write" | "yolo"), or null. */
+  approvalMode: string | null;
+  approvalModes: string[];
+  /** Live context-window usage (only for active sessions). */
+  context: AgentContextUsage | null;
 }

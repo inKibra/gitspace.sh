@@ -184,6 +184,22 @@ export function PaneTerminalPanel({
       .then(() => refreshControl())
       .catch((e) => setModelError(e instanceof Error ? e.message.replace(/^Failed to set model:\s*/, '') : 'Failed to switch model'));
   }, [backend, wsId, agentSessionId, refreshControl]);
+  const handleSetThinkingLevel = useCallback((level: string) => {
+    const fn = backend?.setAgentThinkingLevel;
+    if (!fn || !wsId || !agentSessionId) return;
+    setModelError(null);
+    void fn.call(backend, wsId, agentSessionId, level)
+      .then(() => refreshControl())
+      .catch((e) => setModelError(e instanceof Error ? e.message.replace(/^Failed to set thinking level:\s*/, '') : 'Failed to set thinking level'));
+  }, [backend, wsId, agentSessionId, refreshControl]);
+  const handleSetApprovalMode = useCallback((mode: string) => {
+    const fn = backend?.setAgentApprovalMode;
+    if (!fn || !wsId || !agentSessionId) return;
+    setModelError(null);
+    void fn.call(backend, wsId, agentSessionId, mode)
+      .then(() => refreshControl())
+      .catch((e) => setModelError(e instanceof Error ? e.message.replace(/^Failed to set approval mode:\s*/, '') : 'Failed to set approval mode'));
+  }, [backend, wsId, agentSessionId, refreshControl]);
 
   // Agent panes show the native block transcript (replacing the xterm view);
   // shell panes keep the terminal.
@@ -193,7 +209,15 @@ export function PaneTerminalPanel({
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {isAgentPane ? (
         <>
-          <AgentPaneHeader model={agentModel} status={agentStatus} control={control} onSetModel={handleSetModel} error={modelError} />
+          <AgentPaneHeader
+            model={agentModel}
+            status={agentStatus}
+            control={control}
+            onSetModel={handleSetModel}
+            onSetThinkingLevel={handleSetThinkingLevel}
+            onSetApprovalMode={handleSetApprovalMode}
+            error={modelError}
+          />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} />
           </div>
