@@ -1637,6 +1637,27 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent permission response');
   }
 
+  async getAgentTranscriptRange(
+    workspaceId: string,
+    agentSessionId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<{ blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({
+      type: 'agent-transcript-range',
+      target,
+      agentSessionId,
+      before,
+      limit,
+    });
+    if (tmuxResponse.type === 'agent-transcript-range') {
+      return { blocks: tmuxResponse.blocks, oldestCursor: tmuxResponse.oldestCursor, hasMore: tmuxResponse.hasMore };
+    }
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent transcript response');
+  }
+
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }

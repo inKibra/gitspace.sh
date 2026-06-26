@@ -66,6 +66,7 @@ import {
   rebindPiTerminalSessionOwnership,
   releasePiTerminalSessionOwnership,
   respondToAgentPermission,
+  readAgentTranscriptRange,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
@@ -3428,6 +3429,17 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to respond to agent permission: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-transcript-range':
+            try {
+              await getAgentControlReady();
+              const page = await readAgentTranscriptRange(cmd.target, cmd.agentSessionId, { before: cmd.before, limit: cmd.limit });
+              res = { type: 'agent-transcript-range', blocks: page.blocks, oldestCursor: page.oldestCursor, hasMore: page.hasMore };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read transcript: ${errMsg}` };
             }
             break;
 

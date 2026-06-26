@@ -1530,6 +1530,20 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'get_agent_transcript_range':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-transcript-range',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          before: msg.before,
+          limit: msg.limit,
+        }, sendResponse);
+        break;
+
       case 'list_agent_commands':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

@@ -13,8 +13,11 @@ import {
   createPiSessionManager,
   getManagedPiExtensionPaths,
   openPiSession,
+  openPiSessionManager,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
+import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
+import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 import { executeSpaceCommand } from './extensions/space-command.js';
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
@@ -250,6 +253,22 @@ export class PiCoordinator {
         }),
         updatedAt: s.modified?.toISOString(),
       }));
+  }
+
+  /**
+   * Read one page of a session's transcript as blocks (storage-free projection
+   * over the SDK session's entry tree). Opens the session file read-only; the
+   * SDK's manager is the source of truth — we map a window and release it.
+   */
+  async readTranscriptRange(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    opts: { before?: string; limit: number },
+  ): Promise<TranscriptPage> {
+    const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!file) return { blocks: [], oldestCursor: null, hasMore: false };
+    const manager = await openPiSessionManager(file.path);
+    return getTranscriptRange(manager as unknown as TranscriptSource, opts);
   }
 
   /**

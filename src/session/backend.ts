@@ -248,6 +248,14 @@ export interface SessionBackend {
     response: 'allow' | 'deny',
   ): Promise<boolean>;
 
+  /** Read one page of an agent session's transcript as blocks (range-paginated). */
+  getAgentTranscriptRange?(
+    workspaceId: string,
+    agentSessionId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<{ blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }>;
+
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   /** Live refresh of workspace-scoped agent sessions from the runtime. */

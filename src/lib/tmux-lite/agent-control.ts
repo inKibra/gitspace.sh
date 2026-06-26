@@ -1,4 +1,5 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
+import type { TranscriptPage } from '../../blocks/agent/transcript-source.js';
 import type { HostUIBridgeEmitter, HostUIDialogResponse } from './agents/host-ui-bridge.js';
 import {
   defaultAgentEventManager,
@@ -450,6 +451,15 @@ export async function respondToAgentPermission(
 
 export function markAgentSessionIdle(workspaceId: string, sessionId: string): void {
   defaultAgentEventManager.markSessionIdle(workspaceId, sessionId);
+}
+
+/** Read one page of a session's transcript as blocks (range-paginated). */
+export async function readAgentTranscriptRange(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  opts: { before?: string; limit: number },
+): Promise<TranscriptPage> {
+  return defaultPiCoordinator.readTranscriptRange(target, agentSessionId, opts);
 }
 
 // ---------------------------------------------------------------------------

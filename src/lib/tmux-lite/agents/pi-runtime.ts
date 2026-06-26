@@ -178,6 +178,17 @@ export async function createPiSessionManager(cwd: string) {
 }
 
 /**
+ * Open an existing Pi session file read-only (loads its entry tree) so callers
+ * can read the transcript via getLeafId()/getEntry(). The returned manager is
+ * the SDK's own structure — read it and let it go; do not retain a second copy.
+ */
+export async function openPiSessionManager(sessionFilePath: string) {
+  const { SessionManager } = await importSessionManagerModule();
+  applyManagedPiEnvironment();
+  return SessionManager.open(sessionFilePath);
+}
+
+/**
  * Re-open an existing Pi session file in-process so GitSpace can subscribe to live SDK events
  * again after a tmux-lite restart.
  */

@@ -1,16 +1,19 @@
 /** @jsxImportSource react */
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { AttachedTerminalPaneWeb } from './AttachedTerminalPane.web.js';
 import { applyModifiersToInput, type ModifierState } from './TerminalControls.web.js';
 import type { SessionTerminalHandle } from './SessionTerminal.web.js';
 import { NativeAgentSurfaceConnected } from './NativeAgentSurfaceConnected.web.js';
+import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
+import type { Block } from '../blocks/index.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
 
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
+const NO_LIVE: Block[] = [];
 
 export interface PaneTerminalPanelProps {
   pane: AttachedPaneState;
@@ -90,6 +93,29 @@ export function PaneTerminalPanel({
     onFocus?.();
   }, [onFocus]);
 
+  const wsId = pane.workspaceId;
+  const agentSessionId = pane.agentSessionId;
+  const fetchTranscriptRange = useCallback(
+    async (before: string | undefined, limit: number) => {
+      const fn = backend?.getAgentTranscriptRange;
+      if (!fn || !wsId || !agentSessionId) return { blocks: NO_LIVE, oldestCursor: null, hasMore: false };
+      const r = await fn.call(backend, wsId, agentSessionId, before, limit);
+      return { blocks: r.blocks as Block[], oldestCursor: r.oldestCursor, hasMore: r.hasMore };
+    },
+    [backend, wsId, agentSessionId],
+  );
+  const transcriptHost = useMemo<BlockHost>(() => ({
+    readOnly: false,
+    resolve: (blockId, response) => {
+      if (typeof blockId === 'string' && blockId.startsWith('perm:') && backend && wsId && agentSessionId) {
+        void backend
+          .respondToAgentPermission(wsId, agentSessionId, blockId.slice(5), response === 'Deny' ? 'deny' : 'allow')
+          .catch(() => undefined);
+      }
+    },
+    dispatch: () => {},
+  }), [backend, wsId, agentSessionId]);
+
   return (
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
       <AttachedTerminalPaneWeb
@@ -126,14 +152,19 @@ export function PaneTerminalPanel({
         showHeader={false}
       />
       {pane.agentSessionId && pane.workspaceId ? (
-        <div className="flex-shrink-0">
-          <NativeAgentSurfaceConnected
-            backendKey={backendKey}
-            workspaceId={pane.workspaceId}
-            agentSessionId={pane.agentSessionId}
-            paneId={pane.paneId}
-          />
-        </div>
+        <>
+          <div className="flex-shrink-0 h-72 border-t border-[var(--gs-border)] bg-[var(--gs-bg)]">
+            <AgentTranscript fetchRange={fetchTranscriptRange} live={NO_LIVE} host={transcriptHost} pageSize={30} />
+          </div>
+          <div className="flex-shrink-0">
+            <NativeAgentSurfaceConnected
+              backendKey={backendKey}
+              workspaceId={pane.workspaceId}
+              agentSessionId={pane.agentSessionId}
+              paneId={pane.paneId}
+            />
+          </div>
+        </>
       ) : null}
     </div>
   );

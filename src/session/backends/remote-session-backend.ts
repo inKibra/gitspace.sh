@@ -2942,6 +2942,29 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected agent permission response');
   }
 
+  /** Read one page of an agent session's transcript as blocks (range-paginated). */
+  async getAgentTranscriptRange(
+    workspaceId: string,
+    agentSessionId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<{ blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({
+      type: 'get_agent_transcript_range',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      before,
+      limit,
+    });
+    if (tmuxResponse.type === 'agent-transcript-range') {
+      return { blocks: tmuxResponse.blocks, oldestCursor: tmuxResponse.oldestCursor, hasMore: tmuxResponse.hasMore };
+    }
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent transcript response');
+  }
+
   // ============================================================================
   // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,
