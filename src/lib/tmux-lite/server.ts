@@ -78,6 +78,8 @@ import {
   getAgentSettingsSchema,
   getAgentTools,
   compactAgentSession,
+  cycleAgentRole,
+  applyAgentModelRole,
   startAgentOAuthLogin,
   respondAgentOAuthPrompt,
   restoreAgentSession,
@@ -3597,6 +3599,28 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to compact: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-cycle-role':
+            try {
+              await getAgentControlReady();
+              const ok = await cycleAgentRole(cmd.target, cmd.agentSessionId, cmd.direction);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to cycle role: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-apply-role':
+            try {
+              await getAgentControlReady();
+              const ok = await applyAgentModelRole(cmd.target, cmd.agentSessionId, cmd.role);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to apply role: ${errMsg}` };
             }
             break;
 

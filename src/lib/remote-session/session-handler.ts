@@ -1692,6 +1692,32 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'cycle_agent_role':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-cycle-role',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          direction: msg.direction,
+        }, sendResponse);
+        break;
+
+      case 'apply_agent_role':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-apply-role',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          role: msg.role,
+        }, sendResponse);
+        break;
+
       case 'list_agent_commands':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

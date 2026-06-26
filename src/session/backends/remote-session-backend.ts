@@ -3094,6 +3094,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected compact response');
   }
 
+  async cycleAgentRole(workspaceId: string, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'cycle_agent_role', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, direction });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected cycle-role response');
+  }
+
+  async applyAgentModelRole(workspaceId: string, agentSessionId: string, role: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'apply_agent_role', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, role });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected apply-role response');
+  }
+
   // ============================================================================
   // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,

@@ -52,6 +52,9 @@ interface ControlSessionAccessors {
   settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
   toolRegistry?: Map<string, { name?: string; tier?: string }>;
   compact?(instructions?: string): Promise<unknown>;
+  getRoleModelCycle?(roleOrder: readonly string[]): { models: Array<{ role: string; model?: { provider?: string; id?: string } }>; currentIndex: number } | undefined;
+  applyRoleModel?(entry: unknown): Promise<void>;
+  cycleRoleModels?(roleOrder: readonly string[], direction?: 'forward' | 'backward'): Promise<unknown>;
 }
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
@@ -353,16 +356,60 @@ export class PiCoordinator {
       /* settings unavailable */
     }
 
+    // Model roles (the role cycle) — resolved from the active session.
+    let roles: AgentControlInfo['roles'] = [];
+    try {
+      if (active?.getRoleModelCycle) {
+        const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-registry')) as unknown as {
+          MODEL_ROLE_IDS: string[];
+          MODEL_ROLES: Record<string, { name?: string }>;
+        };
+        const cycle = active.getRoleModelCycle(MODEL_ROLE_IDS);
+        if (cycle?.models) {
+          roles = cycle.models.map((m, i) => ({
+            role: m.role,
+            name: MODEL_ROLES[m.role]?.name ?? m.role,
+            model: m.model?.provider && m.model?.id ? `${m.model.provider}/${m.model.id}` : null,
+            current: i === cycle.currentIndex,
+          }));
+        }
+      }
+    } catch {
+      /* roles unavailable */
+    }
+
     return {
       usage,
       currentModel,
       models,
+      roles,
       thinkingLevel,
       thinkingLevels: THINKING_LEVELS,
       approvalMode,
       approvalModes: APPROVAL_MODES,
       context: context ?? null,
     };
+  }
+
+  /** Cycle the active model through the configured roles (the cmd-P role cycle). */
+  async cycleRole(target: PiWorkspaceTarget, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
+    const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
+    if (!session.cycleRoleModels) return false;
+    const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-registry')) as unknown as { MODEL_ROLE_IDS: string[] };
+    const result = await session.cycleRoleModels(MODEL_ROLE_IDS, direction);
+    return !!result;
+  }
+
+  /** Apply a specific role's model to the active session. */
+  async applyRole(target: PiWorkspaceTarget, agentSessionId: string, role: string): Promise<boolean> {
+    const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
+    if (!session.getRoleModelCycle || !session.applyRoleModel) return false;
+    const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-registry')) as unknown as { MODEL_ROLE_IDS: string[] };
+    const cycle = session.getRoleModelCycle(MODEL_ROLE_IDS);
+    const entry = cycle?.models.find((m) => m.role === role);
+    if (!entry) return false;
+    await session.applyRoleModel(entry);
+    return true;
   }
 
   /** Set the session's thinking/reasoning level (spins up the session if needed). */

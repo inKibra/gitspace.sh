@@ -1756,6 +1756,22 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected compact response');
   }
 
+  async cycleAgentRole(workspaceId: string, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-cycle-role', target, agentSessionId, direction });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected cycle-role response');
+  }
+
+  async applyAgentModelRole(workspaceId: string, agentSessionId: string, role: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-apply-role', target, agentSessionId, role });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected apply-role response');
+  }
+
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }

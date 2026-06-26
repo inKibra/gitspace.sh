@@ -130,12 +130,22 @@ export interface AgentContextUsage {
   percent: number | null;
 }
 
+/** A model role (default/smol/slow/...) resolved to its model, for the role cycle. */
+export interface AgentRoleInfo {
+  role: string;
+  name: string;
+  model: string | null;
+  current: boolean;
+}
+
 /** Control-surface snapshot for an agent session (usage + model + thinking + approval). */
 export interface AgentControlInfo {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; premiumRequests: number; cost: number } | null;
   /** Current model as "provider/id", or null if unset. */
   currentModel: string | null;
   models: AgentModelOption[];
+  /** Resolved model roles for the role cycle (empty when none configured). */
+  roles: AgentRoleInfo[];
   /** Current thinking/reasoning level (e.g. "auto", "high"), or null if unknown. */
   thinkingLevel: string | null;
   /** Selectable thinking levels. */

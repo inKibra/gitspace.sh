@@ -235,6 +235,16 @@ export function PaneTerminalPanel({
     if (!fn || !wsId || !agentSessionId) return;
     void fn.call(backend, wsId, agentSessionId).then(() => refreshControl()).catch(() => undefined);
   }, [backend, wsId, agentSessionId, refreshControl]);
+  const handleCycleRole = useCallback(() => {
+    const fn = backend?.cycleAgentRole;
+    if (!fn || !wsId || !agentSessionId) return;
+    void fn.call(backend, wsId, agentSessionId, 'forward').then(() => refreshControl()).catch(() => undefined);
+  }, [backend, wsId, agentSessionId, refreshControl]);
+  const handleApplyRole = useCallback((role: string) => {
+    const fn = backend?.applyAgentModelRole;
+    if (!fn || !wsId || !agentSessionId) return;
+    void fn.call(backend, wsId, agentSessionId, role).then(() => refreshControl()).catch(() => undefined);
+  }, [backend, wsId, agentSessionId, refreshControl]);
 
   // OAuth sign-in flow (events arrive via the agent-state delta channel)
   const [oauthFlow, setOauthFlow] = useState<(AgentOAuthEvent & { provider: string }) | null>(null);
@@ -282,6 +292,7 @@ export function PaneTerminalPanel({
             onSetModel={handleSetModel}
             onSetThinkingLevel={handleSetThinkingLevel}
             onSetApprovalMode={handleSetApprovalMode}
+            onCycleRole={handleCycleRole}
             onOpenAuth={openSettings}
             error={modelError}
           />
@@ -343,6 +354,7 @@ export function PaneTerminalPanel({
           loading={settingsLoading}
           oauth={oauthFlow}
           onSetModel={handleSetModel}
+          onApplyRole={handleApplyRole}
           onSetSetting={handleSetSetting}
           onSetApiKey={handleSetApiKey}
           onOAuthLogin={handleOAuthLogin}

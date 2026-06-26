@@ -402,6 +402,8 @@ export type Command =
   | { type: 'agent-settings-schema' }
   | { type: 'agent-tools'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-compact'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-cycle-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; direction: 'forward' | 'backward' }
+  | { type: 'agent-apply-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; role: string }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }

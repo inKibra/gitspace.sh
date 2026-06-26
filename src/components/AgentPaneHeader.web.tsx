@@ -63,6 +63,7 @@ export function AgentPaneHeader({
   onSetModel,
   onSetThinkingLevel,
   onSetApprovalMode,
+  onCycleRole,
   onOpenAuth,
   error,
 }: {
@@ -72,6 +73,7 @@ export function AgentPaneHeader({
   onSetModel?: (provider: string, modelId: string) => void;
   onSetThinkingLevel?: (level: string) => void;
   onSetApprovalMode?: (mode: string) => void;
+  onCycleRole?: () => void;
   onOpenAuth?: () => void;
   error?: string | null;
 }): ReactElement {
@@ -88,6 +90,9 @@ export function AgentPaneHeader({
   const ctx = control?.context;
   const models = control?.models ?? [];
   const canSwitch = models.length > 0 && !!onSetModel;
+  const roles = control?.roles ?? [];
+  const currentRole = roles.find((r) => r.current) ?? roles[0];
+  const canCycleRole = roles.length > 1 && !!onCycleRole;
 
   return (
     <div className="relative flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-[11px]">
@@ -126,6 +131,13 @@ export function AgentPaneHeader({
           </>
         )}
       </span>
+
+      {/* role cycle (the cmd-P role selector) */}
+      {canCycleRole && (
+        <button type="button" onClick={onCycleRole} title="Cycle model role" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">
+          ⟳ <span className="text-[var(--gs-text)]">{currentRole?.name ?? 'role'}</span>
+        </button>
+      )}
 
       {/* thinking level */}
       {control?.thinkingLevels?.length && onSetThinkingLevel ? (

@@ -283,6 +283,10 @@ export interface SessionBackend {
   getAgentTools?(workspaceId: string, agentSessionId: string): Promise<AgentToolInfo[]>;
   /** Compact a session's context. */
   compactAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
+  /** Cycle the active model through configured roles. */
+  cycleAgentRole?(workspaceId: string, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean>;
+  /** Apply a specific role's model to the session. */
+  applyAgentModelRole?(workspaceId: string, agentSessionId: string, role: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

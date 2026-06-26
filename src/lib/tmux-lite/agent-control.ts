@@ -549,6 +549,16 @@ export async function compactAgentSession(target: AgentWorkspaceTarget, agentSes
   return defaultPiCoordinator.compactSession(target, agentSessionId);
 }
 
+/** Cycle the active model through configured roles. */
+export async function cycleAgentRole(target: AgentWorkspaceTarget, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
+  return defaultPiCoordinator.cycleRole(target, agentSessionId, direction);
+}
+
+/** Apply a specific role's model to the session. */
+export async function applyAgentModelRole(target: AgentWorkspaceTarget, agentSessionId: string, role: string): Promise<boolean> {
+  return defaultPiCoordinator.applyRole(target, agentSessionId, role);
+}
+
 // ---------------------------------------------------------------------------
 // Host UI bridge wiring
 // ---------------------------------------------------------------------------

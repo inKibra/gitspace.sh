@@ -24,6 +24,7 @@ export function AgentSettingsPanel({
   loading,
   oauth,
   onSetModel,
+  onApplyRole,
   onSetSetting,
   onSetApiKey,
   onOAuthLogin,
@@ -38,6 +39,7 @@ export function AgentSettingsPanel({
   loading: boolean;
   oauth: ActiveOAuth;
   onSetModel: (provider: string, modelId: string) => void;
+  onApplyRole: (role: string) => void;
   onSetSetting: (path: string, value: string | number | boolean) => Promise<void>;
   onSetApiKey: (provider: string, key: string) => Promise<void>;
   onOAuthLogin: (provider: string) => void;
@@ -79,7 +81,7 @@ export function AgentSettingsPanel({
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
-          {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} />}
+          {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onApplyRole={onApplyRole} />}
           {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
           {tab === 'usage' && <UsageTab control={control} />}
@@ -98,11 +100,29 @@ function Grp({ children }: { children: React.ReactNode }): ReactElement {
   return <div className="mb-1 mt-3 text-[10px] uppercase tracking-wide text-[var(--gs-text-ghost)] first:mt-0">{children}</div>;
 }
 
-function ModelsTab({ control, onSetModel }: { control?: AgentControlInfo; onSetModel: (p: string, id: string) => void }): ReactElement {
+function ModelsTab({ control, onSetModel, onApplyRole }: { control?: AgentControlInfo; onSetModel: (p: string, id: string) => void; onApplyRole: (role: string) => void }): ReactElement {
   const models = control?.models ?? [];
   const current = control?.currentModel ?? null;
+  const roles = control?.roles ?? [];
   return (
     <div>
+      {roles.length > 0 && (
+        <>
+          <Grp>Roles — click to apply</Grp>
+          {roles.map((r) => (
+            <button
+              key={r.role}
+              type="button"
+              onClick={() => onApplyRole(r.role)}
+              className={`flex w-full items-center gap-2 px-1 py-1 text-left hover:bg-[var(--gs-border)] ${r.current ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
+            >
+              <span>{r.current ? '◉' : '○'}</span>
+              <span className="font-[family-name:var(--gs-font)]">{r.name}</span>
+              <span className="ml-auto truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-dim)]">{r.model ?? '—'}</span>
+            </button>
+          ))}
+        </>
+      )}
       <Grp>Model — click to switch</Grp>
       {models.length === 0 ? (
         <div className="text-[var(--gs-text-dim)]">No models (sign in to a provider).</div>
