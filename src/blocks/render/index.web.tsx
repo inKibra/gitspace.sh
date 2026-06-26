@@ -15,3 +15,6 @@ export { BlockView, BlockList, defineRenderer, hasRenderer } from './registry.we
 export { Markdown, BLOCK_MD_OPTIONS } from './markdown.web.js';
 export { BlockHostProvider, useBlockHost } from './host.web.js';
 export type { BlockHost, BlockAction } from './host.web.js';
+export { AgentTranscript } from './AgentTranscript.web.js';
+export { useTranscript } from './useTranscript.web.js';
+export type { UseTranscript, TranscriptMode } from './useTranscript.web.js';

@@ -79,8 +79,17 @@ function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): B
   };
 }
 
+/** Index tool results by their call id, for correlating into tool-call blocks. */
+export function collectToolResults(messages: ReadonlyArray<Message>): Map<string, ToolResultMessage> {
+  const results = new Map<string, ToolResultMessage>();
+  for (const message of messages) {
+    if (message.role === 'toolResult') results.set(message.toolCallId, message);
+  }
+  return results;
+}
+
 /** Map one message to blocks. `key` makes block ids stable within a window. */
-function messageToBlocks(message: Message, key: string, results: Map<string, ToolResultMessage>): Block[] {
+export function messageToBlocks(message: Message, key: string, results: Map<string, ToolResultMessage>): Block[] {
   if (message.role === 'user') {
     const blocks: Block[] = [];
     const text = joinText(message.content);
@@ -129,10 +138,7 @@ function messageToBlocks(message: Message, key: string, results: Map<string, Too
  * the call "running" until the result is in range.
  */
 export function messagesToBlocks(messages: ReadonlyArray<Message>): Block[] {
-  const results = new Map<string, ToolResultMessage>();
-  for (const message of messages) {
-    if (message.role === 'toolResult') results.set(message.toolCallId, message);
-  }
+  const results = collectToolResults(messages);
   return messages.flatMap((message, i) => messageToBlocks(message, `m${i}`, results));
 }
 
