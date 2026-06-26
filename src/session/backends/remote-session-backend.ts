@@ -58,6 +58,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
 } from '../backend.js';
+import type { AgentControlInfo } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -2963,6 +2964,34 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected agent transcript response');
+  }
+
+  async getAgentControlInfo(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({
+      type: 'get_agent_control_info',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+    });
+    if (tmuxResponse.type === 'agent-control-info') return tmuxResponse.info;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent control-info response');
+  }
+
+  async setAgentModel(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({
+      type: 'set_agent_model',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      provider,
+      modelId,
+    });
+    if (tmuxResponse.type === 'agent-set-model') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent set-model response');
   }
 
   // ============================================================================

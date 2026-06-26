@@ -10,12 +10,14 @@ import {
 } from '../cli.js';
 import type { Session as TmuxSession } from '../protocol.js';
 import {
+  createPiModelRegistry,
   createPiSessionManager,
   getManagedPiExtensionPaths,
   openPiSession,
   openPiSessionManager,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
+import type { AgentControlInfo } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { LiveTurn } from '../../../blocks/agent/live-turn.js';
@@ -272,6 +274,45 @@ export class PiCoordinator {
     if (!file) return { blocks: [], oldestCursor: null, hasMore: false };
     const manager = await openPiSessionManager(file.path);
     return getTranscriptRange(manager as unknown as TranscriptSource, opts);
+  }
+
+  /** Control-surface snapshot: usage, current model, and the model switcher list. */
+  async getControlInfo(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentControlInfo> {
+    const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    let usage: AgentControlInfo['usage'] = null;
+    let currentModel: string | null = null;
+    if (file) {
+      const manager = (await openPiSessionManager(file.path)) as unknown as {
+        getUsageStatistics?: () => NonNullable<AgentControlInfo['usage']>;
+        buildSessionContext?: () => { models?: { default?: string } };
+      };
+      usage = manager.getUsageStatistics?.() ?? null;
+      currentModel = manager.buildSessionContext?.().models?.default ?? null;
+    }
+    // Prefer the live model from the active session (reflects a just-applied
+    // switch before it's persisted to the session context).
+    const liveModel = this.activeSessions.get(agentSessionId)?.model as { provider?: string; id?: string } | undefined;
+    if (liveModel?.provider && liveModel?.id) {
+      currentModel = `${liveModel.provider}/${liveModel.id}`;
+    }
+    let models: AgentControlInfo['models'] = [];
+    try {
+      const registry = await createPiModelRegistry();
+      models = registry.getAll().map((m) => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow ?? null }));
+    } catch (err) {
+      console.warn('[pi-coordinator] model list failed:', err);
+    }
+    return { usage, currentModel, models };
+  }
+
+  /** Switch the session's model. Spins up the session if needed. */
+  async setModel(target: PiWorkspaceTarget, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {
+    const registry = await createPiModelRegistry();
+    const model = registry.find(provider, modelId);
+    if (!model) return false;
+    const session = await this.ensureActiveSession(target, agentSessionId);
+    await session.setModel(model);
+    return true;
   }
 
   /**

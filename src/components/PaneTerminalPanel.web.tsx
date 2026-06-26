@@ -9,7 +9,7 @@ import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
 import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentModelInfo, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentModelInfo, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -164,6 +164,27 @@ export function PaneTerminalPanel({
     return unsub;
   }, [backend, wsId, agentSessionId]);
 
+  // Control-surface info (usage + model switcher) — refetched on turn boundaries
+  // (status changes) so usage stays current.
+  const [control, setControl] = useState<AgentControlInfo | undefined>(undefined);
+  const refreshControl = useCallback(() => {
+    const fn = backend?.getAgentControlInfo;
+    if (!fn || !wsId || !agentSessionId) return;
+    void fn.call(backend, wsId, agentSessionId).then(setControl).catch(() => undefined);
+  }, [backend, wsId, agentSessionId]);
+  useEffect(() => {
+    refreshControl();
+  }, [refreshControl, agentStatus?.type]);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const handleSetModel = useCallback((provider: string, modelId: string) => {
+    const fn = backend?.setAgentModel;
+    if (!fn || !wsId || !agentSessionId) return;
+    setModelError(null);
+    void fn.call(backend, wsId, agentSessionId, provider, modelId)
+      .then(() => refreshControl())
+      .catch((e) => setModelError(e instanceof Error ? e.message.replace(/^Failed to set model:\s*/, '') : 'Failed to switch model'));
+  }, [backend, wsId, agentSessionId, refreshControl]);
+
   // Agent panes show the native block transcript (replacing the xterm view);
   // shell panes keep the terminal.
   const isAgentPane = !!(pane.agentSessionId && pane.workspaceId);
@@ -172,7 +193,7 @@ export function PaneTerminalPanel({
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {isAgentPane ? (
         <>
-          <AgentPaneHeader model={agentModel} status={agentStatus} />
+          <AgentPaneHeader model={agentModel} status={agentStatus} control={control} onSetModel={handleSetModel} error={modelError} />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} />
           </div>

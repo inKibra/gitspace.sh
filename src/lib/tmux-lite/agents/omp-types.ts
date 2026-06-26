@@ -51,6 +51,7 @@ export interface OmpSessionManagerStatic {
 export interface OmpModelRegistry {
   refresh(mode?: string): Promise<void>;
   find(provider: string, modelId: string): unknown;
+  getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 }
 
 export interface OmpModelRegistryConstructor {

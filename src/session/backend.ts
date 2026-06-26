@@ -22,6 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
+import type { AgentControlInfo } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
@@ -255,6 +256,11 @@ export interface SessionBackend {
     before: string | undefined,
     limit: number,
   ): Promise<{ blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }>;
+
+  /** Control-surface snapshot for an agent session (usage + model switcher). */
+  getAgentControlInfo?(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo>;
+  /** Switch an agent session's model. */
+  setAgentModel?(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

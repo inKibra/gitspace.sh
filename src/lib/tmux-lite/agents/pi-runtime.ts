@@ -6,7 +6,7 @@ import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
 import { resolveWorkspaceSessionLauncherArgs } from '../../../session/workspace-shell-hooks.js';
 import { escapeShellArg } from '../../../utils/shell-escape.js';
-import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
+import type { OmpAgentSession, OmpCreateSessionResult, OmpModelRegistry } from './omp-types.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
@@ -186,6 +186,20 @@ export async function openPiSessionManager(sessionFilePath: string) {
   const { SessionManager } = await importSessionManagerModule();
   applyManagedPiEnvironment();
   return SessionManager.open(sessionFilePath);
+}
+
+/**
+ * A refreshed model registry for the current managed agent dir — used by the
+ * control seam to list available models and resolve a switch target.
+ */
+export async function createPiModelRegistry(): Promise<OmpModelRegistry> {
+  const { discoverAuthStorage } = await importSdk();
+  const { ModelRegistry } = await importModelRegistryModule();
+  const env = applyManagedPiEnvironment();
+  const authStorage = await discoverAuthStorage(env.PI_CODING_AGENT_DIR);
+  const registry = new ModelRegistry(authStorage) as unknown as OmpModelRegistry;
+  await registry.refresh('online-if-uncached');
+  return registry;
 }
 
 /**

@@ -66,3 +66,18 @@ export interface AgentModelInfo {
   /** Current role identifier (e.g., "default", "code", "plan") */
   role?: string;
 }
+
+/** A selectable model for the chrome model switcher. */
+export interface AgentModelOption {
+  provider: string;
+  id: string;
+  contextWindow: number | null;
+}
+
+/** Control-surface snapshot for an agent session (usage + model switcher). */
+export interface AgentControlInfo {
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; premiumRequests: number; cost: number } | null;
+  /** Current model as "provider/id", or null if unset. */
+  currentModel: string | null;
+  models: AgentModelOption[];
+}

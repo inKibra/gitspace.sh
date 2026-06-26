@@ -88,6 +88,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
+import type { AgentControlInfo } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -1656,6 +1657,22 @@ export class LocalSessionBackend implements SessionBackend {
     }
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected agent transcript response');
+  }
+
+  async getAgentControlInfo(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-control-info', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-control-info') return tmuxResponse.info;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent control-info response');
+  }
+
+  async setAgentModel(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-model', target, agentSessionId, provider, modelId });
+    if (tmuxResponse.type === 'agent-set-model') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent set-model response');
   }
 
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {

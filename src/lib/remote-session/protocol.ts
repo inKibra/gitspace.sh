@@ -572,6 +572,22 @@ export interface GetAgentTranscriptRangeRequest {
   limit: number;
 }
 
+export interface GetAgentControlInfoRequest {
+  type: 'get_agent_control_info';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface SetAgentModelRequest {
+  type: 'set_agent_model';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  provider: string;
+  modelId: string;
+}
+
 export interface ListAgentCommandsRequest {
   type: 'list_agent_commands';
   requestId: string;
@@ -973,6 +989,8 @@ export type ClientToMachineMessage =
   | RespondAgentDialogRequest
   | RespondAgentPermissionRequest
   | GetAgentTranscriptRangeRequest
+  | GetAgentControlInfoRequest
+  | SetAgentModelRequest
   | ListAgentCommandsRequest
   | ListWorkspaceEditorsRequest
   | OpenWorkspaceEditorRequest
@@ -1114,6 +1132,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'respond_agent_dialog',
     'respond_agent_permission',
     'get_agent_transcript_range',
+    'get_agent_control_info',
+    'set_agent_model',
     'list_agent_commands',
     'list_workspace_editors',
     'open_workspace_editor',

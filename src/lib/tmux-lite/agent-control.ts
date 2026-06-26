@@ -1,5 +1,6 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
 import type { TranscriptPage } from '../../blocks/agent/transcript-source.js';
+import type { AgentControlInfo } from '../../agents/agent-runtime-types.js';
 import type { HostUIBridgeEmitter, HostUIDialogResponse } from './agents/host-ui-bridge.js';
 import {
   defaultAgentEventManager,
@@ -463,6 +464,24 @@ export async function readAgentTranscriptRange(
   opts: { before?: string; limit: number },
 ): Promise<TranscriptPage> {
   return defaultPiCoordinator.readTranscriptRange(target, agentSessionId, opts);
+}
+
+/** Control-surface snapshot for a session (usage + model switcher). */
+export async function getAgentControlInfo(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+): Promise<AgentControlInfo> {
+  return defaultPiCoordinator.getControlInfo(target, agentSessionId);
+}
+
+/** Switch the session's model. */
+export async function setAgentModel(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  provider: string,
+  modelId: string,
+): Promise<boolean> {
+  return defaultPiCoordinator.setModel(target, agentSessionId, provider, modelId);
 }
 
 // ---------------------------------------------------------------------------

@@ -67,6 +67,8 @@ import {
   releasePiTerminalSessionOwnership,
   respondToAgentPermission,
   readAgentTranscriptRange,
+  getAgentControlInfo,
+  setAgentModel,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
@@ -3440,6 +3442,28 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to read transcript: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-control-info':
+            try {
+              await getAgentControlReady();
+              const info = await getAgentControlInfo(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-control-info', info };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read control info: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-model':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentModel(cmd.target, cmd.agentSessionId, cmd.provider, cmd.modelId);
+              res = { type: 'agent-set-model', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set model: ${errMsg}` };
             }
             break;
 
