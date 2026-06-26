@@ -6,6 +6,7 @@ import { applyModifiersToInput, type ModifierState } from './TerminalControls.we
 import type { SessionTerminalHandle } from './SessionTerminal.web.js';
 import { NativeAgentSurfaceConnected } from './NativeAgentSurfaceConnected.web.js';
 import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
+import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import type { Block } from '../blocks/index.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
@@ -107,10 +108,18 @@ export function PaneTerminalPanel({
   const transcriptHost = useMemo<BlockHost>(() => ({
     readOnly: false,
     resolve: (blockId, response) => {
-      if (typeof blockId === 'string' && blockId.startsWith('perm:') && backend && wsId && agentSessionId) {
+      if (typeof blockId !== 'string' || !backend || !wsId || !agentSessionId) return;
+      // approval-gate blocks: perm:<permissionId>
+      if (blockId.startsWith('perm:')) {
         void backend
           .respondToAgentPermission(wsId, agentSessionId, blockId.slice(5), response === 'Deny' ? 'deny' : 'allow')
           .catch(() => undefined);
+        return;
+      }
+      // host-ui question blocks: q:<id>:<index> → answer the question dialog
+      if (blockId.startsWith('q:') && backend.sendDialogResponse) {
+        const questionId = blockId.slice(2).split(':')[0];
+        void backend.sendDialogResponse(questionId, 'select', typeof response === 'string' ? response : String(response)).catch(() => undefined);
       }
     },
     dispatch: () => {},
@@ -128,6 +137,27 @@ export function PaneTerminalPanel({
     return unsub;
   }, [backend, wsId, agentSessionId]);
 
+  // Pending interactive blocks (permissions / questions / todos) from agent state,
+  // shown at the foot of the transcript and resolved through the host.
+  const [pendingBlocks, setPendingBlocks] = useState<Block[]>(NO_LIVE);
+  useEffect(() => {
+    if (!backend?.subscribeAgentState || !wsId || !agentSessionId) return;
+    const recompute = () => {
+      const snap = backend.getAgentStateSnapshot?.()[wsId];
+      setPendingBlocks(snap
+        ? pendingInteractionBlocks({
+            permissions: snap.pendingPermissions?.[agentSessionId],
+            questions: snap.pendingQuestions?.[agentSessionId],
+            todoPhases: snap.todoPhases?.[agentSessionId],
+            error: snap.errorMessages?.[agentSessionId] ?? null,
+          })
+        : NO_LIVE);
+    };
+    recompute();
+    const unsub = backend.subscribeAgentState(recompute);
+    return unsub;
+  }, [backend, wsId, agentSessionId]);
+
   // Agent panes show the native block transcript (replacing the xterm view);
   // shell panes keep the terminal.
   const isAgentPane = !!(pane.agentSessionId && pane.workspaceId);
@@ -136,7 +166,7 @@ export function PaneTerminalPanel({
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {isAgentPane ? (
         <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
-          <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} host={transcriptHost} pageSize={30} />
+          <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} />
         </div>
       ) : (
         <AttachedTerminalPaneWeb

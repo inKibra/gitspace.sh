@@ -5,6 +5,8 @@ import { BlockList } from './registry.web.js';
 import { BlockHostProvider, type BlockHost } from './host.web.js';
 import { useTranscript } from './useTranscript.web.js';
 
+const EMPTY: readonly Block[] = [];
+
 /**
  * The native agent transcript — an infinite-scroll surface that replaces the
  * xterm agent view. A committed prefix is paged from the session via
@@ -14,18 +16,22 @@ import { useTranscript } from './useTranscript.web.js';
 export function AgentTranscript({
   fetchRange,
   live,
+  pending = EMPTY,
   host,
   busy = false,
   pageSize,
 }: {
   fetchRange: (before: string | undefined, limit: number) => Promise<TranscriptPage>;
   live: readonly Block[];
+  /** Pending interactive blocks (permissions / questions / todos) — shown at the
+   *  foot, not folded into history; resolve through the host. */
+  pending?: readonly Block[];
   host: BlockHost;
   busy?: boolean;
   pageSize?: number;
 }): ReactElement {
   const t = useTranscript({ fetchRange, live, pageSize });
-  const empty = t.committed.length === 0 && live.length === 0;
+  const empty = t.committed.length === 0 && live.length === 0 && pending.length === 0;
 
   return (
     <BlockHostProvider host={host}>
@@ -55,6 +61,8 @@ export function AgentTranscript({
               <span className="mr-1 inline-block animate-pulse">●</span> working…
             </div>
           )}
+
+          {pending.length > 0 && <BlockList blocks={pending} />}
         </div>
 
         {t.mode === 'browse' && t.newBelowCount > 0 && (
