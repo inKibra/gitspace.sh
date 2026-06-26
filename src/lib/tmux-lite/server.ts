@@ -3520,6 +3520,7 @@ routerListener = Bun.listen({
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to list commands: ${errMsg}` };
             }
+            break;
 
           case 'workspace-editors-list':
             try {
