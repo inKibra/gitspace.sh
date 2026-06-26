@@ -1,0 +1,84 @@
+import { describe, expect, it } from 'bun:test';
+import type { Message } from '@oh-my-pi/pi-ai';
+
+import { validateBlock } from '../../index.js';
+import { liveMessageToBlocks, messagesToBlocks } from '../message-blocks.js';
+
+// Minimal well-typed fixtures (only the fields the mapper reads).
+function user(text: string): Message {
+  return { role: 'user', content: text, timestamp: 0 } as Message;
+}
+function assistant(content: unknown[], extra: Record<string, unknown> = {}): Message {
+  return { role: 'assistant', content, timestamp: 0, ...extra } as unknown as Message;
+}
+function toolResult(toolCallId: string, text: string, isError = false): Message {
+  return { role: 'toolResult', toolCallId, toolName: 'bash', content: [{ type: 'text', text }], isError } as Message;
+}
+
+describe('messagesToBlocks', () => {
+  it('maps a user turn to a message block', () => {
+    const blocks = messagesToBlocks([user('migrate the effects')]);
+    expect(blocks).toHaveLength(1);
+    expect(validateBlock(blocks[0]).ok).toBe(true);
+    expect((blocks[0].data as { role: string }).role).toBe('user');
+  });
+
+  it('maps assistant text + thinking into message + thinking blocks', () => {
+    const blocks = messagesToBlocks([
+      assistant([
+        { type: 'thinking', thinking: 'let me plan' },
+        { type: 'text', text: 'Here is the plan.' },
+      ]),
+    ]);
+    const types = blocks.map((b) => b.type);
+    expect(types).toEqual(['thinking', 'message']);
+    for (const b of blocks) expect(validateBlock(b).ok).toBe(true);
+  });
+
+  it('correlates a tool call with its result and nests it', () => {
+    const blocks = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'tc1', name: 'bash', arguments: { command: 'bun test' } }]),
+      toolResult('tc1', 'ok: 13 pass'),
+    ]);
+    const tool = blocks.find((b) => b.type === 'tool-call');
+    expect(tool).toBeDefined();
+    const r = validateBlock(tool!);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.block.data as { status: string; target?: string; result?: unknown[] };
+      expect(data.status).toBe('done');
+      expect(data.target).toBe('bun test');
+      expect(data.result?.length).toBe(1);
+      // the nested result block is itself valid
+      expect(validateBlock((data.result as unknown[])[0]).ok).toBe(true);
+    }
+  });
+
+  it('leaves a tool call running when its result is out of the window', () => {
+    const blocks = messagesToBlocks([assistant([{ type: 'toolCall', id: 'tc9', name: 'edit', arguments: { file_path: 'a.ts' } }])]);
+    const tool = blocks.find((b) => b.type === 'tool-call')!;
+    expect((tool.data as { status: string }).status).toBe('running');
+    expect((tool.data as { target: string }).target).toBe('a.ts');
+  });
+
+  it('surfaces an assistant error as an error block', () => {
+    const blocks = messagesToBlocks([assistant([{ type: 'text', text: 'partial' }], { errorMessage: 'stream aborted' })]);
+    expect(blocks.some((b) => b.type === 'error')).toBe(true);
+    for (const b of blocks) expect(validateBlock(b).ok).toBe(true);
+  });
+
+  it('skips developer messages and bare tool-result messages in the main walk', () => {
+    const blocks = messagesToBlocks([
+      { role: 'developer', content: 'system note', timestamp: 0 } as Message,
+      toolResult('orphan', 'output'),
+    ]);
+    expect(blocks).toHaveLength(0);
+  });
+
+  it('liveMessageToBlocks maps a single in-progress assistant message', () => {
+    const blocks = liveMessageToBlocks(assistant([{ type: 'text', text: 'streaming…' }], { responseId: 'r1' }));
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].id).toContain('r1');
+    expect(validateBlock(blocks[0]).ok).toBe(true);
+  });
+});
