@@ -24,6 +24,16 @@ import type { AgentControlInfo } from '../../../agents/agent-runtime-types.js';
 const THINKING_LEVELS = ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const APPROVAL_MODES = ['always-ask', 'write', 'yolo'];
 
+/** Curated, safe-to-edit settings surfaced in the settings panel. */
+const SETTINGS_CATALOG: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; options?: string[] }> = [
+  { path: 'tools.approvalMode', label: 'Approval mode', kind: 'enum', options: APPROVAL_MODES },
+  { path: 'model.thinkingLevel', label: 'Thinking level', kind: 'enum', options: THINKING_LEVELS },
+  { path: 'compaction.enabled', label: 'Auto-compaction', kind: 'boolean' },
+  { path: 'compaction.autoContinue', label: 'Compaction auto-continue', kind: 'boolean' },
+  { path: 'retry.enabled', label: 'Auto-retry on errors', kind: 'boolean' },
+  { path: 'tools.intentTracing', label: 'Tool intent tracing', kind: 'boolean' },
+];
+
 /** The control-seam accessors on a live session (cast loosely; the strict SDK
  *  signatures aren't worth re-declaring on OmpAgentSession). */
 interface ControlSessionAccessors {
@@ -381,6 +391,29 @@ export class PiCoordinator {
   async setProviderApiKey(provider: string, key: string): Promise<boolean> {
     const auth = await createPiAuthStorage();
     await auth.set(provider, { type: 'api_key', key });
+    return true;
+  }
+
+  /** Read the curated settings catalog with current values. */
+  async getSettings(): Promise<Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }>> {
+    const settings = await getPiSettings();
+    return SETTINGS_CATALOG.map((c) => {
+      let value: string | boolean | null = null;
+      try {
+        const v = settings?.get(c.path);
+        if (typeof v === 'boolean' || typeof v === 'string') value = v;
+      } catch {
+        /* ignore */
+      }
+      return { ...c, value };
+    });
+  }
+
+  /** Write a single setting. */
+  async setSetting(path: string, value: string | boolean): Promise<boolean> {
+    const settings = await getPiSettings();
+    if (!settings) return false;
+    settings.set(path, value);
     return true;
   }
 

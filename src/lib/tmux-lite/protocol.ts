@@ -395,6 +395,8 @@ export type Command =
   | { type: 'agent-set-approval-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: string }
   | { type: 'agent-auth-providers' }
   | { type: 'agent-set-api-key'; provider: string; key: string }
+  | { type: 'agent-get-settings' }
+  | { type: 'agent-set-setting'; path: string; value: string | boolean }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
@@ -483,6 +485,7 @@ export type Response =
   | { type: 'agent-control-info'; info: import('../../agents/agent-runtime-types.js').AgentControlInfo }
   | { type: 'agent-set-model'; ok: boolean }
   | { type: 'agent-auth-providers'; providers: Array<{ provider: string; hasAuth: boolean }> }
+  | { type: 'agent-settings'; settings: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }> }
   | { type: 'workspace-editors'; editors: import('../../utils/open-editor.js').WorkspaceEditorOption[] }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }
   | {

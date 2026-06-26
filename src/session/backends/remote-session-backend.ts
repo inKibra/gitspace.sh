@@ -58,7 +58,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
 } from '../backend.js';
-import type { AgentControlInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentSettingItem } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -3036,6 +3036,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected set-api-key response');
+  }
+
+  async getAgentSettings(): Promise<AgentSettingItem[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_settings', requestId: crypto.randomUUID() });
+    if (tmuxResponse.type === 'agent-settings') return tmuxResponse.settings;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected settings response');
+  }
+
+  async setAgentSetting(path: string, value: string | boolean): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'set_agent_setting', requestId: crypto.randomUUID(), path, value });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-setting response');
   }
 
   // ============================================================================

@@ -616,6 +616,18 @@ export interface SetAgentProviderApiKeyRequest {
   key: string;
 }
 
+export interface GetAgentSettingsRequest {
+  type: 'get_agent_settings';
+  requestId: string;
+}
+
+export interface SetAgentSettingRequest {
+  type: 'set_agent_setting';
+  requestId: string;
+  path: string;
+  value: string | boolean;
+}
+
 export interface ListAgentCommandsRequest {
   type: 'list_agent_commands';
   requestId: string;
@@ -1023,6 +1035,8 @@ export type ClientToMachineMessage =
   | SetAgentApprovalModeRequest
   | GetAgentAuthProvidersRequest
   | SetAgentProviderApiKeyRequest
+  | GetAgentSettingsRequest
+  | SetAgentSettingRequest
   | ListAgentCommandsRequest
   | ListWorkspaceEditorsRequest
   | OpenWorkspaceEditorRequest
@@ -1170,6 +1184,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'set_agent_approval_mode',
     'get_agent_auth_providers',
     'set_agent_provider_api_key',
+    'get_agent_settings',
+    'set_agent_setting',
     'list_agent_commands',
     'list_workspace_editors',
     'open_workspace_editor',

@@ -512,6 +512,16 @@ export async function setAgentProviderApiKey(provider: string, key: string): Pro
   return defaultPiCoordinator.setProviderApiKey(provider, key);
 }
 
+/** Read the curated settings catalog. */
+export async function getAgentSettings(): Promise<Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }>> {
+  return defaultPiCoordinator.getSettings();
+}
+
+/** Write a single setting. */
+export async function setAgentSetting(path: string, value: string | boolean): Promise<boolean> {
+  return defaultPiCoordinator.setSetting(path, value);
+}
+
 // ---------------------------------------------------------------------------
 // Host UI bridge wiring
 // ---------------------------------------------------------------------------

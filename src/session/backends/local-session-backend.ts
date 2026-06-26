@@ -88,7 +88,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentControlInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentSettingItem } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -1703,6 +1703,20 @@ export class LocalSessionBackend implements SessionBackend {
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected set-api-key response');
+  }
+
+  async getAgentSettings(): Promise<AgentSettingItem[]> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-get-settings' });
+    if (tmuxResponse.type === 'agent-settings') return tmuxResponse.settings;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected settings response');
+  }
+
+  async setAgentSetting(path: string, value: string | boolean): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-setting', path, value });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-setting response');
   }
 
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {

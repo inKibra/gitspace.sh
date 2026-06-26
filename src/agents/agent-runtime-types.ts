@@ -80,6 +80,15 @@ export interface AgentAuthProvider {
   hasAuth: boolean;
 }
 
+/** A single editable agent setting for the settings panel. */
+export interface AgentSettingItem {
+  path: string;
+  label: string;
+  kind: 'boolean' | 'enum';
+  value: string | boolean | null;
+  options?: string[];
+}
+
 /** Current context-window usage for a session. */
 export interface AgentContextUsage {
   tokens: number | null;

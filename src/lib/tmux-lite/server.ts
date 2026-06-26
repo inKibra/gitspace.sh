@@ -73,6 +73,8 @@ import {
   setAgentApprovalMode,
   getAgentAuthProviders,
   setAgentProviderApiKey,
+  getAgentSettings,
+  setAgentSetting,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
@@ -3512,6 +3514,28 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to save API key: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-get-settings':
+            try {
+              await getAgentControlReady();
+              const settings = await getAgentSettings();
+              res = { type: 'agent-settings', settings };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read settings: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-setting':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentSetting(cmd.path, cmd.value);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set setting: ${errMsg}` };
             }
             break;
 
