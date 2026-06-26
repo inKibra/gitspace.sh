@@ -78,6 +78,7 @@ import {
 import { listAvailableEditors, openWorkspaceInEditor } from '../../utils/open-editor.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
+import { setInProcessSessionSource } from '../processes/ports.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, setWorkspaceStatus, updateWorkspaceNote } from '../../core/workspace-metadata.js';
 import { buildMachineSnapshot } from './machine/build.js';
 import type { MachineSnapshot } from './machine/protocol.js';
@@ -590,6 +591,13 @@ function getSessionInfo(s: SessionData): Session {
     unreadAlertCount: s.unreadAlertCount || undefined,
   };
 }
+
+// Let port-conflict resolution read this server's live sessions directly
+// instead of round-tripping through the server socket. Without this, a machine
+// snapshot built inside a command handler that resolves a workspace port would
+// send a `list` command back to this (single-threaded, busy) server and
+// deadlock. See setInProcessSessionSource in ../processes/ports.ts.
+setInProcessSessionSource(() => Array.from(sessions.values()).map(getSessionInfo));
 
 function getUnreadInboxCountForSession(sessionId: string): number {
   let count = 0;

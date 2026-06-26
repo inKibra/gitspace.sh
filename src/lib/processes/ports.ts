@@ -46,20 +46,47 @@ function getParentPid(pid: number): number | null {
   return Number.isFinite(parentPid) && parentPid > 0 ? parentPid : null;
 }
 
+type ManagedSessionList = Awaited<ReturnType<typeof listSessionsFromRunningServer>>;
+
+/**
+ * Live-session accessor for port-conflict resolution.
+ *
+ * When this code runs *inside* the tmux-lite server process — e.g. while it is
+ * building a machine snapshot for a `machine-watch` subscriber — it must NOT
+ * call back into the server over its socket. The server is single-threaded and
+ * already busy handling the command that triggered this lookup, so the `list`
+ * request would queue behind it and never run: the server would wait on itself
+ * and deadlock. The server registers an in-process source via
+ * {@link setInProcessSessionSource} so we read its live sessions directly. CLI
+ * and other out-of-process callers leave it unset and query over the socket.
+ */
+let inProcessSessionSource: (() => ManagedSessionList) | null = null;
+
+export function setInProcessSessionSource(source: (() => ManagedSessionList) | null): void {
+  inProcessSessionSource = source;
+}
+
 export async function resolveManagedSession(pid: number): Promise<PortConflictInfo | null> {
-  try {
-    if (!await isServerRunning()) {
+  let sessions: ManagedSessionList;
+  if (inProcessSessionSource) {
+    try {
+      sessions = inProcessSessionSource();
+    } catch {
       return null;
     }
-  } catch {
-    return null;
-  }
-
-  let sessions: Awaited<ReturnType<typeof listSessionsFromRunningServer>>;
-  try {
-    sessions = await listSessionsFromRunningServer();
-  } catch {
-    return null;
+  } else {
+    try {
+      if (!await isServerRunning()) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    try {
+      sessions = await listSessionsFromRunningServer();
+    } catch {
+      return null;
+    }
   }
 
   const sessionByPid = new Map(sessions.map((session) => [session.pid, session]));
