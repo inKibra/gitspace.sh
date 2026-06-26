@@ -58,7 +58,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
 } from '../backend.js';
-import type { AgentControlInfo, AgentSettingItem } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -3046,7 +3046,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected settings response');
   }
 
-  async setAgentSetting(path: string, value: string | boolean): Promise<boolean> {
+  async setAgentSetting(path: string, value: string | number | boolean): Promise<boolean> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'set_agent_setting', requestId: crypto.randomUUID(), path, value });
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
@@ -3068,6 +3068,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected oauth-respond response');
+  }
+
+  async getAgentSettingsSchema(): Promise<AgentSettingSchemaItem[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_settings_schema', requestId: crypto.randomUUID() });
+    if (tmuxResponse.type === 'agent-settings-schema') return tmuxResponse.schema;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected settings-schema response');
+  }
+
+  async getAgentTools(workspaceId: string, agentSessionId: string): Promise<AgentToolInfo[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_tools', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (tmuxResponse.type === 'agent-tools') return tmuxResponse.tools;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected tools response');
+  }
+
+  async compactAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'compact_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected compact response');
   }
 
   // ============================================================================

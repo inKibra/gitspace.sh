@@ -530,8 +530,23 @@ export async function getAgentSettings(): Promise<Array<{ path: string; label: s
 }
 
 /** Write a single setting. */
-export async function setAgentSetting(path: string, value: string | boolean): Promise<boolean> {
+export async function setAgentSetting(path: string, value: string | number | boolean): Promise<boolean> {
   return defaultPiCoordinator.setSetting(path, value);
+}
+
+/** Full settings schema (by tab) with current values. */
+export async function getAgentSettingsSchema(): Promise<import('../../agents/agent-runtime-types.js').AgentSettingSchemaItem[]> {
+  return defaultPiCoordinator.getSettingsSchema();
+}
+
+/** Tools available to a session (per-tool approval). */
+export async function getAgentTools(target: AgentWorkspaceTarget, agentSessionId: string): Promise<import('../../agents/agent-runtime-types.js').AgentToolInfo[]> {
+  return defaultPiCoordinator.getTools(target, agentSessionId);
+}
+
+/** Compact a session's context. */
+export async function compactAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+  return defaultPiCoordinator.compactSession(target, agentSessionId);
 }
 
 // ---------------------------------------------------------------------------

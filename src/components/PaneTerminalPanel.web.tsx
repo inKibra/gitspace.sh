@@ -10,7 +10,7 @@ import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentModelInfo, AgentOAuthEvent, AgentSettingItem, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -205,14 +205,16 @@ export function PaneTerminalPanel({
   // Agent settings panel (settings + provider sign-in)
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [authProviders, setAuthProviders] = useState<AgentAuthProvider[]>([]);
-  const [agentSettings, setAgentSettings] = useState<AgentSettingItem[]>([]);
+  const [agentSchema, setAgentSchema] = useState<AgentSettingSchemaItem[]>([]);
+  const [agentTools, setAgentTools] = useState<AgentToolInfo[]>([]);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const loadSettingsPanel = useCallback(() => {
     setSettingsLoading(true);
     const p = backend?.getAgentAuthProviders?.call(backend).then(setAuthProviders).catch(() => undefined);
-    const s = backend?.getAgentSettings?.call(backend).then(setAgentSettings).catch(() => undefined);
-    void Promise.all([p, s]).finally(() => setSettingsLoading(false));
-  }, [backend]);
+    const s = backend?.getAgentSettingsSchema?.call(backend).then(setAgentSchema).catch(() => undefined);
+    const t = wsId && agentSessionId ? backend?.getAgentTools?.call(backend, wsId, agentSessionId).then(setAgentTools).catch(() => undefined) : undefined;
+    void Promise.all([p, s, t]).finally(() => setSettingsLoading(false));
+  }, [backend, wsId, agentSessionId]);
   const openSettings = useCallback(() => { setSettingsOpen(true); loadSettingsPanel(); }, [loadSettingsPanel]);
   const handleSetApiKey = useCallback(async (provider: string, key: string) => {
     const fn = backend?.setAgentProviderApiKey;
@@ -221,13 +223,18 @@ export function PaneTerminalPanel({
     loadSettingsPanel();
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
-  const handleSetSetting = useCallback(async (path: string, value: string | boolean) => {
+  const handleSetSetting = useCallback(async (path: string, value: string | number | boolean) => {
     const fn = backend?.setAgentSetting;
     if (!fn) throw new Error('Not supported');
     await fn.call(backend, path, value);
     loadSettingsPanel();
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
+  const handleCompact = useCallback(() => {
+    const fn = backend?.compactAgentSession;
+    if (!fn || !wsId || !agentSessionId) return;
+    void fn.call(backend, wsId, agentSessionId).then(() => refreshControl()).catch(() => undefined);
+  }, [backend, wsId, agentSessionId, refreshControl]);
 
   // OAuth sign-in flow (events arrive via the agent-state delta channel)
   const [oauthFlow, setOauthFlow] = useState<(AgentOAuthEvent & { provider: string }) | null>(null);
@@ -329,14 +336,18 @@ export function PaneTerminalPanel({
       ) : null}
       {settingsOpen && (
         <AgentSettingsPanel
-          settings={agentSettings}
+          control={control}
+          schema={agentSchema}
+          tools={agentTools}
           providers={authProviders}
           loading={settingsLoading}
           oauth={oauthFlow}
+          onSetModel={handleSetModel}
           onSetSetting={handleSetSetting}
           onSetApiKey={handleSetApiKey}
           onOAuthLogin={handleOAuthLogin}
           onOAuthRespond={handleOAuthRespond}
+          onCompact={handleCompact}
           onClose={() => { setSettingsOpen(false); setOauthFlow(null); oauthFlowIdRef.current = null; }}
         />
       )}

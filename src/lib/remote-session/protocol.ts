@@ -625,7 +625,7 @@ export interface SetAgentSettingRequest {
   type: 'set_agent_setting';
   requestId: string;
   path: string;
-  value: string | boolean;
+  value: string | number | boolean;
 }
 
 export interface StartAgentOAuthLoginRequest {
@@ -640,6 +640,25 @@ export interface RespondAgentOAuthPromptRequest {
   requestId: string;
   flowId: string;
   value: string;
+}
+
+export interface GetAgentSettingsSchemaRequest {
+  type: 'get_agent_settings_schema';
+  requestId: string;
+}
+
+export interface GetAgentToolsRequest {
+  type: 'get_agent_tools';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface CompactAgentSessionRequest {
+  type: 'compact_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
 }
 
 export interface ListAgentCommandsRequest {
@@ -1053,6 +1072,9 @@ export type ClientToMachineMessage =
   | SetAgentSettingRequest
   | StartAgentOAuthLoginRequest
   | RespondAgentOAuthPromptRequest
+  | GetAgentSettingsSchemaRequest
+  | GetAgentToolsRequest
+  | CompactAgentSessionRequest
   | ListAgentCommandsRequest
   | ListWorkspaceEditorsRequest
   | OpenWorkspaceEditorRequest
@@ -1204,6 +1226,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'set_agent_setting',
     'start_agent_oauth_login',
     'respond_agent_oauth_prompt',
+    'get_agent_settings_schema',
+    'get_agent_tools',
+    'compact_agent_session',
     'list_agent_commands',
     'list_workspace_editors',
     'open_workspace_editor',

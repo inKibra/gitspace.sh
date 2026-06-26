@@ -22,7 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
-import type { AgentControlInfo, AgentSettingItem } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
@@ -272,11 +272,17 @@ export interface SessionBackend {
   /** Read the curated agent settings catalog (machine-global). */
   getAgentSettings?(): Promise<AgentSettingItem[]>;
   /** Write a single agent setting (machine-global). */
-  setAgentSetting?(path: string, value: string | boolean): Promise<boolean>;
+  setAgentSetting?(path: string, value: string | number | boolean): Promise<boolean>;
   /** Start an OAuth sign-in flow (events arrive via subscribeAgentState). */
   startAgentOAuthLogin?(provider: string, flowId: string): Promise<boolean>;
   /** Provide the value an in-progress OAuth flow asked for. */
   respondAgentOAuthPrompt?(flowId: string, value: string): Promise<boolean>;
+  /** Full settings schema by tab (machine-global). */
+  getAgentSettingsSchema?(): Promise<AgentSettingSchemaItem[]>;
+  /** Tools available to a session (per-tool approval). */
+  getAgentTools?(workspaceId: string, agentSessionId: string): Promise<AgentToolInfo[]>;
+  /** Compact a session's context. */
+  compactAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

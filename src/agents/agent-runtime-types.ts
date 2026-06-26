@@ -104,6 +104,25 @@ export interface AgentSettingItem {
   options?: string[];
 }
 
+/** A schema-derived setting (full SETTINGS_SCHEMA browser, grouped by tab). */
+export interface AgentSettingSchemaItem {
+  path: string;
+  tab: string;
+  label: string;
+  description?: string;
+  kind: 'boolean' | 'enum' | 'number' | 'string' | 'record' | 'other';
+  value: string | number | boolean | null;
+  options?: string[];
+}
+
+/** A tool available to the agent (for per-tool approval). */
+export interface AgentToolInfo {
+  name: string;
+  tier: string;
+  /** Current per-tool approval override ("allow"|"prompt"|"deny"), or "default". */
+  approval: string;
+}
+
 /** Current context-window usage for a session. */
 export interface AgentContextUsage {
   tokens: number | null;

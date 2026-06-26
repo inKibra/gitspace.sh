@@ -75,6 +75,9 @@ import {
   setAgentProviderApiKey,
   getAgentSettings,
   setAgentSetting,
+  getAgentSettingsSchema,
+  getAgentTools,
+  compactAgentSession,
   startAgentOAuthLogin,
   respondAgentOAuthPrompt,
   restoreAgentSession,
@@ -3561,6 +3564,39 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to respond: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-settings-schema':
+            try {
+              await getAgentControlReady();
+              const schema = await getAgentSettingsSchema();
+              res = { type: 'agent-settings-schema', schema };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read settings schema: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-tools':
+            try {
+              await getAgentControlReady();
+              const tools = await getAgentTools(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-tools', tools };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list tools: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-compact':
+            try {
+              await getAgentControlReady();
+              const ok = await compactAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to compact: ${errMsg}` };
             }
             break;
 

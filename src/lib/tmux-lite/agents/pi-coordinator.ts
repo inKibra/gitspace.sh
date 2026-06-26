@@ -19,10 +19,17 @@ import {
   openPiSessionManager,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
-import type { AgentControlInfo, AgentOAuthEvent } from '../../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo } from '../../../agents/agent-runtime-types.js';
 
 const THINKING_LEVELS = ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const APPROVAL_MODES = ['always-ask', 'write', 'yolo'];
+
+/** Standard OMP tools + tiers — used when the live tool registry isn't exposed. */
+const DEFAULT_TOOL_TIERS: ReadonlyArray<[string, string]> = [
+  ['read', 'read'], ['ls', 'read'], ['glob', 'read'], ['grep', 'read'], ['web_search', 'read'],
+  ['edit', 'write'], ['write', 'write'], ['todo_write', 'write'],
+  ['bash', 'exec'], ['task', 'exec'], ['web_fetch', 'exec'], ['browser', 'exec'], ['ssh', 'exec'], ['eval', 'exec'],
+];
 
 /** Curated, safe-to-edit settings surfaced in the settings panel. */
 const SETTINGS_CATALOG: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; options?: string[] }> = [
@@ -43,6 +50,8 @@ interface ControlSessionAccessors {
   setThinkingLevel?(level: string, persist?: boolean): void;
   getContextUsage?(options?: { contextWindow?: number }): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
   settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
+  toolRegistry?: Map<string, { name?: string; tier?: string }>;
+  compact?(instructions?: string): Promise<unknown>;
 }
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
@@ -440,10 +449,69 @@ export class PiCoordinator {
   }
 
   /** Write a single setting. */
-  async setSetting(path: string, value: string | boolean): Promise<boolean> {
+  async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
     const settings = await getPiSettings();
     if (!settings) return false;
     settings.set(path, value);
+    return true;
+  }
+
+  /** The full settings schema (grouped client-side by tab) with current values. */
+  async getSettingsSchema(): Promise<AgentSettingSchemaItem[]> {
+    const settings = await getPiSettings();
+    const mod = (await import('@oh-my-pi/pi-coding-agent/config/settings-schema')) as unknown as {
+      SETTINGS_SCHEMA: Record<string, { type?: string; values?: readonly string[]; ui?: { tab?: string; label?: string; description?: string; options?: unknown } }>;
+    };
+    const schema = mod.SETTINGS_SCHEMA ?? {};
+    const items: AgentSettingSchemaItem[] = [];
+    for (const [path, def] of Object.entries(schema)) {
+      const ui = def.ui ?? {};
+      const t = def.type;
+      const kind: AgentSettingSchemaItem['kind'] =
+        t === 'boolean' || t === 'enum' || t === 'number' || t === 'string' || t === 'record' ? t : 'other';
+      const options = def.values
+        ? [...def.values]
+        : Array.isArray(ui.options)
+          ? ui.options.map((o) => (typeof o === 'string' ? o : o?.value)).filter((v): v is string => typeof v === 'string')
+          : undefined;
+      let value: string | number | boolean | null = null;
+      try {
+        const v = settings?.get(path);
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') value = v;
+      } catch {
+        /* ignore */
+      }
+      items.push({ path, tab: ui.tab ?? 'other', label: ui.label ?? path, description: ui.description, kind, value, options });
+    }
+    return items;
+  }
+
+  /** Tools available to the active session (for per-tool approval). The SDK
+   *  doesn't expose the live tool registry on the session instance, so fall
+   *  back to the standard tool set; merge in any registry entries + overrides. */
+  async getTools(_target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentToolInfo[]> {
+    const session = this.activeSessions.get(agentSessionId) as unknown as ControlSessionAccessors | undefined;
+    let approvals: Record<string, string> = {};
+    try {
+      const a = (session?.settings ?? (await getPiSettings()))?.get('tools.approval');
+      if (a && typeof a === 'object') approvals = a as Record<string, string>;
+    } catch {
+      /* ignore */
+    }
+    const tiers = new Map<string, string>(DEFAULT_TOOL_TIERS);
+    const reg = session?.toolRegistry;
+    if (reg) for (const t of reg.values()) if (t.name) tiers.set(t.name, t.tier ?? 'exec');
+    for (const name of Object.keys(approvals)) if (!tiers.has(name)) tiers.set(name, 'exec');
+    return [...tiers.entries()]
+      .map(([name, tier]) => ({ name, tier, approval: approvals[name] ?? 'default' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Compact the session context. */
+  async compactSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+    const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
+    if (!session.compact) return false;
+    await session.compact();
     return true;
   }
 
