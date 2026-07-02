@@ -109,7 +109,10 @@ export async function getWorkspaceRuntimeSnapshot(params: {
   return Promise.all(workspaces.map(async (workspace) => {
     const workspaceId = toCanonicalWorkspaceId(workspace);
     const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
-    const processes = await resolveRuntimeProcesses(workspace.path, processConfig.config);
+    // probe:false — a machine snapshot must not run lsof per port (it can block
+    // the single-threaded server for seconds each); report allocated ports from
+    // state, liveness comes from tmux-lite sessions.
+    const processes = await resolveRuntimeProcesses(workspace.path, processConfig.config, { probe: false });
     const terminals = summarizeWorkspaceTerminals(workspace.path, sessions);
     const agents = summarizeWorkspaceAgents(workspaceId, agentStateByWorkspaceId[workspaceId]);
     const processSummary = summarizeWorkspaceProcesses(sessions, workspaceId, workspace.id, workspace.path, processes.length);

@@ -4,7 +4,14 @@ import type { ResolvedProcessPort } from '../../types/processes.js';
 import { normalizeProcessPortProtocol, PortConflictError, type PortConflictInfo } from './port-conflicts.js';
 
 export function inspectListeningProcess(port: number): Array<{ pid: number; command?: string; user?: string; address?: string }> {
-  const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn']);
+  // `lsof` can hang for many seconds (or indefinitely) on a socket in a bad
+  // state. This runs via blocking spawnSync, so an unbounded call freezes the
+  // single-threaded tmux-lite server mid snapshot build and serve never
+  // connects. Bound it and treat a timeout / non-zero exit as "no listener" —
+  // port-conflict detection is best-effort, not correctness-critical.
+  const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn'], {
+    timeout: 2000,
+  });
   if (result.exitCode !== 0) {
     return [];
   }
@@ -37,7 +44,7 @@ export function inspectListeningProcess(port: number): Array<{ pid: number; comm
 }
 
 function getParentPid(pid: number): number | null {
-  const result = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', String(pid)]);
+  const result = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', String(pid)], { timeout: 2000 });
   if (result.exitCode !== 0) {
     return null;
   }

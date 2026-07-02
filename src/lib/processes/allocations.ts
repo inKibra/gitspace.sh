@@ -153,7 +153,15 @@ async function isAllocationReusable(
   processName: string,
   instance: number,
   entry: ProcessPortAllocation,
+  probe: boolean,
 ): Promise<boolean> {
+  // Snapshot/read-only callers (probe=false) must not run lsof: it can block
+  // the single-threaded tmux-lite server for seconds per port. Trust the
+  // persisted allocation; liveness is reported separately from tmux-lite
+  // sessions, not from port probing.
+  if (!probe) {
+    return true;
+  }
   const listeners = inspectListeningProcess(entry.port);
   if (listeners.length === 0) {
     return true;
@@ -168,6 +176,7 @@ async function findAvailablePort(
   instance: number,
   portName: string,
   reservedPorts: Set<number>,
+  probe: boolean,
 ): Promise<number> {
   const rangeSize = MAX_ALLOCATED_PORT - MIN_ALLOCATED_PORT + 1;
   const seed = hashString(`${getWorkspaceRuntimeId(workspacePath)}:${processName}:${instance}:${portName}`) % rangeSize;
@@ -176,6 +185,12 @@ async function findAvailablePort(
     const candidate = MIN_ALLOCATED_PORT + ((seed + offset) % rangeSize);
     if (reservedPorts.has(candidate)) {
       continue;
+    }
+
+    // Read-only callers pick the first free-by-allocation candidate without
+    // probing the OS for a live listener (see isAllocationReusable).
+    if (!probe) {
+      return candidate;
     }
 
     const listeners = inspectListeningProcess(candidate);
@@ -213,6 +228,7 @@ async function resolveDeclaredPortAllocation(
   port: ProcessPortConfig,
   state: ProcessPortAllocationState,
   reservedPorts: Set<number>,
+  probe: boolean,
 ): Promise<ResolvedProcessPort> {
   const key = getPortAllocationKey(spec.name, spec.instance, port.name);
   const protocol = normalizeProcessPortProtocol(port.protocol);
@@ -222,7 +238,7 @@ async function resolveDeclaredPortAllocation(
     existing
     && existing.protocol === protocol
     && !reservedPorts.has(existing.port)
-    && await isAllocationReusable(workspacePath, spec.name, spec.instance, existing)
+    && await isAllocationReusable(workspacePath, spec.name, spec.instance, existing, probe)
   ) {
     existing.updatedAt = Date.now();
     reservedPorts.add(existing.port);
@@ -234,7 +250,7 @@ async function resolveDeclaredPortAllocation(
     };
   }
 
-  const nextPort = await findAvailablePort(workspacePath, spec.name, spec.instance, port.name, reservedPorts);
+  const nextPort = await findAvailablePort(workspacePath, spec.name, spec.instance, port.name, reservedPorts, probe);
   state.allocations[key] = {
     port: nextPort,
     protocol,
@@ -252,14 +268,16 @@ async function resolveDeclaredPortAllocation(
 export async function resolveProcessRuntimePorts(
   workspacePath: string,
   spec: ProcessInstanceSpec,
+  opts: { probe?: boolean } = {},
 ): Promise<ResolvedProcessPort[]> {
+  const probe = opts.probe ?? true;
   const state = readProcessPortAllocationState(workspacePath);
   const currentKeys = new Set((spec.definition.ports ?? []).map((port) => getPortAllocationKey(spec.name, spec.instance, port.name)));
   const reservedPorts = getReservedPortsForOtherAllocations(state, currentKeys);
   const resolvedPorts: ResolvedProcessPort[] = [];
 
   for (const port of spec.definition.ports ?? []) {
-    resolvedPorts.push(await resolveDeclaredPortAllocation(workspacePath, spec, port, state, reservedPorts));
+    resolvedPorts.push(await resolveDeclaredPortAllocation(workspacePath, spec, port, state, reservedPorts, probe));
   }
 
   writeProcessPortAllocationState(workspacePath, state);
@@ -269,6 +287,7 @@ export async function resolveProcessRuntimePorts(
 export async function resolveRuntimeProcesses(
   workspacePath: string,
   config: ProcessesConfig,
+  opts: { probe?: boolean } = {},
 ): Promise<RuntimeProcessDefinition[]> {
   reconcileProcessPortAllocations(workspacePath, config);
 
@@ -281,7 +300,7 @@ export async function resolveRuntimeProcesses(
         name: process.name,
         instance,
         definition: process,
-      }));
+      }, opts));
     }
 
     return {
