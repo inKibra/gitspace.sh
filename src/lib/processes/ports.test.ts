@@ -65,4 +65,34 @@ describe('resolveManagedSession', () => {
       managedInstance: 1,
     });
   });
+
+  it('uses session metadata (not the truncated name) for identity on long-named workspaces', async () => {
+    // The session name is capped at 64 chars, so a long workspace id is
+    // truncated in `name` but preserved in full in `metadata`. Ownership
+    // resolution must return the untruncated metadata id, otherwise the
+    // running process is never recognised as the owner of its port and its
+    // allocation gets reassigned (the port-flicker bug).
+    const fullWorkspaceId = 'core:bradleat-ink-404-zerbly-demo-voice-session-with-grok-voice-clone-call-prep';
+    mockListSessionsFromRunningServer.mockResolvedValue([
+      {
+        id: 'sess-9',
+        name: 'proc:bradleat-ink-404-zerbly-demo-voice-session-with-grok-:web:1', // truncated to 64
+        pid: 5150,
+        metadata: {
+          role: 'process',
+          workspaceId: fullWorkspaceId,
+          processName: 'web',
+          processInstance: '1',
+        },
+      },
+    ] as Array<any>);
+
+    await expect(resolveManagedSession(5150)).resolves.toMatchObject({
+      pid: 5150,
+      managedSessionId: 'sess-9',
+      managedWorkspaceId: fullWorkspaceId,
+      managedProcessName: 'web',
+      managedInstance: 1,
+    });
+  });
 });

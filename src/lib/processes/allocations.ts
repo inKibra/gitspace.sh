@@ -9,6 +9,7 @@ import type {
   RuntimeProcessDefinition,
 } from '../../types/processes.js';
 import { resolveWorkspaceRef } from '../events/paths.js';
+import { toWorkspaceId } from '../../utils/workspace-id.js';
 import { normalizeProcessInstanceCount } from './instances.js';
 import { getProcessControlDir } from './control.js';
 import { inspectListeningProcess, resolveManagedSession } from './ports.js';
@@ -128,7 +129,14 @@ async function allocationBelongsToRunningSpec(
   instance: number,
   port: number,
 ): Promise<boolean> {
-  const workspaceId = getWorkspaceRuntimeId(workspacePath);
+  // Match the canonical, project-qualified workspace id the process runner
+  // records in its session metadata (`toWorkspaceId(project, workspace)`, see
+  // startProcessInstance). Using the bare/name-derived id here is what caused
+  // long-named workspaces to never match, since the session name is truncated.
+  const ref = resolveWorkspaceRef(workspacePath);
+  const workspaceId = ref
+    ? toWorkspaceId(ref.projectName, ref.workspaceId)
+    : getWorkspaceRuntimeId(workspacePath);
   const listeners = inspectListeningProcess(port);
   if (listeners.length === 0) {
     return false;

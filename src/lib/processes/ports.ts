@@ -102,6 +102,25 @@ export async function resolveManagedSession(pid: number): Promise<PortConflictIn
   while (currentPid && currentPid > 1) {
     const session = sessionByPid.get(currentPid);
     if (session) {
+      // Prefer exact identity from session metadata. The session *name* is
+      // capped at 64 chars (buildProcessSessionName), so parsing it silently
+      // truncates long workspace ids — which made ownership comparisons fail
+      // for long-named workspaces and reallocate a running process's own port.
+      // Metadata carries the full, untruncated ids recorded at process start.
+      const meta = session.metadata;
+      const metaInstance = meta?.processInstance !== undefined ? Number(meta.processInstance) : NaN;
+      if (meta?.role === 'process' && meta.workspaceId && meta.processName && Number.isInteger(metaInstance)) {
+        return {
+          port: 0,
+          protocol: 'http',
+          pid,
+          managedSessionId: session.id,
+          managedSessionName: session.name,
+          managedWorkspaceId: meta.workspaceId,
+          managedProcessName: meta.processName,
+          managedInstance: metaInstance,
+        };
+      }
       const parsed = parseProcessSessionName(session.name);
       if (parsed?.processName) {
         return {
