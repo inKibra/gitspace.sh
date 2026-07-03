@@ -559,6 +559,16 @@ export async function applyAgentModelRole(target: AgentWorkspaceTarget, agentSes
   return defaultPiCoordinator.applyRole(target, agentSessionId, role);
 }
 
+/** User-message checkpoints for conversation rewind. */
+export async function getAgentHistory(target: AgentWorkspaceTarget, agentSessionId: string): Promise<import('../../agents/agent-runtime-types.js').AgentHistoryEntry[]> {
+  return defaultPiCoordinator.getHistory(target, agentSessionId);
+}
+
+/** Rewind the conversation to a prior entry. */
+export async function navigateAgentHistory(target: AgentWorkspaceTarget, agentSessionId: string, entryId: string): Promise<boolean> {
+  return defaultPiCoordinator.navigateHistory(target, agentSessionId, entryId);
+}
+
 // ---------------------------------------------------------------------------
 // Host UI bridge wiring
 // ---------------------------------------------------------------------------

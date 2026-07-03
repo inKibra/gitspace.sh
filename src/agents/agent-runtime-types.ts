@@ -115,6 +115,13 @@ export interface AgentSettingSchemaItem {
   options?: string[];
 }
 
+/** A user-message checkpoint in the session tree, for conversation rewind. */
+export interface AgentHistoryEntry {
+  entryId: string;
+  text: string;
+  current: boolean;
+}
+
 /** A tool available to the agent (for per-tool approval). */
 export interface AgentToolInfo {
   name: string;

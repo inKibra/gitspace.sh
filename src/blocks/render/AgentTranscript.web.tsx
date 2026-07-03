@@ -20,6 +20,7 @@ export function AgentTranscript({
   host,
   busy = false,
   pageSize,
+  refreshNonce,
 }: {
   fetchRange: (before: string | undefined, limit: number) => Promise<TranscriptPage>;
   live: readonly Block[];
@@ -29,8 +30,10 @@ export function AgentTranscript({
   host: BlockHost;
   busy?: boolean;
   pageSize?: number;
+  /** Bump to force a full refetch (after a conversation rewind). */
+  refreshNonce?: number;
 }): ReactElement {
-  const t = useTranscript({ fetchRange, live, pageSize });
+  const t = useTranscript({ fetchRange, live, pageSize, refreshNonce });
   const empty = t.committed.length === 0 && live.length === 0 && pending.length === 0;
 
   return (

@@ -22,7 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
-import type { AgentControlInfo, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
@@ -287,6 +287,10 @@ export interface SessionBackend {
   cycleAgentRole?(workspaceId: string, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean>;
   /** Apply a specific role's model to the session. */
   applyAgentModelRole?(workspaceId: string, agentSessionId: string, role: string): Promise<boolean>;
+  /** User-message checkpoints for conversation rewind. */
+  getAgentHistory?(workspaceId: string, agentSessionId: string): Promise<AgentHistoryEntry[]>;
+  /** Rewind the conversation to a prior entry. */
+  navigateAgentHistory?(workspaceId: string, agentSessionId: string, entryId: string): Promise<boolean>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

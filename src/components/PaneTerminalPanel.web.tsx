@@ -9,8 +9,9 @@ import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
 import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
+import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -252,6 +253,31 @@ export function PaneTerminalPanel({
     void fn.call(backend, 'serviceTier', next).then(() => refreshControl()).catch(() => undefined);
   }, [backend, control?.serviceTier, refreshControl]);
 
+  // Conversation history / rewind
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<AgentHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [transcriptRefresh, setTranscriptRefresh] = useState(0);
+  const loadHistory = useCallback(() => {
+    const fn = backend?.getAgentHistory;
+    if (!fn || !wsId || !agentSessionId) return;
+    setHistoryLoading(true);
+    void fn.call(backend, wsId, agentSessionId).then(setHistoryEntries).catch(() => undefined).finally(() => setHistoryLoading(false));
+  }, [backend, wsId, agentSessionId]);
+  const openHistory = useCallback(() => { setHistoryOpen(true); loadHistory(); }, [loadHistory]);
+  const handleNavigateHistory = useCallback((entryId: string) => {
+    const fn = backend?.navigateAgentHistory;
+    if (!fn || !wsId || !agentSessionId) return;
+    void fn.call(backend, wsId, agentSessionId, entryId).then((ok) => {
+      if (ok) {
+        setHistoryOpen(false);
+        setLiveBlocks(NO_LIVE);
+        setTranscriptRefresh((n) => n + 1);
+        refreshControl();
+      }
+    }).catch(() => undefined);
+  }, [backend, wsId, agentSessionId, refreshControl]);
+
   // OAuth sign-in flow (events arrive via the agent-state delta channel)
   const [oauthFlow, setOauthFlow] = useState<(AgentOAuthEvent & { provider: string }) | null>(null);
   const oauthFlowIdRef = useRef<string | null>(null);
@@ -300,11 +326,12 @@ export function PaneTerminalPanel({
             onSetApprovalMode={handleSetApprovalMode}
             onCycleRole={handleCycleRole}
             onToggleFast={handleToggleFast}
+            onOpenHistory={openHistory}
             onOpenAuth={openSettings}
             error={modelError}
           />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
-            <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} />
+            <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} refreshNonce={transcriptRefresh} />
           </div>
         </>
       ) : (
@@ -368,6 +395,14 @@ export function PaneTerminalPanel({
           onOAuthRespond={handleOAuthRespond}
           onCompact={handleCompact}
           onClose={() => { setSettingsOpen(false); setOauthFlow(null); oauthFlowIdRef.current = null; }}
+        />
+      )}
+      {historyOpen && (
+        <AgentHistoryPanel
+          entries={historyEntries}
+          loading={historyLoading}
+          onNavigate={handleNavigateHistory}
+          onClose={() => setHistoryOpen(false)}
         />
       )}
     </div>

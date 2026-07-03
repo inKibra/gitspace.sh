@@ -38,8 +38,10 @@ export function useTranscript(opts: {
   fetchRange: (before: string | undefined, limit: number) => Promise<TranscriptPage>;
   live: readonly Block[];
   pageSize?: number;
+  /** Bump to force a full refetch of the tail (e.g. after a conversation rewind). */
+  refreshNonce?: number;
 }): UseTranscript {
-  const { fetchRange, live } = opts;
+  const { fetchRange, live, refreshNonce } = opts;
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -87,7 +89,7 @@ export function useTranscript(opts: {
     return () => {
       alive = false;
     };
-  }, [fetchRange, pageSize]);
+  }, [fetchRange, pageSize, refreshNonce]);
 
   const loadOlder = useCallback(async () => {
     const el = containerRef.current;

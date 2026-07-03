@@ -80,6 +80,8 @@ import {
   compactAgentSession,
   cycleAgentRole,
   applyAgentModelRole,
+  getAgentHistory,
+  navigateAgentHistory,
   startAgentOAuthLogin,
   respondAgentOAuthPrompt,
   restoreAgentSession,
@@ -3621,6 +3623,28 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to apply role: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-history':
+            try {
+              await getAgentControlReady();
+              const entries = await getAgentHistory(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-history', entries };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read history: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-navigate-history':
+            try {
+              await getAgentControlReady();
+              const ok = await navigateAgentHistory(cmd.target, cmd.agentSessionId, cmd.entryId);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to rewind: ${errMsg}` };
             }
             break;
 

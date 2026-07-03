@@ -88,7 +88,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentControlInfo, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -1770,6 +1770,22 @@ export class LocalSessionBackend implements SessionBackend {
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected apply-role response');
+  }
+
+  async getAgentHistory(workspaceId: string, agentSessionId: string): Promise<AgentHistoryEntry[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-history', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-history') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected history response');
+  }
+
+  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-navigate-history', target, agentSessionId, entryId });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected navigate-history response');
   }
 
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {

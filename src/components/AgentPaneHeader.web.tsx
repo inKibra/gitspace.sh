@@ -65,6 +65,7 @@ export function AgentPaneHeader({
   onSetApprovalMode,
   onCycleRole,
   onToggleFast,
+  onOpenHistory,
   onOpenAuth,
   error,
 }: {
@@ -76,6 +77,7 @@ export function AgentPaneHeader({
   onSetApprovalMode?: (mode: string) => void;
   onCycleRole?: () => void;
   onToggleFast?: () => void;
+  onOpenHistory?: () => void;
   onOpenAuth?: () => void;
   error?: string | null;
 }): ReactElement {
@@ -187,8 +189,11 @@ export function AgentPaneHeader({
 
       {error && <span className="max-w-[35%] truncate text-[var(--gs-danger)]" title={error}>⚠ {error}</span>}
       <span className="ml-auto flex items-center gap-2">
+        {onOpenHistory && (
+          <button type="button" onClick={onOpenHistory} title="History — rewind the conversation" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">⟲</button>
+        )}
         {onOpenAuth && (
-          <button type="button" onClick={onOpenAuth} title="Provider sign-in" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">⚙</button>
+          <button type="button" onClick={onOpenAuth} title="Agent settings" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">⚙</button>
         )}
         <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
         <span className="text-[var(--gs-text-muted)]">{label}</span>

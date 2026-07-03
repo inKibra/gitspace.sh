@@ -58,7 +58,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
 } from '../backend.js';
-import type { AgentControlInfo, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -3108,6 +3108,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected apply-role response');
+  }
+
+  async getAgentHistory(workspaceId: string, agentSessionId: string): Promise<AgentHistoryEntry[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_history', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (tmuxResponse.type === 'agent-history') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected history response');
+  }
+
+  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'navigate_agent_history', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, entryId });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected navigate-history response');
   }
 
   // ============================================================================
