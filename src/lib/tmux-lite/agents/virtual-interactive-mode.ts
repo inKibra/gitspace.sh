@@ -108,6 +108,17 @@ export async function startVirtualInteractiveMode(
 
   // InteractiveMode constructor uses multiple global singletons established by
   // the CLI/main bootstrap path: Settings, discovery/provider settings, and theme.
+  // 16.x's settings.get throws on unknown/removed paths (15.x returned undefined),
+  // so read the loosely-typed session settings defensively — keys come and go
+  // across SDK versions (e.g. clearOnShrink was removed in 16.x).
+  const safeGet = (s: any, path: string): unknown => {
+    try {
+      return s?.get?.(path);
+    } catch {
+      return undefined;
+    }
+  };
+
   const activeSettings = await Settings.init({ cwd, agentDir });
   initializeWithSettings(activeSettings);
   await initTheme(
@@ -123,10 +134,10 @@ export async function startVirtualInteractiveMode(
 
   const mode = new InteractiveMode(session as any, version, changelog) as any as InteractiveModeInstance;
 
-  const showHardwareCursor = sessionSettings?.get?.('showHardwareCursor') ?? false;
+  const showHardwareCursor = (safeGet(sessionSettings, 'showHardwareCursor') as boolean | undefined) ?? false;
   mode.ui = new TUI(virtualTerminal, showHardwareCursor);
 
-  const clearOnShrink = sessionSettings?.get?.('clearOnShrink') ?? false;
+  const clearOnShrink = (safeGet(sessionSettings, 'clearOnShrink') as boolean | undefined) ?? false;
   if (typeof mode.ui.setClearOnShrink === 'function') {
     mode.ui.setClearOnShrink(clearOnShrink);
   }

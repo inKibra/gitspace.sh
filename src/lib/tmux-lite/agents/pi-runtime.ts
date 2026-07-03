@@ -227,7 +227,6 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
   const { SessionManager } = await importSessionManagerModule();
   const { createAgentSession, discoverAuthStorage, discoverSkills } = await importSdk();
   const { ModelRegistry } = await importModelRegistryModule();
-  const { getBundledModel } = await importPiAi();
   const env = applyManagedPiEnvironment();
   const sessionManager = await SessionManager.open(sessionFilePath);
   const sessionContext = sessionManager.buildSessionContext();
@@ -242,15 +241,8 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     if (slashIndex > 0) {
       const provider = storedModel.slice(0, slashIndex);
       const modelId = storedModel.slice(slashIndex + 1);
+      // 16.x: the model registry resolves bundled models directly (getBundledModel removed).
       restoredModel = modelRegistry.find(provider, modelId) ?? undefined;
-      if (!restoredModel) {
-        try {
-          restoredModel = getBundledModel(provider as Parameters<typeof getBundledModel>[0], modelId);
-        } catch (err) {
-          console.warn(`[pi-runtime] Failed to restore bundled model ${storedModel}:`, err);
-          restoredModel = undefined;
-        }
-      }
     }
   }
 

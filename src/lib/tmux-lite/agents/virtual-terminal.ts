@@ -64,6 +64,12 @@ export class VirtualTerminal implements Terminal {
     return true;
   }
 
+  // 16.x Terminal interface: the raw enable sequence. Virtual terminals don't
+  // emit a kitty-keyboard enable escape, so there's nothing to expose.
+  get kittyEnableSequence(): string | null {
+    return null;
+  }
+
   moveBy(lines: number): void {
     if (lines > 0) this.write(`\x1b[${lines}B`);
     else if (lines < 0) this.write(`\x1b[${-lines}A`);

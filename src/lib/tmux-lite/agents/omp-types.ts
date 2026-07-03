@@ -3,10 +3,10 @@ import type { Skill } from '@oh-my-pi/pi-coding-agent/extensibility/skills';
 export interface OmpAgentSession {
   sessionId: string;
   model?: unknown;
-  prompt(input: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }>; streamingBehavior?: 'steer' | 'followUp' }): Promise<void>;
+  prompt(input: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }>; streamingBehavior?: 'steer' | 'followUp' }): Promise<boolean>;
   compact?(customInstructions?: string): Promise<unknown>;
   subscribe(handler: (event: OmpAgentEvent) => void): () => void;
-  setModel(model: unknown): Promise<void>;
+  setModel(model: unknown): Promise<{ switched: boolean }>;
   /**
    * Interrupt the current agent turn (stop LLM streaming / tool execution).
    * The session stays alive and can accept new prompts afterward.
