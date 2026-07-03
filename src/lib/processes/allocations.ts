@@ -161,15 +161,7 @@ async function isAllocationReusable(
   processName: string,
   instance: number,
   entry: ProcessPortAllocation,
-  probe: boolean,
 ): Promise<boolean> {
-  // Snapshot/read-only callers (probe=false) must not run lsof: it can block
-  // the single-threaded tmux-lite server for seconds per port. Trust the
-  // persisted allocation; liveness is reported separately from tmux-lite
-  // sessions, not from port probing.
-  if (!probe) {
-    return true;
-  }
   const listeners = inspectListeningProcess(entry.port);
   if (listeners.length === 0) {
     return true;
@@ -184,7 +176,6 @@ async function findAvailablePort(
   instance: number,
   portName: string,
   reservedPorts: Set<number>,
-  probe: boolean,
 ): Promise<number> {
   const rangeSize = MAX_ALLOCATED_PORT - MIN_ALLOCATED_PORT + 1;
   const seed = hashString(`${getWorkspaceRuntimeId(workspacePath)}:${processName}:${instance}:${portName}`) % rangeSize;
@@ -193,12 +184,6 @@ async function findAvailablePort(
     const candidate = MIN_ALLOCATED_PORT + ((seed + offset) % rangeSize);
     if (reservedPorts.has(candidate)) {
       continue;
-    }
-
-    // Read-only callers pick the first free-by-allocation candidate without
-    // probing the OS for a live listener (see isAllocationReusable).
-    if (!probe) {
-      return candidate;
     }
 
     const listeners = inspectListeningProcess(candidate);
@@ -236,7 +221,6 @@ async function resolveDeclaredPortAllocation(
   port: ProcessPortConfig,
   state: ProcessPortAllocationState,
   reservedPorts: Set<number>,
-  probe: boolean,
 ): Promise<ResolvedProcessPort> {
   const key = getPortAllocationKey(spec.name, spec.instance, port.name);
   const protocol = normalizeProcessPortProtocol(port.protocol);
@@ -246,7 +230,7 @@ async function resolveDeclaredPortAllocation(
     existing
     && existing.protocol === protocol
     && !reservedPorts.has(existing.port)
-    && await isAllocationReusable(workspacePath, spec.name, spec.instance, existing, probe)
+    && await isAllocationReusable(workspacePath, spec.name, spec.instance, existing)
   ) {
     existing.updatedAt = Date.now();
     reservedPorts.add(existing.port);
@@ -258,7 +242,7 @@ async function resolveDeclaredPortAllocation(
     };
   }
 
-  const nextPort = await findAvailablePort(workspacePath, spec.name, spec.instance, port.name, reservedPorts, probe);
+  const nextPort = await findAvailablePort(workspacePath, spec.name, spec.instance, port.name, reservedPorts);
   state.allocations[key] = {
     port: nextPort,
     protocol,
@@ -273,42 +257,75 @@ async function resolveDeclaredPortAllocation(
   };
 }
 
+/**
+ * Allocate (and persist) runtime ports for a process instance. This MUTATES
+ * `ports.json` and may reallocate — it is the *start* path only (runner and
+ * `startProcessInstance`). Reporting/routing paths must use
+ * {@link readAllocatedProcessPorts} instead, so they can never move the port
+ * of a running process.
+ */
 export async function resolveProcessRuntimePorts(
   workspacePath: string,
   spec: ProcessInstanceSpec,
-  opts: { probe?: boolean } = {},
 ): Promise<ResolvedProcessPort[]> {
-  const probe = opts.probe ?? true;
   const state = readProcessPortAllocationState(workspacePath);
   const currentKeys = new Set((spec.definition.ports ?? []).map((port) => getPortAllocationKey(spec.name, spec.instance, port.name)));
   const reservedPorts = getReservedPortsForOtherAllocations(state, currentKeys);
   const resolvedPorts: ResolvedProcessPort[] = [];
 
   for (const port of spec.definition.ports ?? []) {
-    resolvedPorts.push(await resolveDeclaredPortAllocation(workspacePath, spec, port, state, reservedPorts, probe));
+    resolvedPorts.push(await resolveDeclaredPortAllocation(workspacePath, spec, port, state, reservedPorts));
   }
 
   writeProcessPortAllocationState(workspacePath, state);
   return resolvedPorts;
 }
 
-export async function resolveRuntimeProcesses(
+/**
+ * Pure read of the persisted port allocations for a process instance. Unlike
+ * {@link resolveProcessRuntimePorts} this NEVER allocates, probes (lsof),
+ * reconciles, or writes — it just reports what start-time allocation recorded.
+ * Reporting and routing paths (`space service list`, machine snapshot, hosting
+ * routes) use this so they can never move a running process's port. Ports with
+ * no recorded allocation (never started) are omitted.
+ */
+export function readAllocatedProcessPorts(
+  workspacePath: string,
+  spec: ProcessInstanceSpec,
+): ResolvedProcessPort[] {
+  const state = readProcessPortAllocationState(workspacePath);
+  const resolved: ResolvedProcessPort[] = [];
+  for (const port of spec.definition.ports ?? []) {
+    const existing = state.allocations[getPortAllocationKey(spec.name, spec.instance, port.name)];
+    if (!existing) continue;
+    resolved.push({
+      instance: spec.instance,
+      name: port.name,
+      protocol: normalizeProcessPortProtocol(port.protocol),
+      port: existing.port,
+    });
+  }
+  return resolved;
+}
+
+/**
+ * Read-only runtime process/port report for snapshots. Never allocates,
+ * reconciles, or writes — it reflects the persisted allocation only.
+ */
+export function resolveRuntimeProcesses(
   workspacePath: string,
   config: ProcessesConfig,
-  opts: { probe?: boolean } = {},
-): Promise<RuntimeProcessDefinition[]> {
-  reconcileProcessPortAllocations(workspacePath, config);
-
-  return Promise.all(config.processes.map(async (process) => {
+): RuntimeProcessDefinition[] {
+  return config.processes.map((process) => {
     const ports: ResolvedProcessPort[] = [];
     const instanceCount = normalizeProcessInstanceCount(process.instances);
 
     for (let instance = 1; instance <= instanceCount; instance += 1) {
-      ports.push(...await resolveProcessRuntimePorts(workspacePath, {
+      ports.push(...readAllocatedProcessPorts(workspacePath, {
         name: process.name,
         instance,
         definition: process,
-      }, opts));
+      }));
     }
 
     return {
@@ -316,5 +333,5 @@ export async function resolveRuntimeProcesses(
       instances: process.instances,
       ports,
     } satisfies RuntimeProcessDefinition;
-  }));
+  });
 }
