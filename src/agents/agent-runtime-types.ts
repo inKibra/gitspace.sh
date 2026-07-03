@@ -153,6 +153,8 @@ export interface AgentControlInfo {
   /** Current tool-approval mode ("always-ask" | "write" | "yolo"), or null. */
   approvalMode: string | null;
   approvalModes: string[];
+  /** Current service tier ("priority" == fast mode on Opus), or null. */
+  serviceTier: string | null;
   /** Live context-window usage (only for active sessions). */
   context: AgentContextUsage | null;
 }

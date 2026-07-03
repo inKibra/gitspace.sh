@@ -1,19 +1,7 @@
 import { type ReactElement } from 'react';
-import { File } from '@pierre/diffs/react';
-import type { SupportedLanguages } from '@pierre/diffs';
 import type { CodeData, CodeRefData } from '../types/content.js';
 import { defineRenderer } from './registry.web.js';
-
-// Syntax-highlighted code via @pierre/diffs (shiki) — same engine + pierre-dark
-// theme as the diff block, so code and diffs look consistent.
-function Highlighted({ text, lang, name = 'snippet' }: { text: string; lang?: string; name?: string }): ReactElement {
-  return (
-    <File
-      file={{ name, contents: text, lang: lang as SupportedLanguages | undefined }}
-      options={{ theme: 'pierre-dark', disableFileHeader: true }}
-    />
-  );
-}
+import { Highlighted } from './highlight.web.js';
 
 // ── code ──────────────────────────────────────────────────────────────────
 defineRenderer<CodeData>('code', ({ data }): ReactElement => (

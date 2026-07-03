@@ -64,6 +64,7 @@ export function AgentPaneHeader({
   onSetThinkingLevel,
   onSetApprovalMode,
   onCycleRole,
+  onToggleFast,
   onOpenAuth,
   error,
 }: {
@@ -74,6 +75,7 @@ export function AgentPaneHeader({
   onSetThinkingLevel?: (level: string) => void;
   onSetApprovalMode?: (mode: string) => void;
   onCycleRole?: () => void;
+  onToggleFast?: () => void;
   onOpenAuth?: () => void;
   error?: string | null;
 }): ReactElement {
@@ -162,6 +164,18 @@ export function AgentPaneHeader({
           onPick={(v) => { onSetApprovalMode(v); setMenu(null); }}
         />
       ) : null}
+
+      {/* fast mode (serviceTier=priority → speed:fast on Opus) */}
+      {onToggleFast && (
+        <button
+          type="button"
+          onClick={onToggleFast}
+          title={control?.serviceTier === 'priority' ? 'Fast mode on (priority) — click to turn off' : 'Fast mode off — click to prioritize'}
+          className={control?.serviceTier === 'priority' ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}
+        >
+          ⚡{control?.serviceTier === 'priority' ? ' fast' : ''}
+        </button>
+      )}
 
       {/* context + cost */}
       {ctx && ctx.tokens != null && ctx.contextWindow > 0 ? (

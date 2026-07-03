@@ -348,10 +348,13 @@ export class PiCoordinator {
     const thinkingLevel = active?.configuredThinkingLevel?.() ?? active?.thinkingLevel ?? null;
     const context = active?.getContextUsage?.() ?? null;
     let approvalMode: string | null = null;
+    let serviceTier: string | null = null;
     try {
       const settings = active?.settings ?? (await getPiSettings());
       const m = settings?.get('tools.approvalMode');
       if (typeof m === 'string') approvalMode = m;
+      const st = settings?.get('serviceTier');
+      if (typeof st === 'string') serviceTier = st;
     } catch {
       /* settings unavailable */
     }
@@ -387,6 +390,7 @@ export class PiCoordinator {
       thinkingLevels: THINKING_LEVELS,
       approvalMode,
       approvalModes: APPROVAL_MODES,
+      serviceTier,
       context: context ?? null,
     };
   }

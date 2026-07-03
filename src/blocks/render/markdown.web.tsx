@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react';
 import { renderMarkdownHtml, type MarkdownRenderOptions } from '../../components/markdown-render.js';
+import { Highlighted } from './highlight.web.js';
 
 /**
  * Markdown styling for blocks — Tailwind utilities over the shared `--gs-*`
@@ -21,6 +22,40 @@ export const BLOCK_MD_OPTIONS: MarkdownRenderOptions = {
   linkClassName: 'text-[var(--gs-info)] underline',
 };
 
+const FENCE = /```([\w+#-]*)\n?([\s\S]*?)```/g;
+
+type MdPart = { kind: 'prose'; text: string } | { kind: 'code'; lang: string; code: string };
+
+/** Split markdown into prose runs + fenced code blocks so the latter can be
+ *  syntax-highlighted (shiki via @pierre) instead of rendered as plain <pre>. */
+function splitFences(text: string): MdPart[] {
+  const parts: MdPart[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  FENCE.lastIndex = 0;
+  while ((m = FENCE.exec(text)) !== null) {
+    if (m.index > last) parts.push({ kind: 'prose', text: text.slice(last, m.index) });
+    parts.push({ kind: 'code', lang: m[1] ?? '', code: m[2].replace(/\n$/, '') });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ kind: 'prose', text: text.slice(last) });
+  return parts;
+}
+
 export function Markdown({ text }: { text: string }): ReactElement {
-  return <div className="gs-block-md" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(text, BLOCK_MD_OPTIONS) }} />;
+  const parts = splitFences(text);
+  if (parts.length === 0) return <div className="gs-block-md" />;
+  return (
+    <div className="gs-block-md">
+      {parts.map((p, i) =>
+        p.kind === 'code' ? (
+          <div key={i} className="my-2 border border-[var(--gs-border)] overflow-x-auto">
+            <Highlighted text={p.code} lang={p.lang || undefined} />
+          </div>
+        ) : (
+          <div key={i} dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(p.text, BLOCK_MD_OPTIONS) }} />
+        ),
+      )}
+    </div>
+  );
 }

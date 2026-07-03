@@ -245,6 +245,12 @@ export function PaneTerminalPanel({
     if (!fn || !wsId || !agentSessionId) return;
     void fn.call(backend, wsId, agentSessionId, role).then(() => refreshControl()).catch(() => undefined);
   }, [backend, wsId, agentSessionId, refreshControl]);
+  const handleToggleFast = useCallback(() => {
+    const fn = backend?.setAgentSetting;
+    if (!fn) return;
+    const next = control?.serviceTier === 'priority' ? 'none' : 'priority';
+    void fn.call(backend, 'serviceTier', next).then(() => refreshControl()).catch(() => undefined);
+  }, [backend, control?.serviceTier, refreshControl]);
 
   // OAuth sign-in flow (events arrive via the agent-state delta channel)
   const [oauthFlow, setOauthFlow] = useState<(AgentOAuthEvent & { provider: string }) | null>(null);
@@ -293,6 +299,7 @@ export function PaneTerminalPanel({
             onSetThinkingLevel={handleSetThinkingLevel}
             onSetApprovalMode={handleSetApprovalMode}
             onCycleRole={handleCycleRole}
+            onToggleFast={handleToggleFast}
             onOpenAuth={openSettings}
             error={modelError}
           />

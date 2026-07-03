@@ -51,14 +51,37 @@ function imageBlocks(content: string | ReadonlyArray<TextContent | ImageContent>
     .map((part, i) => ({ id: `${idBase}:img${i}`, type: 'image', data: { src: `data:${part.mimeType};base64,${part.data}` } }));
 }
 
+// File extension → shiki language id (kept small + dependency-free since this
+// runs in the React-free shared layer; @pierre/diffs highlights when `lang` is set).
+const EXT_LANG: Record<string, string> = {
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
+  py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java', kt: 'kotlin', kts: 'kotlin',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', cs: 'csharp',
+  php: 'php', swift: 'swift', scala: 'scala', lua: 'lua', dart: 'dart', ex: 'elixir', exs: 'elixir',
+  json: 'json', jsonc: 'jsonc', yaml: 'yaml', yml: 'yaml', toml: 'toml', xml: 'xml', html: 'html', htm: 'html',
+  css: 'css', scss: 'scss', sass: 'sass', less: 'less',
+  md: 'markdown', mdx: 'mdx', sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'fish',
+  sql: 'sql', graphql: 'graphql', gql: 'graphql', proto: 'proto',
+  vue: 'vue', svelte: 'svelte', astro: 'astro', hcl: 'hcl', tf: 'hcl',
+};
+
+function langFromPath(path: unknown): string | undefined {
+  if (typeof path !== 'string' || !path) return undefined;
+  const base = (path.split('/').pop() ?? path).toLowerCase();
+  if (base === 'dockerfile') return 'docker';
+  const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
+  return EXT_LANG[ext];
+}
+
 /** A tool result's content → nested blocks (text → code, image → image). */
-function toolResultBlocks(result: ToolResultMessage, idBase: string): Block[] {
+function toolResultBlocks(result: ToolResultMessage, idBase: string, lang?: string): Block[] {
   const blocks: Block[] = [];
   const text = result.content
     .filter((part): part is TextContent => part.type === 'text')
     .map((part) => part.text)
     .join('\n');
-  if (text.trim()) blocks.push({ id: `${idBase}:out`, type: 'code', data: { text } });
+  if (text.trim()) blocks.push({ id: `${idBase}:out`, type: 'code', data: lang ? { text, lang } : { text } });
   result.content
     .filter((part): part is ImageContent => part.type === 'image')
     .forEach((part, i) => blocks.push({ id: `${idBase}:img${i}`, type: 'image', data: { src: `data:${part.mimeType};base64,${part.data}` } }));
@@ -67,6 +90,8 @@ function toolResultBlocks(result: ToolResultMessage, idBase: string): Block[] {
 
 function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): Block {
   const id = `tool:${call.id}`;
+  const args = call.arguments as Record<string, unknown> | undefined;
+  const lang = langFromPath(args?.file_path ?? args?.path ?? args?.filePath ?? args?.notebook_path);
   return {
     id,
     type: 'tool-call',
@@ -74,7 +99,7 @@ function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): B
       tool: call.name,
       target: toolTarget(call.arguments),
       status: result ? (result.isError ? 'error' : 'done') : 'running',
-      result: result ? toolResultBlocks(result, id) : undefined,
+      result: result ? toolResultBlocks(result, id, lang) : undefined,
     },
   };
 }
