@@ -3,9 +3,10 @@
  * Discovers and runs executable scripts from project scripts/ directories
  */
 
-import { existsSync, readdirSync, statSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { spawn } from 'child_process';
-import { join } from 'path';
+import { basename, join } from 'path';
+import { createHash } from 'crypto';
 import { SpacesError } from '../types/errors.js';
 import { logger } from './logger.js';
 import { isShellEnvKey, normalizeEnvKey } from './normalize-env-key.js';
@@ -55,40 +56,144 @@ function formatScriptFailureMessage(scriptName: string, code: number | null, out
   return `${header}\n\n${intro}\n${tail}`;
 }
 
+/** Result of scanning a phase directory. */
+export interface PhaseScriptScan {
+  /** Absolute paths of runnable (executable) scripts, sorted lexicographically. */
+  executable: string[];
+  /**
+   * Absolute paths of script-looking files that are NOT executable and were
+   * therefore skipped (files with a script extension or a shebang line). These
+   * are surfaced as errors rather than silently ignored.
+   */
+  ignored: string[];
+}
+
+const SCRIPT_EXTENSIONS = new Set(['.sh', '.bash', '.zsh', '.fish', '.py', '.rb', '.pl', '.js', '.ts', '.mjs']);
+
+/** True if a non-executable regular file looks like it was meant to be a script. */
+function looksLikeScript(filePath: string): boolean {
+  const name = basename(filePath);
+  const dot = name.lastIndexOf('.');
+  if (dot > 0 && SCRIPT_EXTENSIONS.has(name.slice(dot).toLowerCase())) {
+    return true;
+  }
+  try {
+    const fd = readFileSync(filePath);
+    return fd.length >= 2 && fd[0] === 0x23 && fd[1] === 0x21; // "#!"
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Discover executable scripts in a directory
- * Returns scripts sorted alphabetically for predictable execution order
+ * Scan a phase directory, separating runnable executable scripts from
+ * script-looking files that are missing an executable bit (which we must not
+ * silently skip). Executable scripts are sorted lexicographically for
+ * predictable serial execution order.
  */
-export function discoverScripts(scriptsDir: string): string[] {
+export function discoverPhaseScripts(scriptsDir: string): PhaseScriptScan {
   if (!existsSync(scriptsDir)) {
     logger.debug(`Scripts directory does not exist: ${scriptsDir}`);
-    return [];
+    return { executable: [], ignored: [] };
   }
 
   try {
     const files = readdirSync(scriptsDir);
-    const scripts: string[] = [];
+    const executable: string[] = [];
+    const ignored: string[] = [];
 
     for (const file of files) {
       const filePath = join(scriptsDir, file);
       const stats = statSync(filePath);
+      if (!stats.isFile()) continue;
 
-      // Check if file is executable (has execute permission)
-      // On Unix: check if any execute bit is set
-      if (stats.isFile() && (stats.mode & 0o111) !== 0) {
-        scripts.push(filePath);
+      // Executable on Unix = any execute bit set.
+      if ((stats.mode & 0o111) !== 0) {
+        executable.push(filePath);
+      } else if (looksLikeScript(filePath)) {
+        ignored.push(filePath);
       }
     }
 
-    // Sort alphabetically for predictable order
-    scripts.sort();
+    executable.sort();
+    ignored.sort();
 
-    logger.debug(`Discovered ${scripts.length} executable scripts in ${scriptsDir}`);
-    return scripts;
+    logger.debug(`Discovered ${executable.length} executable scripts (${ignored.length} ignored) in ${scriptsDir}`);
+    return { executable, ignored };
   } catch (error) {
     logger.debug(`Error discovering scripts: ${error}`);
-    return [];
+    return { executable: [], ignored: [] };
   }
+}
+
+/**
+ * Discover executable scripts in a directory, sorted lexicographically.
+ * Thin wrapper over {@link discoverPhaseScripts} for callers that only need the
+ * runnable set.
+ */
+export function discoverScripts(scriptsDir: string): string[] {
+  return discoverPhaseScripts(scriptsDir).executable;
+}
+
+/**
+ * Error thrown when a phase directory contains script-looking files that are not
+ * executable — so they'd be silently skipped. Names each file and the fix.
+ */
+export class NonExecutableScriptError extends SpacesError {
+  readonly files: string[];
+  constructor(phase: string, files: string[]) {
+    const list = files.map((f) => `  - ${f}`).join('\n');
+    const fix = files.map((f) => `chmod +x ${f}`).join('\n  ');
+    super(
+      `Non-executable script${files.length > 1 ? 's' : ''} found in "${phase}" phase (skipped because the executable bit is not set):\n${list}\n\nFix:\n  ${fix}`,
+      'USER_ERROR',
+      1,
+    );
+    this.name = 'NonExecutableScriptError';
+    this.files = files;
+  }
+}
+
+export function isNonExecutableScriptError(error: unknown): error is NonExecutableScriptError {
+  return error instanceof NonExecutableScriptError;
+}
+
+/**
+ * Centralized script-manifest fingerprint for a phase directory. Captures
+ * discovery-relevant state so lifecycle decisions invalidate when scripts
+ * change: phase name, directory absent/empty/present, sorted executable
+ * relative paths with content hashes, and the set of ignored (non-executable)
+ * script-looking files (so a `chmod +x` invalidates the phase). Never uses
+ * mtimes.
+ */
+export function buildPhaseScriptManifest(scriptsDir: string): string {
+  const phase = basename(scriptsDir);
+  if (!existsSync(scriptsDir)) {
+    return hashManifest({ phase, state: 'absent' });
+  }
+  const { executable, ignored } = discoverPhaseScripts(scriptsDir);
+  if (executable.length === 0 && ignored.length === 0) {
+    return hashManifest({ phase, state: 'empty' });
+  }
+  const executableEntries = executable.map((filePath) => {
+    let contentHash = 'unreadable';
+    try {
+      contentHash = createHash('sha256').update(readFileSync(filePath)).digest('hex').slice(0, 16);
+    } catch {
+      /* keep sentinel */
+    }
+    return { rel: basename(filePath), contentHash };
+  });
+  return hashManifest({
+    phase,
+    state: 'present',
+    executable: executableEntries,
+    ignored: ignored.map((filePath) => basename(filePath)),
+  });
+}
+
+function hashManifest(manifest: unknown): string {
+  return createHash('sha256').update(JSON.stringify(manifest)).digest('hex').slice(0, 16);
 }
 
 /**
@@ -262,15 +367,26 @@ export async function runScriptsInTerminal(
     throw new ScriptExecutionCancelledError();
   }
 
-  const scripts = discoverScripts(scriptsDir);
+  const phaseName = basename(scriptsDir) || 'scripts';
+  const { executable: scripts, ignored } = discoverPhaseScripts(scriptsDir);
+
+  // Never silently skip script-looking files that just lack the executable bit —
+  // surface them as a phase error with the exact chmod fix.
+  if (ignored.length > 0) {
+    throw new NonExecutableScriptError(phaseName, ignored);
+  }
 
   if (scripts.length === 0) {
     logger.debug(`No scripts to run in ${scriptsDir}`);
     return;
   }
 
-  const phaseName = scriptsDir.split('/').pop() || 'scripts';
   logger.info(`Running ${phaseName} scripts...`);
+  // Stream a visible phase banner into the task transcript (not just the console)
+  // so phase boundaries are preserved across the run.
+  if (options?.nonInteractive) {
+    options?.onOutput?.(Buffer.from(`\r\n==> ${phaseName} scripts\r\n`));
+  }
 
   // Build environment variables from bundle values
   const scriptEnv: Record<string, string> = { ...process.env } as Record<string, string>;
@@ -296,8 +412,13 @@ export async function runScriptsInTerminal(
     }
 
     await new Promise<void>((resolve, reject) => {
-      const scriptName = scriptPath.split('/').pop() || scriptPath;
+      const scriptName = basename(scriptPath) || scriptPath;
       logger.dim(`  $ ${scriptName} ${workspaceName} ${repository}`);
+      // Stream each script's start line into the transcript so individual script
+      // boundaries (and ordering) are visible in the task bar.
+      if (options?.nonInteractive) {
+        options?.onOutput?.(Buffer.from(`$ ${scriptName} ${workspaceName} ${repository}\r\n`));
+      }
 
       // Non-interactive mode: stdin=ignore, capture stdout/stderr
       // Interactive mode: inherit all stdio

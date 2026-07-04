@@ -340,7 +340,7 @@ function createBackend(
             done: false,
           });
         },
-      }) ?? Promise.resolve({ success: true }));
+      }) ?? Promise.resolve({ success: true, kind: 'skipped-current' as const }));
       if (!prep.success) {
         const phase = prep.phase ?? 'setup';
         const code = phase === 'pre' ? 'PRE_SCRIPT_FAILED' : phase === 'select' ? 'SELECT_SCRIPT_FAILED' : 'SETUP_SCRIPT_FAILED';
@@ -434,7 +434,7 @@ describe('LocalSessionBackend', () => {
         options.onOutput?.(Buffer.from('setup-output'));
         options.onPhaseStart?.('select');
         options.onOutput?.(Buffer.from('select-output'));
-        return { success: true };
+        return { success: true, kind: 'skipped-current' as const };
       },
       getInbox: async () => [
         {
@@ -648,7 +648,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -734,7 +734,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -815,7 +815,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -903,7 +903,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -1004,7 +1004,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -1091,7 +1091,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -1163,7 +1163,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -1224,7 +1224,7 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
@@ -1294,6 +1294,7 @@ describe('LocalSessionBackend', () => {
       },
       prepareWorkspaceForSession: async () => ({
         success: false,
+        kind: 'failed' as const,
         phase: 'setup',
         error: 'install failed',
       }),
@@ -1354,7 +1355,7 @@ describe('LocalSessionBackend', () => {
       }),
       prepareWorkspaceForSession: async () => {
         prepareCalls += 1;
-        return { success: true };
+        return { success: true, kind: 'skipped-current' as const };
       },
       getInbox: async () => [],
       clearInbox: async () => {},

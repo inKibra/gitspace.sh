@@ -859,7 +859,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   );
 
   const currentDetailWorkspace = selectedWorkspaceForDetail ?? attachedWorkspaceForDetail;
-  const lastVisibleDetailSelectionKeyRef = useRef<string | null>(null);
   useEffect(() => {
     setDetailWorkspaceCacheKeys((current) => current.filter((key) => workspaceBySelectionKey.has(key)).slice(0, DETAIL_VIEW_CACHE_LIMIT));
   }, [workspaceBySelectionKey]);
@@ -2031,11 +2030,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       return false;
     }
     const selection = options?.selection ?? 'setup-select';
-    const canRunSelectedRerun = options?.mode !== 'rerun'
-      || (selection === 'setup-select' ? Boolean(backend.rerunWorkspaceScripts) : Boolean(backend.runWorkspaceScriptSelection));
-    const canRunOpen = options?.mode === 'rerun' || Boolean(backend.runWorkspaceOpenScripts ?? backend.rerunWorkspaceScripts);
-    if (!canRunSelectedRerun || !canRunOpen) {
-      toast.error(options?.mode === 'rerun' ? 'This backend does not support the selected workspace script command.' : 'Workspace open scripts are not supported for this backend.');
+    if (options?.mode === 'rerun') {
+      const canRerun = selection === 'setup-select' ? Boolean(backend.rerunWorkspaceScripts) : Boolean(backend.runWorkspaceScriptSelection);
+      if (!canRerun) {
+        toast.error('This backend does not support the selected workspace script command.');
+        return false;
+      }
+    } else if (!backend.runWorkspaceOpenScripts) {
+      // Passive open on a backend without open-script support is a silent no-op —
+      // never fall back to an explicit rerun, and never show a task/toast/modal.
       return false;
     }
     scriptRunInFlightRef.current.add(selectionKey);
@@ -2050,10 +2053,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         } else {
           await backend.runWorkspaceScriptSelection?.(workspace.projectName, workspace.id, selection);
         }
-      } else if (backend.runWorkspaceOpenScripts) {
-        await backend.runWorkspaceOpenScripts(workspace.projectName, workspace.id);
       } else {
-        await backend.rerunWorkspaceScripts?.(workspace.projectName, workspace.id);
+        // Passive open: run only the intentional open-scripts path (no rerun fallback).
+        await backend.runWorkspaceOpenScripts?.(workspace.projectName, workspace.id);
       }
       if (activeScriptTaskIdRef.current === taskId) {
         workspaceRemovalTasks.completeSuccess(taskId, 'Workspace scripts complete');
@@ -2094,17 +2096,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     });
   }, [flow, runWorkspaceBundleScripts]);
 
-  useEffect(() => {
-    const visibleSelectionKey = showBoardWhileDetailMounted ? null : currentDetailWorkspace?.selectionKey ?? null;
-    if (visibleSelectionKey === lastVisibleDetailSelectionKeyRef.current) {
-      return;
-    }
-    lastVisibleDetailSelectionKeyRef.current = visibleSelectionKey;
-    if (!visibleSelectionKey || !currentDetailWorkspace || terminalStatus !== 'connected') {
-      return;
-    }
-    void runWorkspaceBundleScripts(currentDetailWorkspace, { announceSuccess: false, mode: 'open' });
-  }, [currentDetailWorkspace, runWorkspaceBundleScripts, showBoardWhileDetailMounted, terminalStatus]);
+  // NOTE: passive Workspace Detail top-strip A -> B switching must NOT run
+  // scripts. Viewing/selecting an already-open workspace is not the same as
+  // activating it, so there is deliberately no effect here that runs open
+  // scripts on visible-detail change. Lifecycle scripts run only on real session
+  // attach (backend side) or via explicit "Run Workspace Scripts".
 
 
   const { commandPalette } = useCommandPaletteOrchestration({

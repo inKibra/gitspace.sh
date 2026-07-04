@@ -17,6 +17,7 @@ import {
   runWorkspaceScripts,
   rerunWorkspaceBundleScripts,
   type RunWorkspaceScriptsResult,
+  type ScriptLifecycleOutcome,
   type WorkspaceScriptRunSelection,
   type ScriptPhase,
 } from '../utils/run-workspace-scripts.js';
@@ -53,14 +54,32 @@ export interface PrepareWorkspaceForSessionOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Result of the automatic workspace preparation path. A discriminated superset
+ * of the lifecycle outcome that keeps a `success` boolean for existing callers
+ * (attach/shell/server) while exposing `kind` so the open path can distinguish a
+ * real run from a no-op. Note that `skipped-current` and `blocked-previous-failure`
+ * are `success: true` — they are intentional no-ops, not errors, so passive
+ * callers proceed without surfacing a task or error.
+ */
 export type PrepareWorkspaceForSessionResult =
-  | RunWorkspaceScriptsResult
-  | {
-      success: false;
-      phase: 'pre';
-      error: string;
-      bundleNeedsRefresh?: boolean;
-    };
+  | { success: true; kind: 'ran'; phasesRun: ScriptPhase[] }
+  | { success: true; kind: 'skipped-current' }
+  | { success: true; kind: 'blocked-previous-failure'; blockedPhase: ScriptPhase; priorError?: string }
+  | { success: false; kind: 'failed'; phase: ScriptPhase; error: string; cancelled?: boolean; bundleNeedsRefresh?: boolean };
+
+function outcomeToPrepareResult(outcome: ScriptLifecycleOutcome): PrepareWorkspaceForSessionResult {
+  switch (outcome.kind) {
+    case 'ran':
+      return { success: true, kind: 'ran', phasesRun: outcome.phasesRun };
+    case 'skipped-current':
+      return { success: true, kind: 'skipped-current' };
+    case 'blocked-previous-failure':
+      return { success: true, kind: 'blocked-previous-failure', blockedPhase: outcome.blockedPhase, priorError: outcome.error };
+    case 'failed':
+      return { success: false, kind: 'failed', phase: outcome.phase, error: outcome.error, cancelled: outcome.cancelled };
+  }
+}
 
 const BUNDLE_REFRESH_REQUIRED_MESSAGE =
   'Run "gssh workspace bundle refresh --project <name> --workspace <name>" and retry.';
@@ -98,17 +117,13 @@ export async function prepareWorkspaceForSession(
     });
 
     if (!bundleReady.success) {
-      return {
-        success: false,
-        phase: 'pre',
-        error: bundleReady.error,
-      };
+      return { success: false, kind: 'failed', phase: 'pre', error: bundleReady.error };
     }
 
     logger.warning(
       `Skipping workspace scripts for "${workspaceName}" because --ignore-keychain-and-skip-secrets is enabled.`
     );
-    return { success: true };
+    return { success: true, kind: 'skipped-current' };
   }
 
   const bundleReady = await ensureBundleReady({
@@ -120,6 +135,7 @@ export async function prepareWorkspaceForSession(
   if (!bundleReady.success) {
     return {
       success: false,
+      kind: 'failed',
       phase: 'pre',
       error: bundleReady.error,
       bundleNeedsRefresh: bundleReady.bundleNeedsRefresh,
@@ -130,7 +146,7 @@ export async function prepareWorkspaceForSession(
     await preloadProjectSecrets(projectName, projectConfig.bundleSecretKeys);
   }
 
-  return runWorkspaceScripts({
+  return outcomeToPrepareResult(await runWorkspaceScripts({
     projectName,
     workspacePath,
     workspaceName,
@@ -141,7 +157,7 @@ export async function prepareWorkspaceForSession(
     onPhaseStart,
     scriptPolicy,
     signal,
-  });
+  }));
 }
 
 export async function rerunWorkspaceScriptsForSession(
