@@ -1,6 +1,10 @@
 import type { ReactElement } from 'react';
 import { renderMarkdownHtml, type MarkdownRenderOptions } from '../../components/markdown-render.js';
 import { Highlighted } from './highlight.web.js';
+import { MermaidDiagram } from './mermaid-diagram.web.js';
+
+// Fence languages that carry a Mermaid diagram (rendered as a chart, not code).
+const MERMAID_LANGS = new Set(['mermaid', 'mermaidjs']);
 
 /**
  * Markdown styling for blocks — Tailwind utilities over the shared `--gs-*`
@@ -52,9 +56,13 @@ export function Markdown({ text }: { text: string }): ReactElement {
     <div className="gs-block-md">
       {parts.map((p, i) =>
         p.kind === 'code' ? (
-          <div key={i} className="my-2 border border-[var(--gs-border)] overflow-x-auto">
-            <Highlighted text={p.code} lang={p.lang || undefined} />
-          </div>
+          MERMAID_LANGS.has(p.lang.toLowerCase()) ? (
+            <MermaidDiagram key={i} code={p.code} />
+          ) : (
+            <div key={i} className="my-2 border border-[var(--gs-border)] overflow-x-auto">
+              <Highlighted text={p.code} lang={p.lang || undefined} />
+            </div>
+          )
         ) : (
           <div key={i} dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(p.text, BLOCK_MD_OPTIONS) }} />
         ),

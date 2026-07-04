@@ -6,3 +6,9 @@ import { mock } from 'bun:test';
 // preload so the mock is registered before any test's import graph resolves.
 mock.module('@pierre/diffs/react', () => ({ File: () => null }));
 mock.module('@pierre/diffs', () => ({}));
+
+// `mermaid` is likewise web-only; the markdown renderer imports it (```mermaid
+// fences render as diagrams). Stub its default export for the root test runtime.
+mock.module('mermaid', () => ({
+  default: { initialize: () => {}, render: async () => ({ svg: '' }) },
+}));
